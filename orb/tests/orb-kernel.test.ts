@@ -4,7 +4,8 @@ import {
   orbAuthToctouExecuteStep, orbHierarchyMergeStep, orbOutboxCrashReconcileStep,
   orbProviderAttemptStep, orbRelativeTimeString, orbResourceLedgerStep,
   orbStreamBoundedCommitStep, orbTranscriptFoldStep, orbTranscriptPatchStep,
-  orbUsageLimitBadge, orbWireApplyPatchStep, orbWireMachineStep,
+  orbUsageLimitBadge, orbWireApplyPatchStep, orbWireDecodeSlice,
+  orbWireEncodeSliceInto, orbWireMachineStep, orbWireVerifySliceIo,
 } from "../src/orbKernel";
 import { mergeMission, reparentMission, resetMissionHierarchy } from "../src/missionHierarchy";
 import { normalizeLoosePipeTables } from "../src/pipeTables";
@@ -187,5 +188,77 @@ describe("orb kernel gates mirror lean-sys", () => {
       admitted: true,
       checkpointForced: true,
     });
+  });
+
+  it("encodes and decodes OrbWire slices zero-copy via WASM linear memory and enforces no-partial-mutation", () => {
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const arena = encoder.encode("wasm_slice");
+    const records = [
+      { tag: 2, flags: 1, len16: 4, payload32: 0 },
+      { tag: 9, flags: 0, len16: 6, payload32: 4 },
+    ];
+    const outBuf = new Uint8Array(64).fill(0xee);
+    const enc = orbWireEncodeSliceInto({ schemaId: 12, flags: 0x77, records, arena, outBuf });
+    expect(enc).toEqual({ status: 0, written: 24 + 16 + 10 });
+    expect(Array.from(outBuf.subarray(enc.written))).toEqual(new Array(64 - enc.written).fill(0xee));
+
+    const framed = outBuf.subarray(0, enc.written);
+    const dec = orbWireDecodeSlice(framed, 12);
+    expect(dec.status).toBe(0);
+    expect(dec.view).not.toBeNull();
+    const view = dec.view!;
+    expect(view.schemaId).toBe(12);
+    expect(view.flags).toBe(0x77);
+    expect(view.recordCount).toBe(2);
+    expect(view.recordAt(0)).toEqual(records[0]);
+    expect(view.recordAt(1)).toEqual(records[1]);
+    expect(view.recordAt(2)).toBeNull();
+    // Zero-copy subarray shares caller buffer
+    expect(view.arenaBytes.buffer).toBe(outBuf.buffer);
+    expect(decoder.decode(view.arenaSlice(0, 4)!)).toBe("wasm");
+    expect(decoder.decode(view.arenaSlice(4, 6)!)).toBe("_slice");
+
+    // Output too small -> OutputTooSmall (5), sentinel untouched
+    const smallOut = new Uint8Array(16).fill(0xaa);
+    expect(orbWireEncodeSliceInto({ schemaId: 12, records, arena, outBuf: smallOut })).toEqual({
+      status: 5,
+      written: 0,
+    });
+    expect(Array.from(smallOut)).toEqual(new Array(16).fill(0xaa));
+
+    // Overlapping linear-memory spans -> SliceAliasOverlap (9), sentinel untouched
+    const aliasOut = new Uint8Array(64).fill(0x55);
+    expect(orbWireEncodeSliceInto({
+      schemaId: 12,
+      records,
+      arena,
+      outBuf: aliasOut,
+      inArenaPtr: 4096,
+      outPtr: 4080,
+    })).toEqual({ status: 9, written: 0 });
+    expect(Array.from(aliasOut)).toEqual(new Array(64).fill(0x55));
+
+    // Null pointer with non-zero span -> NullSlicePtr (7)
+    expect(orbWireEncodeSliceInto({
+      schemaId: 12,
+      records,
+      arena,
+      outBuf: aliasOut,
+      inArenaPtr: 0,
+      outPtr: 8192,
+    })).toEqual({ status: 7, written: 0 });
+    expect(Array.from(aliasOut)).toEqual(new Array(64).fill(0x55));
+
+    // 32-bit wasm32 span overflow vs 64-bit LP64 admission
+    expect(orbWireVerifySliceIo({
+      inPtr: 0xffff_fff0n, inLen: 32n, outPtr: 0x1000n, outCap: 64n, writtenLen: 32n, is32Bit: true,
+    })).toBe(8);
+    expect(orbWireVerifySliceIo({
+      inPtr: 0xffff_fff0n, inLen: 32n, outPtr: 0x1000n, outCap: 64n, writtenLen: 32n, is32Bit: false,
+    })).toBe(0);
+    expect(orbWireVerifySliceIo({
+      inPtr: 0x1000n, inLen: 16n, outPtr: 0x2000n, outCap: 64n, writtenLen: 16n, is32Bit: 2,
+    })).toBe(6);
   });
 });

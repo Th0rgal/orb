@@ -49,6 +49,25 @@ pub fn execute_host_wire_machine<M: shadow::OrbWireMachine>(
     Ok((written, effects))
 }
 
+pub fn encode_host_wire_slice(
+    schema_id: u16,
+    flags: u32,
+    records: &[OrbWireRecordWord],
+    arena: &[u8],
+    out_buf: &mut [u8],
+    max_budget: u32,
+) -> Result<usize, OrbWireStatus> {
+    shadow::OrbWireFrame::encode_slice_into(schema_id, flags, records, arena, out_buf, max_budget)
+}
+
+pub fn decode_host_wire_slice(
+    bytes: &[u8],
+    expected_schema_id: u16,
+    max_budget: u32,
+) -> Result<shadow::OrbWireSliceView<'_>, OrbWireStatus> {
+    shadow::OrbWireSliceView::decode_slice(bytes, expected_schema_id, max_budget)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +267,30 @@ mod tests {
         assert_eq!(summary.newlines, 4);
         assert_eq!(summary.fence_candidates, 2);
         assert_eq!(summary.pipe_bytes, 3);
+
+        let mut slice_out = [0xEEu8; 64];
+        let recs = [OrbWireRecordWord {
+            tag: 2,
+            flags: 1,
+            len16: 4,
+            payload32: 0,
+        }];
+        let written = encode_host_wire_slice(
+            5,
+            0x11,
+            &recs,
+            b"host",
+            &mut slice_out,
+            shadow::ORB_WIRE_DEFAULT_MAX_BUDGET,
+        )
+        .unwrap();
+        let view = decode_host_wire_slice(
+            &slice_out[..written],
+            5,
+            shadow::ORB_WIRE_DEFAULT_MAX_BUDGET,
+        )
+        .unwrap();
+        assert_eq!(view.record_count(), 1);
+        assert_eq!(view.arena_slice(0, 4), Some(&b"host"[..]));
     }
 }

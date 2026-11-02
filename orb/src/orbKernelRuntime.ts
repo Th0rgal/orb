@@ -46,3 +46,22 @@ export function result64(raw: number | bigint): bigint {
   if (typeof raw !== "bigint") throw new TypeError("Expected WASM i64 result");
   return BigInt.asUintN(64, raw);
 }
+
+const WASM_PAGE_BYTES = 65_536;
+
+export function kernelLinearMemory(minEndOffset = 0): WebAssembly.Memory {
+  if (!instance) throw new Error("Shared kernel is not initialized");
+  const mem = instance.exports.memory;
+  if (!(mem instanceof WebAssembly.Memory)) {
+    throw new Error("Shared kernel does not export linear memory");
+  }
+  if (!Number.isSafeInteger(minEndOffset) || minEndOffset < 0 || minEndOffset > 0xffff_ffff) {
+    throw new RangeError("Expected wasm32 linear memory end offset");
+  }
+  const curBytes = mem.buffer.byteLength;
+  if (minEndOffset > curBytes) {
+    const pagesNeeded = Math.ceil((minEndOffset - curBytes) / WASM_PAGE_BYTES);
+    mem.grow(pagesNeeded);
+  }
+  return mem;
+}

@@ -325,3 +325,18 @@ JNIEXPORT jint JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysVerifyFdBounds(JNIEnv *env, jclass clazz, jlong rawWord, jint fdOut) {
     return (jint)leansys_verify_fd_bounds((uint64_t)rawWord, (uint32_t)fdOut);
 }
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWireVerifySliceIo(JNIEnv *env, jclass clazz, jlong inPtr, jlong inLen, jlong outPtr, jlong outCap, jlong writtenLen, jint is32Bit) {
+    return (jint)orb_wire_verify_slice_io((uint64_t)inPtr, (uint64_t)inLen, (uint64_t)outPtr, (uint64_t)outCap, (uint64_t)writtenLen, (uint8_t)is32Bit);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWireEncodeSliceStep(JNIEnv *env, jclass clazz, jlong inArenaPtr, jlong outPtr, jlong outCap, jint schemaId, jint recordsCount, jint arenaLen, jint maxBudgetBytes, jint is32Bit) {
+    return (jint)orb_wire_encode_slice_step((uint64_t)inArenaPtr, (uint64_t)outPtr, (uint64_t)outCap, (uint32_t)schemaId, (uint32_t)recordsCount, (uint32_t)arenaLen, (uint32_t)maxBudgetBytes, (uint8_t)is32Bit);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWireDecodeSliceStep(JNIEnv *env, jclass clazz, jlong inPtr, jlong inLen, jint is32Bit, jint magic, jint abiVersion, jint schemaId, jint expectedSchemaId, jint totalLen, jint payloadLen, jint arenaOff, jint arenaLen, jint maxBudgetBytes) {
+    return (jint)orb_wire_decode_slice_step((uint64_t)inPtr, (uint64_t)inLen, (uint8_t)is32Bit, (uint32_t)magic, (uint32_t)abiVersion, (uint32_t)schemaId, (uint32_t)expectedSchemaId, (uint32_t)totalLen, (uint32_t)payloadLen, (uint32_t)arenaOff, (uint32_t)arenaLen, (uint32_t)maxBudgetBytes);
+}

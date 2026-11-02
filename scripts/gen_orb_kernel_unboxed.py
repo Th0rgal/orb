@@ -70,10 +70,10 @@ def macro(width, op):
 def orb_c(out_dir):
     turbo_bin = os.environ.get("TURBO_LEAN_BIN") or shutil.which("turbo-lean")
     if turbo_bin and pathlib.Path(turbo_bin).is_file():
-        subprocess.run([turbo_bin, "build", "--project-dir", str(ROOT / "lean"), "Orb.Kernel"],
-                       cwd=ROOT, check=True)
+        res = subprocess.run([turbo_bin, "build", "--project-dir", str(ROOT / "lean"), "Orb.Kernel"],
+                             cwd=ROOT, capture_output=True, text=True)
         ir_c = ROOT / "lean/.lake/build/ir/Orb/Kernel.c"
-        if ir_c.is_file():
+        if res.returncode == 0 and ir_c.is_file():
             return ir_c
     setup_file = out_dir / "Orb_Kernel.setup.json"
     setup_file.write_text(json.dumps({

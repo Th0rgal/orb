@@ -1,13 +1,14 @@
-    Finished `test` profile [unoptimized] target(s) in 0.16s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-8374b4127ccc7fbc)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-fb7283fc71635359)
 
-running 38 tests
+running 39 tests
 test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
 test privilege_bunker_deploy_tests::deploy_gate_allows_dev_zero_touch_and_requires_session_grant_on_prod ... ok
 test privilege_bunker_deploy_tests::privilege_step_enforces_biometric_session_clock_and_bunker_fence ... ok
 test shadow::tests::orb_wire_enumerative_boundary_perturbations_rejected ... ok
 test shadow::tests::orb_wire_fuzz_10000_malformed_frames_never_panics ... ok
 test shadow::tests::orb_wire_roundtrip_and_failure_no_partial_mutation ... ok
+test shadow::tests::orb_wire_zero_copy_slice_abi_alias_null_wasm32_and_no_partial_mutation ... ok
 test shadow::tests::phase1_mission_control_and_fork_home_incident_replays ... ok
 test shadow::tests::phase2_proxy_provider_pool_and_argmin_route_fold_replay ... ok
 test shadow::tests::phase3_agent_event_normalizer_and_transcript_reducer_replays ... ok
@@ -41,5 +42,5 @@ test tests::wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gate
 test tests::wave12_node_disk_pressure_and_placement_kernels_match_specs ... ok
 test tests::writer_reuse_gate_enforces_continuation_and_retag_rules ... ok
 
-test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
 

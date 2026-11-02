@@ -1053,6 +1053,38 @@ unsafe extern "C" {
         payload_bytes: u64,
         max_bytes: u64,
     ) -> u8;
+    fn orb_wire_verify_slice_io(
+        in_ptr: u64,
+        in_len: u64,
+        out_ptr: u64,
+        out_cap: u64,
+        written_len: u64,
+        is_32bit: u8,
+    ) -> u8;
+    fn orb_wire_encode_slice_step(
+        in_arena_ptr: u64,
+        out_ptr: u64,
+        out_cap: u64,
+        schema_id: u32,
+        records_count: u32,
+        arena_len: u32,
+        max_budget_bytes: u32,
+        is_32bit: u8,
+    ) -> u8;
+    fn orb_wire_decode_slice_step(
+        in_ptr: u64,
+        in_len: u64,
+        is_32bit: u8,
+        magic: u32,
+        abi_version: u32,
+        schema_id: u32,
+        expected_schema_id: u32,
+        total_len: u32,
+        payload_len: u32,
+        arena_off: u32,
+        arena_len: u32,
+        max_budget_bytes: u32,
+    ) -> u8;
     fn orb_effect_admissible(
         effect_kind: u8,
         has_valid_lease: u8,
@@ -3056,7 +3088,8 @@ pub fn deploy_gate_step(input: DeployGateInput) -> bool {
     raw == 1
 }
 
-/// Status code returned by `orb_wire_validate_frame`.
+/// Status code returned by `orb_wire_validate_frame`, `orb_wire_verify_slice_io`,
+/// `orb_wire_encode_slice_step`, and `orb_wire_decode_slice_step`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum OrbWireStatus {
@@ -3066,6 +3099,29 @@ pub enum OrbWireStatus {
     TruncatedOrOutOfBounds = 3,
     BudgetExceeded = 4,
     OutputTooSmall = 5,
+    InvalidWidth = 6,
+    NullSlicePtr = 7,
+    SpanOverflow = 8,
+    SliceAliasOverlap = 9,
+}
+
+impl OrbWireStatus {
+    #[inline]
+    pub const fn from_raw(raw: u8) -> Self {
+        match raw {
+            0 => Self::Ok,
+            1 => Self::BadMagicOrVersion,
+            2 => Self::UnsupportedSchema,
+            3 => Self::TruncatedOrOutOfBounds,
+            4 => Self::BudgetExceeded,
+            5 => Self::OutputTooSmall,
+            6 => Self::InvalidWidth,
+            7 => Self::NullSlicePtr,
+            8 => Self::SpanOverflow,
+            9 => Self::SliceAliasOverlap,
+            _ => Self::TruncatedOrOutOfBounds,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3100,14 +3156,98 @@ pub fn wire_validate_frame(input: WireFrameInput) -> OrbWireStatus {
             input.required_out_bytes,
         )
     };
-    match raw {
-        0 => OrbWireStatus::Ok,
-        1 => OrbWireStatus::BadMagicOrVersion,
-        2 => OrbWireStatus::UnsupportedSchema,
-        4 => OrbWireStatus::BudgetExceeded,
-        5 => OrbWireStatus::OutputTooSmall,
-        _ => OrbWireStatus::TruncatedOrOutOfBounds,
-    }
+    OrbWireStatus::from_raw(raw)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireSliceIoInput {
+    pub in_ptr: u64,
+    pub in_len: u64,
+    pub out_ptr: u64,
+    pub out_cap: u64,
+    pub written_len: u64,
+    pub is_32bit: u8,
+}
+
+#[inline]
+pub fn wire_verify_slice_io(input: WireSliceIoInput) -> OrbWireStatus {
+    let raw = unsafe {
+        orb_wire_verify_slice_io(
+            input.in_ptr,
+            input.in_len,
+            input.out_ptr,
+            input.out_cap,
+            input.written_len,
+            input.is_32bit,
+        )
+    };
+    OrbWireStatus::from_raw(raw)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireEncodeSliceInput {
+    pub in_arena_ptr: u64,
+    pub out_ptr: u64,
+    pub out_cap: u64,
+    pub schema_id: u32,
+    pub records_count: u32,
+    pub arena_len: u32,
+    pub max_budget_bytes: u32,
+    pub is_32bit: u8,
+}
+
+#[inline]
+pub fn wire_encode_slice_step(input: WireEncodeSliceInput) -> OrbWireStatus {
+    let raw = unsafe {
+        orb_wire_encode_slice_step(
+            input.in_arena_ptr,
+            input.out_ptr,
+            input.out_cap,
+            input.schema_id,
+            input.records_count,
+            input.arena_len,
+            input.max_budget_bytes,
+            input.is_32bit,
+        )
+    };
+    OrbWireStatus::from_raw(raw)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireDecodeSliceInput {
+    pub in_ptr: u64,
+    pub in_len: u64,
+    pub is_32bit: u8,
+    pub magic: u32,
+    pub abi_version: u32,
+    pub schema_id: u32,
+    pub expected_schema_id: u32,
+    pub total_len: u32,
+    pub payload_len: u32,
+    pub arena_off: u32,
+    pub arena_len: u32,
+    pub max_budget_bytes: u32,
+}
+
+#[inline]
+pub fn wire_decode_slice_step(input: WireDecodeSliceInput) -> OrbWireStatus {
+    let raw = unsafe {
+        orb_wire_decode_slice_step(
+            input.in_ptr,
+            input.in_len,
+            input.is_32bit,
+            input.magic,
+            input.abi_version,
+            input.schema_id,
+            input.expected_schema_id,
+            input.total_len,
+            input.payload_len,
+            input.arena_off,
+            input.arena_len,
+            input.max_budget_bytes,
+        )
+    };
+    OrbWireStatus::from_raw(raw)
 }
 
 /// Canonical 64-bit `OrbWire` record word (`tag: u8`, `flags: u8`, `len16: u16`, `payload32: u32`).
@@ -6323,6 +6463,42 @@ pub mod raw_cabi {
         unsafe { super::orb_stream_bounded_commit_step(a0, a1, a2, a3, a4, a5) }
     }
     #[inline]
+    pub fn orb_wire_verify_slice_io(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u8) -> u8 {
+        unsafe { super::orb_wire_verify_slice_io(a0, a1, a2, a3, a4, a5) }
+    }
+    #[inline]
+    pub fn orb_wire_encode_slice_step(
+        a0: u64,
+        a1: u64,
+        a2: u64,
+        a3: u32,
+        a4: u32,
+        a5: u32,
+        a6: u32,
+        a7: u8,
+    ) -> u8 {
+        unsafe { super::orb_wire_encode_slice_step(a0, a1, a2, a3, a4, a5, a6, a7) }
+    }
+    #[inline]
+    pub fn orb_wire_decode_slice_step(
+        a0: u64,
+        a1: u64,
+        a2: u8,
+        a3: u32,
+        a4: u32,
+        a5: u32,
+        a6: u32,
+        a7: u32,
+        a8: u32,
+        a9: u32,
+        a10: u32,
+        a11: u32,
+    ) -> u8 {
+        unsafe {
+            super::orb_wire_decode_slice_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11)
+        }
+    }
+    #[inline]
     pub fn leansys_verify_slice_bounds(a0: u64, a1: u64, a2: u64) -> u8 {
         unsafe { super::lean_sys_cabi::leansys_verify_slice_bounds(a0, a1, a2) }
     }
@@ -7219,6 +7395,34 @@ pub mod raw_cabi {
                 args[4] as u32,
                 args[5] as u32,
             ),
+            "orb_wire_verify_slice_io" if args.len() == 6 => {
+                orb_wire_verify_slice_io(args[0], args[1], args[2], args[3], args[4], args[5] as u8)
+                    as u64
+            }
+            "orb_wire_encode_slice_step" if args.len() == 8 => orb_wire_encode_slice_step(
+                args[0],
+                args[1],
+                args[2],
+                args[3] as u32,
+                args[4] as u32,
+                args[5] as u32,
+                args[6] as u32,
+                args[7] as u8,
+            ) as u64,
+            "orb_wire_decode_slice_step" if args.len() == 12 => orb_wire_decode_slice_step(
+                args[0],
+                args[1],
+                args[2] as u8,
+                args[3] as u32,
+                args[4] as u32,
+                args[5] as u32,
+                args[6] as u32,
+                args[7] as u32,
+                args[8] as u32,
+                args[9] as u32,
+                args[10] as u32,
+                args[11] as u32,
+            ) as u64,
             "leansys_verify_slice_bounds" if args.len() == 3 => {
                 leansys_verify_slice_bounds(args[0] as u64, args[1] as u64, args[2] as u64) as u64
             }
@@ -8753,7 +8957,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 131);
+        assert_eq!(count, 134);
     }
 }
 

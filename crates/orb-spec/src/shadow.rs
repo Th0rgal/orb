@@ -6,8 +6,10 @@
 //! `orb_wire_pack_record`, `orb_wire_schema_migrate_step`, `orb_effect_admissible`).
 
 use crate::{
-    effect_admissible, wire_pack_record, wire_schema_migrate_step, wire_unpack_record,
-    wire_validate_frame, EffectAdmissibleInput, OrbWireRecordWord, OrbWireStatus, WireFrameInput,
+    effect_admissible, wire_decode_slice_step, wire_encode_slice_step, wire_pack_record,
+    wire_schema_migrate_step, wire_unpack_record, wire_validate_frame, wire_verify_slice_io,
+    EffectAdmissibleInput, OrbWireRecordWord, OrbWireStatus, WireDecodeSliceInput,
+    WireEncodeSliceInput, WireFrameInput, WireSliceIoInput,
 };
 
 pub const ORB_WIRE_MAGIC: u32 = 0x4F52_4257; // "ORBW"
@@ -81,25 +83,20 @@ impl OrbWireFrame {
         let payload_len = records_bytes.saturating_add(arena_bytes);
         let total_len = ORB_WIRE_HEADER_BYTES.saturating_add(payload_len);
 
-        if records_bytes > u16::MAX as usize
-            || arena_bytes > u16::MAX as usize
-            || total_len > u32::MAX as usize
-        {
-            return Err(OrbWireStatus::TruncatedOrOutOfBounds);
-        }
-
-        let status = wire_validate_frame(WireFrameInput {
-            magic: ORB_WIRE_MAGIC,
-            abi_version: ORB_WIRE_ABI_VERSION,
+        let records_count =
+            u32::try_from(self.records.len()).map_err(|_| OrbWireStatus::TruncatedOrOutOfBounds)?;
+        let arena_len_u32 =
+            u32::try_from(arena_bytes).map_err(|_| OrbWireStatus::TruncatedOrOutOfBounds)?;
+        let is_32bit = u8::from(usize::BITS == 32);
+        let status = wire_encode_slice_step(WireEncodeSliceInput {
+            in_arena_ptr: self.arena.as_ptr() as usize as u64,
+            out_ptr: out_buf.as_ptr() as usize as u64,
+            out_cap: out_buf.len() as u64,
             schema_id: u32::from(self.schema_id),
-            expected_schema_id: u32::from(self.schema_id),
-            total_len: total_len as u32,
-            payload_len: payload_len as u32,
-            arena_off: records_bytes as u32,
-            arena_len: arena_bytes as u32,
+            records_count,
+            arena_len: arena_len_u32,
             max_budget_bytes,
-            out_cap: out_buf.len().min(u32::MAX as usize) as u32,
-            required_out_bytes: total_len as u32,
+            is_32bit,
         });
         if status != OrbWireStatus::Ok {
             return Err(status);
@@ -127,78 +124,127 @@ impl OrbWireFrame {
         Ok(total_len)
     }
 
-    /// Total, bounded decoder backed by `orb_wire_validate_frame`. Never panics on malformed bytes.
+    /// Total, bounded decoder backed by `orb_wire_decode_slice_step` (zero-copy `OrbWireSliceView`
+    /// plus `Vec<OrbWireRecordWord>` materialization). Never panics on malformed bytes.
     pub fn decode(
         bytes: &[u8],
         expected_schema_id: u16,
         max_budget_bytes: u32,
     ) -> Result<Self, OrbWireStatus> {
-        let Some(hdr) = OrbWireHeader::from_le_bytes(bytes) else {
-            return Err(OrbWireStatus::TruncatedOrOutOfBounds);
-        };
-        if bytes.len() != hdr.total_len as usize {
-            let status = wire_validate_frame(WireFrameInput {
-                magic: hdr.magic,
-                abi_version: u32::from(hdr.abi_version),
-                schema_id: u32::from(hdr.schema_id),
-                expected_schema_id: u32::from(expected_schema_id),
-                total_len: bytes.len().min(u32::MAX as usize) as u32,
-                payload_len: hdr.payload_len,
-                arena_off: u32::from(hdr.arena_off),
-                arena_len: u32::from(hdr.arena_len),
-                max_budget_bytes,
-                out_cap: u32::MAX,
-                required_out_bytes: 0,
-            });
-            return Err(if status == OrbWireStatus::Ok {
-                OrbWireStatus::TruncatedOrOutOfBounds
-            } else {
-                status
-            });
+        let view = OrbWireSliceView::decode_slice(bytes, expected_schema_id, max_budget_bytes)?;
+        let mut records = Vec::with_capacity(view.record_count());
+        for i in 0..view.record_count() {
+            if let Some(rec) = view.record_at(i) {
+                records.push(rec);
+            }
         }
+        Ok(Self {
+            schema_id: view.header.schema_id,
+            flags: view.header.flags,
+            records,
+            arena: view.arena_bytes.to_vec(),
+        })
+    }
 
-        let status = wire_validate_frame(WireFrameInput {
-            magic: hdr.magic,
-            abi_version: u32::from(hdr.abi_version),
-            schema_id: u32::from(hdr.schema_id),
-            expected_schema_id: u32::from(expected_schema_id),
-            total_len: hdr.total_len,
-            payload_len: hdr.payload_len,
-            arena_off: u32::from(hdr.arena_off),
-            arena_len: u32::from(hdr.arena_len),
+    /// Encodes caller-provided records + zero-copy `arena` slice directly into `out_buf`,
+    /// proving disjointness, non-null pointers, LP64/wasm32 span bounds, and frame invariants via
+    /// `orb_wire_encode_slice_step` before mutating a single byte of `out_buf`.
+    pub fn encode_slice_into(
+        schema_id: u16,
+        flags: u32,
+        records: &[OrbWireRecordWord],
+        arena: &[u8],
+        out_buf: &mut [u8],
+        max_budget_bytes: u32,
+    ) -> Result<usize, OrbWireStatus> {
+        unsafe {
+            Self::encode_raw_slice_ptrs(
+                schema_id,
+                flags,
+                records,
+                arena.as_ptr(),
+                arena.len(),
+                out_buf.as_mut_ptr(),
+                out_buf.len(),
+                max_budget_bytes,
+                u8::from(usize::BITS == 32),
+            )
+        }
+    }
+
+    /// Raw pointer/length entrypoint used to verify disjointness & non-null gating on overlapping
+    /// or null buffers without violating Rust `&`/`&mut` aliasing preconditions.
+    ///
+    /// # Safety
+    ///
+    /// When `wire_encode_slice_step` admits the call (`OrbWireStatus::Ok`), `in_arena_ptr` must be
+    /// valid for reads of `arena_bytes` bytes (when `arena_bytes > 0`) and `out_ptr` must be valid
+    /// for writes of `out_cap` bytes (when `out_cap > 0`).
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn encode_raw_slice_ptrs(
+        schema_id: u16,
+        flags: u32,
+        records: &[OrbWireRecordWord],
+        in_arena_ptr: *const u8,
+        arena_bytes: usize,
+        out_ptr: *mut u8,
+        out_cap: usize,
+        max_budget_bytes: u32,
+        is_32bit: u8,
+    ) -> Result<usize, OrbWireStatus> {
+        let records_count =
+            u32::try_from(records.len()).map_err(|_| OrbWireStatus::TruncatedOrOutOfBounds)?;
+        let arena_len_u32 =
+            u32::try_from(arena_bytes).map_err(|_| OrbWireStatus::TruncatedOrOutOfBounds)?;
+        let status = wire_encode_slice_step(WireEncodeSliceInput {
+            in_arena_ptr: in_arena_ptr as usize as u64,
+            out_ptr: out_ptr as usize as u64,
+            out_cap: out_cap as u64,
+            schema_id: u32::from(schema_id),
+            records_count,
+            arena_len: arena_len_u32,
             max_budget_bytes,
-            out_cap: u32::MAX,
-            required_out_bytes: 0,
+            is_32bit,
         });
         if status != OrbWireStatus::Ok {
             return Err(status);
         }
-
-        let arena_off = hdr.arena_off as usize;
-        let arena_len = hdr.arena_len as usize;
-        if arena_off % 8 != 0 || arena_off.saturating_add(arena_len) != hdr.payload_len as usize {
-            return Err(OrbWireStatus::TruncatedOrOutOfBounds);
+        let records_bytes = records.len() * 8;
+        let payload_len = records_bytes + arena_bytes;
+        let total_len = ORB_WIRE_HEADER_BYTES + payload_len;
+        let hdr = OrbWireHeader {
+            magic: ORB_WIRE_MAGIC,
+            abi_version: ORB_WIRE_ABI_VERSION as u16,
+            schema_id,
+            flags,
+            total_len: total_len as u32,
+            payload_len: payload_len as u32,
+            arena_off: records_bytes as u16,
+            arena_len: arena_bytes as u16,
+        };
+        let hdr_bytes = hdr.to_le_bytes();
+        std::ptr::copy_nonoverlapping(hdr_bytes.as_ptr(), out_ptr, ORB_WIRE_HEADER_BYTES);
+        let mut cursor = ORB_WIRE_HEADER_BYTES;
+        for rec in records {
+            let word = wire_pack_record(*rec).to_le_bytes();
+            std::ptr::copy_nonoverlapping(word.as_ptr(), out_ptr.add(cursor), 8);
+            cursor += 8;
         }
-
-        let payload =
-            &bytes[ORB_WIRE_HEADER_BYTES..ORB_WIRE_HEADER_BYTES + hdr.payload_len as usize];
-        let records_slice = &payload[..arena_off];
-        let arena_slice = &payload[arena_off..arena_off + arena_len];
-
-        let mut records = Vec::with_capacity(records_slice.len() / 8);
-        for chunk in records_slice.chunks_exact(8) {
-            let word = u64::from_le_bytes([
-                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-            ]);
-            records.push(wire_unpack_record(word));
+        if arena_bytes > 0 {
+            std::ptr::copy_nonoverlapping(in_arena_ptr, out_ptr.add(cursor), arena_bytes);
         }
-
-        Ok(Self {
-            schema_id: hdr.schema_id,
-            flags: hdr.flags,
-            records,
-            arena: arena_slice.to_vec(),
-        })
+        let io_status = wire_verify_slice_io(WireSliceIoInput {
+            in_ptr: in_arena_ptr as usize as u64,
+            in_len: arena_bytes as u64,
+            out_ptr: out_ptr as usize as u64,
+            out_cap: out_cap as u64,
+            written_len: total_len as u64,
+            is_32bit,
+        });
+        if io_status != OrbWireStatus::Ok {
+            return Err(io_status);
+        }
+        Ok(total_len)
     }
 
     /// Reads an arena slice referenced by `(offset, len)` inside a record's `payload32` & `len16`.
@@ -218,6 +264,99 @@ impl OrbWireFrame {
             payload_bytes,
             max_bytes,
         )
+    }
+}
+
+/// Zero-copy borrowed `OrbWire` frame view backed by `orb_wire_decode_slice_step`.
+/// Neither records nor arena bytes allocate heap storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrbWireSliceView<'a> {
+    pub header: OrbWireHeader,
+    pub records_bytes: &'a [u8],
+    pub arena_bytes: &'a [u8],
+}
+
+impl<'a> OrbWireSliceView<'a> {
+    /// Decodes a borrowed `OrbWire` slice view after validating pointer non-nullness,
+    /// LP64/wasm32 span bounds, exact slice length, alignment, schema, and budget via
+    /// `orb_wire_decode_slice_step`.
+    pub fn decode_slice(
+        bytes: &'a [u8],
+        expected_schema_id: u16,
+        max_budget_bytes: u32,
+    ) -> Result<Self, OrbWireStatus> {
+        let Some(hdr) = OrbWireHeader::from_le_bytes(bytes) else {
+            return Err(OrbWireStatus::TruncatedOrOutOfBounds);
+        };
+        let is_32bit = u8::from(usize::BITS == 32);
+        let status = wire_decode_slice_step(WireDecodeSliceInput {
+            in_ptr: bytes.as_ptr() as usize as u64,
+            in_len: bytes.len() as u64,
+            is_32bit,
+            magic: hdr.magic,
+            abi_version: u32::from(hdr.abi_version),
+            schema_id: u32::from(hdr.schema_id),
+            expected_schema_id: u32::from(expected_schema_id),
+            total_len: hdr.total_len,
+            payload_len: hdr.payload_len,
+            arena_off: u32::from(hdr.arena_off),
+            arena_len: u32::from(hdr.arena_len),
+            max_budget_bytes,
+        });
+        if status != OrbWireStatus::Ok {
+            return Err(status);
+        }
+        let arena_off = hdr.arena_off as usize;
+        let arena_len = hdr.arena_len as usize;
+        if arena_off.saturating_add(arena_len) != hdr.payload_len as usize {
+            let fallback = wire_validate_frame(WireFrameInput {
+                magic: hdr.magic,
+                abi_version: u32::from(hdr.abi_version),
+                schema_id: u32::from(hdr.schema_id),
+                expected_schema_id: u32::from(expected_schema_id),
+                total_len: hdr.total_len,
+                payload_len: hdr.payload_len,
+                arena_off: u32::from(hdr.arena_off),
+                arena_len: u32::from(hdr.arena_len),
+                max_budget_bytes,
+                out_cap: u32::MAX,
+                required_out_bytes: 0,
+            });
+            return Err(if fallback == OrbWireStatus::Ok {
+                OrbWireStatus::TruncatedOrOutOfBounds
+            } else {
+                fallback
+            });
+        }
+        let payload =
+            &bytes[ORB_WIRE_HEADER_BYTES..ORB_WIRE_HEADER_BYTES + hdr.payload_len as usize];
+        Ok(Self {
+            header: hdr,
+            records_bytes: &payload[..arena_off],
+            arena_bytes: &payload[arena_off..arena_off + arena_len],
+        })
+    }
+
+    #[inline]
+    pub const fn record_count(&self) -> usize {
+        self.records_bytes.len() / 8
+    }
+
+    #[inline]
+    pub fn record_at(&self, index: usize) -> Option<OrbWireRecordWord> {
+        let start = index.checked_mul(8)?;
+        let chunk = self.records_bytes.get(start..start + 8)?;
+        let word = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+        Some(wire_unpack_record(word))
+    }
+
+    #[inline]
+    pub fn arena_slice(&self, offset: u32, len: u16) -> Option<&'a [u8]> {
+        let start = offset as usize;
+        let end = start.checked_add(len as usize)?;
+        self.arena_bytes.get(start..end)
     }
 }
 
@@ -1705,5 +1844,129 @@ mod tests {
         });
         assert!(sb.admitted && sb.checkpoint_forced && sb.next_checkpoint == 20_000 - 4_096);
         assert!(20_000 - sb.next_checkpoint <= 4_096);
+    }
+
+    #[test]
+    fn orb_wire_zero_copy_slice_abi_alias_null_wasm32_and_no_partial_mutation() {
+        let records = [
+            OrbWireRecordWord {
+                tag: 3,
+                flags: 1,
+                len16: 4,
+                payload32: 0,
+            },
+            OrbWireRecordWord {
+                tag: 8,
+                flags: 0,
+                len16: 5,
+                payload32: 4,
+            },
+        ];
+        let arena = b"zero_copy";
+        let mut out = [0xCCu8; 96];
+        let written = OrbWireFrame::encode_slice_into(
+            11,
+            0x42,
+            &records,
+            arena,
+            &mut out,
+            ORB_WIRE_DEFAULT_MAX_BUDGET,
+        )
+        .expect("zero-copy slice encode should succeed");
+        assert_eq!(written, 24 + 16 + 9);
+        assert!(out[written..].iter().all(|&b| b == 0xCC));
+
+        let view = OrbWireSliceView::decode_slice(&out[..written], 11, ORB_WIRE_DEFAULT_MAX_BUDGET)
+            .expect("zero-copy slice view should decode");
+        assert_eq!(view.header.schema_id, 11);
+        assert_eq!(view.header.flags, 0x42);
+        assert_eq!(view.record_count(), 2);
+        assert_eq!(view.record_at(0), Some(records[0]));
+        assert_eq!(view.record_at(1), Some(records[1]));
+        assert_eq!(view.record_at(2), None);
+        assert_eq!(view.arena_slice(0, 4), Some(&b"zero"[..]));
+        assert_eq!(view.arena_slice(4, 5), Some(&b"_copy"[..]));
+        // Prove zero-copy borrow points directly inside `out`
+        assert_eq!(
+            view.arena_bytes.as_ptr() as usize,
+            out.as_ptr() as usize + 24 + 16
+        );
+
+        // 1. Overlapping input arena and output buffer rejected without mutating a single byte
+        let mut aliased = [0xA5u8; 96];
+        let err_alias = unsafe {
+            OrbWireFrame::encode_raw_slice_ptrs(
+                11,
+                0,
+                &records,
+                aliased.as_ptr().add(16),
+                arena.len(),
+                aliased.as_mut_ptr(),
+                aliased.len(),
+                ORB_WIRE_DEFAULT_MAX_BUDGET,
+                0,
+            )
+        };
+        assert_eq!(err_alias, Err(OrbWireStatus::SliceAliasOverlap));
+        assert_eq!(aliased, [0xA5u8; 96]);
+
+        // 2. Null pointer with non-zero span rejected without mutating output sentinel
+        let mut sentinel = [0x5Au8; 64];
+        let err_null = unsafe {
+            OrbWireFrame::encode_raw_slice_ptrs(
+                11,
+                0,
+                &records,
+                std::ptr::null(),
+                4,
+                sentinel.as_mut_ptr(),
+                sentinel.len(),
+                ORB_WIRE_DEFAULT_MAX_BUDGET,
+                0,
+            )
+        };
+        assert_eq!(err_null, Err(OrbWireStatus::NullSlicePtr));
+        assert_eq!(sentinel, [0x5Au8; 64]);
+
+        // 3. Invalid is_32bit flag (> 1) rejected fail-closed
+        let err_width = unsafe {
+            OrbWireFrame::encode_raw_slice_ptrs(
+                11,
+                0,
+                &records,
+                arena.as_ptr(),
+                arena.len(),
+                sentinel.as_mut_ptr(),
+                sentinel.len(),
+                ORB_WIRE_DEFAULT_MAX_BUDGET,
+                2,
+            )
+        };
+        assert_eq!(err_width, Err(OrbWireStatus::InvalidWidth));
+        assert_eq!(sentinel, [0x5Au8; 64]);
+
+        // 4. wasm32 32-bit address space span overflow (> u32::MAX) rejected, while LP64 admits
+        assert_eq!(
+            wire_verify_slice_io(WireSliceIoInput {
+                in_ptr: 0xFFFF_FFF0,
+                in_len: 32,
+                out_ptr: 0x1000,
+                out_cap: 64,
+                written_len: 32,
+                is_32bit: 1,
+            }),
+            OrbWireStatus::SpanOverflow
+        );
+        assert_eq!(
+            wire_verify_slice_io(WireSliceIoInput {
+                in_ptr: 0xFFFF_FFF0,
+                in_len: 32,
+                out_ptr: 0x1000,
+                out_cap: 64,
+                written_len: 32,
+                is_32bit: 0,
+            }),
+            OrbWireStatus::Ok
+        );
     }
 }

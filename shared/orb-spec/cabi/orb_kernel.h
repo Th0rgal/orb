@@ -136,6 +136,9 @@ uint32_t orb_vm_cap_admit(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t,
 uint32_t orb_slot_bypass_step(uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t);
 uint64_t orb_node_resize_step(uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 uint32_t orb_node_lane_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint8_t orb_wire_verify_slice_io(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
+uint8_t orb_wire_encode_slice_step(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint8_t);
+uint8_t orb_wire_decode_slice_step(uint64_t, uint64_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 #ifdef __cplusplus
 }
 #endif

@@ -4051,6 +4051,140 @@
         }
       ],
       "internal": true
+    },
+    {
+      "name": "orb_wire_verify_slice_io",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "inPtr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "inLen",
+          "type": "uint64_t"
+        },
+        {
+          "name": "outPtr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "outCap",
+          "type": "uint64_t"
+        },
+        {
+          "name": "writtenLen",
+          "type": "uint64_t"
+        },
+        {
+          "name": "is32Bit",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbWireVerifySliceIo",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_wire_encode_slice_step",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "inArenaPtr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "outPtr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "outCap",
+          "type": "uint64_t"
+        },
+        {
+          "name": "schemaId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "recordsCount",
+          "type": "uint32_t"
+        },
+        {
+          "name": "arenaLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxBudgetBytes",
+          "type": "uint32_t"
+        },
+        {
+          "name": "is32Bit",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbWireEncodeSliceStep",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_wire_decode_slice_step",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "inPtr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "inLen",
+          "type": "uint64_t"
+        },
+        {
+          "name": "is32Bit",
+          "type": "uint8_t"
+        },
+        {
+          "name": "magic",
+          "type": "uint32_t"
+        },
+        {
+          "name": "abiVersion",
+          "type": "uint32_t"
+        },
+        {
+          "name": "schemaId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "expectedSchemaId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "totalLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "payloadLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "arenaOff",
+          "type": "uint32_t"
+        },
+        {
+          "name": "arenaLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxBudgetBytes",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbWireDecodeSliceStep",
+        "ret": "jint"
+      }
     }
   ]
 }

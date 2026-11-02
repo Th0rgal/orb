@@ -1,10 +1,12 @@
 # Shared-kernel conformance: implementation and limits
 
 `scripts/run_shared_kernel_conformance.py` executes every public symbol in
-`shared/orb-spec/kernel_abi.json`: 98 Orb exports and 33 LeanSys exports (131
-public exports across the 132-entry manifest after `#1488` added
-`orb_slot_bypass_step` and live node resize / coordinator lane added
-`orb_node_resize_step` and `orb_node_lane_step`). The inventoried compiler helper is excluded from the
+`shared/orb-spec/kernel_abi.json`: 101 Orb exports and 33 LeanSys exports (134
+public exports across the 135-entry manifest after `#1488` added
+`orb_slot_bypass_step`, live node resize / coordinator lane added
+`orb_node_resize_step` and `orb_node_lane_step`, and Phase R2b added
+`orb_wire_verify_slice_io`, `orb_wire_encode_slice_step`, and
+`orb_wire_decode_slice_step`). The inventoried compiler helper is excluded from the
 public surface. The complete [P0–P7 roadmap](TRUSTWORTHY_SHARED_LEAN_ROADMAP.md)
 and acceptance gates still apply. No phase is accepted by this harness.
 
@@ -35,10 +37,10 @@ of command logs bind the supplied local receipts; dynamic libraries, operating
 system, compiler correctness and hardware execution remain assumptions.
 
 For each export the corpus includes six boundary vectors (0, 1, 2, 3, maximum,
-maximum minus one) and two reproducibly seeded random vectors: 1048 base cases
-across the current 131 public exports (1024 base / 1044 total at the 128-export
+maximum minus one) and two reproducibly seeded random vectors: 1072 base cases
+across the current 134 public exports (1024 base / 1044 total at the 128-export
 execution head `3c70e5ada` recorded below). Lean-witnessed domain mutation
-vectors extend a current 131-export run to 1068 cases.
+vectors extend a current 134-export run to 1092 cases.
 This small scalar corpus is not exhaustive fuzzing. Stock Lean executes wrappers
 calling the actual exported Lean definitions. Those wrappers also compile via
 stock `lean -c` and `leanc`. Native C is compiled from the vendored artifact;
@@ -178,8 +180,8 @@ Evidence directory: `/srv/sandboxed-storage/host-tmp/opencode/p1-final-e585ba9-2
 | `case-receipts.jsonl` | `c34b6a17857a35845ad8d6ec3c925fac7e8afb252dd216f0cc88cef19dd16939` |
 
 These are local unsigned receipts, not durable public artifact hosting or proof
-of complete host wiring. On current `master` (132 manifest entries including
-`orb_slot_bypass_step`, `orb_node_resize_step`, and `orb_node_lane_step`), the coverage registry remains **46 partial / 86
+of complete host wiring. On current `master` (135 manifest entries including
+`orb_slot_bypass_step`, `orb_node_resize_step`, `orb_node_lane_step`, and the Phase R2b `orb_wire_*_slice_*` exports), the coverage registry remains **49 partial / 86
 unconnected** (`acceptance: INCOMPLETE`; 23 partial / 106 unconnected across the
 129 entries at execution head `3c70e5ada`). Physical iPhone/Pixel execution
 remains blocked. See [P3 target qualification](P3_TARGET_QUALIFICATION_REPORT.md)

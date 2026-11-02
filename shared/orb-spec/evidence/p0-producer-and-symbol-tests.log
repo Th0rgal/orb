@@ -1,115 +1,89 @@
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-btw-unblock)
-warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5070:8
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> src/api/control/actor.rs:7420:50
      |
-5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
-     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+7420 | ...                   .fetch_update(
+     |                        ^^^^^^^^^^^^
      |
-     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: `orb-spec` (lib) generated 1 warning
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2227:10
+     = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
      |
-2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
+7420 -                                                 .fetch_update(
+7420 +                                                 .try_update(
      |
-     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
-warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 38.66s
-     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> src/api/control/actor.rs:7427:78
+     |
+7427 | ...                   let _ = runner.active_tool_calls.fetch_update(
+     |                                                        ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+7427 -                                             let _ = runner.active_tool_calls.fetch_update(
+7427 +                                             let _ = runner.active_tool_calls.try_update(
+     |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
+   --> src/node/runner.rs:988:14
+    |
+988 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+    |              ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+988 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+988 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+    |
+
+warning: `sandboxed_sh` (lib test) generated 3 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 3 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c29a904789290e9f)
 
 running 1 test
 test api::control::dispatch_admission_tests::remote_submission_rejects_closed_snapshots_and_records_host_observations ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3682 filtered out; finished in 0.19s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3719 filtered out; finished in 0.14s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-btw-unblock)
-warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5070:8
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> src/api/control/actor.rs:7420:50
      |
-5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
-     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+7420 | ...                   .fetch_update(
+     |                        ^^^^^^^^^^^^
      |
-     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: `orb-spec` (lib) generated 1 warning
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2227:10
+     = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
      |
-2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
+7420 -                                                 .fetch_update(
+7420 +                                                 .try_update(
      |
-     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
-warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 32.06s
-     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> src/api/control/actor.rs:7427:78
+     |
+7427 | ...                   let _ = runner.active_tool_calls.fetch_update(
+     |                                                        ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+7427 -                                             let _ = runner.active_tool_calls.fetch_update(
+7427 +                                             let _ = runner.active_tool_calls.try_update(
+     |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
+   --> src/node/runner.rs:988:14
+    |
+988 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+    |              ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+988 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+988 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+    |
+
+warning: `sandboxed_sh` (lib test) generated 3 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 3 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c29a904789290e9f)
 
 running 14 tests
 test api::control::fork::tests::an_edited_message_replaces_the_rest_of_the_conversation ... ok
@@ -127,24 +101,14 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3669 filtered out; finished in 0.09s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3706 filtered out; finished in 0.06s
 
-warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5070:8
-     |
-5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
-     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
-     |
-     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: `orb-spec` (lib) generated 1 warning
-   Compiling orb-spec v1.3.0 (/Users/thomas/work/orb/worktree/fix-btw-unblock/crates/orb-spec)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.85s
-     Running tests/artifact_symbols.rs (/Users/thomas/work/orb/target/debug/deps/artifact_symbols-2edaf0aafbc62527)
+    Finished `test` profile [unoptimized] target(s) in 0.05s
+     Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-a0e977251a7f3fc9)
 
 running 2 tests
 test missing_extra_duplicate_nontext_and_imported_symbols_fail ... ok
 test real_object_and_archive_mutations_are_rejected ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.58s
 

@@ -359,6 +359,15 @@ internal func orb_vm_claim_step(_ isLive: UInt8, _ sameTenant: UInt8, _ ownerNon
 @_silgen_name("orb_compute_secret_gate")
 internal func orb_compute_secret_gate(_ isCoreReservedComputeKey: UInt8, _ callerOnManagedNode: UInt8, _ isAllowlistedManagedSecret: UInt8, _ operatorBreakGlass: UInt8) -> UInt32
 
+@_silgen_name("orb_wire_verify_slice_io")
+internal func orb_wire_verify_slice_io(_ inPtr: UInt64, _ inLen: UInt64, _ outPtr: UInt64, _ outCap: UInt64, _ writtenLen: UInt64, _ is32Bit: UInt8) -> UInt8
+
+@_silgen_name("orb_wire_encode_slice_step")
+internal func orb_wire_encode_slice_step(_ inArenaPtr: UInt64, _ outPtr: UInt64, _ outCap: UInt64, _ schemaId: UInt32, _ recordsCount: UInt32, _ arenaLen: UInt32, _ maxBudgetBytes: UInt32, _ is32Bit: UInt8) -> UInt8
+
+@_silgen_name("orb_wire_decode_slice_step")
+internal func orb_wire_decode_slice_step(_ inPtr: UInt64, _ inLen: UInt64, _ is32Bit: UInt8, _ magic: UInt32, _ abiVersion: UInt32, _ schemaId: UInt32, _ expectedSchemaId: UInt32, _ totalLen: UInt32, _ payloadLen: UInt32, _ arenaOff: UInt32, _ arenaLen: UInt32, _ maxBudgetBytes: UInt32) -> UInt8
+
 enum OrbKernel {
     struct WorkfoldVerdict: Equatable, Sendable {
         let foldItem: Bool
@@ -794,6 +803,69 @@ enum OrbKernel {
             ((lo32 >> 8) & 1) != 0,
             ((lo32 >> 9) & 1) != 0,
             hi32
+        )
+    }
+
+    static func wireVerifySliceIo(
+        inPtr: UInt64,
+        inLen: UInt64,
+        outPtr: UInt64,
+        outCap: UInt64,
+        writtenLen: UInt64,
+        is32Bit: Bool = false
+    ) -> UInt8 {
+        orb_wire_verify_slice_io(inPtr, inLen, outPtr, outCap, writtenLen, b8(is32Bit))
+    }
+
+    static func wireEncodeSliceStep(
+        inArenaPtr: UInt64,
+        outPtr: UInt64,
+        outCap: UInt64,
+        schemaId: UInt32,
+        recordsCount: UInt32,
+        arenaLen: UInt32,
+        maxBudgetBytes: UInt32,
+        is32Bit: Bool = false
+    ) -> UInt8 {
+        orb_wire_encode_slice_step(
+            inArenaPtr,
+            outPtr,
+            outCap,
+            schemaId,
+            recordsCount,
+            arenaLen,
+            maxBudgetBytes,
+            b8(is32Bit)
+        )
+    }
+
+    static func wireDecodeSliceStep(
+        inPtr: UInt64,
+        inLen: UInt64,
+        is32Bit: Bool = false,
+        magic: UInt32,
+        abiVersion: UInt32,
+        schemaId: UInt32,
+        expectedSchemaId: UInt32,
+        totalLen: UInt32,
+        payloadLen: UInt32,
+        arenaOff: UInt32,
+        arenaLen: UInt32,
+        maxBudgetBytes: UInt32
+    ) -> UInt8 {
+        orb_wire_decode_slice_step(
+            inPtr,
+            inLen,
+            b8(is32Bit),
+            magic,
+            abiVersion,
+            schemaId,
+            expectedSchemaId,
+            totalLen,
+            payloadLen,
+            arenaOff,
+            arenaLen,
+            maxBudgetBytes
         )
     }
 }
