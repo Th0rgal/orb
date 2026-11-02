@@ -320,8 +320,7 @@ struct OrbConversationMenu: View, Equatable {
     enum Action { case rename, move, reopen, archive, stop, sideQuestion, files, fork, clone, context }
 
     let hasMission: Bool
-    let agentLabel: String
-    let status: String
+    let summary: String
     let canReopen: Bool
     let reopenTitle: String
     let canArchive: Bool
@@ -332,8 +331,14 @@ struct OrbConversationMenu: View, Equatable {
     let hasProject: Bool
     let perform: (Action) -> Void
 
+    nonisolated static func summaryText(agentLabel: String, status: String) -> String {
+        let a = agentLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let s = status.trimmingCharacters(in: .whitespacesAndNewlines)
+        return [a, s].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
     nonisolated static func == (l: Self, r: Self) -> Bool {
-        l.hasMission == r.hasMission && l.agentLabel == r.agentLabel && l.status == r.status &&
+        l.hasMission == r.hasMission && l.summary == r.summary &&
         l.canReopen == r.canReopen && l.reopenTitle == r.reopenTitle && l.canArchive == r.canArchive &&
         l.working == r.working && l.canStop == r.canStop && l.externalURL == r.externalURL &&
         l.local == r.local && l.hasProject == r.hasProject
@@ -343,32 +348,45 @@ struct OrbConversationMenu: View, Equatable {
         Menu {
             if hasMission {
                 Section {
-                    Text(agentLabel)
-                    if !status.isEmpty { Text(status) }
+                    if local {
+                        Button { perform(.sideQuestion) } label: { Label("Side question", systemImage: "bubble.left.and.text.bubble.right") }
+                            .accessibilityIdentifier("conversation.sideQuestion")
+                        Button { perform(.files) } label: { Label("Files", systemImage: "folder") }
+                            .accessibilityIdentifier("conversation.files")
+                    }
+                    if hasProject {
+                        Button { perform(.context) } label: { Label("Project context", systemImage: "doc.text") }
+                    }
+                    if let externalURL {
+                        Link(destination: externalURL) { Label("Open in service", systemImage: "arrow.up.right.square") }
+                    }
+                } header: {
+                    if !summary.isEmpty { Text(summary) }
                 }
-                Button { perform(.rename) } label: { Label("Rename", systemImage: "pencil") }
-                Button { perform(.move) } label: { Label("Move", systemImage: "folder") }
-                if canReopen {
-                    Button { perform(.reopen) } label: { Label(reopenTitle, systemImage: "arrow.uturn.backward") }.disabled(working)
+
+                Section {
+                    Button { perform(.rename) } label: { Label("Rename", systemImage: "pencil") }
+                    Button { perform(.move) } label: { Label("Move", systemImage: "folder.badge.gearshape") }
+                    if local {
+                        Button { perform(.fork) } label: { Label("Fork", systemImage: "arrow.triangle.branch") }
+                        Button { perform(.clone) } label: { Label("Clone", systemImage: "plus.square.on.square") }
+                    }
                 }
-                if canArchive {
-                    Button { perform(.archive) } label: { Label("Archive", systemImage: "archivebox") }.disabled(working)
+
+                Section {
+                    if canReopen {
+                        Button { perform(.reopen) } label: { Label(reopenTitle, systemImage: "arrow.uturn.backward") }.disabled(working)
+                    }
+                    if canStop {
+                        Button(role: .destructive) { perform(.stop) } label: { Label("Stop", systemImage: "stop.circle") }
+                    }
+                    if canArchive && !working {
+                        Button { perform(.archive) } label: { Label("Archive", systemImage: "archivebox") }
+                    }
                 }
-                if canStop {
-                    Button(role: .destructive) { perform(.stop) } label: { Label("Stop", systemImage: "stop.circle") }
-                }
-                if let externalURL {
-                    Link(destination: externalURL) { Label("Open in service", systemImage: "arrow.up.right.square") }
-                }
-                if local {
-                    Divider()
-                    Button { perform(.sideQuestion) } label: { Label("Side question (/btw)", systemImage: "bubble.left.and.text.bubble.right") }
-                    Button { perform(.files) } label: { Label("Files", systemImage: "folder") }.accessibilityIdentifier("conversation.files")
-                    Button { perform(.fork) } label: { Label("Fork conversation", systemImage: "arrow.triangle.branch") }
-                    Button { perform(.clone) } label: { Label("Clone", systemImage: "plus.square.on.square") }
-                }
+            } else if hasProject {
+                Button { perform(.context) } label: { Label("Project context", systemImage: "doc.text") }
             }
-            if hasProject { Button { perform(.context) } label: { Label("Project context", systemImage: "doc.text") } }
         } label: {
             Image(systemName: "ellipsis")
                 .frame(width: 44, height: 44)

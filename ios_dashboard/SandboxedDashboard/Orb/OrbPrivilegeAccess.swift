@@ -230,6 +230,7 @@ struct OrbPrivilegeAccessList: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 10) {
                     Image(systemName: monitor.bunkered ? "lock.shield.fill" : "checkmark.shield")
+                        .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(monitor.bunkered ? OrbStyle.error : OrbStyle.success)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(OrbPrivilegeAccessMonitor.bunkerLabel(monitor.bunkerState))
@@ -239,28 +240,50 @@ struct OrbPrivilegeAccessList: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(monitor.bunkered ? 2 : 1)
                     }
+                    .layoutPriority(1)
                     Spacer(minLength: 8)
                     if monitor.bunkered {
                         Button {
                             toggleBunker(lock: false)
                         } label: {
-                            Label("Exit", systemImage: OrbBiometric.symbolName)
-                                .foregroundStyle(.black)
+                            HStack(spacing: 5) {
+                                Image(systemName: OrbBiometric.symbolName)
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text("Exit")
+                                    .font(.caption.weight(.semibold))
+                                    .lineLimit(1)
+                            }
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 6)
+                            .background(OrbStyle.success, in: Capsule())
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(OrbStyle.success)
-                        .controlSize(.small)
+                        .buttonStyle(.plain)
+                        .fixedSize(horizontal: true, vertical: false)
                         .disabled(acting != nil)
+                        .opacity(acting != nil ? 0.5 : 1)
                         .accessibilityIdentifier("privilege.unbunker")
                     } else {
                         Button(role: .destructive) {
                             toggleBunker(lock: true)
                         } label: {
-                            Label("Lock Down", systemImage: OrbBiometric.symbolName)
+                            HStack(spacing: 5) {
+                                Image(systemName: OrbBiometric.symbolName)
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text("Lock down")
+                                    .font(.caption.weight(.semibold))
+                                    .lineLimit(1)
+                            }
+                            .foregroundStyle(OrbStyle.error)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 6)
+                            .background(OrbStyle.error.opacity(0.14), in: Capsule())
+                            .overlay(Capsule().stroke(OrbStyle.error.opacity(0.32), lineWidth: 1))
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                        .buttonStyle(.plain)
+                        .fixedSize(horizontal: true, vertical: false)
                         .disabled(acting != nil)
+                        .opacity(acting != nil ? 0.5 : 1)
                         .accessibilityIdentifier("privilege.bunker")
                     }
                 }
@@ -544,7 +567,7 @@ struct OrbPrivilegeAccessList: View {
     }
 
     private func grantRow(_ g: OrbJSON) -> some View {
-        HStack {
+        HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(OrbPrivilegeAccessMonitor.requester(g)) · \(OrbPrivilegeAccessMonitor.title(g))")
                     .font(.subheadline)
@@ -552,17 +575,20 @@ struct OrbPrivilegeAccessList: View {
                 Text("\(g["session_scoped"].flag ? "Session" : "Fixed") · \(OrbMissionAccessList.left(g["expires_at"].text))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            Spacer()
+            Spacer(minLength: 8)
             Button("Revoke", role: .destructive) { revoke(g) }
-                .buttonStyle(.bordered).controlSize(.small)
+                .buttonStyle(.borderless)
+                .font(.caption.weight(.medium))
+                .fixedSize(horizontal: true, vertical: false)
                 .disabled(acting != nil)
                 .accessibilityIdentifier("privilege.revoke.\(g["id"].text)")
         }
     }
 
     private func missionGrantRow(_ g: OrbJSON) -> some View {
-        HStack {
+        HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(OrbMissionAccessMonitor.requester(g)) → \(OrbMissionAccessMonitor.target(g))")
                     .font(.subheadline)
@@ -570,10 +596,13 @@ struct OrbPrivilegeAccessList: View {
                 Text("\(g["scope"].text == "control" ? "Control" : "Read only") · \(OrbMissionAccessList.left(g["expires_at"].text))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            Spacer()
+            Spacer(minLength: 8)
             Button("Revoke", role: .destructive) { revokeMissionGrant(g) }
-                .buttonStyle(.bordered).controlSize(.small)
+                .buttonStyle(.borderless)
+                .font(.caption.weight(.medium))
+                .fixedSize(horizontal: true, vertical: false)
                 .disabled(acting != nil)
                 .accessibilityIdentifier("access.revoke.\(g["id"].text)")
         }

@@ -486,6 +486,9 @@ fun OrbAppRoot(
                             project = currentScreen.project,
                             initialMission = currentScreen.mission,
                             initialFolder = currentScreen.initialFolder,
+                            onOpenDocuments = { dirPath ->
+                                push(OrbNavScreen.Documents(currentScreen.project, dirPath))
+                            },
                             onBack = { pop() }
                         )
                     }
