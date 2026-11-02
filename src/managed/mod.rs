@@ -63,6 +63,40 @@ use crate::remote_node::RemoteNodeConfig;
 pub const NODE_PREFIX: &str = "managed-";
 pub const SANDBOX_NAME_PREFIX: &str = "orb-managed-";
 
+fn non_prod_service_suffix_for(service_path: &std::path::Path) -> Option<String> {
+    service_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("sandboxed-sh-"))
+        .filter(|suffix| !suffix.is_empty() && *suffix != "prod")
+        .map(str::to_owned)
+}
+
+pub fn sandbox_name_prefix_for(service_path: Option<&std::path::Path>) -> String {
+    match service_path.and_then(non_prod_service_suffix_for) {
+        Some(suffix) => format!("{SANDBOX_NAME_PREFIX}{suffix}-"),
+        None => SANDBOX_NAME_PREFIX.to_string(),
+    }
+}
+
+/// Service-scoped provider VM name prefix (`"orb-managed-"` on production or
+/// unsuffixed binaries, `"orb-managed-<suffix>-"` on `sandboxed-sh-<suffix>`
+/// such as `sandboxed-sh-dev`) so non-production instances on a shared cloud
+/// account never mistake production VMs for orphans.
+pub fn sandbox_name_prefix() -> &'static str {
+    static PREFIX: OnceLock<String> = OnceLock::new();
+    PREFIX.get_or_init(|| {
+        sandbox_name_prefix_for(crate::util::current_sandboxed_service_binary_path().as_deref())
+    })
+}
+
+fn is_non_prod_service_instance() -> bool {
+    crate::util::current_sandboxed_service_binary_path()
+        .as_deref()
+        .and_then(non_prod_service_suffix_for)
+        .is_some()
+}
+
 static RESOURCE_LEDGER_SHADOW_COUNTER: OnceLock<crate::orb_spec::ShadowCounter> = OnceLock::new();
 
 pub fn resource_ledger_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
@@ -583,7 +617,7 @@ impl ManagedSettings {
             idle_minutes: env_parse("SANDBOXED_MANAGED_IDLE_MINUTES").unwrap_or(15),
             working_idle_minutes: env_parse("SANDBOXED_MANAGED_WORKING_IDLE_MINUTES").unwrap_or(15),
             post_job_idle_minutes: env_parse("SANDBOXED_MANAGED_POST_JOB_IDLE_MINUTES")
-                .unwrap_or(5),
+                .unwrap_or(10),
             owner_grace_minutes: env_parse("SANDBOXED_MANAGED_OWNER_GRACE_MINUTES").unwrap_or(2),
             waiting_grace_minutes: env_parse("SANDBOXED_MANAGED_WAITING_GRACE_MINUTES")
                 .unwrap_or(15),
@@ -1146,6 +1180,7 @@ pub(crate) fn unregister_test_node(machine: &ManagedMachine) {
 
 fn unregister_node(machine: &ManagedMachine) {
     unregister_alias(machine);
+    crate::api::control::evict_node_library_skill_uploads(&machine.node_id);
     if let Ok(mut map) = NODES.write() {
         map.remove(&machine.node_id);
     }
@@ -1339,6 +1374,14 @@ fn default_true() -> bool {
 
 impl Default for RuntimeSettings {
     fn default() -> Self {
+        let reaper_dry_run = match std::env::var("SANDBOXED_MANAGED_REAPER_DRY_RUN")
+            .ok()
+            .as_deref()
+        {
+            Some("1" | "true" | "yes" | "on") => true,
+            Some("0" | "false" | "no" | "off") => false,
+            _ => is_non_prod_service_instance(),
+        };
         Self {
             antigravity_on_managed: !matches!(
                 std::env::var("SANDBOXED_MANAGED_ANTIGRAVITY")
@@ -1346,12 +1389,7 @@ impl Default for RuntimeSettings {
                     .as_deref(),
                 Some("0" | "false" | "no" | "off")
             ),
-            reaper_dry_run: matches!(
-                std::env::var("SANDBOXED_MANAGED_REAPER_DRY_RUN")
-                    .ok()
-                    .as_deref(),
-                Some("1" | "true" | "yes" | "on")
-            ),
+            reaper_dry_run,
             disabled_providers: std::collections::BTreeSet::new(),
         }
     }
@@ -3620,6 +3658,7 @@ impl ManagedManager {
             };
             // boat stops the sandbox itself at TTL + a small grace, even if Core
             // is down: the hard backstop against runaway cost.
+            let prefix = sandbox_name_prefix();
             SpawnSpec {
                 machine_id: m.id.clone(),
                 size: m.size.clone(),
@@ -3627,12 +3666,12 @@ impl ManagedManager {
                 ram_gb: m.ram_gb,
                 ttl_seconds: ttl_minutes * 60 + 300,
                 image: Some(m.image.clone()),
-                name: format!("{SANDBOX_NAME_PREFIX}{}", m.id),
+                name: format!("{prefix}{}", m.id),
                 // A resume provisions the same machine id again.
                 idempotency_key: if m.resumes == 0 {
-                    format!("orb-managed-{}", m.id)
+                    format!("{prefix}{}", m.id)
                 } else {
-                    format!("orb-managed-{}-r{}", m.id, m.resumes)
+                    format!("{prefix}{}-r{}", m.id, m.resumes)
                 },
                 bootstrap_script,
                 gpu: extras.gpu.clone(),
@@ -3903,7 +3942,11 @@ impl ManagedManager {
             let mut start_res = Err(String::new());
             for attempt in 0..5 {
                 start_res = provider
-                    .exec(&provider_id, "sudo systemctl restart orb-node.service", 120)
+                    .exec(
+                        &provider_id,
+                        "(sudo systemctl reset-failed orb-node.service 2>/dev/null || true) && sudo systemctl restart orb-node.service",
+                        120,
+                    )
                     .await
                     .and_then(|node_started| {
                         if let Some(code) = exec_exit_code(&node_started).filter(|c| *c != 0) {
@@ -4283,6 +4326,18 @@ impl ManagedManager {
             .is_some_and(|hb| hb.active_jobs > 0 || hb.active_leases > 0 || hb.queued_jobs > 0)
     }
 
+    async fn has_saving_snapshot(&self, machine_id: &str) -> bool {
+        self.snapshots
+            .lock()
+            .await
+            .iter()
+            .any(|s| s.source_machine_id == machine_id && s.status == "saving")
+    }
+
+    async fn machine_busy(&self, m: &ManagedMachine) -> bool {
+        Self::node_busy(&m.node_id) || self.has_saving_snapshot(&m.id).await
+    }
+
     async fn owner_of(&self, m: &ManagedMachine) -> Owner {
         let Some(owner) = m.owner_mission_id.clone() else {
             return if m.owner_kind.as_deref() == Some("user") {
@@ -4305,7 +4360,7 @@ impl ManagedManager {
 
     /// The decision for one live, online machine this pass.
     async fn decide_for(&self, m: &ManagedMachine, now: DateTime<Utc>) -> (ReapDecision, Owner) {
-        let busy = Self::node_busy(&m.node_id);
+        let busy = self.machine_busy(m).await;
         let owner = self.owner_of(m).await;
         let supports_free_stop = self
             .provider_for(&m.provider)
@@ -4340,7 +4395,7 @@ impl ManagedManager {
                 name: m.name.clone(),
                 owner_mission_id: m.owner_mission_id.clone(),
                 owner_kind: m.owner_kind.clone(),
-                busy: Self::node_busy(&m.node_id),
+                busy: self.machine_busy(m).await,
                 owner_state: Some(format!("{owner:?}")),
                 decision,
             });
@@ -4381,12 +4436,15 @@ impl ManagedManager {
                             }
                         }
                     } else {
-                        let busy = Self::node_busy(&m.node_id);
+                        let node_busy = Self::node_busy(&m.node_id);
+                        let busy = node_busy || self.has_saving_snapshot(&m.id).await;
                         if busy {
                             if let Some(updated) = self
                                 .update(&m.id, |m| {
                                     m.last_busy_at = Some(now);
-                                    m.has_executed_job = true;
+                                    if node_busy {
+                                        m.has_executed_job = true;
+                                    }
                                 })
                                 .await
                             {
@@ -4569,9 +4627,9 @@ impl ManagedManager {
                 }
             };
             total_remote += remote.len();
+            let name_prefix = sandbox_name_prefix();
             for pm in &remote {
-                if !pm.name.starts_with(SANDBOX_NAME_PREFIX) || provider.is_stopped_state(&pm.state)
-                {
+                if !pm.name.starts_with(name_prefix) || provider.is_stopped_state(&pm.state) {
                     continue;
                 }
                 let matches_provider = |m: &ManagedMachine| {
@@ -4587,7 +4645,7 @@ impl ManagedManager {
                     matches_provider(m)
                         && m.provider_id.is_none()
                         && m.state.is_live()
-                        && pm.name == format!("{SANDBOX_NAME_PREFIX}{}", m.id)
+                        && pm.name == format!("{name_prefix}{}", m.id)
                 });
                 if live {
                     continue;
@@ -5880,6 +5938,7 @@ fn is_retryable_exec_error(err: &str) -> bool {
     err.contains("HTTP 502")
         || err.contains("HTTP 503")
         || err.contains("HTTP 504")
+        || lower.contains("exit code 143")
         || lower.contains("sandbox_direct_failed")
         || lower.contains("sandbox_starting")
         || lower.contains("timed out")

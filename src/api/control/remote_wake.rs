@@ -1089,23 +1089,29 @@ pub(super) fn remote_skill_prefix(
     prefix
 }
 
+pub(super) type SkillUploadCache = HashMap<(String, String), (String, std::time::Instant)>;
+
 /// Node uploads already holding a given Library skill archive, keyed by
-/// (node id, sha256) → absolute path on the node.
+/// (node id, sha256) → (absolute path on the node, uploaded_at).
 pub(super) static REMOTE_LIBRARY_SKILL_UPLOADS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<(String, String), String>>,
+    std::sync::Mutex<SkillUploadCache>,
 > = std::sync::LazyLock::new(Default::default);
+
+pub fn evict_node_library_skill_uploads(node_id: &str) {
+    if let Ok(mut cache) = REMOTE_LIBRARY_SKILL_UPLOADS.lock() {
+        cache.retain(|(cached_node, _), _| cached_node != node_id);
+    }
+}
 
 /// Resolve, package and upload this mission's Library skills to the node.
 /// Best-effort: any failure is logged and the mission launches without them.
+/// Secret values are never materialized here — `load_skill_contents` strips
+/// secrets and emits a placeholder stub on remote/managed targets.
 pub(super) async fn remote_library_skills(
     state: &Arc<AppState>,
     mission: &Mission,
     node: &crate::remote_node::RemoteNodeConfig,
 ) -> Option<(String, String)> {
-    // Managed machines are untrusted: no Library material beyond the prompt.
-    if crate::managed::is_managed_node(&node.id) {
-        return None;
-    }
     let library = state.library.read().await.clone()?;
     let (workspace_skills, default_host) = match state.workspaces.get(mission.workspace_id).await {
         Some(ws) => (
@@ -1150,10 +1156,20 @@ pub(super) async fn remote_library_skills(
         }
     };
     let key = (node.id.clone(), sha.clone());
+    // Re-upload before sandboxed-node's upload GC (`BATCH_OPEN_SECS`) can prune
+    // `/uploads/.../library-skills-*.tar.gz` on long-lived nodes.
+    let cache_ttl = std::time::Duration::from_secs(crate::uploads::BATCH_OPEN_SECS / 2);
     if let Some(path) = REMOTE_LIBRARY_SKILL_UPLOADS
         .lock()
         .ok()
-        .and_then(|cache| cache.get(&key).cloned())
+        .and_then(|mut cache| match cache.get(&key) {
+            Some((path, uploaded_at)) if uploaded_at.elapsed() < cache_ttl => Some(path.clone()),
+            Some(_) => {
+                cache.remove(&key);
+                None
+            }
+            None => None,
+        })
     {
         return Some((path, sha));
     }
@@ -1199,7 +1215,7 @@ pub(super) async fn remote_library_skills(
                 "Uploaded Library skills to remote node"
             );
             if let Ok(mut cache) = REMOTE_LIBRARY_SKILL_UPLOADS.lock() {
-                cache.insert(key, path.clone());
+                cache.insert(key, (path.clone(), std::time::Instant::now()));
             }
             Some((path, sha))
         }

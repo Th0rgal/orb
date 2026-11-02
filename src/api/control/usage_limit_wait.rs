@@ -410,6 +410,14 @@ fn startup_stall_budget_spent(wait: &RemoteWait) -> bool {
     wait.limit == STARTUP_STALL_WAIT && wait.replays >= MAX_STARTUP_STALL_RESUMES
 }
 
+/// Node disk or harness SQLite write failure (`ENOSPC` / `Failed to execute statement`).
+pub(crate) const STORAGE_EXHAUSTED_WAIT: &str = "Node disk or SQLite write failure";
+const MAX_STORAGE_EXHAUSTED_RESUMES: u32 = 3;
+
+fn storage_exhausted_budget_spent(wait: &RemoteWait) -> bool {
+    wait.limit == STORAGE_EXHAUSTED_WAIT && wait.replays >= MAX_STORAGE_EXHAUSTED_RESUMES
+}
+
 /// Antigravity ended its turn on its native `schedule` tool.
 pub(crate) const NATIVE_SCHEDULE_WAIT: &str = "Antigravity native schedule";
 
@@ -737,6 +745,7 @@ const STREAM_STALL_RESUME_SECS: i64 = 10;
 fn is_transient_wait(limit: &str) -> bool {
     limit == "Inference connection interrupted"
         || limit == STARTUP_STALL_WAIT
+        || limit == STORAGE_EXHAUSTED_WAIT
         || (limit.starts_with("Antigravity ")
             && !limit.ends_with("limit")
             && !is_account_switch(limit))
@@ -880,6 +889,21 @@ pub(crate) async fn plan_remote(
                 });
             }
         }
+        if classified.kind == super::remote_failure::FailureKind::StorageExhausted && has_session {
+            if !sustained_progress
+                && previous
+                    .as_ref()
+                    .is_some_and(storage_exhausted_budget_spent)
+            {
+                return None;
+            }
+            let delay = recovery_delay_secs(replays, mission_id);
+            return Some(UsageLimitWait {
+                limit: STORAGE_EXHAUSTED_WAIT.to_string(),
+                resume_at: now + Duration::seconds(delay),
+                announced: false,
+            });
+        }
         if classified.kind == super::remote_failure::FailureKind::Transport
             && mission
                 .session_id
@@ -944,6 +968,7 @@ pub(crate) async fn plan_remote(
                 wait.replays >= MAX_REMOTE_REPLAYS
                     || idle_wait_budget_spent(wait)
                     || startup_stall_budget_spent(wait)
+                    || storage_exhausted_budget_spent(wait)
             }) {
                 // Keep the exhausted budget while finalization is retried; deleting
                 // it here would let a repeated observation start again at attempt one.
@@ -1047,6 +1072,14 @@ pub(crate) fn remote_resume_prompt(limit: &str) -> String {
             "{RESUME_PROMPT_MARKER} Your previous turn stopped because the Google account's quota \
              ran out; you now run on another account. Resume your work where it stopped, and \
              check the state of anything you had started."
+        );
+    }
+    if limit == STORAGE_EXHAUSTED_WAIT {
+        return format!(
+            "{RECOVERY_PROMPT_MARKER} {limit} stopped your previous turn. Node cache and stale \
+             tool-output cleanup ran automatically. Check available disk space (`df -h`) and any \
+             in-flight jobs before continuing, avoid dumping large raw logs into tool outputs, \
+             and do not redo finished work."
         );
     }
     if is_transient_wait(limit) {
@@ -2374,6 +2407,53 @@ mod tests {
             error,
             Uuid::new_v4(),
             true
+        )
+        .await
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn opencode_storage_exhaustion_auto_recovers_with_bounded_budget() {
+        let (dir, store) = sqlite_store().await;
+        let mission = active_mission(&store, "opencode").await;
+        store
+            .update_mission_session_id(mission.id, "ses_9409f9a9", "opencode", None)
+            .await
+            .unwrap();
+        let crash = r#"Remote opencode job on node 'ashur' finished with state 'failed' (exit Some(1)).
+CLI error: {"data":{"message":"Failed to execute statement"},"name":"UnknownError"}"#;
+        let wait = plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            crash,
+            Uuid::new_v4(),
+            false,
+        )
+        .await
+        .expect("storage/SQLite crash should schedule auto-recovery");
+        assert_eq!(wait.limit, STORAGE_EXHAUSTED_WAIT);
+        assert!(is_transient_wait(&wait.limit));
+        let prompt = remote_resume_prompt(&wait.limit);
+        assert!(prompt.contains("df -h"));
+
+        update_remote_wait(dir.path(), mission.id, |prior| {
+            prior.map(|mut w| {
+                w.replays = MAX_STORAGE_EXHAUSTED_RESUMES;
+                w.resume_at = None;
+                w
+            })
+        })
+        .await;
+        assert!(plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            crash,
+            Uuid::new_v4(),
+            false,
         )
         .await
         .is_none());

@@ -270,15 +270,30 @@ fn rebuildable(name: &str, top_level: bool) -> bool {
                 | ".rbenv"
         ))
 }
+/// Whether a workspace-relative path is a transient harness cache/log directory
+/// beneath `.local/share/opencode` (leaving `opencode.db` intact).
+fn rebuildable_rel(rel: &str) -> bool {
+    matches!(
+        rel,
+        ".local/share/opencode/tool-output"
+            | ".local/share/opencode/log"
+            | ".local/share/opencode/snapshot"
+    )
+}
 /// Whether the manifest carries a path older adapters refuse as build output.
 pub fn carries_rebuildable(manifest: &Manifest) -> bool {
     let paths = manifest.files.iter().map(|f| &f.path);
     paths
         .chain(manifest.links.iter().map(|l| &l.path))
         .any(|path| {
-            path.split('/')
-                .enumerate()
-                .any(|(i, name)| rebuildable(name, i == 0))
+            rebuildable_rel(path)
+                || path.starts_with(".local/share/opencode/tool-output/")
+                || path.starts_with(".local/share/opencode/log/")
+                || path.starts_with(".local/share/opencode/snapshot/")
+                || path
+                    .split('/')
+                    .enumerate()
+                    .any(|(i, name)| rebuildable(name, i == 0))
         })
 }
 /// What the user chose before the snapshot. `omit` leaves a path behind;
@@ -439,7 +454,7 @@ impl Walk<'_> {
                 State::Omitted
             } else if included {
                 State::Moved
-            } else if rebuildable(name, !rel.contains('/')) {
+            } else if rebuildable(name, !rel.contains('/')) || rebuildable_rel(&rel) {
                 State::Rebuildable
             } else if ignored.contains(&rel) {
                 State::Ignored
@@ -1997,5 +2012,23 @@ mod integrity_tests {
                 MISSING_SOURCE_WORKSPACE
             );
         }
+    }
+    #[test]
+    fn opencode_tool_output_stays_behind_while_session_db_moves() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        let opencode_dir = src.join(".local/share/opencode");
+        fs::create_dir_all(opencode_dir.join("tool-output")).unwrap();
+        fs::create_dir_all(opencode_dir.join("log")).unwrap();
+        fs::write(opencode_dir.join("opencode.db"), b"sqlite").unwrap();
+        fs::write(opencode_dir.join("tool-output/tool_huge"), b"dump").unwrap();
+        fs::write(opencode_dir.join("log/run.log"), b"log").unwrap();
+        let area = temp.path().join("a");
+        let m: Manifest =
+            serde_json::from_value(operate(&area, Some(&src), Operation::Snapshot).unwrap())
+                .unwrap();
+        let paths: Vec<&str> = m.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec![".local/share/opencode/opencode.db"]);
+        assert!(!carries_rebuildable(&m));
     }
 }

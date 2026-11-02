@@ -1,4 +1,3 @@
-   Compiling orb-spec v1.3.0 (/Users/thomas/work/orb/worktree/fix-consult-model-quorum/crates/orb-spec)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -8,15 +7,15 @@ warning: function `check_fence_at_line_start` is never used
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `orb-spec` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized] target(s) in 0.94s
+    Finished `test` profile [unoptimized] target(s) in 4.64s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
 
 running 1 test
 test shadow::tests::phase5_privd_command_and_ssh_identity_confinement_replays ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.01s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-consult-model-quorum)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -59,23 +58,22 @@ warning: unused variable: `source`
     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2227:10
+    --> src/node/runner.rs:2236:10
      |
-2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+2236 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
      |          ^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 27.40s
+    Finished `test` profile [unoptimized] target(s) in 1m 18s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::privilege_broker::tests::phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3669 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3687 filtered out; finished in 0.02s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-consult-model-quorum)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -118,23 +116,22 @@ warning: unused variable: `source`
     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2227:10
+    --> src/node/runner.rs:2236:10
      |
-2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+2236 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
      |          ^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 26.68s
+    Finished `test` profile [unoptimized] target(s) in 1.05s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::control::remote_jobs::boot_leftover_tests::phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3669 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3687 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-consult-model-quorum)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -177,15 +174,15 @@ warning: unused variable: `source`
     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2227:10
+    --> src/node/runner.rs:2236:10
      |
-2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+2236 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
      |          ^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 24.54s
+    Finished `test` profile [unoptimized] target(s) in 0.26s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 13 tests
@@ -203,9 +200,8 @@ test api::mission_access::tests::scope_hint_points_reads_and_control_to_the_tool
 test api::mission_access::tests::state_survives_restart ... ok
 test api::mission_access::tests::ttl_is_clamped_and_self_requests_refused ... ok
 
-test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 3657 filtered out; finished in 0.04s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 3675 filtered out; finished in 0.04s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-consult-model-quorum)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -248,15 +244,15 @@ warning: unused variable: `source`
     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2227:10
+    --> src/node/runner.rs:2236:10
      |
-2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+2236 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
      |          ^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 24.50s
+    Finished `test` profile [unoptimized] target(s) in 0.26s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 21 tests
@@ -282,9 +278,8 @@ test remote_node::job_ledger::tests::submission_sequence_breaks_equal_timestamp_
 test remote_node::job_ledger::tests::tentative_handles_round_trip ... ok
 test remote_node::job_ledger::tests::terminal_tentative_handle_never_becomes_validation_receipt ... ok
 
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3649 filtered out; finished in 0.28s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3667 filtered out; finished in 0.47s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-consult-model-quorum)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -327,23 +322,22 @@ warning: unused variable: `source`
     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2227:10
+    --> src/node/runner.rs:2236:10
      |
-2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+2236 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
      |          ^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 24.23s
+    Finished `test` profile [unoptimized] target(s) in 0.26s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::proxy::latency_tests::keepalives_fill_long_pauses_between_events_only ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3669 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3687 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-consult-model-quorum)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -386,23 +380,22 @@ warning: unused variable: `source`
     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2227:10
+    --> src/node/runner.rs:2236:10
      |
-2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+2236 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
      |          ^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 24.43s
+    Finished `test` profile [unoptimized] target(s) in 0.26s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::proxy::latency_tests::stall_before_output_is_rerouted_transparently ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3669 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3687 filtered out; finished in 0.01s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-consult-model-quorum)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -445,19 +438,19 @@ warning: unused variable: `source`
     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2227:10
+    --> src/node/runner.rs:2236:10
      |
-2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+2236 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
      |          ^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 25.27s
+    Finished `test` profile [unoptimized] target(s) in 0.23s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::proxy::latency_tests::stall_after_output_is_surfaced_not_retried ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3669 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3687 filtered out; finished in 0.00s
 

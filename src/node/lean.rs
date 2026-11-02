@@ -1833,6 +1833,78 @@ pub fn spawn_cache_gc(work_root: PathBuf, store: super::JobStore) {
     });
 }
 
+/// Prune stale OpenCode `tool_*` spill files inside `<mission_dir>/.local/share/opencode/tool-output/`
+/// without following symlinks, keeping `opencode.db` and recent outputs intact.
+pub(crate) fn prune_opencode_tool_outputs_in_mission_dir(
+    mission_dir: &Path,
+    max_age: Duration,
+    now: SystemTime,
+) -> usize {
+    let cutoff = now.checked_sub(max_age).unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut dir = mission_dir.to_path_buf();
+    for part in [".local", "share", "opencode", "tool-output"] {
+        dir.push(part);
+        let Ok(meta) = std::fs::symlink_metadata(&dir) else {
+            return 0;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return 0;
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.starts_with("tool_") {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            continue;
+        }
+        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        if mtime <= cutoff && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+pub(crate) fn prune_all_opencode_tool_outputs(
+    work_root: &Path,
+    max_age: Duration,
+    now: SystemTime,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(work_root) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(&name).is_err() {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            continue;
+        }
+        removed += prune_opencode_tool_outputs_in_mission_dir(&path, max_age, now);
+    }
+    removed
+}
+
 async fn run_gc_pass(work_root: &Path, store: &super::JobStore) {
     if let Err(error) = super::scratch::sweep(store, work_root).await {
         tracing::warn!(%error, "node scratch sweep failed; retaining files");
@@ -1857,6 +1929,17 @@ async fn run_gc_pass(work_root: &Path, store: &super::JobStore) {
             return;
         }
     };
+    let tool_output_max_age = if free < floor {
+        Duration::from_secs(15 * 60)
+    } else {
+        Duration::from_secs(60 * 60)
+    };
+    let tool_root = work_root.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || {
+        prune_all_opencode_tool_outputs(&tool_root, tool_output_max_age, SystemTime::now())
+    })
+    .await;
+    let free = fs2::available_space(work_root).unwrap_or(free);
     if free >= floor {
         DISK_PRESSURE_PINNED.store(false, Ordering::Release);
         return;
@@ -4011,5 +4094,43 @@ mod tests {
         assert!(!hot_unlocked.exists());
         assert!(hot_locked.exists());
         drop(held_lock);
+    }
+
+    #[test]
+    fn opencode_tool_output_prune_removes_only_stale_regular_tool_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mission_dir = dir.path().join(uuid::Uuid::new_v4().to_string());
+        let opencode_dir = mission_dir.join(".local/share/opencode");
+        let tool_dir = opencode_dir.join("tool-output");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        let db = opencode_dir.join("opencode.db");
+        let stale_tool = tool_dir.join("tool_stale");
+        let fresh_tool = tool_dir.join("tool_fresh");
+        let non_tool = tool_dir.join("notes.txt");
+        std::fs::write(&db, b"sqlite").unwrap();
+        std::fs::write(&stale_tool, b"stale").unwrap();
+        std::fs::write(&fresh_tool, b"fresh").unwrap();
+        std::fs::write(&non_tool, b"keep").unwrap();
+
+        let future_now = SystemTime::now() + Duration::from_secs(3600);
+        assert_eq!(
+            prune_all_opencode_tool_outputs(dir.path(), Duration::from_secs(1800), future_now),
+            2
+        );
+        assert!(db.exists());
+        assert!(non_tool.exists());
+        assert!(!stale_tool.exists());
+        assert!(!fresh_tool.exists());
+
+        std::fs::write(&fresh_tool, b"fresh").unwrap();
+        assert_eq!(
+            prune_all_opencode_tool_outputs(
+                dir.path(),
+                Duration::from_secs(1800),
+                SystemTime::now()
+            ),
+            0
+        );
+        assert!(fresh_tool.exists());
     }
 }
