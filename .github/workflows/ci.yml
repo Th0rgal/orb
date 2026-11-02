@@ -204,7 +204,7 @@ jobs:
 
   orb-browser:
     name: Orb browser (${{ matrix.shard }}/2)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
     strategy:
       fail-fast: false
@@ -254,7 +254,7 @@ jobs:
   # Timing-sensitive specs: report-only on PRs, blocking on master.
   orb-performance:
     name: Orb performance
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     defaults:

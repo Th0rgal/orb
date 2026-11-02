@@ -131,7 +131,7 @@ class Harness(unittest.TestCase):
             for code in (0, 7):
                 core.write_text(f"#!{sys.executable}\nimport sys\n"
                                 "first = sys.argv[sys.argv.index('--args')+1].endswith(':1')\n"
-                                "print('[{\"decl\":\"probe_fixture\",\"ok\":true,\"value_u64\":\"18\"}]' if first else '['*10000+']'*10000)\n"
+                                "print('[{\"decl\":\"probe_fixture\",\"ok\":true,\"value_u64\":\"18\"}]' if first else '['*200000+']'*200000)\n"
                                 f"raise SystemExit(0 if first else {code})\n")
                 core.chmod(0o700)
                 report, values, partial = {"engines": {}, "blockers": []}, {"stock_lean": self.reference}, {}
