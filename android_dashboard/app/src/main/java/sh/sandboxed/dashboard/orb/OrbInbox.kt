@@ -57,6 +57,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.testTag
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -374,15 +377,22 @@ data class OrbInboxDigest(
 object OrbInboxDigestStore {
     private const val PREFS_KEY = "orb.inbox.digests.v7"
     private const val MAX_CONCURRENT = 3
+    private const val MAX_SETTLING_RETRIES = 3
     private var prefs: SharedPreferences? = null
     private val cache = mutableStateMapOf<String, OrbInboxDigest>()
     private val inFlight = mutableSetOf<String>()
     private val failedAtMs = mutableMapOf<String, Long>()
+    private val settlingRetries = mutableMapOf<String, Int>()
     private val queueMutex = Mutex()
     private var activeCount = 0
     private val queue = mutableListOf<Pair<Int, suspend () -> Unit>>()
     var revision by mutableIntStateOf(0)
         private set
+
+    internal class DigestSettlingException(val statusCode: Int) : java.io.IOException("Inbox summary settling ($statusCode)")
+
+    internal fun isSettlingStatus(statusCode: Int): Boolean =
+        statusCode == 202 || statusCode == 409 || statusCode == 425
 
     fun init(context: Context) {
         if (prefs == null) {
@@ -456,6 +466,7 @@ object OrbInboxDigestStore {
                     val parsed = parseDigest(answer, updated, model)
                     if (parsed != null) {
                         failedAtMs.remove(key)
+                        settlingRetries.remove(key)
                         cache[key] = parsed
                         revision += 1
                         val persisted = OrbJSON.dict(OrbJSON.parse(answer))?.toMutableMap() ?: mutableMapOf()
@@ -463,6 +474,17 @@ object OrbInboxDigestStore {
                         prefs?.edit()?.putString(key, OrbJSON.stringify(persisted))?.apply()
                     } else {
                         failedAtMs[key] = System.currentTimeMillis()
+                    }
+                } catch (settling: DigestSettlingException) {
+                    val nextAttempt = (settlingRetries[key] ?: 0) + 1
+                    if (nextAttempt <= MAX_SETTLING_RETRIES) {
+                        settlingRetries[key] = nextAttempt
+                        core.scope.launch {
+                            delay(4_000L * nextAttempt)
+                            request(core, mission, events, priority = priority + 5)
+                        }
+                    } else {
+                        settlingRetries.remove(key)
                     }
                 } catch (t: Throwable) {
                     if (t !is kotlinx.coroutines.CancellationException) OrbLog.w(OrbLog.Category.Network, "inbox fetch $key failed", t)
@@ -517,6 +539,7 @@ object OrbInboxDigestStore {
             .post(OrbJSON.stringify(mapOf("model" to model)).toRequestBody("application/json; charset=utf-8".toMediaType()))
             .header("Authorization", "Bearer ${core.token ?: ""}").build()
         core.httpClient.newBuilder().callTimeout(100, java.util.concurrent.TimeUnit.SECONDS).readTimeout(100, java.util.concurrent.TimeUnit.SECONDS).build().newCall(request).execute().use { response ->
+            if (isSettlingStatus(response.code)) throw DigestSettlingException(response.code)
             if (!response.isSuccessful) throw java.io.IOException("Inbox summary HTTP ${response.code}")
             if (response.code == 204) return@use null
             response.body?.string() ?: throw java.io.IOException("Empty Inbox summary")
@@ -930,7 +953,7 @@ object OrbInboxModel {
                 if (!projectsBySlug.containsKey(slug)) continue
             }
 
-            val cachedEvents = OrbReadCache.loadRows("mission_events_${mission.id}")
+            val cachedEvents = OrbReadCache.readMemoryRows("mission_events_${mission.id}").orEmpty()
             val classified = classify(mission, cachedEvents, answeredCallIds) ?: continue
             val resolvedSlug = if (rawSlug.isEmpty()) "default" else rawSlug
             val project = projectsBySlug[resolvedSlug] ?: resolveProject(mission, activeProjects)
@@ -1598,9 +1621,15 @@ fun OrbInboxView(
     var isRefreshing by remember { mutableStateOf(false) }
     val answeredCallIds = remember { mutableStateMapOf<String, Boolean>() }
 
+    val lifecycleOwner = LocalLifecycleOwner.current
     var eventsVersion by remember { mutableIntStateOf(0) }
-    LaunchedEffect(core.baseURL, core.token) {
-        while (true) { OrbSharedInboxState.refresh(); delay(10_000L) }
+    LaunchedEffect(core.baseURL, core.token, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                OrbSharedInboxState.refresh()
+                delay(15_000L)
+            }
+        }
     }
     LaunchedEffect(missions, filterMode, OrbInboxSettings.inboxEnabled, OrbInboxSettings.aiSummary, OrbInboxSettings.summaryMode, OrbInboxSettings.model, OrbInboxSettings.includeAutonomous) {
         val candidates = missions.filter { m ->
@@ -1611,13 +1640,18 @@ fun OrbInboxView(
 
         var anyLoaded = false
         for ((idx, row) in candidates.withIndex()) {
-            var evs = OrbReadCache.loadRows("mission_events_${row.id}")
+            val cacheKey = "mission_events_${row.id}"
+            val wasInMemory = OrbReadCache.hasRowsInMemory(cacheKey)
+            var evs = OrbReadCache.loadRowsAsync(cacheKey)
+            if (!wasInMemory && evs.isNotEmpty()) {
+                anyLoaded = true
+            }
             if (evs.isEmpty() && idx < 12) {
                 evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
                     core.fetchRows("/api/control/missions/${core.encodeComponent(row.id)}/events?limit=120", "events")
                 }.getOrDefault(emptyList())
                 if (evs.isNotEmpty()) {
-                    OrbReadCache.saveRows("mission_events_${row.id}", evs)
+                    OrbReadCache.saveRows(cacheKey, evs)
                     anyLoaded = true
                 }
             }
@@ -1706,17 +1740,24 @@ fun OrbInboxView(
             return
         }
         peekedItemId = item.id
-        val cached = OrbReadCache.loadRows("mission_events_${item.id}")
+        val cacheKey = "mission_events_${item.id}"
+        val cached = OrbReadCache.readMemoryRows(cacheKey).orEmpty()
         if (cached.isNotEmpty()) {
             peekTurnsByItem[item.id] = OrbInboxModel.extractPeekTurns(item.mission, cached, item.summary)
         }
         loadingPeekId = item.id
         scope.launch {
+            if (cached.isEmpty()) {
+                val diskCached = OrbReadCache.loadRowsAsync(cacheKey)
+                if (diskCached.isNotEmpty() && peekTurnsByItem[item.id].isNullOrEmpty()) {
+                    peekTurnsByItem[item.id] = OrbInboxModel.extractPeekTurns(item.mission, diskCached, item.summary)
+                }
+            }
             val rows = orbTry(OrbLog.Category.Network, "/api/control/missions") {
                 core.fetchRows("/api/control/missions/${core.encodeComponent(item.id)}/events?limit=120", "events")
             }.getOrDefault(emptyList())
             if (rows.isNotEmpty()) {
-                OrbReadCache.saveRows("mission_events_${item.id}", rows)
+                OrbReadCache.saveRows(cacheKey, rows)
                 peekTurnsByItem[item.id] = OrbInboxModel.extractPeekTurns(item.mission, rows, item.summary)
                 OrbInboxDigestStore.request(core, item.mission, rows, priority = 0)
                 eventsVersion += 1

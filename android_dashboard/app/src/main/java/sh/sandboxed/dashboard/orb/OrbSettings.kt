@@ -2,6 +2,7 @@ package sh.sandboxed.dashboard.orb
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -162,6 +163,9 @@ fun OrbSettingsSheet(
         dragHandle = null
     ) {
         val sheetView = LocalView.current
+        BackHandler(enabled = route != OrbSettingsRoute.Root) {
+            back()
+        }
         SideEffect {
             (sheetView.parent as? DialogWindowProvider)?.window?.let { win ->
                 WindowCompat.getInsetsController(win, sheetView).isAppearanceLightStatusBars = false
@@ -251,11 +255,12 @@ fun OrbSettingsSheet(
                         verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            OrbCircle(
+                                icon = Icons.AutoMirrored.Filled.ArrowBack,
+                                size = 38.dp,
+                                iconSize = 17.dp,
                                 contentDescription = "Back",
-                                tint = Color.White,
-                                modifier = Modifier.clip(CircleShape).orbPressClickable { section = null; route = OrbSettingsRoute.Root }.padding(8.dp)
+                                modifier = Modifier.orbPressClickable { section = null; route = OrbSettingsRoute.Root }
                             )
                             Text(
                                 text = sec.label,
@@ -265,7 +270,7 @@ fun OrbSettingsSheet(
                                 modifier = Modifier.weight(1f),
                                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
                             )
-                            Spacer(modifier = Modifier.width(40.dp))
+                            Spacer(modifier = Modifier.width(38.dp))
                         }
                         OrbSettingsGroup {
                             sec.pages.forEachIndexed { i, (_, label, target) ->

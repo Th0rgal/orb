@@ -67,6 +67,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -125,10 +128,17 @@ fun OrbMachinesSettingsPage(
         }
     }
 
-    LaunchedEffect(Unit) {
-        isRefreshing = true
-        loadMachines()
-        isRefreshing = false
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            val showInitialSpinner = nodes.isEmpty() && computers.isEmpty()
+            if (showInitialSpinner) isRefreshing = true
+            try {
+                loadMachines()
+            } finally {
+                if (showInitialSpinner) isRefreshing = false
+            }
+        }
     }
 
     fun toggleCordon(node: OrbRow) {

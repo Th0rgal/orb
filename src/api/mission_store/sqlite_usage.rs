@@ -52,7 +52,8 @@ pub(super) fn migrate(conn: &Connection) -> Result<(), String> {
     }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_proxy_usage_api_key ON proxy_usage(api_key_id, timestamp);
-         CREATE INDEX IF NOT EXISTS idx_proxy_usage_mission ON proxy_usage(mission_id);",
+         CREATE INDEX IF NOT EXISTS idx_proxy_usage_mission ON proxy_usage(mission_id);
+         CREATE INDEX IF NOT EXISTS idx_events_type_timestamp ON mission_events(event_type, timestamp);",
     )
     .map_err(err)
 }

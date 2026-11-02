@@ -3,10 +3,12 @@ package sh.sandboxed.dashboard.orb
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Base64
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -17,6 +19,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -229,6 +233,7 @@ object OrbJSON {
     }
 }
 
+@Immutable
 data class OrbRow(
     val id: String,
     val raw: OrbDict
@@ -237,6 +242,10 @@ data class OrbRow(
         id = OrbJSON.str(raw, "id", "slug", "session_id", "mission_id", "name", "key", "path") ?: fallback,
         raw = raw
     )
+
+    // Precompute a compact revision stamp once per immutable row so Compose structural
+    // equality checks stay O(1) instead of recursively walking nested JSON maps/lists.
+    private val revisionStamp: Int = computeRevisionStamp(raw)
 
     fun str(vararg keys: String): String? = OrbJSON.str(raw, *keys)
     fun int(vararg keys: String): Int? = OrbJSON.int(raw, *keys)
@@ -247,10 +256,27 @@ data class OrbRow(
         OrbRow(item, "$id-$key-$idx")
     }
 
-    override fun equals(other: Any?): Boolean =
-        other is OrbRow && id == other.id && raw == other.raw
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is OrbRow) return false
+        if (id != other.id || revisionStamp != other.revisionStamp || raw.size != other.raw.size) return false
+        return raw === other.raw || raw == other.raw
+    }
 
-    override fun hashCode(): Int = 31 * id.hashCode() + raw.hashCode()
+    override fun hashCode(): Int = 31 * id.hashCode() + revisionStamp
+
+    companion object {
+        private fun computeRevisionStamp(raw: OrbDict): Int {
+            var h = raw.size
+            h = 31 * h + (raw["updated_at"]?.hashCode() ?: 0)
+            h = 31 * h + (raw["status"]?.hashCode() ?: raw["state"]?.hashCode() ?: 0)
+            h = 31 * h + (raw["title"]?.hashCode() ?: raw["name"]?.hashCode() ?: 0)
+            h = 31 * h + (raw["sequence"]?.hashCode() ?: 0)
+            h = 31 * h + (raw["first_viewed_at"]?.hashCode() ?: 0)
+            h = 31 * h + (raw["enabled"]?.hashCode() ?: 0)
+            return h
+        }
+    }
 }
 
 data class OrbNestedMission(
@@ -900,7 +926,12 @@ object OrbDisk {
     fun write(key: String, value: Any?) {
         try {
             val f = file(key)
-            f.writeText(OrbJSON.stringify(value))
+            val tmp = File(f.parentFile, "${f.name}.tmp.${System.nanoTime()}")
+            tmp.writeText(OrbJSON.stringify(value))
+            if (!tmp.renameTo(f)) {
+                tmp.copyTo(f, overwrite = true)
+                tmp.delete()
+            }
         } catch (t: Throwable) {
             OrbLog.w(OrbLog.Category.Cache, "disk write $key failed", t)
         }
@@ -928,10 +959,15 @@ object OrbReadCache {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<OrbRow>>?) = size > MAX_ROW_KEYS
     }
     private val dictByKey = ConcurrentHashMap<String, OrbDict>()
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val writeJobs = ConcurrentHashMap<String, Job>()
+    private val writeLocks = ConcurrentHashMap<String, Any>()
 
     fun clearMemory() {
         synchronized(rowsByKey) { rowsByKey.clear() }
         dictByKey.clear()
+        writeJobs.values.forEach { it.cancel() }
+        writeJobs.clear()
     }
 
     /** Event rows as the client keeps them: long tool results cut to their head. */
@@ -987,11 +1023,22 @@ object OrbReadCache {
     fun saveRows(key: String, rows: List<OrbRow>) {
         val kept = bounded(key, rows)
         synchronized(rowsByKey) { rowsByKey[key] = kept }
-        val raw = kept.map { it.raw }
-        CoroutineScope(Dispatchers.IO).launch {
-            OrbDisk.write(key, raw)
+        val account = OrbDisk.currentScope()
+        writeJobs.remove(key)?.cancel()
+        writeJobs[key] = ioScope.launch {
+            if (account != OrbDisk.currentScope()) return@launch
+            val raw = kept.map { it.raw }
+            val lock = writeLocks.getOrPut(key) { Any() }
+            synchronized(lock) {
+                if (account == OrbDisk.currentScope()) {
+                    OrbDisk.write(key, raw)
+                }
+            }
         }
     }
+
+    /** Safe for composition: never performs disk I/O or JSON decoding. */
+    fun readMemoryDict(key: String): OrbDict? = dictByKey[key]
 
     fun loadDict(key: String): OrbDict? {
         dictByKey[key]?.let { return it }
@@ -1002,10 +1049,25 @@ object OrbReadCache {
         return dict
     }
 
+    suspend fun loadDictAsync(key: String): OrbDict? {
+        val account = OrbDisk.currentScope()
+        val dict = withContext(Dispatchers.IO) { loadDict(key) }
+        if (account != OrbDisk.currentScope()) throw CancellationException("Cache account changed")
+        return dict
+    }
+
     fun saveDict(key: String, dict: OrbDict) {
         dictByKey[key] = dict
-        CoroutineScope(Dispatchers.IO).launch {
-            OrbDisk.write(key, dict)
+        val account = OrbDisk.currentScope()
+        writeJobs.remove(key)?.cancel()
+        writeJobs[key] = ioScope.launch {
+            if (account != OrbDisk.currentScope()) return@launch
+            val lock = writeLocks.getOrPut(key) { Any() }
+            synchronized(lock) {
+                if (account == OrbDisk.currentScope()) {
+                    OrbDisk.write(key, dict)
+                }
+            }
         }
     }
 }
@@ -1424,17 +1486,50 @@ class OrbCore private constructor(context: Context) {
     val isConfigured: Boolean
         get() = _baseURL.value.trim().isNotEmpty()
 
+    private val _isForeground = MutableStateFlow(false)
+    val isForeground: StateFlow<Boolean> = _isForeground.asStateFlow()
+
+    private val quietRefreshMutex = Mutex()
+    @Volatile private var lastMissionsDiskWriteAtMs: Long = 0L
+    @Volatile private var dirtyMissionsSnapshot: Pair<List<OrbRow>, List<OrbRow>>? = null
+
+    fun onForeground() {
+        val wasBackground = !_isForeground.value
+        _isForeground.value = true
+        if (wasBackground && isConfigured && !_isLoading.value) {
+            scope.launch { refreshMissionsQuietly() }
+        }
+    }
+
+    fun onBackground() {
+        _isForeground.value = false
+        val snapshot = dirtyMissionsSnapshot
+        if (snapshot != null) {
+            dirtyMissionsSnapshot = null
+            lastMissionsDiskWriteAtMs = System.currentTimeMillis()
+            val account = OrbDisk.currentScope()
+            scope.launch(Dispatchers.IO) {
+                if (account == OrbDisk.currentScope()) {
+                    OrbDisk.write("missions", snapshot.first.map { it.raw })
+                    OrbDisk.write("projects", snapshot.second.map { it.raw })
+                }
+            }
+        }
+    }
+
     private fun startLiveRefreshLoop() {
         scope.launch {
             while (isActive) {
-                delay(6_000L)
-                if (!isConfigured || _isLoading.value) continue
+                val intervalMs = if (OrbPresentation.isConnected) 30_000L else 8_000L
+                delay(intervalMs)
+                if (!_isForeground.value || !isConfigured || _isLoading.value) continue
                 refreshMissionsQuietly()
             }
         }
     }
 
-    suspend fun refreshMissionsQuietly() {
+    suspend fun refreshMissionsQuietly(forceDiskFlush: Boolean = false) {
+        if (!quietRefreshMutex.tryLock()) return
         try {
             coroutineScope {
                 val mDeferred = async { fetchRows("/api/control/missions?limit=100&all=true", null) }
@@ -1444,14 +1539,26 @@ class OrbCore private constructor(context: Context) {
                 _missions.value = m
                 _projects.value = p
                 _hasLoadedSuccessfully.value = true
+                val now = System.currentTimeMillis()
+                val shouldWriteDisk = forceDiskFlush || !_isForeground.value || (now - lastMissionsDiskWriteAtMs >= 30_000L)
+                if (shouldWriteDisk) {
+                    dirtyMissionsSnapshot = null
+                    lastMissionsDiskWriteAtMs = now
+                } else {
+                    dirtyMissionsSnapshot = m to p
+                }
                 withContext(Dispatchers.IO) {
                     seedMissionAndProjectCaches(m, fresh = true)
-                    OrbDisk.write("missions", m.map { it.raw })
-                    OrbDisk.write("projects", p.map { it.raw })
+                    if (shouldWriteDisk) {
+                        OrbDisk.write("missions", m.map { it.raw })
+                        OrbDisk.write("projects", p.map { it.raw })
+                    }
                 }
             }
         } catch (t: Throwable) {
             if (t !is CancellationException) OrbLog.w(OrbLog.Category.Network, "quiet missions refresh failed", t)
+        } finally {
+            quietRefreshMutex.unlock()
         }
     }
 
@@ -1594,10 +1701,15 @@ class OrbCore private constructor(context: Context) {
         }
         reqBuilder.method(method.uppercase(), requestBody)
 
+        val startedNs = System.nanoTime()
         val response = httpClient.newCall(reqBuilder.build()).execute()
         val code = response.code
         val bytes = response.body?.bytes() ?: ByteArray(0)
         response.close()
+        val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000L
+        if (elapsedMs >= 1_500L) {
+            OrbPerfMonitor.recordSlowRequest(method.uppercase(), path, elapsedMs, bytes.size)
+        }
 
         if (code == 401 && allowAuthRetry && path != "/api/auth/login") {
             if (renewSessionFromSavedCredentials()) {
@@ -1802,6 +1914,8 @@ object OrbPresentation {
     private val recent = LinkedHashSet<String>()
     private val pending = LinkedHashSet<String>()
     @Volatile private var listChanged = false
+    @Volatile var isConnected: Boolean = false
+        private set
     private val revisions = LinkedHashMap<String, Long>()
     private val labels = LinkedHashMap<String, String>()
     @Synchronized fun activity(id: String): String? = labels["${OrbDisk.currentScope()}|$id"]
@@ -1852,6 +1966,7 @@ object OrbPresentation {
             val account = OrbDisk.currentScope()
             val closed = java.util.concurrent.atomic.AtomicBoolean(false)
             val stream = core.openSSE("/api/control/stream?profile=presentation&kinds=mission_presentation", onEvent = { type, data ->
+                isConnected = true
                 if (type == "status" || type == "stream_lagged") changed(null)
                 if (type == "mission_presentation") {
                     val hint = OrbJSON.dict(OrbJSON.parse(data))
@@ -1866,7 +1981,11 @@ object OrbPresentation {
                         changed(id)
                     }
                 }
-            }, onClosed = { closed.set(true) })
+            }, onClosed = {
+                isConnected = false
+                closed.set(true)
+            })
+            isConnected = true
             changed(null)
             try {
                 while (kotlinx.coroutines.currentCoroutineContext().isActive && account == OrbDisk.currentScope() && !closed.get()) {
@@ -1876,7 +1995,10 @@ object OrbPresentation {
                     }
                     delay(1000)
                 }
-            } finally { stream.cancel() }
+            } finally {
+                isConnected = false
+                stream.cancel()
+            }
             delay(2000)
         }
     }

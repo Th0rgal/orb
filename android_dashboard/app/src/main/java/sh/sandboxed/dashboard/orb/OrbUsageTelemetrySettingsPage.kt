@@ -95,10 +95,23 @@ fun OrbUsageTelemetrySettingsPage(core: OrbCore, onBack: () -> Unit) {
             save(mapOf("prompts_enabled" to it))
         }
 
-        TelemetryField("Namespace", namespace) { namespace = it }
+        TelemetryField(
+            label = "Namespace",
+            placeholder = "e.g. personal",
+            value = namespace
+        ) { namespace = it }
         if (namespace.trim() == "community") Text("“community” is reserved.", color = OrbStyle.warning, fontSize = 12.sp)
-        TelemetryField("Hub URL", hubUrl) { hubUrl = it }
-        TelemetryField(if (status["token_configured"] == true) "Token: configured (type to replace)" else "Token", token, secret = true) { token = it }
+        TelemetryField(
+            label = "Hub URL",
+            placeholder = "https://telemetry.example.com",
+            value = hubUrl
+        ) { hubUrl = it }
+        TelemetryField(
+            label = "Token",
+            placeholder = if (status["token_configured"] == true) "Configured (type to replace)" else "Bearer token",
+            value = token,
+            secret = true
+        ) { token = it }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TelemetryPill("Save", enabled = !busy && namespace.trim() != "community") {
                 val patch = mutableMapOf<String, Any?>("namespace" to namespace.trim(), "hub_url" to hubUrl.trim())
@@ -127,25 +140,39 @@ private fun TelemetryToggle(label: String, checked: Boolean, enabled: Boolean, o
 }
 
 @Composable
-private fun TelemetryField(label: String, value: String, secret: Boolean = false, onChange: (String) -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(OrbStyle.card)
-            .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
-            .padding(horizontal = 10.dp, vertical = 9.dp)
-    ) {
-        if (value.isEmpty()) Text(label, color = OrbStyle.textMuted, fontSize = 13.sp)
-        BasicTextField(
-            value = value,
-            onValueChange = onChange,
-            textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
-            cursorBrush = SolidColor(Color.White),
-            singleLine = true,
-            visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
-            modifier = Modifier.fillMaxWidth()
+private fun TelemetryField(
+    label: String,
+    placeholder: String,
+    value: String,
+    secret: Boolean = false,
+    onChange: (String) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text(
+            text = label,
+            color = OrbStyle.textSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium
         )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(OrbStyle.card)
+                .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                .padding(horizontal = 10.dp, vertical = 9.dp)
+        ) {
+            if (value.isEmpty()) Text(placeholder, color = OrbStyle.textMuted, fontSize = 13.sp)
+            BasicTextField(
+                value = value,
+                onValueChange = onChange,
+                textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
+                cursorBrush = SolidColor(Color.White),
+                singleLine = true,
+                visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
     }
 }
 

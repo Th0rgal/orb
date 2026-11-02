@@ -1,0 +1,14 @@
+# Baseline Profile rules for Orb Android startup, JSON/row projection, and transcript rendering.
+HSPLsh/sandboxed/dashboard/MainActivity;->**(**)**
+HSPLsh/sandboxed/dashboard/orb/OrbCore;->**(**)**
+HSPLsh/sandboxed/dashboard/orb/OrbCore$Companion;->**(**)**
+HSPLsh/sandboxed/dashboard/orb/OrbRow;->**(**)**
+HSPLsh/sandboxed/dashboard/orb/OrbJSON;->**(**)**
+HSPLsh/sandboxed/dashboard/orb/OrbReadCache;->**(**)**
+HSPLsh/sandboxed/dashboard/orb/OrbDisk;->**(**)**
+HSPLsh/sandboxed/dashboard/orb/OrbPresentation;->**(**)**
+HSPLsh/sandboxed/dashboard/orb/OrbTimelineBuilder;->**(**)**
+HSPLsh/sandboxed/dashboard/orb/OrbInboxModel;->**(**)**
+HSPLsh/sandboxed/dashboard/orb/OrbProjectsKt;->**(**)**
+HSPLsh/sandboxed/dashboard/orb/OrbConversationKt;->**(**)**
+HSPLsh/sandboxed/dashboard/orb/OrbMarkdownKt;->**(**)**

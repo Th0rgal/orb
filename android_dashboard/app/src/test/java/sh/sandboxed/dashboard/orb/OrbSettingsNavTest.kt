@@ -33,11 +33,13 @@ class OrbUsageSettingsTest {
     @Test
     fun spendPerDayAndTopMissionsByCost() {
         val s = mapOf(
+            "totals" to mapOf("cost_cents" to 1450),
             "by_day" to listOf(mapOf("day" to "2026-10-25", "cost_cents" to 250), mapOf("day" to "2026-10-26", "cost_cents" to 1200)),
             "by_mission" to listOf(mapOf("key" to "a", "label" to "Cheap", "cost_cents" to 10, "requests" to 2), mapOf("key" to "b", "label" to "Pricey", "cost_cents" to 900, "requests" to 40)),
         )
         assertEquals(listOf(2.5, 12.0), usageDays(s).map { it.usd })
         assertEquals(listOf("10-25", "10-26"), usageDays(s).map { it.label })
+        assertEquals(14.5, usageTotalUsd(s), 0.001)
         assertEquals(listOf("Pricey", "Cheap"), usageTopMissions(s).map { it.name })
     }
 }

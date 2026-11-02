@@ -84,7 +84,7 @@ fun OrbProjectDocumentsPage(
         "project_docs_${slug}_${if (directoryPath.isEmpty()) "root" else directoryPath.replace("/", "_")}"
     }
 
-    var entries by remember(cacheKey) { mutableStateOf(OrbReadCache.loadRows(cacheKey)) }
+    var entries by remember(cacheKey) { mutableStateOf(OrbReadCache.readMemoryRows(cacheKey).orEmpty()) }
     var loading by remember(cacheKey) { mutableStateOf(entries.isEmpty()) }
     var error by remember(cacheKey) { mutableStateOf<String?>(null) }
     var isRefreshing by remember { mutableStateOf(false) }
@@ -104,7 +104,15 @@ fun OrbProjectDocumentsPage(
     }
 
     suspend fun load() {
-        if (entries.isEmpty()) loading = true
+        if (entries.isEmpty()) {
+            val diskCached = OrbReadCache.loadRowsAsync(cacheKey)
+            if (diskCached.isNotEmpty()) {
+                entries = diskCached
+                loading = false
+            } else {
+                loading = true
+            }
+        }
         error = null
         val encodedSlug = core.encodeComponent(slug)
         val encodedPath = core.encodeComponent(directoryPath)
