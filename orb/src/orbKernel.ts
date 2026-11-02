@@ -280,6 +280,25 @@ function clampWireStatus(code: number): OrbWireStatusCode {
   return (code >= 0 && code <= 9 ? code : 3) as OrbWireStatusCode;
 }
 
+function exactU64(value: bigint | number): bigint | null {
+  if (typeof value === "bigint") {
+    return value >= 0n && value <= 0xffff_ffff_ffff_ffffn ? value : null;
+  }
+  return Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : null;
+}
+
+function exactU32(value: number): number | null {
+  return Number.isInteger(value) && value >= 0 && value <= 0xffff_ffff ? value : null;
+}
+
+function exactSchemaId(value: number): number | null {
+  return Number.isInteger(value) && value >= 1 && value <= 0xffff ? value : null;
+}
+
+function spansOverlap(aStart: number, aLen: number, bStart: number, bLen: number): boolean {
+  return aLen > 0 && bLen > 0 && aStart < bStart + bLen && bStart < aStart + aLen;
+}
+
 export function orbWireVerifySliceIo(input: {
   inPtr: bigint | number;
   inLen: bigint | number;
@@ -289,9 +308,18 @@ export function orbWireVerifySliceIo(input: {
   is32Bit: boolean | number;
 }): OrbWireStatusCode {
   const widthFlag = typeof input.is32Bit === "boolean" ? b8(input.is32Bit) : enum8(input.is32Bit);
+  if (widthFlag > 1) return 6;
+  const inPtr = exactU64(input.inPtr);
+  const inLen = exactU64(input.inLen);
+  const outPtr = exactU64(input.outPtr);
+  const outCap = exactU64(input.outCap);
+  const writtenLen = exactU64(input.writtenLen);
+  if (inPtr === null || inLen === null || outPtr === null || outCap === null || writtenLen === null) {
+    return 8;
+  }
   const raw = kernel.orb_wire_verify_slice_io(
-    u64(input.inPtr), u64(input.inLen), u64(input.outPtr),
-    u64(input.outCap), u64(input.writtenLen), widthFlag,
+    inPtr, inLen, outPtr,
+    outCap, writtenLen, widthFlag,
   );
   return clampWireStatus(raw);
 }
@@ -303,25 +331,52 @@ export function orbWireEncodeSliceInto(input: {
   arena: Uint8Array;
   outBuf: Uint8Array;
   maxBudgetBytes?: number;
-  inArenaPtr?: number;
-  outPtr?: number;
+  inArenaPtr?: bigint | number;
+  outPtr?: bigint | number;
 }): { status: OrbWireStatusCode; written: number } {
-  const scratchBase = kernelScratchBaseOffset();
-  const maxBudget = input.maxBudgetBytes ?? ORB_WIRE_DEFAULT_MAX_BUDGET;
+  const scratchBase = BigInt(kernelScratchBaseOffset());
+  const schemaId = exactSchemaId(input.schemaId);
+  if (schemaId === null) {
+    return { status: 2, written: 0 };
+  }
+  const flags = exactU32(input.flags ?? 0);
+  if (flags === null) {
+    return { status: 3, written: 0 };
+  }
+  const maxBudget = exactU32(input.maxBudgetBytes ?? ORB_WIRE_DEFAULT_MAX_BUDGET);
+  if (maxBudget === null) {
+    return { status: 4, written: 0 };
+  }
+  const recordsCount = exactU32(input.records.length);
   const arenaBytes = input.arena.byteLength;
-  const outCap = input.outBuf.byteLength;
+  const arenaLen = exactU32(arenaBytes);
+  if (recordsCount === null || arenaLen === null) {
+    return { status: 3, written: 0 };
+  }
+  const outCapNum = input.outBuf.byteLength;
+  const outCap = exactU64(outCapNum);
+  if (outCap === null) {
+    return { status: 8, written: 0 };
+  }
   const sharesBackingBuffer =
-    arenaBytes > 0 && outCap > 0 && input.arena.buffer === input.outBuf.buffer;
+    arenaBytes > 0 && outCapNum > 0 && input.arena.buffer === input.outBuf.buffer;
+  if (sharesBackingBuffer &&
+      spansOverlap(input.arena.byteOffset, arenaBytes, input.outBuf.byteOffset, outCapNum)) {
+    return { status: 9, written: 0 };
+  }
   const defaultInPtr = sharesBackingBuffer
-    ? scratchBase + input.arena.byteOffset
-    : (arenaBytes === 0 ? 0 : scratchBase);
+    ? scratchBase + BigInt(input.arena.byteOffset)
+    : (arenaBytes === 0 ? 0n : scratchBase);
   const defaultOutPtr = sharesBackingBuffer
-    ? scratchBase + input.outBuf.byteOffset
-    : (outCap === 0 ? 0 : (defaultInPtr === 0 ? scratchBase : defaultInPtr + Math.max(arenaBytes, 8)));
-  const inPtr = input.inArenaPtr ?? defaultInPtr;
-  const outPtr = input.outPtr ?? defaultOutPtr;
-  if ((arenaBytes > 0 && inPtr > 0 && inPtr < scratchBase) ||
-      (outCap > 0 && outPtr > 0 && outPtr < scratchBase)) {
+    ? scratchBase + BigInt(input.outBuf.byteOffset)
+    : (outCapNum === 0 ? 0n : (defaultInPtr === 0n ? scratchBase : defaultInPtr + BigInt(Math.max(arenaBytes, 8))));
+  const inPtr = input.inArenaPtr === undefined ? defaultInPtr : exactU64(input.inArenaPtr);
+  const outPtr = input.outPtr === undefined ? defaultOutPtr : exactU64(input.outPtr);
+  if (inPtr === null || outPtr === null) {
+    return { status: 8, written: 0 };
+  }
+  if ((arenaBytes > 0 && inPtr > 0n && inPtr < scratchBase) ||
+      (outCapNum > 0 && outPtr > 0n && outPtr < scratchBase)) {
     return { status: 9, written: 0 };
   }
   for (let i = 0; i < input.records.length; i++) {
@@ -334,37 +389,41 @@ export function orbWireEncodeSliceInto(input: {
     }
   }
   const status = clampWireStatus(kernel.orb_wire_encode_slice_step(
-    u64(inPtr),
-    u64(outPtr),
-    u64(outCap),
-    sat32(input.schemaId),
-    sat32(input.records.length),
-    sat32(arenaBytes),
-    sat32(maxBudget),
+    inPtr,
+    outPtr,
+    outCap,
+    schemaId,
+    recordsCount,
+    arenaLen,
+    maxBudget,
     1,
   ));
   if (status !== 0) {
     return { status, written: 0 };
   }
-  const recordsBytes = input.records.length * 8;
+  const recordsBytes = recordsCount * 8;
   const payloadLen = recordsBytes + arenaBytes;
   const totalLen = ORB_WIRE_HEADER_BYTES + payloadLen;
+  if (input.outBuf.byteLength < totalLen ||
+      (arenaBytes > 0 && input.arena.byteLength < arenaBytes)) {
+    return { status: 5, written: 0 };
+  }
   const hdrView = new DataView(input.outBuf.buffer, input.outBuf.byteOffset, ORB_WIRE_HEADER_BYTES);
   hdrView.setUint32(0, ORB_WIRE_MAGIC, true);
   hdrView.setUint16(4, ORB_WIRE_ABI_VERSION, true);
-  hdrView.setUint16(6, input.schemaId & 0xffff, true);
-  hdrView.setUint32(8, (input.flags ?? 0) >>> 0, true);
+  hdrView.setUint16(6, schemaId, true);
+  hdrView.setUint32(8, flags, true);
   hdrView.setUint32(12, totalLen >>> 0, true);
   hdrView.setUint32(16, payloadLen >>> 0, true);
-  hdrView.setUint16(20, recordsBytes & 0xffff, true);
-  hdrView.setUint16(22, arenaBytes & 0xffff, true);
+  hdrView.setUint16(20, recordsBytes, true);
+  hdrView.setUint16(22, arenaLen, true);
 
   const recView = new DataView(
     input.outBuf.buffer,
     input.outBuf.byteOffset + ORB_WIRE_HEADER_BYTES,
     recordsBytes,
   );
-  for (let i = 0; i < input.records.length; i++) {
+  for (let i = 0; i < recordsCount; i++) {
     const rec = input.records[i];
     const packed = kernel.orb_wire_pack_record(
       rec.tag, rec.flags, rec.len16, rec.payload32,
@@ -372,7 +431,7 @@ export function orbWireEncodeSliceInto(input: {
     recView.setBigUint64(i * 8, packed, true);
   }
   if (arenaBytes > 0) {
-    input.outBuf.set(input.arena, ORB_WIRE_HEADER_BYTES + recordsBytes);
+    input.outBuf.set(input.arena.subarray(0, arenaBytes), ORB_WIRE_HEADER_BYTES + recordsBytes);
   }
   return { status: 0, written: totalLen };
 }
@@ -381,12 +440,24 @@ export function orbWireDecodeSlice(
   bytes: Uint8Array,
   expectedSchemaId: number,
   maxBudgetBytes = ORB_WIRE_DEFAULT_MAX_BUDGET,
-  inPtr?: number,
+  inPtr?: bigint | number,
 ): { status: OrbWireStatusCode; view: OrbWireSliceView | null } {
-  const scratchBase = kernelScratchBaseOffset();
-  const effectiveInPtr = inPtr ?? scratchBase;
-  if (bytes.byteLength > 0 && effectiveInPtr > 0 && effectiveInPtr < scratchBase) {
+  const scratchBase = BigInt(kernelScratchBaseOffset());
+  const effectiveInPtr = inPtr === undefined ? scratchBase : exactU64(inPtr);
+  const inLen = exactU64(bytes.byteLength);
+  if (effectiveInPtr === null || inLen === null) {
+    return { status: 8, view: null };
+  }
+  if (bytes.byteLength > 0 && effectiveInPtr > 0n && effectiveInPtr < scratchBase) {
     return { status: 9, view: null };
+  }
+  const expectedSchema = exactSchemaId(expectedSchemaId);
+  if (expectedSchema === null) {
+    return { status: 2, view: null };
+  }
+  const maxBudget = exactU32(maxBudgetBytes);
+  if (maxBudget === null) {
+    return { status: 4, view: null };
   }
   if (bytes.byteLength < ORB_WIRE_HEADER_BYTES) {
     return { status: 3, view: null };
@@ -402,18 +473,18 @@ export function orbWireDecodeSlice(
   const arenaLen = hdr.getUint16(22, true);
 
   const status = clampWireStatus(kernel.orb_wire_decode_slice_step(
-    u64(effectiveInPtr),
-    u64(bytes.byteLength),
+    effectiveInPtr,
+    inLen,
     1,
     magic,
     abiVersion,
     schemaId,
-    sat32(expectedSchemaId),
+    expectedSchema,
     totalLen,
     payloadLen,
     arenaOff,
     arenaLen,
-    sat32(maxBudgetBytes),
+    maxBudget,
   ));
   if (status !== 0) {
     return { status, view: null };
@@ -441,9 +512,10 @@ export function orbWireDecodeSlice(
       recordCount,
       recordAt(index: number): OrbWireRecord | null {
         if (!Number.isInteger(index) || index < 0 || index >= recordCount) return null;
-        if (recordsBytes.buffer.byteLength === 0) return null;
-        const recView = new DataView(recordsBytes.buffer, recordsBytes.byteOffset, recordsBytes.byteLength);
-        const word = recView.getBigUint64(index * 8, true);
+        const byteOff = index * 8;
+        if (recordsBytes.byteLength < byteOff + 8) return null;
+        const recView = new DataView(recordsBytes.buffer, recordsBytes.byteOffset + byteOff, 8);
+        const word = recView.getBigUint64(0, true);
         return {
           tag: Number(word & 0xffn),
           flags: Number((word >> 8n) & 0xffn),
@@ -452,7 +524,8 @@ export function orbWireDecodeSlice(
         };
       },
       arenaSlice(offset: number, len: number): Uint8Array | null {
-        if (!coordinates(offset, len) || offset + len > arenaBytes.byteLength) return null;
+        if (!coordinates(offset, len) || offset + len > arenaLen) return null;
+        if (arenaBytes.byteLength < offset + len) return null;
         if (arenaBytes.buffer.byteLength === 0) return null;
         return arenaBytes.subarray(offset, offset + len);
       },
