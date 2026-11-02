@@ -31,6 +31,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -457,47 +460,78 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    Icon(
+                        imageVector = if (bunkerState > 0) Icons.Default.Lock else Icons.Default.Shield,
+                        contentDescription = null,
+                        tint = if (bunkerState > 0) OrbStyle.error else OrbStyle.success,
+                        modifier = Modifier.size(18.dp)
+                    )
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(
-                            text = OrbPrivilegeAccess.bunkerLabel(bunkerState) +
-                                (meshEpoch?.let { " · epoch $it${if (meshVerified) " · Lean verified" else ""}" } ?: ""),
-                            color = if (bunkerState > 0) Color(0xFFFF6B6B) else Color.White,
+                            text = OrbPrivilegeAccess.bunkerLabel(bunkerState),
+                            color = if (bunkerState > 0) OrbStyle.error else Color.White,
                             fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
+                            fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = if (bunkerState > 0) "Privileged requests locked · active grants revoked"
-                            else "Canary tripwires & dead-man heartbeats armed",
+                            else meshEpoch?.let { "Epoch $it · ${if (meshVerified) "Lean 4 verified" else "canary armed"}" }
+                                ?: "Canary tripwires & dead-man heartbeats armed",
                             color = OrbStyle.textMuted,
                             fontSize = 12.sp,
-                            maxLines = 1,
+                            maxLines = if (bunkerState > 0) 2 else 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
                     if (bunkerState > 0) {
-                        TextButton(enabled = !busy, onClick = {
-                            act {
-                                OrbApprovalKey.signedRequest(
-                                    core, activity, "POST",
-                                    "/api/privilege-access/unbunker",
-                                    null,
-                                    "exit Fleet Bunker Mode"
-                                )
-                            }
-                        }) { Text("Exit", fontWeight = FontWeight.SemiBold) }
+                        Row(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(OrbStyle.success.copy(alpha = if (busy) 0.5f else 1f))
+                                .orbPressClickable(enabled = !busy) {
+                                    act {
+                                        OrbApprovalKey.signedRequest(
+                                            core, activity, "POST",
+                                            "/api/privilege-access/unbunker",
+                                            null,
+                                            "exit Fleet Bunker Mode"
+                                        )
+                                    }
+                                }
+                                .padding(horizontal = 12.dp, vertical = 7.dp)
+                                .testTag("privilege.unbunker"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(Icons.Default.Fingerprint, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
+                            Text("Exit", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                        }
                     } else {
-                        TextButton(enabled = !busy, onClick = {
-                            act {
-                                OrbApprovalKey.signedRequest(
-                                    core, activity, "POST",
-                                    "/api/privilege-access/bunker",
-                                    OrbPrivilegeAccess.bunkerBody(),
-                                    "enter Hard Bunker Lockdown across the fleet"
-                                )
-                            }
-                        }) { Text("Lock Down", color = Color(0xFFFF6B6B), fontWeight = FontWeight.SemiBold) }
+                        Row(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(OrbStyle.error.copy(alpha = if (busy) 0.08f else 0.14f))
+                                .border(1.dp, OrbStyle.error.copy(alpha = 0.32f), CircleShape)
+                                .orbPressClickable(enabled = !busy) {
+                                    act {
+                                        OrbApprovalKey.signedRequest(
+                                            core, activity, "POST",
+                                            "/api/privilege-access/bunker",
+                                            OrbPrivilegeAccess.bunkerBody(),
+                                            "enter Hard Bunker Lockdown across the fleet"
+                                        )
+                                    }
+                                }
+                                .padding(horizontal = 12.dp, vertical = 7.dp)
+                                .testTag("privilege.bunker"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(Icons.Default.Fingerprint, contentDescription = null, tint = OrbStyle.error, modifier = Modifier.size(14.dp))
+                            Text("Lock down", color = OrbStyle.error, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                        }
                     }
                 }
             }

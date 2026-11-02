@@ -268,7 +268,7 @@ final class OrbTranscriptUITests: XCTestCase {
         let menu = app.buttons["conversation.menu"]
         XCTAssertTrue(menu.waitForExistence(timeout: 10))
         menu.tap()
-        app.buttons["Side question (/btw)"].tap()
+        app.buttons["conversation.sideQuestion"].tap()
         let input = app.textFields["btw.input"]
         XCTAssertTrue(input.waitForExistence(timeout: 5))
         XCTAssertTrue(app.descendants(matching: .any)["btw-composer"].exists, "shared composer box")

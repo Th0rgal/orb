@@ -513,51 +513,41 @@ extension OrbConversation {
                 composerFocused = false
                 showSelection = true
             } label: {
-                HStack(spacing: 6) {
-                    HStack(spacing: 4) {
-                        Image(systemName: selection.primaryIcon)
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(selection.needsAgentSelection ? .white : OrbStyle.textSecondary)
-                        Text(selection.primaryPillLabel)
-                            .font(.caption.weight(selection.needsAgentSelection ? .semibold : .medium))
-                            .foregroundStyle(selection.needsAgentSelection ? .white : OrbStyle.textSecondary)
+                HStack(spacing: 4.5) {
+                    Image(systemName: selection.primaryIcon)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(selection.needsAgentSelection ? .white : OrbStyle.textSecondary)
+                    Text(selection.primaryPillLabel)
+                        .font(.caption.weight(selection.needsAgentSelection ? .semibold : .medium))
+                        .foregroundStyle(selection.needsAgentSelection ? .white : OrbStyle.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if let nodeBadge = selection.machinePillLabel {
+                        Text("·")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(OrbStyle.textMuted)
+                        Text(nodeBadge)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(OrbStyle.textMuted)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 8.5, weight: .semibold))
-                            .foregroundStyle(OrbStyle.textMuted)
                     }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5.5)
-                    .background(
-                        selection.needsAgentSelection ? Color.white.opacity(0.09) : Color.white.opacity(0.05),
-                        in: Capsule()
-                    )
-                    .overlay(
-                        Capsule().stroke(
-                            selection.needsAgentSelection ? OrbStyle.borderStrong : OrbStyle.border,
-                            lineWidth: 1
-                        )
-                    )
-                    .layoutPriority(1)
-
-                    if let nodeBadge = selection.machinePillLabel {
-                        HStack(spacing: 3.5) {
-                            Image(systemName: "server.rack")
-                                .font(.system(size: 9, weight: .medium))
-                                .foregroundStyle(OrbStyle.textMuted)
-                            Text(nodeBadge)
-                                .font(.system(.caption, weight: .medium))
-                                .foregroundStyle(OrbStyle.textSecondary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 5)
-                        .background(Color.white.opacity(0.04), in: Capsule())
-                        .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
-                    }
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundStyle(OrbStyle.textMuted)
                 }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5.5)
+                .background(
+                    selection.needsAgentSelection ? Color.white.opacity(0.09) : Color.white.opacity(0.05),
+                    in: Capsule()
+                )
+                .overlay(
+                    Capsule().stroke(
+                        selection.needsAgentSelection ? OrbStyle.borderStrong : OrbStyle.border,
+                        lineWidth: 1
+                    )
+                )
                 .frame(minHeight: 38)
                 .contentShape(Rectangle())
             }

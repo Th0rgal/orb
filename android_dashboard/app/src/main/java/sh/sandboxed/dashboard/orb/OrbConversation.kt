@@ -65,8 +65,11 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.ListAlt
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Psychology
@@ -75,6 +78,8 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Unarchive
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -83,6 +88,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -529,6 +535,7 @@ fun OrbConversationPage(
     project: OrbRow,
     initialMission: OrbRow?,
     initialFolder: String? = null,
+    onOpenDocuments: ((String) -> Unit)? = null,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -590,6 +597,9 @@ fun OrbConversationPage(
     var sharedFiles by remember(missionId) { mutableStateOf<List<OrbSharedFile>>(emptyList()) }
     var showAgentPicker by remember { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
+    var showHeaderMenu by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var renameDraft by remember { mutableStateOf("") }
     var sideAgentSession by remember(initialMission?.id) { mutableStateOf<OrbSideAgentSession?>(null) }
     var commandBanner by remember { mutableStateOf<String?>(null) }
 
@@ -1695,26 +1705,6 @@ fun OrbConversationPage(
                 }
             }
 
-            if (missionId != null) {
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(OrbStyle.surface)
-                        .border(1.dp, OrbStyle.border, CircleShape)
-                        .orbPressClickable { showFiles = true }
-                        .testTag("conversation.files"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Folder,
-                        contentDescription = "Files",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-            }
-
             if (!prUrl.isNullOrEmpty()) {
                 Row(
                     modifier = Modifier
@@ -1744,6 +1734,181 @@ fun OrbConversationPage(
                         maxLines = 1,
                         softWrap = false
                     )
+                }
+            }
+
+            if (missionId != null || onOpenDocuments != null) {
+                Box {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.border, CircleShape)
+                            .orbPressClickable { showHeaderMenu = true }
+                            .testTag("conversation.menu"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreHoriz,
+                            contentDescription = "Conversation actions",
+                            tint = Color.White,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = showHeaderMenu,
+                        onDismissRequest = { showHeaderMenu = false },
+                        containerColor = OrbStyle.elevated
+                    ) {
+                        if (missionId != null && liveRow != null) {
+                            val rawStatus = liveRow.str("status", "state") ?: ""
+                            val statusText = if (rawStatus.isNotEmpty() && rawStatus != "unknown") MissionState.label(rawStatus) else ""
+                            val shortModel = selectedModel.substringAfterLast('/')
+                            val agentText = shortModel.ifEmpty { OrbAgentCatalog.backendLabel(selectedBackend.ifEmpty { "Agent" }, backends) }
+                            val summary = listOf(agentText, statusText).filter { it.isNotEmpty() }.joinToString(" · ")
+                            if (summary.isNotEmpty()) {
+                                Text(
+                                    text = summary,
+                                    color = OrbStyle.textMuted,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                )
+                                HorizontalDivider(color = OrbStyle.border)
+                            }
+                            if (!isCloudMission) {
+                                DropdownMenuItem(
+                                    text = { Text("Side question", color = Color.White) },
+                                    leadingIcon = { Icon(Icons.Default.Psychology, contentDescription = null, tint = Color.White) },
+                                    onClick = {
+                                        showHeaderMenu = false
+                                        sideAgentSession = OrbSideAgentSession(parentId = missionId, initialQuestion = "", contextTurns = latestTurns)
+                                        UsageTelemetry.trackAction(UsageTelemetry.Action.Btw, "header_menu")
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Files", color = Color.White) },
+                                    leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null, tint = Color.White) },
+                                    modifier = Modifier.testTag("conversation.files"),
+                                    onClick = {
+                                        showHeaderMenu = false
+                                        showFiles = true
+                                    }
+                                )
+                            }
+                            if (onOpenDocuments != null) {
+                                DropdownMenuItem(
+                                    text = { Text("Project context", color = Color.White) },
+                                    leadingIcon = { Icon(Icons.Default.Description, contentDescription = null, tint = Color.White) },
+                                    onClick = {
+                                        showHeaderMenu = false
+                                        onOpenDocuments("")
+                                    }
+                                )
+                            }
+                            val externalUrl = OrbJSON.str(liveRow.dict("execution"), "external_url")
+                            if (!externalUrl.isNullOrEmpty()) {
+                                DropdownMenuItem(
+                                    text = { Text("Open in service", color = Color.White) },
+                                    leadingIcon = { Icon(Icons.Default.OpenInNew, contentDescription = null, tint = Color.White) },
+                                    onClick = {
+                                        showHeaderMenu = false
+                                        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(externalUrl))) }
+                                    }
+                                )
+                            }
+                            HorizontalDivider(color = OrbStyle.border)
+                            DropdownMenuItem(
+                                text = { Text("Rename", color = Color.White) },
+                                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, tint = Color.White) },
+                                onClick = {
+                                    showHeaderMenu = false
+                                    renameDraft = OrbJSON.cleanTitle(liveRow.str("title", "name") ?: "")
+                                    showRenameDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Move", color = Color.White) },
+                                leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color.White) },
+                                onClick = {
+                                    showHeaderMenu = false
+                                    val projectSlug = project.str("slug", "id") ?: project.id
+                                    OrbMoveClipboard.pick(liveRow, projectSlug)
+                                    commandBanner = "Ready to move — open destination project or folder"
+                                }
+                            )
+                            if (!isCloudMission) {
+                                DropdownMenuItem(
+                                    text = { Text("Fork", color = Color.White) },
+                                    leadingIcon = { Icon(Icons.Default.CallSplit, contentDescription = null, tint = Color.White) },
+                                    onClick = {
+                                        showHeaderMenu = false
+                                        runMissionCommand(OrbMissionCommand.Fork, "")
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Clone", color = Color.White) },
+                                    leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, tint = Color.White) },
+                                    onClick = {
+                                        showHeaderMenu = false
+                                        runMissionCommand(OrbMissionCommand.Clone, "")
+                                    }
+                                )
+                            }
+                            val isArchived = OrbMissionTree.isArchived(liveRow)
+                            if (isLive || !isArchived || isArchived) {
+                                HorizontalDivider(color = OrbStyle.border)
+                                if (isLive) {
+                                    DropdownMenuItem(
+                                        text = { Text("Stop", color = OrbStyle.error) },
+                                        leadingIcon = { Icon(Icons.Default.Stop, contentDescription = null, tint = OrbStyle.error) },
+                                        onClick = {
+                                            showHeaderMenu = false
+                                            stopMission()
+                                        }
+                                    )
+                                } else {
+                                    val nextStatus = if (isArchived) "paused" else "acknowledged"
+                                    DropdownMenuItem(
+                                        text = { Text(if (isArchived) "Restore" else "Archive", color = Color.White) },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = if (isArchived) Icons.Default.Unarchive else Icons.Default.Archive,
+                                                contentDescription = null,
+                                                tint = Color.White
+                                            )
+                                        },
+                                        onClick = {
+                                            showHeaderMenu = false
+                                            scope.launch {
+                                                orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                                                    core.request(
+                                                        "/api/control/missions/${core.encodeComponent(missionId)}/status",
+                                                        method = "POST",
+                                                        body = mapOf("status" to nextStatus)
+                                                    )
+                                                    core.refreshMissionsQuietly()
+                                                    loadHistory(missionId)
+                                                }.onFailure { errorMessage = it.message }
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        } else if (onOpenDocuments != null) {
+                            DropdownMenuItem(
+                                text = { Text("Project context", color = Color.White) },
+                                leadingIcon = { Icon(Icons.Default.Description, contentDescription = null, tint = Color.White) },
+                                onClick = {
+                                    showHeaderMenu = false
+                                    onOpenDocuments("")
+                                }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -2765,6 +2930,65 @@ fun OrbConversationPage(
     }
     if (showFiles) {
         OrbFilesSheet(core = core, scope = fileScope, onDismiss = { showFiles = false })
+    }
+
+    if (showRenameDialog && missionId != null) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            containerColor = OrbStyle.elevated,
+            titleContentColor = Color.White,
+            title = { Text("Rename conversation", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                ) {
+                    if (renameDraft.isEmpty()) {
+                        Text("Title", color = OrbStyle.textMuted, fontSize = 14.sp)
+                    }
+                    BasicTextField(
+                        value = renameDraft,
+                        onValueChange = { renameDraft = it },
+                        textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
+                        cursorBrush = SolidColor(Color.White),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val next = renameDraft.trim()
+                    showRenameDialog = false
+                    if (next.isNotEmpty()) {
+                        scope.launch {
+                            orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                                core.request(
+                                    path = "/api/control/missions/${core.encodeComponent(missionId)}/title",
+                                    method = "POST",
+                                    body = mapOf("title" to next)
+                                )
+                                currentMission?.let { cur ->
+                                    currentMission = OrbRow(cur.id, cur.raw.toMutableMap().apply { put("title", next) })
+                                }
+                                core.refreshMissionsQuietly()
+                            }.onFailure { errorMessage = it.message ?: "Couldn’t rename the conversation." }
+                        }
+                    }
+                }) {
+                    Text("Save", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameDialog = false }) {
+                    Text("Cancel", color = OrbStyle.textSecondary)
+                }
+            }
+        )
     }
 
     previewFilePath?.let { path ->

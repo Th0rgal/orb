@@ -6,10 +6,10 @@ extension OrbConversation {
     var conversationToolbarMenu: some View {
         let currentStatus = mission["status"].text
         let state = MissionState(rawValue: currentStatus)
+        let statusLabel = !turns.isEmpty ? status.capitalized : (currentStatus == "unknown" ? "" : OrbStyle.statusLabel(currentStatus))
         return OrbConversationMenu(
             hasMission: id != nil && !unavailable,
-            agentLabel: selection.label,
-            status: status.capitalized,
+            summary: OrbConversationMenu.summaryText(agentLabel: selection.compactLabel, status: statusLabel),
             canReopen: state?.canReopen == true,
             reopenTitle: currentStatus == "acknowledged" ? "Restore" : "Reopen",
             canArchive: currentStatus != "acknowledged",

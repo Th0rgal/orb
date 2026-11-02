@@ -239,6 +239,14 @@ final class OrbDesktopParityTests: XCTestCase {
         XCTAssertFalse(selected.needsAgentSelection)
         XCTAssertEqual(selected.primaryPillLabel, "claude-opus-5-5")
         XCTAssertNil(selected.machinePillLabel)
+        XCTAssertEqual(
+            OrbConversationMenu.summaryText(agentLabel: selected.compactLabel, status: MissionState.label("active")),
+            "claude-opus-5-5 · Working"
+        )
+        XCTAssertEqual(
+            OrbConversationMenu.summaryText(agentLabel: "smart", status: ""),
+            "smart"
+        )
     }
 
     func testContextTaggingParsesQueriesInsertsMentionsAndResolvesChips() {
