@@ -332,6 +332,12 @@ export function MissionAutomationsDialog({
 
   // Debounced inline prompt variable parsing
   const promptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (promptTimerRef.current !== null) {
+      clearTimeout(promptTimerRef.current);
+      promptTimerRef.current = null;
+    }
+  }, [open, missionId]);
   const handleInlinePromptChange = useCallback(
     (text: string) => {
       setInlinePrompt(text);
