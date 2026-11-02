@@ -3,7 +3,7 @@
 import { useEffect, useRef } from 'react';
 import { X, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { AsyncButton } from './async-button';
+import { AsyncButton, useAsyncAction } from './async-button';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -25,11 +25,13 @@ export function ConfirmDialog({
   confirmLabel = 'Confirm',
   cancelLabel = 'Cancel',
   variant = 'default',
-  busy,
+  busy: externalBusy,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
+  const { run: handleConfirm, pending } = useAsyncAction(onConfirm);
+  const busy = Boolean(externalBusy) || pending;
 
   // Handle escape key
   useEffect(() => {
@@ -115,7 +117,7 @@ export function ConfirmDialog({
             {cancelLabel}
           </button>
           <AsyncButton
-            onClick={onConfirm}
+            onClick={handleConfirm}
             busy={busy}
             className={cn('px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors', styles.button)}
           >
