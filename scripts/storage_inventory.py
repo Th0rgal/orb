@@ -306,6 +306,7 @@ def kind_for(path):
     if name in {
         "target", ".cache", ".lean", ".lake", "cache", "caches",
         ".elan", "toolchains", ".rustup", "node_modules", "conecache",
+        "turbo-lean", ".turbo-lean", "turbo-lean-staging",
     }:
         return "build_cache"
     if "image" in name or name in {"machines", "containers"}:

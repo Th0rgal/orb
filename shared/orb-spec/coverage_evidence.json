@@ -201,7 +201,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -209,7 +209,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "0df8ec50d25c5372d051fa54984f44b598842034688901eaa3f3fc02425e2651"
+          "sha256": "dc2154b413efe22ad12a2277cb54a9bac6be1c7822c49c16b18f2988157a6aa8"
         }
       ],
       "execution": {
@@ -264,7 +264,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -272,7 +272,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "0df8ec50d25c5372d051fa54984f44b598842034688901eaa3f3fc02425e2651"
+          "sha256": "dc2154b413efe22ad12a2277cb54a9bac6be1c7822c49c16b18f2988157a6aa8"
         }
       ],
       "execution": {
@@ -322,7 +322,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -330,7 +330,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "0df8ec50d25c5372d051fa54984f44b598842034688901eaa3f3fc02425e2651"
+          "sha256": "dc2154b413efe22ad12a2277cb54a9bac6be1c7822c49c16b18f2988157a6aa8"
         }
       ],
       "execution": {
@@ -380,7 +380,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -388,7 +388,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "0df8ec50d25c5372d051fa54984f44b598842034688901eaa3f3fc02425e2651"
+          "sha256": "dc2154b413efe22ad12a2277cb54a9bac6be1c7822c49c16b18f2988157a6aa8"
         }
       ],
       "execution": {
@@ -443,7 +443,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -455,7 +455,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "bc6f251190beff78b41d21c7233b06db6b50e34b987eb00c055941695fab44fb"
+          "sha256": "47e875e69ca3e18c65697879c9fce5cb2a7895c94b40df4d2ddf25bcd3046ac4"
         }
       ],
       "execution": {
@@ -510,7 +510,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -522,7 +522,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "bc6f251190beff78b41d21c7233b06db6b50e34b987eb00c055941695fab44fb"
+          "sha256": "47e875e69ca3e18c65697879c9fce5cb2a7895c94b40df4d2ddf25bcd3046ac4"
         }
       ],
       "execution": {
@@ -592,7 +592,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "src/api/mission_access.rs",
@@ -600,7 +600,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "bc6f251190beff78b41d21c7233b06db6b50e34b987eb00c055941695fab44fb"
+          "sha256": "47e875e69ca3e18c65697879c9fce5cb2a7895c94b40df4d2ddf25bcd3046ac4"
         }
       ],
       "execution": {
@@ -650,7 +650,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "src/api/proxy.rs",
@@ -658,7 +658,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "bc6f251190beff78b41d21c7233b06db6b50e34b987eb00c055941695fab44fb"
+          "sha256": "47e875e69ca3e18c65697879c9fce5cb2a7895c94b40df4d2ddf25bcd3046ac4"
         }
       ],
       "execution": {
@@ -713,7 +713,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "src/api/proxy.rs",
@@ -721,7 +721,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "bc6f251190beff78b41d21c7233b06db6b50e34b987eb00c055941695fab44fb"
+          "sha256": "47e875e69ca3e18c65697879c9fce5cb2a7895c94b40df4d2ddf25bcd3046ac4"
         }
       ],
       "execution": {
@@ -786,7 +786,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "src/remote_node/job_ledger.rs",
@@ -794,7 +794,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "bc6f251190beff78b41d21c7233b06db6b50e34b987eb00c055941695fab44fb"
+          "sha256": "47e875e69ca3e18c65697879c9fce5cb2a7895c94b40df4d2ddf25bcd3046ac4"
         }
       ],
       "execution": {
@@ -854,7 +854,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -862,11 +862,11 @@
         },
         {
           "path": "src/orb_spec.rs",
-          "sha256": "51015c9b651861f3ce58f72164c5a29cfadf78e755d911813fd72c4a4fb30c1b"
+          "sha256": "ce1147ab7761340c23332dd91300c37467fb22c952c6589e31d3674415862c8e"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
+          "sha256": "3dc9c4cb6a7849fa8398020fdd8918d9601c9a5bdbfa600c3e9f72f0585dbe3e"
         }
       ],
       "execution": {
@@ -926,7 +926,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -934,11 +934,11 @@
         },
         {
           "path": "src/orb_spec.rs",
-          "sha256": "51015c9b651861f3ce58f72164c5a29cfadf78e755d911813fd72c4a4fb30c1b"
+          "sha256": "ce1147ab7761340c23332dd91300c37467fb22c952c6589e31d3674415862c8e"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
+          "sha256": "3dc9c4cb6a7849fa8398020fdd8918d9601c9a5bdbfa600c3e9f72f0585dbe3e"
         }
       ],
       "execution": {
@@ -1007,7 +1007,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1023,7 +1023,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
+          "sha256": "3dc9c4cb6a7849fa8398020fdd8918d9601c9a5bdbfa600c3e9f72f0585dbe3e"
         }
       ],
       "execution": {
@@ -1092,7 +1092,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1108,7 +1108,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
+          "sha256": "3dc9c4cb6a7849fa8398020fdd8918d9601c9a5bdbfa600c3e9f72f0585dbe3e"
         }
       ],
       "execution": {
@@ -1177,7 +1177,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1193,7 +1193,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
+          "sha256": "3dc9c4cb6a7849fa8398020fdd8918d9601c9a5bdbfa600c3e9f72f0585dbe3e"
         }
       ],
       "execution": {
@@ -1262,7 +1262,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1278,7 +1278,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
+          "sha256": "3dc9c4cb6a7849fa8398020fdd8918d9601c9a5bdbfa600c3e9f72f0585dbe3e"
         }
       ],
       "execution": {
@@ -1347,7 +1347,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1363,7 +1363,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
+          "sha256": "3dc9c4cb6a7849fa8398020fdd8918d9601c9a5bdbfa600c3e9f72f0585dbe3e"
         }
       ],
       "execution": {
@@ -1437,7 +1437,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1457,7 +1457,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
+          "sha256": "3dc9c4cb6a7849fa8398020fdd8918d9601c9a5bdbfa600c3e9f72f0585dbe3e"
         }
       ],
       "execution": {
@@ -1535,7 +1535,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1547,7 +1547,7 @@
         },
         {
           "path": "src/api/control/streaming.rs",
-          "sha256": "105bffecc49bfd502c23e0afb4e292b947d0616b8cdf90d77fbd543827324031"
+          "sha256": "a693c26d06e0bc893b9c1fd2c5f431ce7e577c2d9671fea97d6c140155c16cd6"
         },
         {
           "path": "src/api/control/tests.rs",
@@ -1555,7 +1555,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
+          "sha256": "3dc9c4cb6a7849fa8398020fdd8918d9601c9a5bdbfa600c3e9f72f0585dbe3e"
         }
       ],
       "execution": {
@@ -1592,15 +1592,15 @@
       "sources": [
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "src/orb_spec.rs",
-          "sha256": "51015c9b651861f3ce58f72164c5a29cfadf78e755d911813fd72c4a4fb30c1b"
+          "sha256": "ce1147ab7761340c23332dd91300c37467fb22c952c6589e31d3674415862c8e"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
+          "sha256": "3dc9c4cb6a7849fa8398020fdd8918d9601c9a5bdbfa600c3e9f72f0585dbe3e"
         }
       ],
       "execution": {
@@ -1665,7 +1665,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
+          "sha256": "7316bf5a3463d39c50f6fc3b2f21dd3ce88bc2a13f17d7ab640821b9b525de5a"
         },
         {
           "path": "src/managed/mod.rs",
@@ -1677,7 +1677,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/mission-vm-limits-tests.log",
-          "sha256": "15c594ac181736710f371167821b81ddc4702417c57742de700885dca82465ab"
+          "sha256": "538ea8f034c76bb5387cbb6a2d92365b9235c44da60ebb9b93e2378030858e28"
         }
       ],
       "execution": {
@@ -1694,6 +1694,1260 @@
       "blockers": [
         "Mission lineage resolution and pool-count aggregation across live registry rows remain in host Rust.",
         "Provider-side VM creation and quota reconciliation remain asynchronous I/O outside orb_vm_cap_admit."
+      ]
+    },
+    "leansys_verify_cas_digest": {
+      "status": "partial",
+      "claim": "Host source-bundle content admission and artifact path gates invoke leansys_verify_cas_digest via verify_cas_hex_digest over all four mixed 64-bit SHA-256 limbs and path-separator flags after host Rust parses canonical 64-char lowercase hex.",
+      "links": [
+        {
+          "kind": "host_observer",
+          "path": "src/node/lean.rs",
+          "symbol": "verify_cas_hex_digest"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/node/lean.rs",
+          "symbol": "turbo_lean_command_confinement_and_cache_env_verified"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/node/lean.rs",
+          "symbol": "collect_artifacts_hashes_and_sizes_matches"
+        }
+      ],
+      "sources": [
+        {
+          "path": "shared/orb-spec/kernel_abi.json",
+          "sha256": "0aa6c4860309cb43a88e4d81a6b7c324dc4ca7f234616c4eea8fa668a21b1914"
+        },
+        {
+          "path": "src/node/lean.rs",
+          "sha256": "e74efaee30eb152b8e6aafa69479843b381543bdde6478eb0eb3794cda7561fe"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Pinned LeanSys source theorems live in external Th0rgal/lean-sys rather than repository-local lean/Orb/Spec.lean.",
+        "SHA-256 byte hashing and 64-char lowercase-hex limb parsing run in host Rust before leansys_verify_cas_digest checks non-zero limb equality and path-separator absence."
+      ]
+    },
+    "leansys_verify_token_auth": {
+      "status": "partial",
+      "claim": "Node bearer and scoped lease token verifiers invoke leansys_verify_token_auth over constant-time XOR accumulators, failing closed on empty tokens, length mismatches, or expired lease timestamps.",
+      "links": [
+        {
+          "kind": "host_observer",
+          "path": "src/remote_node/protocol.rs",
+          "symbol": "validate_lease_token"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/remote_node/protocol.rs",
+          "symbol": "node_token_matches"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/remote_node/protocol.rs",
+          "symbol": "lease_and_bearer_token_auth_gates_fail_closed_on_expiry_and_rotation"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/remote_node/protocol.rs",
+          "symbol": "token_rotation_decision_table"
+        }
+      ],
+      "sources": [
+        {
+          "path": "shared/orb-spec/kernel_abi.json",
+          "sha256": "0aa6c4860309cb43a88e4d81a6b7c324dc4ca7f234616c4eea8fa668a21b1914"
+        },
+        {
+          "path": "src/remote_node/protocol.rs",
+          "sha256": "4c850c9430e6d7316bf18e8ad63458479db193389a73fecc5a47e19ff873e7d9"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Pinned LeanSys source theorems live in external Th0rgal/lean-sys rather than repository-local lean/Orb/Spec.lean.",
+        "TLS transport and HTTP header extraction remain in host Rust/Axum."
+      ]
+    },
+    "leansys_verify_log_window": {
+      "status": "partial",
+      "claim": "Runner log-chunk slicing checks both orb_verify_log_window and leansys_verify_log_window before seeking or reading bounded UTF-8 chunks from job log files.",
+      "links": [
+        {
+          "kind": "host_observer",
+          "path": "src/node/runner.rs",
+          "symbol": "read_log_chunk"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/node/runner.rs",
+          "symbol": "log_chunks_preserve_unicode_and_partial_writes"
+        }
+      ],
+      "sources": [
+        {
+          "path": "shared/orb-spec/kernel_abi.json",
+          "sha256": "0aa6c4860309cb43a88e4d81a6b7c324dc4ca7f234616c4eea8fa668a21b1914"
+        },
+        {
+          "path": "src/node/runner.rs",
+          "sha256": "4df3a5ccdd504393ec4dd6c9b9e7fe6b48d702b6c8dd26b94db679cee5506dd3"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Pinned LeanSys source theorems live in external Th0rgal/lean-sys rather than repository-local lean/Orb/Spec.lean.",
+        "Filesystem seek/read I/O and UTF-8 lossy recovery remain in host Rust."
+      ]
+    },
+    "leansys_verify_proc_stat_fields": {
+      "status": "partial",
+      "claim": "Linux /proc/<pid>/stat parsing gates field extraction on leansys_verify_proc_stat_fields before reading state and start-time ticks for PID-reuse-safe liveness checks.",
+      "links": [
+        {
+          "kind": "host_observer",
+          "path": "src/node/runner.rs",
+          "symbol": "proc_stat_fields"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/node/runner.rs",
+          "symbol": "runs_a_job_and_captures_its_log"
+        }
+      ],
+      "sources": [
+        {
+          "path": "shared/orb-spec/kernel_abi.json",
+          "sha256": "0aa6c4860309cb43a88e4d81a6b7c324dc4ca7f234616c4eea8fa668a21b1914"
+        },
+        {
+          "path": "src/node/runner.rs",
+          "sha256": "4df3a5ccdd504393ec4dd6c9b9e7fe6b48d702b6c8dd26b94db679cee5506dd3"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Pinned LeanSys source theorems live in external Th0rgal/lean-sys rather than repository-local lean/Orb/Spec.lean.",
+        "Reading /proc/<pid>/stat from procfs and platform signal delivery remain in host Rust."
+      ]
+    },
+    "leansys_verify_slice_bounds": {
+      "status": "partial",
+      "claim": "Host slice-window validation and runner log-chunk reads enforce leansys_verify_slice_bounds before indexing or seeking sub-slices.",
+      "links": [
+        {
+          "kind": "host_observer",
+          "path": "src/node/runner.rs",
+          "symbol": "read_log_chunk"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/orb_spec.rs",
+          "symbol": "host_slice_bounds_and_isa_selection_gates_verified"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/node/runner.rs",
+          "symbol": "log_chunks_preserve_unicode_and_partial_writes"
+        }
+      ],
+      "sources": [
+        {
+          "path": "shared/orb-spec/kernel_abi.json",
+          "sha256": "0aa6c4860309cb43a88e4d81a6b7c324dc4ca7f234616c4eea8fa668a21b1914"
+        },
+        {
+          "path": "src/node/runner.rs",
+          "sha256": "4df3a5ccdd504393ec4dd6c9b9e7fe6b48d702b6c8dd26b94db679cee5506dd3"
+        },
+        {
+          "path": "src/orb_spec.rs",
+          "sha256": "ce1147ab7761340c23332dd91300c37467fb22c952c6589e31d3674415862c8e"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Pinned LeanSys source theorems live in external Th0rgal/lean-sys rather than repository-local lean/Orb/Spec.lean.",
+        "Raw slice construction after bounds admission remains in host Rust."
+      ]
+    },
+    "leansys_select_isa": {
+      "status": "partial",
+      "claim": "Host stream byte scanning selects SIMD/scalar ISA tiers via leansys_select_isa and verifies dispatch soundness before scanning UTF-8 stream tails.",
+      "links": [
+        {
+          "kind": "host_observer",
+          "path": "src/orb_spec.rs",
+          "symbol": "select_host_stream_isa_with_caps"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/orb_spec.rs",
+          "symbol": "scan_host_stream_bytes"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/orb_spec.rs",
+          "symbol": "host_slice_bounds_and_isa_selection_gates_verified"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/control/streaming.rs",
+          "symbol": "kmp_suffix_prefix_overlap_matches_naive_across_multibyte_utf8"
+        }
+      ],
+      "sources": [
+        {
+          "path": "shared/orb-spec/kernel_abi.json",
+          "sha256": "0aa6c4860309cb43a88e4d81a6b7c324dc4ca7f234616c4eea8fa668a21b1914"
+        },
+        {
+          "path": "src/orb_spec.rs",
+          "sha256": "ce1147ab7761340c23332dd91300c37467fb22c952c6589e31d3674415862c8e"
+        },
+        {
+          "path": "src/api/control/streaming.rs",
+          "sha256": "a693c26d06e0bc893b9c1fd2c5f431ce7e577c2d9671fea97d6c140155c16cd6"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Pinned LeanSys source theorems live in external Th0rgal/lean-sys rather than repository-local lean/Orb/Spec.lean.",
+        "Runtime CPU feature detection on x86_64/aarch64 queries host target features before calling leansys_select_isa."
+      ]
+    },
+    "leansys_verify_isa_selection": {
+      "status": "partial",
+      "claim": "Host stream ISA selection validates every candidate ISA code through leansys_verify_isa_selection, falling back to scalar code 0 if capability masks disagree.",
+      "links": [
+        {
+          "kind": "host_observer",
+          "path": "src/orb_spec.rs",
+          "symbol": "select_host_stream_isa_with_caps"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/orb_spec.rs",
+          "symbol": "scan_host_stream_bytes"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/orb_spec.rs",
+          "symbol": "host_slice_bounds_and_isa_selection_gates_verified"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/control/streaming.rs",
+          "symbol": "kmp_suffix_prefix_overlap_matches_naive_across_multibyte_utf8"
+        }
+      ],
+      "sources": [
+        {
+          "path": "shared/orb-spec/kernel_abi.json",
+          "sha256": "0aa6c4860309cb43a88e4d81a6b7c324dc4ca7f234616c4eea8fa668a21b1914"
+        },
+        {
+          "path": "src/orb_spec.rs",
+          "sha256": "ce1147ab7761340c23332dd91300c37467fb22c952c6589e31d3674415862c8e"
+        },
+        {
+          "path": "src/api/control/streaming.rs",
+          "sha256": "a693c26d06e0bc893b9c1fd2c5f431ce7e577c2d9671fea97d6c140155c16cd6"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Pinned LeanSys source theorems live in external Th0rgal/lean-sys rather than repository-local lean/Orb/Spec.lean.",
+        "Actual byte-comparison loops after ISA selection remain in host Rust until Phase R4 native scanner linkage."
+      ]
+    },
+    "orb_verify_log_window": {
+      "status": "partial",
+      "claim": "Runner log pagination enforces orb_verify_log_window (backed by log_window_rejects_invalid_chunk) before reading bounded log windows.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "log_window_rejects_invalid_chunk"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/node/runner.rs",
+          "symbol": "read_log_chunk"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/node/runner.rs",
+          "symbol": "log_chunks_preserve_unicode_and_partial_writes"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/node/runner.rs",
+          "sha256": "4df3a5ccdd504393ec4dd6c9b9e7fe6b48d702b6c8dd26b94db679cee5506dd3"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "File descriptor management and UTF-8 boundary trimming after window admission remain in host Rust."
+      ]
+    },
+    "orb_verify_bundle_budget": {
+      "status": "partial",
+      "claim": "Workspace source-bundle admission enforces orb_verify_bundle_budget (backed by bundle_budget_rejects_oversized) on cumulative tar entry counts and byte totals.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "bundle_budget_rejects_oversized"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/remote_node/protocol.rs",
+          "symbol": "check"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/remote_node/protocol.rs",
+          "symbol": "source_capacity_is_exactly_the_advertised_limit"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/remote_node/protocol.rs",
+          "sha256": "4c850c9430e6d7316bf18e8ad63458479db193389a73fecc5a47e19ff873e7d9"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Tar archive decompression and path traversal sanitization run in host Rust around BudgetTracker::check."
+      ]
+    },
+    "orb_verify_token_rotation": {
+      "status": "partial",
+      "claim": "Remote-node bearer token rotation enforces orb_verify_token_rotation (backed by token_rotation_rejects_invalid) over constant-time byte comparisons and grace-epoch bounds.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "token_rotation_rejects_invalid"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/remote_node/protocol.rs",
+          "symbol": "node_token_matches"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/remote_node/protocol.rs",
+          "symbol": "token_rotation_decision_table"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/remote_node/protocol.rs",
+          "sha256": "4c850c9430e6d7316bf18e8ad63458479db193389a73fecc5a47e19ff873e7d9"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Token storage and rotation epoch clocks are supplied by host Rust state."
+      ]
+    },
+    "orb_node_gc_step": {
+      "status": "partial",
+      "claim": "Tiered Lean/Cargo cache garbage collection delegates per-entry retention/eviction decisions to orb_node_gc_step across healthy 72h grace, pinned pressure, and emergency disk floors.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "node_gc_healthy_keeps_72h_grace"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "node_gc_preserves_hot_cache_when_pinned_above_emergency"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "node_gc_emergency_evicts_hot_cache"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/node/lean.rs",
+          "symbol": "run_gc_pass"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/node/lean.rs",
+          "symbol": "tiered_gc_preserves_hot_caches_when_disk_pressure_is_pinned_above_emergency"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/node/lean.rs",
+          "symbol": "tiered_gc_evicts_hot_caches_under_emergency_floor_while_respecting_active_locks"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/node/lean.rs",
+          "sha256": "e74efaee30eb152b8e6aafa69479843b381543bdde6478eb0eb3794cda7561fe"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Filesystem directory traversal, flock probes, and statvfs disk-space queries remain in host Rust."
+      ]
+    },
+    "orb_node_lane_step": {
+      "status": "partial",
+      "claim": "Node job admission delegates main-pool vs coordinator-priority-lane routing to orb_node_lane_step so coordinator wake-ups are never starved by saturated child workers.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "coordinator_wakeup_never_starved_by_saturated_workers"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "coordinator_prefers_main_when_uncongested"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/node/runner.rs",
+          "symbol": "spawn_with_options"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/node/runner.rs",
+          "symbol": "coordinator_wakeup_runs_immediately_while_child_workers_saturate_main"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/node/runner.rs",
+          "sha256": "4df3a5ccdd504393ec4dd6c9b9e7fe6b48d702b6c8dd26b94db679cee5506dd3"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Semaphore permit acquisition and subprocess spawning after lane selection remain in host Tokio/Rust."
+      ]
+    },
+    "orb_proc_liveness_step": {
+      "status": "partial",
+      "claim": "Process liveness probes delegate /proc/<pid>/stat state and start-tick verification to orb_proc_liveness_step, rejecting recycled PIDs and preserving fail-closed read errors.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "proc_liveness_rejects_pid_reuse_and_keeps_read_err"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/node/runner.rs",
+          "symbol": "pid_is_alive"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/node/runner.rs",
+          "symbol": "runs_a_job_and_captures_its_log"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/node/runner.rs",
+          "sha256": "4df3a5ccdd504393ec4dd6c9b9e7fe6b48d702b6c8dd26b94db679cee5506dd3"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Procfs file reads and POSIX kill(pid, 0) existence probes remain in host Rust."
+      ]
+    },
+    "orb_node_disk_admission_step": {
+      "status": "partial",
+      "claim": "Remote-node disk admission delegates pinned-pressure and free-byte floor checks to orb_node_disk_admission_step via check_disk_admission.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "node_disk_admission_rejects_pinned"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "node_disk_admission_respects_node_floor"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/remote_node/protocol.rs",
+          "symbol": "check_disk_admission"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/orb_spec.rs",
+          "symbol": "reexported_orb_spec_links_and_executes_all_30_kernels"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/remote_node/protocol.rs",
+          "sha256": "4c850c9430e6d7316bf18e8ad63458479db193389a73fecc5a47e19ff873e7d9"
+        },
+        {
+          "path": "src/orb_spec.rs",
+          "sha256": "ce1147ab7761340c23332dd91300c37467fb22c952c6589e31d3674415862c8e"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "statvfs free-byte sampling and job scratch-size estimation remain in host Rust."
+      ]
+    },
+    "orb_slot_bypass_step": {
+      "status": "partial",
+      "claim": "Runner force-start admission and active slot accounting delegate bypass guard checks to orb_slot_bypass_step so forced recovery jobs get at most one extra slot without starving regular admission accounting.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "slot_bypass_bypasses_saturated_regular_and_enforces_guards"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "slot_bypass_regular_admission_ignores_forced_workers"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/node/runner.rs",
+          "symbol": "active_count"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/node/runner.rs",
+          "symbol": "force_start_bypasses_saturated_pool_with_single_extra_slot"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/node/runner.rs",
+          "sha256": "4df3a5ccdd504393ec4dd6c9b9e7fe6b48d702b6c8dd26b94db679cee5506dd3"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Mutex-guarded slot counter mutation and permit release drop guards remain in host Rust."
+      ]
+    },
+    "orb_verify_writer_reuse": {
+      "status": "partial",
+      "claim": "Writer-recycle identity checks delegate track/PR reuse validation to orb_verify_writer_reuse (backed by writer_reuse_rejects_stale_identity).",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "writer_reuse_rejects_stale_identity"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/writer_recycle.rs",
+          "symbol": "apply_writer_reuse"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/writer_recycle.rs",
+          "symbol": "explicit_same_track_allows_exclusions_and_collaborator_references"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/api/writer_recycle.rs",
+          "sha256": "a892552b49438e60cc5741d675a93b038be4f2cdb8c39203a001936932927c4c"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Prose PR-reference extraction and mission-store persistence remain in host Rust."
+      ]
+    },
+    "orb_verify_lease_mode": {
+      "status": "partial",
+      "claim": "Track lease precedence resolution delegates writer vs read-only lease mode selection to orb_verify_lease_mode (backed by lease_mode_defaults_to_writer).",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "lease_mode_defaults_to_writer"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/track_leases.rs",
+          "symbol": "lease_mode"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/track_leases.rs",
+          "symbol": "lease_mode_precedence_table"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/api/track_leases.rs",
+          "sha256": "f6f313b59368651f27bb25090671662cc719a4987a713a2e98033fd3cfdc0ed1"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "SQLite lease row locking and expiry sweeps remain in host Rust."
+      ]
+    },
+    "orb_verify_track_hold": {
+      "status": "partial",
+      "claim": "Execution ownership checks delegate track-hold retention across active runs and queued follow-ups to orb_verify_track_hold (backed by track_hold_blocks_premature_release).",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "track_hold_blocks_premature_release"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/control/execution_ownership.rs",
+          "symbol": "holds_track"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/control/execution_ownership.rs",
+          "symbol": "queued_followup_protects_assignment_without_claiming_execution"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/api/control/execution_ownership.rs",
+          "sha256": "d2d70d0bd6689b97c670fd0f33286a5ad31e704e9b72bc134cc37d48e50a54be"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Live run-registry lookups and SQLite queue queries remain in host Rust."
+      ]
+    },
+    "orb_verify_repo_disjoint": {
+      "status": "partial",
+      "claim": "Remote repository conflict detection delegates canonical repo disjointness checks to orb_verify_repo_disjoint, rejecting unknown or equal repositories.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "repo_disjoint_rejects_unknown_or_equal"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/control/execution_ownership.rs",
+          "symbol": "remote_conflicts_with"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/control/execution_ownership.rs",
+          "symbol": "unrecognised_repositories_prove_nothing"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/api/control/execution_ownership.rs",
+          "sha256": "d2d70d0bd6689b97c670fd0f33286a5ad31e704e9b72bc134cc37d48e50a54be"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Git remote URL normalization into 64-bit hashes runs in host Rust before calling orb_verify_repo_disjoint."
+      ]
+    },
+    "orb_verify_remote_outbox": {
+      "status": "partial",
+      "claim": "Durable remote-queue enqueue and FIFO promotion gate state transitions through orb_verify_remote_outbox (backed by remote_outbox_rejects_unsafe_op).",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "remote_outbox_rejects_unsafe_op"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/control/remote_queue.rs",
+          "symbol": "enqueue"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/control/remote_queue.rs",
+          "symbol": "promote"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/control/remote_queue.rs",
+          "symbol": "remote_queue_reopen_fifo_cancel_and_receipts"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/api/control/remote_queue.rs",
+          "sha256": "8740478a8f6b61cb691246ca5e21f84347ec31dfc2e80b3f871959e0dc096395"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "SQLite outbox persistence and network dispatch receipts remain in host Rust."
+      ]
+    },
+    "orb_verify_board_slots": {
+      "status": "partial",
+      "claim": "Task-board DAG scheduling gates worker vs boss slot admission via orb_verify_board_slots (backed by board_slots_prevent_boss_starvation).",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "board_slots_prevent_boss_starvation"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/control/board.rs",
+          "symbol": "scheduler_pass"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/control/board.rs",
+          "symbol": "upsert_and_dep_flow_in_memory_store"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/api/control/board.rs",
+          "sha256": "8b4d35066999c747be72f48c0edbef3f53bc40fa60e2cb738685c0d64739379a"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Dependency graph topological queries and mission dispatch side effects remain in host Rust."
+      ]
+    },
+    "orb_verify_board_retry": {
+      "status": "partial",
+      "claim": "Task-board terminal failure handling gates automatic retry disposition via orb_verify_board_retry (backed by board_retry_rejects_exhausted_or_merged).",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "board_retry_rejects_exhausted_or_merged"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/control/board.rs",
+          "symbol": "retry_disposition"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/control/board.rs",
+          "symbol": "boss_terminal_status_classification"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/api/control/board.rs",
+          "sha256": "8b4d35066999c747be72f48c0edbef3f53bc40fa60e2cb738685c0d64739379a"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Retry backoff timers and mission-store updates remain in host Rust."
+      ]
+    },
+    "orb_verify_job_transition": {
+      "status": "partial",
+      "claim": "Durable node job-store status updates gate state transitions through orb_verify_job_transition (backed by job_transition_absorbs_terminal) so terminal outcomes are first-wins.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "job_transition_absorbs_terminal"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/node/job_store.rs",
+          "symbol": "can_transition_to"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/node/job_store.rs",
+          "symbol": "terminal_outcome_is_first_wins"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
+        },
+        {
+          "path": "src/node/job_store.rs",
+          "sha256": "0fc3d4efe9e3c6ce091f964965a4e50e5d1a5b3cd315464c30b22e5ddef504b5"
+        },
+        {
+          "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+          "sha256": "c1c8f60b82a402caa1bad5c165d76610a9eb90c294c843b123ed224f905e4fc1"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::streaming:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::collect_artifacts_hashes_and_sizes_matches -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::lean::tests::tiered_gc_ -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::protocol::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::runner::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::track_leases::tests::lease_mode_precedence_table -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::execution_ownership:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::board::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib node::job_store::tests::terminal_outcome_is_first_wins -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "JSON/SQLite job record serialization and log-tail truncation remain in host Rust."
       ]
     }
   }

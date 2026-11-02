@@ -11,7 +11,8 @@ open-work statements rather than claiming phase acceptance.
 
 **P1/P3 local evidence now exists.** turbo-lean Stage 1D #280 merged at
 `e585ba96f58cb06414ce5e3216f3ffc0ce235300` after exact-head green CI and a
-clean Codex review (and `lean/turbo-lean-revision` is pinned to `e585ba96`). At
+clean Codex review (and `lean/turbo-lean-revision` is currently pinned to
+`c98ac645e3fe9344c92a97d28ed8efaaeb0bf45e`). At
 the historical execution head Orb `3c70e5ada278a4e37e0180255f360aa2ff5fe86c` /
 Turbo `e585ba96f58cb06414ce5e3216f3ffc0ce235300` / LeanSys
 `c089f3e31dbd36f2bde2219913d5b9c90da670be`, the six-engine kernel conformance
@@ -28,7 +29,7 @@ added the repo-owned 264-case (`132 * 2` on current manifest) Ed25519-signed loc
 receipt and `ORB_KERNEL_BACKEND=stock-c` default rollback without retroactively
 relabeling the `3c70e5ada` multi-target run.
 
-That local evidence is not phase acceptance: **23 partial / 109 unconnected**
+That local evidence is not phase acceptance: **46 partial / 86 unconnected**
 coverage entries remain across the current 132-entry manifest (`acceptance:
 INCOMPLETE`; 23 partial / 106 unconnected at `3c70e5ada`); physical iPhone 13
 mini and Pixel 8 stay `BLOCKED_PHYSICAL_DEVICE`, the MacBook Air host is
@@ -56,7 +57,7 @@ those checks.
 
 The coverage registry remains incomplete: 106 entries were unconnected and 23
 had explicit partial evidence in `shared/orb-spec/coverage_evidence.json` at the
-2026-10-28 handoff (on current `master`, after `#1488` and live node capacity / coordinator lane exports, 109 entries are unconnected and 23 partial across 132
+2026-10-28 handoff (on current `master`, after `#1488`, live node capacity / coordinator lane exports, and Phase R1 host-gate evidence, 86 entries are unconnected and 46 partial across 132
 manifest entries: 98 `orb_*` + 33 `leansys_*` + 1 compiler helper).
 Source hashes bind local host-test receipts to the linked theorem declarations
 and observers; these links do not establish authoritative callers or adapter parity.

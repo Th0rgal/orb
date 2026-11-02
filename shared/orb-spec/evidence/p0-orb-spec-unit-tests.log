@@ -1,14 +1,5 @@
-warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5070:8
-     |
-5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
-     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
-     |
-     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: `orb-spec` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized] target(s) in 0.11s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
+    Finished `test` profile [unoptimized] target(s) in 0.16s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-8374b4127ccc7fbc)
 
 running 38 tests
 test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
@@ -50,5 +41,5 @@ test tests::wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gate
 test tests::wave12_node_disk_pressure_and_placement_kernels_match_specs ... ok
 test tests::writer_reuse_gate_enforces_continuation_and_retag_rules ... ok
 
-test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
 

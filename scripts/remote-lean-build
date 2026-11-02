@@ -102,7 +102,7 @@ def validate_path(rel):
             not component
             or component == ".."
             or component.startswith("-")
-            or component in {".git", ".lake"}
+            or component in {".git", ".lake", ".turbo-lean", ".turbo-lean.toml", "turbo-lean.toml"}
             or any(not (ch.isascii() and (ch.isalnum() or ch in "_.-")) for ch in component)
             for component in components
         )
@@ -135,7 +135,7 @@ req["build_protocol_version"] = "1"
 # Behaviour-affecting, non-secret environment only (allowlist), hashed so a
 # changed Lean/Lake setting cannot reuse a stale receipt. Anything that looks
 # like a credential is excluded even when it matches the prefixes.
-_env_prefixes = ("LEAN_", "LAKE_", "ELAN_", "SANDBOXED_COMPUTE_POLICY")
+_env_prefixes = ("LEAN_", "LAKE_", "ELAN_", "TURBO_LEAN_", "SANDBOXED_COMPUTE_POLICY")
 _secretish = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 _behavior_env = sorted(
     (k, v)

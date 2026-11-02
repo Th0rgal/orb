@@ -136,28 +136,37 @@ pub enum JobLiveness {
 }
 
 #[cfg(target_os = "linux")]
+fn parse_proc_stat_content(stat: &str) -> Result<Vec<String>, ()> {
+    let Some(open_idx) = stat.find('(') else {
+        return Err(());
+    };
+    let Some(close_idx) = stat.rfind(") ") else {
+        return Err(());
+    };
+    let rest = &stat[close_idx + 2..];
+    let fields: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
+    if !crate::orb_spec::proc_stat_fields_valid(
+        open_idx as u64,
+        close_idx as u64,
+        stat.len() as u64,
+        20,
+        fields.len() as u64,
+    ) || !crate::orb_spec::lean_sys_cabi::verify_proc_stat_fields(
+        open_idx as u64,
+        close_idx as u64,
+        stat.len() as u64,
+        20,
+        fields.len() as u64,
+    ) {
+        return Err(());
+    }
+    Ok(fields)
+}
+
+#[cfg(target_os = "linux")]
 fn proc_stat_fields(pid: u32) -> Option<Result<Vec<String>, ()>> {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => {
-            let Some(open_idx) = stat.find('(') else {
-                return Some(Err(()));
-            };
-            let Some(close_idx) = stat.rfind(") ") else {
-                return Some(Err(()));
-            };
-            let rest = &stat[close_idx + 2..];
-            let fields: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
-            if !crate::orb_spec::proc_stat_fields_valid(
-                open_idx as u64,
-                close_idx as u64,
-                stat.len() as u64,
-                20,
-                fields.len() as u64,
-            ) {
-                return Some(Err(()));
-            }
-            Some(Ok(fields))
-        }
+        Ok(stat) => Some(parse_proc_stat_content(&stat)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => Some(Err(())),
     }
@@ -2624,14 +2633,22 @@ pub async fn read_log_chunk(
             actual_len: want,
         };
         // Enforced in release too: never read a window the verified kernel rejects.
-        if !crate::orb_spec::log_window_valid(window) {
+        if !crate::orb_spec::log_window_valid(window)
+            || !crate::orb_spec::lean_sys_cabi::verify_log_window(
+                start,
+                start.saturating_add(want),
+                len,
+                max_bytes,
+            )
+            || !crate::orb_spec::lean_sys_cabi::verify_slice_bounds(start, want, len)
+        {
             tracing::error!(
                 path = %path.display(),
                 offset = start,
                 len = want,
                 max_bytes,
                 file_size = len,
-                "log chunk window rejected by orb_verify_log_window; refusing to read"
+                "log chunk window rejected by orb_verify_log_window / leansys_verify_log_window / leansys_verify_slice_bounds; refusing to read"
             );
             return None;
         }
@@ -3876,6 +3893,22 @@ mod tests {
             wait_for_terminal(&store, goal_job).await.state,
             JobState::Succeeded
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_stat_fields_dual_cabi_gates_reject_malformed_and_short_records() {
+        let valid = "4242 (lean (worker)) S 1 4242 4242 0 -1 4194304 10 0 0 0 1 2 0 0 20 0 1 0 987654321 1024 10";
+        let fields = parse_proc_stat_content(valid).expect("valid /proc/<pid>/stat must parse");
+        assert_eq!(fields[0], "S");
+        assert_eq!(fields[19], "987654321");
+
+        // Fewer than 20 post-comm fields must be rejected by both `orb_verify_proc_stat_fields`
+        // and `leansys_verify_proc_stat_fields`.
+        let short = "4242 (lean) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18";
+        assert!(parse_proc_stat_content(short).is_err());
+        assert!(parse_proc_stat_content("no_parens_at_all").is_err());
+        assert!(parse_proc_stat_content(") inverted ( 1 2 3").is_err());
     }
 }
 

@@ -182,10 +182,19 @@ pub(super) fn text_op_events_for_stream(
             let mut next = previous.clone();
             merge_text_stream_fragment(&mut next, &content);
             let new_bytes = next.len().min(u32::MAX as usize) as u32;
-            let raw_commit = next
-                .rfind("\n\n")
-                .map(|idx| (idx + 2).min(u32::MAX as usize) as u32)
-                .unwrap_or(prev_raw_commit);
+            let tail_start = (prev_checkpoint.saturating_sub(1) as usize).min(next.len());
+            let tail_scan = crate::orb_spec::scan_host_stream_bytes(&next.as_bytes()[tail_start..]);
+            let raw_commit = if tail_scan.newlines >= 2 && tail_scan.last_newline != usize::MAX {
+                let bound = (tail_start + tail_scan.last_newline + 1).min(next.len());
+                next.as_bytes()[tail_start..bound]
+                    .windows(2)
+                    .rposition(|pair| pair == b"\n\n")
+                    .map(|idx| (tail_start + idx + 2).min(u32::MAX as usize) as u32)
+                    .unwrap_or(prev_raw_commit)
+                    .max(prev_raw_commit)
+            } else {
+                prev_raw_commit
+            };
             let commit_verdict = evaluate_stream_bounded_commit_gate(
                 prev_bytes,
                 prev_raw_commit,
@@ -1125,5 +1134,42 @@ mod presentation_tests {
                 "case {case_idx}"
             );
         }
+    }
+
+    #[test]
+    fn text_op_events_for_stream_handles_multibyte_utf8_across_forced_tail_boundary() {
+        let mission_id = Uuid::new_v4();
+        let mut buffers = HashMap::new();
+        let initial = format!("€{}", "a".repeat(STREAM_MAX_OPEN_TAIL_BYTES as usize));
+        let first = text_op_events_for_stream(
+            AgentEvent::TextDelta {
+                content: initial.clone(),
+                mission_id: Some(mission_id),
+            },
+            &mut buffers,
+        );
+        assert_eq!(first.len(), 1);
+
+        let second = text_op_events_for_stream(
+            AgentEvent::TextDelta {
+                content: "😀\n\nnext paragraph".to_string(),
+                mission_id: Some(mission_id),
+            },
+            &mut buffers,
+        );
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            buffers.get(&mission_id).map(String::as_str),
+            Some(format!("{initial}😀\n\nnext paragraph").as_str())
+        );
+
+        let third = text_op_events_for_stream(
+            AgentEvent::TextDelta {
+                content: format!("{}\n\ntail", "🧪".repeat(1_200)),
+                mission_id: Some(mission_id),
+            },
+            &mut buffers,
+        );
+        assert_eq!(third.len(), 1);
     }
 }

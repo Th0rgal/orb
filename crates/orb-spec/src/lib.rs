@@ -5016,12 +5016,13 @@ pub mod stream_simd {
                 return VARIANT_SIMD128;
             }
         }
-        let _ = lean_sys_cabi::verify_isa_selection(
+        let scalar_ok = lean_sys_cabi::verify_isa_selection(
             caps,
             MASK_BASELINE,
             VARIANT_SCALAR,
             MAX_VARIANT_ID,
         );
+        debug_assert!(scalar_ok);
         VARIANT_SCALAR
     }
 
