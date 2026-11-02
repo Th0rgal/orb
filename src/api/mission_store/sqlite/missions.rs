@@ -1340,62 +1340,6 @@ impl SqliteMissionStore {
         .map_err(|e| e.to_string())?
     }
 
-    pub(super) async fn acknowledge_stale_awaiting_user_missions(
-        &self,
-        grace_seconds: u64,
-    ) -> Result<Vec<Uuid>, String> {
-        let conn = self.conn.clone();
-        let cutoff = (Utc::now() - chrono::Duration::seconds(grace_seconds as i64)).to_rfc3339();
-        let now = now_string();
-        tokio::task::spawn_blocking(move || {
-            let mut conn = conn.blocking_lock();
-            let tx = conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(|e| e.to_string())?;
-            let ids: Vec<Uuid> = {
-                let mut stmt = tx
-                    .prepare(
-                        "SELECT id FROM missions
-                         WHERE status = 'awaiting_user'
-                           AND first_viewed_at IS NOT NULL
-                           AND first_viewed_at <= ?1
-                           AND NOT EXISTS (
-                               SELECT 1 FROM mission_runs r
-                               WHERE r.mission_id = missions.id AND r.execution_state <> 'terminal'
-                           )",
-                    )
-                    .map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map(params![&cutoff], |row| {
-                        let id_str: String = row.get(0)?;
-                        Ok(parse_uuid_or_nil(&id_str))
-                    })
-                    .map_err(|e| e.to_string())?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| e.to_string())?;
-                rows
-            };
-            if !ids.is_empty() {
-                tx.execute(
-                    "UPDATE missions SET status = 'acknowledged', updated_at = ?1
-                     WHERE status = 'awaiting_user'
-                       AND first_viewed_at IS NOT NULL
-                       AND first_viewed_at <= ?2
-                       AND NOT EXISTS (
-                           SELECT 1 FROM mission_runs r
-                           WHERE r.mission_id = missions.id AND r.execution_state <> 'terminal'
-                       )",
-                    params![&now, &cutoff],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-            tx.commit().map_err(|e| e.to_string())?;
-            Ok(ids)
-        })
-        .await
-        .map_err(|e| e.to_string())?
-    }
-
     pub(super) async fn get_waiting_background_mission_ids(&self) -> Result<Vec<Uuid>, String> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {

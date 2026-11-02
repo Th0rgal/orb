@@ -155,7 +155,7 @@ use uuid::Uuid;
 
 #[allow(unused_imports)]
 use super::supervision::{
-    ack_promotion_loop, background_task_autoresume_loop, cleanup_stale_active_missions_once,
+    background_task_autoresume_loop, cleanup_stale_active_missions_once,
     recover_server_shutdown_missions, reset_waiting_background_on_boot, stale_mission_cleanup_loop,
     stuck_mission_watchdog_loop, watchdog_skips_control_owned_mission,
 };

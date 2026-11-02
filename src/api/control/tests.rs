@@ -7311,8 +7311,8 @@ async fn activating_waiting_background_clears_first_viewed_at_and_blocks_ack() {
         .await
         .expect("activate to Active");
 
-    // Activation cleared the stale first_viewed_at, so once the resumed turn
-    // re-parks in AwaitingUser the ack-promotion sweep must not archive it.
+    // Activation cleared the stale first_viewed_at so the resumed turn re-parks
+    // unread in AwaitingUser.
     store
         .update_mission_status(mission.id, MissionStatus::AwaitingUser)
         .await
@@ -7325,14 +7325,6 @@ async fn activating_waiting_background_clears_first_viewed_at_and_blocks_ack() {
     assert_eq!(
         after.first_viewed_at, None,
         "activation must clear first_viewed_at"
-    );
-    let promoted = store
-        .acknowledge_stale_awaiting_user_missions(0)
-        .await
-        .expect("run ack sweep");
-    assert!(
-        !promoted.contains(&mission.id),
-        "a freshly-resumed mission must not be ack-promoted after demotion"
     );
 }
 

@@ -3373,25 +3373,15 @@ pub trait MissionStore: Send + Sync {
         paused_at: Option<String>,
     ) -> Result<(), String>;
 
-    /// Record the first time the user opened this mission, if not already set.
-    /// Returns `Some(timestamp)` if the field was set by this call, or `None`
-    /// if it was already populated (no-op). Used by the new
-    /// `POST /missions/:id/opened` endpoint to start the AwaitingUser ack
-    /// grace timer.
+    /// Record the first time the user opened this mission since it last
+    /// entered `AwaitingUser`, if not already set. Returns `Some(timestamp)` if
+    /// the field was updated by this call, or `None` if it was already at or
+    /// past `timestamp`.
     async fn set_mission_first_viewed_at_if_unset(
         &self,
         id: Uuid,
         timestamp: &str,
     ) -> Result<Option<String>, String>;
-
-    /// Atomically flip any AwaitingUser mission whose `first_viewed_at` is
-    /// older than `grace_seconds` to `Acknowledged`. Returns the IDs that
-    /// were promoted so the caller can broadcast `MissionStatusChanged`
-    /// events for them.
-    async fn acknowledge_stale_awaiting_user_missions(
-        &self,
-        grace_seconds: u64,
-    ) -> Result<Vec<Uuid>, String>;
 
     /// IDs of missions currently parked in `WaitingBackground` — the agent's
     /// turn ended but tracked background shell jobs are (or were) still live.

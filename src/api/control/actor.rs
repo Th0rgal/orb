@@ -204,10 +204,6 @@ pub(super) fn spawn_control_session(
             workspaces.clone(),
             config.working_dir.clone(),
         ));
-        tokio::spawn(ack_promotion_loop(
-            Arc::clone(&state.mission_store),
-            events_tx.clone(),
-        ));
     }
 
     // Spawn the background-task auto-resume watcher. When a mission agent

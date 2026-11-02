@@ -574,45 +574,6 @@ impl MissionStore for FileMissionStore {
         Ok(Some(timestamp.to_string()))
     }
 
-    async fn acknowledge_stale_awaiting_user_missions(
-        &self,
-        grace_seconds: u64,
-    ) -> Result<Vec<Uuid>, String> {
-        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(grace_seconds as i64);
-        let active: std::collections::HashSet<Uuid> = self
-            .list_active_mission_runs()
-            .await?
-            .into_iter()
-            .map(|run| run.mission_id)
-            .collect();
-        let mut missions = self.missions.write().await;
-        let mut promoted = Vec::new();
-        for mission in missions.values_mut() {
-            if mission.status != MissionStatus::AwaitingUser {
-                continue;
-            }
-            if active.contains(&mission.id) {
-                continue;
-            }
-            let Some(ref viewed_at) = mission.first_viewed_at else {
-                continue;
-            };
-            let Ok(viewed_dt) = chrono::DateTime::parse_from_rfc3339(viewed_at) else {
-                continue;
-            };
-            if viewed_dt <= cutoff {
-                mission.status = MissionStatus::Acknowledged;
-                mission.updated_at = now_string();
-                promoted.push(mission.id);
-            }
-        }
-        drop(missions);
-        if !promoted.is_empty() {
-            self.persist().await?;
-        }
-        Ok(promoted)
-    }
-
     async fn update_mission_history(
         &self,
         id: Uuid,
@@ -1700,11 +1661,6 @@ mod tests {
             .await
             .unwrap_err()
             .contains("run is non-terminal"));
-        assert!(store
-            .acknowledge_stale_awaiting_user_missions(0)
-            .await
-            .expect("run acknowledgement sweep")
-            .is_empty());
         assert_eq!(
             store
                 .get_mission(mission.id)
