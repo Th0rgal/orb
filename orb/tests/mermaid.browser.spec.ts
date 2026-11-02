@@ -80,6 +80,57 @@ test("wide diagrams fit the block and expand supports zoom", async ({ page }) =>
   await expect(dialog).toHaveCount(0);
 });
 
+test("zoomed diagram drag-panning coalesces frame updates on a static bitmap without re-rasterizing", async ({ page }) => {
+  await page.goto("/tests/mermaid.html?only=flowchart");
+  const block = page.locator(".mermaid-block");
+  await expect(block).toHaveAttribute("data-state", "ready");
+  await block.getByRole("button", { name: "Expand diagram" }).click();
+  const dialog = page.getByRole("dialog", { name: "Diagram", exact: true });
+  await expect(dialog.locator("canvas.mermaid-zoom")).toBeVisible();
+  // Zoom past 200% and let the debounced rasterization settle.
+  await dialog.getByRole("button", { name: "Zoom in" }).click();
+  await dialog.getByRole("button", { name: "Zoom in" }).click();
+  await expect.poll(async () => Number.parseInt((await dialog.locator(".mermaid-zoom-level").textContent()) ?? "0", 10)).toBeGreaterThan(200);
+  await page.waitForTimeout(220);
+
+  const panMetrics = await page.evaluate(async () => {
+    const stage = document.querySelector(".mermaid-stage") as HTMLElement;
+    const canvasEl = document.querySelector("canvas.mermaid-zoom") as HTMLCanvasElement;
+    const beforeW = canvasEl.width, beforeH = canvasEl.height, beforeTransform = canvasEl.style.transform;
+    let styleMutations = 0;
+    const obs = new MutationObserver(() => { styleMutations++; });
+    obs.observe(canvasEl, { attributes: true, attributeFilter: ["style"] });
+    const rect = stage.getBoundingClientRect();
+    const sx = rect.left + rect.width / 2, sy = rect.top + rect.height / 2;
+    const t0 = performance.now();
+    stage.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 1, clientX: sx, clientY: sy }));
+    // Burst of 20 high-rate pointermove events within a single frame.
+    for (let i = 1; i <= 20; i++) {
+      stage.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, clientX: sx + i * 8, clientY: sy + i * 5 }));
+    }
+    const handlerMs = performance.now() - t0;
+    const writesSync = obs.takeRecords().length + styleMutations;
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null))));
+    const writesAfterFrame = obs.takeRecords().length + styleMutations;
+    obs.disconnect();
+    const afterTransform = canvasEl.style.transform;
+    stage.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, button: 0, pointerId: 1, clientX: sx + 160, clientY: sy + 100 }));
+    return {
+      beforeW, beforeH, afterW: canvasEl.width, afterH: canvasEl.height,
+      beforeTransform, afterTransform,
+      writesSync, writesAfterFrame, handlerMs,
+    };
+  });
+  expect(panMetrics.beforeW).toBeGreaterThan(400);
+  expect(panMetrics.afterW).toBe(panMetrics.beforeW);
+  expect(panMetrics.afterH).toBe(panMetrics.beforeH);
+  expect(panMetrics.writesSync).toBe(0);
+  expect(panMetrics.writesAfterFrame).toBe(1);
+  expect(panMetrics.handlerMs).toBeLessThan(8);
+  expect(panMetrics.afterTransform).toContain("translate3d(");
+  expect(panMetrics.afterTransform).not.toBe(panMetrics.beforeTransform);
+});
+
 test("a single click on the diagram opens the zoom view", async ({ page }) => {
   await page.goto("/tests/mermaid.html?only=wide");
   const block = page.locator(".mermaid-block");

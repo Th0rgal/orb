@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@solidjs/testing-library";
 import DOMPurify from "dompurify";
 import { MdView, parseMarkdown } from "../src/Markdown";
+import { mermaidRasterDensity } from "../src/MermaidBlock";
 import { safeCss, stripDirectives, cachedMermaid, clearMermaidCache, hashSource, mermaidCacheSize, renderMermaid, sanitizeSvg, setMermaidLoader, quoteEdgeLabels } from "../src/mermaidRenderer";
 
 const theme = { primaryColor: "#123456" };
@@ -85,4 +86,11 @@ it("neutralises directives, external CSS and links", async () => {
   expect(out).toContain('marker-end="url(#m)"');
   await renderMermaid('%%{init: {"theme":"dark"}}%%\ngraph TD\nA-->B', theme);
   expect(parse).toHaveBeenCalledWith("\ngraph TD\nA-->B");
+});
+
+it("caps mermaid viewer bitmap density inside GPU texture bounds while keeping zoomed text crisp", () => {
+  expect(mermaidRasterDensity(800, 600, 1, 2)).toBe(4);
+  expect(mermaidRasterDensity(800, 600, 3, 2)).toBeCloseTo(4096 / 800, 4);
+  const wide = mermaidRasterDensity(5000, 400, 2, 2);
+  expect(5000 * wide).toBeLessThanOrEqual(4096.01);
 });

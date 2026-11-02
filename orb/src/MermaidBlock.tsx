@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { copyText } from "./clipboard";
 import { Dialog } from "./Dialog";
 import { CheckIcon, CopyIcon } from "./icons";
@@ -103,41 +103,148 @@ export function MermaidBlock(p: { text: string; complete: boolean }) {
   );
 }
 
+/** Max bitmap edge (px) and total pixels so the GPU texture stays inside Metal/WebGL limits without tiling. */
+const MAX_RASTER_EDGE = 4096;
+const MAX_RASTER_PIXELS = 4096 * 4096;
+
+/** Highest crisp pixel density for `width × height` that fits inside a single GPU texture. */
+export function mermaidRasterDensity(width: number, height: number, targetScale: number, dpr = 1): number {
+  const w = Math.max(1, width), h = Math.max(1, height);
+  const cap = Math.min(MAX_RASTER_EDGE / Math.max(w, h), Math.sqrt(MAX_RASTER_PIXELS / (w * h)));
+  return Math.max(0.05, Math.min(cap, Math.max(2, targetScale) * Math.max(1, dpr)));
+}
+
 /** Fullscreen zoom and pan: wheel or pinch zooms around the pointer, drag pans, 0 fits, +/- step. */
 function MermaidViewer(p: { svg: string; width: number; height: number; onClose: () => void }) {
-  let stage!: HTMLDivElement;
-  const [scale, setScale] = createSignal(1);
-  const [pos, setPos] = createSignal({ x: 0, y: 0 });
+  let stage!: HTMLDivElement, canvas!: HTMLCanvasElement, fallbackImg!: HTMLImageElement;
+  const src = svgDataUrl(p.svg);
+  const [percent, setPercent] = createSignal(100);
+  const [bitmapReady, setBitmapReady] = createSignal(false);
+  let scale = 1, x = 0, y = 0, fitting = true, frame = 0, settleTimer: ReturnType<typeof setTimeout> | undefined;
+  let rasterDensity = 0, decoded: HTMLImageElement | undefined, alive = true;
+  let drag: { id: number; x: number; y: number; ox: number; oy: number } | undefined;
+
+  const applyTransform = () => {
+    const t = `translate3d(${x}px, ${y}px, 0) scale(${scale})`;
+    canvas.style.transform = t;
+    fallbackImg.style.transform = t;
+    setPercent(Math.round(scale * 100));
+  };
+  const paint = () => {
+    if (frame) return;
+    frame = requestAnimationFrame(() => { frame = 0; applyTransform(); });
+  };
+  const rasterize = (targetScale: number) => {
+    if (!alive || !decoded) return;
+    const dpr = typeof devicePixelRatio === "number" ? devicePixelRatio : 1;
+    const next = mermaidRasterDensity(p.width, p.height, targetScale, dpr);
+    if (bitmapReady() && Math.abs(next - rasterDensity) / (rasterDensity || 1) < 0.15) return;
+    const cw = Math.max(1, Math.round(p.width * next)), ch = Math.max(1, Math.round(p.height * next));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    canvas.width = cw;
+    canvas.height = ch;
+    ctx.setTransform(cw / Math.max(1, p.width), 0, 0, ch / Math.max(1, p.height), 0, 0);
+    ctx.clearRect(0, 0, Math.max(1, p.width), Math.max(1, p.height));
+    ctx.drawImage(decoded, 0, 0, Math.max(1, p.width), Math.max(1, p.height));
+    rasterDensity = next;
+    if (!bitmapReady()) setBitmapReady(true);
+  };
+  const scheduleRaster = () => {
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => rasterize(scale), 140);
+  };
   const fit = () => {
+    if (!stage.clientWidth || !stage.clientHeight) return;
+    fitting = true;
     const w = stage.clientWidth - 48, h = stage.clientHeight - 48;
-    const s = Math.max(0.02, Math.min(2, w / (p.width || 1), h / (p.height || 1)));
-    setScale(s);
-    setPos({ x: (stage.clientWidth - p.width * s) / 2, y: (stage.clientHeight - p.height * s) / 2 });
+    scale = Math.max(0.02, Math.min(2, w / (p.width || 1), h / (p.height || 1)));
+    x = (stage.clientWidth - p.width * scale) / 2;
+    y = (stage.clientHeight - p.height * scale) / 2;
+    paint();
+    scheduleRaster();
   };
   const zoomAt = (factor: number, cx = stage.clientWidth / 2, cy = stage.clientHeight / 2) => {
-    const s = scale(), next = Math.max(0.02, Math.min(8, s * factor)), k = next / s, o = pos();
-    setScale(next);
-    setPos({ x: cx - (cx - o.x) * k, y: cy - (cy - o.y) * k });
+    fitting = false;
+    const next = Math.max(0.02, Math.min(8, scale * factor)), k = next / scale;
+    x = cx - (cx - x) * k;
+    y = cy - (cy - y) * k;
+    scale = next;
+    paint();
+    scheduleRaster();
   };
-  let drag: { x: number; y: number; ox: number; oy: number } | undefined;
-  createEffect(() => { if (stage) requestAnimationFrame(fit); });
+  const endDrag = () => { drag = undefined; stage.classList.remove("is-dragging"); };
+
+  onMount(() => {
+    requestAnimationFrame(fit);
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => { if (fitting) fit(); }) : undefined;
+    ro?.observe(stage);
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const r = stage.getBoundingClientRect();
+      zoomAt(Math.exp(-e.deltaY * (e.ctrlKey || e.metaKey ? 0.01 : 0.0025)), e.clientX - r.left, e.clientY - r.top);
+    };
+    // WKWebView exposes native trackpad pinch as GestureEvent rather than wheel.
+    let gestureBase = 1;
+    const onGestureStart = (e: Event) => { e.preventDefault(); gestureBase = scale; };
+    const onGestureChange = (e: Event) => {
+      e.preventDefault();
+      const g = e as Event & { scale: number; clientX: number; clientY: number };
+      const r = stage.getBoundingClientRect();
+      if (g.scale > 0) zoomAt((gestureBase * g.scale) / scale, g.clientX - r.left, g.clientY - r.top);
+    };
+    stage.addEventListener("wheel", onWheel, { passive: false });
+    stage.addEventListener("gesturestart", onGestureStart);
+    stage.addEventListener("gesturechange", onGestureChange);
+    onCleanup(() => {
+      ro?.disconnect();
+      stage.removeEventListener("wheel", onWheel);
+      stage.removeEventListener("gesturestart", onGestureStart);
+      stage.removeEventListener("gesturechange", onGestureChange);
+    });
+
+    const img = new Image();
+    img.decoding = "async";
+    img.src = src;
+    void img.decode().then(() => {
+      if (!alive) return;
+      decoded = img;
+      rasterize(scale);
+    }).catch(() => { /* Keep vector fallback <img> visible if canvas decode fails. */ });
+  });
+  onCleanup(() => { alive = false; cancelAnimationFrame(frame); clearTimeout(settleTimer); });
+
   return (
     <Dialog size="fullscreen" class="dlg-mermaid" title="Diagram" hint="Scroll to zoom · drag to pan · 0 to fit" onClose={p.onClose}
       onKeyDown={(e) => {
-        if (e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.isComposing || e.ctrlKey || e.altKey) return;
+        if (e.metaKey && !["+", "=", "-", "0"].includes(e.key)) return;
         if (e.key === "+" || e.key === "=") { e.preventDefault(); zoomAt(1.25); }
         else if (e.key === "-") { e.preventDefault(); zoomAt(0.8); }
         else if (e.key === "0") { e.preventDefault(); fit(); }
       }}>
       <div class="mermaid-stage" ref={stage}
-        onWheel={(e) => { e.preventDefault(); const r = stage.getBoundingClientRect(); zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025)), e.clientX - r.left, e.clientY - r.top); }}
-        onPointerDown={(e) => { if (e.button !== 0 || (e.target as Element).closest(".mermaid-zoom-controls")) return; stage.setPointerCapture(e.pointerId); const o = pos(); drag = { x: e.clientX, y: e.clientY, ox: o.x, oy: o.y }; }}
-        onPointerMove={(e) => { if (drag) setPos({ x: drag.ox + e.clientX - drag.x, y: drag.oy + e.clientY - drag.y }); }}
-        onPointerUp={() => { drag = undefined; }} onPointerCancel={() => { drag = undefined; }}>
-        <img class="mermaid-zoom" alt="Diagram" draggable={false} src={svgDataUrl(p.svg)} style={{ width: `${p.width}px`, height: `${p.height}px`, transform: `translate(${pos().x}px, ${pos().y}px) scale(${scale()})` }} />
+        onPointerDown={(e) => {
+          if (e.button !== 0 || (e.target as Element).closest(".mermaid-zoom-controls")) return;
+          e.preventDefault();
+          try { stage.setPointerCapture(e.pointerId); } catch { /* synthetic pointer events */ }
+          drag = { id: e.pointerId, x: e.clientX, y: e.clientY, ox: x, oy: y };
+          stage.classList.add("is-dragging");
+        }}
+        onPointerMove={(e) => {
+          if (!drag || drag.id !== e.pointerId) return;
+          fitting = false;
+          x = drag.ox + e.clientX - drag.x;
+          y = drag.oy + e.clientY - drag.y;
+          paint();
+        }}
+        onPointerUp={(e) => { try { if (stage.hasPointerCapture(e.pointerId)) stage.releasePointerCapture(e.pointerId); } catch {} endDrag(); }}
+        onPointerCancel={endDrag} onLostPointerCapture={endDrag}>
+        <canvas ref={canvas} class="mermaid-zoom" role="img" aria-label="Diagram" style={{ width: `${p.width}px`, height: `${p.height}px`, visibility: bitmapReady() ? "visible" : "hidden" }} />
+        <img ref={fallbackImg} class="mermaid-zoom-fallback" alt="" aria-hidden="true" draggable={false} src={src} style={{ width: `${p.width}px`, height: `${p.height}px`, display: bitmapReady() ? "none" : "block" }} />
         <div class="mermaid-zoom-controls">
           <button type="button" class="icon-btn" aria-label="Zoom out" onClick={() => zoomAt(0.8)}>−</button>
-          <span class="mermaid-zoom-level">{Math.round(scale() * 100)}%</span>
+          <span class="mermaid-zoom-level">{percent()}%</span>
           <button type="button" class="icon-btn" aria-label="Zoom in" onClick={() => zoomAt(1.25)}>+</button>
           <button type="button" class="mermaid-fit" onClick={fit}>Fit</button>
         </div>
