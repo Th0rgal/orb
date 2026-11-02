@@ -1,13 +1,13 @@
-    Finished `test` profile [unoptimized] target(s) in 0.04s
+    Finished `test` profile [unoptimized] target(s) in 0.03s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-e925cae11053abab)
 
 running 2 tests
 test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 test stateful_tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.02s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.12s
+    Finished `test` profile [unoptimized] target(s) in 0.08s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
@@ -15,23 +15,23 @@ test orb_spec::tests::host_orb_wire_machine_patch_and_fd_bounds_gates_verified .
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.12s
+    Finished `test` profile [unoptimized] target(s) in 0.08s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
 test api::mission_store::harness_session_tests::phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 1.89s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.04s
 
-    Finished `test` profile [unoptimized] target(s) in 0.12s
+    Finished `test` profile [unoptimized] target(s) in 0.10s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
 test api::control::remote_grok::tests::phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.62s
+    Finished `test` profile [unoptimized] target(s) in 0.09s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
@@ -39,7 +39,7 @@ test api::control::control_queue::native_schedule_pool_tests::outbox_crash_recon
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.90s
+    Finished `test` profile [unoptimized] target(s) in 0.09s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
@@ -47,7 +47,7 @@ test provider_health::tests::provider_attempt_gate_enforces_pinning_cooldown_fir
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.15s
+    Finished `test` profile [unoptimized] target(s) in 0.10s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
@@ -63,7 +63,7 @@ test managed::tests::resource_ledger_gate_conserves_slots_budget_ttl_and_zero_di
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.11s
+    Finished `test` profile [unoptimized] target(s) in 0.09s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test

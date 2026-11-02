@@ -1,4 +1,4 @@
-    Finished `test` profile [unoptimized] target(s) in 0.19s
+    Finished `test` profile [unoptimized] target(s) in 0.10s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
@@ -6,7 +6,7 @@ test orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels ... 
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.27s
+    Finished `test` profile [unoptimized] target(s) in 0.10s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
@@ -14,7 +14,7 @@ test orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.49s
+    Finished `test` profile [unoptimized] target(s) in 0.09s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 3 tests
@@ -24,15 +24,15 @@ test api::control::streaming::presentation_tests::offscreen_hints_exclude_heavy_
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 3715 filtered out; finished in 0.01s
 
-    Finished `test` profile [unoptimized] target(s) in 0.11s
+    Finished `test` profile [unoptimized] target(s) in 0.09s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
 test node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.13s
+    Finished `test` profile [unoptimized] target(s) in 0.10s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
@@ -40,14 +40,14 @@ test node::lean::tests::collect_artifacts_hashes_and_sizes_matches ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.25s
+    Finished `test` profile [unoptimized] target(s) in 0.09s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 2 tests
 test node::lean::tests::tiered_gc_evicts_hot_caches_under_emergency_floor_while_respecting_active_locks ... ok
 test node::lean::tests::tiered_gc_preserves_hot_caches_when_disk_pressure_is_pinned_above_emergency ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3716 filtered out; finished in 0.01s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3716 filtered out; finished in 0.00s
 
     Finished `test` profile [unoptimized] target(s) in 0.09s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
@@ -68,9 +68,9 @@ test remote_node::protocol::tests::token_rotation_accepts_current_or_previous ..
 test remote_node::protocol::tests::token_rotation_decision_table ... ok
 test remote_node::protocol::tests::validates_scoped_lease_token ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3704 filtered out; finished in 0.01s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3704 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.15s
+    Finished `test` profile [unoptimized] target(s) in 0.10s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 28 tests
@@ -103,9 +103,9 @@ test node::runner::tests::user_scope_probe_requires_an_accessible_bus_socket ...
 test node::runner::tests::user_scope_probe_selects_user_mode_for_accessible_bus ... ok
 test node::runner::tests::user_scope_wrapper_preserves_cleared_payload_environment ... ok
 
-test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 3690 filtered out; finished in 34.66s
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 3690 filtered out; finished in 10.92s
 
-    Finished `test` profile [unoptimized] target(s) in 0.18s
+    Finished `test` profile [unoptimized] target(s) in 0.09s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
@@ -113,7 +113,7 @@ test api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_colla
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.18s
+    Finished `test` profile [unoptimized] target(s) in 0.09s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
@@ -121,7 +121,7 @@ test api::track_leases::tests::lease_mode_precedence_table ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.11s
+    Finished `test` profile [unoptimized] target(s) in 0.09s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 4 tests
@@ -132,15 +132,15 @@ test api::control::execution_ownership::repository_identity_tests::unrecognised_
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3714 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.14s
+    Finished `test` profile [unoptimized] target(s) in 0.09s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
 test api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 12.03s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.03s
 
-    Finished `test` profile [unoptimized] target(s) in 0.10s
+    Finished `test` profile [unoptimized] target(s) in 0.08s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 40 tests
@@ -187,11 +187,11 @@ test api::control::board::tests::worker_contract_delivers_acceptance_criteria_as
 
 test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 3678 filtered out; finished in 0.01s
 
-    Finished `test` profile [unoptimized] target(s) in 0.11s
+    Finished `test` profile [unoptimized] target(s) in 0.09s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
 
 running 1 test
 test node::job_store::tests::terminal_outcome_is_first_wins ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 3.16s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3717 filtered out; finished in 0.01s
 

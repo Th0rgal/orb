@@ -270,8 +270,8 @@ fn verify_cas_hex_digest(expected_hex: &str, computed_hex: &str, rel_path: &str)
                 .wrapping_add(1);
             let exp_tag = crate::orb_spec::mix64_word(exp_raw, salt) | 1;
             let comp_tag = crate::orb_spec::mix64_word(comp_raw, salt) | 1;
-            exp_raw == comp_raw
-                && crate::orb_spec::lean_sys_cabi::verify_cas_digest(exp_tag, comp_tag, unsafe_sep)
+            crate::orb_spec::lean_sys_cabi::verify_cas_digest(exp_tag, comp_tag, unsafe_sep)
+                && exp_raw == comp_raw
         })
 }
 
@@ -366,7 +366,7 @@ fn validate_source_bundle(bundle: &SourceBundle) -> Result<u64, String> {
             ));
         }
         let computed = hex::encode(Sha256::digest(&bytes));
-        if computed != file.sha256 || !verify_cas_hex_digest(&file.sha256, &computed, &file.path) {
+        if !verify_cas_hex_digest(&file.sha256, &computed, &file.path) {
             return Err(format!(
                 "source bundle content hash mismatch for '{}'",
                 file.path
@@ -961,12 +961,21 @@ fn turbo_lean_staging_root(work_root: &Path) -> PathBuf {
     caches_dir(work_root).join("turbo-lean-staging")
 }
 
-fn turbo_lean_staging_base_dir(work_root: &Path) -> PathBuf {
+fn turbo_lean_staging_base_dir(work_root: &Path, repo: Option<&str>) -> PathBuf {
     // `turbo-lean`'s `OneShotGuard` creates `<base>-oneshot-<pid>-<seq>` in
-    // `base.parent()`. Nesting `base` under `caches/turbo-lean-staging/` keeps
-    // every oneshot sibling confined inside `caches/turbo-lean-staging/` so
-    // node GC can sweep orphaned oneshot directories after SIGKILL/timeouts.
-    turbo_lean_staging_root(work_root).join("base")
+    // `base.parent()`. Nesting per-repo `base` under
+    // `caches/turbo-lean-staging/<shard>/base` isolates each repo's oneshot
+    // directories under its own `<shard>.lock`-guarded parent so node GC never
+    // sweeps an active build's oneshot sibling while reclaiming orphaned ones.
+    match repo {
+        Some(r) => {
+            let repo_hash = sha256_hex(r.as_bytes());
+            turbo_lean_staging_root(work_root)
+                .join(&repo_hash[..16])
+                .join("base")
+        }
+        None => turbo_lean_staging_root(work_root).join("base"),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1071,7 +1080,9 @@ fn cache_env_for_repo(work_root: &Path, repo: Option<&str>) -> Vec<(String, Stri
         ("TURBO_LEAN_HOME".to_string(), tl_home.display().to_string()),
         (
             "TURBO_LEAN_STAGING_DIR".to_string(),
-            turbo_lean_staging_base_dir(work_root).display().to_string(),
+            turbo_lean_staging_base_dir(work_root, repo)
+                .display()
+                .to_string(),
         ),
         ("TURBO_LEAN_NO_DAEMON".to_string(), "1".to_string()),
         ("TURBO_LEAN_NO_WORKTREE_LINK".to_string(), "1".to_string()),
@@ -1090,6 +1101,10 @@ fn cache_env_for_repo(work_root: &Path, repo: Option<&str>) -> Vec<(String, Stri
         (
             "TURBO_LEAN_AUDIT_SPEC_CONFIG".to_string(),
             r#"{"policy":"default"}"#.to_string(),
+        ),
+        (
+            "TURBO_LEAN_AUDIT_CACHE_DIR".to_string(),
+            tl_home.join("audit-cache").display().to_string(),
         ),
         ("TURBO_LEAN_ALLOWED_AXIOMS".to_string(), String::new()),
         ("TURBO_LEAN_ALLOWED_CSIMP".to_string(), String::new()),
@@ -1473,6 +1488,25 @@ impl FileLock {
             Ok(Self { file })
         })
         .await?
+    }
+
+    async fn try_acquire(path: PathBuf) -> Option<Self> {
+        tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok()?;
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .ok()?;
+            fs2::FileExt::try_lock_exclusive(&file).ok()?;
+            Some(Self { file })
+        })
+        .await
+        .ok()
+        .flatten()
     }
 }
 
@@ -2139,10 +2173,7 @@ async fn restore_lake_dependency_cache(
 /// `turbo-lean` so tracked files in public/fetched repositories cannot inject
 /// external accelerator commands, telemetry endpoints, or policy overrides.
 fn quarantine_checkout_turbo_lean_configs(root: &Path) -> std::io::Result<usize> {
-    fn walk(dir: &Path, depth: usize, removed: &mut usize) -> std::io::Result<()> {
-        if depth > 16 {
-            return Ok(());
-        }
+    fn walk(dir: &Path, removed: &mut usize) -> std::io::Result<()> {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -2166,13 +2197,13 @@ fn quarantine_checkout_turbo_lean_configs(root: &Path) -> std::io::Result<usize>
                 continue;
             }
             if ft.is_dir() && !ft.is_symlink() {
-                walk(&path, depth + 1, removed)?;
+                walk(&path, removed)?;
             }
         }
         Ok(())
     }
     let mut removed = 0;
-    walk(root, 0, &mut removed)?;
+    walk(root, &mut removed)?;
     Ok(removed)
 }
 
@@ -2275,6 +2306,8 @@ pub async fn execute_lean_build(
     // tokens, signing secrets and operator credentials must never reach code
     // executed from a repository.
     let is_turbo_lean = command.first().is_some_and(|c| c == "turbo-lean");
+    let mut _turbo_repo_cache_lock = None;
+    let mut _turbo_repo_staging_lock = None;
     let resolved_turbo_bin = if is_turbo_lean {
         let quarantine_root = checkout.clone();
         tokio::task::spawn_blocking(move || {
@@ -2282,8 +2315,17 @@ pub async fn execute_lean_build(
         })
         .await
         .map_err(|e| anyhow::anyhow!("checkout config quarantine panicked: {e}"))??;
-        tokio::fs::create_dir_all(turbo_lean_repo_cache_dir(work_root, &source.repo)).await?;
-        tokio::fs::create_dir_all(turbo_lean_staging_root(work_root)).await?;
+        let repo_cache = turbo_lean_repo_cache_dir(work_root, &source.repo);
+        let repo_staging_base = turbo_lean_staging_base_dir(work_root, Some(&source.repo));
+        let repo_staging = repo_staging_base
+            .parent()
+            .unwrap_or(repo_staging_base.as_path())
+            .to_path_buf();
+        tokio::fs::create_dir_all(&repo_cache).await?;
+        tokio::fs::create_dir_all(&repo_staging).await?;
+        _turbo_repo_cache_lock = Some(FileLock::acquire(repo_cache.with_extension("lock")).await?);
+        _turbo_repo_staging_lock =
+            Some(FileLock::acquire(repo_staging.with_extension("lock")).await?);
         let search_path = node_tool_search_path(work_root, std::env::var_os("PATH").as_deref());
         Some(
             find_turbo_lean_binary_with_path(Some(OsStr::new(&search_path)))
@@ -2756,6 +2798,14 @@ async fn maybe_gc_turbo_lean_cache(work_root: &Path, emergency: bool) {
     };
     let base_env = cache_env_for_repo(work_root, None);
     for cache_dir in db_dirs {
+        let Some(_cache_lock) = FileLock::try_acquire(cache_dir.with_extension("lock")).await
+        else {
+            tracing::debug!(
+                cache_dir = %cache_dir.display(),
+                "node cache GC: skipped turbo-lean gc on active locked shard"
+            );
+            continue;
+        };
         let mut cmd = tokio::process::Command::new(&bin);
         cmd.env_clear();
         for (key, value) in &base_env {
@@ -2784,7 +2834,7 @@ async fn maybe_gc_turbo_lean_cache(work_root: &Path, emergency: bool) {
             cmd.arg("--prune-worktrees-older-than-secs")
                 .arg(prune_older_secs.to_string());
         }
-        if caps.gc_has_keep_pinned {
+        if caps.gc_has_keep_pinned && !emergency {
             cmd.arg("--keep-pinned");
         }
         match tokio::time::timeout(Duration::from_secs(30), cmd.output()).await {
@@ -2957,6 +3007,7 @@ fn collect_tiered_gc_candidates(work_root: &Path, now: SystemTime) -> TieredGcCa
         .into_iter()
         .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some("base"))
         .collect();
+    let tl_root = turbo_lean_cache_root(work_root);
     let tl_db_dirs = collect_turbo_lean_cache_db_dirs(work_root);
 
     let mut cold_dirs = Vec::new();
@@ -2969,21 +3020,37 @@ fn collect_tiered_gc_candidates(work_root: &Path, now: SystemTime) -> TieredGcCa
         cold_dirs.push(dir);
     }
     for (mtime, dir) in dirs_with_mtime(staging_dirs) {
-        if mtime <= cold_cutoff {
-            cold_bytes = cold_bytes.saturating_add(super::scratch::dir_tree_bytes_nofollow(&dir));
-            cold_dirs.push(dir);
-        }
-    }
-    for db_dir in tl_db_dirs {
-        let cas_dir = db_dir.join("cas");
-        let bytes = super::scratch::dir_tree_bytes_nofollow(&cas_dir);
-        let mtime = std::fs::metadata(db_dir.join("state.db"))
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let bytes = super::scratch::dir_tree_bytes_nofollow(&dir);
         if mtime <= cold_cutoff {
             cold_bytes = cold_bytes.saturating_add(bytes);
+            cold_dirs.push(dir);
         } else {
             hot_bytes = hot_bytes.saturating_add(bytes);
+            hot_dirs.push(dir);
+        }
+    }
+
+    let mut cold_tl_dirs = Vec::new();
+    let mut hot_tl_dirs = Vec::new();
+    let mut tl_entries: Vec<(SystemTime, PathBuf)> = tl_db_dirs
+        .into_iter()
+        .filter(|db_dir| db_dir != &tl_root && is_unlocked_for_gc(db_dir))
+        .map(|db_dir| {
+            let mtime = std::fs::metadata(db_dir.join("state.db"))
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            (mtime, db_dir)
+        })
+        .collect();
+    tl_entries.sort();
+    for (mtime, db_dir) in tl_entries {
+        let bytes = super::scratch::dir_tree_bytes_nofollow(&db_dir);
+        if mtime <= cold_cutoff {
+            cold_bytes = cold_bytes.saturating_add(bytes);
+            cold_tl_dirs.push(db_dir);
+        } else {
+            hot_bytes = hot_bytes.saturating_add(bytes);
+            hot_tl_dirs.push(db_dir);
         }
     }
 
@@ -3008,8 +3075,14 @@ fn collect_tiered_gc_candidates(work_root: &Path, now: SystemTime) -> TieredGcCa
             hot_lake_dirs.push(dir);
         }
     }
-    // Within hot caches, evict hot checkouts before shared Lake dependency slots.
+    // Prefer running `maybe_gc_turbo_lean_cache` first; if free space is still
+    // below target after mutation builds, staging, checkouts, and Lake slots,
+    // fall back to full unlocked `turbo-lean` shard eviction.
+    cold_dirs.extend(cold_tl_dirs);
+    // Within hot caches, evict orphaned staging and hot checkouts before shared
+    // Lake dependency slots and shared per-repo `turbo-lean` shards.
     hot_dirs.extend(hot_lake_dirs);
+    hot_dirs.extend(hot_tl_dirs);
 
     TieredGcCandidates {
         cold_dirs,
@@ -4175,14 +4248,35 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("LD_PRELOAD"), "{err}");
 
-        // Custom allowlists are honored.
+        // Custom allowlists are honored for non-reserved keys, while reserved
+        // loader/runtime keys stay rejected even if listed in the allowlist.
         let custom = parse_env_allowlist("LD_PRELOAD, FOO");
+        assert!(validate_lean_build(
+            &source(&"a".repeat(40)),
+            None,
+            &["lake".to_string(), "build".to_string()],
+            &env,
+            &custom,
+        )
+        .is_err());
+
+        let foo_env: HashMap<String, String> = [("FOO".to_string(), "bar".to_string())]
+            .into_iter()
+            .collect();
+        assert!(validate_lean_build(
+            &source(&"a".repeat(40)),
+            None,
+            &["lake".to_string(), "build".to_string()],
+            &foo_env,
+            &allowlist(),
+        )
+        .is_err());
         assert_eq!(
             validate_lean_build(
                 &source(&"a".repeat(40)),
                 None,
                 &["lake".to_string(), "build".to_string()],
-                &env,
+                &foo_env,
                 &custom,
             ),
             Ok(())
@@ -5104,71 +5198,102 @@ mod tests {
             repo_b_env.get("TURBO_LEAN_HOME"),
             "distinct repositories must receive isolated TURBO_LEAN_HOME shards"
         );
-        assert_eq!(
-            repo_a_env
-                .get("TURBO_LEAN_ALLOWED_AXIOMS")
-                .map(String::as_str),
-            Some("")
+        assert_ne!(
+            repo_a_env.get("TURBO_LEAN_STAGING_DIR"),
+            repo_b_env.get("TURBO_LEAN_STAGING_DIR"),
+            "distinct repositories must receive isolated TURBO_LEAN_STAGING_DIR shards"
         );
-        assert_eq!(
-            repo_a_env
-                .get("TURBO_LEAN_ALLOWED_CSIMP")
-                .map(String::as_str),
-            Some("")
+        assert_ne!(
+            repo_a_env.get("TURBO_LEAN_AUDIT_CACHE_DIR"),
+            repo_b_env.get("TURBO_LEAN_AUDIT_CACHE_DIR"),
+            "distinct repositories must receive isolated TURBO_LEAN_AUDIT_CACHE_DIR shards"
         );
-        assert_eq!(
-            repo_a_env
-                .get("TURBO_LEAN_DISABLE_ACCEL")
-                .map(String::as_str),
-            Some("all")
-        );
-        assert_eq!(
-            repo_a_env
-                .get("TURBO_LEAN_TRUST_PROJECT_TELEMETRY")
-                .map(String::as_str),
-            Some("0")
-        );
-        assert_eq!(
-            cenv.get("SANDBOXED_TELEMETRY_BATCH_ONLY")
-                .map(String::as_str),
-            Some("1")
-        );
+        assert!(repo_a_env
+            .get("TURBO_LEAN_AUDIT_CACHE_DIR")
+            .unwrap()
+            .starts_with(repo_a_env.get("TURBO_LEAN_HOME").unwrap()));
 
-        // Quarantine strips tracked turbo-lean config files inside a checkout.
+        // Quarantine strips tracked turbo-lean config files inside a checkout at any depth.
         let co = dir.path().join("checkout-test");
+        let deep = (0..20).fold(co.clone(), |acc, i| acc.join(format!("d{i}")));
         std::fs::create_dir_all(co.join("sub/.turbo-lean")).unwrap();
+        std::fs::create_dir_all(&deep).unwrap();
         std::fs::write(co.join("turbo-lean.toml"), b"[accelerators]\n").unwrap();
         std::fs::write(co.join(".turbo-lean.toml"), b"[axioms]\n").unwrap();
         std::fs::write(co.join("sub/.turbo-lean/accelerators.json"), b"{}").unwrap();
+        std::fs::write(
+            deep.join("turbo-lean.toml"),
+            b"[zygote]\ntimeout_secs = 999999\n",
+        )
+        .unwrap();
         std::fs::write(co.join("Main.lean"), b"def x := 1\n").unwrap();
-        assert_eq!(quarantine_checkout_turbo_lean_configs(&co).unwrap(), 3);
+        assert_eq!(quarantine_checkout_turbo_lean_configs(&co).unwrap(), 4);
         assert!(!co.join("turbo-lean.toml").exists());
         assert!(!co.join(".turbo-lean.toml").exists());
         assert!(!co.join("sub/.turbo-lean").exists());
+        assert!(!deep.join("turbo-lean.toml").exists());
         assert!(co.join("Main.lean").exists());
 
-        // Per-shard CAS bytes and stale staging dirs participate in tiered GC accounting.
+        // Per-shard TurboStore layout (`blobs/`, `state.db`, `file_splits.sst`) and
+        // staging shards participate in tiered GC accounting and fallback eviction,
+        // while active `.lock`-held shards are skipped.
         let shard_db = turbo_lean_repo_cache_dir(dir.path(), "https://github.com/org/repo-a");
-        std::fs::create_dir_all(shard_db.join("cas")).unwrap();
+        std::fs::create_dir_all(shard_db.join("blobs")).unwrap();
         std::fs::write(shard_db.join("state.db"), b"sqlite").unwrap();
-        std::fs::write(shard_db.join("cas/blob1"), vec![1_u8; 4096]).unwrap();
-        let stale_oneshot = turbo_lean_staging_root(dir.path()).join("base-oneshot-999-1");
-        std::fs::create_dir_all(&stale_oneshot).unwrap();
-        std::fs::write(stale_oneshot.join("tmp.olean"), vec![2_u8; 1024]).unwrap();
+        std::fs::write(shard_db.join("blobs/blob1"), vec![1_u8; 4096]).unwrap();
+        let locked_shard = turbo_lean_repo_cache_dir(dir.path(), "https://github.com/org/repo-b");
+        std::fs::create_dir_all(locked_shard.join("blobs")).unwrap();
+        std::fs::write(locked_shard.join("state.db"), b"sqlite").unwrap();
+        std::fs::write(locked_shard.join("blobs/blob2"), vec![7_u8; 8192]).unwrap();
+        let held_shard_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(locked_shard.with_extension("lock"))
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&held_shard_lock).unwrap();
+
+        let stale_staging =
+            turbo_lean_staging_base_dir(dir.path(), Some("https://github.com/org/repo-a"))
+                .parent()
+                .unwrap()
+                .to_path_buf();
+        std::fs::create_dir_all(stale_staging.join("base-oneshot-999-1")).unwrap();
+        std::fs::write(
+            stale_staging.join("base-oneshot-999-1/tmp.olean"),
+            vec![2_u8; 1024],
+        )
+        .unwrap();
+        let hot_staging =
+            turbo_lean_staging_base_dir(dir.path(), Some("https://github.com/org/repo-c"))
+                .parent()
+                .unwrap()
+                .to_path_buf();
+        std::fs::create_dir_all(hot_staging.join("base-oneshot-1000-1")).unwrap();
+        std::fs::write(
+            hot_staging.join("base-oneshot-1000-1/tmp.olean"),
+            vec![3_u8; 2048],
+        )
+        .unwrap();
         let now = SystemTime::now();
         let three_hours_ago = now - Duration::from_secs(3 * 3600);
         std::fs::File::open(shard_db.join("state.db"))
             .unwrap()
             .set_modified(three_hours_ago)
             .unwrap();
-        std::fs::File::open(&stale_oneshot)
+        std::fs::File::open(&stale_staging)
             .unwrap()
             .set_modified(three_hours_ago)
             .unwrap();
         let candidates = collect_tiered_gc_candidates(dir.path(), now);
         assert!(candidates.cold_bytes >= 5120);
-        assert!(candidates.cold_dirs.contains(&stale_oneshot));
-        assert!(!candidates.cold_dirs.contains(&shard_db));
+        assert!(candidates.hot_bytes >= 2048);
+        assert!(candidates.cold_dirs.contains(&stale_staging));
+        assert!(candidates.cold_dirs.contains(&shard_db));
+        assert!(candidates.hot_dirs.contains(&hot_staging));
+        assert!(!candidates.cold_dirs.contains(&locked_shard));
+        assert!(!candidates.hot_dirs.contains(&locked_shard));
+        drop(held_shard_lock);
 
         let digest = sha256_hex(b"hello");
         let other = sha256_hex(b"world");
