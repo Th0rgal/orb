@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -108,10 +110,17 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -540,6 +549,7 @@ fun OrbConversationPage(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val allMissions by core.missions.collectAsState()
     val backends by core.backends.collectAsState()
@@ -743,7 +753,7 @@ fun OrbConversationPage(
             kotlinx.coroutines.coroutineScope {
                 val jobs = idsToLoad.map { cid ->
                     async(Dispatchers.IO) {
-                        val existingForCid = OrbConversationHistory.forMission(if (cid == targetId) events else OrbReadCache.loadRows("mission_events_$cid"), cid)
+                        val existingForCid = OrbConversationHistory.forMission(if (cid == targetId) events else OrbReadCache.loadRowsAsync("mission_events_$cid"), cid)
                         val lastSeq = existingForCid.lastOrNull()?.int("sequence", "seq")
                         val detailDef = async {
                             orbTry(OrbLog.Category.Network, "/api/control/missions") { core.fetchDict("/api/control/missions/${core.encodeComponent(cid)}") }.getOrNull()
@@ -756,7 +766,7 @@ fun OrbConversationPage(
                         val eventsDef = async {
                             orbTry(OrbLog.Category.Network, "core.fetchRows") { core.fetchRows(evPath, "events") }.getOrDefault(emptyList())
                         }
-                        val savedHistory = OrbConversationHistory.forMission(OrbReadCache.loadRows("mission_msgs_$cid"), cid)
+                        val savedHistory = OrbConversationHistory.forMission(OrbReadCache.loadRowsAsync("mission_msgs_$cid"), cid)
                         val conversationCursor = savedHistory.takeIf { it.isNotEmpty() && it.all { row -> row.int("sequence") != null } }?.maxOf { it.int("sequence")!! }
                         val conversationSuffix = conversationCursor?.let { "&since_seq=$it" } ?: ""
                         val conversationDef = async {
@@ -871,47 +881,57 @@ fun OrbConversationPage(
         }
     }
 
+    var streamConnected by remember(missionId) { mutableStateOf(false) }
+
     // Live SSE stream when missionId is active (auto-reconnects if Core closes or idles the connection)
-    LaunchedEffect(missionId) {
+    LaunchedEffect(missionId, lifecycleOwner) {
         val id = missionId ?: return@LaunchedEffect
-        while (isActive && id == missionId) {
-            val closed = kotlinx.coroutines.CompletableDeferred<Unit>()
-            val sinceSuffix = events.lastOrNull()?.int("sequence", "seq")?.let { "&since_seq=$it" } ?: ""
-            val sse = orbTry(OrbLog.Category.Network, "core.openSSE") {
-                core.openSSE(
-                    path = "/api/control/stream?mission=${core.encodeComponent(id)}$sinceSuffix",
-                    onEvent = { type, data ->
-                        val parsed = OrbJSON.dict(OrbJSON.parse(data)) ?: return@openSSE
-                        val eventMission = OrbJSON.str(parsed, "mission_id")
-                        if (eventMission != id) return@openSSE
-                        val evType = (type ?: OrbJSON.str(parsed, "type", "event_type") ?: "").lowercase()
-                        when {
-                            evType == "text_delta" || evType == "delta" -> live.applyTextDelta(parsed)
-                            evType == "text_op" -> live.applyTextOp(parsed)
-                            evType == "user_message" -> {
-                                if (OrbJSON.bool(parsed, "queued") != true) live.resetTurn()
-                                scope.launch(Dispatchers.Main) { loadHistory(id) }
-                            }
-                            evType in setOf("assistant_message", "assistant_message_canonical", "mission_status_changed", "mission_completed", "turn_complete") -> {
-                                scope.launch(Dispatchers.Main) {
-                                    loadHistory(id)
-                                    core.refreshMissionsQuietly()
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (isActive && id == missionId) {
+                val closed = kotlinx.coroutines.CompletableDeferred<Unit>()
+                val sinceSuffix = events.lastOrNull()?.int("sequence", "seq")?.let { "&since_seq=$it" } ?: ""
+                val sse = orbTry(OrbLog.Category.Network, "core.openSSE") {
+                    core.openSSE(
+                        path = "/api/control/stream?mission=${core.encodeComponent(id)}$sinceSuffix",
+                        onEvent = { type, data ->
+                            streamConnected = true
+                            val parsed = OrbJSON.dict(OrbJSON.parse(data)) ?: return@openSSE
+                            val eventMission = OrbJSON.str(parsed, "mission_id")
+                            if (eventMission != id) return@openSSE
+                            val evType = (type ?: OrbJSON.str(parsed, "type", "event_type") ?: "").lowercase()
+                            when {
+                                evType == "text_delta" || evType == "delta" -> live.applyTextDelta(parsed)
+                                evType == "text_op" -> live.applyTextOp(parsed)
+                                evType == "user_message" -> {
+                                    if (OrbJSON.bool(parsed, "queued") != true) live.resetTurn()
+                                    scope.launch(Dispatchers.Main) { loadHistory(id) }
+                                }
+                                evType in setOf("assistant_message", "assistant_message_canonical", "mission_status_changed", "mission_completed", "turn_complete") -> {
+                                    scope.launch(Dispatchers.Main) {
+                                        loadHistory(id)
+                                        core.refreshMissionsQuietly()
+                                    }
+                                }
+                                evType in setOf("tool_call", "tool_result", "thinking") -> {
+                                    scheduleCoalescedHistoryRefresh(id)
                                 }
                             }
-                            evType in setOf("tool_call", "tool_result", "thinking") -> {
-                                scheduleCoalescedHistoryRefresh(id)
-                            }
+                        },
+                        onClosed = {
+                            streamConnected = false
+                            closed.complete(Unit)
                         }
-                    },
-                    onClosed = { closed.complete(Unit) }
-                )
-            }.getOrNull()
-            try {
-                if (sse != null) closed.await()
-            } finally {
-                sse?.cancel()
+                    )
+                }.getOrNull()
+                if (sse != null) streamConnected = true
+                try {
+                    if (sse != null) closed.await()
+                } finally {
+                    streamConnected = false
+                    sse?.cancel()
+                }
+                delay(2000L)
             }
-            delay(2000L)
         }
     }
 
@@ -919,7 +939,7 @@ fun OrbConversationPage(
         if (!isLive && historySettled) live.clear()
     }
 
-    LaunchedEffect(missionId) {
+    LaunchedEffect(missionId, lifecycleOwner) {
         val id = missionId ?: return@LaunchedEffect
         val cachedMessages = OrbReadCache.loadRowsAsync(messagesCacheKey)
         val cachedEvents = OrbReadCache.loadRowsAsync(eventsCacheKey)
@@ -941,10 +961,18 @@ fun OrbConversationPage(
             }
             if (messages.isEmpty()) messages = preview
         }
-        loadHistory(id)
-        while (isActive) {
-            delay(if (isLive) 2800L else 10000L)
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             loadHistory(id)
+            while (isActive) {
+                val intervalMs = when {
+                    isLive && streamConnected -> 12_000L
+                    isLive -> 3_500L
+                    streamConnected -> 25_000L
+                    else -> 12_000L
+                }
+                delay(intervalMs)
+                loadHistory(id)
+            }
         }
     }
 
@@ -955,11 +983,13 @@ fun OrbConversationPage(
         if (id == missionId) followUps = followUps.withServer(OrbFollowUpQueue.parse(rows, id))
     }
 
-    LaunchedEffect(missionId) {
+    LaunchedEffect(missionId, lifecycleOwner) {
         val id = missionId ?: return@LaunchedEffect
-        while (isActive) {
-            refreshFollowUps(id)
-            delay(if (isLive || followUps.count > 0) 3000L else 10000L)
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (isActive) {
+                refreshFollowUps(id)
+                delay(if (isLive || followUps.count > 0) 4_000L else 15_000L)
+            }
         }
     }
 
@@ -1763,7 +1793,12 @@ fun OrbConversationPage(
                     ) {
                         if (missionId != null && liveRow != null) {
                             val rawStatus = liveRow.str("status", "state") ?: ""
-                            val statusText = if (rawStatus.isNotEmpty() && rawStatus != "unknown") MissionState.label(rawStatus) else ""
+                            val liveStreaming = isLive || live.hasText || baseTurns.turns.any { (it is OrbTurn.WorkFold && it.isLive) || (it is OrbTurn.Assistant && it.isStreaming) }
+                            val statusText = when {
+                                liveStreaming && (rawStatus.isEmpty() || MissionState.of(rawStatus)?.live != true) -> "Working"
+                                rawStatus.isNotEmpty() && rawStatus != "unknown" -> MissionState.label(rawStatus)
+                                else -> ""
+                            }
                             val shortModel = selectedModel.substringAfterLast('/')
                             val agentText = shortModel.ifEmpty { OrbAgentCatalog.backendLabel(selectedBackend.ifEmpty { "Agent" }, backends) }
                             val summary = listOf(agentText, statusText).filter { it.isNotEmpty() }.joinToString(" · ")
@@ -1859,44 +1894,42 @@ fun OrbConversationPage(
                                 )
                             }
                             val isArchived = OrbMissionTree.isArchived(liveRow)
-                            if (isLive || !isArchived || isArchived) {
-                                HorizontalDivider(color = OrbStyle.border)
-                                if (isLive) {
-                                    DropdownMenuItem(
-                                        text = { Text("Stop", color = OrbStyle.error) },
-                                        leadingIcon = { Icon(Icons.Default.Stop, contentDescription = null, tint = OrbStyle.error) },
-                                        onClick = {
-                                            showHeaderMenu = false
-                                            stopMission()
+                            HorizontalDivider(color = OrbStyle.border)
+                            if (liveStreaming) {
+                                DropdownMenuItem(
+                                    text = { Text("Stop", color = OrbStyle.error) },
+                                    leadingIcon = { Icon(Icons.Default.Stop, contentDescription = null, tint = OrbStyle.error) },
+                                    onClick = {
+                                        showHeaderMenu = false
+                                        stopMission()
+                                    }
+                                )
+                            } else {
+                                val nextStatus = if (isArchived) "paused" else "acknowledged"
+                                DropdownMenuItem(
+                                    text = { Text(if (isArchived) "Restore" else "Archive", color = Color.White) },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = if (isArchived) Icons.Default.Unarchive else Icons.Default.Archive,
+                                            contentDescription = null,
+                                            tint = Color.White
+                                        )
+                                    },
+                                    onClick = {
+                                        showHeaderMenu = false
+                                        scope.launch {
+                                            orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                                                core.request(
+                                                    "/api/control/missions/${core.encodeComponent(missionId)}/status",
+                                                    method = "POST",
+                                                    body = mapOf("status" to nextStatus)
+                                                )
+                                                core.refreshMissionsQuietly()
+                                                loadHistory(missionId)
+                                            }.onFailure { errorMessage = it.message }
                                         }
-                                    )
-                                } else {
-                                    val nextStatus = if (isArchived) "paused" else "acknowledged"
-                                    DropdownMenuItem(
-                                        text = { Text(if (isArchived) "Restore" else "Archive", color = Color.White) },
-                                        leadingIcon = {
-                                            Icon(
-                                                imageVector = if (isArchived) Icons.Default.Unarchive else Icons.Default.Archive,
-                                                contentDescription = null,
-                                                tint = Color.White
-                                            )
-                                        },
-                                        onClick = {
-                                            showHeaderMenu = false
-                                            scope.launch {
-                                                orbTry(OrbLog.Category.Network, "/api/control/missions") {
-                                                    core.request(
-                                                        "/api/control/missions/${core.encodeComponent(missionId)}/status",
-                                                        method = "POST",
-                                                        body = mapOf("status" to nextStatus)
-                                                    )
-                                                    core.refreshMissionsQuietly()
-                                                    loadHistory(missionId)
-                                                }.onFailure { errorMessage = it.message }
-                                            }
-                                        }
-                                    )
-                                }
+                                    }
+                                )
                             }
                         } else if (onOpenDocuments != null) {
                             DropdownMenuItem(
@@ -3578,6 +3611,26 @@ fun OrbAgentPickerSheet(
     val modelChoices = remember(selectedBackend, backendModels) {
         OrbAgentCatalog.modelsForBackend(selectedBackend, backendModels)
     }
+    var workspaceQuery by remember { mutableStateOf("") }
+    val filteredWorkspaces = remember(workspaces, workspaceQuery, selectedWorkspaceId) {
+        val q = workspaceQuery.trim().lowercase()
+        val matching = if (q.isEmpty()) {
+            workspaces
+        } else {
+            workspaces.filter { ws ->
+                val wName = (ws.str("name", "title", "slug") ?: ws.id).lowercase()
+                val wType = (ws.str("workspace_type", "type") ?: "host").lowercase()
+                wName.contains(q) || wType.contains(q)
+            }
+        }
+        if (selectedWorkspaceId.isEmpty() || q.isNotEmpty()) {
+            matching
+        } else {
+            val selectedFirst = matching.filter { (it.str("id") ?: it.id) == selectedWorkspaceId }
+            val others = matching.filterNot { (it.str("id") ?: it.id) == selectedWorkspaceId }
+            selectedFirst + others
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -3588,7 +3641,9 @@ fun OrbAgentPickerSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(580.dp)
+                .heightIn(max = 640.dp)
+                .navigationBarsPadding()
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(18.dp)
@@ -3635,28 +3690,50 @@ fun OrbAgentPickerSheet(
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.7.sp
                 )
-                Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                val harnessScrollState = rememberScrollState()
+                val showRightFade = harnessScrollState.canScrollForward
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .drawWithContent {
+                            drawContent()
+                            if (showRightFade) {
+                                val fadeWidth = 28.dp.toPx()
+                                drawRect(
+                                    brush = Brush.horizontalGradient(
+                                        colors = listOf(Color.Transparent, OrbStyle.background),
+                                        startX = size.width - fadeWidth,
+                                        endX = size.width
+                                    ),
+                                    topLeft = Offset(size.width - fadeWidth, 0f),
+                                    size = Size(fadeWidth, size.height)
+                                )
+                            }
+                        }
                 ) {
-                    backendOptions.forEach { b ->
-                        val active = selectedBackend == b
-                        Box(
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(if (active) Color.White else OrbStyle.surface)
-                                .border(1.dp, if (active) Color.Transparent else OrbStyle.border, CircleShape)
-                                .orbPressClickable { if (!locked) onSelectBackend(b) }
-                                .padding(horizontal = 13.dp, vertical = 8.dp)
-                        ) {
-                            Text(
-                                text = OrbAgentCatalog.backendLabel(b, backends),
-                                color = if (active) Color.Black else Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                softWrap = false
-                            )
+                    Row(
+                        modifier = Modifier.horizontalScroll(harnessScrollState),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        backendOptions.forEach { b ->
+                            val active = selectedBackend == b
+                            Box(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(if (active) Color.White else OrbStyle.surface)
+                                    .border(1.dp, if (active) Color.Transparent else OrbStyle.border, CircleShape)
+                                    .orbPressClickable { if (!locked) onSelectBackend(b) }
+                                    .padding(horizontal = 13.dp, vertical = 8.dp)
+                            ) {
+                                Text(
+                                    text = OrbAgentCatalog.backendLabel(b, backends),
+                                    color = if (active) Color.Black else Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
                         }
                     }
                 }
@@ -3665,13 +3742,69 @@ fun OrbAgentPickerSheet(
             // Machine / Workspace
             if (!existing && !isCloudService && workspaces.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "MACHINE / WORKSPACE",
-                        color = OrbStyle.textMuted,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.7.sp
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "MACHINE / WORKSPACE",
+                            color = OrbStyle.textMuted,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.7.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (workspaces.size > 6) {
+                            Text(
+                                text = "${filteredWorkspaces.size}/${workspaces.size}",
+                                color = OrbStyle.textMuted,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                    if (workspaces.size > 6) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(OrbStyle.surface)
+                                .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = null,
+                                tint = OrbStyle.textMuted,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Box(modifier = Modifier.weight(1f)) {
+                                if (workspaceQuery.isEmpty()) {
+                                    Text("Filter machines…", color = OrbStyle.textMuted, fontSize = 13.sp)
+                                }
+                                BasicTextField(
+                                    value = workspaceQuery,
+                                    onValueChange = { workspaceQuery = it },
+                                    textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
+                                    cursorBrush = SolidColor(Color.White),
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                            if (workspaceQuery.isNotEmpty()) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Clear filter",
+                                    tint = OrbStyle.textMuted,
+                                    modifier = Modifier
+                                        .size(15.dp)
+                                        .orbPressClickable { workspaceQuery = "" }
+                                )
+                            }
+                        }
+                    }
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -3679,46 +3812,55 @@ fun OrbAgentPickerSheet(
                             .background(OrbStyle.surface)
                             .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
                     ) {
-                        workspaces.take(10).forEachIndexed { idx, ws ->
-                            val wid = ws.str("id") ?: ws.id
-                            val wName = ws.str("name", "title", "slug") ?: wid.take(8)
-                            val wType = ws.str("workspace_type", "type") ?: "host"
-                            val selected = selectedWorkspaceId == wid
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .orbPressClickable { onSelectWorkspaceId(wid) }
-                                    .padding(horizontal = 14.dp, vertical = 11.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = wName,
-                                        color = Color.White,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = wType,
-                                        color = OrbStyle.textMuted,
-                                        fontSize = 11.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                        if (filteredWorkspaces.isEmpty()) {
+                            Text(
+                                text = "No matching workspaces",
+                                color = OrbStyle.textMuted,
+                                fontSize = 13.sp,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                            )
+                        } else {
+                            filteredWorkspaces.forEachIndexed { idx, ws ->
+                                val wid = ws.str("id") ?: ws.id
+                                val wName = ws.str("name", "title", "slug") ?: wid.take(8)
+                                val wType = ws.str("workspace_type", "type") ?: "host"
+                                val selected = selectedWorkspaceId == wid
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .orbPressClickable { onSelectWorkspaceId(wid) }
+                                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = wName,
+                                            color = Color.White,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = wType,
+                                            color = OrbStyle.textMuted,
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    if (selected) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
                                 }
-                                if (selected) {
-                                    Icon(
-                                        imageVector = Icons.Default.Check,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(16.dp)
-                                    )
+                                if (idx < filteredWorkspaces.size - 1) {
+                                    HorizontalDivider(color = OrbStyle.border)
                                 }
-                            }
-                            if (idx < minOf(workspaces.size, 10) - 1) {
-                                HorizontalDivider(color = OrbStyle.border)
                             }
                         }
                     }

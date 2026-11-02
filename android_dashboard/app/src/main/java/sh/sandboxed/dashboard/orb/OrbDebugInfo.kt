@@ -3,6 +3,10 @@ package sh.sandboxed.dashboard.orb
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Handler
+import android.os.HandlerThread
+import android.view.FrameMetrics
+import android.view.Window
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -46,8 +50,164 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import sh.sandboxed.dashboard.BuildConfig
 import java.time.Instant
+
+/**
+ * Lightweight frame-stall and slow-request telemetry matching desktop `orb/src/diagnostics.ts`.
+ * Uses Android's `Window.OnFrameMetricsAvailableListener` on a background HandlerThread so
+ * monitoring never allocates or blocks on the UI thread.
+ */
+object OrbPerfMonitor {
+    const val STALL_THRESHOLD_MS = 32L
+    const val SLOW_REQUEST_THRESHOLD_MS = 1_500L
+    private const val MAX_SLOW_REQUESTS = 20
+
+    data class SlowRequest(
+        val method: String,
+        val path: String,
+        val durationMs: Long,
+        val bytes: Int,
+        val atEpochMs: Long = System.currentTimeMillis()
+    ) {
+        fun format(): String {
+            val cleanPath = sanitizePath(path)
+            val kb = bytes / 1024
+            return "${Instant.ofEpochMilli(atEpochMs)} $method $cleanPath ${durationMs}ms (${kb}KB)"
+        }
+    }
+
+    data class Snapshot(
+        val totalFrames: Long = 0L,
+        val stalledFrames: Long = 0L,
+        val worstFrameMs: Long = 0L,
+        val slowRequests: List<SlowRequest> = emptyList()
+    ) {
+        fun stallsSummary(): String =
+            if (totalFrames == 0L) "0"
+            else "$stalledFrames / $totalFrames (worst ${worstFrameMs}ms)"
+
+        fun slowRequestsSummary(): String =
+            if (slowRequests.isEmpty()) "0"
+            else "${slowRequests.size} (worst ${slowRequests.maxOf { it.durationMs }}ms)"
+    }
+
+    private val lock = Any()
+    private var totalFrames = 0L
+    private var stalledFrames = 0L
+    private var worstFrameMs = 0L
+    private val slowRing = ArrayDeque<SlowRequest>(MAX_SLOW_REQUESTS)
+    private val _snapshot = MutableStateFlow(Snapshot())
+    val snapshot: StateFlow<Snapshot> = _snapshot.asStateFlow()
+
+    private var metricsThread: HandlerThread? = null
+    private var metricsHandler: Handler? = null
+    private val listener = Window.OnFrameMetricsAvailableListener { _, frameMetrics, _ ->
+        val totalNs = frameMetrics.getMetric(FrameMetrics.TOTAL_DURATION)
+        if (totalNs > 0L) {
+            recordFrameDurationMs(totalNs / 1_000_000L)
+        }
+    }
+
+    fun attach(window: Window) {
+        try {
+            val handler = synchronized(lock) {
+                metricsHandler ?: run {
+                    val thread = HandlerThread("orb-frame-metrics").apply { start() }
+                    metricsThread = thread
+                    Handler(thread.looper).also { metricsHandler = it }
+                }
+            }
+            window.addOnFrameMetricsAvailableListener(listener, handler)
+        } catch (_: Throwable) {
+            // Robolectric / headless test windows may not back FrameMetrics.
+        }
+    }
+
+    fun detach(window: Window) {
+        try {
+            window.removeOnFrameMetricsAvailableListener(listener)
+        } catch (_: Throwable) {
+        }
+    }
+
+    fun recordFrameDurationMs(durationMs: Long) {
+        if (durationMs < 0L) return
+        var emit: Snapshot? = null
+        synchronized(lock) {
+            totalFrames += 1L
+            var changed = false
+            if (durationMs > worstFrameMs) {
+                worstFrameMs = durationMs
+                changed = true
+            }
+            if (durationMs > STALL_THRESHOLD_MS) {
+                stalledFrames += 1L
+                changed = true
+            }
+            if (changed || totalFrames % 120L == 0L) {
+                emit = Snapshot(totalFrames, stalledFrames, worstFrameMs, slowRing.toList())
+            }
+        }
+        emit?.let { _snapshot.value = it }
+    }
+
+    fun recordSlowRequest(
+        method: String,
+        path: String,
+        durationMs: Long,
+        bytes: Int,
+        atEpochMs: Long = System.currentTimeMillis()
+    ) {
+        if (durationMs < SLOW_REQUEST_THRESHOLD_MS) return
+        val next = synchronized(lock) {
+            if (slowRing.size >= MAX_SLOW_REQUESTS) slowRing.removeFirst()
+            slowRing.addLast(
+                SlowRequest(
+                    method = method,
+                    path = sanitizePath(path),
+                    durationMs = durationMs,
+                    bytes = bytes,
+                    atEpochMs = atEpochMs
+                )
+            )
+            Snapshot(totalFrames, stalledFrames, worstFrameMs, slowRing.toList())
+        }
+        _snapshot.value = next
+    }
+
+    fun resetForTest() {
+        synchronized(lock) {
+            totalFrames = 0L
+            stalledFrames = 0L
+            worstFrameMs = 0L
+            slowRing.clear()
+        }
+        _snapshot.value = Snapshot()
+    }
+
+    internal fun sanitizePath(path: String): String {
+        val qIdx = path.indexOf('?')
+        if (qIdx < 0) return path
+        val base = path.substring(0, qIdx)
+        val query = path.substring(qIdx + 1)
+            .split('&')
+            .filter { it.isNotEmpty() }
+            .joinToString("&") { part ->
+                val eq = part.indexOf('=')
+                val key = if (eq >= 0) part.substring(0, eq) else part
+                if (key.lowercase() in setOf("token", "access_token", "api_key", "secret", "code", "state")) {
+                    "$key=<redacted>"
+                } else {
+                    part
+                }
+            }
+        return if (query.isEmpty()) base else "$base?$query"
+    }
+}
 
 /** Plain-text diagnostics, shared by the Debug info page and "Copy diagnostics". */
 object OrbDiagnostics {
@@ -58,6 +218,7 @@ object OrbDiagnostics {
         lastRefreshAtMs: Long?,
         errors: List<OrbLog.Entry>,
         backendVersion: String? = null,
+        perf: OrbPerfMonitor.Snapshot = OrbPerfMonitor.snapshot.value,
     ): List<Pair<String, String>> {
         val (permitted, channels) = OrbNotifications.diagnostics(context)
         val account = tokenSubject(token) ?: if (token.isNullOrBlank()) "signed out" else "token (opaque)"
@@ -69,6 +230,8 @@ object OrbDiagnostics {
             add("Core version" to (backendVersion?.takeIf { it.isNotBlank() } ?: "unknown"))
             add("Account" to account)
             add("Last refresh" to (lastRefreshAtMs?.let { Instant.ofEpochMilli(it).toString() } ?: "never"))
+            add("UI stalls (>32ms)" to perf.stallsSummary())
+            add("Slow requests (>=1.5s)" to perf.slowRequestsSummary())
             add("Notification permission" to if (permitted) "granted" else "denied")
             add("In-app notifications" to if (OrbNotifications.notificationsEnabled) "on" else "off")
             for (ch in channels) {
@@ -82,8 +245,16 @@ object OrbDiagnostics {
     fun backendVersion(health: Any?): String? =
         OrbJSON.str(OrbJSON.dict(health), "version")?.trim()?.takeIf { it.isNotEmpty() }
 
-    fun text(rows: List<Pair<String, String>>, errors: List<OrbLog.Entry>): String = buildString {
+    fun text(
+        rows: List<Pair<String, String>>,
+        errors: List<OrbLog.Entry>,
+        perf: OrbPerfMonitor.Snapshot = OrbPerfMonitor.snapshot.value
+    ): String = buildString {
         rows.forEach { (k, v) -> append(k).append(": ").append(v).append('\n') }
+        if (perf.slowRequests.isNotEmpty()) {
+            append("\n--- slow requests (oldest first) ---\n")
+            perf.slowRequests.forEach { append(it.format()).append('\n') }
+        }
         if (errors.isNotEmpty()) {
             append("\n--- errors (oldest first) ---\n")
             errors.forEach { append(it.format()).append('\n') }
@@ -97,6 +268,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
     val endpoint by core.baseURLFlow.collectAsState()
     val lastRefresh by core.lastRefreshAtMs.collectAsState()
     val errors by OrbLog.ring.collectAsState()
+    val perf by OrbPerfMonitor.snapshot.collectAsState()
     var backendVersion by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(endpoint) {
         backendVersion = null
@@ -109,7 +281,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
             null
         }
     }
-    val rows = OrbDiagnostics.build(context, endpoint, core.token, lastRefresh, errors, backendVersion)
+    val rows = OrbDiagnostics.build(context, endpoint, core.token, lastRefresh, errors, backendVersion, perf)
     val channelRows = rows.filter { it.first.startsWith("Channel ") }
     val summaryRows = rows.filterNot {
         it.first == "Notification permission" || it.first == "In-app notifications" || it.first.startsWith("Channel ")
@@ -218,7 +390,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                 .clip(RoundedCornerShape(14.dp))
                 .background(Color.White)
                 .orbPressClickable {
-                    val text = OrbDiagnostics.text(rows, errors)
+                    val text = OrbDiagnostics.text(rows, errors, perf)
                     val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                     cm?.setPrimaryClip(ClipData.newPlainText("Orb diagnostics", text))
                     Toast.makeText(context, "Diagnostics copied", Toast.LENGTH_SHORT).show()
@@ -227,6 +399,47 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
             contentAlignment = Alignment.Center
         ) {
             Text("Copy diagnostics", color = Color.Black, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        }
+
+        if (perf.slowRequests.isNotEmpty()) {
+            Text("Slow requests", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            perf.slowRequests.asReversed().take(8).forEach { req ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(OrbStyle.card)
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "${req.method} ${req.path}",
+                            color = OrbStyle.textPrimary,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "${req.durationMs}ms",
+                            color = OrbStyle.warning,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    Text(
+                        text = "${req.bytes / 1024} KB · ${Instant.ofEpochMilli(req.atEpochMs)}",
+                        color = OrbStyle.textMuted,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
         }
 
         Text("Recent errors", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)

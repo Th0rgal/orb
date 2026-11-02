@@ -107,6 +107,7 @@ dependencies {
     implementation(libs.androidx.biometric)
     implementation(libs.androidx.fragment.ktx)
     implementation(libs.androidx.browser)
+    implementation(libs.androidx.profileinstaller)
 
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)

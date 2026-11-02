@@ -606,7 +606,31 @@ fun OrbFilesSheet(core: OrbCore, scope: OrbFileScope, onDismiss: () -> Unit) {
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         item { OrbSectionLabel("Shared in this conversation") }
                         when {
-                            loading && files.isEmpty() -> item { Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { CircularProgressIndicator(Modifier.size(16.dp), color = OrbStyle.textSecondary, strokeWidth = 2.dp); Text("Loading files…", color = OrbStyle.textSecondary, fontSize = 14.sp) } }
+                            loading && files.isEmpty() -> items(3) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth(0.58f)
+                                            .height(14.dp)
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(OrbStyle.elevated)
+                                            .orbShimmer()
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth(0.36f)
+                                            .height(10.dp)
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(OrbStyle.surface)
+                                            .orbShimmer()
+                                    )
+                                }
+                            }
                             error != null && files.isEmpty() -> item { OrbNotice(title = error!!, log = null) }
                             files.isEmpty() -> item { Text("No files shared yet. Files the agent shares appear here.", color = OrbStyle.textSecondary, fontSize = 14.sp, modifier = Modifier.padding(12.dp).testTag("files.empty")) }
                         }

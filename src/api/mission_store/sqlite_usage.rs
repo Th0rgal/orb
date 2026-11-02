@@ -54,7 +54,21 @@ pub(super) fn migrate(conn: &Connection) -> Result<(), String> {
         "CREATE INDEX IF NOT EXISTS idx_proxy_usage_api_key ON proxy_usage(api_key_id, timestamp);
          CREATE INDEX IF NOT EXISTS idx_proxy_usage_mission ON proxy_usage(mission_id);",
     )
-    .map_err(err)
+    .map_err(err)?;
+    let has_mission_events: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mission_events')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(err)?;
+    if has_mission_events {
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_events_type_timestamp ON mission_events(event_type, timestamp);",
+        )
+        .map_err(err)?;
+    }
+    Ok(())
 }
 
 pub(super) async fn record(
@@ -430,6 +444,20 @@ mod tests {
         assert_eq!(records[0].api_key_id, None);
         assert!(!records[0].account_bound);
         assert_eq!(records[0].cache_read_tokens, 0);
+
+        conn.execute_batch(
+            "CREATE TABLE mission_events (id INTEGER PRIMARY KEY, event_type TEXT NOT NULL, timestamp TEXT NOT NULL);",
+        )
+        .expect("mission_events table");
+        migrate(&conn).expect("migrate creates mission_events index when table exists");
+        let has_index: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_type_timestamp')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(has_index);
     }
 
     #[tokio::test]

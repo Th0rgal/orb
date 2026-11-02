@@ -94,7 +94,7 @@ struct OrbUsageSettings: View {
     }
 
     private func load() async {
-        do { summary = try await client.call("/api/ai/usage/summary?window=\(window)"); error = "" }
+        do { summary = try await client.call("/api/ai/usage/summary?window=\(window)&compact=true&top_limit=5"); error = "" }
         catch is CancellationError {} catch { self.error = "Couldn’t load usage. Pull to retry." }
     }
 }

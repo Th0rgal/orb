@@ -178,6 +178,27 @@ pub struct UsageTotals {
     pub unknown_cost_requests: u64,
 }
 
+impl UsageSummaryResponse {
+    /// Trim large per-dimension breakdowns for compact mobile clients that only
+    /// render aggregate totals, daily/hourly bars, and top-N missions.
+    pub fn into_compact(mut self, top_limit: usize) -> Self {
+        let cap = top_limit.clamp(1, 50);
+        self.by_mission.truncate(cap);
+        self.by_root_mission.truncate(cap);
+        self.by_model.clear();
+        self.by_provider.clear();
+        self.by_source.clear();
+        self.by_route.clear();
+        self.by_caller_kind.clear();
+        self.by_purpose.clear();
+        self.by_backend.clear();
+        self.by_api_key.clear();
+        self.by_account.clear();
+        self.by_selected_account.clear();
+        self
+    }
+}
+
 impl UsageTotals {
     fn add(&mut self, r: &UsageRecord) {
         self.requests += 1;
@@ -824,5 +845,43 @@ mod tests {
 
     fn s_records() -> Vec<UsageRecord> {
         vec![record(UsageSource::Harness, "m", "10")]
+    }
+
+    #[test]
+    fn compact_summary_keeps_totals_buckets_and_bounded_top_missions() {
+        let mut m1 = record(UsageSource::Harness, "claude-opus-4-6", "10");
+        m1.mission_id = Some("m1".into());
+        m1.mission_title = Some("First".into());
+        m1.cost_cents = 900;
+        let mut m2 = record(UsageSource::Harness, "claude-opus-4-6", "11");
+        m2.mission_id = Some("m2".into());
+        m2.mission_title = Some("Second".into());
+        m2.cost_cents = 500;
+        let mut m3 = record(UsageSource::Router, "gpt-5.4", "12");
+        m3.mission_id = Some("m3".into());
+        m3.mission_title = Some("Third".into());
+        m3.cost_cents = 100;
+        m3.api_key_id = Some("k1".into());
+
+        let full = summarize(
+            &[m1, m2, m3],
+            &parse_window(Some("7d")).unwrap(),
+            None,
+            &UsageFilter::default(),
+        );
+        assert_eq!(full.by_mission.len(), 3);
+        assert!(!full.by_model.is_empty());
+
+        let compact = full.clone().into_compact(2);
+        assert_eq!(compact.totals, full.totals);
+        assert_eq!(compact.by_day.len(), full.by_day.len());
+        assert_eq!(compact.by_hour.len(), full.by_hour.len());
+        assert_eq!(compact.by_mission.len(), 2);
+        assert_eq!(compact.by_mission[0].key.as_deref(), Some("m1"));
+        assert_eq!(compact.by_mission[1].key.as_deref(), Some("m2"));
+        assert!(compact.by_model.is_empty());
+        assert!(compact.by_provider.is_empty());
+        assert!(compact.by_api_key.is_empty());
+        assert!(compact.by_account.is_empty());
     }
 }

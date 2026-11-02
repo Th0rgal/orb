@@ -69,6 +69,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -556,16 +559,20 @@ fun OrbProvidersSettingsPage(
         }
     }
 
-    LaunchedEffect(Unit) {
-        isRefreshing = true
-        try {
-            loadProvidersAndUsage()
-        } finally {
-            isRefreshing = false
-        }
-        while (isActive) {
-            delay(30_000)
-            loadProvidersAndUsage()
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            val showInitialSpinner = providers.isEmpty()
+            if (showInitialSpinner) isRefreshing = true
+            try {
+                loadProvidersAndUsage()
+            } finally {
+                if (showInitialSpinner) isRefreshing = false
+            }
+            while (isActive) {
+                delay(30_000)
+                loadProvidersAndUsage()
+            }
         }
     }
 

@@ -183,19 +183,22 @@ fun OrbRunningDots(
     spacing: Dp = 2.4.dp,
     modifier: Modifier = Modifier
 ) {
-    // 3x3 animated dot matrix matching iOS OrbRunningDots
+    // 3x3 animated dot matrix matching iOS OrbRunningDots, driven by Compose's
+    // frame-clock transition so off-screen and backgrounded screens pause cleanly.
     val delays = remember {
         floatArrayOf(0.0f, 0.15f, 0.30f, 0.20f, 0.35f, 0.50f, 0.40f, 0.55f, 0.70f)
     }
-    var timeMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (isActive) {
-            timeMs = System.currentTimeMillis()
-            delay(80L)
-        }
-    }
+    val transition = rememberInfiniteTransition(label = "orbRunningDots")
+    val basePhase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "orbRunningDotsPhase"
+    )
     val totalSide = dotSize * 3 + spacing * 2
-    val tSec = (timeMs % 120000L) / 1000.0
     Canvas(modifier = modifier.size(totalSide)) {
         val dotPx = dotSize.toPx()
         val gapPx = spacing.toPx()
@@ -204,7 +207,7 @@ fun OrbRunningDots(
         for (row in 0..2) {
             for (col in 0..2) {
                 val idx = row * 3 + col
-                val phase = ((tSec / 1.2 + delays[idx]) % 1.0)
+                val phase = ((basePhase + delays[idx]) % 1.0f).toDouble()
                 val wave = (0.5 - 0.5 * cos(phase * 2.0 * PI)).toFloat()
                 val alpha = (0.18f + 0.72f * wave).coerceIn(0f, 1f)
                 drawCircle(
@@ -224,6 +227,7 @@ fun OrbCircle(
     iconSize: Dp = 17.dp,
     tint: Color = Color.White,
     background: Color = OrbStyle.surface,
+    contentDescription: String? = null,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -236,7 +240,7 @@ fun OrbCircle(
     ) {
         Icon(
             imageVector = icon,
-            contentDescription = null,
+            contentDescription = contentDescription,
             tint = tint,
             modifier = Modifier.size(iconSize)
         )

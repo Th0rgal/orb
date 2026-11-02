@@ -16,6 +16,7 @@ import sh.sandboxed.dashboard.orb.OrbGitHubSignIn
 import sh.sandboxed.dashboard.orb.OrbLog
 import sh.sandboxed.dashboard.orb.OrbMaterialTheme
 import sh.sandboxed.dashboard.orb.OrbNotifications
+import sh.sandboxed.dashboard.orb.OrbPerfMonitor
 import sh.sandboxed.dashboard.orb.UsageTelemetry
 
 // FragmentActivity: BiometricPrompt (device approvals, FIDO signing) needs one.
@@ -27,6 +28,7 @@ class MainActivity : FragmentActivity() {
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
         )
+        OrbPerfMonitor.attach(window)
         val orbCore = OrbCore.getInstance(applicationContext)
         if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
@@ -45,12 +47,19 @@ class MainActivity : FragmentActivity() {
 
     override fun onStart() {
         super.onStart()
+        OrbCore.getInstance(applicationContext).onForeground()
         UsageTelemetry.onForeground()
     }
 
     override fun onStop() {
+        OrbCore.getInstance(applicationContext).onBackground()
         UsageTelemetry.onBackground()
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        OrbPerfMonitor.detach(window)
+        super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent) {

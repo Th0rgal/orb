@@ -1242,7 +1242,7 @@ fun OrbProjectPage(
         mutableStateOf(false)
     }
     var manifestFolders by remember(projectSlug) {
-        val cachedManifest = OrbReadCache.loadDict("project_manifest_$projectSlug")
+        val cachedManifest = OrbReadCache.readMemoryDict("project_manifest_$projectSlug")
         val entries = OrbJSON.dict(cachedManifest?.get("entries"))
         val initialDirs = entries?.mapNotNull { (k, v) ->
             val d = OrbJSON.dict(v)
@@ -1279,7 +1279,7 @@ fun OrbProjectPage(
                 launch(kotlinx.coroutines.Dispatchers.IO) {
                     for (m in mobile.take(5)) {
                         val evKey = "mission_events_${m.id}"
-                        if (OrbReadCache.loadRows(evKey).isEmpty()) {
+                        if (OrbReadCache.loadRowsAsync(evKey).isEmpty()) {
                             val evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
                                 core.fetchRows("/api/control/missions/${core.encodeComponent(m.id)}/events?limit=150", "events")
                             }.getOrDefault(emptyList())
@@ -1308,6 +1308,16 @@ fun OrbProjectPage(
     LaunchedEffect(projectSlug) {
         val cached = OrbReadCache.loadRowsAsync("project_missions_$projectSlug")
         if (fetchedProjectMissions.isEmpty() && cached.isNotEmpty()) fetchedProjectMissions = cached
+        if (manifestFolders.isEmpty()) {
+            val cachedManifest = OrbReadCache.loadDictAsync("project_manifest_$projectSlug")
+            val entries = OrbJSON.dict(cachedManifest?.get("entries"))
+            if (entries != null) {
+                manifestFolders = entries.mapNotNull { (k, v) ->
+                    val d = OrbJSON.dict(v)
+                    if (OrbJSON.bool(d, "directory") == true && k != "attachments" && !k.startsWith("attachments/")) k else null
+                }
+            }
+        }
         loadProjectData()
     }
 
@@ -1660,6 +1670,7 @@ fun OrbProjectPage(
                     icon = Icons.AutoMirrored.Filled.ArrowBack,
                     size = 40.dp,
                     iconSize = 18.dp,
+                    contentDescription = "Back",
                     modifier = Modifier.orbPressClickable { onBack() }
                 )
 
@@ -1681,6 +1692,7 @@ fun OrbProjectPage(
                         icon = Icons.Default.Add,
                         size = 40.dp,
                         iconSize = 19.dp,
+                        contentDescription = "New conversation",
                         modifier = Modifier.orbPressClickable { onNewAgent(null) }
                     )
 
@@ -1689,6 +1701,7 @@ fun OrbProjectPage(
                             icon = Icons.Default.MoreHoriz,
                             size = 40.dp,
                             iconSize = 19.dp,
+                            contentDescription = "Project options",
                             modifier = Modifier.orbPressClickable { showMenu = true }
                         )
                         DropdownMenu(

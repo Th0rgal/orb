@@ -2276,6 +2276,11 @@ async fn get_stats(
 pub struct UsageSummaryQuery {
     /// "all" (default) or N followed by h, d or w (e.g. "1h", "5h", "30d").
     window: Option<String>,
+    /// Omit full per-model/key/account tables and cap mission breakdowns for mobile.
+    #[serde(default)]
+    compact: bool,
+    /// Maximum missions returned when `compact=true` (default 10, max 50).
+    top_limit: Option<usize>,
     #[serde(flatten)]
     filter: super::usage_summary::UsageFilter,
 }
@@ -2308,12 +2313,12 @@ async fn get_ai_usage_summary(
             tracing::warn!(error = %e, "Failed to read usage records");
             (StatusCode::INTERNAL_SERVER_ERROR, e)
         })?;
-    Ok(Json(super::usage_summary::summarize(
-        &records,
-        &window,
-        since,
-        &params.filter,
-    )))
+    let summary = super::usage_summary::summarize(&records, &window, since, &params.filter);
+    Ok(Json(if params.compact {
+        summary.into_compact(params.top_limit.unwrap_or(10))
+    } else {
+        summary
+    }))
 }
 
 #[derive(Debug, Deserialize)]
