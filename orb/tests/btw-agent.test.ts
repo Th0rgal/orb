@@ -940,3 +940,94 @@ it('preserves existing Attachment trailer and imagePaths when editing a local qu
   expect(queuedLocalMessages('local-side')[0]?.request.imagePaths).toEqual(['/tmp/staged/diagram.png']);
  }finally{uploadSpy.mockRestore();readSpy.mockRestore();saveSpy.mockRestore();}
 });
+
+it('uses a single-row tail preflight on reuse and auto-rotates bloated side sessions (>=400 events or >=8 turns)',async()=>{
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {getMissionEvents}=await import('../src/stream');
+ const {BTW_MAX_SESSION_EVENTS,shouldRotateBtwSession}=await import('../src/btwAgent');
+ expect(shouldRotateBtwSession(7,399)).toBe(false);
+ expect(shouldRotateBtwSession(8,10)).toBe(true);
+ expect(shouldRotateBtwSession(2,BTW_MAX_SESSION_EVENTS)).toBe(true);
+ vi.mocked(getMission).mockImplementation(async id=>({
+  id,
+  status:id==='bloat-parent'?'active':'completed',
+  tags:id==='bloat-parent'?[]:['btw-parent:bloat-parent'],
+  history:[],
+  title:'evm.fast',
+  created_at:'',
+  updated_at:'',
+ } as any));
+ vi.mocked(api).mockResolvedValueOnce({id:'bloated-side'}).mockResolvedValueOnce({id:'rotated-side'});
+ vi.mocked(getMissionEvents).mockResolvedValueOnce([{id:1,sequence:12,event_type:'assistant_message',content:'Initial answer',timestamp:''}]);
+ await askBtwAgent('bloat-parent','Q1','ctx1',[],new AbortController().signal,()=>{});
+ expect(btwSession('bloat-parent')?.id).toBe('bloated-side');
+
+ // Simulate bloated-side reaching sequence 1022 (> 400). Continuation preflight fetches 1 tail row and rotates cleanly.
+ vi.mocked(getMissionEvents)
+  .mockResolvedValueOnce([{id:1022,sequence:1022,event_type:'assistant_message',content:'Turn 12 answer',timestamp:''}])
+  .mockResolvedValueOnce([{id:1,sequence:2,event_type:'assistant_message',content:'Fast clean answer',timestamp:''}]);
+ const prior=[{question:'Q1',answer:'Initial answer'}];
+ const received:any[]=[];
+ await askBtwAgent('bloat-parent','Q13','ctx13',prior as any,new AbortController().signal,e=>received.push(e));
+ expect(getMissionEvents).toHaveBeenCalledWith('bloated-side',expect.objectContaining({limit:1,enough:expect.any(Function)}));
+ expect(sendMissionMessage).not.toHaveBeenCalled();
+ expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[3]).toBeUndefined();
+ expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[4]).toEqual(prior);
+ expect(btwSession('bloat-parent')?.id).toBe('rotated-side');
+ expect(btwSession('bloat-parent')?.turnCount).toBe(1);
+ expect(received.at(-1)).toEqual({type:'done',answer:'Fast clean answer'});
+});
+
+it('arms startFreshBtwSession across server reconciles and polls live /btw threads incrementally',async()=>{
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {getMissionEvents}=await import('../src/stream');
+ const {reconcileBtwServerHistory,startFreshBtwSession}=await import('../src/btwAgent');
+ let liveStatus='active';
+ vi.mocked(api).mockImplementation(async(path:string)=>{
+  if(path.startsWith('/api/control/missions?tag=')){
+   return [{id:'live-side',status:liveStatus,created_at:'2026-11-02T05:00:00Z',updated_at:'2026-11-02T05:10:00Z',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:fresh-parent'],history:[],title:null}] as any;
+  }
+  return {id:'brand-new-side',tags:['btw-parent:fresh-parent']} as any;
+ });
+ const eventCalls:Array<{id:string;opts:any}>=[];
+ vi.mocked(getMissionEvents).mockImplementation(async(id:string,opts?:any)=>{
+  eventCalls.push({id,opts});
+  if(id==='brand-new-side')return [{id:2,sequence:2,event_type:'assistant_message',content:'Brand new session answer.',timestamp:'2026-11-02T05:12:00Z'}];
+  if(opts?.since===1)return liveStatus==='completed'
+   ?[{id:2,sequence:2,event_type:'assistant_message',content:'Completed turn 1.',timestamp:'2026-11-02T05:10:00Z'}]
+   :[];
+  return [{id:1,sequence:1,event_type:'user_message',content:'Header\n\nCurrent request:\nCheck status',timestamp:'2026-11-02T05:00:01Z'}];
+ });
+ await reconcileBtwServerHistory('fresh-parent',[]);
+ await reconcileBtwServerHistory('fresh-parent',[]);
+ expect(eventCalls.slice(0,2)).toEqual([
+  {id:'live-side',opts:{view:'history'}},
+  {id:'live-side',opts:{view:'history',since:1}},
+ ]);
+ liveStatus='completed';
+ const settled=await reconcileBtwServerHistory('fresh-parent',[]);
+ expect(settled.history.map(h=>h.answer)).toEqual(['Completed turn 1.']);
+ expect(btwSession('fresh-parent')).toMatchObject({id:'live-side',active:false,turnCount:1,lastSequence:2});
+
+ // User clicks "New side session"; a subsequent 15s reconcile must preserve freshSession: true.
+ startFreshBtwSession('fresh-parent');
+ expect(btwSession('fresh-parent')?.freshSession).toBe(true);
+ await reconcileBtwServerHistory('fresh-parent',settled.history);
+ expect(btwSession('fresh-parent')?.freshSession).toBe(true);
+
+ vi.mocked(getMission).mockImplementation(async id=>({
+  id,
+  status:id==='fresh-parent'?'active':'completed',
+  tags:id==='fresh-parent'?[]:['btw-parent:fresh-parent'],
+  history:[],
+  title:'Main',
+  created_at:'',
+  updated_at:'',
+ } as any));
+ await askBtwAgent('fresh-parent','Next in clean session','ctx',settled.history,new AbortController().signal,()=>{});
+ expect(sendMissionMessage).not.toHaveBeenCalled();
+ expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[3]).toBeUndefined();
+ expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[4]).toEqual(settled.history);
+ expect(btwSession('fresh-parent')).toMatchObject({id:'brand-new-side',turnCount:1});
+ expect(btwSession('fresh-parent')?.freshSession).toBeUndefined();
+});

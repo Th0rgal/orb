@@ -57,7 +57,7 @@
         },
         {
           "path": "src/api/control/fork.rs",
-          "sha256": "bd3834b304e71e334c0a0c153fe2fb5e49e527b64476e960d4fc84718c190f47"
+          "sha256": "34c61930ace12b742b52cf618c4098a14e55b8bf8bdca827c538b63bc7fdb185"
         },
         {
           "path": "src/api/control/remote_jobs.rs",
@@ -65,7 +65,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
-          "sha256": "0bf94850293879b00c66d6860116b58da856b3b42a6aa8925c7d3544e7055184"
+          "sha256": "54b56d8d1f5abe2815cf2f84b2548edea00e958260f13d9f8a14ffca84d0cf6c"
         },
         {
           "path": "src/api/control/dispatch_admission_tests.rs",
@@ -131,11 +131,11 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
-          "sha256": "a1a9afa96e7cf380d393ee08f57fb69ee26e15977a8343e41334348ce4f77c66"
+          "sha256": "e228d101786cc2a763d9f4accf2929e8b27734fc9d97e01796af79523adeb0bc"
         },
         {
           "path": "src/api/control/fork.rs",
-          "sha256": "bd3834b304e71e334c0a0c153fe2fb5e49e527b64476e960d4fc84718c190f47"
+          "sha256": "34c61930ace12b742b52cf618c4098a14e55b8bf8bdca827c538b63bc7fdb185"
         }
       ],
       "execution": {

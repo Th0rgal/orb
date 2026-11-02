@@ -163,4 +163,31 @@ class OrbTurnRecapTest {
         val preserved = OrbSideAgent.parseTurns("side-long", emptyList(), active = false, previous = parsed)
         assertEquals(parsed.turns, preserved.turns)
     }
+
+    @Test
+    fun sideAgentRotatesBloatedSessionsMergesDeltasAndSummarizesPriorTurns() {
+        assertFalse(OrbSideAgent.shouldRotateSession(7, 399L))
+        assertTrue(OrbSideAgent.shouldRotateSession(8, 10L))
+        assertTrue(OrbSideAgent.shouldRotateSession(2, 400L))
+
+        fun ev(seq: Long, content: String) = OrbRow(
+            "e-$seq",
+            mapOf("sequence" to seq, "event_id" to "e-$seq", "event_type" to "assistant_message", "content" to content)
+        )
+        val existing = listOf(ev(1L, "one"), ev(2L, "two"))
+        assertEquals(listOf(1L, 2L), OrbSideAgent.mergeThreadEvents(existing, emptyList())?.map { it.raw["sequence"] })
+        val merged = OrbSideAgent.mergeThreadEvents(existing, listOf(ev(3L, "three"), ev(4L, "four")))
+        assertEquals(listOf(1L, 2L, 3L, 4L), merged?.map { it.raw["sequence"] })
+        assertEquals(4L, OrbSideAgent.maxEventSeq(merged.orEmpty()))
+        assertEquals(null, OrbSideAgent.mergeThreadEvents(merged.orEmpty(), listOf(ev(1L, "reset"))))
+
+        val wrapped = OrbSideAgent.prompt(
+            context = "User: objective",
+            question = "Next question?",
+            priorTurns = listOf(OrbSideAgent.Turn(id = "btw:m:1", question = "First?", answer = "Answer 1"))
+        )
+        assertTrue(wrapped.contains("Earlier side questions in this conversation"))
+        assertTrue(wrapped.contains("Q: First?\nA: Answer 1"))
+        assertEquals("Next question?", OrbSideAgent.extractQuestion(wrapped))
+    }
 }

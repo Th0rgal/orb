@@ -82,6 +82,43 @@ enum OrbBtwThreads {
 
     static let liveStatuses: Set<String> = ["active", "running", "pending", "queued", "starting", "resuming", "waiting_background", "paused"]
     static let resumableStatuses: Set<String> = ["awaiting_user", "completed", "interrupted"]
+    static let maxSessionEvents: Int64 = 400
+    static let maxSessionTurns = 8
+
+    static func shouldRotateSession(turnCount: Int, maxSequence: Int64) -> Bool {
+        turnCount >= maxSessionTurns || maxSequence >= maxSessionEvents
+    }
+
+    /// Merge a `since_seq` delta onto cached thread events, returning `nil` if the server log reset.
+    static func mergeEvents(existing: [StoredEvent], delta: [StoredEvent]) -> [StoredEvent]? {
+        guard let maxKnown = existing.map(\.sequence).max() else {
+            return delta.sorted { $0.sequence < $1.sequence }
+        }
+        if let maxDelta = delta.map(\.sequence).max(), maxDelta < maxKnown {
+            return nil
+        }
+        if delta.isEmpty { return existing }
+        var bySeq: [Int64: StoredEvent] = Dictionary(uniqueKeysWithValues: existing.map { ($0.sequence, $0) })
+        for ev in delta { bySeq[ev.sequence] = ev }
+        return bySeq.values.sorted { $0.sequence < $1.sequence }
+    }
+
+    /// Include bounded recent side Q&As when starting a fresh rotated `/btw` session while
+    /// keeping the final `Current request:\n` delimiter intact for `question(_:)`.
+    static func launchQuestion(_ content: String, priorTurns: [Turn]) -> String {
+        guard !priorTurns.isEmpty else { return content }
+        let formatted = priorTurns.map { "Q: \($0.question)\nA: \($0.answer)" }.joined(separator: "\n\n")
+        let utf8 = Array(formatted.utf8)
+        let bounded: String
+        if utf8.count <= 4000 {
+            bounded = formatted
+        } else {
+            var start = utf8.count - 4000
+            while start < utf8.count && (utf8[start] & 0xC0) == 0x80 { start += 1 }
+            bounded = "[Earlier side history omitted]\n" + String(decoding: utf8[start...], as: UTF8.self)
+        }
+        return "Earlier side questions in this conversation (most recent last):\n\(bounded)\n\nCurrent request:\n\(content)"
+    }
 
     /// The side agent's prompt embeds the parent conversation; show only the request.
     static func question(_ content: String) -> String {
@@ -249,6 +286,8 @@ final class OrbBtwStore {
     /// The thread new questions continue (latest activity), and its mission.
     private(set) var bound: OrbJSON = .null
     private(set) var boundDeliveredMessages: [OrbDeliveredMessage] = []
+    private(set) var boundTurnCount = 0
+    private(set) var boundMaxSequence: Int64 = 0
     private(set) var loaded = false
     private var eventCache: [String: (stamp: String, events: [StoredEvent])] = [:]
     private var refreshing: Task<Void, Error>?
@@ -275,9 +314,15 @@ final class OrbBtwStore {
 
     /// A question was just posted to `id`: follow it as live until Core reports it.
     func sent(to id: String) {
-        if boundID != id { bound = .object(["id": .string(id), "status": .string("running")]) }
-        else if !running, case .object(var fields) = bound { fields["status"] = .string("running"); bound = .object(fields) }
-        eventCache[id] = nil
+        if boundID != id {
+            bound = .object(["id": .string(id), "status": .string("running")])
+            boundTurnCount = 0
+            boundMaxSequence = 0
+        } else if !running, case .object(var fields) = bound {
+            fields["status"] = .string("running")
+            bound = .object(fields)
+        }
+        if let existing = eventCache[id] { eventCache[id] = ("", existing.events) }
     }
 
     private func load() async throws {
@@ -286,13 +331,25 @@ final class OrbBtwStore {
         let threads = OrbBtwThreads.threads(rows["missions"].items.isEmpty ? rows.items : rows["missions"].items, parent: parent)
         var fetched: [String: [StoredEvent]] = [:]
         // Threads are read concurrently; a finished thread whose activity has
-        // not changed is not read again.
+        // not changed is not read again, and cached threads fetch only `sinceSeq` deltas.
         var reads: [(id: String, stamp: String, task: Task<[StoredEvent]?, Never>)] = []
         for m in threads {
             let id = m["id"].text, stamp = OrbBtwThreads.activity(m) + m["status"].text
             let live = OrbBtwThreads.liveStatuses.contains(m["status"].text)
-            if !live, let cached = eventCache[id], cached.stamp == stamp { fetched[id] = cached.events; continue }
-            reads.append((id, stamp, Task { try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 1000).events }))
+            if !live, let cached = eventCache[id], !cached.stamp.isEmpty, cached.stamp == stamp {
+                fetched[id] = cached.events
+                continue
+            }
+            let priorEvents = eventCache[id]?.events
+            let sinceSeq = priorEvents?.map(\.sequence).max()
+            reads.append((id, stamp, Task {
+                if let priorEvents, let sinceSeq,
+                   let delta = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 1000, sinceSeq: sinceSeq).events,
+                   let merged = OrbBtwThreads.mergeEvents(existing: priorEvents, delta: delta) {
+                    return merged
+                }
+                return try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 1000).events
+            }))
         }
         for read in reads {
             guard let events = await read.task.value else { continue }
@@ -328,6 +385,8 @@ final class OrbBtwStore {
         if nextOpen != open { open = nextOpen }
         if next != bound { bound = next }
         let boundEvents = fetched[next["id"].text] ?? []
+        boundTurnCount = perThread.enumerated().first(where: { threads[$0.offset]["id"].text == next["id"].text })?.element.count ?? 0
+        boundMaxSequence = boundEvents.map(\.sequence).max() ?? 0
         boundDeliveredMessages = boundEvents.compactMap { e in
             guard e.eventType == "user_message", (e.metadata["queued"]?.value as? Bool) != true else { return nil }
             return OrbDeliveredMessage(id: e.eventId, content: OrbBtwThreads.question(e.content), sequence: e.sequence)
@@ -618,7 +677,7 @@ struct OrbSideQuestionSheet: View {
         VStack(spacing: 0) {
             if followUps.count > 0 || editingQueuedID != nil { queuedDrawer }
             OrbComposerBox(
-                placeholder: running ? "Queue a side question…" : "Ask a side question",
+                placeholder: running ? "Queue a side question…" : freshSession ? "Ask in a new side session…" : "Ask a side question",
                 text: $question,
                 focused: $focused,
                 dictation: dictation,
@@ -726,7 +785,8 @@ struct OrbSideQuestionSheet: View {
                 guard !receipt["path"].text.isEmpty else { throw URLError(.cannotParseResponse) }
                 content += "\nAttachment: " + receipt["path"].text
             }
-            if let id = store.boundID, !freshSession, (running || followUps.count > 0 || OrbBtwThreads.resumableStatuses.contains(store.boundStatus)) {
+            let rotateIdle = !running && followUps.count == 0 && OrbBtwThreads.shouldRotateSession(turnCount: store.boundTurnCount, maxSequence: store.boundMaxSequence)
+            if let id = store.boundID, !freshSession, !rotateIdle, (running || followUps.count > 0 || OrbBtwThreads.resumableStatuses.contains(store.boundStatus)) {
                 let shouldQueue = running || followUps.count > 0
                 let result = try await OrbSideSend.retrying { try await OrbCore.shared.call("/api/control/message", method: "POST", body: .object([
                     "mission_id": .string(id),
@@ -752,9 +812,10 @@ struct OrbSideQuestionSheet: View {
                     store.sent(to: id)
                 }
             } else {
+                let launchBody = OrbBtwThreads.launchQuestion(content, priorTurns: store.turns)
                 let created = try await OrbSideSend.retrying { try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(parentID))/btw/agent", method: "POST", body: .object([
                     "backend": .string(OrbBtwConfig.harness), "model_override": .string(OrbBtwConfig.model), "model_effort": .null,
-                    "idempotency_key": .string(messageID), "side_question": .string(content),
+                    "idempotency_key": .string(messageID), "side_question": .string(launchBody),
                 ])) }
                 freshSession = false
                 store.sent(to: created["id"].text)

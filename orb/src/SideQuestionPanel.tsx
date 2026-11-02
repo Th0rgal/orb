@@ -101,6 +101,13 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const hasQueueFollowUp=()=>{
   try{return 'queueBtwFollowUp' in btwMod&&typeof btwMod.queueBtwFollowUp==='function';}catch{return false;}
  };
+ const freshSession=()=>Boolean(btwSession(p.mission)?.freshSession);
+ const canStartFreshSession=()=>{
+  try{return 'startFreshBtwSession' in btwMod&&typeof btwMod.startFreshBtwSession==='function';}catch{return false;}
+ };
+ const startFreshSession=()=>{
+  try{if('startFreshBtwSession' in btwMod&&typeof btwMod.startFreshBtwSession==='function')btwMod.startFreshBtwSession(p.mission);}catch{}
+ };
  const sendNext=()=>{
   if(hasQueueFollowUp()||busy()||error())return;
   const next=queue()[0];if(!next)return;
@@ -533,7 +540,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   <div ref={inline}/>
   <Show when={!side&&!open()&&(history().length||busy()||error())}><button class="btw-reopen" onClick={reveal}>Side questions {busy()?'· Answering…':`· ${history().length}`}</button></Show>
   <Show when={open()}><Portal mount={side ? side.target() : inline}><section class="btw-panel" aria-label="Side questions">
-   <header><div><strong>Side question</strong></div><div class="btw-actions"><button class="icon-btn" aria-label="Close side questions" onClick={()=>{setOpen(false);side?.hide();}}><Ic.CloseIcon size={16}/></button></div></header>
+   <header><div><strong>Side question</strong></div><div class="btw-actions"><Show when={canStartFreshSession()}><button class="icon-btn" aria-label="New side session" title={freshSession()?"Next question starts a new side session":"New side session"} disabled={busy()||!btwSession(p.mission)||freshSession()} onClick={startFreshSession}><Ic.PlusIcon size={15}/></button></Show><button class="icon-btn" aria-label="Close side questions" onClick={()=>{setOpen(false);side?.hide();}}><Ic.CloseIcon size={16}/></button></div></header>
    <div class="btw-thread" ref={pin.ref} onScroll={pin.onScroll}>
     <For each={turns}>{exchange=>{
      const content=()=>remoteLog(exchange.answer);
@@ -599,7 +606,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      revision={draftRevision()}
      onPending={prepareSend}
      picker={false}
-     placeholder={busy()?"Queue a side question…":"Ask a side question…"}
+     placeholder={busy()?"Queue a side question…":freshSession()?"Ask in a new side session…":"Ask a side question…"}
      busy={busy()}
      scope={key()}
      uploadTarget="side"

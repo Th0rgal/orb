@@ -10,7 +10,8 @@ const serverReconcile=vi.hoisted(()=>({
 }));
 const watchMock=vi.hoisted(()=>({fn:async(_parent:string,_signal:AbortSignal,_receive:(e:any)=>void)=>{}}));
 const queueFollowUpMock=vi.hoisted(()=>({enabled:false,fn:vi.fn()}));
-vi.mock('../src/btwAgent',async()=>{const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>undefined,btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[])=>serverReconcile.fn(parent,local),get queueBtwFollowUp(){return queueFollowUpMock.enabled?queueFollowUpMock.fn:undefined;},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
+const sessionMock=vi.hoisted(()=>({current:undefined as any,rev:undefined as (()=>number)|undefined,bump:undefined as (()=>void)|undefined}));
+vi.mock('../src/btwAgent',async()=>{const {createSignal}=await import('solid-js');const [rev,setRev]=createSignal(0);sessionMock.rev=rev;sessionMock.bump=()=>setRev(v=>v+1);const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>{sessionMock.rev?.();return sessionMock.current;},startFreshBtwSession:()=>{if(sessionMock.current){sessionMock.current={...sessionMock.current,freshSession:true};sessionMock.bump?.();}},btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[])=>serverReconcile.fn(parent,local),get queueBtwFollowUp(){return queueFollowUpMock.enabled?queueFollowUpMock.fn:undefined;},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
 const thoughts=vi.hoisted(()=>({value:[] as {kind:'think';key:string;text:string;done:boolean}[]}));
 const storage=vi.hoisted(()=>new Map<string,unknown>());
 vi.mock('../src/composerDrafts',()=>({
@@ -19,7 +20,7 @@ vi.mock('../src/composerDrafts',()=>({
  readSideThread:async(key:string)=>storage.get('thread:'+key),
  saveSideThread:async(key:string,value:unknown)=>{storage.set('thread:'+key,structuredClone(value));},
 }));
-afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];queueFollowUpMock.enabled=false;queueFollowUpMock.fn.mockReset();watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];sessionMock.current=undefined;queueFollowUpMock.enabled=false;queueFollowUpMock.fn.mockReset();watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
 it('routes /btw away from the working agent while it is busy',async()=>{
  const send=vi.fn(),ask=vi.fn(()=>true),stop=vi.fn();
  render(()=><Composer placeholder="Follow-up" busy onSend={send} onStop={stop} onBtw={ask}/>);
@@ -447,4 +448,18 @@ it('handles live turn transitions when an immediately-admitted follow-up queues 
  await waitFor(()=>expect(screen.queryByLabelText('Queued messages')).toBeNull());
  emitWatch!({type:'done',answer:'Third turn answer.'});
  expect(await screen.findByText('Third turn answer.')).toBeTruthy();
+});
+
+it('lets the user arm a clean side session from the panel header',async()=>{
+ sessionMock.current={id:'side-bloated',question:'Prior',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0};
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="fresh-btn-test" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ handle.open();
+ const btn=await screen.findByRole('button',{name:'New side session'});
+ expect((btn as HTMLButtonElement).disabled).toBe(false);
+ expect(screen.getByPlaceholderText('Ask a side question…')).toBeTruthy();
+ fireEvent.click(btn);
+ expect(sessionMock.current.freshSession).toBe(true);
+ expect((btn as HTMLButtonElement).disabled).toBe(true);
+ expect(screen.getByPlaceholderText('Ask in a new side session…')).toBeTruthy();
 });
