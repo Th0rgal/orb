@@ -751,14 +751,14 @@ for c in json.loads(Path(sys.argv[3]).read_text()):
         run([TOOLS / "lean", "LarOracle.lean", "-c", "LarOracle.c"], lar_dir, env=lar_env)
         run([TOOLS / "leanc", "-O2", "LarOracle.c", "LoopAliasRc.c", "-o", "lar-stock-c"], lar_dir, env=lar_env)
         lar_c = parse_rows(run([lar_dir / "lar-stock-c", "lar_cases.txt"], lar_dir, env=lar_env, role="execution"))
-        run([TURBO / "lean/.lake/build/bin/lean-native", "emit-lnir", "--wire", lar_dir / "LoopAliasRc.lean",
+        run([TURBO / "lean/.lake/build/bin/lean-native", "emit-lnir", "--wire", "--allow-rc-adt", lar_dir / "LoopAliasRc.lean",
              "-o", lar_dir / "lar.lnir"], lar_dir, env=lar_env)
         lar_lnir, lar_lnir_opt, max_live_objects = {}, {}, 0
         core_bin = TURBO / "lean/.lake/build/bin/lean-native-core"
         for c in lar_cases:
             binding = f"probe_{c['symbol']}:" + ",".join(map(str, c["args"]))
             for dest, extra in ((lar_lnir, []), (lar_lnir_opt, ["--opt"])):
-                raw = run([core_bin, "eval-lnir", "--lnir", lar_dir / "lar.lnir",
+                raw = run([core_bin, "eval-lnir", "--allow-rc-adt", "--lnir", lar_dir / "lar.lnir",
                            "--args", binding, "--batch-json", *extra], lar_dir, env=lar_env, role="execution")
                 rows = json.loads(raw)
                 if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
@@ -768,7 +768,7 @@ for c in json.loads(Path(sys.argv[3]).read_text()):
                 if type(live) is not int or live < 0:
                     raise ValueError(f"invalid live_objects in LAR LNIR receipt: {live!r}")
                 max_live_objects = max(max_live_objects, live)
-        tv_json = json.loads(run([core_bin, "validate-tv", "--lnir", lar_dir / "lar.lnir", "--json"], lar_dir, env=lar_env))
+        tv_json = json.loads(run([core_bin, "validate-tv", "--allow-rc-adt", "--lnir", lar_dir / "lar.lnir", "--json"], lar_dir, env=lar_env))
         lar_mismatches = (
             compare_rows(lar_stock, lar_c, lar_cases)
             + compare_rows(lar_stock, lar_lnir, lar_cases)
