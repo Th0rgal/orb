@@ -65,7 +65,7 @@ relabeled.
 Physical device and native Apple execution remain blocked. Production rollout,
 full end-to-end host callers and independently accepted phase exits remain
 separate gates. On current `master` (132 manifest entries including
-`orb_slot_bypass_step`, `orb_node_resize_step`, and `orb_node_lane_step`), the coverage registry is **23 partial / 109 unconnected**
+`orb_slot_bypass_step`, `orb_node_resize_step`, and `orb_node_lane_step`), the coverage registry is **46 partial / 86 unconnected**
 (23 partial / 106 unconnected across the 129 entries at execution head
 `3c70e5ada`); passing scalar conformance does not close those connections.
 

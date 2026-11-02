@@ -179,7 +179,7 @@ Evidence directory: `/srv/sandboxed-storage/host-tmp/opencode/p1-final-e585ba9-2
 
 These are local unsigned receipts, not durable public artifact hosting or proof
 of complete host wiring. On current `master` (132 manifest entries including
-`orb_slot_bypass_step`, `orb_node_resize_step`, and `orb_node_lane_step`), the coverage registry remains **23 partial / 109
+`orb_slot_bypass_step`, `orb_node_resize_step`, and `orb_node_lane_step`), the coverage registry remains **46 partial / 86
 unconnected** (`acceptance: INCOMPLETE`; 23 partial / 106 unconnected across the
 129 entries at execution head `3c70e5ada`). Physical iPhone/Pixel execution
 remains blocked. See [P3 target qualification](P3_TARGET_QUALIFICATION_REPORT.md)

@@ -14,7 +14,7 @@ pub fn select_host_stream_isa_with_caps(caps: u64, max_requested: u8) -> u8 {
     stream_simd::select_verified_stream_isa_with_caps(caps, max_requested)
 }
 
-pub fn scan_host_stream_bytes(buf: &[u8]) -> stream_simd::StreamByteScanSummary {
+pub fn scan_host_stream_bytes(buf: &[u8]) -> StreamByteScanSummary {
     stream_simd::scan_stream_bytes(buf)
 }
 
