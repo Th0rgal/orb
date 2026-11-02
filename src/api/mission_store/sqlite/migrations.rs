@@ -148,6 +148,7 @@ CREATE INDEX IF NOT EXISTS idx_events_type ON mission_events(mission_id, event_t
 CREATE INDEX IF NOT EXISTS idx_events_mission_type_sequence ON mission_events(mission_id, event_type, sequence);
 CREATE INDEX IF NOT EXISTS idx_events_tool_call ON mission_events(tool_call_id) WHERE tool_call_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_event_type ON mission_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_type_timestamp ON mission_events(event_type, timestamp);
 -- Stale-mission detection takes MAX(timestamp) per mission. Sequence ordering
 -- doesn't help here because in-place updates (e.g. text_delta_latest rewriting
 -- an existing event_id row) bump `timestamp` without changing `sequence`.
@@ -440,6 +441,7 @@ impl SqliteMissionStore {
             "CREATE INDEX IF NOT EXISTS idx_missions_status_updated ON missions(status, updated_at);
              CREATE INDEX IF NOT EXISTS idx_events_mission_type_sequence ON mission_events(mission_id, event_type, sequence);
              CREATE INDEX IF NOT EXISTS idx_events_event_type ON mission_events(event_type);
+             CREATE INDEX IF NOT EXISTS idx_events_type_timestamp ON mission_events(event_type, timestamp);
              CREATE INDEX IF NOT EXISTS idx_events_mission_timestamp ON mission_events(mission_id, timestamp DESC);",
         )
         .map_err(|e| format!("Failed to create performance indexes: {}", e))?;
