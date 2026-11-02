@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import useSWR from 'swr';
 import { Github, Loader, Copy, Check, ExternalLink } from 'lucide-react';
 import { toast } from '@/components/toast';
@@ -48,49 +48,71 @@ export function GithubIntegrationCard() {
   const [device, setDevice] = useState<DevicePrompt | null>(null);
   const { copiedId, copy } = useCopyToClipboard();
 
+  const cancelConnectRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => { cancelConnectRef.current?.(); }, []);
+
   const connect = async () => {
-    let auth: GithubAuthorizeResponse;
+    cancelConnectRef.current?.();
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    let finishPolling: (() => void) | undefined;
+    const cancel = () => {
+      cancelled = true;
+      clearInterval(timer);
+      finishPolling?.();
+    };
+    cancelConnectRef.current = cancel;
     try {
-      auth = await authorizeGithub();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to start GitHub authorization');
-      return;
+      let auth: GithubAuthorizeResponse;
+      try {
+        auth = await authorizeGithub();
+      } catch (e) {
+        if (!cancelled) toast.error(e instanceof Error ? e.message : 'Failed to start GitHub authorization');
+        return;
+      }
+      if (cancelled) return;
+
+      const openUrl = auth.verification_uri_complete || auth.verification_uri;
+      setDevice({ userCode: auth.user_code, verificationUri: auth.verification_uri, openUrl });
+      window.open(openUrl, 'github-device', 'noopener,noreferrer');
+
+      const deadline = Date.now() + auth.expires_in * 1000;
+      const intervalMs = Math.max(auth.interval, 2) * 1000 || CONNECT_POLL_FALLBACK_MS;
+      await new Promise<void>((resolve) => {
+        finishPolling = resolve;
+        let polling = false;
+        timer = setInterval(async () => {
+          if (cancelled || polling) return;
+          polling = true;
+          let status: GithubIntegrationStatus | undefined;
+          try {
+            status = await getGithubStatus();
+          } catch {
+            // Transient; keep polling while this card remains mounted.
+          } finally {
+            polling = false;
+          }
+          if (cancelled) return;
+          if (status?.connected) {
+            clearInterval(timer);
+            toast.success(`Connected GitHub as ${status.login}`);
+            setDevice(null);
+            resolve();
+            return;
+          }
+          if (Date.now() > deadline) {
+            clearInterval(timer);
+            toast.error('GitHub code expired before approval. Please try again.');
+            setDevice(null);
+            resolve();
+          }
+        }, intervalMs);
+      });
+      if (!cancelled) await mutate();
+    } finally {
+      clearInterval(timer);
+      if (cancelConnectRef.current === cancel) cancelConnectRef.current = null;
     }
-
-    const openUrl = auth.verification_uri_complete || auth.verification_uri;
-    setDevice({ userCode: auth.user_code, verificationUri: auth.verification_uri, openUrl });
-
-    // Open the GitHub verification page (code pre-filled when available).
-    window.open(openUrl, 'github-device', 'noopener,noreferrer');
-
-    // Poll the backend until the device flow completes or the code expires.
-    const deadline = Date.now() + auth.expires_in * 1000;
-    const intervalMs = Math.max(auth.interval, 2) * 1000 || CONNECT_POLL_FALLBACK_MS;
-    await new Promise<void>((resolve) => {
-      const timer = window.setInterval(async () => {
-        let status: GithubIntegrationStatus | undefined;
-        try {
-          status = await getGithubStatus();
-        } catch {
-          // Transient; keep polling.
-        }
-        if (status?.connected) {
-          window.clearInterval(timer);
-          toast.success(`Connected GitHub as ${status.login}`);
-          setDevice(null);
-          resolve();
-          return;
-        }
-        if (Date.now() > deadline) {
-          window.clearInterval(timer);
-          toast.error('GitHub code expired before approval. Please try again.');
-          setDevice(null);
-          resolve();
-        }
-      }, intervalMs);
-    });
-
-    await mutate();
   };
 
   const disconnect = async () => {
