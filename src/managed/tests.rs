@@ -4322,3 +4322,69 @@ async fn mission_budget_overrides_daily_cap_for_spawn_auto_extend_resume_and_iso
         after_clear.message
     );
 }
+
+#[test]
+fn sandbox_name_prefix_isolates_non_prod_services_and_retries_sigterm_143() {
+    assert_eq!(sandbox_name_prefix_for(None), "orb-managed-");
+    assert_eq!(
+        sandbox_name_prefix_for(Some(std::path::Path::new("/usr/local/bin/sandboxed-sh"))),
+        "orb-managed-"
+    );
+    assert_eq!(
+        sandbox_name_prefix_for(Some(std::path::Path::new(
+            "/usr/local/bin/sandboxed-sh-prod"
+        ))),
+        "orb-managed-"
+    );
+    assert_eq!(
+        sandbox_name_prefix_for(Some(std::path::Path::new(
+            "/usr/local/bin/sandboxed-sh-dev"
+        ))),
+        "orb-managed-dev-"
+    );
+    assert!(is_retryable_exec_error("exit code 143"));
+    assert!(!is_retryable_exec_error("exit code 1"));
+    assert_eq!(LifecyclePolicy::default().post_job_working_idle_minutes, 10);
+}
+
+#[tokio::test]
+async fn in_flight_snapshot_protects_post_job_worker_from_idle_reaper() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.post_job_idle_minutes = 5;
+    s.max_concurrent = Some(4);
+    let (m, _) = manager(dir.path(), s);
+    let vm = online_machine(&m, "parent-working").await;
+    let mut map = std::collections::HashMap::new();
+    map.insert("parent-working".to_string(), OwnerState::Working);
+    m.set_owner_probe(probe_from(map));
+
+    m.update(&vm.id, |x| {
+        x.last_busy_at = Some(Utc::now() - chrono::Duration::minutes(20));
+        x.has_executed_job = true;
+    })
+    .await;
+    m.snapshots.lock().await.push(snapshots::ManagedSnapshot {
+        provisioning_mode: ProvisioningMode::Worker,
+        name: "orb-snap-verity-warm-1234".into(),
+        label: "warm".into(),
+        project: Some("verity-core".into()),
+        owner_mission_id: Some("parent-working".into()),
+        owner_user_id: Some("t1".into()),
+        source_machine_id: vm.id.clone(),
+        source_size: "xlarge".into(),
+        created_at: Utc::now(),
+        last_used_at: None,
+        status: "saving".into(),
+        size_bytes: None,
+        error: None,
+        monthly_usd: 0.0,
+    });
+
+    m.reap_once().await;
+    assert_eq!(
+        m.get(&vm.id).await.unwrap().state,
+        MachineState::Online,
+        "saving snapshot must keep source VM busy against post-job idle reaper"
+    );
+}

@@ -16,6 +16,9 @@ pub(crate) enum FailureKind {
     /// The startup watchdog stopped a job that stayed silent on every
     /// liveness signal. Nobody asked for the stop, so it is retried once.
     StartupStall,
+    /// Node disk or harness SQLite/tool-output write failure (`ENOSPC`,
+    /// `SQLITE_FULL`, or OpenCode's `Failed to execute statement`).
+    StorageExhausted,
     Unknown,
 }
 
@@ -66,12 +69,25 @@ pub(crate) fn classify(raw: &str) -> Failure {
     } else if [
         "content safety filter",
         "blocked by safety",
+        "blocked by gemini's filters",
         "content_policy_violation",
     ]
     .iter()
     .any(|s| lower.contains(s))
     {
         FailureKind::ProviderPolicy
+    } else if [
+        "no space left on device",
+        "enospc",
+        "database or disk is full",
+        "sqlite_full",
+        "filesystem.writefile",
+        "failed to execute statement",
+    ]
+    .iter()
+    .any(|s| lower.contains(s))
+    {
+        FailureKind::StorageExhausted
     } else if [
         "unauthorized",
         "unauthenticated",
@@ -174,6 +190,7 @@ pub(crate) fn classify(raw: &str) -> Failure {
         FailureKind::Quota => "The provider usage limit was reached.",
         FailureKind::Cancelled => "The run was stopped. Automatic recovery will not override that stop.",
         FailureKind::StartupStall => "The run stayed silent past the startup watchdog and was interrupted; it is resumed automatically once.",
+        FailureKind::StorageExhausted => "The node ran out of disk space or its local SQLite store could not write; it is resumed automatically after cleanup.",
         FailureKind::Unknown => "The run ended without a confirmed recoverable cause.",
     }.into();
     failure
@@ -232,6 +249,18 @@ mod tests {
             (
                 "blocked by content safety filters",
                 FailureKind::ProviderPolicy,
+            ),
+            (
+                "This request was blocked by Gemini's filters.",
+                FailureKind::ProviderPolicy,
+            ),
+            (
+                r#"CLI error: {"data":{"message":"Failed to execute statement"},"name":"UnknownError"}"#,
+                FailureKind::StorageExhausted,
+            ),
+            (
+                "Error: ENOSPC: no space left on device, write",
+                FailureKind::StorageExhausted,
             ),
             (
                 "/usr/local/bin/codex-code-mode-host: No such file or directory",

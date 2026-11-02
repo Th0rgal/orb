@@ -1486,6 +1486,15 @@ impl JobRunner {
                     let _ = monitor.await;
                 }
                 let (state, exit_code, error) = outcome?.into_job_result();
+                let cleanup_dir = mission_dir.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    super::lean::prune_opencode_tool_outputs_in_mission_dir(
+                        &cleanup_dir,
+                        Duration::from_secs(60 * 60),
+                        std::time::SystemTime::now(),
+                    );
+                })
+                .await;
                 Ok((state, exit_code, error, None))
             }
             JobPayload::LeanBuild { .. } => {

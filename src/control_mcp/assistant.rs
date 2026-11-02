@@ -232,6 +232,11 @@ struct MissionEventsParams {
     /// When neither cursor is provided, the MCP defaults to the newest page.
     #[serde(default)]
     before_seq: Option<i64>,
+    /// Per-event tool payload truncation cap in bytes (default 4096, clamped
+    /// 1024..=65536). Prevents multi-megabyte tool dumps from overflowing the
+    /// caller's context window.
+    #[serde(default)]
+    max_payload: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1289,15 +1294,24 @@ fn default_event_limit() -> usize {
     40
 }
 
+const DEFAULT_MCP_EVENT_MAX_PAYLOAD: usize = 4_096;
+const MIN_MCP_EVENT_MAX_PAYLOAD: usize = 1_024;
+const MAX_MCP_EVENT_MAX_PAYLOAD: usize = 65_536;
+
 fn mission_events_path(
     id: Uuid,
     limit: usize,
     view: &str,
     before_seq: Option<i64>,
     since_seq: Option<i64>,
+    max_payload: Option<usize>,
 ) -> String {
-    let mut path =
-        format!("/api/control/missions/{id}/events?limit={limit}&view={view}&include_counts=false");
+    let max_payload = max_payload
+        .unwrap_or(DEFAULT_MCP_EVENT_MAX_PAYLOAD)
+        .clamp(MIN_MCP_EVENT_MAX_PAYLOAD, MAX_MCP_EVENT_MAX_PAYLOAD);
+    let mut path = format!(
+        "/api/control/missions/{id}/events?limit={limit}&view={view}&include_counts=false&max_payload={max_payload}"
+    );
     if let Some(before_seq) = before_seq {
         path.push_str(&format!("&before_seq={before_seq}"));
     } else if let Some(since_seq) = since_seq {
@@ -1927,16 +1941,17 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "get_mission_events".to_string(),
-                description: "Fetch persisted mission events. Without a cursor, returns the newest bounded page in ascending order; use before_seq to page backwards or since_seq for deltas.".to_string(),
+                description: "Fetch persisted mission events (prefer get_mission_digest or get_mission_health for routine checks). Without a cursor, returns the newest bounded page in ascending order; use before_seq to page backwards or since_seq for deltas. Tool payloads default to a 4 KB excerpt cap.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id"],
                     "properties": {
                         "mission_id": {"type": "string"},
-                        "limit": {"type": "integer", "description": "Maximum events to return, default 40 newest events."},
+                        "limit": {"type": "integer", "description": "Maximum events to return, default 40 newest events (capped at 50 for view='all')."},
                         "view": {"type": "string", "enum": ["transcript", "trace", "history", "all"]},
                         "since_seq": {"type": "integer", "description": "Return events with sequence greater than this value."},
-                        "before_seq": {"type": "integer", "description": "Page backwards: return the newest events with sequence below this value (takes precedence over since_seq)."}
+                        "before_seq": {"type": "integer", "description": "Page backwards: return the newest events with sequence below this value (takes precedence over since_seq)."},
+                        "max_payload": {"type": "integer", "description": "Maximum bytes per tool_call/tool_result payload (default 4096, range 1024..65536)."}
                     }
                 }),
             },
@@ -2686,7 +2701,6 @@ impl AssistantMcp {
 
     async fn get_mission_events(&self, params: MissionEventsParams) -> Result<Value, String> {
         let id = self.resolve_mission_id(&params.mission_id).await?;
-        let limit = params.limit.clamp(1, 200);
         // Validate against the declared enum rather than interpolating a
         // free-form string into the URL, which would let a caller smuggle
         // extra query parameters (e.g. `all&foo=bar`) into the internal request.
@@ -2701,7 +2715,20 @@ impl AssistantMcp {
                 ))
             }
         };
-        let path = mission_events_path(id, limit, view, params.before_seq, params.since_seq);
+        let limit_cap = match view {
+            "all" => 50,
+            "trace" => 300,
+            _ => 200,
+        };
+        let limit = params.limit.clamp(1, limit_cap);
+        let path = mission_events_path(
+            id,
+            limit,
+            view,
+            params.before_seq,
+            params.since_seq,
+            params.max_payload,
+        );
         let response = self.api_get(&path).await?;
         if !response.status().is_success() {
             return Err(format!(
@@ -2731,6 +2758,7 @@ impl AssistantMcp {
                 view: Some("transcript".to_string()),
                 since_seq: None,
                 before_seq: Some(i64::MAX),
+                max_payload: None,
             })
             .await?;
         let mut files = Vec::new();
@@ -3420,6 +3448,7 @@ impl AssistantMcp {
                             view: Some("transcript".to_string()),
                             since_seq: None,
                             before_seq: Some(i64::MAX),
+                            max_payload: None,
                         })
                         .await?;
                     let empty = Vec::new();
@@ -4249,6 +4278,7 @@ impl AssistantMcp {
                 view: Some("transcript".to_string()),
                 since_seq: None,
                 before_seq: Some(i64::MAX),
+                max_payload: None,
             })
             .await
             .ok()?;
@@ -4294,6 +4324,7 @@ impl AssistantMcp {
                 view: Some("trace".to_string()),
                 since_seq: None,
                 before_seq: Some(i64::MAX),
+                max_payload: None,
             })
             .await?;
         let empty = Vec::new();
@@ -4343,6 +4374,7 @@ impl AssistantMcp {
                 view: Some("trace".to_string()),
                 since_seq: None,
                 before_seq: Some(i64::MAX),
+                max_payload: None,
             })
             .await?;
         let empty = Vec::new();
@@ -7915,14 +7947,17 @@ mod tests {
     #[test]
     fn mission_events_default_to_the_newest_bounded_page() {
         let id = Uuid::nil();
-        let newest = mission_events_path(id, 40, "all", None, None);
+        let newest = mission_events_path(id, 40, "all", None, None, None);
+        assert!(newest.contains("&max_payload=4096&"));
         assert!(newest.ends_with(&format!("&before_seq={}", i64::MAX)));
 
-        let delta = mission_events_path(id, 40, "all", None, Some(17));
+        let delta = mission_events_path(id, 40, "all", None, Some(17), Some(256));
+        assert!(delta.contains("&max_payload=1024&"));
         assert!(delta.ends_with("&since_seq=17"));
         assert!(!delta.contains("before_seq"));
 
-        let backwards = mission_events_path(id, 40, "all", Some(99), Some(17));
+        let backwards = mission_events_path(id, 40, "all", Some(99), Some(17), Some(200_000));
+        assert!(backwards.contains("&max_payload=65536&"));
         assert!(backwards.ends_with("&before_seq=99"));
         assert!(!backwards.contains("since_seq"));
     }

@@ -9514,6 +9514,7 @@ fn is_google_content_filter_finish_reason(reason: &str) -> bool {
 struct CannedFilterAccumulator {
     text: String,
     saw_non_text_output: bool,
+    saw_reasoning: bool,
 }
 
 enum CannedFilterPeek {
@@ -9525,7 +9526,7 @@ enum CannedFilterPeek {
 
 impl CannedFilterAccumulator {
     fn has_buffered_output(&self) -> bool {
-        self.saw_non_text_output || !self.text.is_empty()
+        self.saw_non_text_output || self.saw_reasoning || !self.text.is_empty()
     }
 
     fn evaluate(&self) -> CannedFilterPeek {
@@ -9567,7 +9568,17 @@ impl CannedFilterAccumulator {
                     self.saw_non_text_output = true;
                 }
                 if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
-                    self.text.push_str(t);
+                    if part
+                        .get("thought")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        if !t.is_empty() {
+                            self.saw_reasoning = true;
+                        }
+                    } else {
+                        self.text.push_str(t);
+                    }
                 }
             }
         }
@@ -9588,10 +9599,13 @@ impl CannedFilterAccumulator {
                         .get("reasoning")
                         .and_then(|v| v.as_str())
                         .is_some_and(|t| !t.is_empty())
-                    || delta
-                        .get("tool_calls")
-                        .and_then(|v| v.as_array())
-                        .is_some_and(|arr| !arr.is_empty())
+                {
+                    self.saw_reasoning = true;
+                }
+                if delta
+                    .get("tool_calls")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|arr| !arr.is_empty())
                     || delta.get("function_call").is_some_and(|v| !v.is_null())
                     || delta.get("audio").is_some_and(|v| !v.is_null())
                 {
@@ -13718,6 +13732,51 @@ mod tests {
             .await
             .expect("valid short strict-prefix answer must be released");
         assert!(String::from_utf8(short_peek).unwrap().contains("\"This\""));
+
+        // Thinking / reasoning deltas arriving BEFORE CloudCode's post-thought canned safety
+        // refusal must NOT commit SafeOutput early — both OpenAI/CLIProxyAPI (`reasoning_content`)
+        // and native Google (`thought: true`) streams must still fail over cleanly!
+        let reasoning_then_canned_openai = sse(&[
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me inspect the EVM storage layout...\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"This request was blocked by Gemini's filters. They can occasionally trigger by mistake.\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+        let (reason_oa_res, reason_oa_retries) = open_sse_with_retry(
+            reasoning_then_canned_openai,
+            PeekKind::OpenAi,
+            |_: &(CooldownReason, String)| async { Some(sse(&[HELLO])) },
+            &policy,
+            std::time::Duration::from_secs(5),
+            ("antigravity", "agy-model-low"),
+        )
+        .await;
+        let Err((reason_oa_kind, reason_oa_detail)) = reason_oa_res else {
+            panic!("post-reasoning OpenAI canned refusal must fail over");
+        };
+        assert!(matches!(reason_oa_kind, CooldownReason::ClientError));
+        assert!(is_per_request_content_filter_detail(&reason_oa_detail));
+        assert_eq!(reason_oa_retries, 0);
+
+        let thought_then_canned_google = sse(&[
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"thought\":true,\"text\":\"Checking invariant...\"}]}}]}\n\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"This request was blocked by Gemini's filters.\"}]}}]}\n\n",
+        ]);
+        let (thought_g_res, thought_g_retries) = open_sse_with_retry(
+            thought_then_canned_google,
+            PeekKind::Google,
+            |_: &(CooldownReason, String)| async { Some(sse(&[HELLO])) },
+            &policy,
+            std::time::Duration::from_secs(5),
+            ("google", "gemini-4-argon-eap"),
+        )
+        .await;
+        let Err((thought_g_kind, thought_g_detail)) = thought_g_res else {
+            panic!("post-thought Google canned refusal must fail over");
+        };
+        assert!(matches!(thought_g_kind, CooldownReason::ClientError));
+        assert!(is_per_request_content_filter_detail(&thought_g_detail));
+        assert_eq!(thought_g_retries, 0);
 
         let non_stream_canned = serde_json::json!({
             "choices": [{

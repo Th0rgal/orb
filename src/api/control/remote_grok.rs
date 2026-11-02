@@ -2650,6 +2650,7 @@ impl NativeGrokObserver {
                 super::remote_failure::FailureKind::Quota => "remote_quota",
                 super::remote_failure::FailureKind::Cancelled => "remote_job_cancelled",
                 super::remote_failure::FailureKind::StartupStall => "remote_startup_stalled",
+                super::remote_failure::FailureKind::StorageExhausted => "remote_storage_exhausted",
                 super::remote_failure::FailureKind::Unknown => "remote_node_job",
             }
         } else {
