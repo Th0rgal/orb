@@ -38,7 +38,7 @@ export function CopyButton({ text, className, label = 'Copied!', showOnHover = t
       onClick={handleCopy}
       className={cn(
         'p-1.5 rounded-lg transition-all',
-        showOnHover && 'opacity-0 group-hover:opacity-100',
+        showOnHover && 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
         'hover:bg-white/[0.08] text-white/40 hover:text-white/70',
         className
       )}
