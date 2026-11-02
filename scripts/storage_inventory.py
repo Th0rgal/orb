@@ -20,11 +20,14 @@ TERMINAL = {"completed", "failed", "interrupted", "blocked", "not_feasible"}
 RECLAIMABLE_WORKER_CACHES = {
     ".elan",
     ".lake",
+    ".turbo-lean-overlay",
+    ".cargo-targets",
     "target",
     "toolchains",
     ".rustup",
     "node_modules",
     "conecache",
+    "wave8-pkg-pack-cache",
 }
 
 

@@ -82,7 +82,13 @@ Example:
 Read-only storage attribution across Core workspaces and remote `sandboxed-node` work directories (`--apply` is intentionally rejected). Supports `--export-missions` / `--missions-snapshot` so worker UUID directories and nested caches are attributed to Core mission status and owner without copying prompt/history payloads.
 
 ### reclaim_worker_build_caches.py
-Dry-run-first reclaimer for reconstructible build/toolchain caches (`.elan`, `.lake`, `target`, `toolchains`, `.rustup`, `node_modules`) inside verified non-active worker mission directories (`lsof +D`-checked, single-device / nested-mount-fenced via `dir_fd`, fail-closed on incomplete Core or `jobs.db` indexes, preserves all mission source and `.git` state).
+Dry-run-first reclaimer for reconstructible build/toolchain caches (`.elan`, `.lake`, `.turbo-lean-overlay`, `.cargo-targets`, `wave8-pkg-pack-cache`, `target`, `toolchains`, `.rustup`, `node_modules`, `conecache`, `.npm/_cacache`, `.codex/.tmp`, `.bun/install/cache`, and marker-verified `target-*` / `*-overlay` dirs) inside verified non-active worker mission directories (`/proc` + `lsof +D`-checked, single-device / nested-mount-fenced via `dir_fd`, fail-closed on incomplete Core or `jobs.db` indexes, preserves all mission source and `.git` state).
+
+### disk_sentinel.sh
+Multi-host disk sentinel run every 30 minutes on `agent-core` with per-host hysteresis (`WARN=85%`, `CRIT=92%`, `EMERG=95%`, `3%` recovery hysteresis at `<=82%`) and a `12h` repeat cooldown (`--stateless` prints raw current status without reading or mutating cooldown state).
+
+### bootstrap_baremetal_worker.sh
+Idempotent post-install bootstrap for bare-metal Ubuntu 26.04 LTS RAID0 workers (`docs/WORKER_RAID0_REINSTALL.md`), provisioning a single read-only `/opt/orb/elan` toolchain shared across `sandboxed-node` and CI runners, `/tmp` age cleanup via `systemd-tmpfiles`, and `SANDBOXED_NODE_MIN_FREE_GB` sized above `disk-sentinel`'s `85%` warn line.
 
 ### rolling_upgrade_nodes.py
 Zero-disruption rolling upgrade controller for `sandboxed-node` workers. Cordons at most `--max-concurrent-cordons` nodes at a time via `/api/nodes/:name/cordon`, fences worker admission via an exclusive `BEGIN IMMEDIATE` lock on `jobs.db` before verifying zero active jobs/leases, swaps staged binaries with automatic `.prev` rollback and `.new.failed` quarantine on activation failure, and uncordons only health-verified nodes.

@@ -48,7 +48,8 @@ The production cron runs:
 ```
 
 Keep its mirrored operator copy in
-`/srv/sandboxed-storage/staging/agent-core/hermes/scripts/` identical. It checks
+`/srv/sandboxed-storage/staging/agent-core/hermes/scripts/` and the repository
+source in `scripts/disk_sentinel.sh` identical. It checks
 `agent-core` locally, then Ashur, Babylon, Nippur, DGX Spark, `uruk`, and `nimrud`
 over direct SSH. It must not contain the retired CI runner or route DGX through
 `uruk`.
@@ -68,12 +69,17 @@ for each failing entry before diagnosing a simultaneous fleet outage:
 
 ```bash
 ssh agent-core \
-  '/srv/sandboxed-storage/staging/agent-core/hermes/.hermes/scripts/disk-sentinel.sh'
+  '/srv/sandboxed-storage/staging/agent-core/hermes/.hermes/scripts/disk-sentinel.sh --stateless'
 ```
 
-No output means every monitored filesystem is reachable and below its alert
-threshold. The current cron job ID is `6bfc537e6dc9`; a manual cron execution
-must also finish successfully before closing the incident.
+`--stateless` prints every currently degraded or unreachable host without
+reading or mutating the per-host hysteresis/cooldown state file
+(`/var/lib/hermes-assistant/cron/state/disk-sentinel.json`: `WARN=85%`,
+`CRIT=92%`, `EMERG=95%`, `3%` recovery hysteresis at `<=82%`, `12h` repeat
+cooldown). Under `--stateless`, no output means every monitored filesystem is
+reachable and below its alert threshold. The current cron job ID is
+`aa64a47ff16b`; a manual cron execution must also finish successfully before
+closing the incident.
 
 The fleet uses [Lean-Mesh](docs/LEAN_MESH.md), not the retired Tailscale
 service. If `dgx-spark` is unknown, inspect the overlay route on `agent-core`
