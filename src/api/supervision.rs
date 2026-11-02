@@ -5,7 +5,7 @@
 //!
 //! - [`recover_server_shutdown_missions`] — boot-time recovery of missions a
 //!   previous process left active/interrupted.
-//! - [`stuck_mission_watchdog_loop`] + [`ack_promotion_loop`] — in-process
+//! - [`stuck_mission_watchdog_loop`] — in-process
 //!   detection of silent/orphaned runners (incl. OOM-kill reporting).
 //! - [`stale_mission_cleanup_loop`] — hour-scale cleanup of abandoned
 //!   missions.
@@ -480,43 +480,6 @@ pub(crate) async fn cleanup_stale_active_missions_once(
 ///
 /// Threshold is intentionally generous (15 min) so a model in the
 /// middle of a slow API turn or a long shell command isn't false-killed.
-/// Periodic ack-promotion: scans `AwaitingUser` missions whose
-/// `first_viewed_at` is older than `ACK_GRACE_SECONDS` and flips them to
-/// `Acknowledged`. Broadcasts `MissionStatusChanged` so dashboard/iOS clients
-/// move the row from "Needs You" to "Finished" without a refresh.
-pub(crate) async fn ack_promotion_loop(
-    mission_store: Arc<dyn MissionStore>,
-    events_tx: broadcast::Sender<AgentEvent>,
-) {
-    tracing::info!(
-        "Ack-promotion loop started: grace {}s, tick {}s",
-        ACK_GRACE_SECONDS,
-        ACK_PROMOTION_TICK_INTERVAL.as_secs()
-    );
-    loop {
-        tokio::time::sleep(ACK_PROMOTION_TICK_INTERVAL).await;
-        match mission_store
-            .acknowledge_stale_awaiting_user_missions(ACK_GRACE_SECONDS)
-            .await
-        {
-            Ok(promoted) => {
-                for mission_id in promoted {
-                    let _ = events_tx.send(AgentEvent::MissionStatusChanged {
-                        completion: None,
-                        execution: None,
-                        mission_id,
-                        status: MissionStatus::Acknowledged,
-                        summary: None,
-                    });
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Ack-promotion tick failed: {}", e);
-            }
-        }
-    }
-}
-
 fn inactivity_is_cancellable(seconds_since_activity: u64, tool_call_in_flight: bool) -> bool {
     seconds_since_activity >= stuck_seconds()
         && (!tool_call_in_flight || seconds_since_activity >= TOOL_CALL_STALL_GRACE_SECS)

@@ -81,7 +81,12 @@ pub(super) async fn save(
             }
         }
         if let Some(turn) = execution.turns.iter().find(|t| !t.phase.terminal()).or_else(|| execution.turns.last()) {
-            tx.execute("UPDATE missions SET status=?2,updated_at=?3 WHERE id=?1 AND (status<>'acknowledged' OR ?4)",params![execution.mission_id.to_string(),turn.phase.mission_status(),now_string(),new_turn]).map_err(err)?;
+            let next_status = turn.phase.mission_status();
+            let clear_first_viewed_at = new_turn || next_status == "active";
+            tx.execute(
+                "UPDATE missions SET status=?2,updated_at=?3,first_viewed_at=CASE WHEN ?5 THEN NULL ELSE first_viewed_at END WHERE id=?1 AND (status<>'acknowledged' OR ?4)",
+                params![execution.mission_id.to_string(), next_status, now_string(), new_turn, clear_first_viewed_at],
+            ).map_err(err)?;
         }
         search_index::on_cloud_execution_saved(&tx, &execution, &now_string())?;
         tx.commit().map_err(err)?; Ok(execution)
@@ -261,19 +266,20 @@ mod tests {
                 .status,
             MissionStatus::Acknowledged
         );
+        store
+            .set_mission_first_viewed_at_if_unset(e.mission_id, "2026-11-02T02:32:42Z")
+            .await
+            .unwrap();
         e.enqueue("second".into(), "Continue".into()).unwrap();
         e = store
             .save_cloud_execution(e.clone(), Some(e.revision), None, None, vec![])
             .await
             .unwrap();
+        let active_mission = store.get_mission(e.mission_id).await.unwrap().unwrap();
+        assert_eq!(active_mission.status, MissionStatus::Active);
         assert_eq!(
-            store
-                .get_mission(e.mission_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            MissionStatus::Active
+            active_mission.first_viewed_at, None,
+            "new cloud follow-up must clear stale first_viewed_at"
         );
         store
             .update_mission_status(e.mission_id, MissionStatus::Acknowledged)

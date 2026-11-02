@@ -624,15 +624,12 @@ pub enum MissionStatus {
     /// Agent's turn / automation cycle finished cleanly with no follow-up
     /// queued; mission is parked waiting for the user to read it.
     AwaitingUser,
-    /// User opened the mission while it was AwaitingUser and the ack grace
-    /// period elapsed without a new message — mission is auto-archived.
+    /// Explicitly archived / acknowledged conversation.
     Acknowledged,
     /// The agent's turn finished but it left one or more background shell jobs
     /// (`Bash run_in_background`) running in the workspace. The mission is NOT
     /// done: it is parked waiting for that background work to complete, and the
-    /// auto-resume watcher will wake it with the output. Non-terminal, and NOT
-    /// eligible for ack-promotion while jobs are live — otherwise a mission
-    /// could silently look "done" while work is still running.
+    /// auto-resume watcher will wake it with the output.
     WaitingBackground,
     Completed,
     Failed,

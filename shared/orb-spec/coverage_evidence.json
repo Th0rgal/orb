@@ -866,7 +866,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "8381e472cf1b8a3001f0c8474b239776a2d9896ee16ca2580333405ec6b04df7"
+          "sha256": "c1d54ee2df64d3a1438df1310374aef40b523ed997840f70f0dac15987429c39"
         }
       ],
       "execution": {
@@ -938,7 +938,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "8381e472cf1b8a3001f0c8474b239776a2d9896ee16ca2580333405ec6b04df7"
+          "sha256": "c1d54ee2df64d3a1438df1310374aef40b523ed997840f70f0dac15987429c39"
         }
       ],
       "execution": {
@@ -1019,11 +1019,11 @@
         },
         {
           "path": "src/api/mission_store/mod.rs",
-          "sha256": "7606e9394b93ff1accffbe63c1774cd7f1d64b2dbd4ac00c438fd3f18696dc0f"
+          "sha256": "26f764f1df347d5114e0d5da2e0a969b42ae60332f2f40ec0a14e88041f18825"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "8381e472cf1b8a3001f0c8474b239776a2d9896ee16ca2580333405ec6b04df7"
+          "sha256": "c1d54ee2df64d3a1438df1310374aef40b523ed997840f70f0dac15987429c39"
         }
       ],
       "execution": {
@@ -1108,7 +1108,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "8381e472cf1b8a3001f0c8474b239776a2d9896ee16ca2580333405ec6b04df7"
+          "sha256": "c1d54ee2df64d3a1438df1310374aef40b523ed997840f70f0dac15987429c39"
         }
       ],
       "execution": {
@@ -1189,11 +1189,11 @@
         },
         {
           "path": "src/api/control/control_queue.rs",
-          "sha256": "e6ef230ae19443a7cad298d6877481e569025377f00ee21779f3a32f5930dbb5"
+          "sha256": "da86a56a3c4be809dda5f086e5838804ddad178e801ca87a198d2141d9485c5b"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "8381e472cf1b8a3001f0c8474b239776a2d9896ee16ca2580333405ec6b04df7"
+          "sha256": "c1d54ee2df64d3a1438df1310374aef40b523ed997840f70f0dac15987429c39"
         }
       ],
       "execution": {
@@ -1278,7 +1278,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "8381e472cf1b8a3001f0c8474b239776a2d9896ee16ca2580333405ec6b04df7"
+          "sha256": "c1d54ee2df64d3a1438df1310374aef40b523ed997840f70f0dac15987429c39"
         }
       ],
       "execution": {
@@ -1363,7 +1363,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "8381e472cf1b8a3001f0c8474b239776a2d9896ee16ca2580333405ec6b04df7"
+          "sha256": "c1d54ee2df64d3a1438df1310374aef40b523ed997840f70f0dac15987429c39"
         }
       ],
       "execution": {
@@ -1457,7 +1457,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "8381e472cf1b8a3001f0c8474b239776a2d9896ee16ca2580333405ec6b04df7"
+          "sha256": "c1d54ee2df64d3a1438df1310374aef40b523ed997840f70f0dac15987429c39"
         }
       ],
       "execution": {
@@ -1551,11 +1551,11 @@
         },
         {
           "path": "src/api/control/tests.rs",
-          "sha256": "227ab9de99624b53033889d9c245444db7b7aad0834d5618d330786139d42fe4"
+          "sha256": "220c6127de052576e9716acc90876b5a2ca5d448591885ba985acb48ba84b6f6"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "8381e472cf1b8a3001f0c8474b239776a2d9896ee16ca2580333405ec6b04df7"
+          "sha256": "c1d54ee2df64d3a1438df1310374aef40b523ed997840f70f0dac15987429c39"
         }
       ],
       "execution": {
@@ -1600,7 +1600,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "8381e472cf1b8a3001f0c8474b239776a2d9896ee16ca2580333405ec6b04df7"
+          "sha256": "c1d54ee2df64d3a1438df1310374aef40b523ed997840f70f0dac15987429c39"
         }
       ],
       "execution": {

@@ -359,25 +359,14 @@ pub(crate) fn stuck_seconds() -> u64 {
         .unwrap_or(STUCK_SECONDS)
 }
 
-/// Grace period after the user first opens an `AwaitingUser` mission before
-/// the ack-promotion tick auto-archives it to `Acknowledged` (Finished).
-/// Resets whenever the user sends a new message (status returns to Active and
-/// `first_viewed_at` is cleared).
-pub(crate) const ACK_GRACE_SECONDS: u64 = 3600;
-
-/// How often the ack-promotion tick scans for stale `AwaitingUser` missions.
-pub(crate) const ACK_PROMOTION_TICK_INTERVAL: std::time::Duration =
-    std::time::Duration::from_secs(60);
-
 /// Whether an incoming user message (a real one, or the background-task
 /// auto-resume synthetic message) should re-activate `status` to `Active`.
 ///
 /// Kept as one predicate so every message-dequeue site agrees. It deliberately
 /// includes `WaitingBackground`: a resume delivered while background jobs were
 /// still live must flip the mission to `Active` — which clears `first_viewed_at`
-/// (see `MissionStore::update_mission_status`) — otherwise the stale timestamp
-/// survives the later demotion back to `AwaitingUser` and the ack-promotion
-/// sweep can archive a mission whose next turn just started.
+/// (see `MissionStore::update_mission_status`) so the next `AwaitingUser`
+/// round starts unread.
 /// Reason written when a cancel's JoinHandle never resolves. During a
 /// deploy/SIGTERM drain this must stay `server_shutdown` so boot recovery
 /// and reconcile resume the writer instead of leaving it stranded.

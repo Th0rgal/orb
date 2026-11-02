@@ -901,12 +901,6 @@ impl MissionStore for SqliteMissionStore {
     ) -> Result<Option<String>, String> {
         SqliteMissionStore::set_mission_first_viewed_at_if_unset(self, id, timestamp).await
     }
-    async fn acknowledge_stale_awaiting_user_missions(
-        &self,
-        grace_seconds: u64,
-    ) -> Result<Vec<Uuid>, String> {
-        SqliteMissionStore::acknowledge_stale_awaiting_user_missions(self, grace_seconds).await
-    }
     async fn get_waiting_background_mission_ids(&self) -> Result<Vec<Uuid>, String> {
         SqliteMissionStore::get_waiting_background_mission_ids(self).await
     }

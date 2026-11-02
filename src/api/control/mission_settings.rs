@@ -1993,12 +1993,10 @@ pub async fn load_mission(
     })
 }
 
-/// Record that the user opened this mission for the first time since it last
-/// entered `AwaitingUser`. Sets `first_viewed_at` to now (no-op if already set)
-/// and broadcasts a `MissionStatusChanged` event so other clients can render
-/// the "opened" dot. The dashboard and iOS clients call this from their
-/// mission-detail entry points; the periodic ack-promotion tick uses the
-/// timestamp to decide when to move the mission to `Acknowledged`.
+/// Record that the user opened this mission since it last entered
+/// `AwaitingUser`. Sets `first_viewed_at` to now (no-op if already at or past
+/// now) and broadcasts a `MissionStatusChanged` event so other clients can
+/// render read state.
 #[derive(Debug, Serialize)]
 pub struct MarkMissionOpenedResponse {
     pub id: Uuid,
