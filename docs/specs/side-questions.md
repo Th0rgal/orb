@@ -159,17 +159,65 @@ conversation rather than an isolated browser-only draft array:
      Core's OpenCode stream parser (`remote_grok.rs`) and in client `/btw`
      parsers across desktop, iOS, and Android.
 
+## 5. Bounded session lifecycle, O(1) continuation preflight & incremental live reconciliation (P0)
+
+Long-running parent campaigns (for example `9409f9a9`, >63,000 events) and
+multi-turn `/btw` sessions (`2ac904f3`, 12 turns / 1,022 events / 832K input
+tokens) exposed three client/server scaling hazards that made `/btw` appear
+blocked:
+
+1. **O(1) tail sequence preflight on idle continuation**:
+   - Resuming an idle `/btw` mission needs only its latest sequence number
+     (`afterSequence`) and depth, never its full event history.
+   - `askBtwAgent` reads a single tail row (`getMissionEvents(id, { limit: 1,
+     enough: () => true })`) instead of walking every `before_seq` page before
+     calling `sendMissionMessage`.
+2. **Bounded parent delta reads (`lazyBtwContext` / `fork.rs`)**:
+   - Remote/Core `/btw` context (`lazyBtwContext`) passes
+     `include_counts=false&max_payload=4096` (and `since_seq` when advancing an
+     existing `ConversationCursor`, falling back to a bounded 200-event tail
+     page on first turn or cursor reset), avoiding multi-MB `view=all&limit=1000`
+     payloads and `COUNT(*)` table scans on >60k-event parent missions.
+   - Core's non-incremental `/btw/agent` path (`src/api/control/fork.rs`, used
+     by iOS) reads only a bounded head + tail transcript slice instead of
+     scanning 50,001 rows or rejecting >50k-message parents with `413
+     Conversation is too large to fork without truncation`.
+3. **Incremental live-thread event cache**:
+   - While a `/btw` mission is active, `reconcileBtwServerHistory` (desktop),
+     `OrbBtwStore` (iOS), and `OrbSideAgentSheet` (Android) retain a
+     sequence-keyed in-memory event cache per thread and fetch only
+     `since_seq = maxKnownSequence` deltas on periodic polls, falling back to a
+     full read only on first load or sequence regression.
+4. **Automatic session rotation (`BTW_MAX_SESSION_EVENTS = 400`, `BTW_MAX_SESSION_TURNS = 8`) & explicit `New side session`**:
+   - Reusing one `/btw` harness session across a dozen tool-heavy turns bloats
+     its context to hundreds of thousands of tokens and triggers multi-minute
+     compaction stalls.
+   - When the bound `/btw` session is idle (`!active` and no queued follow-ups)
+     and either the operator armed **New side session** (`freshSession`) or the
+     session reached `>= 8` answered turns or `maxSequence >= 400` events
+     (`shouldRotateBtwSession`), the next side question automatically launches a
+     fresh `POST /api/control/missions/:id/btw/agent` mission (seeding recent
+     `/btw` Q&A in `<main_conversation_update>`) while keeping every earlier
+     turn visible in the unified `/btw` transcript.
+   - While a side session is actively running or holds queued follow-ups,
+     follow-ups continue queueing onto that live mission so `Edit`, `Send now`,
+     and `Remove` remain atomic on a single queue.
+
 ## Client parity
 
 - **Orb desktop (`orb/`)**: implemented in `orb/src/SideQuestionPanel.tsx`,
-  `orb/src/btwAgent.ts`, `orb/src/RemoteQueue.tsx`, and `orb/src/messagePresentation.ts`.
+  `orb/src/btwAgent.ts`, `orb/src/btwContext.ts`, `orb/src/RemoteQueue.tsx`, and
+  `orb/src/messagePresentation.ts` (including header `New side session` action,
+  `shouldRotateBtwSession`, O(1) tail preflight, bounded parent delta reads, and
+  incremental live `view=history` caching).
 - **iOS (`ios_dashboard/SandboxedDashboard/Orb/OrbSideQuestion.swift`)**:
   `OrbSideQuestionSheet` shares `OrbFollowUpQueue` (`queue_followup: true`,
-  `Edit`, `Send now`, `Remove`), caches finished threads by `(activity, status)`
-  stamp, ignores queued `user_message` events, and strips OpenCode compaction
-  checkpoints.
+  `Edit`, `Send now`, `Remove`), toolbar `New side session`, automatic
+  `OrbBtwThreads.shouldRotateSession` rotation, incremental `sinceSeq` live
+  polling, queued `user_message` isolation, and OpenCode compaction stripping.
 - **Android (`android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbSideAgent.kt`)**:
   `OrbSideAgentSheet` renders multi-turn `/btw` threads, shares
   `OrbFollowUpQueueView` (`queue_followup: true`, `Edit`, `Send now`, `Remove`),
-  ignores queued `user_message` events, and strips OpenCode compaction
-  checkpoints.
+  header `New` side-session action, automatic `OrbSideAgent.shouldRotateSession`
+  rotation, incremental `since_seq` live polling, queued `user_message`
+  isolation, and OpenCode compaction stripping.

@@ -260,4 +260,29 @@ final class OrbTurnSummaryTests: XCTestCase {
         XCTAssertEqual(OrbTurnTiming.workedFor((12 * 60 + 6) * 60), "12h 6m")
         XCTAssertEqual(OrbTurnTiming.workedFor(51 * 3600), "2d 3h")
     }
+
+    func testBtwSessionRotationMergeEventsAndLaunchSummary() {
+        XCTAssertFalse(OrbBtwThreads.shouldRotateSession(turnCount: 7, maxSequence: 399))
+        XCTAssertTrue(OrbBtwThreads.shouldRotateSession(turnCount: 8, maxSequence: 10))
+        XCTAssertTrue(OrbBtwThreads.shouldRotateSession(turnCount: 2, maxSequence: 400))
+
+        let existing = [
+            event(1, "user_message", "First?", at: "2026-11-02T05:00:00Z"),
+            event(2, "assistant_message", "Answer 1", at: "2026-11-02T05:00:05Z"),
+        ]
+        XCTAssertEqual(OrbBtwThreads.mergeEvents(existing: existing, delta: [])?.map(\.sequence), [1, 2])
+        let delta = [
+            event(3, "user_message", "Second?", at: "2026-11-02T05:01:00Z"),
+            event(4, "assistant_message", "Answer 2", at: "2026-11-02T05:01:05Z"),
+        ]
+        XCTAssertEqual(OrbBtwThreads.mergeEvents(existing: existing, delta: delta)?.map(\.sequence), [1, 2, 3, 4])
+        XCTAssertNil(OrbBtwThreads.mergeEvents(existing: existing + delta, delta: [event(1, "user_message", "Reset", at: "2026-11-02T05:02:00Z")]))
+
+        let wrapped = OrbBtwThreads.launchQuestion(
+            "What is left?\nAttachment: /tmp/spec.md",
+            priorTurns: [.init(id: "btw:m:1", question: "First?", answer: "Answer 1", at: "2026-11-02T05:00:00Z")]
+        )
+        XCTAssertTrue(wrapped.contains("Earlier side questions in this conversation"))
+        XCTAssertEqual(OrbBtwThreads.question(wrapped), "What is left?")
+    }
 }

@@ -130,12 +130,13 @@ export function getMissionEventPreview(id:string):Promise<EventPage>{
  * long thread (a /btw thread easily exceeds it with tool rows). This walks
  * back with the exclusive `before` cursor until the history is complete, or
  * until `enough` says the rows read so far suffice (e.g. the latest turn). */
-export async function getMissionEvents(id:string,options:{view?:'transcript'|'trace'|'history'|'all';since?:number;enough?:(newestFirst:StoredEvent[])=>boolean}={}):Promise<StoredEvent[]>{
+export async function getMissionEvents(id:string,options:{view?:'transcript'|'trace'|'history'|'all';since?:number;limit?:number;enough?:(newestFirst:StoredEvent[])=>boolean}={}):Promise<StoredEvent[]>{
  const bySequence=new Map<number,StoredEvent>();
+ const pageLimit=options.limit!==undefined?{limit:options.limit}:{};
  if(options.since!==undefined){
   let since=options.since,reset=false;
   for(let pages=0;pages<500;pages++){
-   const page=await getMissionEventPage(id,{...(options.view?{view:options.view}:{}),since});
+   const page=await getMissionEventPage(id,{...(options.view?{view:options.view}:{}),...pageLimit,since});
    if(page.reset){reset=true;bySequence.clear();break;}
    for(const event of page.events)bySequence.set(event.sequence,event);
    if(!page.hasMore||page.nextCursor===undefined||!page.events.length)break;
@@ -147,7 +148,7 @@ export async function getMissionEvents(id:string,options:{view?:'transcript'|'tr
  }
  let before:number|undefined;
  for(let pages=0;pages<500;pages++){
-  const page=await getMissionEventPage(id,{...(options.view?{view:options.view}:{}),...(before!==undefined?{before}:{})});
+  const page=await getMissionEventPage(id,{...(options.view?{view:options.view}:{}),...pageLimit,...(before!==undefined?{before}:{})});
   for(const event of page.events)bySequence.set(event.sequence,event);
   if(!page.hasMore||page.nextCursor===undefined||!page.events.length)break;
   if(before!==undefined&&page.nextCursor>=before)throw Error('Event cursor did not advance.');

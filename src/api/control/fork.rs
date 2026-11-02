@@ -318,6 +318,10 @@ pub async fn fork_mission(
     };
     let events = if incremental {
         Vec::new()
+    } else if req.side_question.is_some() {
+        bounded_side_history_events(&*control.mission_store, id)
+            .await
+            .map_err(internal_error)?
     } else {
         control
             .mission_store
@@ -330,7 +334,7 @@ pub async fn fork_mission(
             .await
             .map_err(internal_error)?
     };
-    if events.len() > 50000 {
+    if req.side_question.is_none() && events.len() > 50000 {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
             "Conversation is too large to fork without truncation".into(),
@@ -649,6 +653,37 @@ pub async fn btw_agent(
     fork_mission(state, user, id, Json(req)).await
 }
 
+const BTW_LEGACY_HEAD_MESSAGES: usize = 32;
+const BTW_LEGACY_TAIL_MESSAGES: usize = 128;
+
+async fn bounded_side_history_events(
+    store: &dyn crate::api::mission_store::MissionStore,
+    id: Uuid,
+) -> Result<Vec<crate::api::mission_store::StoredEvent>, String> {
+    let types = ["user_message", "assistant_message"];
+    let head = store
+        .get_events_since(id, 0, Some(&types), Some(BTW_LEGACY_HEAD_MESSAGES))
+        .await?;
+    let tail = store
+        .get_events_before(id, i64::MAX, Some(&types), Some(BTW_LEGACY_TAIL_MESSAGES))
+        .await?;
+    if !head.is_empty() || !tail.is_empty() {
+        let mut merged = std::collections::BTreeMap::new();
+        for ev in head.into_iter().chain(tail) {
+            merged.insert(ev.sequence, ev);
+        }
+        return Ok(merged.into_values().collect());
+    }
+    let all = store.get_events(id, Some(&types), None, None).await?;
+    if all.len() <= BTW_LEGACY_HEAD_MESSAGES + BTW_LEGACY_TAIL_MESSAGES {
+        return Ok(all);
+    }
+    let mut bounded = Vec::with_capacity(BTW_LEGACY_HEAD_MESSAGES + BTW_LEGACY_TAIL_MESSAGES);
+    bounded.extend_from_slice(&all[..BTW_LEGACY_HEAD_MESSAGES]);
+    bounded.extend_from_slice(&all[all.len() - BTW_LEGACY_TAIL_MESSAGES..]);
+    Ok(bounded)
+}
+
 fn side_agent_prompt(
     history: &[serde_json::Value],
     question: &str,
@@ -712,6 +747,76 @@ mod side_context_tests {
         assert!(prompt.contains("Original objective"));
         assert!(prompt.contains("Latest validation receipt"));
         assert!(prompt.ends_with("Quel résultat ?"));
+    }
+
+    #[tokio::test]
+    async fn bounded_side_history_events_keeps_head_and_tail_in_ascending_order() {
+        use crate::api::control::AgentEvent;
+        use crate::api::mission_store::{MissionStore, SqliteMissionStore};
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("sqlite store");
+        let mission = store
+            .create_mission(Some("Large parent"), None, None, None, None, None, None)
+            .await
+            .expect("mission");
+
+        for i in 0..250 {
+            if i == 0 {
+                store
+                    .log_event(
+                        mission.id,
+                        &AgentEvent::UserMessage {
+                            id: Uuid::new_v4(),
+                            content: "Original objective".to_string(),
+                            queued: false,
+                            mission_id: Some(mission.id),
+                            source: None,
+                        },
+                    )
+                    .await
+                    .expect("log user event");
+                continue;
+            }
+            let content = if i == 249 {
+                "Latest validation receipt".to_string()
+            } else {
+                format!("turn {i}")
+            };
+            store
+                .log_event(
+                    mission.id,
+                    &AgentEvent::AssistantMessage {
+                        id: Uuid::new_v4(),
+                        content,
+                        success: true,
+                        cost_cents: 0,
+                        cost_source: crate::agents::CostSource::Estimated,
+                        usage: None,
+                        model: None,
+                        model_normalized: None,
+                        mission_id: Some(mission.id),
+                        shared_files: None,
+                        resumable: false,
+                        completion_evidence: None,
+                    },
+                )
+                .await
+                .expect("log assistant event");
+        }
+
+        let bounded = bounded_side_history_events(&store, mission.id)
+            .await
+            .expect("bounded side history");
+        assert_eq!(
+            bounded.len(),
+            BTW_LEGACY_HEAD_MESSAGES + BTW_LEGACY_TAIL_MESSAGES
+        );
+        assert_eq!(bounded.first().unwrap().content, "Original objective");
+        assert_eq!(bounded.last().unwrap().content, "Latest validation receipt");
+        assert!(bounded.windows(2).all(|w| w[0].sequence < w[1].sequence));
     }
 }
 

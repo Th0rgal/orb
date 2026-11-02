@@ -15,11 +15,18 @@ export function publicEvents(events:StoredEvent[]):StoredEvent[] {
  const allowed=new Set(['user_message','assistant_message','assistant_message_canonical','text_delta','text_op','tool_call','tool_result','error']);
  return events.filter(e=>allowed.has(e.event_type)&&e.metadata?.queued!==true).map(e=>({id:e.id,sequence:e.sequence,event_type:e.event_type,timestamp:e.timestamp,tool_call_id:e.tool_call_id,tool_name:e.tool_name,content:e.content}));
 }
-export async function conversationEvents(parent:string,sinceSequence?:number,maxPages?:number):Promise<StoredEvent[]> {
+export async function conversationEvents(
+ parent:string,
+ sinceSequence?:number,
+ maxPages?:number,
+ options?:{limit?:number;maxPayload?:number},
+):Promise<StoredEvent[]> {
  const result:StoredEvent[]=[];let before:number|undefined,pages=0;
+ const limit=options?.limit??1000;
+ const maxPayload=options?.maxPayload?`&max_payload=${options.maxPayload}`:'';
  // Backwards pagination freezes the upper boundary even while the mission runs.
  while(true){
-  const page=await api<StoredEvent[]|{events?:StoredEvent[]}>(`/api/control/missions/${encodeURIComponent(parent)}/events?view=all&limit=1000${before===undefined?'':`&before_seq=${before}`}`);
+  const page=await api<StoredEvent[]|{events?:StoredEvent[]}>(`/api/control/missions/${encodeURIComponent(parent)}/events?view=all&limit=${limit}&include_counts=false${maxPayload}${before===undefined?'':`&before_seq=${before}`}`);
   const rows=Array.isArray(page)?page:page.events??[];
   if(!rows.length)break;
   const next=Math.min(...rows.map(e=>e.sequence));
@@ -65,7 +72,9 @@ export async function archiveParts(name:string,rows:string[],write:(name:string,
  * conversation on demand. Send only the delta since the last side question instead of
  * downloading every event and re-uploading it as an archive on each new session. */
 export async function lazyBtwContext(source:Mission,visible:string,previous?:ConversationCursor,sideHistory:SideExchange[]=[]){
- const events=await conversationEvents(source.id,previous?.sequence,1);
+ // Bound both row count and per-row payload size: contextSnapshot keeps at most 500 bytes per event
+ // and <=4,500 bytes overall, while still needing the newest sequence so idle parent logs never reset previous.sequence.
+ const events=await conversationEvents(source.id,previous?.sequence,1,{limit:150,maxPayload:2048});
  const snapshot=await contextSnapshot(source,events,visible,previous?.archive?undefined:previous);
  const sides=sideHistory.length?`\nEarlier side questions in this conversation (most recent last):\n${byteTail(sideHistory.map(e=>`Q: ${e.question}\nA: ${e.answer}`).join('\n\n'),4000)}\n`:'';
  return {cursor:{...snapshot.cursor},context:`Mission: ${source.id}\nTitle: ${source.title??''}\nStatus: ${source.status}\nParent conversation: not attached. Call the get_mission_events tool with mission_id="${source.id}" (view "transcript" for messages, "trace" for tool calls; before_seq pages back, since_seq reads newer events; latest sequence ${snapshot.cursor.sequence}). Read only what the question needs.${sides}\n${snapshot.summary}`};

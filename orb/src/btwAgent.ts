@@ -32,11 +32,31 @@ import {createSignal} from 'solid-js';
 import type {LocalActivity} from './localAgents';
 import {usageTelemetry} from './usageTelemetry';
 const [remoteActivities,setRemoteActivities]=createSignal<Record<string,LocalActivity[]>>({});
+const [sessionRevision,setSessionRevision]=createSignal(0);
+export const BTW_MAX_SESSION_EVENTS=400;
+export const BTW_MAX_SESSION_TURNS=8;
+export function shouldRotateBtwSession(turnCount:number,maxSequence:number):boolean{
+ return turnCount>=BTW_MAX_SESSION_TURNS||maxSequence>=BTW_MAX_SESSION_EVENTS;
+}
 export type QueuedBtwCursor={id:string;before?:ConversationCursor;after:ConversationCursor};
-export type BtwSession={id:string;question:string;harness:string;model:string;local:boolean;active:boolean;baseline:number;afterSequence?:number;placement?:string;conversationCursor?:ConversationCursor;pendingCursor?:ConversationCursor;queuedCursor?:ConversationCursor;queuedCursors?:QueuedBtwCursor[];contextBytes?:number;contextVersion?:number;launchPending?:boolean;brokenSession?:boolean};
+export type BtwSession={id:string;question:string;harness:string;model:string;local:boolean;active:boolean;baseline:number;afterSequence?:number;placement?:string;conversationCursor?:ConversationCursor;pendingCursor?:ConversationCursor;queuedCursor?:ConversationCursor;queuedCursors?:QueuedBtwCursor[];contextBytes?:number;contextVersion?:number;launchPending?:boolean;brokenSession?:boolean;freshSession?:boolean;turnCount?:number;lastSequence?:number};
 const storageKey=(parent:string)=>'agent:'+sideQuestionKey(parent);
-export function btwSession(parent:string):BtwSession|undefined{const s=readJson<BtwSession|undefined>(storageKey(parent),undefined,isRecord);return s?{...s}:undefined;}
-function save(parent:string,s:BtwSession){writeJson(storageKey(parent),s);}
+export function btwSession(parent:string):BtwSession|undefined{sessionRevision();const s=readJson<BtwSession|undefined>(storageKey(parent),undefined,isRecord);return s?{...s}:undefined;}
+function save(parent:string,s:BtwSession){writeJson(storageKey(parent),s);setSessionRevision(v=>v+1);}
+function removeSession(parent:string){localStorage.removeItem(storageKey(parent));setSessionRevision(v=>v+1);}
+/** Arm the next side question on `parent` to launch a clean `/btw` mission while
+ * keeping prior side turns visible in the panel and summarized in the prompt. */
+export function startFreshBtwSession(parent:string):void{
+ const s=btwSession(parent);
+ if(!s||s.active)return;
+ const next:BtwSession={...s,freshSession:true};
+ delete next.brokenSession;
+ delete next.pendingCursor;
+ delete next.queuedCursor;
+ delete next.queuedCursors;
+ delete next.conversationCursor;
+ save(parent,next);
+}
 function syncSessionCursors(parent:string,s:BtwSession):BtwSession{
  const latest=btwSession(parent);
  if(!latest||latest.id!==s.id)return s;
@@ -310,6 +330,8 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
     throw new Error(`No response was captured from the side agent (${mission.status}${reason?`: ${reason}`:''}). ${hint}`);
    }
    if(s.pendingCursor){s.conversationCursor=s.pendingCursor;delete s.pendingCursor;}
+   const maxSeq=events.reduce((n,e)=>Math.max(n,e.sequence),s.lastSequence??0);
+   if(maxSeq>0)s.lastSequence=maxSeq;
    delete s.queuedCursor;
    delete s.brokenSession;save(parent,s);
    receive({type:'done',answer:text,...(result.narration.length?{narration:result.narration}:{})});return;
@@ -383,7 +405,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
     s={...s,active:false};save(parent,s);
    } catch(error) {
     if(!(error instanceof ApiError)||error.status!==404)throw error;
-    localStorage.removeItem(key);s=undefined;current=undefined;
+    removeSession(parent);s=undefined;current=undefined;
    }
   }
   // Placement decides where the snapshot is written. getMission falls back to
@@ -397,8 +419,14 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   const placement=JSON.stringify([local,node,source.working_directory,source.workspace_id]);
   const paths=await upload(attachments,destination);
   if(local)await restoreLocalBindings();
-  const resumable=!!current&&RESUMABLE.includes(current.status)&&!s?.brokenSession&&(local||!current.track||current.track===`mission-${current.id}`||current.track===`mission-${current.id.slice(0,8)}`||!!current.tags?.includes(`btw-parent:${parent}`));
-  const reuse=resumable&&s?.contextVersion===2&&!!s.conversationCursor&&s.harness===config.harness&&s.model===config.model&&s.placement===placement;
+  const resumable=!!current&&RESUMABLE.includes(current.status)&&!s?.brokenSession&&!s?.freshSession&&(local||!current.track||current.track===`mission-${current.id}`||current.track===`mission-${current.id.slice(0,8)}`||!!current.tags?.includes(`btw-parent:${parent}`));
+  let reuse=resumable&&s?.contextVersion===2&&!!s.conversationCursor&&s.harness===config.harness&&s.model===config.model&&s.placement===placement&&!shouldRotateBtwSession(s?.turnCount??0,s?.lastSequence??0);
+  let headSeq=0;
+  if(reuse){
+   const tail=await getMissionEvents(s!.id,{limit:1,enough:()=>true});
+   headSeq=tail.reduce((n,e)=>Math.max(n,e.sequence),0);
+   if(shouldRotateBtwSession(s?.turnCount??0,headSeq))reuse=false;
+  }
   let snapshot=await prepareBtwContext(source,context,destination,reuse?s?.conversationCursor:undefined,reuse?[]:history,local?localBinding(parent)?.cwd:undefined);
   const makePrompt=(context:string)=>makeBtwPrompt(context,question,paths);
   let prompt=makePrompt(snapshot.context);
@@ -424,12 +452,12 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    // Core owns placement. A stale local view must not launch a native run for
    // a side session Core already started elsewhere.
    if(local&&!m.tags?.includes('placement:client'))local=false;
-   s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0};save(parent,s);localStorage.removeItem(attemptKey);accepted=true;
+   s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0,turnCount:1};save(parent,s);localStorage.removeItem(attemptKey);accepted=true;
   };
   if(!reuse)await createSide();
   else{
-   const next={...s!,question,active:!local,baseline:0,afterSequence:Math.max(0,...(await getMissionEvents(s!.id)).map(e=>e.sequence))};
-   delete next.brokenSession;
+   const next:BtwSession={...s!,question,active:!local,baseline:0,afterSequence:headSeq,turnCount:(s!.turnCount??1)+1,lastSequence:headSeq};
+   delete next.brokenSession;delete next.freshSession;
    try{
     if(!local)await sendMissionMessage(next.id,prompt,undefined,clientMessageId);
     s=next;save(parent,s);accepted=!local;
@@ -597,12 +625,14 @@ export function btwThreadChain(parent:string):Promise<string[]>{
  return chain;
 }
 
-type ParsedBtwThread={stamp:string;turns:(SideExchange&{at:string})[];active?:BtwSession};
+type ParsedBtwThread={stamp:string;turns:(SideExchange&{at:string})[];active?:BtwSession;lastSequence:number};
 const terminalThreadCache=new Map<string,ParsedBtwThread>();
-export function resetBtwThreadCache(){terminalThreadCache.clear();}
+const liveThreadEventCache=new Map<string,Map<number,StoredEvent>>();
+export function resetBtwThreadCache(){terminalThreadCache.clear();liveThreadEventCache.clear();}
 const btwActivity=(m:Mission)=>(m as Mission&{last_activity_at?:string}).last_activity_at||m.updated_at||m.created_at||'';
 function parseBtwThread(m:Mission,events:StoredEvent[]):Omit<ParsedBtwThread,'stamp'>{
  const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
+ const lastSequence=ordered.at(-1)?.sequence??0;
  const turns:(SideExchange&{at:string})[]=[];
  let curQuestion='',curAt='',curSeq=0;
  let curAnswers:string[]=[];let curFinal:string|undefined;let curDelta:string|undefined;
@@ -629,11 +659,11 @@ function parseBtwThread(m:Mission,events:StoredEvent[]):Omit<ParsedBtwThread,'st
  let active:BtwSession|undefined;
  if(ACTIVE.includes(m.status)&&curQuestion){
   const local=m.tags?.includes('placement:client')??false;
-  active={id:m.id,question:curQuestion,harness:m.backend||'opencode',model:m.model_override||'builtin/smart',local,active:true,baseline:0};
+  active={id:m.id,question:curQuestion,harness:m.backend||'opencode',model:m.model_override||'builtin/smart',local,active:true,baseline:0,turnCount:turns.length+1,lastSequence};
  }else if(curQuestion){
   flush();
  }
- return {turns,active};
+ return {turns,active,lastSequence};
 }
 
 export async function reconnectBtwSession(parent:string,sideId:string):Promise<BtwSession>{
@@ -697,7 +727,32 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
    }
    // History, not transcript: the streamed text repairs a truncated final (repairedFinal).
    let events:StoredEvent[];
-   try{events=await getMissionEvents(m.id,{view:'history'});}catch{continue;}
+   try{
+    let known=liveThreadEventCache.get(cacheKey)??new Map<number,StoredEvent>();
+    const maxKnown=known.size?Math.max(...known.keys()):undefined;
+    if(maxKnown!==undefined){
+     const delta=await getMissionEvents(m.id,{view:'history',since:maxKnown});
+     if(delta.length&&Math.max(...delta.map(e=>e.sequence))<maxKnown){
+      known=new Map<number,StoredEvent>();
+      for(const ev of await getMissionEvents(m.id,{view:'history'}))known.set(ev.sequence,ev);
+     }else{
+      for(const ev of delta)known.set(ev.sequence,ev);
+     }
+    }else{
+     for(const ev of await getMissionEvents(m.id,{view:'history'}))known.set(ev.sequence,ev);
+    }
+    events=[...known.values()].sort((a,b)=>a.sequence-b.sequence);
+    if(live){
+     liveThreadEventCache.set(cacheKey,known);
+     while(liveThreadEventCache.size>64){
+      const oldest=liveThreadEventCache.keys().next().value;
+      if(oldest===undefined)break;
+      liveThreadEventCache.delete(oldest);
+     }
+    }else{
+     liveThreadEventCache.delete(cacheKey);
+    }
+   }catch{continue;}
    if(signal?.aborted||connectionVersion()!==version)return;
    const parsed=parseBtwThread(m,events);
    byId.set(m.id,parsed);
@@ -731,9 +786,28 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
   save(parent,latestActive);
  }else if(latest&&RESUMABLE.includes(latest.status)&&!existing?.active){
   const local=latest.tags?.includes('placement:client')??false;
+  const latestParsed=byId.get(latest.id);
+  const turnCount=latestParsed?.turns.length??existing?.turnCount;
+  const lastSequence=latestParsed?.lastSequence??existing?.lastSequence;
   const lastTurn=serverTurns.at(-1);
-  if(lastTurn&&(!existing||existing.id!==latest.id||existing.question!==lastTurn.question)){
-   save(parent,{id:latest.id,question:lastTurn.question,harness:latest.backend||existing?.harness||'opencode',model:latest.model_override||existing?.model||'builtin/smart',local,active:false,baseline:0,placement:existing?.placement,contextVersion:existing?.contextVersion,conversationCursor:existing?.conversationCursor});
+  const sameSession=existing?.id===latest.id;
+  const freshSession=sameSession?existing?.freshSession:undefined;
+  if(lastTurn&&(!existing||!sameSession||existing.question!==lastTurn.question||existing.turnCount!==turnCount||existing.lastSequence!==lastSequence)){
+   save(parent,{
+    id:latest.id,
+    question:lastTurn.question,
+    harness:latest.backend||existing?.harness||'opencode',
+    model:latest.model_override||existing?.model||'builtin/smart',
+    local,
+    active:false,
+    baseline:0,
+    placement:sameSession?existing?.placement:undefined,
+    contextVersion:sameSession?existing?.contextVersion:undefined,
+    conversationCursor:freshSession?undefined:(sameSession?existing?.conversationCursor:undefined),
+    ...(turnCount!==undefined?{turnCount}:{}),
+    ...(lastSequence!==undefined?{lastSequence}:{}),
+    ...(freshSession?{freshSession:true}:{}),
+   });
   }
  }
  if(!serverTurns.length)return {history:localHistory,activeSession:latestActive,latest:latest?.id};

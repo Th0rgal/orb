@@ -95,11 +95,17 @@ it('writes local archives inside the owning workspace without external uploads',
 it("remote side agents get only the delta and a get_mission_events pointer, no archive upload", async () => {
   const { lazyBtwContext } = await import("../src/btwContext");
   const api = await import("../src/api");
-  const spy = vi.spyOn(api, "api").mockResolvedValueOnce([{ id: 1, sequence: 7, event_type: "assistant_message", timestamp: "", content: "Done with step 2" }]).mockResolvedValue([]);
+  const spy = vi.spyOn(api, "api").mockResolvedValueOnce([{ id: 1, sequence: 7, event_type: "assistant_message", timestamp: "", content: "Done with step 2" }]).mockResolvedValue([{ id: 1, sequence: 7, event_type: "assistant_message", timestamp: "", content: "Done with step 2" }]);
   const out = await lazyBtwContext({ id: "m1", title: "T", status: "active", history: [] } as never, "visible", { sequence: 5, visibleHash: "x" });
+  expect(spy.mock.calls[0][0]).toContain("limit=150&include_counts=false&max_payload=2048");
   expect(out.context).toContain('get_mission_events tool with mission_id="m1"');
   expect(out.context).toContain("Done with step 2");
   expect(out.context).not.toContain("@conversation");
   expect(out.cursor.sequence).toBe(7);
+  // Idle follow-up with 0 new parent events preserves cursor.sequence instead of resetting to initial context.
+  const idle = await lazyBtwContext({ id: "m1", title: "T", status: "active", history: [] } as never, "visible", out.cursor);
+  expect(idle.cursor.sequence).toBe(7);
+  expect(idle.context).toContain("New events after 7 through 7\nNo new public events.");
+  expect(idle.context).not.toContain("Initial recent context");
   spy.mockRestore();
 });
