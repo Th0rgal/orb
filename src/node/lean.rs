@@ -1468,7 +1468,7 @@ pub async fn collect_artifacts(
 // File locking (fs2 flock)
 // ---------------------------------------------------------------------------
 
-/// Exclusive advisory file lock; released on drop.
+/// Advisory file lock (exclusive or shared); released on drop.
 struct FileLock {
     file: std::fs::File,
 }
@@ -1485,6 +1485,22 @@ impl FileLock {
                 .write(true)
                 .open(&path)?;
             file.lock_exclusive()?;
+            Ok(Self { file })
+        })
+        .await?
+    }
+
+    async fn acquire_shared(path: PathBuf) -> anyhow::Result<Self> {
+        tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)?;
+            fs2::FileExt::lock_shared(&file)?;
             Ok(Self { file })
         })
         .await?
@@ -2173,12 +2189,15 @@ async fn restore_lake_dependency_cache(
 /// `turbo-lean` so tracked files in public/fetched repositories cannot inject
 /// external accelerator commands, telemetry endpoints, or policy overrides.
 fn quarantine_checkout_turbo_lean_configs(root: &Path) -> std::io::Result<usize> {
-    fn walk(dir: &Path, removed: &mut usize) -> std::io::Result<()> {
-        let entries = match std::fs::read_dir(dir) {
+    let mut removed = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => return Err(err),
         };
+        let mut child_dirs = Vec::new();
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
@@ -2193,17 +2212,15 @@ fn quarantine_checkout_turbo_lean_configs(root: &Path) -> std::io::Result<usize>
                 } else {
                     std::fs::remove_file(&path)?;
                 }
-                *removed += 1;
+                removed += 1;
                 continue;
             }
             if ft.is_dir() && !ft.is_symlink() {
-                walk(&path, removed)?;
+                child_dirs.push(path);
             }
         }
-        Ok(())
+        stack.extend(child_dirs);
     }
-    let mut removed = 0;
-    walk(root, &mut removed)?;
     Ok(removed)
 }
 
@@ -2321,11 +2338,12 @@ pub async fn execute_lean_build(
             .parent()
             .unwrap_or(repo_staging_base.as_path())
             .to_path_buf();
+        _turbo_repo_cache_lock =
+            Some(FileLock::acquire_shared(repo_cache.with_extension("lock")).await?);
+        _turbo_repo_staging_lock =
+            Some(FileLock::acquire_shared(repo_staging.with_extension("lock")).await?);
         tokio::fs::create_dir_all(&repo_cache).await?;
         tokio::fs::create_dir_all(&repo_staging).await?;
-        _turbo_repo_cache_lock = Some(FileLock::acquire(repo_cache.with_extension("lock")).await?);
-        _turbo_repo_staging_lock =
-            Some(FileLock::acquire(repo_staging.with_extension("lock")).await?);
         let search_path = node_tool_search_path(work_root, std::env::var_os("PATH").as_deref());
         Some(
             find_turbo_lean_binary_with_path(Some(OsStr::new(&search_path)))
@@ -2688,14 +2706,10 @@ async fn run_gc_pass(work_root: &Path, store: &super::JobStore) {
     let hot_bytes = tiered.hot_bytes;
     let total_candidates = tiered.cold_dirs.len() + hot_count;
     let mut removed = 0_u64;
-    if (verdict.evict_cold_cache || verdict.evict_hot_cache || verdict.pinned_pressure)
+    if (verdict.evict_cold_cache || verdict.evict_hot_cache)
         && fs2::available_space(work_root).is_ok_and(|now_free| now_free < target)
     {
-        maybe_gc_turbo_lean_cache(
-            work_root,
-            verdict.evict_hot_cache || verdict.pinned_pressure,
-        )
-        .await;
+        maybe_gc_turbo_lean_cache(work_root, verdict.evict_hot_cache).await;
     }
 
     if (verdict.evict_cold_cache || verdict.evict_hot_cache)
@@ -2797,6 +2811,7 @@ async fn maybe_gc_turbo_lean_cache(work_root: &Path, emergency: bool) {
         (2 * (1 << 30), COLD_CACHE_IDLE_SECS)
     };
     let base_env = cache_env_for_repo(work_root, None);
+    let tl_root = turbo_lean_cache_root(work_root);
     for cache_dir in db_dirs {
         let Some(_cache_lock) = FileLock::try_acquire(cache_dir.with_extension("lock")).await
         else {
@@ -2806,12 +2821,23 @@ async fn maybe_gc_turbo_lean_cache(work_root: &Path, emergency: bool) {
             );
             continue;
         };
+        let shard_staging_base = if cache_dir == tl_root {
+            turbo_lean_staging_base_dir(work_root, None)
+        } else if let Some(shard_name) = cache_dir.file_name().and_then(|n| n.to_str()) {
+            turbo_lean_staging_root(work_root)
+                .join(shard_name)
+                .join("base")
+        } else {
+            turbo_lean_staging_base_dir(work_root, None)
+        };
         let mut cmd = tokio::process::Command::new(&bin);
         cmd.env_clear();
         for (key, value) in &base_env {
             cmd.env(key, value);
         }
         cmd.env("TURBO_LEAN_HOME", &cache_dir);
+        cmd.env("TURBO_LEAN_AUDIT_CACHE_DIR", cache_dir.join("audit-cache"));
+        cmd.env("TURBO_LEAN_STAGING_DIR", &shard_staging_base);
         cmd.arg("--cache-dir").arg(&cache_dir);
         if caps.has_no_daemon {
             cmd.arg("--no-daemon");
@@ -2837,31 +2863,76 @@ async fn maybe_gc_turbo_lean_cache(work_root: &Path, emergency: bool) {
         if caps.gc_has_keep_pinned && !emergency {
             cmd.arg("--keep-pinned");
         }
-        match tokio::time::timeout(Duration::from_secs(30), cmd.output()).await {
-            Ok(Ok(output)) if output.status.success() => {
-                tracing::info!(
-                    cache_dir = %cache_dir.display(),
-                    emergency,
-                    max_reclaimable_bytes,
-                    prune_older_secs,
-                    "node cache GC: turbo-lean CAS GC completed"
-                );
+        cmd.kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                tracing::warn!(%err, "node cache GC: failed to spawn turbo-lean gc");
+                continue;
             }
-            Ok(Ok(output)) => {
-                tracing::warn!(
-                    cache_dir = %cache_dir.display(),
-                    status = ?output.status.code(),
-                    stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                    "node cache GC: turbo-lean CAS GC returned non-zero status"
-                );
+        };
+        let pid = child.id();
+        let mut stdout_pipe = child.stdout.take();
+        let mut stderr_pipe = child.stderr.take();
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(ref mut pipe) = stdout_pipe {
+                let _ = tokio::io::AsyncReadExt::read_to_end(pipe, &mut buf).await;
+            }
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(ref mut pipe) = stderr_pipe {
+                let _ = tokio::io::AsyncReadExt::read_to_end(pipe, &mut buf).await;
+            }
+            buf
+        });
+        match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
+            Ok(Ok(status)) => {
+                let _ = stdout_task.await;
+                let stderr = stderr_task.await.unwrap_or_default();
+                if status.success() {
+                    tracing::info!(
+                        cache_dir = %cache_dir.display(),
+                        emergency,
+                        max_reclaimable_bytes,
+                        prune_older_secs,
+                        "node cache GC: turbo-lean CAS GC completed"
+                    );
+                } else {
+                    tracing::warn!(
+                        cache_dir = %cache_dir.display(),
+                        status = ?status.code(),
+                        stderr = %String::from_utf8_lossy(&stderr).trim(),
+                        "node cache GC: turbo-lean CAS GC returned non-zero status"
+                    );
+                }
             }
             Ok(Err(err)) => {
-                tracing::warn!(%err, "node cache GC: failed to spawn turbo-lean gc");
+                stdout_task.abort();
+                stderr_task.abort();
+                tracing::warn!(%err, "node cache GC: failed to wait on turbo-lean gc");
             }
             Err(_) => {
+                #[cfg(unix)]
+                if let Some(pgid) = pid {
+                    unsafe {
+                        libc::kill(-(pgid as i32), libc::SIGKILL);
+                    }
+                }
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                stdout_task.abort();
+                stderr_task.abort();
                 tracing::warn!(
                     cache_dir = %cache_dir.display(),
-                    "node cache GC: turbo-lean gc timed out after 30s"
+                    "node cache GC: turbo-lean gc timed out after 30s and was killed"
                 );
             }
         }
@@ -5251,7 +5322,14 @@ mod tests {
             .write(true)
             .open(locked_shard.with_extension("lock"))
             .unwrap();
-        fs2::FileExt::try_lock_exclusive(&held_shard_lock).unwrap();
+        fs2::FileExt::lock_shared(&held_shard_lock).unwrap();
+        let held_shard_lock_second = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(locked_shard.with_extension("lock"))
+            .unwrap();
+        fs2::FileExt::lock_shared(&held_shard_lock_second).unwrap();
 
         let stale_staging =
             turbo_lean_staging_base_dir(dir.path(), Some("https://github.com/org/repo-a"))
@@ -5293,7 +5371,11 @@ mod tests {
         assert!(candidates.hot_dirs.contains(&hot_staging));
         assert!(!candidates.cold_dirs.contains(&locked_shard));
         assert!(!candidates.hot_dirs.contains(&locked_shard));
+        assert!(!is_unlocked_for_gc(&locked_shard));
+        drop(held_shard_lock_second);
+        assert!(!is_unlocked_for_gc(&locked_shard));
         drop(held_shard_lock);
+        assert!(is_unlocked_for_gc(&locked_shard));
 
         let digest = sha256_hex(b"hello");
         let other = sha256_hex(b"world");
