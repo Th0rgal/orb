@@ -99,8 +99,8 @@ pub(crate) async fn reparent_subtree(store: &Arc<dyn MissionStore>, user_id: &st
         return;
     };
     let pools = manager.budget_pools().await;
-    let changed = changed.to_string();
-    for plan in reparent_plan(&pools, user_id, &changed, |id| {
+    let changed_str = changed.to_string();
+    for plan in reparent_plan(&pools, user_id, &changed_str, |id| {
         let store = store.clone();
         let id = id.to_string();
         async move {
@@ -112,6 +112,33 @@ pub(crate) async fn reparent_subtree(store: &Arc<dyn MissionStore>, user_id: &st
     .await
     {
         manager.reparent_pool(&plan.0, plan.1).await;
+    }
+
+    let pools = manager.budget_pools().await;
+    for m in manager.machines_snapshot().await {
+        if !(m.state.is_live() || m.state == crate::managed::MachineState::Stopped) {
+            continue;
+        }
+        if m.owner_user_id.as_deref() != Some(user_id) {
+            continue;
+        }
+        let Some(owner_str) = m
+            .owner_mission_id
+            .as_deref()
+            .or(m.requested_by_mission_id.as_deref())
+        else {
+            continue;
+        };
+        let Ok(owner_uuid) = Uuid::parse_str(owner_str) else {
+            continue;
+        };
+        let chain = lineage(store, owner_uuid).await;
+        if !chain.iter().any(|a| a == &changed_str) {
+            continue;
+        }
+        let next_pool =
+            crate::managed::budget::nearest_pool(chain.iter().map(String::as_str), &pools, user_id);
+        manager.set_machine_pool(&m.id, next_pool).await;
     }
 }
 

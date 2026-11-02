@@ -4159,3 +4159,166 @@ async fn newest_ready_worker_snapshot_is_project_and_tenant_scoped_and_light_is_
     assert_eq!(warm.image, s2.name);
     assert_eq!(warm.source_snapshot.as_deref(), Some(s2.name.as_str()));
 }
+
+#[tokio::test]
+async fn mission_budget_overrides_daily_cap_for_spawn_auto_extend_resume_and_isolates_shared_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    // Global shared daily cap is $50, max_concurrent high so dollar admission is tested.
+    s.daily_cap_usd = Some(50.0);
+    s.max_concurrent = Some(50);
+    let (m, _) = manager(dir.path(), s);
+
+    // Mission `root` has a $200 budget, overriding the $50 global daily cap.
+    m.set_mission_budget("root", Some(200.0), None, Some("t1".into()))
+        .await
+        .unwrap();
+
+    // Seed $60 already spent today inside `root`'s pool (above the $50 global daily cap).
+    let past_vm = online_machine(&m, "root").await;
+    m.update(&past_vm.id, |x| {
+        x.budget_pool_id = Some("root".into());
+        x.state = MachineState::Destroyed;
+        x.destroyed_at = Some(Utc::now());
+        x.cost_usd = 60.0;
+        x.cost_is_metered = true;
+    })
+    .await;
+
+    // 1) `spawn` for `root` succeeds even though $60 > $50 daily_cap_usd.
+    let spawned = m
+        .spawn(SpawnRequest {
+            size: Some("xlarge".into()), // $0.20/h
+            ttl_minutes: Some(60),
+            wait: Some(false),
+            budget_pool_id: Some("root".into()),
+            owner_mission_id: Some("root".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("mission with $200 pool must bypass $50 daily_cap_usd");
+    assert_eq!(spawned.budget_pool_id.as_deref(), Some("root"));
+
+    // 2) `auto_extend` succeeds past $50 daily_cap_usd for a VM in `root`'s pool.
+    let now = Utc::now();
+    m.update(&spawned.id, |x| {
+        x.state = MachineState::Online;
+        x.expires_at = now + chrono::Duration::minutes(5);
+    })
+    .await;
+    let cur = m.get(&spawned.id).await.unwrap();
+    assert!(
+        m.auto_extend(&cur, now).await,
+        "busy VM in $200 mission pool must auto-extend past $50 daily_cap_usd"
+    );
+
+    // 3) `resume_with_lineage` succeeds past $50 daily_cap_usd (including when stopped before/after budget set).
+    let to_stop = online_machine(&m, "root").await;
+    m.stop_inner(&to_stop.id, "requested", false).await.unwrap();
+    // Re-apply budget to verify stopped machines owned by `root` attach cleanly, and lineage resolves on resume.
+    m.update(&to_stop.id, |x| x.budget_pool_id = None).await;
+    let resumed = m
+        .resume_with_lineage(&to_stop.id, Some(60), &["root".to_string()])
+        .await
+        .expect("resuming stopped VM in $200 mission pool must bypass $50 daily_cap_usd");
+    assert_eq!(resumed.budget_pool_id.as_deref(), Some("root"));
+
+    // 4) Un-pooled missions still get their own $50 shared daily cap (not starved by `root`'s $60 pooled spend).
+    let unpooled_ok = m
+        .spawn(SpawnRequest {
+            size: Some("xlarge".into()), // $0.20/h * 1h = $0.20 <= $50 shared cap
+            ttl_minutes: Some(60),
+            wait: Some(false),
+            owner_mission_id: Some("other".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("un-pooled mission must not have its $50 shared daily cap consumed by pooled mission spend");
+    assert_eq!(unpooled_ok.budget_pool_id, None);
+
+    // Once un-pooled spend itself reaches $50, un-pooled spawns are rejected by `daily_cap_usd`.
+    m.update(&unpooled_ok.id, |x| {
+        x.cost_usd = 50.0;
+        x.cost_is_metered = true;
+    })
+    .await;
+    let unpooled_err = m
+        .spawn(SpawnRequest {
+            size: Some("small".into()),
+            ttl_minutes: Some(60),
+            wait: Some(false),
+            owner_mission_id: Some("other".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(unpooled_err.error, "budget_exceeded");
+    assert!(
+        unpooled_err
+            .message
+            .contains("Daily managed-machine budget $50.00"),
+        "{}",
+        unpooled_err.message
+    );
+
+    // Meanwhile `root` can STILL spawn because its $200 pool still has plenty of room!
+    m.spawn(SpawnRequest {
+        size: Some("xlarge".into()),
+        ttl_minutes: Some(60),
+        wait: Some(false),
+        budget_pool_id: Some("root".into()),
+        owner_mission_id: Some("root".into()),
+        owner_user_id: Some("t1".into()),
+        ..Default::default()
+    })
+    .await
+    .expect("exhausted shared daily cap must not block mission with its own $200 budget");
+
+    // 5) Exhausting `root`'s $200 pool still enforces `budget_exceeded` at $200.
+    m.update(&past_vm.id, |x| x.cost_usd = 199.95).await;
+    let pool_err = m
+        .spawn(SpawnRequest {
+            size: Some("xlarge".into()), // reserves $0.20 > remaining
+            ttl_minutes: Some(60),
+            wait: Some(false),
+            budget_pool_id: Some("root".into()),
+            owner_mission_id: Some("root".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(pool_err.error, "budget_exceeded");
+    assert!(
+        pool_err.message.contains("of $200.00"),
+        "{}",
+        pool_err.message
+    );
+
+    // 6) Removing `root`'s budget moves its spend back to un-pooled and re-subjects future spawns to `daily_cap_usd`.
+    m.set_mission_budget("root", None, None, Some("t1".into()))
+        .await
+        .unwrap();
+    let after_clear = m
+        .spawn(SpawnRequest {
+            size: Some("small".into()),
+            ttl_minutes: Some(30),
+            wait: Some(false),
+            owner_mission_id: Some("root".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(after_clear.error, "budget_exceeded");
+    assert!(
+        after_clear
+            .message
+            .contains("Daily managed-machine budget $50.00"),
+        "{}",
+        after_clear.message
+    );
+}

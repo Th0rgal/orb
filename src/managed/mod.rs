@@ -2739,6 +2739,51 @@ impl ManagedManager {
         }
     }
 
+    /// True when `pool_id` refers to an existing pool with an active `budget_usd`
+    /// (which overrides the shared global `daily_cap_usd`).
+    pub(crate) fn has_active_budget_pool(
+        pools: &HashMap<String, budget::BudgetPool>,
+        pool_id: Option<&str>,
+    ) -> bool {
+        pool_id
+            .and_then(|id| pools.get(id))
+            .is_some_and(|p| p.budget_usd.is_some())
+    }
+
+    /// Shared (un-pooled) `(spent_today_usd, committed_usd)` counted against the
+    /// default global `daily_cap_usd` for missions without an active budget pool.
+    /// Charges covered by an active `BudgetPool` do not consume the shared daily cap.
+    pub(crate) fn shared_daily_usage(
+        machines: &[ManagedMachine],
+        pools: &HashMap<String, budget::BudgetPool>,
+    ) -> (f64, f64) {
+        let now = Utc::now();
+        let today = start_of_today();
+        let mut spent = 0.0;
+        let mut committed = 0.0;
+        for m in machines {
+            let cur_pooled = Self::has_active_budget_pool(pools, m.budget_pool_id.as_deref());
+            if m.created_at >= today || m.state.is_live() {
+                let active_prior: f64 = m
+                    .prior_pool_charges
+                    .iter()
+                    .filter(|(pid, _)| Self::has_active_budget_pool(pools, Some(pid.as_str())))
+                    .map(|(_, usd)| *usd)
+                    .sum();
+                let unpooled_cost = if cur_pooled {
+                    (m.pool_spent_offset - active_prior).max(0.0)
+                } else {
+                    (m.cost_usd - active_prior).max(0.0)
+                };
+                spent += unpooled_cost;
+            }
+            if !cur_pooled {
+                committed += m.remaining_commitment(now);
+            }
+        }
+        ((spent * 10000.0).round() / 10000.0, committed)
+    }
+
     pub async fn list(&self, include_history_hours: i64) -> ListView {
         let cutoff = Utc::now() - chrono::Duration::hours(include_history_hours);
         let active_by_node = match self
@@ -3300,32 +3345,43 @@ impl ManagedManager {
                     req.owner_user_id.as_deref(),
                 )
                 .await?;
-            let budget = self.budget_view(&live_snapshot);
+            let pools_snapshot = self.budgets.lock().await.clone();
+            let governed_by_mission_pool =
+                Self::has_active_budget_pool(&pools_snapshot, req.budget_pool_id.as_deref());
+            let (shared_spent_usd, shared_committed_usd) =
+                Self::shared_daily_usage(&live_snapshot, &pools_snapshot);
             let new_cost = committed_minutes as f64 / 60.0 * effective_usd_per_hour;
-            if let Some(cap) = self
-                .settings
-                .daily_cap_usd
-                .filter(|cap| budget.spent_today_usd + budget.committed_usd + new_cost > *cap)
-            {
-                return Err(ManagedError::new(
-                    "budget_exceeded",
-                    402,
-                    format!(
-                        "Daily managed-machine budget ${:.2} would be exceeded (spent ${:.2}, committed ${:.2}, this machine up to ${:.2}); pick a smaller size or shorter TTL",
-                        cap,
-                        budget.spent_today_usd,
-                        budget.committed_usd,
-                        new_cost
-                    ),
-                ));
+            if !governed_by_mission_pool {
+                if let Some(cap) = self
+                    .settings
+                    .daily_cap_usd
+                    .filter(|cap| shared_spent_usd + shared_committed_usd + new_cost > *cap)
+                {
+                    return Err(ManagedError::new(
+                        "budget_exceeded",
+                        402,
+                        format!(
+                            "Daily managed-machine budget ${:.2} would be exceeded (spent ${:.2}, committed ${:.2}, this machine up to ${:.2}); pick a smaller size or shorter TTL",
+                            cap,
+                            shared_spent_usd,
+                            shared_committed_usd,
+                            new_cost
+                        ),
+                    ));
+                }
             }
             let spent_plus_new_cents =
-                ((budget.spent_today_usd + budget.committed_usd + new_cost) * 100.0).ceil() as u64;
-            let daily_cap_cents = self
-                .settings
-                .daily_cap_usd
-                .map(|c| (c * 100.0).floor() as u64)
-                .unwrap_or(spent_plus_new_cents.saturating_add(1));
+                ((shared_spent_usd + shared_committed_usd + new_cost) * 100.0).ceil() as u64;
+            let daily_cap_cents = if governed_by_mission_pool {
+                // Active mission budget pools (`budget_usd`) override the shared
+                // daily cap and are enforced via `check_pool` below.
+                spent_plus_new_cents.saturating_add(1)
+            } else {
+                self.settings
+                    .daily_cap_usd
+                    .map(|c| (c * 100.0).floor() as u64)
+                    .unwrap_or(spent_plus_new_cents.saturating_add(1))
+            };
             // Concurrency admission was already checked via `orb_vm_cap_admit`
             // in `check_concurrency_quota`, so pass `(0, 1)` slots here to keep
             // daily dollar budget and TTL gates independent of overridden pools.
@@ -3348,7 +3404,7 @@ impl ManagedManager {
                 ));
             }
             let spent_before_cents =
-                ((budget.spent_today_usd + budget.committed_usd) * 100.0).ceil() as u64;
+                ((shared_spent_usd + shared_committed_usd) * 100.0).ceil() as u64;
             let cost_delta_cents = spent_plus_new_cents.saturating_sub(spent_before_cents);
             let ledger_cap_cents = daily_cap_cents.max(spent_plus_new_cents);
             let now_tick = Utc::now().timestamp().max(0) as u64;
@@ -3641,11 +3697,19 @@ impl ManagedManager {
                                 let extra_hourly = next_quote.usd_per_hour - admitted_rate;
                                 let extra_cost = ttl_minutes as f64 / 60.0 * extra_hourly;
                                 let _guard = self.admission.lock().await;
-                                let budget = self.budget().await;
-                                if self.settings.daily_cap_usd.is_some_and(|cap| {
-                                    budget.spent_today_usd + budget.committed_usd + extra_cost > cap
-                                }) {
-                                    return Err(first_err);
+                                let pools_snapshot = self.budgets.lock().await.clone();
+                                if !Self::has_active_budget_pool(
+                                    &pools_snapshot,
+                                    m.budget_pool_id.as_deref(),
+                                ) {
+                                    let live_snapshot = self.machines.lock().await.clone();
+                                    let (shared_spent_usd, shared_committed_usd) =
+                                        Self::shared_daily_usage(&live_snapshot, &pools_snapshot);
+                                    if self.settings.daily_cap_usd.is_some_and(|cap| {
+                                        shared_spent_usd + shared_committed_usd + extra_cost > cap
+                                    }) {
+                                        return Err(first_err);
+                                    }
                                 }
                                 if let Some(pool) = m.budget_pool_id.as_deref() {
                                     if self
@@ -5111,10 +5175,10 @@ impl ManagedManager {
                 );
                 drop(pools);
                 if !had_budget {
-                    // Live machines this mission owns now charge to its pool.
+                    // Live or stopped machines this mission owns now charge to its pool.
                     let mut machines = self.machines.lock().await;
                     for m in machines.iter_mut().filter(|m| {
-                        m.state.is_live()
+                        (m.state.is_live() || m.state == MachineState::Stopped)
                             && m.owner_mission_id.as_deref() == Some(mission_id)
                             && m.budget_pool_id == parent_pool
                     }) {
@@ -5657,7 +5721,8 @@ impl ManagedManager {
     }
 
     /// While busy and close to its TTL, extend by `auto_extend_minutes` if
-    /// the pool (and the daily cap) allow. Returns true when extended.
+    /// the mission pool (or, when un-pooled, the shared daily cap) allows.
+    /// Returns true when extended.
     async fn auto_extend(&self, m: &ManagedMachine, now: DateTime<Utc>) -> bool {
         let chunk = self.settings.auto_extend_minutes;
         if chunk == 0 || m.expires_at - now > chrono::Duration::minutes(10) {
@@ -5669,9 +5734,16 @@ impl ManagedManager {
             return false;
         }
         if let Some(cap) = self.settings.daily_cap_usd {
-            let b = self.budget().await;
-            if b.spent_today_usd + b.committed_usd + chunk as f64 / 60.0 * m.usd_per_hour > cap {
-                return false;
+            let pools_snapshot = self.budgets.lock().await.clone();
+            if !Self::has_active_budget_pool(&pools_snapshot, m.budget_pool_id.as_deref()) {
+                let live_snapshot = self.machines.lock().await.clone();
+                let (shared_spent_usd, shared_committed_usd) =
+                    Self::shared_daily_usage(&live_snapshot, &pools_snapshot);
+                if shared_spent_usd + shared_committed_usd + chunk as f64 / 60.0 * m.usd_per_hour
+                    > cap
+                {
+                    return false;
+                }
             }
         }
         match self.extend(&m.id, chunk).await {

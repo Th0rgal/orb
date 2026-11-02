@@ -737,20 +737,37 @@ impl ManagedManager {
                     m.owner_user_id.as_deref(),
                 )
                 .await?;
-            let b = self.budget_view(&live_snapshot);
+            let pools_snapshot = self.budgets.lock().await.clone();
+            let resolved_budget_pool = if !cap_lineage.is_empty() {
+                if let Some(uid) = m.owner_user_id.as_deref() {
+                    budget::nearest_pool(
+                        cap_lineage.iter().map(String::as_str),
+                        &pools_snapshot,
+                        uid,
+                    )
+                } else {
+                    m.budget_pool_id.clone()
+                }
+            } else {
+                m.budget_pool_id.clone()
+            };
             let new_cost = ttl as f64 / 60.0 * m.usd_per_hour;
-            if let Some(cap) = self
-                .settings
-                .daily_cap_usd
-                .filter(|cap| b.spent_today_usd + b.committed_usd + new_cost > *cap)
-            {
-                return Err(ManagedError::new(
-                    "budget_exceeded",
-                    402,
-                    format!("Daily managed-machine budget ${cap:.2} would be exceeded"),
-                ));
+            if !Self::has_active_budget_pool(&pools_snapshot, resolved_budget_pool.as_deref()) {
+                let (shared_spent_usd, shared_committed_usd) =
+                    Self::shared_daily_usage(&live_snapshot, &pools_snapshot);
+                if let Some(cap) = self
+                    .settings
+                    .daily_cap_usd
+                    .filter(|cap| shared_spent_usd + shared_committed_usd + new_cost > *cap)
+                {
+                    return Err(ManagedError::new(
+                        "budget_exceeded",
+                        402,
+                        format!("Daily managed-machine budget ${cap:.2} would be exceeded"),
+                    ));
+                }
             }
-            if let Some(pool) = m.budget_pool_id.as_deref() {
+            if let Some(pool) = resolved_budget_pool.as_deref() {
                 self.check_pool(
                     pool,
                     budget::reservation_for(ttl, m.usd_per_hour),
@@ -772,6 +789,7 @@ impl ManagedManager {
             };
             let machine = self
                 .update(&m.id, |x| {
+                    x.change_pool(resolved_budget_pool, now);
                     x.name = name;
                     x.state = MachineState::Provisioning;
                     x.cap_pool_id = cap_pool_id;
