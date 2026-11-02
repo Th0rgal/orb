@@ -385,6 +385,17 @@ printf '503'
             ["turbo-lean", "build", "--project-dir", "lean"],
         )
 
+    def test_turbo_lean_config_paths_rejected_in_source_bundle(self):
+        for rel in ("turbo-lean.toml", ".turbo-lean.toml", ".turbo-lean/accelerators.json"):
+            target = self.repo / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("[accelerators]\n")
+            self.git(self.repo, "add", "-f", rel)
+            self.rejected("unsafe source bundle path")
+            self.git(self.repo, "rm", "-f", rel)
+            if (self.repo / ".turbo-lean").exists():
+                shutil.rmtree(self.repo / ".turbo-lean")
+
 
 if __name__ == "__main__":
     if sys.argv[1:] in (["--emit-fixture"], ["--emit-large-fixture"]):

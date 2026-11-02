@@ -102,7 +102,7 @@ def validate_path(rel):
             not component
             or component == ".."
             or component.startswith("-")
-            or component in {".git", ".lake"}
+            or component in {".git", ".lake", ".turbo-lean", ".turbo-lean.toml", "turbo-lean.toml"}
             or any(not (ch.isascii() and (ch.isalnum() or ch in "_.-")) for ch in component)
             for component in components
         )

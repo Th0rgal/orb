@@ -6,10 +6,6 @@ pub fn verify_host_fd_bounds(raw_word: u64, fd_out: u32) -> bool {
     lean_sys_cabi::verify_fd_bounds(raw_word, fd_out)
 }
 
-pub fn verify_host_slice_bounds(off: u64, len: u64, cap: u64) -> bool {
-    lean_sys_cabi::verify_slice_bounds(off, len, cap)
-}
-
 pub fn select_host_stream_isa_with_caps(caps: u64, max_requested: u8) -> u8 {
     stream_simd::select_verified_stream_isa_with_caps(caps, max_requested)
 }
@@ -227,10 +223,10 @@ mod tests {
 
     #[test]
     fn host_slice_bounds_and_isa_selection_gates_verified() {
-        assert!(verify_host_slice_bounds(0, 64, 64));
-        assert!(verify_host_slice_bounds(64, 0, 64));
-        assert!(!verify_host_slice_bounds(64, 1, 64));
-        assert!(!verify_host_slice_bounds(u64::MAX, 1, u64::MAX));
+        assert!(lean_sys_cabi::verify_slice_bounds(0, 64, 64));
+        assert!(lean_sys_cabi::verify_slice_bounds(64, 0, 64));
+        assert!(!lean_sys_cabi::verify_slice_bounds(64, 1, 64));
+        assert!(!lean_sys_cabi::verify_slice_bounds(u64::MAX, 1, u64::MAX));
 
         assert_eq!(
             select_host_stream_isa_with_caps(stream_simd::MASK_BASELINE, stream_simd::VARIANT_AVX2),

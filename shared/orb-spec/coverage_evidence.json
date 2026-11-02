@@ -1901,11 +1901,6 @@
           "symbol": "read_log_chunk"
         },
         {
-          "kind": "host_observer",
-          "path": "src/orb_spec.rs",
-          "symbol": "verify_host_slice_bounds"
-        },
-        {
           "kind": "host_test",
           "path": "src/orb_spec.rs",
           "symbol": "host_slice_bounds_and_isa_selection_gates_verified"

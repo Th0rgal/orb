@@ -590,25 +590,32 @@ pub fn validate_lease_token(
         .map_err(|e| RemoteNodeError::InvalidLease(e.to_string()))?;
     let claims: LeaseClaims =
         serde_json::from_slice(&bytes).map_err(|e| RemoteNodeError::InvalidLease(e.to_string()))?;
-    if claims.node_id != expected_node_id {
+    let node_ok = claims.node_id == expected_node_id;
+    let scope_ok = claims.scope == expected_scope;
+    let now_ts = now.timestamp();
+    let now_epoch = u64::try_from(now_ts).ok();
+    let exp_epoch = u64::try_from(claims.expires_at).ok().filter(|v| *v > 0);
+    let cabi_admitted = match (now_epoch, exp_epoch) {
+        (Some(now_u64), Some(exp_u64)) => crate::orb_spec::lean_sys_cabi::verify_token_auth(
+            sig_ok,
+            false,
+            false,
+            node_ok && scope_ok,
+            now_u64,
+            exp_u64,
+        ),
+        _ => false,
+    };
+    if !node_ok {
         return Err(RemoteNodeError::InvalidLease("wrong node".to_string()));
     }
-    let now_ts = now.timestamp();
-    if claims.expires_at <= 0 || now_ts < 0 || claims.expires_at <= now_ts {
+    if now_epoch.is_none() || exp_epoch.is_none() || claims.expires_at <= now_ts {
         return Err(RemoteNodeError::InvalidLease("expired".to_string()));
     }
-    let scope_ok = claims.scope == expected_scope;
     if !scope_ok {
         return Err(RemoteNodeError::InvalidLease("wrong scope".to_string()));
     }
-    if !crate::orb_spec::lean_sys_cabi::verify_token_auth(
-        sig_ok,
-        false,
-        false,
-        scope_ok,
-        now_ts as u64,
-        claims.expires_at as u64,
-    ) {
+    if !cabi_admitted {
         return Err(RemoteNodeError::InvalidLease(
             "rejected by leansys_verify_token_auth".to_string(),
         ));
@@ -1096,6 +1103,23 @@ mod tests {
                 Err(RemoteNodeError::InvalidLease(msg)) if msg == "expired"
             ));
         }
+        let pre_epoch = chrono::TimeZone::timestamp_opt(&chrono::Utc, -10, 0).unwrap();
+        assert!(matches!(
+            validate_lease_token(&valid, "secret", "babylon", SCOPE_MISSION_EXECUTE, pre_epoch),
+            Err(RemoteNodeError::InvalidLease(msg)) if msg == "expired"
+        ));
+        assert!(matches!(
+            validate_lease_token(&valid, "wrong-secret", "babylon", SCOPE_MISSION_EXECUTE, now),
+            Err(RemoteNodeError::InvalidLease(msg)) if msg == "bad signature"
+        ));
+        assert!(matches!(
+            validate_lease_token(&valid, "secret", "other-node", SCOPE_MISSION_EXECUTE, now),
+            Err(RemoteNodeError::InvalidLease(msg)) if msg == "wrong node"
+        ));
+        assert!(matches!(
+            validate_lease_token(&valid, "secret", "babylon", "wrong:scope", now),
+            Err(RemoteNodeError::InvalidLease(msg)) if msg == "wrong scope"
+        ));
         assert!(node_token_matches("cur-tok", "cur-tok", None));
         assert!(node_token_matches("prev-tok", "cur-tok", Some("prev-tok")));
         assert!(!node_token_matches("", "", None));

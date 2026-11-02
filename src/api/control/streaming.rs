@@ -182,11 +182,18 @@ pub(super) fn text_op_events_for_stream(
             let mut next = previous.clone();
             merge_text_stream_fragment(&mut next, &content);
             let new_bytes = next.len().min(u32::MAX as usize) as u32;
-            let _scan = crate::orb_spec::scan_host_stream_bytes(content.as_bytes());
-            let raw_commit = next
-                .rfind("\n\n")
-                .map(|idx| (idx + 2).min(u32::MAX as usize) as u32)
-                .unwrap_or(prev_raw_commit);
+            let tail_start = (prev_checkpoint.saturating_sub(1) as usize).min(next.len());
+            let tail_scan = crate::orb_spec::scan_host_stream_bytes(&next.as_bytes()[tail_start..]);
+            let raw_commit = if tail_scan.newlines >= 2 && tail_scan.last_newline != usize::MAX {
+                let bound = (tail_start + tail_scan.last_newline + 1).min(next.len());
+                next[tail_start..bound]
+                    .rfind("\n\n")
+                    .map(|idx| (tail_start + idx + 2).min(u32::MAX as usize) as u32)
+                    .unwrap_or(prev_raw_commit)
+                    .max(prev_raw_commit)
+            } else {
+                prev_raw_commit
+            };
             let commit_verdict = evaluate_stream_bounded_commit_gate(
                 prev_bytes,
                 prev_raw_commit,
