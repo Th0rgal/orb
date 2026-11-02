@@ -37,7 +37,7 @@ pub struct UpdateMissionProjectRequest {
     pub descendant_ids: Vec<Uuid>,
 }
 
-pub(super) fn is_fork_of_parent(mission: &Mission, parent_id: Uuid) -> bool {
+pub(crate) fn is_fork_of_parent(mission: &Mission, parent_id: Uuid) -> bool {
     let expected_fork_tag = format!("fork-of:{parent_id}");
     if mission
         .project

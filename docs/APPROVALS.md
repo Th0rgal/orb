@@ -26,6 +26,26 @@ Every pending request is an `ApprovalItem`:
 `GET /api/approvals/queue` lists them for the signed-in user. The per-kind list
 endpoints also carry `digest`, `requester` and `requester_label` on requests.
 
+## Mission-tree secret read grants & `development-identity`
+
+Subagent fan-outs (for example coordinator missions spawning workers on
+`auto-managed:boat`) share one logical mission tree:
+
+- **Default `GITHUB_TOKEN` / `GH_TOKEN` for `development-identity` projects:**
+  Projects that explicitly include `development-identity` in `projects.skills`
+  automatically authorize `GITHUB_TOKEN` and `GH_TOKEN` reads in
+  `secret_broker.rs` (`via = "development-identity"`) without exposing any
+  other secrets stored in the same Bitwarden project. Delivery to `managed-*`
+  workers remains gated by `orb_compute_secret_gate`.
+- **Tree-scoped read grants & sibling deduplication:** Concurrent `secret_get` /
+  `secret_request` read prompts from sibling subagents sharing a non-fork,
+  non-`/btw` `root_mission_id` deduplicate into one pending `ApprovalItem`.
+  Approving a secret read request on any mission in the tree grants read access
+  to the entire non-fork mission tree (and auto-resolves any covered co-pending
+  sibling read requests), while forks (`fork-of:<parent>`) and `/btw` side
+  missions never inherit parent secret grants. Secret writes, deletes, and moves
+  remain strictly per-actor.
+
 ## External MCP sessions & secret CLI
 
 `POST /api/mcp/external-sessions` (device-signed) mints bounded `mcp1.`

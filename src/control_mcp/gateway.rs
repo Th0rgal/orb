@@ -2251,8 +2251,11 @@ pub async fn wait_request(
     let requester = p.requester_subject();
     let value = match kind.as_str() {
         "secret" => {
+            let caller = crate::api::secret_broker::caller_for(&state, &p)
+                .await
+                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             crate::api::secret_broker::broker(&state)
-                .wait_for_requester(&p.sub, &requester, id, wait)
+                .wait_for_requester(&p.sub, &requester, &caller.lineage, id, wait)
                 .await?
         }
         "privilege" => {

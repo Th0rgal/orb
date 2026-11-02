@@ -30,7 +30,10 @@ via `env_crypto`), environment variables, or Bitwarden Secrets Manager
    rent VMs through `spawn_managed_machine` or
    `start_mission(remote_node_id="auto-managed[:provider[:size]]")`.
 2. Callers executing on untrusted `managed-*` remote nodes are denied all
-   non-allowlisted vault secrets (`orb_compute_secret_gate`).
+   non-allowlisted vault secrets (`orb_compute_secret_gate`); only worker-safe
+   repository tokens (`GITHUB_TOKEN` / `GH_TOKEN`) may cross to `managed-*` VMs,
+   and projects with the `development-identity` skill receive default read
+   access to those two keys without per-subagent Touch ID prompts.
 3. Operators can inspect, configure, and individually enable/disable each
    provider via `GET /api/managed-machines/providers` and
    `PUT /api/managed-machines/providers/:provider` (`disabled_providers` in
