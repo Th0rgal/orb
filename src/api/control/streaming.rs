@@ -182,6 +182,7 @@ pub(super) fn text_op_events_for_stream(
             let mut next = previous.clone();
             merge_text_stream_fragment(&mut next, &content);
             let new_bytes = next.len().min(u32::MAX as usize) as u32;
+            let _scan = crate::orb_spec::scan_host_stream_bytes(content.as_bytes());
             let raw_commit = next
                 .rfind("\n\n")
                 .map(|idx| (idx + 2).min(u32::MAX as usize) as u32)

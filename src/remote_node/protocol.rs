@@ -581,7 +581,8 @@ pub fn validate_lease_token(
         .map_err(|e| RemoteNodeError::InvalidLease(e.to_string()))?;
     mac.update(payload.as_bytes());
     let expected = hex::encode(mac.finalize().into_bytes());
-    if !constant_time_eq(signature.as_bytes(), expected.as_bytes()) {
+    let sig_ok = constant_time_eq(signature.as_bytes(), expected.as_bytes());
+    if !sig_ok {
         return Err(RemoteNodeError::InvalidLease("bad signature".to_string()));
     }
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -592,11 +593,25 @@ pub fn validate_lease_token(
     if claims.node_id != expected_node_id {
         return Err(RemoteNodeError::InvalidLease("wrong node".to_string()));
     }
-    if claims.expires_at <= now.timestamp() {
+    let now_ts = now.timestamp();
+    if claims.expires_at <= 0 || now_ts < 0 || claims.expires_at <= now_ts {
         return Err(RemoteNodeError::InvalidLease("expired".to_string()));
     }
-    if claims.scope != expected_scope {
+    let scope_ok = claims.scope == expected_scope;
+    if !scope_ok {
         return Err(RemoteNodeError::InvalidLease("wrong scope".to_string()));
+    }
+    if !crate::orb_spec::lean_sys_cabi::verify_token_auth(
+        sig_ok,
+        false,
+        false,
+        scope_ok,
+        now_ts as u64,
+        claims.expires_at as u64,
+    ) {
+        return Err(RemoteNodeError::InvalidLease(
+            "rejected by leansys_verify_token_auth".to_string(),
+        ));
     }
     Ok(claims)
 }
@@ -612,6 +627,9 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// presented token is accepted when it matches the current token OR the
 /// (optional, non-empty) previous token still being phased out.
 pub fn node_token_matches(presented: &str, current: &str, previous: Option<&str>) -> bool {
+    if presented.is_empty() {
+        return false;
+    }
     let cur = constant_time_eq(presented.as_bytes(), current.as_bytes());
     let (pne, prev) = previous.map_or((false, false), |p| {
         (
@@ -620,12 +638,12 @@ pub fn node_token_matches(presented: &str, current: &str, previous: Option<&str>
         )
     });
     crate::orb_spec::token_rotation_allowed(crate::orb_spec::TokenRotation {
-        presented_nonempty: !presented.is_empty(),
+        presented_nonempty: true,
         match_current: cur,
         prev_nonempty: pne,
         match_prev: prev,
         scope_and_expiry_ok: true,
-    })
+    }) && crate::orb_spec::lean_sys_cabi::verify_token_auth(cur, pne, prev, true, 0, 1)
 }
 
 /// Parse a comma-separated label list (`SANDBOXED_NODE_LABELS`) into a
@@ -1055,6 +1073,33 @@ mod tests {
     fn parses_label_lists() {
         assert_eq!(parse_labels("gpu, lean ,,x"), vec!["gpu", "lean", "x"]);
         assert!(parse_labels("  ").is_empty());
+    }
+
+    #[test]
+    fn lease_and_bearer_token_auth_gates_fail_closed_on_expiry_and_rotation() {
+        let now = chrono::TimeZone::timestamp_opt(&chrono::Utc, 1_800_000_000, 0).unwrap();
+        let make_claims = |expires_at: i64| LeaseClaims {
+            mission_id: Uuid::new_v4(),
+            node_id: "babylon".to_string(),
+            scope: SCOPE_MISSION_EXECUTE.to_string(),
+            expires_at,
+            job_id: None,
+        };
+        let valid = create_lease_token(&make_claims(1_800_000_001), "secret").unwrap();
+        assert!(
+            validate_lease_token(&valid, "secret", "babylon", SCOPE_MISSION_EXECUTE, now).is_ok()
+        );
+        for expired_at in [0_i64, -5_i64, 1_800_000_000_i64] {
+            let tok = create_lease_token(&make_claims(expired_at), "secret").unwrap();
+            assert!(matches!(
+                validate_lease_token(&tok, "secret", "babylon", SCOPE_MISSION_EXECUTE, now),
+                Err(RemoteNodeError::InvalidLease(msg)) if msg == "expired"
+            ));
+        }
+        assert!(node_token_matches("cur-tok", "cur-tok", None));
+        assert!(node_token_matches("prev-tok", "cur-tok", Some("prev-tok")));
+        assert!(!node_token_matches("", "", None));
+        assert!(!node_token_matches("prev-tok", "cur-tok", Some("   ")));
     }
 }
 

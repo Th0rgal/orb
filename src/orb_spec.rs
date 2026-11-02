@@ -6,6 +6,18 @@ pub fn verify_host_fd_bounds(raw_word: u64, fd_out: u32) -> bool {
     lean_sys_cabi::verify_fd_bounds(raw_word, fd_out)
 }
 
+pub fn verify_host_slice_bounds(off: u64, len: u64, cap: u64) -> bool {
+    lean_sys_cabi::verify_slice_bounds(off, len, cap)
+}
+
+pub fn select_host_stream_isa_with_caps(caps: u64, max_requested: u8) -> u8 {
+    stream_simd::select_verified_stream_isa_with_caps(caps, max_requested)
+}
+
+pub fn scan_host_stream_bytes(buf: &[u8]) -> stream_simd::StreamByteScanSummary {
+    stream_simd::scan_stream_bytes(buf)
+}
+
 pub fn apply_host_wire_patch(
     slots: &mut [Option<u32>],
     current_rev: u64,
@@ -211,5 +223,34 @@ mod tests {
         assert!(written > 0);
         assert_eq!(state, (1, 12));
         assert_eq!(effects, vec![12]);
+    }
+
+    #[test]
+    fn host_slice_bounds_and_isa_selection_gates_verified() {
+        assert!(verify_host_slice_bounds(0, 64, 64));
+        assert!(verify_host_slice_bounds(64, 0, 64));
+        assert!(!verify_host_slice_bounds(64, 1, 64));
+        assert!(!verify_host_slice_bounds(u64::MAX, 1, u64::MAX));
+
+        assert_eq!(
+            select_host_stream_isa_with_caps(stream_simd::MASK_BASELINE, stream_simd::VARIANT_AVX2),
+            stream_simd::VARIANT_SCALAR
+        );
+        assert_eq!(
+            select_host_stream_isa_with_caps(stream_simd::MASK_SIMD128, stream_simd::VARIANT_AVX2),
+            stream_simd::VARIANT_SIMD128
+        );
+        assert_eq!(
+            select_host_stream_isa_with_caps(stream_simd::MASK_AVX2, stream_simd::VARIANT_AVX2),
+            stream_simd::VARIANT_AVX2
+        );
+        assert_eq!(
+            select_host_stream_isa_with_caps(stream_simd::MASK_AVX2, stream_simd::VARIANT_SIMD128),
+            stream_simd::VARIANT_SIMD128
+        );
+        let summary = scan_host_stream_bytes(b"hello\n```lean\n| a | b |\n```\n");
+        assert_eq!(summary.newlines, 4);
+        assert_eq!(summary.fence_candidates, 2);
+        assert_eq!(summary.pipe_bytes, 3);
     }
 }

@@ -2624,14 +2624,16 @@ pub async fn read_log_chunk(
             actual_len: want,
         };
         // Enforced in release too: never read a window the verified kernel rejects.
-        if !crate::orb_spec::log_window_valid(window) {
+        if !crate::orb_spec::log_window_valid(window)
+            || !crate::orb_spec::lean_sys_cabi::verify_slice_bounds(start, want, len)
+        {
             tracing::error!(
                 path = %path.display(),
                 offset = start,
                 len = want,
                 max_bytes,
                 file_size = len,
-                "log chunk window rejected by orb_verify_log_window; refusing to read"
+                "log chunk window rejected by orb_verify_log_window / leansys_verify_slice_bounds; refusing to read"
             );
             return None;
         }

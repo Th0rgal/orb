@@ -361,6 +361,30 @@ printf '503'
         self.assertFalse(overlay["source_bundle"]["complete"])
         self.assertEqual(overlay["source_bundle"]["deleted_paths"], ["Gone.lean"])
 
+    def test_turbo_lean_behavior_env_hashed_and_secret_excluded(self):
+        self.command = ["turbo-lean", "build", "--project-dir", "lean"]
+        baseline = self.request()
+        with_tuning = self.request(TURBO_LEAN_MAX_MEMORY_MB="4096")
+        self.assertNotEqual(
+            baseline.get("behavior_env_digest"),
+            with_tuning.get("behavior_env_digest"),
+        )
+        with_secret_only = self.request(
+            TURBO_LEAN_API_TOKEN="super-secret-token",
+            TURBO_LEAN_RECEIPT_SIGNING_KEY="super-secret-key",
+        )
+        self.assertEqual(
+            baseline.get("behavior_env_digest"),
+            with_secret_only.get("behavior_env_digest"),
+        )
+        raw = json.dumps(with_secret_only)
+        self.assertNotIn("super-secret-token", raw)
+        self.assertNotIn("super-secret-key", raw)
+        self.assertEqual(
+            with_tuning["command"],
+            ["turbo-lean", "build", "--project-dir", "lean"],
+        )
+
 
 if __name__ == "__main__":
     if sys.argv[1:] in (["--emit-fixture"], ["--emit-large-fixture"]):
