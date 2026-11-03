@@ -313,12 +313,18 @@ struct OrbConversation: View {
                         if mission != .null { loading = false }
                         let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
                         OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts, status: mission["status"].text, hasInteraction: !pendingQuestionEvents.isEmpty)
-                    } else if !selection.cloud && selection.node.isEmpty {
-                        if let cached = OrbReadCache.read("catalog:agent") {
-                            selection.node = OrbSelection.firstAvailableNodeID(cached["nodes"]["nodes"].items, backend: selection.backend) ?? "core"
+                    } else if !selection.cloud && !selection.nodePinnedByUser {
+                        let resolveAutoNode: ([OrbJSON]) -> String = { items in
+                            if selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                return "core"
+                            }
+                            return OrbSelection.firstAvailableNodeID(items, backend: selection.backend) ?? "core"
                         }
-                        if let catalog = try? await OrbReadCache.agentCatalog(), !selection.cloud && (selection.node.isEmpty || selection.node == "core") {
-                            selection.node = OrbSelection.firstAvailableNodeID(catalog["nodes"]["nodes"].items, backend: selection.backend) ?? "core"
+                        if selection.node.isEmpty, let cached = OrbReadCache.read("catalog:agent") {
+                            selection.node = resolveAutoNode(cached["nodes"]["nodes"].items)
+                        }
+                        if let catalog = try? await OrbReadCache.agentCatalog(), !selection.cloud && !selection.nodePinnedByUser {
+                            selection.node = resolveAutoNode(catalog["nodes"]["nodes"].items)
                         }
                     }
                     let targetProject = effectiveProjectSlug

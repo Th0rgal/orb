@@ -645,10 +645,14 @@ fun OrbConversationPage(
                 !project.str("remote_node_id").isNullOrEmpty()
         )
     }
-    LaunchedEffect(currentMission?.id, nodes, selectedBackend, selectedWorkspaceId, nodePinnedByUser) {
+    LaunchedEffect(currentMission?.id, nodes, selectedBackend, selectedModel, selectedWorkspaceId, nodePinnedByUser) {
         val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
         if (currentMission == null && !isCloudService && selectedWorkspaceId.isEmpty() && !nodePinnedByUser) {
-            selectedNodeId = OrbComputePlacement.firstAvailableNodeId(nodes, backend = selectedBackend) ?: "core"
+            selectedNodeId = if (selectedBackend == "opencode" && selectedModel.isBlank()) {
+                "core"
+            } else {
+                OrbComputePlacement.firstAvailableNodeId(nodes, backend = selectedBackend) ?: "core"
+            }
         }
     }
     val fileScope = remember(missionId, selectedWorkspaceId) { OrbFileScope(missionId, selectedWorkspaceId.takeIf { it.isNotEmpty() }) }
@@ -1202,6 +1206,12 @@ fun OrbConversationPage(
             return
         }
 
+        val isCloudServiceForLaunch = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
+        if (currentMission == null && !isCloudServiceForLaunch && selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core" && selectedBackend == "opencode" && selectedModel.isBlank() && nodePinnedByUser) {
+            errorMessage = "Choose an explicit model to run OpenCode on a remote machine, or select Core."
+            return
+        }
+
         val attachmentsSnapshot = pendingAttachments.toList()
         if (rawInput == null) {
             inputText = ""
@@ -1258,7 +1268,13 @@ fun OrbConversationPage(
                     if (selectedWorkspaceId.isNotEmpty()) body["workspace_id"] = selectedWorkspaceId
                     val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
                     if (!isCloudService && selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core") {
-                        body["remote_node_id"] = selectedNodeId
+                        if (selectedBackend == "opencode" && selectedModel.isBlank()) {
+                            if (nodePinnedByUser) {
+                                throw OrbError("Choose an explicit model to run OpenCode on a remote machine, or select Core.")
+                            }
+                        } else {
+                            body["remote_node_id"] = selectedNodeId
+                        }
                     }
                     if (selectedAccount.isNotEmpty()) body["account_id"] = selectedAccount
                     if (selectedRepo.isNotEmpty()) body["repo"] = selectedRepo

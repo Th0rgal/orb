@@ -3627,7 +3627,7 @@
           },
           {
             "path": "src/api/control/remote_jobs.rs",
-            "sha256": "5086116bed47ae0d4efc307f055316b5ea1a55ad969c5364a5df5dc5df7d0b08"
+            "sha256": "745154838b406d46e7b713c36a2d7b6555e488fcdebb8160224ecaf6d7bf1b0f"
           },
           {
             "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
@@ -3884,7 +3884,7 @@
           },
           {
             "path": "src/api/control/remote_jobs.rs",
-            "sha256": "5086116bed47ae0d4efc307f055316b5ea1a55ad969c5364a5df5dc5df7d0b08"
+            "sha256": "745154838b406d46e7b713c36a2d7b6555e488fcdebb8160224ecaf6d7bf1b0f"
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
@@ -3958,7 +3958,7 @@
           },
           {
             "path": "src/api/control/remote_grok.rs",
-            "sha256": "5279857e135d07c5994003b1c6fbaeb81743d710fd3b74df4810a469521d54cd"
+            "sha256": "c5ed790c87a83bbcd3224cd178e950605e534dec64f8075ae788559d37bf0c07"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
@@ -4035,7 +4035,7 @@
           },
           {
             "path": "src/api/control/remote_grok.rs",
-            "sha256": "5279857e135d07c5994003b1c6fbaeb81743d710fd3b74df4810a469521d54cd"
+            "sha256": "c5ed790c87a83bbcd3224cd178e950605e534dec64f8075ae788559d37bf0c07"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
@@ -4282,7 +4282,7 @@
           },
           {
             "path": "src/api/control/remote_grok.rs",
-            "sha256": "5279857e135d07c5994003b1c6fbaeb81743d710fd3b74df4810a469521d54cd"
+            "sha256": "c5ed790c87a83bbcd3224cd178e950605e534dec64f8075ae788559d37bf0c07"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
@@ -4667,7 +4667,7 @@
           },
           {
             "path": "src/api/control/remote_grok.rs",
-            "sha256": "5279857e135d07c5994003b1c6fbaeb81743d710fd3b74df4810a469521d54cd"
+            "sha256": "c5ed790c87a83bbcd3224cd178e950605e534dec64f8075ae788559d37bf0c07"
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",

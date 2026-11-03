@@ -3,6 +3,7 @@ import UIKit
 
 struct OrbSelection {
     var provider = "agent", account = "", backend = "", model = "", node = "", repository = "", gitRef = ""
+    var nodePinnedByUser = false
     var serviceTier = "standard"
     var params: OrbJSON = .array([])
     var canCancel = false
@@ -89,6 +90,9 @@ struct OrbSelection {
     func validate() throws {
         if cloud && account.isEmpty || !cloud && backend.isEmpty { throw OrbHTTPError(status: 400, detail: "Choose an available agent and account.") }
         if provider == "cursor_cloud" && (repository.isEmpty || gitRef.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) { throw OrbHTTPError(status: 400, detail: "Choose a repository and Git reference for Cursor Cloud.") }
+        if !cloud && backend == "opencode" && !node.isEmpty && node != "core" && model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw OrbHTTPError(status: 400, detail: "Choose an explicit model to run OpenCode on a remote machine, or select Core.")
+        }
     }
     static let minAutoNodeMemBytes: Double = 8.0 * 1024.0 * 1024.0 * 1024.0
     static let minAutoNodeDiskBytes: Double = 20.0 * 1024.0 * 1024.0 * 1024.0
@@ -174,7 +178,18 @@ struct OrbAgentPicker: View {
                     } else {
                         Picker("Harness", selection: $selection.backend) { Text("Choose harness").tag(""); ForEach(backends.indices, id: \.self) { Text(backends[$0]["name"].text.isEmpty ? backends[$0]["id"].text : backends[$0]["name"].text).tag(backends[$0]["id"].text) } }.accessibilityIdentifier("picker.harness")
                     }
-                    if !existing { Picker("Machine", selection: $selection.node) { Text("Core").tag("core"); ForEach(nodes.indices, id: \.self) { Text(nodes[$0]["name"].text.isEmpty ? nodes[$0]["id"].text : nodes[$0]["name"].text).tag(nodes[$0]["id"].text) } } }
+                    if !existing {
+                        Picker("Machine", selection: Binding(
+                            get: { selection.node },
+                            set: {
+                                selection.node = $0
+                                selection.nodePinnedByUser = true
+                            }
+                        )) {
+                            Text("Core").tag("core")
+                            ForEach(nodes.indices, id: \.self) { Text(nodes[$0]["name"].text.isEmpty ? nodes[$0]["id"].text : nodes[$0]["name"].text).tag(nodes[$0]["id"].text) }
+                        }
+                    }
                 }
                 if selection.provider != "grok_bot" { Picker("Model", selection: $selection.model) {
                     Text("Service default").tag("")
@@ -206,20 +221,36 @@ struct OrbAgentPicker: View {
             }.navigationTitle("Agent settings").navigationBarTitleDisplayMode(.inline).scrollDismissesKeyboard(.interactively).toolbar { Button("Done") { dismiss() } }
             .task { await load() }
             .onChange(of: selection.provider) { _, _ in selection.account = ""; selection.model = ""; selection.params = .array([]); Task { await load() } }
-            .onChange(of: selection.backend) { _, _ in Task { await loadModels() } }
-            .onChange(of: selection.model) { _, _ in selection.params = models.first(where: { $0["id"].text == selection.model })?["variants"].items.first?["params"] ?? .array([]) }
+            .onChange(of: selection.backend) { _, _ in
+                selection.model = ""
+                selection.params = .array([])
+                recomputeAutoNodeIfNeeded()
+                Task { await loadModels() }
+            }
+            .onChange(of: selection.model) { _, _ in
+                selection.params = models.first(where: { $0["id"].text == selection.model })?["variants"].items.first?["params"] ?? .array([])
+                recomputeAutoNodeIfNeeded()
+            }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+    }
+    private func recomputeAutoNodeIfNeeded() {
+        guard !existing, !selection.cloud, !selection.nodePinnedByUser else { return }
+        if selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            selection.node = "core"
+            return
+        }
+        if !nodes.isEmpty {
+            selection.node = OrbSelection.firstAvailableNodeID(nodes, backend: selection.backend) ?? "core"
+        }
     }
     private func applyAgentCatalog(_ catalog: OrbJSON) {
         let response = catalog["backends"]
         let rawBackends = response.items.isEmpty ? response["backends"].items : response.items
         backends = rawBackends.filter { $0["id"].text != "gemini" }
         nodes = OrbSelection.sortedComputeNodes(catalog["nodes"]["nodes"].items)
-        if !existing && selection.node.isEmpty {
-            selection.node = OrbSelection.firstAvailableNodeID(nodes, backend: selection.backend) ?? "core"
-        }
+        recomputeAutoNodeIfNeeded()
         backendModelsMap = catalog["models"]["backends"]
         models = backendModelsMap[selection.backend].items
     }

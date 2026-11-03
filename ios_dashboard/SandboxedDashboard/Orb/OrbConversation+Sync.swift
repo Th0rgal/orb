@@ -407,6 +407,16 @@ extension OrbConversation {
                     }
                     pending = OrbPending(path: "/api/control/message", body: .object(body))
                 } else {
+                    // Re-verify unpinned auto-placement against the chosen backend/model so
+                    // selecting a quarantined harness or OpenCode without an explicit model
+                    // never submits a stale initial node selection.
+                    if !selection.cloud && !selection.nodePinnedByUser {
+                        if selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            selection.node = "core"
+                        } else if let cached = OrbReadCache.read("catalog:agent") {
+                            selection.node = OrbSelection.firstAvailableNodeID(cached["nodes"]["nodes"].items, backend: selection.backend) ?? "core"
+                        }
+                    }
                     try selection.validate()
                     body = ["title": .string(OrbStyle.missionTitle(prompt)), "prompt": .string(prompt), "project": .string(project), "tags": .array(folder.isEmpty ? [] : [.string("orb-folder:\(folder)")]), "idempotency_key": .string(UUID().uuidString)]
                     if !uploaded.isEmpty { body["attachments"] = .array(uploaded) }
