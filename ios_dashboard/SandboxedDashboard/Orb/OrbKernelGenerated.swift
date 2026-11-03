@@ -368,6 +368,24 @@ internal func orb_wire_encode_slice_step(_ inArenaPtr: UInt64, _ outPtr: UInt64,
 @_silgen_name("orb_wire_decode_slice_step")
 internal func orb_wire_decode_slice_step(_ inPtr: UInt64, _ inLen: UInt64, _ is32Bit: UInt8, _ magic: UInt32, _ abiVersion: UInt32, _ schemaId: UInt32, _ expectedSchemaId: UInt32, _ totalLen: UInt32, _ payloadLen: UInt32, _ arenaOff: UInt32, _ arenaLen: UInt32, _ maxBudgetBytes: UInt32) -> UInt8
 
+@_silgen_name("orb_scroll_policy_gap")
+internal func orb_scroll_policy_gap(_ height: UInt64, _ client: UInt64, _ top: UInt64) -> UInt64
+
+@_silgen_name("orb_scroll_policy_correct")
+internal func orb_scroll_policy_correct(_ height: UInt64, _ client: UInt64, _ top: UInt64, _ anchorDoc: UInt64, _ y0: UInt64) -> UInt64
+
+@_silgen_name("orb_scroll_policy_step")
+internal func orb_scroll_policy_step(_ opKind: UInt8, _ pinned: UInt8, _ intent: UInt8, _ resized: UInt8, _ curTop: UInt64, _ height: UInt64, _ client: UInt64, _ arg: UInt64) -> UInt64
+
+@_silgen_name("orb_wire_scroll_slice_step")
+internal func orb_wire_scroll_slice_step(_ inPtr: UInt64, _ inLen: UInt64, _ outPtr: UInt64, _ outCap: UInt64, _ is32Bit: UInt8, _ opKind: UInt8, _ pinned: UInt8, _ intent: UInt8, _ resized: UInt8, _ curTop: UInt64, _ height: UInt64, _ client: UInt64, _ arg: UInt64) -> UInt64
+
+@_silgen_name("orb_wire_stream_slice_step")
+internal func orb_wire_stream_slice_step(_ inPtr: UInt64, _ inLen: UInt64, _ outPtr: UInt64, _ outCap: UInt64, _ is32Bit: UInt8, _ prevLen: UInt32, _ prevCommit: UInt32, _ prevCheckpoint: UInt32, _ newLen: UInt32, _ rawCommit: UInt32, _ maxOpenTailBytes: UInt32) -> UInt64
+
+@_silgen_name("orb_wire_transcript_slice_step")
+internal func orb_wire_transcript_slice_step(_ inPtr: UInt64, _ inLen: UInt64, _ outPtr: UInt64, _ outCap: UInt64, _ is32Bit: UInt8, _ lastAppliedSeq: UInt64, _ incomingSeq: UInt64, _ entryCount: UInt32, _ thinkingOpen: UInt8, _ normalizedAction: UInt8, _ isReplayFromLog: UInt8) -> UInt64
+
 enum OrbKernel {
     struct WorkfoldVerdict: Equatable, Sendable {
         let foldItem: Bool
@@ -376,6 +394,11 @@ enum OrbKernel {
 
     @inline(__always)
     private static func b8(_ v: Bool) -> UInt8 { v ? 1 : 0 }
+
+    @inline(__always)
+    private static func enum8(_ v: Int) -> UInt8 {
+        (v >= 0 && v <= 255) ? UInt8(v) : 255
+    }
 
     @inline(__always)
     private static func satU8(_ v: Int) -> UInt8 {
@@ -409,7 +432,7 @@ enum OrbKernel {
         foldHasTool: Bool
     ) -> WorkfoldVerdict {
         let raw = orb_workfold_step(
-            satU8(itemKind),
+            enum8(itemKind),
             b8(isCumulative),
             b8(isNonEmpty),
             b8(toolAhead),
@@ -524,7 +547,7 @@ enum OrbKernel {
             UInt64(attrOff),
             UInt64(attrLen),
             UInt64(bufLen),
-            satU8(tagKind)
+            enum8(tagKind)
         ) != 0
     }
 
@@ -534,7 +557,7 @@ enum OrbKernel {
         eventKind: Int,
         deltaLen: UInt32
     ) -> (len: UInt32, seq: UInt32) {
-        let raw = orb_transcript_patch_step(stateLen, stateSeq, satU8(eventKind), deltaLen)
+        let raw = orb_transcript_patch_step(stateLen, stateSeq, enum8(eventKind), deltaLen)
         return (UInt32(truncatingIfNeeded: raw), UInt32(truncatingIfNeeded: raw >> 32))
     }
 
@@ -571,7 +594,7 @@ enum OrbKernel {
     }
 
     static func streamCoalescerStep(opKind: Int, shownLen: Int, pendingLen: Int, deltaLen: Int) -> (shownLen: Int, pendingLen: Int, rendered: Bool) {
-        let raw = orb_stream_coalescer_step(satU8(opKind), satU32(shownLen), satU32(pendingLen), satU32(deltaLen))
+        let raw = orb_stream_coalescer_step(enum8(opKind), satU32(shownLen), satU32(pendingLen), satU32(deltaLen))
         let nextShown = Int(raw & 0xFFFF_FFFF)
         let nextPending = Int((raw >> 32) & 0x7FFF_FFFF)
         let rendered = ((raw >> 63) & 1) != 0
@@ -579,7 +602,8 @@ enum OrbKernel {
     }
 
     static func streamFenceStep(openKind: Int, openCount: Int, markerKind: Int, markerCount: Int) -> (kind: Int, count: Int) {
-        let raw = orb_stream_fence_step(satU8(openKind), satU32(openCount), satU8(markerKind), satU32(markerCount))
+        guard openCount >= 0, markerCount >= 0 else { return (openKind, max(0, openCount)) }
+        let raw = orb_stream_fence_step(enum8(openKind), satU32(openCount), enum8(markerKind), satU32(markerCount))
         return (Int(raw & 0xFF), Int((raw >> 32) & 0xFFFF_FFFF))
     }
 
@@ -597,11 +621,11 @@ enum OrbKernel {
         let fence = streamFenceStep(openKind: openKind, openCount: openCount, markerKind: markerKind, markerCount: markerCount)
         let raw = orb_stream_commit_step(
             b8(tick),
-            satU8(openKind),
+            enum8(openKind),
             satU32(openCount),
             b8(lineBlank),
             b8(lineTick),
-            satU8(markerKind),
+            enum8(markerKind),
             satU32(markerCount),
             satU32(pos),
             satU32(commit)
@@ -676,7 +700,7 @@ enum OrbKernel {
         let raw = orb_turn_outcome_step(
             b8(prevFinished),
             b8(prevFailed),
-            satU8(eventKind),
+            enum8(eventKind),
             b8(isNarration),
             b8(isSuccessFalse),
             b8(isTextNonEmpty)
@@ -700,7 +724,7 @@ enum OrbKernel {
     }
 
     static func machineActionAdmitted(stateKind: Int, isBusy: Bool, isMuted: Bool) -> (isLive: Bool, canAct: Bool, meterLiveCost: Bool, isStopped: Bool, canResume: Bool) {
-        let raw = orb_machine_action_admitted(satU8(stateKind), b8(isBusy), b8(isMuted))
+        let raw = orb_machine_action_admitted(enum8(stateKind), b8(isBusy), b8(isMuted))
         return ((raw & 1) != 0, ((raw >> 8) & 1) != 0, ((raw >> 16) & 1) != 0, ((raw >> 24) & 1) != 0, ((raw >> 25) & 1) != 0)
     }
 
@@ -730,11 +754,13 @@ enum OrbKernel {
     }
 
     static func verifyWorkerBudget(activeWorkers: Int, maxWorkers: Int, microChunks: Int, totalLen: Int, isMobileHetero: Bool = true) -> Bool {
-        leansys_verify_worker_budget(satU64(activeWorkers), satU64(maxWorkers), satU64(microChunks), satU64(totalLen), b8(isMobileHetero)) != 0
+        guard activeWorkers >= 0, maxWorkers >= 0, microChunks >= 0, totalLen >= 0 else { return false }
+        return leansys_verify_worker_budget(UInt64(activeWorkers), UInt64(maxWorkers), UInt64(microChunks), UInt64(totalLen), b8(isMobileHetero)) != 0
     }
 
     static func verifyWorkerBudget(activeWorkers: Int, maxWorkers: Int, microChunks: Int, totalLen: Int, topologyKind: Int) -> Bool {
-        leansys_verify_worker_budget(satU64(activeWorkers), satU64(maxWorkers), satU64(microChunks), satU64(totalLen), satU8(topologyKind)) != 0
+        guard activeWorkers >= 0, maxWorkers >= 0, microChunks >= 0, totalLen >= 0 else { return false }
+        return leansys_verify_worker_budget(UInt64(activeWorkers), UInt64(maxWorkers), UInt64(microChunks), UInt64(totalLen), enum8(topologyKind)) != 0
     }
 
     static func verifyPageAlignedBuffer(addr: UInt64, allocBytes: UInt64, capacityBytes: UInt64, dirtyRssBytes: UInt64, maxBudgetBytes: UInt64, pageAlignMask: UInt64 = 16383) -> Bool {
@@ -742,11 +768,11 @@ enum OrbKernel {
     }
 
     static func selectIsa(detectedHwCaps: UInt64, requiredMask: UInt64, requestedVariantId: Int, maxVariantId: Int = 4) -> Int {
-        Int(leansys_select_isa(detectedHwCaps, requiredMask, satU8(requestedVariantId), satU8(maxVariantId)))
+        Int(leansys_select_isa(detectedHwCaps, requiredMask, enum8(requestedVariantId), enum8(maxVariantId)))
     }
 
     static func verifyIsaSelection(detectedHwCaps: UInt64, requiredMask: UInt64, selectedVariantId: Int, maxVariantId: Int = 4) -> Bool {
-        leansys_verify_isa_selection(detectedHwCaps, requiredMask, satU8(selectedVariantId), satU8(maxVariantId)) != 0
+        leansys_verify_isa_selection(detectedHwCaps, requiredMask, enum8(selectedVariantId), enum8(maxVariantId)) != 0
     }
 
     static func verifyFdBounds(rawWord: UInt64, fdOut: UInt32) -> Bool {
@@ -789,7 +815,7 @@ enum OrbKernel {
         scrollCorrectedInEpoch: UInt8
     ) -> (action: Int, parityAdmitted: Bool, singleScrollCorrectionOk: Bool, digest32: UInt32) {
         let raw = orb_client_parity_step(
-            satU8(clientTarget),
+            enum8(clientTarget),
             wireSchemaId,
             transcriptSeq,
             markdownBlocksCount,
@@ -866,6 +892,158 @@ enum OrbKernel {
             arenaOff,
             arenaLen,
             maxBudgetBytes
+        )
+    }
+
+    private static let scrollDomainMin: Int64 = -0x4000_0000
+    private static let scrollDomainMax: Int64 = 0x3FFF_FFFF
+
+    @inline(__always)
+    private static func inScrollDomain(_ v: Int64) -> Bool {
+        v >= scrollDomainMin && v <= scrollDomainMax
+    }
+
+    static func scrollPolicyGap(height: Int64, client: Int64, top: Int64) -> Int64? {
+        guard inScrollDomain(height), inScrollDomain(client), inScrollDomain(top) else { return nil }
+        return Int64(bitPattern: orb_scroll_policy_gap(
+            UInt64(bitPattern: height),
+            UInt64(bitPattern: client),
+            UInt64(bitPattern: top)
+        ))
+    }
+
+    static func scrollPolicyCorrect(
+        height: Int64,
+        client: Int64,
+        top: Int64,
+        anchorDoc: Int64,
+        y0: Int64
+    ) -> Int64? {
+        guard inScrollDomain(height), inScrollDomain(client), inScrollDomain(top), inScrollDomain(anchorDoc), inScrollDomain(y0) else { return nil }
+        return Int64(bitPattern: orb_scroll_policy_correct(
+            UInt64(bitPattern: height),
+            UInt64(bitPattern: client),
+            UInt64(bitPattern: top),
+            UInt64(bitPattern: anchorDoc),
+            UInt64(bitPattern: y0)
+        ))
+    }
+
+    static func scrollPolicyStep(
+        opKind: UInt8,
+        pinned: Bool,
+        intent: Bool,
+        resized: Bool,
+        curTop: Int64,
+        height: Int64,
+        client: Int64,
+        arg: Int64
+    ) -> (status: UInt8, admitted: Bool, pinned: Bool, top: UInt32) {
+        let raw = orb_scroll_policy_step(
+            opKind,
+            b8(pinned),
+            b8(intent),
+            b8(resized),
+            UInt64(bitPattern: curTop),
+            UInt64(bitPattern: height),
+            UInt64(bitPattern: client),
+            UInt64(bitPattern: arg)
+        )
+        let lo32 = UInt32(truncatingIfNeeded: raw)
+        let hi32 = UInt32(truncatingIfNeeded: raw >> 32)
+        return (
+            UInt8(lo32 & 0xFF),
+            ((lo32 >> 8) & 1) != 0,
+            ((lo32 >> 9) & 1) != 0,
+            hi32
+        )
+    }
+
+    static func wireScrollSliceStep(
+        inPtr: UInt64,
+        inLen: UInt64,
+        outPtr: UInt64,
+        outCap: UInt64,
+        is32Bit: Bool = false,
+        opKind: UInt8,
+        pinned: Bool,
+        intent: Bool,
+        resized: Bool,
+        curTop: Int64,
+        height: Int64,
+        client: Int64,
+        arg: Int64
+    ) -> UInt64 {
+        orb_wire_scroll_slice_step(
+            inPtr,
+            inLen,
+            outPtr,
+            outCap,
+            b8(is32Bit),
+            opKind,
+            b8(pinned),
+            b8(intent),
+            b8(resized),
+            UInt64(bitPattern: curTop),
+            UInt64(bitPattern: height),
+            UInt64(bitPattern: client),
+            UInt64(bitPattern: arg)
+        )
+    }
+
+    static func wireStreamSliceStep(
+        inPtr: UInt64,
+        inLen: UInt64,
+        outPtr: UInt64,
+        outCap: UInt64,
+        is32Bit: Bool = false,
+        prevLen: UInt32,
+        prevCommit: UInt32,
+        prevCheckpoint: UInt32,
+        newLen: UInt32,
+        rawCommit: UInt32,
+        maxOpenTailBytes: UInt32
+    ) -> UInt64 {
+        orb_wire_stream_slice_step(
+            inPtr,
+            inLen,
+            outPtr,
+            outCap,
+            b8(is32Bit),
+            prevLen,
+            prevCommit,
+            prevCheckpoint,
+            newLen,
+            rawCommit,
+            maxOpenTailBytes
+        )
+    }
+
+    static func wireTranscriptSliceStep(
+        inPtr: UInt64,
+        inLen: UInt64,
+        outPtr: UInt64,
+        outCap: UInt64,
+        is32Bit: Bool = false,
+        lastAppliedSeq: UInt64,
+        incomingSeq: UInt64,
+        entryCount: UInt32,
+        thinkingOpen: Bool,
+        normalizedAction: UInt8,
+        isReplayFromLog: Bool
+    ) -> UInt64 {
+        orb_wire_transcript_slice_step(
+            inPtr,
+            inLen,
+            outPtr,
+            outCap,
+            b8(is32Bit),
+            lastAppliedSeq,
+            incomingSeq,
+            entryCount,
+            b8(thinkingOpen),
+            normalizedAction,
+            b8(isReplayFromLog)
         )
     }
 }

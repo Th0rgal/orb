@@ -6,11 +6,12 @@ import { For, Index, Show, createEffect, onCleanup, createMemo, createSignal, ty
 import { openExternalUrl } from "./api";
 import { timed } from "./diagnostics";
 import { swallow } from "./log";
-import { RICH_TAG, expandMediaLines, parseRichTag, richTagSpan } from "./richTags";
+import { RICH_TAG, expandMediaLines, hasRichTagSyntax, mediaLineTag, parseRichTag, richTagSpan } from "./richTags";
 import { WorkspaceImage } from "./WorkspaceImage";
 import * as Ic from "./icons";
 import { normalizeGluedFences, splitGluedFence } from "./codeFences";
 import { normalizeLoosePipeTables } from "./pipeTables";
+import { advanceStreamBoundedCommit, STREAM_MAX_OPEN_TAIL_BYTES, type StreamTailCommitState } from "./stream";
 
 /**
  * Source-vs-preview for Markdown file views, shared by every one of them so ⌘/
@@ -96,10 +97,10 @@ function UnavailableFile(p: { label: string; path: string }) {
 /** `<image>`/`<file>` tags are taken before any other inline syntax so their
  * quoted paths are never read as emphasis, code or links. */
 function inline(text: string, links = true): JSX.Element[] {
-  if (!links || !/<(?:image|file)\s/i.test(text)) return inlineMarkdown(text, links);
+  if (!links || !hasRichTagSyntax(text)) return inlineMarkdown(text, links);
   const out: JSX.Element[] = [];
   let last = 0;
-  for (const m of text.matchAll(RICH_TAG)) {
+  for (const m of text.matchAll(new RegExp(RICH_TAG.source, "gi"))) {
     const tag = parseRichTag(m[1], m[2], m[3], richTagSpan(m[0], m[1], m[2], m.index!, text.length));
     if (!tag) continue;
     if (m.index! > last) out.push(...inlineMarkdown(text.slice(last, m.index), links));
@@ -411,7 +412,7 @@ function parseBlocks(src: string): Block[] {
 /** Freeze only completed blocks; fences keep blank lines inside the active tail. */
 /** Search the same block content without mounting historical Markdown. */
 export function markdownText(source:string):string{
- const plain=(text:string):string=>text.replace(RICH_TAG,(tag,type:string,attrs:string,inner:string|undefined,off:number)=>parseRichTag(type,attrs,inner,richTagSpan(tag,type,attrs,off,text.length))?.label??tag).replace(/(?<!\\)(?:\*\*(.+?)\*\*|`([^`]+)`|!\[([^\]]*)\]\(([^)\s]+)\)|\[((?:`[^`\n]*`|[^\]`\n])+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|(:codex-file-citation\{(?:[^"{}]|"(?:\\.|[^"\\])*")*\})|\*([^*\n]+)\*)/g,(match,bold,code,_alt,imgSrc,label,_href,citation,italic)=>{
+ const plain=(text:string):string=>text.replace(new RegExp(RICH_TAG.source,"gi"),(tag,type:string,attrs:string,inner:string|undefined,off:number)=>parseRichTag(type,attrs,inner,richTagSpan(tag,type,attrs,off,text.length))?.label??tag).replace(/(?<!\\)(?:\*\*(.+?)\*\*|`([^`]+)`|!\[([^\]]*)\]\(([^)\s]+)\)|\[((?:`[^`\n]*`|[^\]`\n])+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|(:codex-file-citation\{(?:[^"{}]|"(?:\\.|[^"\\])*")*\})|\*([^*\n]+)\*)/g,(match,bold,code,_alt,imgSrc,label,_href,citation,italic)=>{
   if(citation!==undefined){
    const quoted=[...citation.matchAll(/([a-z_]+)\s*=\s*("(?:\\.|[^"\\])*")/g)].find(a=>a[1]==='path')?.[2];
    try{const path=quoted?JSON.parse(quoted):undefined;if(path)return path.split('/').pop()||path;}catch{}
@@ -507,6 +508,10 @@ export function incrementalMarkdown(): IncrementalMarkdownParser {
   let fencePrefixBlocks: Block[] | null = null, fenceAccText = "", fenceBodyCursor = 0, fenceHasLines = false, fenceCleanRaw = false;
   let stable: Block[] = [], unstable: Block[] = [];
   let scannedBytes = 0, parsedBytes = 0;
+  let commitState: StreamTailCommitState = { totalBytes: 0, committedBytes: 0, checkpointBytes: 0 };
+  let lastUtf8Cursor = 0;
+  let checkpointCursor = 0, checkpointUtf8Offset = 0, checkpointParaPrefix = "";
+  let checkpointPrefixBlocks: Block[] | null = null;
 
   const samePrefix = (next: string): boolean => {
     const plen = previous.length;
@@ -523,8 +528,16 @@ export function incrementalMarkdown(): IncrementalMarkdownParser {
     fenceStart = -1;
     fencePrefixBlocks = null;
     fenceAccText = "";
+    fenceBodyCursor = 0;
     fenceHasLines = false;
     fenceCleanRaw = false;
+  };
+
+  const resetCheckpointState = (nextBoundary: number, nextCommittedUtf8: number) => {
+    checkpointCursor = nextBoundary;
+    checkpointUtf8Offset = nextCommittedUtf8;
+    checkpointParaPrefix = "";
+    checkpointPrefixBlocks = null;
   };
 
   const fn = ((text: string): Block[] => {
@@ -538,8 +551,11 @@ export function incrementalMarkdown(): IncrementalMarkdownParser {
       listAfterBlank = false;
       inQuote = false;
       resetFenceState();
+      resetCheckpointState(0, 0);
       stable = [];
       unstable = [];
+      commitState = { totalBytes: 0, committedBytes: 0, checkpointBytes: 0 };
+      lastUtf8Cursor = 0;
     }
     previous = text;
 
@@ -652,12 +668,37 @@ export function incrementalMarkdown(): IncrementalMarkdownParser {
       }
     }
 
+    const deltaUtf8 = text.length > lastUtf8Cursor ? utf8LenSlice(text, lastUtf8Cursor, text.length) : 0;
+    lastUtf8Cursor = text.length;
+    let newlyCommittedBytes = commitState.committedBytes;
     if (newCommitBoundary > boundary) {
       const newlyCommitted = text.slice(boundary, newCommitBoundary);
-      parsedBytes += utf8LenSlice(text, boundary, newCommitBoundary);
+      const commitDelta = utf8LenSlice(text, boundary, newCommitBoundary);
+      parsedBytes += commitDelta;
+      newlyCommittedBytes += commitDelta;
       stable = [...stable, ...parseMarkdown(newlyCommitted)];
       boundary = newCommitBoundary;
       unstable = [];
+      resetCheckpointState(boundary, newlyCommittedBytes);
+    }
+    const totalUtf8Now = commitState.totalBytes + deltaUtf8;
+    const openTailBytesLen = Math.max(
+      0,
+      totalUtf8Now - (fenced && fenceStart >= boundary ? Math.max(newlyCommittedBytes, totalUtf8Now - STREAM_MAX_OPEN_TAIL_BYTES) : Math.max(newlyCommittedBytes, checkpointUtf8Offset)),
+    );
+    const steppedCommit = advanceStreamBoundedCommit(
+      commitState,
+      deltaUtf8,
+      newlyCommittedBytes,
+      STREAM_MAX_OPEN_TAIL_BYTES,
+      openTailBytesLen,
+    );
+    if (steppedCommit.admitted) {
+      commitState = {
+        totalBytes: steppedCommit.totalBytes,
+        committedBytes: steppedCommit.committedBytes,
+        checkpointBytes: steppedCommit.checkpointBytes,
+      };
     }
 
     if (fenced && fenceStart >= boundary) {
@@ -719,6 +760,278 @@ export function incrementalMarkdown(): IncrementalMarkdownParser {
         unstable = [...fencePrefixBlocks, openBlock];
         return [...stable, ...unstable];
       }
+    }
+
+    if (!fenced && !math && !inList && !inQuote && steppedCommit.checkpointForced) {
+      let advanced = false;
+      const flushParaPrefix = () => {
+        if (!checkpointParaPrefix) return;
+        if (checkpointPrefixBlocks === null) {
+          const prefixSlice = text.slice(boundary, checkpointCursor);
+          parsedBytes += utf8LenSlice(text, boundary, checkpointCursor);
+          checkpointPrefixBlocks = prefixSlice ? reuseBlocks(unstable, parseMarkdown(prefixSlice)) : [];
+        }
+        checkpointPrefixBlocks = [...checkpointPrefixBlocks, { t: "p", text: checkpointParaPrefix }];
+        checkpointParaPrefix = "";
+      };
+      const ensurePrefixBlocks = () => {
+        if (checkpointPrefixBlocks !== null) return;
+        const prefixSlice = text.slice(boundary, checkpointCursor);
+        parsedBytes += utf8LenSlice(text, boundary, checkpointCursor);
+        checkpointPrefixBlocks = prefixSlice ? reuseBlocks(unstable, parseMarkdown(prefixSlice)) : [];
+      };
+      while (checkpointUtf8Offset < commitState.checkpointBytes) {
+        const nl = text.indexOf("\n", checkpointCursor);
+        if (nl === -1 || nl >= scanCursor) break;
+        const rawLine = text.slice(checkpointCursor, nl);
+        const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+        const expandedLine = mediaLineTag(line) ?? line;
+        const lineUtf8 = utf8LenSlice(text, checkpointCursor, nl) + 1;
+        if (!expandedLine.trim()) {
+          flushParaPrefix();
+          ensurePrefixBlocks();
+          parsedBytes += lineUtf8;
+          checkpointCursor = nl + 1;
+          checkpointUtf8Offset += lineUtf8;
+          advanced = true;
+          continue;
+        }
+        const singleLineSelfDelimited =
+          isHrLine(expandedLine) ||
+          /^ {0,3}#{1,6}\s/.test(expandedLine) ||
+          /^\s*(?:\$\$(.+?)\$\$|\\\[(.+?)\\\])\s*$/.test(expandedLine);
+        if (singleLineSelfDelimited) {
+          flushParaPrefix();
+          ensurePrefixBlocks();
+          parsedBytes += lineUtf8;
+          checkpointPrefixBlocks = [...checkpointPrefixBlocks!, ...parseMarkdown(expandedLine)];
+          checkpointCursor = nl + 1;
+          checkpointUtf8Offset += lineUtf8;
+          advanced = true;
+          continue;
+        }
+        const trimFence = expandedLine.trimStart();
+        const gluedFence = !trimFence.startsWith("```") ? splitGluedFence(expandedLine) : null;
+        if (trimFence.startsWith("```") || gluedFence !== null) {
+          let closeStart = nl + 1;
+          let closeEnd = -1;
+          while (closeStart < scanCursor) {
+            const cnl = text.indexOf("\n", closeStart);
+            if (cnl === -1 || cnl >= scanCursor) break;
+            const cline = text.slice(closeStart, cnl).replace(/\r$/, "");
+            if (cline.trimStart().startsWith("```")) {
+              closeEnd = cnl + 1;
+              break;
+            }
+            closeStart = cnl + 1;
+          }
+          if (closeEnd !== -1) {
+            flushParaPrefix();
+            ensurePrefixBlocks();
+            const spanUtf8 = utf8LenSlice(text, checkpointCursor, closeEnd);
+            parsedBytes += spanUtf8;
+            checkpointPrefixBlocks = [...checkpointPrefixBlocks!, ...parseMarkdown(text.slice(checkpointCursor, closeEnd - 1))];
+            checkpointCursor = closeEnd;
+            checkpointUtf8Offset += spanUtf8;
+            advanced = true;
+            continue;
+          }
+          flushParaPrefix();
+          break;
+        }
+        if (expandedLine.trim() === "$$" || expandedLine.trim() === "\\[") {
+          const endTok = expandedLine.trim() === "$$" ? "$$" : "\\]";
+          let closeStart = nl + 1;
+          let closeEnd = -1;
+          while (closeStart < scanCursor) {
+            const cnl = text.indexOf("\n", closeStart);
+            if (cnl === -1 || cnl >= scanCursor) break;
+            if (text.slice(closeStart, cnl).replace(/\r$/, "").trim() === endTok) {
+              closeEnd = cnl + 1;
+              break;
+            }
+            closeStart = cnl + 1;
+          }
+          if (closeEnd !== -1) {
+            flushParaPrefix();
+            ensurePrefixBlocks();
+            const spanUtf8 = utf8LenSlice(text, checkpointCursor, closeEnd);
+            parsedBytes += spanUtf8;
+            checkpointPrefixBlocks = [...checkpointPrefixBlocks!, ...parseMarkdown(text.slice(checkpointCursor, closeEnd - 1))];
+            checkpointCursor = closeEnd;
+            checkpointUtf8Offset += spanUtf8;
+            advanced = true;
+            continue;
+          }
+          flushParaPrefix();
+          break;
+        }
+        if (/^ {0,3}>/.test(expandedLine)) {
+          let qPos = nl + 1;
+          let ended = false;
+          while (qPos < scanCursor) {
+            const qnl = text.indexOf("\n", qPos);
+            if (qnl === -1 || qnl >= scanCursor) break;
+            const qline = text.slice(qPos, qnl).replace(/\r$/, "");
+            if (!/^ {0,3}>/.test(qline)) {
+              ended = true;
+              break;
+            }
+            qPos = qnl + 1;
+          }
+          if (ended) {
+            flushParaPrefix();
+            ensurePrefixBlocks();
+            const spanUtf8 = utf8LenSlice(text, checkpointCursor, qPos);
+            parsedBytes += spanUtf8;
+            checkpointPrefixBlocks = [...checkpointPrefixBlocks!, ...parseMarkdown(text.slice(checkpointCursor, qPos - 1))];
+            checkpointCursor = qPos;
+            checkpointUtf8Offset += spanUtf8;
+            advanced = true;
+            continue;
+          }
+          flushParaPrefix();
+          break;
+        }
+        const nextNl = text.indexOf("\n", nl + 1);
+        const nextLine = text.slice(nl + 1, nextNl === -1 ? text.length : nextNl).replace(/\r$/, "");
+        if (expandedLine.includes("|") || nextLine.includes("|")) {
+          if (nextNl !== -1 && nextNl < scanCursor && (expandedLine.includes("|") || isTableSep(nextLine))) {
+            let tPos = nl + 1;
+            let ended = false;
+            while (tPos < scanCursor) {
+              const tnl = text.indexOf("\n", tPos);
+              if (tnl === -1 || tnl >= scanCursor) break;
+              const tline = text.slice(tPos, tnl).replace(/\r$/, "");
+              if (!tline.includes("|") && !isTableSep(tline)) {
+                ended = true;
+                break;
+              }
+              tPos = tnl + 1;
+            }
+            if (ended) {
+              flushParaPrefix();
+              ensurePrefixBlocks();
+              const spanUtf8 = utf8LenSlice(text, checkpointCursor, tPos);
+              parsedBytes += spanUtf8;
+              checkpointPrefixBlocks = [...checkpointPrefixBlocks!, ...parseMarkdown(text.slice(checkpointCursor, tPos - 1))];
+              checkpointCursor = tPos;
+              checkpointUtf8Offset += spanUtf8;
+              advanced = true;
+              continue;
+            }
+          }
+          flushParaPrefix();
+          break;
+        }
+        if (listMarker(expandedLine) !== null) {
+          const lm = listMarker(expandedLine)!;
+          let lPos = nl + 1;
+          let ended = false;
+          while (lPos < scanCursor) {
+            const lnl = text.indexOf("\n", lPos);
+            if (lnl === -1 || lnl >= scanCursor) break;
+            const lline = text.slice(lPos, lnl).replace(/\r$/, "");
+            if (!lline.trim()) {
+              let lookPos = lnl + 1;
+              let nextNonEmptyStart = -1;
+              let nextNonEmptyEnd = -1;
+              while (lookPos < scanCursor) {
+                const knl = text.indexOf("\n", lookPos);
+                if (knl === -1 || knl >= scanCursor) break;
+                if (text.slice(lookPos, knl).trim()) {
+                  nextNonEmptyStart = lookPos;
+                  nextNonEmptyEnd = knl;
+                  break;
+                }
+                lookPos = knl + 1;
+              }
+              if (nextNonEmptyStart === -1) break;
+              const afterBlank = text.slice(nextNonEmptyStart, nextNonEmptyEnd).replace(/\r$/, "");
+              const nextM = listMarker(afterBlank);
+              const lead = /^ */.exec(afterBlank)?.[0].length ?? 0;
+              if ((nextM && nextM.indent === lm.indent && nextM.kind === lm.kind) || lead > lm.indent) {
+                lPos = nextNonEmptyEnd + 1;
+                continue;
+              }
+              ended = true;
+              lPos = nextNonEmptyStart;
+              break;
+            }
+            if (isHrLine(lline) || /^ {0,3}#{1,6}\s/.test(lline)) {
+              ended = true;
+              break;
+            }
+            const nextM = listMarker(lline);
+            if (nextM && (nextM.indent < lm.indent || (nextM.indent === lm.indent && nextM.kind !== lm.kind))) {
+              ended = true;
+              break;
+            }
+            const lead = /^ */.exec(lline)?.[0].length ?? 0;
+            if (lead <= lm.indent && (lline.trimStart().startsWith("```") || /^ {0,3}>/.test(lline))) {
+              ended = true;
+              break;
+            }
+            lPos = lnl + 1;
+          }
+          if (ended) {
+            flushParaPrefix();
+            ensurePrefixBlocks();
+            const spanUtf8 = utf8LenSlice(text, checkpointCursor, lPos);
+            parsedBytes += spanUtf8;
+            checkpointPrefixBlocks = [...checkpointPrefixBlocks!, ...parseMarkdown(text.slice(checkpointCursor, lPos - 1))];
+            checkpointCursor = lPos;
+            checkpointUtf8Offset += spanUtf8;
+            advanced = true;
+            continue;
+          }
+          flushParaPrefix();
+          break;
+        }
+        if (/^\s*(?:\$\$|\\\[)/.test(expandedLine)) {
+          flushParaPrefix();
+          break;
+        }
+        ensurePrefixBlocks();
+        parsedBytes += lineUtf8;
+        checkpointParaPrefix = checkpointParaPrefix ? `${checkpointParaPrefix} ${expandedLine}` : expandedLine;
+        checkpointCursor = nl + 1;
+        checkpointUtf8Offset += lineUtf8;
+        advanced = true;
+      }
+      if ((checkpointParaPrefix || checkpointCursor > boundary) && (checkpointPrefixBlocks !== null || checkpointCursor > boundary)) {
+        if (checkpointPrefixBlocks === null) {
+          const prefixSlice = text.slice(boundary, checkpointCursor);
+          parsedBytes += utf8LenSlice(text, boundary, checkpointCursor);
+          checkpointPrefixBlocks = reuseBlocks(unstable, parseMarkdown(prefixSlice));
+        }
+        const remSlice = text.slice(checkpointCursor);
+        parsedBytes += utf8LenSlice(text, checkpointCursor, text.length);
+        const remBlocks = remSlice ? parseMarkdown(remSlice) : [];
+        let mergedTail: Block[];
+        if (checkpointParaPrefix) {
+          if (remBlocks.length > 0 && remBlocks[0].t === "p") {
+            mergedTail = [
+              { t: "p", text: `${checkpointParaPrefix} ${remBlocks[0].text}` },
+              ...remBlocks.slice(1),
+            ];
+          } else {
+            mergedTail = [{ t: "p", text: checkpointParaPrefix }, ...remBlocks];
+          }
+        } else {
+          mergedTail = remBlocks;
+        }
+        if (!advanced && unstable.length === checkpointPrefixBlocks.length + mergedTail.length) {
+          const firstAfter = unstable[checkpointPrefixBlocks.length];
+          if (mergedTail.length === 1 && firstAfter?.t === "p" && firstAfter.text === (mergedTail[0] as Extract<Block, { t: "p" }>).text) {
+            return [...stable, ...unstable];
+          }
+        }
+        unstable = reuseBlocks(unstable, [...checkpointPrefixBlocks, ...mergedTail]);
+        return [...stable, ...unstable];
+      }
+    } else if ((fenced || math || inList || inQuote) && (checkpointParaPrefix || checkpointPrefixBlocks !== null)) {
+      resetCheckpointState(boundary, commitState.committedBytes);
     }
 
     // The unstable tail is re-parsed each time; blocks that did not change

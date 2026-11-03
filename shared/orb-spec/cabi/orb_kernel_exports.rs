@@ -145,4 +145,10 @@ pub const EXPORTS: &[&str] = &[
     "leansys_verify_stream_relay",
     "orb_fleet_endpoint_gate",
     "orb_prefill_deadline_ms",
+    "orb_scroll_policy_gap",
+    "orb_scroll_policy_correct",
+    "orb_scroll_policy_step",
+    "orb_wire_scroll_slice_step",
+    "orb_wire_stream_slice_step",
+    "orb_wire_transcript_slice_step",
 ];

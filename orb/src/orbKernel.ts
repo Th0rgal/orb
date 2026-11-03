@@ -1,6 +1,6 @@
 // Host input encoding and presentation over generated scalar ABI adapters.
 import { kernelAbi as kernel } from "./orbKernelAbi";
-import { kernelScratchBaseOffset } from "./orbKernelRuntime";
+import { ensureKernelLinearScratch, kernelScratchBaseOffset } from "./orbKernelRuntime";
 
 export type WorkfoldVerdict = { foldItem: boolean; foldHasToolNext: boolean };
 export type TranscriptPatchState = { len: number; seq: number };
@@ -532,3 +532,356 @@ export function orbWireDecodeSlice(
     },
   };
 }
+
+export const ORB_WIRE_SCHEMA_SCROLL_SLICE = 10;
+export const ORB_WIRE_SCHEMA_STREAM_SLICE = 12;
+export const ORB_WIRE_SCHEMA_TRANSCRIPT_SLICE = 13;
+export const ORB_WIRE_FIXED_SLICE_FRAME_BYTES = 32;
+
+const I64_MIN = -(1n << 63n);
+const I64_MAX = (1n << 63n) - 1n;
+export const SCROLL_DOMAIN_MIN = -0x4000_0000;
+export const SCROLL_DOMAIN_MAX = 0x3fff_ffff;
+
+export function inScrollDomain(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= SCROLL_DOMAIN_MIN && value <= SCROLL_DOMAIN_MAX;
+}
+
+function exactI64Bits(value: bigint | number): bigint | null {
+  if (typeof value === "bigint") {
+    return value >= I64_MIN && value <= I64_MAX ? BigInt.asUintN(64, value) : null;
+  }
+  if (!Number.isSafeInteger(value)) return null;
+  return BigInt.asUintN(64, BigInt(value));
+}
+
+function writeFixedSliceVerdictFrame(outBuf: Uint8Array, schemaId: number, record: OrbWireRecord): number {
+  const hdrView = new DataView(outBuf.buffer, outBuf.byteOffset, ORB_WIRE_HEADER_BYTES);
+  hdrView.setUint32(0, ORB_WIRE_MAGIC, true);
+  hdrView.setUint16(4, ORB_WIRE_ABI_VERSION, true);
+  hdrView.setUint16(6, schemaId, true);
+  hdrView.setUint32(8, 0, true);
+  hdrView.setUint32(12, ORB_WIRE_FIXED_SLICE_FRAME_BYTES, true);
+  hdrView.setUint32(16, 8, true);
+  hdrView.setUint16(20, 8, true);
+  hdrView.setUint16(22, 0, true);
+  const recView = new DataView(outBuf.buffer, outBuf.byteOffset + ORB_WIRE_HEADER_BYTES, 8);
+  const packed = kernel.orb_wire_pack_record(record.tag, record.flags, record.len16, record.payload32);
+  recView.setBigUint64(0, packed, true);
+  return ORB_WIRE_FIXED_SLICE_FRAME_BYTES;
+}
+
+function resolveSliceStepPointers(
+  inSlice: Uint8Array,
+  outBuf: Uint8Array,
+  inPtrOverride?: bigint | number,
+  outPtrOverride?: bigint | number,
+  inLenOverride?: bigint | number,
+): { status: OrbWireStatusCode; inPtr: bigint; inLen: bigint; outPtr: bigint; outCap: bigint } | null {
+  const scratchBase = BigInt(kernelScratchBaseOffset());
+  const inBytes = inSlice.byteLength;
+  const outBytes = outBuf.byteLength;
+  const inLen = inLenOverride === undefined ? exactU64(inBytes) : exactU64(inLenOverride);
+  const outCap = exactU64(outBytes);
+  if (inLen === null || outCap === null) {
+    return { status: 8, inPtr: 0n, inLen: 0n, outPtr: 0n, outCap: 0n };
+  }
+  const sharesBackingBuffer = inBytes > 0 && outBytes > 0 && inSlice.buffer === outBuf.buffer;
+  if (sharesBackingBuffer && spansOverlap(inSlice.byteOffset, inBytes, outBuf.byteOffset, outBytes)) {
+    return { status: 9, inPtr: 0n, inLen, outPtr: 0n, outCap };
+  }
+  const defaultOutPtr = outBytes === 0 ? 0n : scratchBase;
+  const defaultInPtr = inLen === 0n ? 0n : scratchBase + BigInt(Math.max(outBytes, ORB_WIRE_FIXED_SLICE_FRAME_BYTES));
+  const inPtr = inPtrOverride === undefined ? defaultInPtr : exactU64(inPtrOverride);
+  const outPtr = outPtrOverride === undefined ? defaultOutPtr : exactU64(outPtrOverride);
+  if (inPtr === null || outPtr === null) {
+    return { status: 8, inPtr: 0n, inLen, outPtr: 0n, outCap };
+  }
+  if ((inLen > 0n && inPtr > 0n && inPtr < scratchBase) ||
+      (outBytes > 0 && outPtr > 0n && outPtr < scratchBase)) {
+    return { status: 9, inPtr: 0n, inLen, outPtr: 0n, outCap };
+  }
+  return { status: 0, inPtr, inLen, outPtr, outCap };
+}
+
+export type ScrollPolicyVerdict = {
+  status: number;
+  admitted: boolean;
+  pinned: boolean;
+  top: number;
+};
+
+export function orbScrollPolicyGap(height: number, client: number, top: number): number | null {
+  if (!inScrollDomain(height) || !inScrollDomain(client) || !inScrollDomain(top)) return null;
+  const h = exactI64Bits(height), c = exactI64Bits(client), t = exactI64Bits(top);
+  if (h === null || c === null || t === null) return null;
+  const raw = kernel.orb_scroll_policy_gap(h, c, t);
+  return Number(BigInt.asIntN(64, raw));
+}
+
+export function orbScrollPolicyCorrect(
+  height: number, client: number, top: number, anchorDoc: number, y0: number,
+): number | null {
+  if (!inScrollDomain(height) || !inScrollDomain(client) || !inScrollDomain(top) ||
+      !inScrollDomain(anchorDoc) || !inScrollDomain(y0)) {
+    return null;
+  }
+  const h = exactI64Bits(height), c = exactI64Bits(client), t = exactI64Bits(top);
+  const a = exactI64Bits(anchorDoc), y = exactI64Bits(y0);
+  if (h === null || c === null || t === null || a === null || y === null) return null;
+  const raw = kernel.orb_scroll_policy_correct(h, c, t, a, y);
+  return Number(BigInt.asIntN(64, raw));
+}
+
+export function orbScrollPolicyStep(input: {
+  opKind: number;
+  pinned: boolean;
+  intent: boolean;
+  resized: boolean;
+  curTop: number;
+  height: number;
+  client: number;
+  arg: number;
+}): ScrollPolicyVerdict | null {
+  const curTop = exactI64Bits(input.curTop);
+  const height = exactI64Bits(input.height);
+  const client = exactI64Bits(input.client);
+  const arg = exactI64Bits(input.arg);
+  if (curTop === null || height === null || client === null || arg === null) return null;
+  const raw = kernel.orb_scroll_policy_step(
+    enum8(input.opKind), b8(input.pinned), b8(input.intent), b8(input.resized),
+    curTop, height, client, arg,
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    status: lo32 & 0xff,
+    admitted: ((lo32 >> 8) & 1) !== 0,
+    pinned: ((lo32 >> 9) & 1) !== 0,
+    top: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export function orbScrollPolicyMaxTop(height: number, client: number): number | null {
+  const v = orbScrollPolicyStep({
+    opKind: 3, pinned: true, intent: false, resized: false, curTop: 0, height, client, arg: 0,
+  });
+  return v && v.admitted ? v.top : null;
+}
+
+export function orbScrollPolicyClampTop(height: number, client: number, target: number): number | null {
+  const v = orbScrollPolicyStep({
+    opKind: 1, pinned: false, intent: false, resized: false, curTop: 0, height, client, arg: target,
+  });
+  return v && v.admitted ? v.top : null;
+}
+
+export function orbWireScrollSliceStep(input: {
+  inSlice: Uint8Array;
+  outBuf: Uint8Array;
+  opKind: number;
+  pinned: boolean;
+  intent: boolean;
+  resized: boolean;
+  curTop: bigint | number;
+  height: bigint | number;
+  client: bigint | number;
+  arg: bigint | number;
+  inPtr?: bigint | number;
+  outPtr?: bigint | number;
+}): { status: OrbWireStatusCode; written: number; verdict: ScrollPolicyVerdict | null } {
+  const ptrs = resolveSliceStepPointers(input.inSlice, input.outBuf, input.inPtr, input.outPtr);
+  if (!ptrs || ptrs.status !== 0) {
+    return { status: ptrs ? ptrs.status : 8, written: 0, verdict: null };
+  }
+  const curTop = exactI64Bits(input.curTop);
+  const height = exactI64Bits(input.height);
+  const client = exactI64Bits(input.client);
+  const arg = exactI64Bits(input.arg);
+  if (curTop === null || height === null || client === null || arg === null) {
+    return { status: 3, written: 0, verdict: null };
+  }
+  const raw = kernel.orb_wire_scroll_slice_step(
+    ptrs.inPtr, ptrs.inLen, ptrs.outPtr, ptrs.outCap, 1,
+    enum8(input.opKind), b8(input.pinned), b8(input.intent), b8(input.resized),
+    curTop, height, client, arg,
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  const admitted = ((lo32 >> 8) & 1) !== 0;
+  const statusByte = lo32 & 0xff;
+  if (!admitted) {
+    return { status: clampWireStatus(statusByte), written: 0, verdict: null };
+  }
+  const verdict: ScrollPolicyVerdict = {
+    status: statusByte,
+    admitted: true,
+    pinned: ((lo32 >> 9) & 1) !== 0,
+    top: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+  const written = writeFixedSliceVerdictFrame(input.outBuf, ORB_WIRE_SCHEMA_SCROLL_SLICE, {
+    tag: enum8(input.opKind),
+    flags: b8(verdict.pinned),
+    len16: 0,
+    payload32: verdict.top,
+  });
+  return { status: 0, written, verdict };
+}
+
+export function orbWireStreamSliceStep(input: {
+  inTail: Uint8Array;
+  outBuf: Uint8Array;
+  prevLen: number;
+  prevCommit: number;
+  prevCheckpoint: number;
+  newLen: number;
+  rawCommit: number;
+  maxOpenTailBytes: number;
+  inPtr?: bigint | number;
+  outPtr?: bigint | number;
+  inTailBytesLen?: bigint | number;
+}): {
+  status: OrbWireStatusCode;
+  written: number;
+  verdict: { admitted: boolean; checkpointForced: boolean; nextCheckpoint: number } | null;
+} {
+  const ptrs = resolveSliceStepPointers(
+    input.inTail,
+    input.outBuf,
+    input.inPtr,
+    input.outPtr,
+    input.inTailBytesLen,
+  );
+  if (!ptrs || ptrs.status !== 0) {
+    return { status: ptrs ? ptrs.status : 8, written: 0, verdict: null };
+  }
+  const prevLen = exactU32(input.prevLen);
+  const prevCommit = exactU32(input.prevCommit);
+  const prevCheckpoint = exactU32(input.prevCheckpoint);
+  const newLen = exactU32(input.newLen);
+  const rawCommit = exactU32(input.rawCommit);
+  const maxOpenTailBytes = exactU32(input.maxOpenTailBytes);
+  if (prevLen === null || prevCommit === null || prevCheckpoint === null ||
+      newLen === null || rawCommit === null || maxOpenTailBytes === null) {
+    return { status: 3, written: 0, verdict: null };
+  }
+  const raw = kernel.orb_wire_stream_slice_step(
+    ptrs.inPtr, ptrs.inLen, ptrs.outPtr, ptrs.outCap, 1,
+    prevLen, prevCommit, prevCheckpoint, newLen, rawCommit, maxOpenTailBytes,
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  const admitted = ((lo32 >> 8) & 1) !== 0;
+  const statusByte = lo32 & 0xff;
+  if (!admitted) {
+    return { status: clampWireStatus(statusByte), written: 0, verdict: null };
+  }
+  const checkpointForced = ((lo32 >> 9) & 1) !== 0;
+  const nextCheckpoint = Number((raw >> 32n) & 0xffff_ffffn);
+  const written = writeFixedSliceVerdictFrame(input.outBuf, ORB_WIRE_SCHEMA_STREAM_SLICE, {
+    tag: 1,
+    flags: b8(checkpointForced),
+    len16: ptrs.inLen > 0xffffn ? 0xffff : Number(ptrs.inLen),
+    payload32: nextCheckpoint,
+  });
+  return {
+    status: 0,
+    written,
+    verdict: { admitted: true, checkpointForced, nextCheckpoint },
+  };
+}
+
+export function orbWireTranscriptSliceStep(input: {
+  inEvent: Uint8Array;
+  outBuf: Uint8Array;
+  lastAppliedSeq: bigint | number;
+  incomingSeq: bigint | number;
+  entryCount: number;
+  thinkingOpen: boolean;
+  normalizedAction: number;
+  isReplayFromLog: boolean;
+  inPtr?: bigint | number;
+  outPtr?: bigint | number;
+}): {
+  status: OrbWireStatusCode;
+  written: number;
+  verdict: {
+    actionCode: number;
+    admitted: boolean;
+    thinkingOpenNext: boolean;
+    closedPreviousThinking: boolean;
+    gapBuffered: boolean;
+    nextEntryCount: number;
+  } | null;
+} {
+  const ptrs = resolveSliceStepPointers(input.inEvent, input.outBuf, input.inPtr, input.outPtr);
+  if (!ptrs || ptrs.status !== 0) {
+    return { status: ptrs ? ptrs.status : 8, written: 0, verdict: null };
+  }
+  const lastSeq = exactU64(input.lastAppliedSeq);
+  const incSeq = exactU64(input.incomingSeq);
+  const entryCount = exactU32(input.entryCount);
+  if (lastSeq === null || incSeq === null || entryCount === null) {
+    return { status: 3, written: 0, verdict: null };
+  }
+  const raw = kernel.orb_wire_transcript_slice_step(
+    ptrs.inPtr, ptrs.inLen, ptrs.outPtr, ptrs.outCap, 1,
+    lastSeq, incSeq, entryCount,
+    b8(input.thinkingOpen), enum8(input.normalizedAction), b8(input.isReplayFromLog),
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  const admitted = ((lo32 >> 8) & 1) !== 0;
+  const actionCode = lo32 & 0xff;
+  const thinkingOpenNext = ((lo32 >> 9) & 1) !== 0;
+  const closedPreviousThinking = ((lo32 >> 10) & 1) !== 0;
+  const gapBuffered = ((lo32 >> 11) & 1) !== 0;
+  const nextEntryCount = Number((raw >> 32n) & 0xffff_ffffn);
+  if (!admitted) {
+    return {
+      status: actionCode >= 5 ? clampWireStatus(actionCode) : 3,
+      written: 0,
+      verdict: actionCode >= 5 ? null : {
+        actionCode,
+        admitted: false,
+        thinkingOpenNext,
+        closedPreviousThinking,
+        gapBuffered,
+        nextEntryCount,
+      },
+    };
+  }
+  const flags = b8(thinkingOpenNext) | (b8(closedPreviousThinking) << 1) | (b8(gapBuffered) << 2);
+  const written = writeFixedSliceVerdictFrame(input.outBuf, ORB_WIRE_SCHEMA_TRANSCRIPT_SLICE, {
+    tag: actionCode,
+    flags,
+    len16: Math.min(0xffff, input.inEvent.byteLength),
+    payload32: nextEntryCount,
+  });
+  return {
+    status: 0,
+    written,
+    verdict: {
+      actionCode,
+      admitted: true,
+      thinkingOpenNext,
+      closedPreviousThinking,
+      gapBuffered,
+      nextEntryCount,
+    },
+  };
+}
+
+export function orbKernelScratchSliceStep(inBytes = 0): {
+  inView: Uint8Array;
+  outView: Uint8Array;
+  inOffset: number;
+  outOffset: number;
+} {
+  const safeInBytes = Math.max(0, Math.floor(inBytes));
+  const { memory, inOffset, outOffset } = ensureKernelLinearScratch(safeInBytes);
+  const availInBytes = Math.max(0, Math.min(safeInBytes, memory.buffer.byteLength - inOffset));
+  return {
+    inView: new Uint8Array(memory.buffer, inOffset, availInBytes),
+    outView: new Uint8Array(memory.buffer, outOffset, ORB_WIRE_FIXED_SLICE_FRAME_BYTES),
+    inOffset,
+    outOffset,
+  };
+}
+

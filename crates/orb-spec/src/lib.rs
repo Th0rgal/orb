@@ -1189,6 +1189,65 @@ unsafe extern "C" {
         per_k_tokens_ms: u64,
         max_prefill_ms: u64,
     ) -> u64;
+    fn orb_scroll_policy_gap(height: u64, client: u64, top: u64) -> u64;
+    fn orb_scroll_policy_correct(
+        height: u64,
+        client: u64,
+        top: u64,
+        anchor_doc: u64,
+        y0: u64,
+    ) -> u64;
+    fn orb_scroll_policy_step(
+        op_kind: u8,
+        pinned: u8,
+        intent: u8,
+        resized: u8,
+        cur_top: u64,
+        height: u64,
+        client: u64,
+        arg: u64,
+    ) -> u64;
+    fn orb_wire_scroll_slice_step(
+        in_ptr: u64,
+        in_len: u64,
+        out_ptr: u64,
+        out_cap: u64,
+        is_32bit: u8,
+        op_kind: u8,
+        pinned: u8,
+        intent: u8,
+        resized: u8,
+        cur_top: u64,
+        height: u64,
+        client: u64,
+        arg: u64,
+    ) -> u64;
+    fn orb_wire_stream_slice_step(
+        in_ptr: u64,
+        in_len: u64,
+        out_ptr: u64,
+        out_cap: u64,
+        is_32bit: u8,
+        prev_len: u32,
+        prev_commit: u32,
+        prev_checkpoint: u32,
+        new_len: u32,
+        raw_commit: u32,
+        max_open_tail_bytes: u32,
+    ) -> u64;
+    fn orb_wire_transcript_slice_step(
+        in_ptr: u64,
+        in_len: u64,
+        out_ptr: u64,
+        out_cap: u64,
+        is_32bit: u8,
+        last_applied_seq: u64,
+        incoming_seq: u64,
+        entry_count: u32,
+        thinking_open: u8,
+        normalized_action: u8,
+        is_replay_from_log: u8,
+    ) -> u64;
     fn orb_effect_admissible(
         effect_kind: u8,
         has_valid_lease: u8,
@@ -5417,12 +5476,91 @@ pub mod stream_simd {
         }
     }
 
+    /// # Safety
+    /// Caller must ensure the current CPU supports `neon` (mandatory on `aarch64` Linux/macOS/iOS/Android
+    /// and checked via `select_verified_stream_isa()` / `is_aarch64_feature_detected!("neon")`).
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    pub unsafe fn scan_stream_bytes_neon(buf: &[u8]) -> StreamByteScanSummary {
+        use core::arch::aarch64::*;
+
+        let len = buf.len();
+        if len == 0 {
+            return StreamByteScanSummary {
+                newlines: 0,
+                fence_candidates: 0,
+                pipe_bytes: 0,
+                last_newline: usize::MAX,
+            };
+        }
+
+        #[inline]
+        unsafe fn neon_movemask_u8(cmp: uint8x16_t) -> u32 {
+            const WEIGHTS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+            let weights = unsafe { vld1q_u8(WEIGHTS.as_ptr()) };
+            let masked = vandq_u8(cmp, weights);
+            let lo = u32::from(vaddv_u8(vget_low_u8(masked)));
+            let hi = u32::from(vaddv_u8(vget_high_u8(masked)));
+            lo | (hi << 8)
+        }
+
+        let mut fence_candidates = check_fence_at_line_start(buf, 0);
+        let mut newlines = 0usize;
+        let mut pipe_bytes = 0usize;
+        let mut last_newline = usize::MAX;
+
+        let nl_vec = vdupq_n_u8(b'\n');
+        let pipe_vec = vdupq_n_u8(b'|');
+        let ptr = buf.as_ptr();
+        let mut i = 0usize;
+
+        while i + 16 <= len {
+            let chunk = unsafe { vld1q_u8(ptr.add(i)) };
+            let nl_mask = unsafe { neon_movemask_u8(vceqq_u8(chunk, nl_vec)) };
+            let pipe_mask = unsafe { neon_movemask_u8(vceqq_u8(chunk, pipe_vec)) };
+            pipe_bytes += pipe_mask.count_ones() as usize;
+            if nl_mask != 0 {
+                newlines += nl_mask.count_ones() as usize;
+                let highest_bit = 31 - nl_mask.leading_zeros() as usize;
+                last_newline = i + highest_bit;
+                let mut m = nl_mask;
+                while m != 0 {
+                    let bit = m.trailing_zeros() as usize;
+                    fence_candidates += check_fence_at_line_start(buf, i + bit + 1);
+                    m &= m - 1;
+                }
+            }
+            i += 16;
+        }
+
+        while i < len {
+            let b = buf[i];
+            if b == b'\n' {
+                newlines += 1;
+                last_newline = i;
+                fence_candidates += check_fence_at_line_start(buf, i + 1);
+            } else if b == b'|' {
+                pipe_bytes += 1;
+            }
+            i += 1;
+        }
+
+        StreamByteScanSummary {
+            newlines,
+            fence_candidates,
+            pipe_bytes,
+            last_newline,
+        }
+    }
+
     pub fn scan_stream_bytes(buf: &[u8]) -> StreamByteScanSummary {
         match select_verified_stream_isa() {
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             VARIANT_AVX2 => unsafe { scan_stream_bytes_avx2(buf) },
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             VARIANT_SIMD128 => unsafe { scan_stream_bytes_sse2(buf) },
+            #[cfg(target_arch = "aarch64")]
+            VARIANT_SIMD128 => unsafe { scan_stream_bytes_neon(buf) },
             _ => scan_stream_bytes_scalar(buf),
         }
     }
@@ -6552,6 +6690,81 @@ pub mod raw_cabi {
         }
     }
     #[inline]
+    pub fn orb_scroll_policy_gap(a0: u64, a1: u64, a2: u64) -> u64 {
+        unsafe { super::orb_scroll_policy_gap(a0, a1, a2) }
+    }
+    #[inline]
+    pub fn orb_scroll_policy_correct(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+        unsafe { super::orb_scroll_policy_correct(a0, a1, a2, a3, a4) }
+    }
+    #[inline]
+    pub fn orb_scroll_policy_step(
+        a0: u8,
+        a1: u8,
+        a2: u8,
+        a3: u8,
+        a4: u64,
+        a5: u64,
+        a6: u64,
+        a7: u64,
+    ) -> u64 {
+        unsafe { super::orb_scroll_policy_step(a0, a1, a2, a3, a4, a5, a6, a7) }
+    }
+    #[inline]
+    pub fn orb_wire_scroll_slice_step(
+        a0: u64,
+        a1: u64,
+        a2: u64,
+        a3: u64,
+        a4: u8,
+        a5: u8,
+        a6: u8,
+        a7: u8,
+        a8: u8,
+        a9: u64,
+        a10: u64,
+        a11: u64,
+        a12: u64,
+    ) -> u64 {
+        unsafe {
+            super::orb_wire_scroll_slice_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12)
+        }
+    }
+    #[inline]
+    pub fn orb_wire_stream_slice_step(
+        a0: u64,
+        a1: u64,
+        a2: u64,
+        a3: u64,
+        a4: u8,
+        a5: u32,
+        a6: u32,
+        a7: u32,
+        a8: u32,
+        a9: u32,
+        a10: u32,
+    ) -> u64 {
+        unsafe { super::orb_wire_stream_slice_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) }
+    }
+    #[inline]
+    pub fn orb_wire_transcript_slice_step(
+        a0: u64,
+        a1: u64,
+        a2: u64,
+        a3: u64,
+        a4: u8,
+        a5: u64,
+        a6: u64,
+        a7: u32,
+        a8: u8,
+        a9: u8,
+        a10: u8,
+    ) -> u64 {
+        unsafe {
+            super::orb_wire_transcript_slice_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10)
+        }
+    }
+    #[inline]
     pub fn leansys_verify_slice_bounds(a0: u64, a1: u64, a2: u64) -> u8 {
         unsafe { super::lean_sys_cabi::leansys_verify_slice_bounds(a0, a1, a2) }
     }
@@ -7552,6 +7765,63 @@ pub mod raw_cabi {
                 args[10] as u32,
                 args[11] as u32,
             ) as u64,
+            "orb_scroll_policy_gap" if args.len() == 3 => {
+                orb_scroll_policy_gap(args[0], args[1], args[2])
+            }
+            "orb_scroll_policy_correct" if args.len() == 5 => {
+                orb_scroll_policy_correct(args[0], args[1], args[2], args[3], args[4])
+            }
+            "orb_scroll_policy_step" if args.len() == 8 => orb_scroll_policy_step(
+                args[0] as u8,
+                args[1] as u8,
+                args[2] as u8,
+                args[3] as u8,
+                args[4],
+                args[5],
+                args[6],
+                args[7],
+            ),
+            "orb_wire_scroll_slice_step" if args.len() == 13 => orb_wire_scroll_slice_step(
+                args[0],
+                args[1],
+                args[2],
+                args[3],
+                args[4] as u8,
+                args[5] as u8,
+                args[6] as u8,
+                args[7] as u8,
+                args[8] as u8,
+                args[9],
+                args[10],
+                args[11],
+                args[12],
+            ),
+            "orb_wire_stream_slice_step" if args.len() == 11 => orb_wire_stream_slice_step(
+                args[0],
+                args[1],
+                args[2],
+                args[3],
+                args[4] as u8,
+                args[5] as u32,
+                args[6] as u32,
+                args[7] as u32,
+                args[8] as u32,
+                args[9] as u32,
+                args[10] as u32,
+            ),
+            "orb_wire_transcript_slice_step" if args.len() == 11 => orb_wire_transcript_slice_step(
+                args[0],
+                args[1],
+                args[2],
+                args[3],
+                args[4] as u8,
+                args[5],
+                args[6],
+                args[7] as u32,
+                args[8] as u8,
+                args[9] as u8,
+                args[10] as u8,
+            ),
             "leansys_verify_slice_bounds" if args.len() == 3 => {
                 leansys_verify_slice_bounds(args[0] as u64, args[1] as u64, args[2] as u64) as u64
             }
@@ -9172,7 +9442,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 144);
+        assert_eq!(count, 150);
     }
 }
 
@@ -9710,6 +9980,367 @@ pub fn stream_bounded_commit_step(input: StreamBoundedCommitInput) -> StreamBoun
     }
 }
 
+pub const ORB_WIRE_SCHEMA_SCROLL_SLICE: u16 = 10;
+pub const ORB_WIRE_SCHEMA_STREAM_SLICE: u16 = 12;
+pub const ORB_WIRE_SCHEMA_TRANSCRIPT_SLICE: u16 = 13;
+pub const ORB_WIRE_FIXED_SLICE_FRAME_BYTES: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ScrollPolicyOp {
+    Layout = 0,
+    UserScroll = 1,
+    ScrollEvent = 2,
+    Jump = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollPolicyInput {
+    pub op_kind: u8,
+    pub pinned: bool,
+    pub intent: bool,
+    pub resized: bool,
+    pub cur_top: i64,
+    pub height: i64,
+    pub client: i64,
+    pub arg: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollPolicyVerdict {
+    pub raw: u64,
+    pub status: u8,
+    pub admitted: bool,
+    pub pinned: bool,
+    pub top: u32,
+}
+
+pub const SCROLL_DOMAIN_MIN: i64 = -(1 << 30);
+pub const SCROLL_DOMAIN_MAX: i64 = (1 << 30) - 1;
+
+#[inline]
+pub fn in_scroll_domain(value: i64) -> bool {
+    (SCROLL_DOMAIN_MIN..=SCROLL_DOMAIN_MAX).contains(&value)
+}
+
+#[inline]
+pub fn scroll_policy_gap(height: i64, client: i64, top: i64) -> Option<i64> {
+    if !(in_scroll_domain(height) && in_scroll_domain(client) && in_scroll_domain(top)) {
+        return None;
+    }
+    Some(unsafe { orb_scroll_policy_gap(height as u64, client as u64, top as u64) as i64 })
+}
+
+#[inline]
+pub fn scroll_policy_correct(
+    height: i64,
+    client: i64,
+    top: i64,
+    anchor_doc: i64,
+    y0: i64,
+) -> Option<i64> {
+    if !(in_scroll_domain(height)
+        && in_scroll_domain(client)
+        && in_scroll_domain(top)
+        && in_scroll_domain(anchor_doc)
+        && in_scroll_domain(y0))
+    {
+        return None;
+    }
+    Some(unsafe {
+        orb_scroll_policy_correct(
+            height as u64,
+            client as u64,
+            top as u64,
+            anchor_doc as u64,
+            y0 as u64,
+        ) as i64
+    })
+}
+
+#[inline]
+pub fn scroll_policy_max_top(height: i64, client: i64) -> Option<u32> {
+    let verdict = scroll_policy_step(ScrollPolicyInput {
+        op_kind: ScrollPolicyOp::Jump as u8,
+        pinned: true,
+        intent: false,
+        resized: false,
+        cur_top: 0,
+        height,
+        client,
+        arg: 0,
+    });
+    verdict.admitted.then_some(verdict.top)
+}
+
+#[inline]
+pub fn scroll_policy_clamp_top(height: i64, client: i64, target: i64) -> Option<u32> {
+    let verdict = scroll_policy_step(ScrollPolicyInput {
+        op_kind: ScrollPolicyOp::UserScroll as u8,
+        pinned: false,
+        intent: false,
+        resized: false,
+        cur_top: 0,
+        height,
+        client,
+        arg: target,
+    });
+    verdict.admitted.then_some(verdict.top)
+}
+
+#[inline]
+pub fn scroll_policy_step(input: ScrollPolicyInput) -> ScrollPolicyVerdict {
+    let raw = unsafe {
+        orb_scroll_policy_step(
+            input.op_kind,
+            u8::from(input.pinned),
+            u8::from(input.intent),
+            u8::from(input.resized),
+            input.cur_top as u64,
+            input.height as u64,
+            input.client as u64,
+            input.arg as u64,
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    ScrollPolicyVerdict {
+        raw,
+        status: (lo32 & 0xFF) as u8,
+        admitted: ((lo32 >> 8) & 1) != 0,
+        pinned: ((lo32 >> 9) & 1) != 0,
+        top: (raw >> 32) as u32,
+    }
+}
+
+#[inline]
+fn write_fixed_slice_verdict_frame(
+    out_buf: &mut [u8],
+    schema_id: u16,
+    record: OrbWireRecordWord,
+) -> usize {
+    let hdr = shadow::OrbWireHeader {
+        magic: shadow::ORB_WIRE_MAGIC,
+        abi_version: shadow::ORB_WIRE_ABI_VERSION as u16,
+        schema_id,
+        flags: 0,
+        total_len: ORB_WIRE_FIXED_SLICE_FRAME_BYTES as u32,
+        payload_len: 8,
+        arena_off: 8,
+        arena_len: 0,
+    };
+    out_buf[..shadow::ORB_WIRE_HEADER_BYTES].copy_from_slice(&hdr.to_le_bytes());
+    let word = wire_pack_record(record);
+    out_buf[shadow::ORB_WIRE_HEADER_BYTES..ORB_WIRE_FIXED_SLICE_FRAME_BYTES]
+        .copy_from_slice(&word.to_le_bytes());
+    ORB_WIRE_FIXED_SLICE_FRAME_BYTES
+}
+
+/// Zero-copy `OrbWire` Scroll policy slice stepper backed by `orb_wire_scroll_slice_step`.
+/// Validates LP64/`wasm32` slice safety (`in_slice` disjoint from `out_buf`, `out_buf.len() >= 32`)
+/// and `op_kind <= 3` BEFORE writing a single byte of `out_buf`.
+pub fn wire_scroll_slice_step(
+    in_slice: &[u8],
+    out_buf: &mut [u8],
+    input: ScrollPolicyInput,
+) -> Result<(ScrollPolicyVerdict, usize), OrbWireStatus> {
+    let is_32bit = u8::from(usize::BITS == 32);
+    let raw = unsafe {
+        orb_wire_scroll_slice_step(
+            if in_slice.is_empty() {
+                0
+            } else {
+                in_slice.as_ptr() as usize as u64
+            },
+            in_slice.len() as u64,
+            if out_buf.is_empty() {
+                0
+            } else {
+                out_buf.as_ptr() as usize as u64
+            },
+            out_buf.len() as u64,
+            is_32bit,
+            input.op_kind,
+            u8::from(input.pinned),
+            u8::from(input.intent),
+            u8::from(input.resized),
+            input.cur_top as u64,
+            input.height as u64,
+            input.client as u64,
+            input.arg as u64,
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    let admitted = ((lo32 >> 8) & 1) != 0;
+    let status_byte = (lo32 & 0xFF) as u8;
+    if !admitted {
+        return Err(OrbWireStatus::from_raw(status_byte));
+    }
+    let verdict = ScrollPolicyVerdict {
+        raw,
+        status: status_byte,
+        admitted,
+        pinned: ((lo32 >> 9) & 1) != 0,
+        top: (raw >> 32) as u32,
+    };
+    let written = write_fixed_slice_verdict_frame(
+        out_buf,
+        ORB_WIRE_SCHEMA_SCROLL_SLICE,
+        OrbWireRecordWord {
+            tag: input.op_kind,
+            flags: u8::from(verdict.pinned),
+            len16: 0,
+            payload32: verdict.top,
+        },
+    );
+    Ok((verdict, written))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireStreamSliceVerdict {
+    pub raw: u64,
+    pub status: u8,
+    pub admitted: bool,
+    pub checkpoint_forced: bool,
+    pub next_checkpoint: u32,
+}
+
+/// Zero-copy `OrbWire` Stream bounded-tail slice stepper backed by `orb_wire_stream_slice_step`
+/// (`G-ORB-6`). Validates LP64/`wasm32` slice safety (`in_tail` disjoint from `out_buf`,
+/// `out_buf.len() >= 32`) and monotone stream state BEFORE writing `out_buf`.
+pub fn wire_stream_slice_step(
+    in_tail: &[u8],
+    out_buf: &mut [u8],
+    input: StreamBoundedCommitInput,
+) -> Result<(WireStreamSliceVerdict, usize), OrbWireStatus> {
+    let is_32bit = u8::from(usize::BITS == 32);
+    let raw = unsafe {
+        orb_wire_stream_slice_step(
+            if in_tail.is_empty() {
+                0
+            } else {
+                in_tail.as_ptr() as usize as u64
+            },
+            in_tail.len() as u64,
+            if out_buf.is_empty() {
+                0
+            } else {
+                out_buf.as_ptr() as usize as u64
+            },
+            out_buf.len() as u64,
+            is_32bit,
+            input.prev_len,
+            input.prev_commit,
+            input.prev_checkpoint,
+            input.new_len,
+            input.raw_commit,
+            input.max_open_tail_bytes,
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    let admitted = ((lo32 >> 8) & 1) != 0;
+    let status_byte = (lo32 & 0xFF) as u8;
+    if !admitted {
+        return Err(OrbWireStatus::from_raw(status_byte));
+    }
+    let verdict = WireStreamSliceVerdict {
+        raw,
+        status: status_byte,
+        admitted,
+        checkpoint_forced: ((lo32 >> 9) & 1) != 0,
+        next_checkpoint: (raw >> 32) as u32,
+    };
+    let written = write_fixed_slice_verdict_frame(
+        out_buf,
+        ORB_WIRE_SCHEMA_STREAM_SLICE,
+        OrbWireRecordWord {
+            tag: 1,
+            flags: u8::from(verdict.checkpoint_forced),
+            len16: (in_tail.len().min(u16::MAX as usize)) as u16,
+            payload32: verdict.next_checkpoint,
+        },
+    );
+    Ok((verdict, written))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireTranscriptSliceError {
+    Wire(OrbWireStatus),
+    FoldRejected(TranscriptFoldStepVerdict),
+}
+
+/// Zero-copy `OrbWire` Transcript fold slice stepper backed by `orb_wire_transcript_slice_step`
+/// (`G-ORB-3`). Validates LP64/`wasm32` slice safety (`in_event` disjoint from `out_buf`,
+/// `out_buf.len() >= 32`) and contiguous replay-invariant folding BEFORE writing `out_buf`.
+///
+/// Slice I/O failures (`action_code` in `5..=9`) return `Err(WireTranscriptSliceError::Wire(_))`;
+/// transcript fold rejections (`action_code = 2` duplicate, `3` sequence gap with `gap_buffered`,
+/// `4` invalid `normalized_action`) return `Err(WireTranscriptSliceError::FoldRejected(verdict))`
+/// without mutating `out_buf`.
+pub fn wire_transcript_slice_step(
+    in_event: &[u8],
+    out_buf: &mut [u8],
+    input: TranscriptFoldStepInput,
+) -> Result<(TranscriptFoldStepVerdict, usize), WireTranscriptSliceError> {
+    let is_32bit = u8::from(usize::BITS == 32);
+    let raw = unsafe {
+        orb_wire_transcript_slice_step(
+            if in_event.is_empty() {
+                0
+            } else {
+                in_event.as_ptr() as usize as u64
+            },
+            in_event.len() as u64,
+            if out_buf.is_empty() {
+                0
+            } else {
+                out_buf.as_ptr() as usize as u64
+            },
+            out_buf.len() as u64,
+            is_32bit,
+            input.last_applied_seq,
+            input.incoming_seq,
+            input.entry_count,
+            u8::from(input.thinking_open),
+            input.normalized_action,
+            u8::from(input.is_replay_from_log),
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    let admitted = ((lo32 >> 8) & 1) != 0;
+    let action_code = (lo32 & 0xFF) as u8;
+    let verdict = TranscriptFoldStepVerdict {
+        raw,
+        action_code,
+        admitted,
+        thinking_open_next: ((lo32 >> 9) & 1) != 0,
+        closed_previous_thinking: ((lo32 >> 10) & 1) != 0,
+        gap_buffered: ((lo32 >> 11) & 1) != 0,
+        next_entry_count: (raw >> 32) as u32,
+    };
+    if !admitted {
+        if action_code >= 5 {
+            return Err(WireTranscriptSliceError::Wire(OrbWireStatus::from_raw(
+                action_code,
+            )));
+        }
+        return Err(WireTranscriptSliceError::FoldRejected(verdict));
+    }
+    let flags = u8::from(verdict.thinking_open_next)
+        | (u8::from(verdict.closed_previous_thinking) << 1)
+        | (u8::from(verdict.gap_buffered) << 2);
+    let written = write_fixed_slice_verdict_frame(
+        out_buf,
+        ORB_WIRE_SCHEMA_TRANSCRIPT_SLICE,
+        OrbWireRecordWord {
+            tag: verdict.action_code,
+            flags,
+            len16: (in_event.len().min(u16::MAX as usize)) as u16,
+            payload32: verdict.next_entry_count,
+        },
+    );
+    Ok((verdict, written))
+}
+
 #[cfg(test)]
 mod stateful_tests {
     use super::*;
@@ -10122,5 +10753,283 @@ mod stateful_tests {
         });
         assert!(coord_main.admitted);
         assert_eq!(coord_main.decision, NodeLaneDecision::AdmitMain);
+    }
+
+    #[test]
+    fn r4_scroll_policy_and_zero_copy_slice_steppers_verified() {
+        // Signed negative gap when height < top + client, and fail-closed None outside [-2^30, 2^30 - 1]
+        assert_eq!(scroll_policy_gap(200, 300, 50), Some(-150));
+        assert_eq!(scroll_policy_gap(1 << 30, 300, 50), None);
+        assert_eq!(scroll_policy_gap(200, -(1 << 30) - 1, 50), None);
+        assert_eq!(scroll_policy_max_top(200, 300), Some(0));
+        assert_eq!(scroll_policy_max_top(1200, 400), Some(800));
+        assert_eq!(scroll_policy_clamp_top(1200, 400, -50), Some(0));
+        assert_eq!(scroll_policy_clamp_top(1200, 400, 999), Some(800));
+        // Out-of-domain coordinates outside [-2^30, 2^30 - 1] reject fail-closed (status = 3)
+        assert_eq!(scroll_policy_max_top(1 << 30, 400), None);
+        assert_eq!(scroll_policy_clamp_top(1200, 400, -(1 << 30) - 1), None);
+        let oob_step = scroll_policy_step(ScrollPolicyInput {
+            op_kind: ScrollPolicyOp::Layout as u8,
+            pinned: true,
+            intent: false,
+            resized: false,
+            cur_top: 250,
+            height: 1 << 30,
+            client: 400,
+            arg: 0,
+        });
+        assert!(!oob_step.admitted);
+        assert_eq!(oob_step.status, 3);
+        assert!(oob_step.pinned);
+        assert_eq!(oob_step.top, 250);
+        let bad_op = scroll_policy_step(ScrollPolicyInput {
+            op_kind: 9,
+            pinned: false,
+            intent: false,
+            resized: false,
+            cur_top: 120,
+            height: 1000,
+            client: 400,
+            arg: 0,
+        });
+        assert!(!bad_op.admitted);
+        assert_eq!(bad_op.status, 2);
+        assert_eq!(bad_op.top, 120);
+
+        // Anchor correction is idempotent and fail-closed outside [-2^30, 2^30 - 1]
+        let c1 = scroll_policy_correct(2000, 500, 400, 620, 120).expect("in-domain correct");
+        assert_eq!(c1, 500);
+        let c2 = scroll_policy_correct(2000, 500, c1, 620, 620 - c1).expect("in-domain correct");
+        assert_eq!(c2, c1);
+        assert_eq!(scroll_policy_correct(1 << 30, 500, 400, 620, 120), None);
+        assert_eq!(
+            scroll_policy_correct(2000, 500, 400, -(1 << 30) - 1, 120),
+            None
+        );
+
+        // Passive scrollEvent during resize preserves pinned=true
+        let passive_resize = scroll_policy_step(ScrollPolicyInput {
+            op_kind: ScrollPolicyOp::ScrollEvent as u8,
+            pinned: true,
+            intent: false,
+            resized: true,
+            cur_top: 800,
+            height: 1200,
+            client: 400,
+            arg: 300,
+        });
+        assert!(passive_resize.admitted && passive_resize.pinned);
+        assert_eq!(passive_resize.top, 300);
+
+        // Zero-copy Scroll slice step + view decode + no-partial-mutation on small buffer
+        let in_bytes = b"scroll_ev";
+        let mut out_scroll = [0xAAu8; 32];
+        let (sv, written) = wire_scroll_slice_step(
+            in_bytes,
+            &mut out_scroll,
+            ScrollPolicyInput {
+                op_kind: ScrollPolicyOp::Layout as u8,
+                pinned: true,
+                intent: false,
+                resized: false,
+                cur_top: 100,
+                height: 1500,
+                client: 500,
+                arg: 0,
+            },
+        )
+        .expect("scroll slice step ok");
+        assert_eq!(written, 32);
+        assert!(sv.pinned);
+        assert_eq!(sv.top, 1000);
+        let scroll_view =
+            shadow::OrbWireSliceView::decode_slice(&out_scroll, ORB_WIRE_SCHEMA_SCROLL_SLICE, 64)
+                .expect("scroll view decode");
+        assert_eq!(scroll_view.record_at(0).unwrap().payload32, 1000);
+
+        let mut tiny = [0x55u8; 16];
+        assert_eq!(
+            wire_scroll_slice_step(
+                in_bytes,
+                &mut tiny,
+                ScrollPolicyInput {
+                    op_kind: ScrollPolicyOp::Jump as u8,
+                    pinned: false,
+                    intent: false,
+                    resized: false,
+                    cur_top: 0,
+                    height: 1000,
+                    client: 400,
+                    arg: 0,
+                },
+            ),
+            Err(OrbWireStatus::OutputTooSmall)
+        );
+        assert_eq!(tiny, [0x55u8; 16]);
+
+        // Zero-copy Stream bounded-tail slice step (open fence forces checkpoint)
+        let tail = b"```rust\nfn unclosed_open_fence() {\n";
+        let mut out_stream = [0u8; 32];
+        let (stv, st_written) = wire_stream_slice_step(
+            tail,
+            &mut out_stream,
+            StreamBoundedCommitInput {
+                prev_len: 20,
+                prev_commit: 5,
+                prev_checkpoint: 12,
+                new_len: 40,
+                raw_commit: 5,
+                max_open_tail_bytes: 8,
+            },
+        )
+        .expect("stream slice step ok");
+        assert_eq!(st_written, 32);
+        assert!(stv.checkpoint_forced);
+        assert_eq!(stv.next_checkpoint, 32);
+        let stream_view =
+            shadow::OrbWireSliceView::decode_slice(&out_stream, ORB_WIRE_SCHEMA_STREAM_SLICE, 64)
+                .expect("stream view decode");
+        assert_eq!(stream_view.record_at(0).unwrap().payload32, 32);
+
+        // Zero-copy Transcript slice step (live == replay invariance)
+        let ev_bytes = b"{\"seq\":1}";
+        let mut out_live = [0u8; 32];
+        let mut out_replay = [0u8; 32];
+        let (tv_live, _) = wire_transcript_slice_step(
+            ev_bytes,
+            &mut out_live,
+            TranscriptFoldStepInput {
+                last_applied_seq: 0,
+                incoming_seq: 1,
+                entry_count: 3,
+                thinking_open: true,
+                normalized_action: 5,
+                is_replay_from_log: false,
+            },
+        )
+        .expect("live transcript slice ok");
+        let (tv_replay, _) = wire_transcript_slice_step(
+            ev_bytes,
+            &mut out_replay,
+            TranscriptFoldStepInput {
+                last_applied_seq: 0,
+                incoming_seq: 1,
+                entry_count: 3,
+                thinking_open: true,
+                normalized_action: 5,
+                is_replay_from_log: true,
+            },
+        )
+        .expect("replay transcript slice ok");
+        assert_eq!(tv_live, tv_replay);
+        assert_eq!(out_live, out_replay);
+        assert!(tv_live.closed_previous_thinking);
+        assert_eq!(tv_live.next_entry_count, 4);
+
+        // Status 4 (invalid normalizedAction) vs Status 5 (OutputTooSmall) disambiguation
+        let invalid_fold = transcript_fold_step(TranscriptFoldStepInput {
+            last_applied_seq: 0,
+            incoming_seq: 1,
+            entry_count: 3,
+            thinking_open: true,
+            normalized_action: 99,
+            is_replay_from_log: false,
+        });
+        assert!(!invalid_fold.admitted);
+        assert_eq!(invalid_fold.action_code, 4);
+        assert!(invalid_fold.thinking_open_next);
+        assert_eq!(invalid_fold.next_entry_count, 3);
+
+        let mut out_bad_act = [0xCCu8; 32];
+        assert_eq!(
+            wire_transcript_slice_step(
+                ev_bytes,
+                &mut out_bad_act,
+                TranscriptFoldStepInput {
+                    last_applied_seq: 0,
+                    incoming_seq: 1,
+                    entry_count: 3,
+                    thinking_open: true,
+                    normalized_action: 99,
+                    is_replay_from_log: false,
+                },
+            ),
+            Err(WireTranscriptSliceError::FoldRejected(invalid_fold))
+        );
+        assert_eq!(out_bad_act, [0xCCu8; 32]);
+
+        let gap_fold = transcript_fold_step(TranscriptFoldStepInput {
+            last_applied_seq: 5,
+            incoming_seq: 8,
+            entry_count: 3,
+            thinking_open: true,
+            normalized_action: 5,
+            is_replay_from_log: false,
+        });
+        assert!(!gap_fold.admitted);
+        assert_eq!(gap_fold.action_code, 3);
+        assert!(gap_fold.gap_buffered);
+        assert_eq!(
+            wire_transcript_slice_step(
+                ev_bytes,
+                &mut out_bad_act,
+                TranscriptFoldStepInput {
+                    last_applied_seq: 5,
+                    incoming_seq: 8,
+                    entry_count: 3,
+                    thinking_open: true,
+                    normalized_action: 5,
+                    is_replay_from_log: false,
+                },
+            ),
+            Err(WireTranscriptSliceError::FoldRejected(gap_fold))
+        );
+
+        let dup_fold = transcript_fold_step(TranscriptFoldStepInput {
+            last_applied_seq: 5,
+            incoming_seq: 5,
+            entry_count: 3,
+            thinking_open: false,
+            normalized_action: 5,
+            is_replay_from_log: false,
+        });
+        assert!(!dup_fold.admitted);
+        assert_eq!(dup_fold.action_code, 2);
+        assert!(!dup_fold.gap_buffered);
+        assert_eq!(
+            wire_transcript_slice_step(
+                ev_bytes,
+                &mut out_bad_act,
+                TranscriptFoldStepInput {
+                    last_applied_seq: 5,
+                    incoming_seq: 5,
+                    entry_count: 3,
+                    thinking_open: false,
+                    normalized_action: 5,
+                    is_replay_from_log: false,
+                },
+            ),
+            Err(WireTranscriptSliceError::FoldRejected(dup_fold))
+        );
+
+        let mut out_small_tx = [0xDDu8; 16];
+        assert_eq!(
+            wire_transcript_slice_step(
+                ev_bytes,
+                &mut out_small_tx,
+                TranscriptFoldStepInput {
+                    last_applied_seq: 0,
+                    incoming_seq: 1,
+                    entry_count: 3,
+                    thinking_open: true,
+                    normalized_action: 99,
+                    is_replay_from_log: false,
+                },
+            ),
+            Err(WireTranscriptSliceError::Wire(
+                OrbWireStatus::OutputTooSmall
+            ))
+        );
+        assert_eq!(out_small_tx, [0xDDu8; 16]);
     }
 }

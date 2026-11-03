@@ -2164,7 +2164,7 @@ def transcriptFoldStep
     else if isOpenThink then 769
     else if isAppendEntry then (if thinkingOpen == 1 then 1281 else 257)
     else if isMetaUpdate then 260 ||| keepThink
-    else 5 ||| keepThink
+    else 4 ||| keepThink
   let hi32 : UInt32 :=
     if isContiguous && isAppendEntry then satAdd32 entryCount 1 else entryCount
   lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
@@ -2614,5 +2614,231 @@ def prefillDeadlineMs
   else if perKTokensMs == 0 || (promptTokens >>> 10) == 0 then baseMs
   else if (promptTokens >>> 10) > (maxPrefillMs - baseMs) / perKTokensMs then maxPrefillMs
   else baseMs + (promptTokens >>> 10) * perKTokensMs
+
+-- ===========================================================================
+-- Phase R4: Signed Two's-Complement `Orb.Scroll` C-ABI & Zero-Copy `OrbWire`
+--           Stream / Scroll / Transcript Slice Steppers
+-- ===========================================================================
+
+@[inline] def scrollI64SignFlip (x : UInt64) : UInt64 :=
+  x + 0x8000000000000000
+
+@[inline] def scrollI64Lt (a b : UInt64) : Bool :=
+  scrollI64SignFlip a < scrollI64SignFlip b
+
+@[inline] def scrollI64Le (a b : UInt64) : Bool :=
+  scrollI64SignFlip a ≤ scrollI64SignFlip b
+
+@[inline] def scrollI64Max (a b : UInt64) : UInt64 :=
+  if scrollI64Lt a b then b else a
+
+@[inline] def scrollI64Min (a b : UInt64) : UInt64 :=
+  if scrollI64Le a b then a else b
+
+/--
+  Signed two's-complement domain predicate `[-2^30, 2^30 - 1]`
+  (`-1073741824 <= signed(x) <= 1073741823`, i.e., `x <= 0x3FFFFFFF || x >= 0xFFFFFFFFC0000000`).
+  Within this domain:
+  1. Any 3-term sum/difference lies strictly inside `[-3 * 2^30, 3 * 2^30]`, so zero 64-bit
+     two's-complement wraparound can ever occur.
+  2. Every clamped scroll position (`0 <= top <= maxTop`) lies in `[0, 2^31 - 1]`, so packing
+     `nextTop.toUInt32` in the upper 32 bits of `scrollPolicyStep` is exact (`0` truncation).
+-/
+@[inline] def inScrollDomainI64 (x : UInt64) : Bool :=
+  x ≤ 0x3FFFFFFF || 0xFFFFFFFFC0000000 ≤ x
+
+@[inline] def scrollI64SatAdd (a b : UInt64) : UInt64 :=
+  let sum : UInt64 := a + b
+  let aNeg : Bool := 0x8000000000000000 ≤ a
+  let bNeg : Bool := 0x8000000000000000 ≤ b
+  let sNeg : Bool := 0x8000000000000000 ≤ sum
+  if !aNeg && !bNeg && sNeg then 0x7FFFFFFFFFFFFFFF
+  else if aNeg && bNeg && !sNeg then 0x8000000000000000
+  else sum
+
+@[inline] def scrollI64SatSub (a b : UInt64) : UInt64 :=
+  let diff : UInt64 := a - b
+  let aNeg : Bool := 0x8000000000000000 ≤ a
+  let bNeg : Bool := 0x8000000000000000 ≤ b
+  let dNeg : Bool := 0x8000000000000000 ≤ diff
+  if !aNeg && bNeg && dNeg then 0x7FFFFFFFFFFFFFFF
+  else if aNeg && !bNeg && !dNeg then 0x8000000000000000
+  else diff
+
+/--
+  Unboxed C-ABI Signed `Orb.Scroll` Max Top (`orb_scroll_policy_max_top`):
+  Two's-complement `Int64` encoding of `max(0, height - client)` with saturating signed subtraction.
+-/
+@[inline] def scrollPolicyMaxTopI64 (height client : UInt64) : UInt64 :=
+  scrollI64Max 0 (scrollI64SatSub height client)
+
+/--
+  Unboxed C-ABI Signed `Orb.Scroll` Clamp Top (`orb_scroll_policy_clamp_top`):
+  Two's-complement `Int64` encoding of `max(0, min(target, maxTop(height, client)))`.
+-/
+@[inline] def scrollPolicyClampTopI64 (height client target : UInt64) : UInt64 :=
+  scrollI64Max 0 (scrollI64Min target (scrollPolicyMaxTopI64 height client))
+
+/--
+  Unboxed C-ABI Signed `Orb.Scroll` Gap (`orb_scroll_policy_gap`):
+  Two's-complement `Int64` encoding of `height - top - client` (can be negative when
+  `height < top + client`, matching `Orb.Scroll.gap` over `[-2^30, 2^30 - 1]` and
+  saturating outside `Int64` bounds).
+-/
+@[inline, export orb_scroll_policy_gap]
+def scrollPolicyGap (height client top : UInt64) : UInt64 :=
+  scrollI64SatSub (scrollI64SatSub height top) client
+
+/--
+  Unboxed C-ABI Signed `Orb.Scroll` Anchor Correction (`orb_scroll_policy_correct`):
+  Two's-complement `Int64` encoding of `clampTop(height, client, top + (anchorDoc - top - y0))`
+  (`clampTop(height, client, anchorDoc - y0)`), idempotent on second run.
+-/
+@[inline, export orb_scroll_policy_correct]
+def scrollPolicyCorrect (height client top anchorDoc y0 : UInt64) : UInt64 :=
+  scrollPolicyClampTopI64 height client
+    (scrollI64SatAdd top (scrollI64SatSub (scrollI64SatSub anchorDoc top) y0))
+
+@[inline] def scrollPolicyNextTop
+    (opKind pinned : UInt8)
+    (curTop height client arg : UInt64) : UInt64 :=
+  if opKind == 0 then
+    if pinned == 1 then scrollPolicyMaxTopI64 height client
+    else scrollPolicyClampTopI64 height client (scrollI64SatAdd curTop arg)
+  else if opKind == 1 || opKind == 2 then
+    scrollPolicyClampTopI64 height client arg
+  else
+    scrollPolicyMaxTopI64 height client
+
+@[inline] def scrollPolicyNextPinned
+    (opKind pinned intent resized : UInt8)
+    (curTop height client arg : UInt64) : Bool :=
+  let pinBool : Bool := pinned == 1
+  if opKind == 0 then
+    pinBool
+  else if opKind == 1 || (opKind == 2 && intent == 1) then
+    let t := scrollPolicyClampTopI64 height client arg
+    if scrollI64Lt t curTop then false
+    else if scrollI64Lt (scrollPolicyGap height client t) 24 then true
+    else pinBool
+  else if opKind == 2 then
+    let t := scrollPolicyClampTopI64 height client arg
+    if !(resized == 1) && pinBool && scrollI64Lt t curTop &&
+       scrollI64Le 24 (scrollPolicyGap height client t) then false
+    else pinBool
+  else
+    true
+
+@[inline] def scrollPolicyFallbackTopU32 (curTop : UInt64) : UInt32 :=
+  let nonNeg : UInt64 := scrollI64Max 0 curTop
+  if nonNeg ≤ 0xFFFFFFFF then nonNeg.toUInt32 else 0xFFFFFFFF
+
+/--
+  Unboxed C-ABI Signed `Orb.Scroll` Policy Step (`orb_scroll_policy_step`):
+  Executes `Orb.Scroll.{layout, userScroll, scrollEvent, jump}` over bounded signed
+  CSS pixel coordinates (`[-2^30, 2^30 - 1]` encoded as two's-complement `UInt64`):
+  - `opKind`: `0 = layout` (`arg = shift`), `1 = userScroll` (`arg = top'`),
+    `2 = scrollEvent` (`arg = top'`), `3 = jump`.
+  - Returns `lo32 = status | admittedBit(256) | pinnedNextBit(512)`,
+    `hi32 = nextTop.toUInt32` (exact lossless `0 <= nextTop < 2^31`).
+  - Rejects `opKind > 3` (`lo32 = 2`, `admittedBit = 0`) and out-of-domain coordinates
+    (`!(inScrollDomainI64 curTop && inScrollDomainI64 height && inScrollDomainI64 client && inScrollDomainI64 arg)`,
+    `lo32 = 3`, `admittedBit = 0`).
+-/
+@[inline, export orb_scroll_policy_step]
+def scrollPolicyStep
+    (opKind pinned intent resized : UInt8)
+    (curTop height client arg : UInt64) : UInt64 :=
+  let keepPin : UInt32 := if pinned == 1 then 512 else 0
+  let keepTop : UInt32 := scrollPolicyFallbackTopU32 curTop
+  let inDom : Bool :=
+    inScrollDomainI64 curTop && inScrollDomainI64 height &&
+    inScrollDomainI64 client && inScrollDomainI64 arg
+  if !(opKind ≤ 3) then
+    let lo32Err : UInt32 := (2 : UInt32) ||| keepPin
+    lo32Err.toUInt64 ||| (keepTop.toUInt64 <<< 32)
+  else if !inDom then
+    let lo32Dom : UInt32 := (3 : UInt32) ||| keepPin
+    lo32Dom.toUInt64 ||| (keepTop.toUInt64 <<< 32)
+  else
+    let nextPin : Bool :=
+      scrollPolicyNextPinned opKind pinned intent resized curTop height client arg
+    let nextTop : UInt64 :=
+      scrollPolicyNextTop opKind pinned curTop height client arg
+    let pinBit : UInt32 := if nextPin then 512 else 0
+    let lo32 : UInt32 := (257 : UInt32) ||| pinBit
+    let hi32 : UInt32 := nextTop.toUInt32
+    lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Zero-Copy `OrbWire` Scroll Slice Stepper (`orb_wire_scroll_slice_step`):
+  Atomically validates zero-copy LP64 / `wasm32` input/output slice safety (`inPtr`, `inLen`,
+  `outPtr`, `outCap`, `24 + 8`, `is32Bit`), `opKind <= 3`, AND signed coordinate domain
+  `[-2^30, 2^30 - 1]` before emitting a 32-byte `OrbWire` Scroll frame (`schemaId = 10`,
+  1 record, 0 arena bytes).
+  On failure (`sliceSt != 0`, `opKind > 3`, or out-of-domain coordinates), returns
+  `admittedBit = 0` and preserves `(pinned, curTop)` with zero output buffer mutation.
+-/
+@[inline, export orb_wire_scroll_slice_step]
+def wireScrollSliceStep
+    (inPtr inLen outPtr outCap : UInt64)
+    (is32Bit opKind pinned intent resized : UInt8)
+    (curTop height client arg : UInt64) : UInt64 :=
+  let sliceSt : UInt8 := wireVerifySliceIo inPtr inLen outPtr outCap 32 is32Bit
+  let keepPin : UInt32 := if pinned == 1 then 512 else 0
+  let keepTop : UInt32 := scrollPolicyFallbackTopU32 curTop
+  if !(sliceSt == 0) then
+    (sliceSt.toUInt32 ||| keepPin).toUInt64 ||| (keepTop.toUInt64 <<< 32)
+  else
+    scrollPolicyStep opKind pinned intent resized curTop height client arg
+
+/--
+  Unboxed C-ABI Zero-Copy `OrbWire` Stream Bounded-Tail Slice Stepper (`orb_wire_stream_slice_step`):
+  Combines zero-copy LP64 / `wasm32` slice validation (`[inPtr, inPtr + inLen)` disjoint from
+  `[outPtr, outPtr + outCap)`, `32 <= outCap`) with `G-ORB-6` bounded-tail checkpoint progression
+  (`streamBoundedCommitStep`, bounding the open Markdown tail by `maxOpenTailBytes` even across
+  giant unclosed code fences).
+  - Returns `lo32 = status | admittedBit(256) | checkpointForcedBit(512)`,
+    `hi32 = nextCheckpoint : UInt32`.
+-/
+@[inline, export orb_wire_stream_slice_step]
+def wireStreamSliceStep
+    (inPtr inLen outPtr outCap : UInt64)
+    (is32Bit : UInt8)
+    (prevLen prevCommit prevCheckpoint newLen rawCommit maxOpenTailBytes : UInt32) : UInt64 :=
+  let sliceSt : UInt8 := wireVerifySliceIo inPtr inLen outPtr outCap 32 is32Bit
+  if !(sliceSt == 0) then
+    sliceSt.toUInt32.toUInt64 ||| (prevCheckpoint.toUInt64 <<< 32)
+  else
+    let stepWord : UInt64 :=
+      streamBoundedCommitStep prevLen prevCommit prevCheckpoint newLen rawCommit maxOpenTailBytes
+    let stepLo : UInt32 := (stepWord &&& 0xFFFFFFFF).toUInt32
+    if (stepLo &&& 256) == 0 then
+      (3 : UInt64) ||| (prevCheckpoint.toUInt64 <<< 32)
+    else
+      stepWord
+
+/--
+  Unboxed C-ABI Zero-Copy `OrbWire` Transcript Fold Slice Stepper (`orb_wire_transcript_slice_step`):
+  Combines zero-copy LP64 / `wasm32` slice validation (`[inPtr, inPtr + inLen)` disjoint from
+  `[outPtr, outPtr + outCap)`, `32 <= outCap`) with contiguous-sequence, replay-invariant
+  transcript folding (`transcriptFoldStep`, `isReplayFromLog` ignored so live == replay).
+  - Returns `lo32` (`status | admittedBit(256) | thinkingOpenBit(512) | closedPrevBit(1024) | gapBit(2048)`),
+    `hi32 = nextEntryCount : UInt32`.
+-/
+@[inline, export orb_wire_transcript_slice_step]
+def wireTranscriptSliceStep
+    (inPtr inLen outPtr outCap : UInt64)
+    (is32Bit : UInt8)
+    (lastAppliedSeq incomingSeq : UInt64)
+    (entryCount : UInt32)
+    (thinkingOpen normalizedAction isReplayFromLog : UInt8) : UInt64 :=
+  let sliceSt : UInt8 := wireVerifySliceIo inPtr inLen outPtr outCap 32 is32Bit
+  let keepThink : UInt32 := if thinkingOpen == 1 then 512 else 0
+  if !(sliceSt == 0) then
+    (sliceSt.toUInt32 ||| keepThink).toUInt64 ||| (entryCount.toUInt64 <<< 32)
+  else
+    transcriptFoldStep lastAppliedSeq incomingSeq entryCount
+      thinkingOpen normalizedAction isReplayFromLog
 
 end Orb.Kernel

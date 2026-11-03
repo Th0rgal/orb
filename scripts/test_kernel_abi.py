@@ -117,10 +117,22 @@ class Generator(unittest.TestCase):
         kt = gen.render_kotlin(data)
         self.assertIn(ROOT / data["kotlin"]["path"], gen.outputs(data))
         self.assertNotIn("if (nativeLoaded)", kt)
+        self.assertNotIn(".coerceIn(0, 255)", kt)
+        self.assertIn("private fun enum8(v: Int): Int = if (v in 0..255) v else 255", kt)
+        self.assertIn("fun scrollPolicyGap(height: Long, client: Long, top: Long): Long?", kt)
+        self.assertIn("fun scrollPolicyCorrect(", kt)
         self.assertIn('check(nativeLoaded) { "liborb_kernel JNI not loaded" }', kt)
         self.assertIn("external fun leansysVerifyPageAlignedBuffer(", kt)
         self.assertIn("external fun leansysSelectIsa(", kt)
         self.assertIn("external fun leansysVerifyIsaSelection(", kt)
+
+    def test_swift_uses_fail_closed_enum8_and_optional_scroll_domain(self):
+        data = manifest()
+        swift = gen.render_swift(data)
+        self.assertIn("private static func enum8(_ v: Int) -> UInt8", swift)
+        self.assertIn("static func scrollPolicyGap(height: Int64, client: Int64, top: Int64) -> Int64?", swift)
+        self.assertIn("static func scrollPolicyCorrect(", swift)
+        self.assertIn(") -> Int64? {", swift)
 
     def test_leannative_shim_exports_all_manifest_symbols_and_quarantines_runtime(self):
         data = manifest()

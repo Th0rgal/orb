@@ -149,6 +149,12 @@ uint8_t leansys_verify_step_reactor(uint64_t, uint64_t, uint64_t, uint64_t, uint
 uint8_t leansys_verify_stream_relay(uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint8_t orb_fleet_endpoint_gate(uint8_t, uint8_t, uint8_t, uint8_t);
 uint64_t orb_prefill_deadline_ms(uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t orb_scroll_policy_gap(uint64_t, uint64_t, uint64_t);
+uint64_t orb_scroll_policy_correct(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t orb_scroll_policy_step(uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t orb_wire_scroll_slice_step(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t orb_wire_stream_slice_step(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint64_t orb_wire_transcript_slice_step(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t, uint64_t, uint64_t, uint32_t, uint8_t, uint8_t, uint8_t);
 #ifdef __cplusplus
 }
 #endif

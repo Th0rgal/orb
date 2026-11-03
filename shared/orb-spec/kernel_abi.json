@@ -4487,6 +4487,270 @@
         }
       ],
       "internal": true
+    },
+    {
+      "name": "orb_scroll_policy_gap",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "height",
+          "type": "uint64_t"
+        },
+        {
+          "name": "client",
+          "type": "uint64_t"
+        },
+        {
+          "name": "top",
+          "type": "uint64_t"
+        }
+      ],
+      "jni": {
+        "method": "orbScrollPolicyGap",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_scroll_policy_correct",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "height",
+          "type": "uint64_t"
+        },
+        {
+          "name": "client",
+          "type": "uint64_t"
+        },
+        {
+          "name": "top",
+          "type": "uint64_t"
+        },
+        {
+          "name": "anchorDoc",
+          "type": "uint64_t"
+        },
+        {
+          "name": "y0",
+          "type": "uint64_t"
+        }
+      ],
+      "jni": {
+        "method": "orbScrollPolicyCorrect",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_scroll_policy_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "opKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "pinned",
+          "type": "uint8_t"
+        },
+        {
+          "name": "intent",
+          "type": "uint8_t"
+        },
+        {
+          "name": "resized",
+          "type": "uint8_t"
+        },
+        {
+          "name": "curTop",
+          "type": "uint64_t"
+        },
+        {
+          "name": "height",
+          "type": "uint64_t"
+        },
+        {
+          "name": "client",
+          "type": "uint64_t"
+        },
+        {
+          "name": "arg",
+          "type": "uint64_t"
+        }
+      ],
+      "jni": {
+        "method": "orbScrollPolicyStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_wire_scroll_slice_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "inPtr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "inLen",
+          "type": "uint64_t"
+        },
+        {
+          "name": "outPtr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "outCap",
+          "type": "uint64_t"
+        },
+        {
+          "name": "is32Bit",
+          "type": "uint8_t"
+        },
+        {
+          "name": "opKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "pinned",
+          "type": "uint8_t"
+        },
+        {
+          "name": "intent",
+          "type": "uint8_t"
+        },
+        {
+          "name": "resized",
+          "type": "uint8_t"
+        },
+        {
+          "name": "curTop",
+          "type": "uint64_t"
+        },
+        {
+          "name": "height",
+          "type": "uint64_t"
+        },
+        {
+          "name": "client",
+          "type": "uint64_t"
+        },
+        {
+          "name": "arg",
+          "type": "uint64_t"
+        }
+      ],
+      "jni": {
+        "method": "orbWireScrollSliceStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_wire_stream_slice_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "inPtr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "inLen",
+          "type": "uint64_t"
+        },
+        {
+          "name": "outPtr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "outCap",
+          "type": "uint64_t"
+        },
+        {
+          "name": "is32Bit",
+          "type": "uint8_t"
+        },
+        {
+          "name": "prevLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "prevCommit",
+          "type": "uint32_t"
+        },
+        {
+          "name": "prevCheckpoint",
+          "type": "uint32_t"
+        },
+        {
+          "name": "newLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "rawCommit",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxOpenTailBytes",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbWireStreamSliceStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_wire_transcript_slice_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "inPtr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "inLen",
+          "type": "uint64_t"
+        },
+        {
+          "name": "outPtr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "outCap",
+          "type": "uint64_t"
+        },
+        {
+          "name": "is32Bit",
+          "type": "uint8_t"
+        },
+        {
+          "name": "lastAppliedSeq",
+          "type": "uint64_t"
+        },
+        {
+          "name": "incomingSeq",
+          "type": "uint64_t"
+        },
+        {
+          "name": "entryCount",
+          "type": "uint32_t"
+        },
+        {
+          "name": "thinkingOpen",
+          "type": "uint8_t"
+        },
+        {
+          "name": "normalizedAction",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isReplayFromLog",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbWireTranscriptSliceStep",
+        "ret": "jlong"
+      }
     }
   ]
 }

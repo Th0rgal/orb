@@ -2,7 +2,10 @@ import {batch} from "solid-js";
 import { api, clearConnection, getJwt, connectionVersion, isAbortError, isTransientNetworkError, noteAbort, orderedApiCandidates, REQUEST_TIMEOUT_MS, RequestTimeoutError, transportFetch } from "./api";
 import { nativeInvoke } from "./native";
 import { requestDone, streamLoad, timed } from "./diagnostics";
-import { orbStreamBoundedCommitStep } from "./orbKernel";
+import {
+  orbKernelScratchSliceStep,
+  orbWireStreamSliceStep,
+} from "./orbKernel";
 
 export const STREAM_MAX_OPEN_TAIL_BYTES = 16_384;
 
@@ -12,31 +15,58 @@ export type StreamTailCommitState = {
   checkpointBytes: number;
 };
 
+const EMPTY_STREAM_TAIL: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+const UTF8_ENCODER = new TextEncoder();
+
 export function advanceStreamBoundedCommit(
   state: StreamTailCommitState,
   chunkBytes: number,
   rawCommitBytes: number,
   maxOpenTailBytes = STREAM_MAX_OPEN_TAIL_BYTES,
+  inTailOrByteLen: Uint8Array | number = EMPTY_STREAM_TAIL,
 ): StreamTailCommitState & { admitted: boolean; checkpointForced: boolean } {
-  const newLen = state.totalBytes + Math.max(0, Math.floor(chunkBytes));
-  const clampedCommit = Math.max(state.committedBytes, Math.min(newLen, Math.max(0, Math.floor(rawCommitBytes))));
-  const verdict = orbStreamBoundedCommitStep(
-    state.totalBytes,
-    state.committedBytes,
-    state.checkpointBytes,
-    newLen,
-    clampedCommit,
-    maxOpenTailBytes,
-  );
-  if (!verdict.admitted) {
+  if (
+    !Number.isInteger(chunkBytes) ||
+    chunkBytes < 0 ||
+    !Number.isInteger(rawCommitBytes) ||
+    !Number.isInteger(maxOpenTailBytes) ||
+    !Number.isInteger(state.totalBytes) ||
+    !Number.isInteger(state.committedBytes) ||
+    !Number.isInteger(state.checkpointBytes) ||
+    (typeof inTailOrByteLen === "number" && (!Number.isInteger(inTailOrByteLen) || inTailOrByteLen < 0))
+  ) {
     return { ...state, admitted: false, checkpointForced: false };
   }
+  const newLen = state.totalBytes + chunkBytes;
+  const tailByteLen = typeof inTailOrByteLen === "number" ? inTailOrByteLen : inTailOrByteLen.byteLength;
+  const scratchInBytes = typeof inTailOrByteLen === "number" ? 0 : Math.min(tailByteLen, STREAM_MAX_OPEN_TAIL_BYTES);
+  const scratch = orbKernelScratchSliceStep(scratchInBytes);
+  if (typeof inTailOrByteLen !== "number" && scratch.inView.byteLength > 0) {
+    scratch.inView.set(inTailOrByteLen.subarray(0, scratch.inView.byteLength));
+  }
+  const sliceRes = orbWireStreamSliceStep({
+    inTail: typeof inTailOrByteLen !== "number" && scratch.inView.byteLength > 0 ? scratch.inView : EMPTY_STREAM_TAIL,
+    outBuf: scratch.outView,
+    inPtr: tailByteLen === 0 ? 0 : scratch.inOffset,
+    outPtr: scratch.outOffset,
+    inTailBytesLen: tailByteLen,
+    prevLen: state.totalBytes,
+    prevCommit: state.committedBytes,
+    prevCheckpoint: state.checkpointBytes,
+    newLen,
+    rawCommit: rawCommitBytes,
+    maxOpenTailBytes,
+  });
+  if (sliceRes.status !== 0 || !sliceRes.verdict || !sliceRes.verdict.admitted) {
+    return { ...state, admitted: false, checkpointForced: false };
+  }
+  const nextCommitted = Math.max(state.committedBytes, Math.min(newLen, rawCommitBytes));
   return {
     totalBytes: newLen,
-    committedBytes: clampedCommit,
-    checkpointBytes: verdict.nextCheckpoint,
+    committedBytes: nextCommitted,
+    checkpointBytes: sliceRes.verdict.nextCheckpoint,
     admitted: true,
-    checkpointForced: verdict.checkpointForced,
+    checkpointForced: sliceRes.verdict.checkpointForced,
   };
 }
 
@@ -593,12 +623,13 @@ export function streamMission(
         const { done, value } = await reader.read();
         if (done) break;
         const decoded = decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        const decodedUtf8Len = UTF8_ENCODER.encode(decoded).byteLength;
         buffer += decoded;
-        let idx = buffer.indexOf("\n\n"), frames = 0, consumedChars = 0;
+        let idx = buffer.indexOf("\n\n"), frames = 0, consumedBytes = 0;
         while (idx !== -1) {
           const raw = buffer.slice(0, idx);
           buffer = buffer.slice(idx + 2);
-          consumedChars += idx + 2;
+          consumedBytes += UTF8_ENCODER.encode(raw).byteLength + 2;
           idx = buffer.indexOf("\n\n");
           let eventType = "message";
           let data = "";
@@ -622,10 +653,13 @@ export function streamMission(
             /* malformed frame — skip */
           }
         }
+        const openTailBytes = buffer.length > 0 ? UTF8_ENCODER.encode(buffer) : EMPTY_STREAM_TAIL;
         tailState = advanceStreamBoundedCommit(
           tailState,
-          decoded.length,
-          tailState.committedBytes + consumedChars,
+          decodedUtf8Len,
+          tailState.committedBytes + consumedBytes,
+          STREAM_MAX_OPEN_TAIL_BYTES,
+          openTailBytes,
         );
         streamLoad(`mission ${missionId?.slice(0, 8) ?? "presentation"}`, frames, value.byteLength);
       }

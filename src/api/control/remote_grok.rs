@@ -371,7 +371,7 @@ pub fn evaluate_transcript_fold_gate(
             4 => (true, entry_count, 1),
             5..=7 | 9..=10 => (true, entry_count.saturating_add(1), 1),
             2 | 3 | 8 => (true, entry_count, 4),
-            _ => (false, entry_count, 5),
+            _ => (false, entry_count, 4),
         }
     };
     crate::orb_spec::observe_transcript_fold_shadow(

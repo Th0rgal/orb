@@ -340,3 +340,33 @@ JNIEXPORT jint JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWireDecodeSliceStep(JNIEnv *env, jclass clazz, jlong inPtr, jlong inLen, jint is32Bit, jint magic, jint abiVersion, jint schemaId, jint expectedSchemaId, jint totalLen, jint payloadLen, jint arenaOff, jint arenaLen, jint maxBudgetBytes) {
     return (jint)orb_wire_decode_slice_step((uint64_t)inPtr, (uint64_t)inLen, (uint8_t)is32Bit, (uint32_t)magic, (uint32_t)abiVersion, (uint32_t)schemaId, (uint32_t)expectedSchemaId, (uint32_t)totalLen, (uint32_t)payloadLen, (uint32_t)arenaOff, (uint32_t)arenaLen, (uint32_t)maxBudgetBytes);
 }
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbScrollPolicyGap(JNIEnv *env, jclass clazz, jlong height, jlong client, jlong top) {
+    return (jlong)orb_scroll_policy_gap((uint64_t)height, (uint64_t)client, (uint64_t)top);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbScrollPolicyCorrect(JNIEnv *env, jclass clazz, jlong height, jlong client, jlong top, jlong anchorDoc, jlong y0) {
+    return (jlong)orb_scroll_policy_correct((uint64_t)height, (uint64_t)client, (uint64_t)top, (uint64_t)anchorDoc, (uint64_t)y0);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbScrollPolicyStep(JNIEnv *env, jclass clazz, jint opKind, jint pinned, jint intent, jint resized, jlong curTop, jlong height, jlong client, jlong arg) {
+    return (jlong)orb_scroll_policy_step((uint8_t)opKind, (uint8_t)pinned, (uint8_t)intent, (uint8_t)resized, (uint64_t)curTop, (uint64_t)height, (uint64_t)client, (uint64_t)arg);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWireScrollSliceStep(JNIEnv *env, jclass clazz, jlong inPtr, jlong inLen, jlong outPtr, jlong outCap, jint is32Bit, jint opKind, jint pinned, jint intent, jint resized, jlong curTop, jlong height, jlong client, jlong arg) {
+    return (jlong)orb_wire_scroll_slice_step((uint64_t)inPtr, (uint64_t)inLen, (uint64_t)outPtr, (uint64_t)outCap, (uint8_t)is32Bit, (uint8_t)opKind, (uint8_t)pinned, (uint8_t)intent, (uint8_t)resized, (uint64_t)curTop, (uint64_t)height, (uint64_t)client, (uint64_t)arg);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWireStreamSliceStep(JNIEnv *env, jclass clazz, jlong inPtr, jlong inLen, jlong outPtr, jlong outCap, jint is32Bit, jint prevLen, jint prevCommit, jint prevCheckpoint, jint newLen, jint rawCommit, jint maxOpenTailBytes) {
+    return (jlong)orb_wire_stream_slice_step((uint64_t)inPtr, (uint64_t)inLen, (uint64_t)outPtr, (uint64_t)outCap, (uint8_t)is32Bit, (uint32_t)prevLen, (uint32_t)prevCommit, (uint32_t)prevCheckpoint, (uint32_t)newLen, (uint32_t)rawCommit, (uint32_t)maxOpenTailBytes);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWireTranscriptSliceStep(JNIEnv *env, jclass clazz, jlong inPtr, jlong inLen, jlong outPtr, jlong outCap, jint is32Bit, jlong lastAppliedSeq, jlong incomingSeq, jint entryCount, jint thinkingOpen, jint normalizedAction, jint isReplayFromLog) {
+    return (jlong)orb_wire_transcript_slice_step((uint64_t)inPtr, (uint64_t)inLen, (uint64_t)outPtr, (uint64_t)outCap, (uint8_t)is32Bit, (uint64_t)lastAppliedSeq, (uint64_t)incomingSeq, (uint32_t)entryCount, (uint8_t)thinkingOpen, (uint8_t)normalizedAction, (uint8_t)isReplayFromLog);
+}

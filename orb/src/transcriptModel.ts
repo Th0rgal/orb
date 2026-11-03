@@ -2,7 +2,10 @@ import { shallowEqual } from "./poll";
 import { isFailedStatus } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { deferredMessages } from "./deferredMessages";
-import { orbTranscriptFoldStep } from "./orbKernel";
+import {
+  orbKernelScratchSliceStep,
+  orbWireTranscriptSliceStep,
+} from "./orbKernel";
 import { isCancellationRequestedNotice, isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
 
 export type StreamItem =
@@ -27,6 +30,8 @@ export type StreamItem =
 
 const str = (v: unknown): string => typeof v === "string" ? v : v == null ? "" : String(v);
 const states = new WeakMap<StreamItem[], TranscriptReducer>();
+const EMPTY_TRANSCRIPT_SLICE: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+const TRANSCRIPT_EVENT_ENCODER = new TextEncoder();
 
 /** The producer owns text_delta_latest for an entire assistant response,
  * including tool boundaries. Other text_op bubbles have independent identities.
@@ -237,17 +242,28 @@ export class TranscriptReducer {
       : ev.type === "error" ? 10 : 8;
     const prevFoldSeq = this.foldSeq.get(channel) ?? 0n;
     const nextFoldSeq = prevFoldSeq + 1n;
-    const foldStep = orbTranscriptFoldStep(
-      prevFoldSeq,
-      nextFoldSeq,
-      this.foldEntries,
-      last?.kind === "think" && !last.done,
-      foldAction,
-      ev.storedId !== undefined,
-    );
-    if (!foldStep.admitted) return;
+    const thinkingOpen = last?.kind === "think" && !last.done;
+    const isReplayFromLog = ev.storedId !== undefined;
+    const eventBytes = TRANSCRIPT_EVENT_ENCODER.encode(identity ?? channel);
+    const scratch = orbKernelScratchSliceStep(eventBytes.byteLength);
+    if (eventBytes.byteLength > 0) {
+      scratch.inView.set(eventBytes);
+    }
+    const sliceRes = orbWireTranscriptSliceStep({
+      inEvent: eventBytes.byteLength > 0 ? scratch.inView : EMPTY_TRANSCRIPT_SLICE,
+      outBuf: scratch.outView,
+      inPtr: eventBytes.byteLength === 0 ? 0 : scratch.inOffset,
+      outPtr: scratch.outOffset,
+      lastAppliedSeq: prevFoldSeq,
+      incomingSeq: nextFoldSeq,
+      entryCount: this.foldEntries,
+      thinkingOpen,
+      normalizedAction: foldAction,
+      isReplayFromLog,
+    });
+    if (sliceRes.status !== 0 || !sliceRes.verdict || !sliceRes.verdict.admitted) return;
     this.foldSeq.set(channel, nextFoldSeq);
-    this.foldEntries = foldStep.nextEntryCount;
+    this.foldEntries = sliceRes.verdict.nextEntryCount;
     switch (ev.type) {
       case "text_delta":
       case "text_op": {

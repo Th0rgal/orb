@@ -246,4 +246,90 @@ class OrbKernelTest {
         follow.advanceLayoutEpoch()
         assertTrue(follow.shouldCorrectInEpoch(targetTopPx = 1000, currentTopPx = 800))
     }
+
+    @Test
+    fun r4ScrollDomainAndFailClosedWrapperGuardsMatchLeanSpec() {
+        // Signed scroll gap and anchor correction inside [-2^30, 2^30 - 1]
+        assertEquals(480L, OrbKernel.scrollPolicyGap(1200L, 600L, 120L))
+        assertEquals(-50L, OrbKernel.scrollPolicyGap(550L, 400L, 200L))
+        assertEquals(300L, OrbKernel.scrollPolicyCorrect(1200L, 600L, 120L, 420L, 120L))
+
+        // Out-of-domain coordinates (> 2^30 - 1 or < -2^30) fail closed with null
+        assertEquals(null, OrbKernel.scrollPolicyGap(1L shl 30, 600L, 0L))
+        assertEquals(null, OrbKernel.scrollPolicyGap(1200L, -(1L shl 30) - 1L, 0L))
+        assertEquals(null, OrbKernel.scrollPolicyCorrect(1L shl 30, 600L, 120L, 420L, 120L))
+        assertEquals(null, OrbKernel.scrollPolicyCorrect(1200L, 600L, 120L, -(1L shl 30) - 1L, 120L))
+
+        // Negative or out-of-range enum/count arguments fail closed instead of coercing to valid enum 0
+        val badOp = OrbKernel.scrollPolicyStep(
+            opKind = -1,
+            pinned = true,
+            intent = false,
+            resized = false,
+            curTop = 250L,
+            height = 1200L,
+            client = 600L,
+            arg = 0L
+        )
+        assertFalse(badOp.admitted)
+        assertEquals(2, badOp.status)
+        assertTrue(badOp.pinned)
+        assertEquals(250L, badOp.top)
+
+        val badDom = OrbKernel.scrollPolicyStep(
+            opKind = 0,
+            pinned = true,
+            intent = false,
+            resized = false,
+            curTop = 250L,
+            height = 1L shl 30,
+            client = 600L,
+            arg = 0L
+        )
+        assertFalse(badDom.admitted)
+        assertEquals(3, badDom.status)
+        assertEquals(250L, badDom.top)
+
+        val badMachine = OrbKernel.machineActionAdmitted(stateKind = -1, isBusy = false, isMuted = false)
+        assertFalse(badMachine.isLive)
+        assertFalse(badMachine.canAct)
+
+        val badParity = OrbKernel.clientParityStep(-1, 1, 42, 7, 1, 1)
+        assertFalse(badParity.parityAdmitted)
+        val negParity = OrbKernel.clientParityStep(2, 1, -1, 7, 1, 1)
+        assertFalse(negParity.parityAdmitted)
+
+        // Negative pointer/length/count guards on zero-copy slice steppers fail closed
+        assertEquals(8, OrbKernel.wireVerifySliceIo(-1L, 32L, 64L, 64L, 32L))
+        assertEquals(8, OrbKernel.wireEncodeSliceStep(-1L, 64L, 64L, 1, 1, 0, 1024))
+        assertEquals(2, OrbKernel.wireEncodeSliceStep(0L, 64L, 64L, -1, 1, 0, 1024))
+        assertEquals(3, OrbKernel.wireEncodeSliceStep(0L, 64L, 64L, 1, -1, 0, 1024))
+        assertEquals(8, OrbKernel.wireDecodeSliceStep(-1L, 32L, false, 0x4F524257, 1, 1, 1, 24, 0, 0, 0, 1024))
+        assertEquals(3, OrbKernel.wireDecodeSliceStep(0L, 32L, false, 0x4F524257, 1, 1, 1, -1, 0, 0, 0, 1024))
+
+        val negScrollSlice = OrbKernel.wireScrollSliceStep(-1L, 32L, 64L, 64L, false, 0, true, false, false, 120L, 1200L, 600L, 0L)
+        assertEquals(8L, negScrollSlice and 0xFFL)
+        assertEquals(0L, (negScrollSlice ushr 8) and 1L)
+        assertEquals(120L, (negScrollSlice ushr 32) and 0xFFFF_FFFFL)
+
+        val negStreamSlice = OrbKernel.wireStreamSliceStep(0L, 32L, 64L, 64L, false, -1, 0, 64, 128, 0, 16384)
+        assertEquals(3L, negStreamSlice and 0xFFL)
+        assertEquals(0L, (negStreamSlice ushr 8) and 1L)
+        assertEquals(64L, (negStreamSlice ushr 32) and 0xFFFF_FFFFL)
+
+        val negTranscriptSlice = OrbKernel.wireTranscriptSliceStep(0L, 32L, 64L, 64L, false, -1L, 1L, 5, true, 0, false)
+        assertEquals(3L, negTranscriptSlice and 0xFFL)
+        assertEquals(0L, (negTranscriptSlice ushr 8) and 1L)
+        assertEquals(5L, (negTranscriptSlice ushr 32) and 0xFFFF_FFFFL)
+
+        val nullTranscriptSlice = OrbKernel.wireTranscriptSliceStep(0L, 16L, 64L, 64L, false, 1L, 2L, 5, false, 5, false)
+        assertEquals(7L, nullTranscriptSlice and 0xFFL)
+        assertEquals(0L, (nullTranscriptSlice ushr 8) and 1L)
+        assertEquals(5L, (nullTranscriptSlice ushr 32) and 0xFFFF_FFFFL)
+
+        val badTranscriptAction = OrbKernel.wireTranscriptSliceStep(16L, 16L, 64L, 64L, false, 1L, 2L, 5, false, -1, false)
+        assertEquals(4L, badTranscriptAction and 0xFFL)
+        assertEquals(0L, (badTranscriptAction ushr 8) and 1L)
+        assertEquals(5L, (badTranscriptAction ushr 32) and 0xFFFF_FFFFL)
+    }
 }

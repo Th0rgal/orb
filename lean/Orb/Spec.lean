@@ -18,6 +18,8 @@
 -/
 
 import Orb.Kernel
+import Orb.Scroll
+import Orb.Stream
 
 namespace Orb.Spec
 
@@ -6703,5 +6705,1401 @@ theorem prefill_deadline_cloudflare_and_overflow_witnesses :
     prefillDeadlineMs 40960 45000 1500 90000 = 90000 ∧
     prefillDeadlineMs 0xFFFFFFFFFFFFFFFF 45000 1500 240000 = 240000 := by
   decide
+
+-- ===========================================================================
+-- Phase R4: Signed `Orb.Scroll` C-ABI & Zero-Copy `OrbWire`
+--           Stream / Scroll / Transcript Slice Specifications
+-- ===========================================================================
+
+def encodeScrollI64 (x : Int) : UInt64 :=
+  if 0 ≤ x then
+    (UInt64.ofNat x.toNat)
+  else
+    0 - (UInt64.ofNat (-x).toNat)
+
+def decodeScrollI64 (w : UInt64) : Int :=
+  if w < 0x8000000000000000 then
+    (w.toNat : Int)
+  else
+    (w.toNat : Int) - 18446744073709551616
+
+theorem scroll_policy_signed_negative_shift_and_idempotence :
+    scrollPolicyGap 1000 400 700 = 0xFFFFFFFFFFFFFF9C ∧
+    decodeScrollI64 (scrollPolicyGap 1000 400 700) = Orb.Scroll.gap 1000 400 700 ∧
+    scrollPolicyCorrect 2000 600 500 1200 100 = 1100 ∧
+    scrollPolicyCorrect 2000 600 1100 1200 100 = 1100 ∧
+    Int.ofNat (scrollPolicyCorrect 2000 600 500 1200 100).toNat =
+      Orb.Scroll.correct 2000 600 500 1200 100 ∧
+    (scrollPolicyStep 0 0 0 0 800 2000 600 (encodeScrollI64 (-700)) >>> 32).toUInt32 = 100 ∧
+    Int.ofNat
+      ((scrollPolicyStep 0 0 0 0 800 2000 600 (encodeScrollI64 (-700)) >>> 32).toUInt32).toNat =
+      (Orb.Scroll.layout ⟨false, 800⟩ 2000 600 (-700)).top ∧
+    (scrollPolicyStep 0 0 0 0 100 2000 600 (encodeScrollI64 (-700)) >>> 32).toUInt32 = 0 ∧
+    Int.ofNat
+      ((scrollPolicyStep 0 0 0 0 100 2000 600 (encodeScrollI64 (-700)) >>> 32).toUInt32).toNat =
+      (Orb.Scroll.layout ⟨false, 100⟩ 2000 600 (-700)).top ∧
+    ((scrollPolicyStep 2 1 0 1 1400 2000 600 200 &&& 0xFFFFFFFF) &&& 512) != 0 ∧
+    (((scrollPolicyStep 2 1 0 1 1400 2000 600 200 &&& 0xFFFFFFFF) &&& 512) != 0) =
+      (Orb.Scroll.scrollEvent ⟨true, 1400⟩ false true 2000 600 200).pinned ∧
+    ((scrollPolicyStep 2 1 0 0 1400 2000 600 200 &&& 0xFFFFFFFF) &&& 512) = 0 ∧
+    (((scrollPolicyStep 2 1 0 0 1400 2000 600 200 &&& 0xFFFFFFFF) &&& 512) != 0) =
+      (Orb.Scroll.scrollEvent ⟨true, 1400⟩ false false 2000 600 200).pinned := by
+  decide
+
+structure ScrollPolicyCheck where
+  opKind  : UInt8
+  pinned  : UInt8
+  intent  : UInt8
+  resized : UInt8
+  curTop  : UInt64
+  height  : UInt64
+  client  : UInt64
+  arg     : UInt64
+  deriving Repr, DecidableEq
+
+def ScrollPolicyCheck.Admissible (s : ScrollPolicyCheck) : Bool :=
+  decide (s.opKind ≤ 3) &&
+  inScrollDomainI64 s.curTop &&
+  inScrollDomainI64 s.height &&
+  inScrollDomainI64 s.client &&
+  inScrollDomainI64 s.arg
+
+theorem scrollPolicyStep_admit_eq (s : ScrollPolicyCheck) :
+    (((scrollPolicyStep s.opKind s.pinned s.intent s.resized
+        s.curTop s.height s.client s.arg &&& 0xFFFFFFFF) &&& 256) != 0) =
+      s.Admissible := by
+  unfold ScrollPolicyCheck.Admissible scrollPolicyStep
+  dsimp only
+  have hdom_assoc :
+      (((inScrollDomainI64 s.curTop && inScrollDomainI64 s.height) &&
+          inScrollDomainI64 s.client) && inScrollDomainI64 s.arg) =
+      (inScrollDomainI64 s.curTop && inScrollDomainI64 s.height &&
+        inScrollDomainI64 s.client && inScrollDomainI64 s.arg) := rfl
+  cases hop : decide (s.opKind ≤ 3)
+  · simp only [hop, Bool.false_and, Bool.false_eq_true, Bool.not_false, ite_true]
+    rw [pack32_lo]
+    cases hp : (s.pinned == 1)
+    · change (((2 : UInt32) ||| if false = true then 512 else 0).toUInt64
+        &&& 256 != 0) = false
+      decide
+    · change (((2 : UInt32) ||| if true = true then 512 else 0).toUInt64
+        &&& 256 != 0) = false
+      decide
+  · simp only [hop, Bool.true_and, Bool.not_true, Bool.false_eq_true, ite_false]
+    cases hdom : (inScrollDomainI64 s.curTop && inScrollDomainI64 s.height &&
+        inScrollDomainI64 s.client && inScrollDomainI64 s.arg)
+    · simp only [hdom, Bool.not_false, ite_true]
+      rw [pack32_lo]
+      cases hp : (s.pinned == 1)
+      · change (((3 : UInt32) ||| if false = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false
+        decide
+      · change (((3 : UInt32) ||| if true = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false
+        decide
+    · simp only [hdom, Bool.not_true, Bool.false_eq_true, ite_false]
+      rw [pack32_lo]
+      cases hn : scrollPolicyNextPinned s.opKind s.pinned s.intent s.resized
+          s.curTop s.height s.client s.arg
+      · change (((257 : UInt32) ||| if false = true then 512 else 0).toUInt64
+          &&& 256 != 0) = true
+        decide
+      · change (((257 : UInt32) ||| if true = true then 512 else 0).toUInt64
+          &&& 256 != 0) = true
+        decide
+
+def scrollPolicyMetaGate : MetaGateSpec ScrollPolicyCheck
+    (fun s => s.Admissible = true) where
+  gate s :=
+    ((scrollPolicyStep s.opKind s.pinned s.intent s.resized
+        s.curTop s.height s.client s.arg &&& 0xFFFFFFFF) &&& 256) != 0
+  sound s h := by rw [← scrollPolicyStep_admit_eq s]; exact h
+  complete s h := by rw [scrollPolicyStep_admit_eq s]; exact h
+  posWitness := ⟨0, 1, 0, 0, 400, 1200, 500, 50⟩
+  negWitness := ⟨0, 1, 0, 0, 400, 0x100000000, 500, 50⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Layout transitions in `scrollPolicyStep` (`opKind = 0`) never flip `pinned` (`512`)
+    across any signed `shift` or geometry (admitted or rejected), matching `Orb.Scroll.layout_keeps_pinned`. -/
+theorem scroll_policy_layout_preserves_pinned
+    (pinned intent resized : UInt8) (curTop height client shift : UInt64) :
+    (((scrollPolicyStep 0 pinned intent resized curTop height client shift
+        &&& 0xFFFFFFFF) &&& 512) != 0) = (pinned == 1) := by
+  unfold scrollPolicyStep scrollPolicyNextPinned
+  have hop : decide ((0 : UInt8) ≤ 3) = true := by decide
+  have hop0 : ((0 : UInt8) == 0) = true := by decide
+  simp only [hop, hop0, Bool.not_true, Bool.false_eq_true, ite_false, ite_true]
+  cases hdom : (inScrollDomainI64 curTop && inScrollDomainI64 height &&
+      inScrollDomainI64 client && inScrollDomainI64 shift)
+  · simp only [hdom, Bool.not_false, ite_true]
+    rw [pack32_lo]
+    cases hp : (pinned == 1)
+    · change (((3 : UInt32) ||| if false = true then 512 else 0).toUInt64
+        &&& 512 != 0) = false
+      decide
+    · change (((3 : UInt32) ||| if true = true then 512 else 0).toUInt64
+        &&& 512 != 0) = true
+      decide
+  · simp only [hdom, Bool.not_true, Bool.false_eq_true, ite_false]
+    rw [pack32_lo]
+    cases hp : (pinned == 1)
+    · change (((257 : UInt32) ||| if false = true then 512 else 0).toUInt64
+        &&& 512 != 0) = false
+      decide
+    · change (((257 : UInt32) ||| if true = true then 512 else 0).toUInt64
+        &&& 512 != 0) = true
+      decide
+
+theorem wireVerifySliceIo_err_cases
+    (inPtr inLen outPtr outCap writtenLen : UInt64) (is32Bit : UInt8)
+    (hsl : (wireVerifySliceIo inPtr inLen outPtr outCap writtenLen is32Bit == 0) = false) :
+    wireVerifySliceIo inPtr inLen outPtr outCap writtenLen is32Bit = 5 ∨
+    wireVerifySliceIo inPtr inLen outPtr outCap writtenLen is32Bit = 6 ∨
+    wireVerifySliceIo inPtr inLen outPtr outCap writtenLen is32Bit = 7 ∨
+    wireVerifySliceIo inPtr inLen outPtr outCap writtenLen is32Bit = 8 ∨
+    wireVerifySliceIo inPtr inLen outPtr outCap writtenLen is32Bit = 9 := by
+  unfold wireVerifySliceIo at hsl ⊢
+  split
+  · exact .inr (.inl rfl)
+  · split
+    · exact .inr (.inr (.inl rfl))
+    · split
+      · exact .inr (.inr (.inr (.inl rfl)))
+      · split
+        · exact .inr (.inr (.inr (.inr rfl)))
+        · split
+          · exact .inl rfl
+          · next h1 h2 h3 h4 h5 =>
+            simp only [h1, h2, h3, h4, h5, ite_false] at hsl
+            contradiction
+
+structure WireScrollSliceCheck where
+  inPtr   : UInt64
+  inLen   : UInt64
+  outPtr  : UInt64
+  outCap  : UInt64
+  is32Bit : UInt8
+  opKind  : UInt8
+  pinned  : UInt8
+  intent  : UInt8
+  resized : UInt8
+  curTop  : UInt64
+  height  : UInt64
+  client  : UInt64
+  arg     : UInt64
+  deriving Repr, DecidableEq
+
+def WireScrollSliceCheck.Admissible (w : WireScrollSliceCheck) : Bool :=
+  (wireVerifySliceIo w.inPtr w.inLen w.outPtr w.outCap 32 w.is32Bit == 0) &&
+  (ScrollPolicyCheck.mk w.opKind w.pinned w.intent w.resized
+    w.curTop w.height w.client w.arg).Admissible
+
+theorem wireScrollSliceStep_admit_eq (w : WireScrollSliceCheck) :
+    (((wireScrollSliceStep w.inPtr w.inLen w.outPtr w.outCap
+        w.is32Bit w.opKind w.pinned w.intent w.resized
+        w.curTop w.height w.client w.arg &&& 0xFFFFFFFF) &&& 256) != 0) =
+      w.Admissible := by
+  unfold WireScrollSliceCheck.Admissible wireScrollSliceStep
+  dsimp only
+  cases hsl : (wireVerifySliceIo w.inPtr w.inLen w.outPtr w.outCap 32 w.is32Bit == 0)
+  · simp only [hsl, Bool.false_and, Bool.false_eq_true, Bool.not_false, ite_true]
+    rw [pack32_lo]
+    have hst := wireVerifySliceIo_err_cases w.inPtr w.inLen w.outPtr w.outCap 32 w.is32Bit hsl
+    rcases hst with h5 | h6 | h7 | h8 | h9
+    · rw [h5]; cases hp : (w.pinned == 1)
+      · change (((5 : UInt8).toUInt32 ||| if false = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+      · change (((5 : UInt8).toUInt32 ||| if true = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+    · rw [h6]; cases hp : (w.pinned == 1)
+      · change (((6 : UInt8).toUInt32 ||| if false = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+      · change (((6 : UInt8).toUInt32 ||| if true = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+    · rw [h7]; cases hp : (w.pinned == 1)
+      · change (((7 : UInt8).toUInt32 ||| if false = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+      · change (((7 : UInt8).toUInt32 ||| if true = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+    · rw [h8]; cases hp : (w.pinned == 1)
+      · change (((8 : UInt8).toUInt32 ||| if false = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+      · change (((8 : UInt8).toUInt32 ||| if true = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+    · rw [h9]; cases hp : (w.pinned == 1)
+      · change (((9 : UInt8).toUInt32 ||| if false = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+      · change (((9 : UInt8).toUInt32 ||| if true = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+  · simp only [hsl, Bool.true_and, Bool.not_true, Bool.false_eq_true, ite_false]
+    exact scrollPolicyStep_admit_eq
+      ⟨w.opKind, w.pinned, w.intent, w.resized, w.curTop, w.height, w.client, w.arg⟩
+
+def wireScrollSliceMetaGate : MetaGateSpec WireScrollSliceCheck
+    (fun w => w.Admissible = true) where
+  gate w :=
+    ((wireScrollSliceStep w.inPtr w.inLen w.outPtr w.outCap
+        w.is32Bit w.opKind w.pinned w.intent w.resized
+        w.curTop w.height w.client w.arg &&& 0xFFFFFFFF) &&& 256) != 0
+  sound w h := by rw [← wireScrollSliceStep_admit_eq w]; exact h
+  complete w h := by rw [wireScrollSliceStep_admit_eq w]; exact h
+  posWitness := ⟨0x1000, 24, 0x2000, 64, 1, 0, 1, 0, 0, 400, 1200, 500, 50⟩
+  negWitness := ⟨0x1000, 32, 0x1010, 64, 1, 0, 1, 0, 0, 400, 1200, 500, 50⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+structure WireScrollState where
+  pinned : UInt8
+  top    : UInt32
+  deriving Repr, DecidableEq
+
+def effectiveWireScrollCheck (s : WireScrollState) (w : WireScrollSliceCheck) :
+    WireScrollSliceCheck :=
+  { w with pinned := s.pinned, curTop := s.top.toUInt64 }
+
+def wireScrollMachineStep (s : WireScrollState) (w : WireScrollSliceCheck) :
+    WireScrollState × List UInt32 :=
+  let w' := effectiveWireScrollCheck s w
+  let res := wireScrollSliceStep w'.inPtr w'.inLen w'.outPtr w'.outCap
+    w'.is32Bit w'.opKind w'.pinned w'.intent w'.resized
+    w'.curTop w'.height w'.client w'.arg
+  let admit := wireScrollSliceMetaGate.gate w'
+  let nextPin : UInt8 := if ((res &&& 0xFFFFFFFF) &&& 512) != 0 then 1 else 0
+  let nextTop : UInt32 := (res >>> 32).toUInt32
+  (if admit then ⟨nextPin, nextTop⟩ else s,
+   if admit then [nextTop] else [])
+
+def wireScrollSliceMetaStepSpec :
+    MetaStepSpec WireScrollState WireScrollSliceCheck UInt32 where
+  safety := {
+    step := wireScrollMachineStep
+    authorized := fun s w eff =>
+      let w' := effectiveWireScrollCheck s w
+      let res := wireScrollSliceStep w'.inPtr w'.inLen w'.outPtr w'.outCap
+        w'.is32Bit w'.opKind w'.pinned w'.intent w'.resized
+        w'.curTop w'.height w'.client w'.arg
+      eff == (res >>> 32).toUInt32 && w'.Admissible
+    sound := fun s w eff h_in => by
+      dsimp [wireScrollMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := wireScrollSliceMetaGate.sound (effectiveWireScrollCheck s w) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨1, 0⟩
+    step := wireScrollMachineStep
+    progressRequired := fun s w => (effectiveWireScrollCheck s w).Admissible
+    expectedEffect := fun _ _ => true
+    live := fun s w h_req => by
+      have h_gate := wireScrollSliceMetaGate.complete (effectiveWireScrollCheck s w) h_req
+      dsimp [wireScrollMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨0x1000, 24, 0x2000, 64, 1, 0, 1, 0, 0, 0, 1200, 500, 0⟩]
+    posEvent := ⟨0x1000, 24, 0x2000, 64, 1, 1, 1, 1, 0, 700, 1200, 500, 200⟩
+    negEvent := ⟨0x1000, 32, 0x1010, 64, 1, 1, 1, 1, 0, 700, 1200, 500, 200⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := wireScrollMachineStep
+    cpuFuel := fun s w => 12 + ((wireScrollMachineStep s w).2).length
+    inputBytes := fun _ => 56
+    outputBytes := fun s w => 32 * ((wireScrollMachineStep s w).2).length
+    c0 := 13
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 32
+    fuel_bound := fun s w => by
+      dsimp [wireScrollMachineStep]
+      split <;> simp
+    eff_bound := fun s w => by
+      dsimp [wireScrollMachineStep]
+      split <;> simp
+    out_bound := fun s w => by
+      dsimp [wireScrollMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+structure WireStreamSliceCheck where
+  inPtr            : UInt64
+  inLen            : UInt64
+  outPtr           : UInt64
+  outCap           : UInt64
+  is32Bit          : UInt8
+  prevLen          : UInt32
+  prevCommit       : UInt32
+  prevCheckpoint   : UInt32
+  newLen           : UInt32
+  rawCommit        : UInt32
+  maxOpenTailBytes : UInt32
+  deriving Repr, DecidableEq
+
+def WireStreamSliceCheck.Admissible (c : WireStreamSliceCheck) : Bool :=
+  (wireVerifySliceIo c.inPtr c.inLen c.outPtr c.outCap 32 c.is32Bit == 0) &&
+  (StreamBoundedCommitCheck.mk c.prevLen c.prevCommit c.prevCheckpoint
+    c.newLen c.rawCommit c.maxOpenTailBytes).Admissible
+
+theorem streamBoundedCommit_lo32_admit_zero
+    (prevLen prevCommit prevCheckpoint newLen rawCommit maxOpenTailBytes : UInt32) :
+    (((streamBoundedCommitStep prevLen prevCommit prevCheckpoint
+        newLen rawCommit maxOpenTailBytes &&& 0xFFFFFFFF).toUInt32 &&& 256) == 0) =
+      !(StreamBoundedCommitCheck.mk prevLen prevCommit prevCheckpoint
+        newLen rawCommit maxOpenTailBytes).Admissible := by
+  unfold StreamBoundedCommitCheck.Admissible streamBoundedCommitStep
+  rw [pack32_lo]
+  dsimp only [GT.gt]
+  let clampedRaw := if rawCommit ≤ newLen then rawCommit else newLen
+  let nextCommit := if prevCommit ≤ clampedRaw then clampedRaw else prevCommit
+  let baseCheckpoint := if prevCheckpoint ≤ nextCommit then nextCommit else prevCheckpoint
+  let capFloor := if maxOpenTailBytes ≤ newLen then newLen - maxOpenTailBytes else 0
+  let nextCheckpoint := if baseCheckpoint ≤ capFloor then capFloor else baseCheckpoint
+  have hfold :
+      (if nextCommit < nextCheckpoint then (512 : UInt32) else 0) =
+      (if decide (nextCommit < nextCheckpoint) = true then (512 : UInt32) else 0) := by
+    by_cases hlt : nextCommit < nextCheckpoint <;> simp [hlt]
+  change
+    (((if (!(decide (0 < maxOpenTailBytes) &&
+            (decide (prevCommit ≤ prevCheckpoint) &&
+              decide (prevCheckpoint ≤ prevLen) &&
+              decide (prevLen ≤ newLen)))) = true then
+        (0 : UInt32)
+      else 257 ||| (if nextCommit < nextCheckpoint then 512 else 0)).toUInt64.toUInt32
+        &&& 256) == 0)
+    = !(decide (0 < maxOpenTailBytes) &&
+        decide (prevCommit ≤ prevCheckpoint) &&
+        decide (prevCheckpoint ≤ prevLen) &&
+        decide (prevLen ≤ newLen))
+  rw [hfold]
+  cases hcap : decide (0 < maxOpenTailBytes) <;>
+    cases hm1 : decide (prevCommit ≤ prevCheckpoint) <;>
+    cases hm2 : decide (prevCheckpoint ≤ prevLen) <;>
+    cases hm3 : decide (prevLen ≤ newLen) <;>
+    cases hcf : decide (nextCommit < nextCheckpoint) <;>
+    (simp only [hcap, hm1, hm2, hm3, hcf, Bool.true_and, Bool.false_and, Bool.and_true,
+      Bool.and_false, Bool.not_true, Bool.not_false, Bool.false_eq_true,
+      ite_true, ite_false]; decide)
+
+theorem wireStreamSliceStep_admit_eq (c : WireStreamSliceCheck) :
+    (((wireStreamSliceStep c.inPtr c.inLen c.outPtr c.outCap c.is32Bit
+        c.prevLen c.prevCommit c.prevCheckpoint
+        c.newLen c.rawCommit c.maxOpenTailBytes &&& 0xFFFFFFFF) &&& 256) != 0) =
+      c.Admissible := by
+  unfold WireStreamSliceCheck.Admissible wireStreamSliceStep
+  dsimp only
+  cases hsl : (wireVerifySliceIo c.inPtr c.inLen c.outPtr c.outCap 32 c.is32Bit == 0)
+  · simp only [hsl, Bool.false_and, Bool.false_eq_true, Bool.not_false, ite_true]
+    rw [pack32_lo]
+    have hst := wireVerifySliceIo_err_cases c.inPtr c.inLen c.outPtr c.outCap 32 c.is32Bit hsl
+    rcases hst with h5 | h6 | h7 | h8 | h9
+    · rw [h5]; decide
+    · rw [h6]; decide
+    · rw [h7]; decide
+    · rw [h8]; decide
+    · rw [h9]; decide
+  · simp only [hsl, Bool.true_and, Bool.not_true, Bool.false_eq_true, ite_false]
+    rw [streamBoundedCommit_lo32_admit_zero]
+    let inner : StreamBoundedCommitCheck :=
+      ⟨c.prevLen, c.prevCommit, c.prevCheckpoint, c.newLen, c.rawCommit, c.maxOpenTailBytes⟩
+    cases hadm_b : inner.Admissible
+    · simp only [hadm_b, Bool.not_false, ite_true]
+      have h3 : (3 : UInt64) = (3 : UInt32).toUInt64 := rfl
+      rw [h3, pack32_lo]
+      decide
+    · simp only [hadm_b, Bool.not_true, Bool.false_eq_true, ite_false]
+      exact (streamBoundedCommit_admit_eq inner).trans hadm_b
+
+def wireStreamSliceMetaGate : MetaGateSpec WireStreamSliceCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    ((wireStreamSliceStep c.inPtr c.inLen c.outPtr c.outCap c.is32Bit
+        c.prevLen c.prevCommit c.prevCheckpoint
+        c.newLen c.rawCommit c.maxOpenTailBytes &&& 0xFFFFFFFF) &&& 256) != 0
+  sound c h := by rw [← wireStreamSliceStep_admit_eq c]; exact h
+  complete c h := by rw [wireStreamSliceStep_admit_eq c]; exact h
+  posWitness := ⟨0x1000, 128, 0x2000, 64, 1, 0, 0, 0, 128, 64, 32⟩
+  negWitness := ⟨0x1000, 128, 0x1040, 64, 1, 0, 0, 0, 128, 64, 32⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def effectiveWireStreamCheck (s : StreamCommitState) (c : WireStreamSliceCheck) :
+    WireStreamSliceCheck :=
+  { c with prevLen := s.len, prevCommit := s.commit, prevCheckpoint := s.checkpoint }
+
+def wireStreamMachineStep (s : StreamCommitState) (c : WireStreamSliceCheck) :
+    StreamCommitState × List UInt32 :=
+  let c' := effectiveWireStreamCheck s c
+  let w := wireStreamSliceStep c'.inPtr c'.inLen c'.outPtr c'.outCap c'.is32Bit
+    c'.prevLen c'.prevCommit c'.prevCheckpoint
+    c'.newLen c'.rawCommit c'.maxOpenTailBytes
+  let admit := wireStreamSliceMetaGate.gate c'
+  let clampedRaw := if c'.rawCommit ≤ c'.newLen then c'.rawCommit else c'.newLen
+  let nextCommit := if s.commit ≤ clampedRaw then clampedRaw else s.commit
+  let nextCheckpoint := (w >>> 32).toUInt32
+  (if admit then ⟨c'.newLen, nextCommit, nextCheckpoint⟩ else s,
+   if admit then [nextCheckpoint] else [])
+
+def wireStreamSliceMetaStepSpec :
+    MetaStepSpec StreamCommitState WireStreamSliceCheck UInt32 where
+  safety := {
+    step := wireStreamMachineStep
+    authorized := fun s c eff =>
+      let c' := effectiveWireStreamCheck s c
+      let w := wireStreamSliceStep c'.inPtr c'.inLen c'.outPtr c'.outCap c'.is32Bit
+        c'.prevLen c'.prevCommit c'.prevCheckpoint
+        c'.newLen c'.rawCommit c'.maxOpenTailBytes
+      eff == (w >>> 32).toUInt32 && c'.Admissible
+    sound := fun s c eff h_in => by
+      dsimp [wireStreamMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := wireStreamSliceMetaGate.sound (effectiveWireStreamCheck s c) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨0, 0, 0⟩
+    step := wireStreamMachineStep
+    progressRequired := fun s c => (effectiveWireStreamCheck s c).Admissible
+    expectedEffect := fun _ _ => true
+    live := fun s c h_req => by
+      have h_gate := wireStreamSliceMetaGate.complete (effectiveWireStreamCheck s c) h_req
+      dsimp [wireStreamMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨0x1000, 20, 0x2000, 64, 1, 0, 0, 0, 20, 5, 8⟩]
+    posEvent := ⟨0x1000, 40, 0x2000, 64, 1, 20, 5, 12, 40, 5, 8⟩
+    negEvent := ⟨0x1000, 40, 0x1010, 64, 1, 20, 5, 12, 40, 5, 8⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := wireStreamMachineStep
+    cpuFuel := fun s c => 16 + ((wireStreamMachineStep s c).2).length
+    inputBytes := fun _ => 56
+    outputBytes := fun s c => 32 * ((wireStreamMachineStep s c).2).length
+    c0 := 17
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 32
+    fuel_bound := fun s c => by
+      dsimp [wireStreamMachineStep]
+      split <;> simp
+    eff_bound := fun s c => by
+      dsimp [wireStreamMachineStep]
+      split <;> simp
+    out_bound := fun s c => by
+      dsimp [wireStreamMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- `orb_wire_stream_slice_step` enforces `G-ORB-6` bounded-tail progression (`newLen - checkpoint <= 8`)
+    on disjoint slices while rejecting aliased (`9`) or regressions (`3`) without advancing `checkpoint`,
+    bridging directly to `Orb.Stream.stepBoundedStream`. -/
+theorem wire_stream_slice_bounded_open_fence_and_bridge :
+    let w1 := wireStreamSliceStep 0x1000 40 0x2000 64 1 20 5 12 40 5 8
+    let stLean := Orb.Stream.stepBoundedStream 8 ⟨20, 5, 12⟩ ⟨40, 5⟩
+    ((w1 &&& 0xFFFFFFFF) &&& 256) != 0 ∧
+    ((w1 &&& 0xFFFFFFFF) &&& 512) != 0 ∧
+    (w1 >>> 32).toUInt32 = 32 ∧
+    ((w1 >>> 32).toUInt32).toNat = stLean.checkpoint ∧
+    (40 : UInt32) - (w1 >>> 32).toUInt32 ≤ 8 ∧
+    wireStreamSliceStep 0x1000 40 0x1010 64 1 20 5 12 40 5 8 =
+      (9 : UInt32).toUInt64 ||| ((12 : UInt64) <<< 32) ∧
+    wireStreamSliceStep 0x1000 40 0x2000 64 1 20 15 12 40 5 8 =
+      (3 : UInt32).toUInt64 ||| ((12 : UInt64) <<< 32) := by
+  decide
+
+structure WireTranscriptSliceCheck where
+  inPtr            : UInt64
+  inLen            : UInt64
+  outPtr           : UInt64
+  outCap           : UInt64
+  is32Bit          : UInt8
+  lastAppliedSeq   : UInt64
+  incomingSeq      : UInt64
+  entryCount       : UInt32
+  thinkingOpen     : UInt8
+  normalizedAction : UInt8
+  isReplayFromLog  : UInt8
+  deriving Repr, DecidableEq
+
+def WireTranscriptSliceCheck.Admissible (t : WireTranscriptSliceCheck) : Bool :=
+  (wireVerifySliceIo t.inPtr t.inLen t.outPtr t.outCap 32 t.is32Bit == 0) &&
+  (TranscriptFoldCheck.mk t.lastAppliedSeq t.incomingSeq t.entryCount
+    t.thinkingOpen t.normalizedAction t.isReplayFromLog).Admissible
+
+theorem wireTranscriptSliceStep_admit_eq (t : WireTranscriptSliceCheck) :
+    (((wireTranscriptSliceStep t.inPtr t.inLen t.outPtr t.outCap t.is32Bit
+        t.lastAppliedSeq t.incomingSeq t.entryCount
+        t.thinkingOpen t.normalizedAction t.isReplayFromLog &&& 0xFFFFFFFF) &&& 256) != 0) =
+      t.Admissible := by
+  unfold WireTranscriptSliceCheck.Admissible wireTranscriptSliceStep
+  dsimp only
+  cases hsl : (wireVerifySliceIo t.inPtr t.inLen t.outPtr t.outCap 32 t.is32Bit == 0)
+  · simp only [hsl, Bool.false_and, Bool.false_eq_true, Bool.not_false, ite_true]
+    rw [pack32_lo]
+    have hst := wireVerifySliceIo_err_cases t.inPtr t.inLen t.outPtr t.outCap 32 t.is32Bit hsl
+    rcases hst with h5 | h6 | h7 | h8 | h9
+    · rw [h5]; cases ht : (t.thinkingOpen == 1)
+      · change (((5 : UInt8).toUInt32 ||| if false = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+      · change (((5 : UInt8).toUInt32 ||| if true = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+    · rw [h6]; cases ht : (t.thinkingOpen == 1)
+      · change (((6 : UInt8).toUInt32 ||| if false = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+      · change (((6 : UInt8).toUInt32 ||| if true = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+    · rw [h7]; cases ht : (t.thinkingOpen == 1)
+      · change (((7 : UInt8).toUInt32 ||| if false = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+      · change (((7 : UInt8).toUInt32 ||| if true = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+    · rw [h8]; cases ht : (t.thinkingOpen == 1)
+      · change (((8 : UInt8).toUInt32 ||| if false = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+      · change (((8 : UInt8).toUInt32 ||| if true = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+    · rw [h9]; cases ht : (t.thinkingOpen == 1)
+      · change (((9 : UInt8).toUInt32 ||| if false = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+      · change (((9 : UInt8).toUInt32 ||| if true = true then 512 else 0).toUInt64
+          &&& 256 != 0) = false; decide
+  · simp only [hsl, Bool.true_and, Bool.not_true, Bool.false_eq_true, ite_false]
+    let inner : TranscriptFoldCheck :=
+      ⟨t.lastAppliedSeq, t.incomingSeq, t.entryCount,
+        t.thinkingOpen, t.normalizedAction, t.isReplayFromLog⟩
+    cases hadm : inner.Admissible
+    · apply Bool.eq_false_iff.mpr
+      intro hg
+      have hs := transcriptFoldMetaGate.sound inner hg
+      rw [hadm] at hs
+      contradiction
+    · exact transcriptFoldMetaGate.complete inner hadm
+
+def wireTranscriptSliceMetaGate : MetaGateSpec WireTranscriptSliceCheck
+    (fun t => t.Admissible = true) where
+  gate t :=
+    ((wireTranscriptSliceStep t.inPtr t.inLen t.outPtr t.outCap t.is32Bit
+        t.lastAppliedSeq t.incomingSeq t.entryCount
+        t.thinkingOpen t.normalizedAction t.isReplayFromLog &&& 0xFFFFFFFF) &&& 256) != 0
+  sound t h := by rw [← wireTranscriptSliceStep_admit_eq t]; exact h
+  complete t h := by rw [wireTranscriptSliceStep_admit_eq t]; exact h
+  posWitness := ⟨0x1000, 24, 0x2000, 64, 1, 10, 11, 3, 0, 5, 0⟩
+  negWitness := ⟨0x1000, 24, 0x2000, 64, 1, 10, 12, 3, 0, 5, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def effectiveWireTranscriptCheck (s : TranscriptFoldState) (t : WireTranscriptSliceCheck) :
+    WireTranscriptSliceCheck :=
+  { t with
+    lastAppliedSeq := s.lastSeq,
+    entryCount := s.entryCount,
+    thinkingOpen := s.thinkingOpen }
+
+def wireTranscriptMachineStep (s : TranscriptFoldState) (t : WireTranscriptSliceCheck) :
+    TranscriptFoldState × List UInt64 :=
+  let t' := effectiveWireTranscriptCheck s t
+  let w := wireTranscriptSliceStep t'.inPtr t'.inLen t'.outPtr t'.outCap t'.is32Bit
+    t'.lastAppliedSeq t'.incomingSeq t'.entryCount
+    t'.thinkingOpen t'.normalizedAction t'.isReplayFromLog
+  let admit := wireTranscriptSliceMetaGate.gate t'
+  let nextThink : UInt8 := if ((w &&& 0xFFFFFFFF) &&& 512) != 0 then 1 else 0
+  let nextCount : UInt32 := (w >>> 32).toUInt32
+  (if admit then ⟨t'.incomingSeq, nextCount, nextThink⟩ else s,
+   if admit then [t'.incomingSeq] else [])
+
+def wireTranscriptSliceMetaStepSpec :
+    MetaStepSpec TranscriptFoldState WireTranscriptSliceCheck UInt64 where
+  safety := {
+    step := wireTranscriptMachineStep
+    authorized := fun s t eff =>
+      let t' := effectiveWireTranscriptCheck s t
+      eff == t'.incomingSeq && t'.Admissible
+    sound := fun s t eff h_in => by
+      dsimp [wireTranscriptMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := wireTranscriptSliceMetaGate.sound (effectiveWireTranscriptCheck s t) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨0, 0, 0⟩
+    step := wireTranscriptMachineStep
+    progressRequired := fun s t => (effectiveWireTranscriptCheck s t).Admissible
+    expectedEffect := fun _ _ => true
+    live := fun s t h_req => by
+      have h_gate := wireTranscriptSliceMetaGate.complete (effectiveWireTranscriptCheck s t) h_req
+      dsimp [wireTranscriptMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨0x1000, 24, 0x2000, 64, 1, 0, 1, 0, 0, 4, 0⟩]
+    posEvent := ⟨0x1000, 24, 0x2000, 64, 1, 1, 2, 0, 1, 5, 1⟩
+    negEvent := ⟨0x1000, 24, 0x2000, 64, 1, 1, 4, 0, 1, 5, 1⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := wireTranscriptMachineStep
+    cpuFuel := fun s t => 14 + ((wireTranscriptMachineStep s t).2).length
+    inputBytes := fun _ => 56
+    outputBytes := fun s t => 32 * ((wireTranscriptMachineStep s t).2).length
+    c0 := 15
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 32
+    fuel_bound := fun s t => by
+      dsimp [wireTranscriptMachineStep]
+      split <;> simp
+    eff_bound := fun s t => by
+      dsimp [wireTranscriptMachineStep]
+      split <;> simp
+    out_bound := fun s t => by
+      dsimp [wireTranscriptMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- `orb_wire_transcript_slice_step` is bit-for-bit invariant under `isReplayFromLog`
+    (`0` live vs `1` replay) across every slice and sequence input, while buffering
+    gaps (`2048`), rejecting aliased slices (`9`), and keeping invalid `normalizedAction`
+    rejection codes (`4`, disjoint from `OrbWireStatus` slice error codes `5..=9`). -/
+theorem wire_transcript_slice_replay_invariance_and_gap_buffer
+    (inPtr inLen outPtr outCap : UInt64) (is32Bit : UInt8)
+    (lastSeq incSeq : UInt64) (cnt : UInt32) (think act : UInt8) :
+    wireTranscriptSliceStep inPtr inLen outPtr outCap is32Bit
+      lastSeq incSeq cnt think act 0 =
+      wireTranscriptSliceStep inPtr inLen outPtr outCap is32Bit
+        lastSeq incSeq cnt think act 1 ∧
+    ((wireTranscriptSliceStep 0x1000 24 0x2000 64 1 10 12 3 1 5 0
+        &&& 0xFFFFFFFF) &&& 2048) != 0 ∧
+    wireTranscriptSliceStep 0x1000 32 0x1010 64 1 10 11 3 1 5 0 =
+      ((9 : UInt32) ||| 512).toUInt64 ||| ((3 : UInt64) <<< 32) ∧
+    (wireTranscriptSliceStep 0x1000 24 0x2000 64 1 10 11 3 0 99 0 &&& 0xFF) = 4 ∧
+    (wireTranscriptSliceStep 0x1000 24 0x2000 16 1 10 11 3 0 5 0 &&& 0xFF) = 5 := by
+  refine ⟨rfl, ?_⟩
+  decide
+
+-- ---------------------------------------------------------------------------
+-- Universal Refinement Theorems: `Orb.Stream.stepBoundedStream` & `Orb.Scroll`
+-- ---------------------------------------------------------------------------
+
+/-- Universal refinement for `streamBoundedCommitStep` and `wireStreamSliceStep` against
+    `Orb.Stream.stepBoundedStream`: for ALL admissible `UInt32` stream coordinates
+    (`0 < maxOpenTailBytes` and `prevCommit ≤ prevCheckpoint ≤ prevLen ≤ newLen`),
+    `streamBoundedCommitStep` and `wireStreamSliceStep` produce the exact checkpoint
+    and `checkpointForced` flag computed by `Orb.Stream.stepBoundedStream` on `Nat`. -/
+theorem streamBoundedCommitStep_refines_stepBoundedStream
+    (prevLen prevCommit prevCheckpoint newLen rawCommit maxOpenTailBytes : UInt32)
+    (hadm : (StreamBoundedCommitCheck.mk prevLen prevCommit prevCheckpoint
+              newLen rawCommit maxOpenTailBytes).Admissible = true) :
+    let w := streamBoundedCommitStep prevLen prevCommit prevCheckpoint
+              newLen rawCommit maxOpenTailBytes
+    let st := Orb.Stream.stepBoundedStream maxOpenTailBytes.toNat
+                ⟨prevLen.toNat, prevCommit.toNat, prevCheckpoint.toNat⟩
+                ⟨newLen.toNat, rawCommit.toNat⟩
+    (((w &&& 0xFFFFFFFF) &&& 256) != 0) = true ∧
+    ((w >>> 32).toUInt32).toNat = st.checkpoint ∧
+    (((w &&& 0xFFFFFFFF) &&& 512) != 0) = decide (st.commit < st.checkpoint) := by
+  have hgate := streamBoundedCommitMetaGate.complete
+    ⟨prevLen, prevCommit, prevCheckpoint, newLen, rawCommit, maxOpenTailBytes⟩ hadm
+  dsimp [streamBoundedCommitMetaGate] at hgate
+  have hadm' := hadm
+  unfold StreamBoundedCommitCheck.Admissible at hadm'
+  dsimp only [GT.gt] at hadm'
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hadm'
+  rcases hadm' with ⟨⟨⟨hcap, hm1⟩, hm2⟩, hm3⟩
+  have hm1_n : prevCommit.toNat ≤ prevCheckpoint.toNat := UInt32.le_iff_toNat_le.mp hm1
+  have hm2_n : prevCheckpoint.toNat ≤ prevLen.toNat := UInt32.le_iff_toNat_le.mp hm2
+  have hm3_n : prevLen.toNat ≤ newLen.toNat := UInt32.le_iff_toNat_le.mp hm3
+  have hz : (0 : UInt32).toNat = 0 := rfl
+  have hadm_cond :
+      (!(decide (0 < maxOpenTailBytes) &&
+          (decide (prevCommit ≤ prevCheckpoint) &&
+            decide (prevCheckpoint ≤ prevLen) &&
+            decide (prevLen ≤ newLen)))) = false := by
+    simp [hcap, hm1, hm2, hm3]
+  let clampedRaw := if rawCommit ≤ newLen then rawCommit else newLen
+  let nextCommit := if prevCommit ≤ clampedRaw then clampedRaw else prevCommit
+  let baseCheckpoint := if prevCheckpoint ≤ nextCommit then nextCommit else prevCheckpoint
+  let capFloor := if maxOpenTailBytes ≤ newLen then newLen - maxOpenTailBytes else 0
+  let nextCheckpoint := if baseCheckpoint ≤ capFloor then capFloor else baseCheckpoint
+  have hcl : clampedRaw.toNat = min rawCommit.toNat newLen.toNat := by
+    dsimp [clampedRaw]; split <;> rename_i h
+    · have := UInt32.le_iff_toNat_le.mp h; omega
+    · have : ¬ (rawCommit.toNat ≤ newLen.toNat) := fun hc => h (UInt32.le_iff_toNat_le.mpr hc); omega
+  have hnc : nextCommit.toNat =
+      max prevCommit.toNat (min rawCommit.toNat (max prevLen.toNat newLen.toNat)) := by
+    dsimp [nextCommit]; split <;> rename_i h
+    · have := UInt32.le_iff_toNat_le.mp h; omega
+    · have : ¬ (prevCommit.toNat ≤ clampedRaw.toNat) := fun hc => h (UInt32.le_iff_toNat_le.mpr hc); omega
+  have hbc : baseCheckpoint.toNat = max prevCheckpoint.toNat nextCommit.toNat := by
+    dsimp [baseCheckpoint]; split <;> rename_i h
+    · have := UInt32.le_iff_toNat_le.mp h; omega
+    · have : ¬ (prevCheckpoint.toNat ≤ nextCommit.toNat) := fun hc => h (UInt32.le_iff_toNat_le.mpr hc); omega
+  have hcf : capFloor.toNat = max prevLen.toNat newLen.toNat - maxOpenTailBytes.toNat := by
+    dsimp [capFloor]; split <;> rename_i h
+    · rw [UInt32.toNat_sub_of_le _ _ h]; omega
+    · have : ¬ (maxOpenTailBytes.toNat ≤ newLen.toNat) := fun hc => h (UInt32.le_iff_toNat_le.mpr hc)
+      rw [hz]; omega
+  have hnx : nextCheckpoint.toNat = max baseCheckpoint.toNat capFloor.toNat := by
+    dsimp [nextCheckpoint]; split <;> rename_i h
+    · have := UInt32.le_iff_toNat_le.mp h; omega
+    · have : ¬ (baseCheckpoint.toNat ≤ capFloor.toNat) := fun hc => h (UInt32.le_iff_toNat_le.mpr hc); omega
+  refine ⟨hgate, ?_, ?_⟩
+  · unfold streamBoundedCommitStep Orb.Stream.stepBoundedStream
+    simp only [hadm_cond, Bool.false_eq_true, ite_false]
+    rw [pack32_hi, toUInt32_toUInt64]
+    change nextCheckpoint.toNat = _
+    omega
+  · unfold streamBoundedCommitStep Orb.Stream.stepBoundedStream
+    simp only [hadm_cond, Bool.false_eq_true, ite_false]
+    rw [pack32_lo]
+    have hbit :
+        (((257 ||| (if nextCommit < nextCheckpoint then (512 : UInt32) else 0)).toUInt64
+            &&& 512) != 0) = decide (nextCommit < nextCheckpoint) := by
+      by_cases hlt : nextCommit < nextCheckpoint <;> simp [hlt] <;> decide
+    change (((257 ||| (if nextCommit < nextCheckpoint then (512 : UInt32) else 0)).toUInt64
+        &&& 512) != 0) = _
+    rw [hbit]
+    by_cases hlt : nextCommit < nextCheckpoint
+    · have hlt_n : nextCommit.toNat < nextCheckpoint.toNat := UInt32.lt_iff_toNat_lt.mp hlt
+      rw [decide_eq_true hlt]
+      symm
+      apply decide_eq_true
+      omega
+    · have hge_n : ¬ (nextCommit.toNat < nextCheckpoint.toNat) :=
+        fun hc => hlt (UInt32.lt_iff_toNat_lt.mpr hc)
+      rw [decide_eq_false hlt]
+      symm
+      apply decide_eq_false
+      omega
+
+theorem wireStreamSliceStep_refines_stepBoundedStream
+    (w : WireStreamSliceCheck) (hadm : w.Admissible = true) :
+    let res := wireStreamSliceStep w.inPtr w.inLen w.outPtr w.outCap w.is32Bit
+                w.prevLen w.prevCommit w.prevCheckpoint
+                w.newLen w.rawCommit w.maxOpenTailBytes
+    let st := Orb.Stream.stepBoundedStream w.maxOpenTailBytes.toNat
+                ⟨w.prevLen.toNat, w.prevCommit.toNat, w.prevCheckpoint.toNat⟩
+                ⟨w.newLen.toNat, w.rawCommit.toNat⟩
+    ((res >>> 32).toUInt32).toNat = st.checkpoint ∧
+    (((res &&& 0xFFFFFFFF) &&& 512) != 0) = decide (st.commit < st.checkpoint) := by
+  unfold WireStreamSliceCheck.Admissible at hadm
+  simp only [Bool.and_eq_true] at hadm
+  rcases hadm with ⟨hsl, hinner⟩
+  have hstep_eq :
+      wireStreamSliceStep w.inPtr w.inLen w.outPtr w.outCap w.is32Bit
+        w.prevLen w.prevCommit w.prevCheckpoint w.newLen w.rawCommit w.maxOpenTailBytes =
+      streamBoundedCommitStep w.prevLen w.prevCommit w.prevCheckpoint
+        w.newLen w.rawCommit w.maxOpenTailBytes := by
+    unfold wireStreamSliceStep
+    simp only [hsl, Bool.not_true, Bool.false_eq_true, ite_false]
+    rw [streamBoundedCommit_lo32_admit_zero, hinner]
+    rfl
+  rw [hstep_eq]
+  have href := streamBoundedCommitStep_refines_stepBoundedStream
+    w.prevLen w.prevCommit w.prevCheckpoint w.newLen w.rawCommit w.maxOpenTailBytes hinner
+  exact ⟨href.2.1, href.2.2⟩
+
+theorem scrollI64SignFlip_toNat (x : UInt64) :
+    (scrollI64SignFlip x).toNat =
+      if x < 0x8000000000000000 then x.toNat + 9223372036854775808
+      else x.toNat - 9223372036854775808 := by
+  unfold scrollI64SignFlip
+  rw [UInt64.toNat_add]
+  have hx : x.toNat < 2 ^ 64 := UInt64.toNat_lt x
+  have hc : (0x8000000000000000 : UInt64).toNat = 9223372036854775808 := rfl
+  rw [hc]
+  by_cases h : x < 0x8000000000000000
+  · have hlt : x.toNat < 9223372036854775808 := by
+      have := UInt64.lt_iff_toNat_lt.mp h
+      rw [hc] at this
+      exact this
+    simp only [h, ite_true]
+    omega
+  · have hge : ¬ (x.toNat < 9223372036854775808) := by
+      intro h0
+      apply h
+      apply UInt64.lt_iff_toNat_lt.mpr
+      rw [hc]
+      exact h0
+    simp only [h, ite_false]
+    omega
+
+theorem scrollI64SignFlip_toInt (x : UInt64) :
+    ((scrollI64SignFlip x).toNat : Int) = decodeScrollI64 x + 9223372036854775808 := by
+  unfold decodeScrollI64
+  rw [scrollI64SignFlip_toNat]
+  have hx : x.toNat < 2 ^ 64 := UInt64.toNat_lt x
+  have hc : (0x8000000000000000 : UInt64).toNat = 9223372036854775808 := rfl
+  by_cases h : x < 0x8000000000000000
+  · simp only [h, ite_true]
+    omega
+  · have hge : ¬ (x.toNat < 9223372036854775808) := by
+      intro h0
+      apply h
+      apply UInt64.lt_iff_toNat_lt.mpr
+      rw [hc]
+      exact h0
+    simp only [h, ite_false]
+    omega
+
+theorem scrollI64Lt_eq_decide (a b : UInt64) :
+    scrollI64Lt a b = decide (decodeScrollI64 a < decodeScrollI64 b) := by
+  unfold scrollI64Lt
+  have ha := scrollI64SignFlip_toInt a
+  have hb := scrollI64SignFlip_toInt b
+  by_cases h : scrollI64SignFlip a < scrollI64SignFlip b
+  · have hlt : (scrollI64SignFlip a).toNat < (scrollI64SignFlip b).toNat :=
+      UInt64.lt_iff_toNat_lt.mp h
+    simp only [decide_eq_true h]
+    symm; apply decide_eq_true; omega
+  · have hge : ¬ ((scrollI64SignFlip a).toNat < (scrollI64SignFlip b).toNat) :=
+      fun hc => h (UInt64.lt_iff_toNat_lt.mpr hc)
+    simp only [decide_eq_false h]
+    symm; apply decide_eq_false; omega
+
+theorem scrollI64Le_eq_decide (a b : UInt64) :
+    scrollI64Le a b = decide (decodeScrollI64 a ≤ decodeScrollI64 b) := by
+  unfold scrollI64Le
+  have ha := scrollI64SignFlip_toInt a
+  have hb := scrollI64SignFlip_toInt b
+  by_cases h : scrollI64SignFlip a ≤ scrollI64SignFlip b
+  · have hle : (scrollI64SignFlip a).toNat ≤ (scrollI64SignFlip b).toNat :=
+      UInt64.le_iff_toNat_le.mp h
+    simp only [decide_eq_true h]
+    symm; apply decide_eq_true; omega
+  · have hgt : ¬ ((scrollI64SignFlip a).toNat ≤ (scrollI64SignFlip b).toNat) :=
+      fun hc => h (UInt64.le_iff_toNat_le.mpr hc)
+    simp only [decide_eq_false h]
+    symm; apply decide_eq_false; omega
+
+theorem decodeScrollI64_max (a b : UInt64) :
+    decodeScrollI64 (scrollI64Max a b) = max (decodeScrollI64 a) (decodeScrollI64 b) := by
+  unfold scrollI64Max
+  rw [scrollI64Lt_eq_decide]
+  by_cases h : decodeScrollI64 a < decodeScrollI64 b <;> simp [h] <;> omega
+
+theorem decodeScrollI64_min (a b : UInt64) :
+    decodeScrollI64 (scrollI64Min a b) = min (decodeScrollI64 a) (decodeScrollI64 b) := by
+  unfold scrollI64Min
+  rw [scrollI64Le_eq_decide]
+  by_cases h : decodeScrollI64 a ≤ decodeScrollI64 b <;> simp [h] <;> omega
+
+theorem decodeScrollI64_zero : decodeScrollI64 0 = 0 := rfl
+theorem decodeScrollI64_near : decodeScrollI64 24 = Orb.Scroll.near := rfl
+
+theorem inScrollDomainI64_bounds (x : UInt64) (h : inScrollDomainI64 x = true) :
+    -1073741824 ≤ decodeScrollI64 x ∧ decodeScrollI64 x ≤ 1073741823 := by
+  unfold inScrollDomainI64 decodeScrollI64 at *
+  have hx : x.toNat < 2 ^ 64 := UInt64.toNat_lt x
+  simp only [Bool.or_eq_true, decide_eq_true_eq, UInt64.le_iff_toNat_le] at h
+  have h1 : (0x3FFFFFFF : UInt64).toNat = 1073741823 := rfl
+  have h2 : (0xFFFFFFFFC0000000 : UInt64).toNat = 18446744072635809792 := rfl
+  have hc : (0x8000000000000000 : UInt64).toNat = 9223372036854775808 := rfl
+  rw [h1, h2] at h
+  by_cases hlt : x < 0x8000000000000000
+  · have hlt' : x.toNat < 9223372036854775808 := by
+      have := UInt64.lt_iff_toNat_lt.mp hlt
+      rw [hc] at this
+      exact this
+    simp only [hlt, ite_true]
+    omega
+  · have hge' : ¬ (x.toNat < 9223372036854775808) := by
+      intro h0
+      apply hlt
+      apply UInt64.lt_iff_toNat_lt.mpr
+      rw [hc]
+      exact h0
+    simp only [hlt, ite_false]
+    omega
+
+theorem neg_iff_decode_neg (x : UInt64) :
+    decide (0x8000000000000000 ≤ x) = decide (decodeScrollI64 x < 0) := by
+  unfold decodeScrollI64
+  have hx : x.toNat < 2 ^ 64 := UInt64.toNat_lt x
+  have hc : (0x8000000000000000 : UInt64).toNat = 9223372036854775808 := rfl
+  by_cases hlt : x < 0x8000000000000000
+  · have hlt' : x.toNat < 9223372036854775808 := by
+      have := UInt64.lt_iff_toNat_lt.mp hlt
+      rw [hc] at this
+      exact this
+    have hnle : ¬ (0x8000000000000000 ≤ x) := by
+      intro hle
+      have := UInt64.le_iff_toNat_le.mp hle
+      rw [hc] at this
+      omega
+    simp only [hlt, ite_true, decide_eq_false hnle]
+    symm
+    apply decide_eq_false
+    omega
+  · have hge' : ¬ (x.toNat < 9223372036854775808) := by
+      intro h0
+      apply hlt
+      apply UInt64.lt_iff_toNat_lt.mpr
+      rw [hc]
+      exact h0
+    have hle : 0x8000000000000000 ≤ x := by
+      apply UInt64.le_iff_toNat_le.mpr
+      rw [hc]
+      omega
+    simp only [hlt, ite_false, decide_eq_true hle]
+    symm
+    apply decide_eq_true
+    omega
+
+theorem decodeScrollI64_add_no_overflow (a b : UInt64)
+    (hlo : -9223372036854775808 ≤ decodeScrollI64 a + decodeScrollI64 b)
+    (hhi : decodeScrollI64 a + decodeScrollI64 b ≤ 9223372036854775807) :
+    decodeScrollI64 (scrollI64SatAdd a b) = decodeScrollI64 a + decodeScrollI64 b := by
+  unfold scrollI64SatAdd
+  have ha : a.toNat < 2 ^ 64 := UInt64.toNat_lt a
+  have hb : b.toNat < 2 ^ 64 := UInt64.toNat_lt b
+  have hc : (0x8000000000000000 : UInt64).toNat = 9223372036854775808 := rfl
+  have hsum_decode : decodeScrollI64 (a + b) = decodeScrollI64 a + decodeScrollI64 b := by
+    unfold decodeScrollI64 at hlo hhi ⊢
+    have hab : (a + b).toNat = (a.toNat + b.toNat) % (2 ^ 64) := UInt64.toNat_add a b
+    by_cases ha_lt : a < 0x8000000000000000 <;>
+    by_cases hb_lt : b < 0x8000000000000000 <;>
+    by_cases hs_lt : a + b < 0x8000000000000000
+    all_goals
+      simp only [ha_lt, hb_lt, hs_lt, ite_true, ite_false] at hlo hhi ⊢
+    all_goals
+      try
+        have ha_n : a.toNat < 9223372036854775808 := by
+          have := UInt64.lt_iff_toNat_lt.mp ha_lt
+          rw [hc] at this
+          exact this
+      try
+        have ha_ge : ¬ (a.toNat < 9223372036854775808) := by
+          intro h0
+          apply ha_lt
+          apply UInt64.lt_iff_toNat_lt.mpr
+          rw [hc]
+          exact h0
+      try
+        have hb_n : b.toNat < 9223372036854775808 := by
+          have := UInt64.lt_iff_toNat_lt.mp hb_lt
+          rw [hc] at this
+          exact this
+      try
+        have hb_ge : ¬ (b.toNat < 9223372036854775808) := by
+          intro h0
+          apply hb_lt
+          apply UInt64.lt_iff_toNat_lt.mpr
+          rw [hc]
+          exact h0
+      try
+        have hs_n : (a + b).toNat < 9223372036854775808 := by
+          have := UInt64.lt_iff_toNat_lt.mp hs_lt
+          rw [hc] at this
+          exact this
+      try
+        have hs_ge : ¬ ((a + b).toNat < 9223372036854775808) := by
+          intro h0
+          apply hs_lt
+          apply UInt64.lt_iff_toNat_lt.mpr
+          rw [hc]
+          exact h0
+      omega
+  have han := neg_iff_decode_neg a
+  have hbn := neg_iff_decode_neg b
+  have hsn := neg_iff_decode_neg (a + b)
+  dsimp only
+  rw [han, hbn, hsn, hsum_decode]
+  have hf1 : (!decide (decodeScrollI64 a < 0) && !decide (decodeScrollI64 b < 0) &&
+      decide (decodeScrollI64 a + decodeScrollI64 b < 0)) = false := by
+    by_cases h1 : decodeScrollI64 a < 0 <;> by_cases h2 : decodeScrollI64 b < 0 <;>
+    by_cases h3 : decodeScrollI64 a + decodeScrollI64 b < 0 <;> simp [h1, h2, h3] <;> omega
+  have hf2 : (decide (decodeScrollI64 a < 0) && decide (decodeScrollI64 b < 0) &&
+      !decide (decodeScrollI64 a + decodeScrollI64 b < 0)) = false := by
+    by_cases h1 : decodeScrollI64 a < 0 <;> by_cases h2 : decodeScrollI64 b < 0 <;>
+    by_cases h3 : decodeScrollI64 a + decodeScrollI64 b < 0 <;> simp [h1, h2, h3] <;> omega
+  rw [hf1, hf2]
+  simp [hsum_decode]
+
+theorem toNat_sub_mod (a b : UInt64) :
+    (a - b).toNat = if b.toNat ≤ a.toNat then a.toNat - b.toNat else a.toNat + 18446744073709551616 - b.toNat := by
+  have ha : a.toNat < 2 ^ 64 := UInt64.toNat_lt a
+  have hb : b.toNat < 2 ^ 64 := UInt64.toNat_lt b
+  by_cases h : b ≤ a
+  · have hn := UInt64.le_iff_toNat_le.mp h
+    rw [UInt64.toNat_sub_of_le a b h]
+    simp [hn]
+  · have hn : ¬ (b.toNat ≤ a.toNat) := fun hc => h (UInt64.le_iff_toNat_le.mpr hc)
+    simp only [hn, ite_false]
+    have hsub : a - b = a + (0 - b) := by
+      apply UInt64.eq_of_toBitVec_eq; simp [BitVec.sub_eq_add_neg]
+    rw [hsub, UInt64.toNat_add]
+    have hneg : (0 - b).toNat = (2 ^ 64 - b.toNat) % (2 ^ 64) := by
+      change (0#64 - b.toBitVec).toNat = _
+      rw [BitVec.toNat_sub]
+      simp
+    rw [hneg]
+    omega
+
+theorem decodeScrollI64_sub_no_overflow (a b : UInt64)
+    (hlo : -9223372036854775808 ≤ decodeScrollI64 a - decodeScrollI64 b)
+    (hhi : decodeScrollI64 a - decodeScrollI64 b ≤ 9223372036854775807) :
+    decodeScrollI64 (scrollI64SatSub a b) = decodeScrollI64 a - decodeScrollI64 b := by
+  unfold scrollI64SatSub
+  have ha : a.toNat < 2 ^ 64 := UInt64.toNat_lt a
+  have hb : b.toNat < 2 ^ 64 := UInt64.toNat_lt b
+  have hc : (0x8000000000000000 : UInt64).toNat = 9223372036854775808 := rfl
+  have hdiff_decode : decodeScrollI64 (a - b) = decodeScrollI64 a - decodeScrollI64 b := by
+    unfold decodeScrollI64 at hlo hhi ⊢
+    have hab := toNat_sub_mod a b
+    by_cases ha_lt : a < 0x8000000000000000 <;>
+    by_cases hb_lt : b < 0x8000000000000000 <;>
+    by_cases hd_lt : a - b < 0x8000000000000000 <;>
+    by_cases hle : b.toNat ≤ a.toNat
+    all_goals
+      simp only [ha_lt, hb_lt, hd_lt, hle, ite_true, ite_false] at hlo hhi hab ⊢
+    all_goals
+      try
+        have ha_n : a.toNat < 9223372036854775808 := by
+          have := UInt64.lt_iff_toNat_lt.mp ha_lt
+          rw [hc] at this
+          exact this
+      try
+        have ha_ge : ¬ (a.toNat < 9223372036854775808) := by
+          intro h0
+          apply ha_lt
+          apply UInt64.lt_iff_toNat_lt.mpr
+          rw [hc]
+          exact h0
+      try
+        have hb_n : b.toNat < 9223372036854775808 := by
+          have := UInt64.lt_iff_toNat_lt.mp hb_lt
+          rw [hc] at this
+          exact this
+      try
+        have hb_ge : ¬ (b.toNat < 9223372036854775808) := by
+          intro h0
+          apply hb_lt
+          apply UInt64.lt_iff_toNat_lt.mpr
+          rw [hc]
+          exact h0
+      try
+        have hd_n : (a - b).toNat < 9223372036854775808 := by
+          have := UInt64.lt_iff_toNat_lt.mp hd_lt
+          rw [hc] at this
+          exact this
+      try
+        have hd_ge : ¬ ((a - b).toNat < 9223372036854775808) := by
+          intro h0
+          apply hd_lt
+          apply UInt64.lt_iff_toNat_lt.mpr
+          rw [hc]
+          exact h0
+      omega
+  have han := neg_iff_decode_neg a
+  have hbn := neg_iff_decode_neg b
+  have hdn := neg_iff_decode_neg (a - b)
+  dsimp only
+  rw [han, hbn, hdn, hdiff_decode]
+  have hf1 : (!decide (decodeScrollI64 a < 0) && decide (decodeScrollI64 b < 0) &&
+      decide (decodeScrollI64 a - decodeScrollI64 b < 0)) = false := by
+    by_cases h1 : decodeScrollI64 a < 0 <;> by_cases h2 : decodeScrollI64 b < 0 <;>
+    by_cases h3 : decodeScrollI64 a - decodeScrollI64 b < 0 <;> simp [h1, h2, h3] <;> omega
+  have hf2 : (decide (decodeScrollI64 a < 0) && !decide (decodeScrollI64 b < 0) &&
+      !decide (decodeScrollI64 a - decodeScrollI64 b < 0)) = false := by
+    by_cases h1 : decodeScrollI64 a < 0 <;> by_cases h2 : decodeScrollI64 b < 0 <;>
+    by_cases h3 : decodeScrollI64 a - decodeScrollI64 b < 0 <;> simp [h1, h2, h3] <;> omega
+  rw [hf1, hf2]
+  simp [hdiff_decode]
+
+theorem nonneg_u32_exact (w : UInt64)
+    (h0 : 0 ≤ decodeScrollI64 w) (hhi : decodeScrollI64 w < 4294967296) :
+    ((w.toUInt32.toNat : Int)) = decodeScrollI64 w := by
+  unfold decodeScrollI64 at h0 hhi ⊢
+  have hw : w.toNat < 2 ^ 64 := UInt64.toNat_lt w
+  have hc : (0x8000000000000000 : UInt64).toNat = 9223372036854775808 := rfl
+  by_cases hlt : w < 0x8000000000000000
+  · simp only [hlt, ite_true] at h0 hhi ⊢
+    have hu : w.toUInt32.toNat = w.toNat % 4294967296 := UInt64.toNat_toUInt32 w
+    rw [hu]
+    omega
+  · have hge : ¬ (w.toNat < 9223372036854775808) := by
+      intro h0'
+      apply hlt
+      apply UInt64.lt_iff_toNat_lt.mpr
+      rw [hc]
+      exact h0'
+    simp only [hlt, ite_false] at h0
+    omega
+
+theorem scrollPolicyMaxTopI64_refines (h c : UInt64)
+    (hh : inScrollDomainI64 h = true) (hc : inScrollDomainI64 c = true) :
+    decodeScrollI64 (scrollPolicyMaxTopI64 h c) =
+      Orb.Scroll.maxTop (decodeScrollI64 h) (decodeScrollI64 c) ∧
+    decodeScrollI64 (scrollPolicyMaxTopI64 h c) ≤ 2147483647 := by
+  have bh := inScrollDomainI64_bounds h hh
+  have bc := inScrollDomainI64_bounds c hc
+  unfold scrollPolicyMaxTopI64 Orb.Scroll.maxTop
+  rw [decodeScrollI64_max, decodeScrollI64_zero]
+  rw [decodeScrollI64_sub_no_overflow h c (by omega) (by omega)]
+  refine ⟨rfl, by omega⟩
+
+theorem scrollPolicyClampTopI64_refines (h c : UInt64)
+    (hh : inScrollDomainI64 h = true) (hc : inScrollDomainI64 c = true)
+    (t : UInt64) :
+    decodeScrollI64 (scrollPolicyClampTopI64 h c t) =
+      Orb.Scroll.clampTop (decodeScrollI64 h) (decodeScrollI64 c) (decodeScrollI64 t) ∧
+    decodeScrollI64 (scrollPolicyClampTopI64 h c t) ≤ 2147483647 := by
+  have hm := scrollPolicyMaxTopI64_refines h c hh hc
+  unfold scrollPolicyClampTopI64 Orb.Scroll.clampTop
+  rw [decodeScrollI64_max, decodeScrollI64_min, decodeScrollI64_zero, hm.1]
+  refine ⟨rfl, ?_⟩
+  have hm_hi : Orb.Scroll.maxTop (decodeScrollI64 h) (decodeScrollI64 c) ≤ 2147483647 := by
+    rw [← hm.1]
+    exact hm.2
+  omega
+
+/-- Universal refinement for `scrollPolicyGap` (`orb_scroll_policy_gap`) against `Orb.Scroll.gap`
+    across all signed inputs in `[-2^30, 2^30 - 1]` (and clamped tops up to `2^31 - 1`). -/
+theorem scrollPolicyGap_refines_gap (h c t : UInt64)
+    (hh : inScrollDomainI64 h = true) (hc : inScrollDomainI64 c = true)
+    (ht : -2147483648 ≤ decodeScrollI64 t ∧ decodeScrollI64 t ≤ 2147483647) :
+    decodeScrollI64 (scrollPolicyGap h c t) =
+      Orb.Scroll.gap (decodeScrollI64 h) (decodeScrollI64 c) (decodeScrollI64 t) := by
+  have bh := inScrollDomainI64_bounds h hh
+  have bc := inScrollDomainI64_bounds c hc
+  unfold scrollPolicyGap Orb.Scroll.gap
+  have h1 := decodeScrollI64_sub_no_overflow h t (by omega) (by omega)
+  have h2 := decodeScrollI64_sub_no_overflow (scrollI64SatSub h t) c (by omega) (by omega)
+  rw [h2, h1]
+
+/-- Universal refinement for `scrollPolicyCorrect` (`orb_scroll_policy_correct`) against
+    `Orb.Scroll.correct` across all signed inputs in `[-2^30, 2^30 - 1]`. -/
+theorem scrollPolicyCorrect_refines_correct (h c t a y0 : UInt64)
+    (hh : inScrollDomainI64 h = true) (hc : inScrollDomainI64 c = true)
+    (ht : inScrollDomainI64 t = true) (ha : inScrollDomainI64 a = true)
+    (hy : inScrollDomainI64 y0 = true) :
+    decodeScrollI64 (scrollPolicyCorrect h c t a y0) =
+      Orb.Scroll.correct (decodeScrollI64 h) (decodeScrollI64 c)
+        (decodeScrollI64 t) (decodeScrollI64 a) (decodeScrollI64 y0) := by
+  have bh := inScrollDomainI64_bounds h hh
+  have bc := inScrollDomainI64_bounds c hc
+  have bt := inScrollDomainI64_bounds t ht
+  have ba := inScrollDomainI64_bounds a ha
+  have by0 := inScrollDomainI64_bounds y0 hy
+  unfold scrollPolicyCorrect Orb.Scroll.correct
+  have hcl := (scrollPolicyClampTopI64_refines h c hh hc
+    (scrollI64SatAdd t (scrollI64SatSub (scrollI64SatSub a t) y0))).1
+  rw [hcl]
+  have s1 := decodeScrollI64_sub_no_overflow a t (by omega) (by omega)
+  have s2 := decodeScrollI64_sub_no_overflow (scrollI64SatSub a t) y0 (by omega) (by omega)
+  have s3 := decodeScrollI64_add_no_overflow t (scrollI64SatSub (scrollI64SatSub a t) y0)
+    (by omega) (by omega)
+  rw [s3, s2, s1]
+
+def scrollModelStep (opKind : UInt8) (pinned intent resized : Bool)
+    (curTop height client arg : Int) : Orb.Scroll.State :=
+  let s : Orb.Scroll.State := ⟨pinned, curTop⟩
+  if opKind == 0 then
+    Orb.Scroll.layout s height client arg
+  else if opKind == 1 then
+    Orb.Scroll.userScroll s height client arg
+  else if opKind == 2 then
+    Orb.Scroll.scrollEvent s intent resized height client arg
+  else
+    Orb.Scroll.jump s height client
+
+theorem userScroll_top_eq (s : Orb.Scroll.State) (h c t : Int) :
+    (Orb.Scroll.userScroll s h c t).top = Orb.Scroll.clampTop h c t := by
+  unfold Orb.Scroll.userScroll
+  dsimp only
+  split <;> try rfl
+  split <;> rfl
+
+theorem scrollEvent_top_eq (s : Orb.Scroll.State) (intent resized : Bool) (h c t : Int) :
+    (Orb.Scroll.scrollEvent s intent resized h c t).top = Orb.Scroll.clampTop h c t := by
+  cases intent
+  · unfold Orb.Scroll.scrollEvent
+    simp only [Bool.false_eq_true, ite_false]
+    split <;> rfl
+  · simp [Orb.Scroll.scrollEvent, userScroll_top_eq]
+
+theorem scrollPolicyNextTop_refines
+    (opKind pinned intent resized : UInt8)
+    (curTop height client arg : UInt64)
+    (htop : inScrollDomainI64 curTop = true)
+    (hh : inScrollDomainI64 height = true)
+    (hc : inScrollDomainI64 client = true)
+    (harg : inScrollDomainI64 arg = true) :
+    (((scrollPolicyNextTop opKind pinned curTop height client arg).toUInt32.toNat : Int)) =
+      (scrollModelStep opKind (pinned == 1) (intent == 1) (resized == 1)
+        (decodeScrollI64 curTop) (decodeScrollI64 height)
+        (decodeScrollI64 client) (decodeScrollI64 arg)).top := by
+  have bt := inScrollDomainI64_bounds curTop htop
+  have bh := inScrollDomainI64_bounds height hh
+  have bc := inScrollDomainI64_bounds client hc
+  have ba := inScrollDomainI64_bounds arg harg
+  have hmax := scrollPolicyMaxTopI64_refines height client hh hc
+  have hmax_lo : 0 ≤ decodeScrollI64 (scrollPolicyMaxTopI64 height client) := by
+    rw [hmax.1]
+    unfold Orb.Scroll.maxTop
+    omega
+  have hcl_arg := scrollPolicyClampTopI64_refines height client hh hc arg
+  have hcl_arg_lo : 0 ≤ decodeScrollI64 (scrollPolicyClampTopI64 height client arg) := by
+    rw [hcl_arg.1]
+    unfold Orb.Scroll.clampTop
+    omega
+  have hadd_arg := decodeScrollI64_add_no_overflow curTop arg (by omega) (by omega)
+  have hcl_add := scrollPolicyClampTopI64_refines height client hh hc (scrollI64SatAdd curTop arg)
+  have hcl_add_lo :
+      0 ≤ decodeScrollI64 (scrollPolicyClampTopI64 height client (scrollI64SatAdd curTop arg)) := by
+    rw [hcl_add.1]
+    unfold Orb.Scroll.clampTop
+    omega
+  unfold scrollPolicyNextTop scrollModelStep
+  by_cases h0 : opKind == 0
+  · simp only [h0, ite_true, Orb.Scroll.layout]
+    by_cases hp : pinned == 1
+    · simp only [hp, ite_true]
+      rw [nonneg_u32_exact _ hmax_lo (by omega), hmax.1]
+    · simp only [hp, Bool.false_eq_true, ite_false]
+      rw [nonneg_u32_exact _ hcl_add_lo (by omega), hcl_add.1, hadd_arg]
+  · simp only [h0, Bool.false_eq_true, ite_false]
+    by_cases h1 : opKind == 1
+    · simp only [h1, Bool.true_or, ite_true, userScroll_top_eq]
+      rw [nonneg_u32_exact _ hcl_arg_lo (by omega), hcl_arg.1]
+    · simp only [h1, Bool.false_or, Bool.false_eq_true, ite_false]
+      by_cases h2 : opKind == 2
+      · simp only [h2, ite_true, scrollEvent_top_eq]
+        rw [nonneg_u32_exact _ hcl_arg_lo (by omega), hcl_arg.1]
+      · simp only [h2, Bool.false_eq_true, ite_false, Orb.Scroll.jump]
+        rw [nonneg_u32_exact _ hmax_lo (by omega), hmax.1]
+
+theorem userScroll_pinned_eq (pin : Bool) (curTop h c arg : Int) :
+    (if decide (Orb.Scroll.clampTop h c arg < curTop) = true then false
+     else if decide (Orb.Scroll.gap h c (Orb.Scroll.clampTop h c arg) < Orb.Scroll.near) = true then true
+     else pin) =
+    (Orb.Scroll.userScroll ⟨pin, curTop⟩ h c arg).pinned := by
+  unfold Orb.Scroll.userScroll
+  dsimp only
+  by_cases h1 : Orb.Scroll.clampTop h c arg < curTop
+  · simp [h1]
+  · by_cases h2 : Orb.Scroll.gap h c (Orb.Scroll.clampTop h c arg) < Orb.Scroll.near
+    · simp [h1, h2]
+    · simp [h1, h2]
+
+theorem scrollPolicyNextPinned_refines
+    (opKind pinned intent resized : UInt8)
+    (curTop height client arg : UInt64)
+    (htop : inScrollDomainI64 curTop = true)
+    (hh : inScrollDomainI64 height = true)
+    (hc : inScrollDomainI64 client = true) :
+    scrollPolicyNextPinned opKind pinned intent resized curTop height client arg =
+      (scrollModelStep opKind (pinned == 1) (intent == 1) (resized == 1)
+        (decodeScrollI64 curTop) (decodeScrollI64 height)
+        (decodeScrollI64 client) (decodeScrollI64 arg)).pinned := by
+  have bt := inScrollDomainI64_bounds curTop htop
+  have hcl := scrollPolicyClampTopI64_refines height client hh hc arg
+  have hcl_lo : 0 ≤ decodeScrollI64 (scrollPolicyClampTopI64 height client arg) := by
+    rw [hcl.1]
+    unfold Orb.Scroll.clampTop
+    omega
+  have hgap := scrollPolicyGap_refines_gap height client
+    (scrollPolicyClampTopI64 height client arg) hh hc ⟨by omega, by omega⟩
+  rw [hcl.1] at hgap
+  unfold scrollPolicyNextPinned scrollModelStep
+  dsimp only
+  rw [scrollI64Lt_eq_decide, scrollI64Lt_eq_decide, scrollI64Le_eq_decide]
+  rw [hcl.1, hgap, decodeScrollI64_near]
+  by_cases h0 : opKind == 0
+  · simp only [h0, ite_true, Orb.Scroll.layout_keeps_pinned]
+  · simp only [h0, Bool.false_eq_true, ite_false]
+    by_cases h1 : opKind == 1
+    · simp only [h1, Bool.true_or, ite_true]
+      exact userScroll_pinned_eq (pinned == 1) (decodeScrollI64 curTop)
+        (decodeScrollI64 height) (decodeScrollI64 client) (decodeScrollI64 arg)
+    · simp only [h1, Bool.false_or, Bool.false_eq_true, ite_false]
+      by_cases h2 : opKind == 2
+      · simp only [h2, Bool.true_and, ite_true]
+        by_cases hint : intent == 1
+        · simp only [hint, ite_true, Orb.Scroll.scrollEvent]
+          exact userScroll_pinned_eq (pinned == 1) (decodeScrollI64 curTop)
+            (decodeScrollI64 height) (decodeScrollI64 client) (decodeScrollI64 arg)
+        · simp only [hint, Bool.false_eq_true, ite_false, Orb.Scroll.scrollEvent]
+          split <;> rfl
+      · simp only [h2, Bool.false_and, Bool.false_eq_true, ite_false, Orb.Scroll.jump]
+
+/-- Universal refinement for `scrollPolicyStep` (`orb_scroll_policy_step`) and
+    `wireScrollSliceStep` (`orb_wire_scroll_slice_step`) against `Orb.Scroll.{layout, userScroll,
+    scrollEvent, jump}` across ALL admissible inputs (`opKind ≤ 3` and signed coordinates in
+    `[-2^30, 2^30 - 1]`). -/
+theorem scrollPolicyStep_refines_OrbScroll
+    (s : ScrollPolicyCheck) (hadm : s.Admissible = true) :
+    let w := scrollPolicyStep s.opKind s.pinned s.intent s.resized
+              s.curTop s.height s.client s.arg
+    let st := scrollModelStep s.opKind (s.pinned == 1) (s.intent == 1) (s.resized == 1)
+                (decodeScrollI64 s.curTop) (decodeScrollI64 s.height)
+                (decodeScrollI64 s.client) (decodeScrollI64 s.arg)
+    (((w &&& 0xFFFFFFFF) &&& 256) != 0) = true ∧
+    (((w &&& 0xFFFFFFFF) &&& 512) != 0) = st.pinned ∧
+    (((w >>> 32).toUInt32.toNat : Int)) = st.top := by
+  have hgate := scrollPolicyMetaGate.complete s hadm
+  dsimp [scrollPolicyMetaGate] at hgate
+  have hadm' := hadm
+  unfold ScrollPolicyCheck.Admissible at hadm'
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hadm'
+  rcases hadm' with ⟨⟨⟨⟨hop, htop⟩, hh⟩, hc⟩, harg⟩
+  have hop' : (!(decide (s.opKind ≤ 3))) = false := by simp [hop]
+  have hdom' : (!(inScrollDomainI64 s.curTop && inScrollDomainI64 s.height &&
+      inScrollDomainI64 s.client && inScrollDomainI64 s.arg)) = false := by
+    simp [htop, hh, hc, harg]
+  refine ⟨hgate, ?_, ?_⟩
+  · unfold scrollPolicyStep
+    simp only [hop', hdom', Bool.false_eq_true, ite_false]
+    rw [pack32_lo]
+    rw [← scrollPolicyNextPinned_refines s.opKind s.pinned s.intent s.resized
+      s.curTop s.height s.client s.arg htop hh hc]
+    cases hn : scrollPolicyNextPinned s.opKind s.pinned s.intent s.resized
+      s.curTop s.height s.client s.arg
+    · change (((257 : UInt32) ||| if false = true then 512 else 0).toUInt64
+        &&& 512 != 0) = false; decide
+    · change (((257 : UInt32) ||| if true = true then 512 else 0).toUInt64
+        &&& 512 != 0) = true; decide
+  · unfold scrollPolicyStep
+    simp only [hop', hdom', Bool.false_eq_true, ite_false]
+    rw [pack32_hi, toUInt32_toUInt64]
+    exact scrollPolicyNextTop_refines s.opKind s.pinned s.intent s.resized
+      s.curTop s.height s.client s.arg htop hh hc harg
+
+theorem wireScrollSliceStep_refines_OrbScroll
+    (w : WireScrollSliceCheck) (hadm : w.Admissible = true) :
+    let res := wireScrollSliceStep w.inPtr w.inLen w.outPtr w.outCap
+                w.is32Bit w.opKind w.pinned w.intent w.resized
+                w.curTop w.height w.client w.arg
+    let st := scrollModelStep w.opKind (w.pinned == 1) (w.intent == 1) (w.resized == 1)
+                (decodeScrollI64 w.curTop) (decodeScrollI64 w.height)
+                (decodeScrollI64 w.client) (decodeScrollI64 w.arg)
+    (((res &&& 0xFFFFFFFF) &&& 256) != 0) = true ∧
+    (((res &&& 0xFFFFFFFF) &&& 512) != 0) = st.pinned ∧
+    (((res >>> 32).toUInt32.toNat : Int)) = st.top := by
+  unfold WireScrollSliceCheck.Admissible at hadm
+  simp only [Bool.and_eq_true] at hadm
+  rcases hadm with ⟨hsl, hinner⟩
+  have hstep_eq :
+      wireScrollSliceStep w.inPtr w.inLen w.outPtr w.outCap
+        w.is32Bit w.opKind w.pinned w.intent w.resized
+        w.curTop w.height w.client w.arg =
+      scrollPolicyStep w.opKind w.pinned w.intent w.resized
+        w.curTop w.height w.client w.arg := by
+    unfold wireScrollSliceStep
+    simp [hsl]
+  rw [hstep_eq]
+  exact scrollPolicyStep_refines_OrbScroll
+    ⟨w.opKind, w.pinned, w.intent, w.resized, w.curTop, w.height, w.client, w.arg⟩ hinner
 
 end Orb.Spec
