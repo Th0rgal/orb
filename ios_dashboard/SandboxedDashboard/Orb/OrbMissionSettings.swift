@@ -5,6 +5,7 @@ struct OrbMissionBudget: Equatable {
     static let maxVmConcurrency = 128
     static let providers: [(id: String, label: String)] = [
         ("boat", "boat.dev"),
+        ("boost", "boost.ci"),
         ("hetzner", "Hetzner"),
         ("vastai", "Vast.ai"),
         ("scaleway", "Scaleway"),

@@ -548,6 +548,10 @@ mod tests {
             exclude_offer_ids: Vec::new(),
             allow_24h_commitment: false,
             provisioning_mode: crate::managed::ProvisioningMode::Worker,
+            repo: None,
+            base_key: None,
+            lean_mode: None,
+            memory_mib: None,
         }
     }
 

@@ -171,6 +171,87 @@
       "supports_snapshots": true
     },
     {
+      "availability": {
+        "active_vms": 1,
+        "checked_at": "2026-10-29T10:00:00Z",
+        "largest_bootable_memory_mib": 91136,
+        "largest_bootable_vcpus": 32,
+        "online_engines": 1,
+        "queued_spawns": 0,
+        "reason": "pool_memory",
+        "schedulable_memory_mib": 91136,
+        "schedulable_vcpus": 32,
+        "status": "degraded"
+      },
+      "configured": true,
+      "credential_source": "settings",
+      "display_name": "boost.ci",
+      "enabled": true,
+      "key_hint": "••••9012",
+      "project_id": "ws-evm-fast",
+      "provider": "boost",
+      "sizes": [
+        {
+          "arch": "x86_64",
+          "cpu": 2,
+          "disk_gb": 50,
+          "ram_gb": 8,
+          "size": "boost-2vcpu-ubuntu-2604",
+          "usd_per_hour": 0.018
+        },
+        {
+          "arch": "x86_64",
+          "cpu": 4,
+          "disk_gb": 75,
+          "ram_gb": 16,
+          "size": "boost-4vcpu-ubuntu-2604",
+          "usd_per_hour": 0.036
+        },
+        {
+          "arch": "x86_64",
+          "cpu": 8,
+          "disk_gb": 100,
+          "ram_gb": 32,
+          "size": "boost-8vcpu-ubuntu-2604",
+          "usd_per_hour": 0.072
+        },
+        {
+          "arch": "x86_64",
+          "cpu": 16,
+          "disk_gb": 150,
+          "ram_gb": 64,
+          "size": "boost-16vcpu-ubuntu-2604",
+          "usd_per_hour": 0.2
+        },
+        {
+          "arch": "x86_64",
+          "cpu": 24,
+          "disk_gb": 175,
+          "ram_gb": 96,
+          "size": "boost-24vcpu-ubuntu-2604",
+          "usd_per_hour": 0.3
+        },
+        {
+          "arch": "x86_64",
+          "cpu": 32,
+          "disk_gb": 200,
+          "ram_gb": 96,
+          "size": "boost-32vcpu-96gb",
+          "usd_per_hour": 0.4
+        },
+        {
+          "arch": "x86_64",
+          "cpu": 32,
+          "disk_gb": 200,
+          "ram_gb": 128,
+          "size": "boost-32vcpu-ubuntu-2604",
+          "usd_per_hour": 0.45
+        }
+      ],
+      "supports_free_stop": false,
+      "supports_snapshots": true
+    },
+    {
       "configured": true,
       "credential_source": "settings",
       "display_name": "Hetzner Cloud",

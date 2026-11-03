@@ -281,6 +281,14 @@ struct SpawnManagedParams {
     #[serde(default)]
     image: Option<String>,
     #[serde(default)]
+    repo: Option<String>,
+    #[serde(default)]
+    base_key: Option<String>,
+    #[serde(default)]
+    lean_mode: Option<String>,
+    #[serde(default)]
+    memory_mib: Option<u32>,
+    #[serde(default)]
     reason: Option<String>,
     /// Registry name of a project snapshot to start from.
     #[serde(default)]
@@ -377,6 +385,14 @@ struct StartMissionParams {
     managed_ttl_minutes: Option<u64>,
     #[serde(default)]
     managed_from_snapshot: Option<String>,
+    #[serde(default)]
+    managed_repo: Option<String>,
+    #[serde(default)]
+    managed_base_key: Option<String>,
+    #[serde(default)]
+    managed_lean_mode: Option<String>,
+    #[serde(default)]
+    managed_memory_mib: Option<u32>,
     #[serde(default)]
     managed_allow_24h_commitment: Option<bool>,
     /// Optional managed-machine budget (USD) for the new mission's subtree;
@@ -1796,12 +1812,12 @@ impl AssistantMcp {
         vec![
             ToolDefinition {
                 name: "spawn_managed_machine".to_string(),
-                description: "Rent a fresh, disposable cloud VM across Core's native providers (`boat` default, `hetzner`, `vastai`, `scaleway`) and enroll it as a compute node (or raw guest), so you can run a subagent or heavy CPU/GPU/ARM64/macOS job with Core-enforced ownership, budget caps, and automatic idle reaping. NEVER fetch cloud API keys via `secret_get` to rent VMs directly. Sizes by provider: `boat` (`small` 2 vCPU/4 GB, `default` 4 vCPU/8 GB, `large` 8 vCPU/16 GB, `xlarge` 16 vCPU/32 GB on Zen 5), `hetzner` (`cpx22`, `cpx32`, `cpx42`, `cpx52`, `cpx62`, `ccx33`, `ccx43` x86_64; `cax31` arm64), `vastai` (`rtx4090`, `a100`, `h100` CUDA GPUs), `scaleway` (`PRO2-S`, `PRO2-M`, `L4-1-24G`, `H100-1-80G`, and `M2-M`/`M2-PRO` Apple Silicon macOS with `allow_24h_commitment=true`). Or pass `cpu`, `ram_gb`, `gpu`, or `arch` and Core picks the cheapest fitting tier. Shortcut: `start_mission(remote_node_id=\"auto-managed:<provider>:<size>\")` spawns and places in one call. Every machine has a TTL (default 60 min, auto-extended while busy, max 720) and is reaped automatically after your mission ends, after 15 min idle while unused (5 min post-job), or at its TTL. Call `destroy_managed_machine` as soon as you are done.".to_string(),
+                description: "Rent a fresh, disposable cloud VM across Core's native providers (`boat` default, `boost`, `hetzner`, `vastai`, `scaleway`) and enroll it as a compute node (or raw guest), so you can run a subagent or heavy CPU/GPU/ARM64/macOS/Lean job with Core-enforced ownership, budget caps, and automatic idle reaping. NEVER fetch cloud API keys via `secret_get` to rent VMs directly. Sizes by provider: `boat` (`small` 2 vCPU/4 GB, `default` 4 vCPU/8 GB, `large` 8 vCPU/16 GB, `xlarge` 16 vCPU/32 GB on Zen 5), `boost` (`boost-2vcpu-ubuntu-2604`..`boost-32vcpu-96gb` / `boost-32vcpu-ubuntu-2604` isolated Cloud Hypervisor microVMs with optional warm `.olean` overlay via `repo`/`base_key`/`lean_mode` and `turbo-lean`), `hetzner` (`cpx22`, `cpx32`, `cpx42`, `cpx52`, `cpx62`, `ccx33`, `ccx43` x86_64; `cax31` arm64), `vastai` (`rtx4090`, `a100`, `h100` CUDA GPUs), `scaleway` (`PRO2-S`, `PRO2-M`, `L4-1-24G`, `H100-1-80G`, and `M2-M`/`M2-PRO` Apple Silicon macOS with `allow_24h_commitment=true`). Or pass `cpu`, `ram_gb`, `gpu`, or `arch` and Core picks the cheapest fitting tier. Shortcut: `start_mission(remote_node_id=\"auto-managed:<provider>:<size>\")` spawns and places in one call. Every machine has a TTL (default 60 min, auto-extended while busy, max 720) and is reaped automatically after your mission ends, after 15 min idle while unused (5 min post-job), or at its TTL. Call `destroy_managed_machine` as soon as you are done.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "provider": {"type": "string", "enum": ["boat", "hetzner", "vastai", "scaleway"], "description": "Cloud provider (default `boat`; `hetzner` for cheap EU x86_64/arm64 Linux, `vastai` for disposable CUDA GPUs, `scaleway` for EU Linux/GPU or Apple Silicon macOS)."},
-                        "size": {"type": "string", "description": "Provider size tier (e.g. `small`/`default`/`large`/`xlarge` on boat; `cpx42`/`ccx33`/`cax31` on hetzner; `rtx4090`/`a100`/`h100` on vastai; `PRO2-S`/`L4-1-24G`/`M2-M` on scaleway). Omit to pick from cpu/ram_gb/gpu/arch or the provider default."},
+                        "provider": {"type": "string", "enum": ["boat", "boost", "hetzner", "vastai", "scaleway"], "description": "Cloud provider (default `boat`; `boost` for warm Lean/Ubuntu 26.04 Cloud Hypervisor microVMs up to 32 vCPU/128 GiB, `hetzner` for cheap EU x86_64/arm64 Linux, `vastai` for disposable CUDA GPUs, `scaleway` for EU Linux/GPU or Apple Silicon macOS)."},
+                        "size": {"type": "string", "description": "Provider size tier (e.g. `small`/`default`/`large`/`xlarge` on boat; `boost-4vcpu-ubuntu-2604`/`boost-16vcpu-ubuntu-2604`/`boost-32vcpu-96gb`/`boost-32vcpu-ubuntu-2604` on boost; `cpx42`/`ccx33`/`cax31` on hetzner; `rtx4090`/`a100`/`h100` on vastai; `PRO2-S`/`L4-1-24G`/`M2-M` on scaleway). Omit to pick from cpu/ram_gb/gpu/arch or the provider default."},
                         "cpu": {"type": "integer", "minimum": 1, "maximum": 128, "description": "Minimum vCPUs needed (alternative to size)."},
                         "ram_gb": {"type": "integer", "minimum": 1, "maximum": 512, "description": "Minimum RAM in GB needed (alternative to size)."},
                         "gpu": {"type": "string", "description": "Optional GPU requirement (e.g. `rtx4090`, `l4`, `a100`, `h100`)."},
@@ -1810,8 +1826,12 @@ impl AssistantMcp {
                         "allow_24h_commitment": {"type": "boolean", "description": "Explicit opt-in required for providers/tiers with a 24-hour minimum billing lease (Scaleway Apple Silicon `M2-*`)."},
                         "ttl_minutes": {"type": "integer", "minimum": 5, "maximum": 720, "description": "Initial lifetime; auto-extended while busy (within budget). Default 60."},
                         "image": {"type": "string", "description": "Optional image or snapshot override."},
-                        "provisioning_mode": {"type": "string", "enum": ["worker", "raw"], "description": "Worker installs/enrolls Orb (default). Raw only rents the VM (Boat): use `exec_raw_managed_machine` for bounded guest ops."},
-                        "from_snapshot": {"type": "string", "description": "Optional Boat project snapshot (`list_managed_snapshots`), \"latest\" for the newest ready project snapshot, or \"light\"/\"none\" for the clean base image. Omitted defaults to light mode (clean base image, no snapshot files restored)."},
+                        "repo": {"type": "string", "description": "Only on `boost`: GitHub `owner/repo` (e.g. `Layr-Labs/evm.fast`) to mount the latest warm `.olean` CoW overlay at `/workspace/boost-cvm/lean-overlay/merged`."},
+                        "base_key": {"type": "string", "description": "Only on `boost`: exact warm base commit/cache key override."},
+                        "lean_mode": {"type": "string", "enum": ["auto", "cache-only", "off"], "description": "Only on `boost`: Lean overlay mode (`auto` default, `cache-only`, or `off`)."},
+                        "memory_mib": {"type": "integer", "minimum": 4096, "maximum": 131072, "description": "Only on `boost`: optional custom RAM override in MiB (multiple of 1024, 4096..=131072)."},
+                        "provisioning_mode": {"type": "string", "enum": ["worker", "raw"], "description": "Worker installs/enrolls Orb (default). Raw only rents the VM (Boat/Boost): use `exec_raw_managed_machine` for bounded guest ops."},
+                        "from_snapshot": {"type": "string", "description": "Optional Boat/Boost project snapshot (`list_managed_snapshots`), \"latest\" for the newest ready project snapshot, or \"light\"/\"none\" for the clean base image. Omitted defaults to light mode (clean base image, no snapshot files restored)."},
                         "reason": {"type": "string", "description": "Why you need it (shown to the operator and in the cost ledger)."}
                     }
                 }),
@@ -1834,7 +1854,7 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "list_managed_machines".to_string(),
-                description: "List live managed VMs across all configured providers (`boat`, `hetzner`, `vastai`, `scaleway`) compactly: name, provider, size, state, project, owner, expires_at, reap_at, deletable_at, cost so far, plus configured providers, today's spend, global running count/caps, `mission_budget` (when your mission or an ancestor has a USD budget pool, which overrides `budget.daily_cap_usd`), and your mission's `effective_vm_limits` (which overrides the global concurrency cap when configured in Mission settings). Pass verbose=true for full rows and the last 24 h of destroyed machines. Check this before spawning to reuse a machine you already own.".to_string(),
+                description: "List live managed VMs across all configured providers (`boat`, `boost`, `hetzner`, `vastai`, `scaleway`) compactly: name, provider, size, state, project, owner, expires_at, reap_at, deletable_at, cost so far, plus configured providers (including live `availability` status `available`/`degraded`/`saturated`), today's spend, global running count/caps, `mission_budget` (when your mission or an ancestor has a USD budget pool, which overrides `budget.daily_cap_usd`), and your mission's `effective_vm_limits` (which overrides the global concurrency cap when configured in Mission settings). Pass verbose=true for full rows and the last 24 h of destroyed machines. Check this before spawning to reuse a machine you already own.".to_string(),
                 input_schema: json!({"type": "object", "properties": {"verbose": {"type": "boolean", "description": "Full rows and history (large)."}}}),
             },
             ToolDefinition {
@@ -2954,6 +2974,10 @@ impl AssistantMcp {
             "attachments": params.attachments,
             "managed_ttl_minutes": params.managed_ttl_minutes,
             "managed_from_snapshot": params.managed_from_snapshot,
+            "managed_repo": params.managed_repo,
+            "managed_base_key": params.managed_base_key,
+            "managed_lean_mode": params.managed_lean_mode,
+            "managed_memory_mib": params.managed_memory_mib,
             "managed_allow_24h_commitment": params.managed_allow_24h_commitment,
             "budget_usd": params.budget_usd,
         });
@@ -3078,6 +3102,10 @@ impl AssistantMcp {
                     remote_node_id: params.remote_node_id.clone(),
                     managed_ttl_minutes: params.managed_ttl_minutes,
                     managed_from_snapshot: params.managed_from_snapshot.clone(),
+                    managed_repo: None,
+                    managed_base_key: None,
+                    managed_lean_mode: None,
+                    managed_memory_mib: None,
                     managed_allow_24h_commitment: None,
                     budget_usd: None,
                     backend: Some("opencode".into()),
@@ -3682,6 +3710,10 @@ impl AssistantMcp {
                     "allow_24h_commitment": params.allow_24h_commitment.unwrap_or(false),
                     "ttl_minutes": params.ttl_minutes,
                     "image": params.image,
+                    "repo": params.repo,
+                    "base_key": params.base_key,
+                    "lean_mode": params.lean_mode,
+                    "memory_mib": params.memory_mib,
                     "reason": params.reason,
                     "from_snapshot": params.from_snapshot,
                     "provisioning_mode": params.provisioning_mode,
@@ -8362,6 +8394,14 @@ mod compact_managed_tests {
         assert_eq!(
             parse_auto_managed_spec("auto-managed:large"),
             Some((None, Some("large".into())))
+        );
+        assert_eq!(
+            parse_auto_managed_spec("auto-managed:boost"),
+            Some((Some("boost".into()), None))
+        );
+        assert_eq!(
+            parse_auto_managed_spec("auto-managed:boost:boost-32vcpu-96gb"),
+            Some((Some("boost".into()), Some("boost-32vcpu-96gb".into())))
         );
         assert_eq!(
             parse_auto_managed_spec("auto-managed:hetzner"),

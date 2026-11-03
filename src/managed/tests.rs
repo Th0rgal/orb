@@ -442,6 +442,10 @@ async fn boat_e2e_provider_round_trip() {
         bootstrap_script: None,
         allow_24h_commitment: false,
         provisioning_mode: ProvisioningMode::Worker,
+        repo: None,
+        base_key: None,
+        lean_mode: None,
+        memory_mib: None,
     };
     let created = provider.spawn(&spec).await.expect("spawn");
     let id = created.provider_id.clone();
@@ -579,6 +583,9 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         active_mission_ids: Vec::new(),
         deletable_at: None,
         has_executed_job: false,
+        repo: None,
+        base_key: None,
+        lean_mode: None,
     };
     register_node(&machine, 3999, "tok");
     let settings = crate::remote_node::RemoteNodeSettings {
@@ -979,6 +986,9 @@ fn spend_machine(
         active_mission_ids: Vec::new(),
         deletable_at: None,
         has_executed_job: false,
+        repo: None,
+        base_key: None,
+        lean_mode: None,
     }
 }
 
@@ -1792,6 +1802,7 @@ use super::snapshots as snaps;
 fn snap(name: &str, project: &str, days_old: i64, status: &str) -> snaps::ManagedSnapshot {
     snaps::ManagedSnapshot {
         provisioning_mode: ProvisioningMode::Worker,
+        provider: Some("boat".into()),
         name: name.into(),
         label: name.into(),
         project: Some(project.into()),
@@ -2729,6 +2740,10 @@ async fn scaleway_provider_spawn_rejects_apple_silicon_worker_before_network() {
         exclude_offer_ids: Vec::new(),
         allow_24h_commitment: true,
         provisioning_mode: ProvisioningMode::Worker,
+        repo: None,
+        base_key: None,
+        lean_mode: None,
+        memory_mib: None,
     };
     let err = scw.spawn(&spec).await.unwrap_err();
     assert!(err.contains("provisioning_mode: \"raw\""), "{err}");
@@ -3036,7 +3051,40 @@ fn cloud_bootstrap_script_configures_user_bus_and_harnesses_within_onstart_budge
 async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
     let dir = tempfile::tempdir().unwrap();
     let m = Arc::new(ManagedManager::new(settings(), None, dir.path(), 3000));
+    let t0 = chrono::DateTime::parse_from_rfc3339("2026-10-29T10:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t1 = chrono::DateTime::parse_from_rfc3339("2026-10-29T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
     m.register_base_credential("boat", "bitwarden", "boat-secret-1234", None, None);
+    let boost_p = boost::BoostProvider::with_workspace(
+        boost::DEFAULT_API_BASE,
+        "bst-secret-9012",
+        Some("ws-evm-fast".into()),
+    );
+    boost_p.seed_availability(ProviderAvailability {
+        status: AvailabilityStatus::Degraded,
+        reason: Some("pool_memory".into()),
+        schedulable_vcpus: Some(32),
+        schedulable_memory_mib: Some(91136),
+        largest_bootable_vcpus: Some(32),
+        largest_bootable_memory_mib: Some(91136),
+        online_engines: Some(1),
+        active_vms: Some(1),
+        queued_spawns: Some(0),
+        checked_at: t0,
+    });
+    m.register_provider_with_meta(
+        Arc::new(boost_p),
+        Some(ProviderMeta {
+            credential_source: Some("settings".into()),
+            key_hint: Some("••••9012".into()),
+            region: None,
+            project_id: Some("ws-evm-fast".into()),
+        }),
+    );
     m.update_provider_config(
         "hetzner",
         ProviderUpdateRequest {
@@ -3058,7 +3106,7 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
     .unwrap();
 
     let catalog = m.provider_catalog();
-    assert_eq!(catalog.len(), 4);
+    assert_eq!(catalog.len(), 5);
     assert_eq!(catalog[0].provider, "boat");
     assert_eq!(catalog[0].display_name, "boat.dev");
     assert!(catalog[0].configured);
@@ -3068,36 +3116,44 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
     assert!(catalog[0].supports_free_stop);
     assert!(catalog[0].supports_snapshots);
 
-    assert_eq!(catalog[1].provider, "hetzner");
-    assert_eq!(catalog[1].display_name, "Hetzner Cloud");
+    assert_eq!(catalog[1].provider, "boost");
+    assert_eq!(catalog[1].display_name, "boost.ci");
     assert!(catalog[1].configured);
     assert!(catalog[1].enabled);
     assert_eq!(catalog[1].credential_source.as_deref(), Some("settings"));
-    assert_eq!(catalog[1].key_hint.as_deref(), Some("••••5678"));
-    assert_eq!(catalog[1].region.as_deref(), Some("fsn1"));
+    assert_eq!(catalog[1].key_hint.as_deref(), Some("••••9012"));
+    assert_eq!(catalog[1].project_id.as_deref(), Some("ws-evm-fast"));
     assert!(!catalog[1].supports_free_stop);
-    assert!(!catalog[1].supports_snapshots);
+    assert!(catalog[1].supports_snapshots);
+    assert_eq!(
+        catalog[1].availability.as_ref().map(|a| a.status),
+        Some(AvailabilityStatus::Degraded)
+    );
 
-    assert_eq!(catalog[2].provider, "vastai");
-    assert!(!catalog[2].configured);
+    assert_eq!(catalog[2].provider, "hetzner");
+    assert_eq!(catalog[2].display_name, "Hetzner Cloud");
+    assert!(catalog[2].configured);
     assert!(catalog[2].enabled);
-    assert_eq!(catalog[3].provider, "scaleway");
+    assert_eq!(catalog[2].credential_source.as_deref(), Some("settings"));
+    assert_eq!(catalog[2].key_hint.as_deref(), Some("••••5678"));
+    assert_eq!(catalog[2].region.as_deref(), Some("fsn1"));
+    assert!(!catalog[2].supports_free_stop);
+    assert!(!catalog[2].supports_snapshots);
+
+    assert_eq!(catalog[3].provider, "vastai");
     assert!(!catalog[3].configured);
-    assert!(!catalog[3].enabled);
+    assert!(catalog[3].enabled);
+    assert_eq!(catalog[4].provider, "scaleway");
+    assert!(!catalog[4].configured);
+    assert!(!catalog[4].enabled);
     assert!(
-        catalog[3]
+        catalog[4]
             .sizes
             .iter()
             .all(|s| !scaleway::is_apple_silicon_type(s.size)),
         "worker catalog must not advertise macOS-only Apple Silicon sizes"
     );
 
-    let t0 = chrono::DateTime::parse_from_rfc3339("2026-10-29T10:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let t1 = chrono::DateTime::parse_from_rfc3339("2026-10-29T12:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
     let sample_machine = ManagedMachine {
         id: "mm1001".into(),
         name: "cpx42-a".into(),
@@ -3149,6 +3205,9 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
         active_mission_ids: vec!["550e8400-e29b-41d4-a716-446655440000".into()],
         deletable_at: None,
         has_executed_job: true,
+        repo: None,
+        base_key: None,
+        lean_mode: None,
     };
     let view = ListView {
         enabled: true,
@@ -3966,6 +4025,10 @@ async fn vastai_splits_v0_and_v1_routes_and_guards_destroy_and_null_usage() {
         exclude_offer_ids: Vec::new(),
         allow_24h_commitment: false,
         provisioning_mode: ProvisioningMode::Worker,
+        repo: None,
+        base_key: None,
+        lean_mode: None,
+        memory_mib: None,
     };
 
     let quote = p.quote_spawn(&spec).await.unwrap().unwrap();
@@ -4366,6 +4429,7 @@ async fn in_flight_snapshot_protects_post_job_worker_from_idle_reaper() {
     .await;
     m.snapshots.lock().await.push(snapshots::ManagedSnapshot {
         provisioning_mode: ProvisioningMode::Worker,
+        provider: Some("boat".into()),
         name: "orb-snap-verity-warm-1234".into(),
         label: "warm".into(),
         project: Some("verity-core".into()),
@@ -4596,6 +4660,7 @@ fn secrets_wipe_deletes_secrets_and_prunes_heavy_build_and_cache_trees() {
         std::fs::create_dir_all(&secret_dir).unwrap();
         std::fs::write(secret_dir.join("GITHUB_TOKEN"), "secret").unwrap();
     }
+    std::fs::write(orb.join(".boost-env"), "BOOST_CACHE_TOKEN=scoped\n").unwrap();
     // Heavy toolchain/build/VCS trees that must be pruned without traversal.
     for pruned in [
         orb.join("work/caches/rustup/toolchains/stable/marker"),
@@ -4631,6 +4696,7 @@ fn secrets_wipe_deletes_secrets_and_prunes_heavy_build_and_cache_trees() {
 
     assert!(!root.join("run/user/1001/paloma-secrets").exists());
     assert!(!orb.join(".paloma-secrets").exists());
+    assert!(!orb.join(".boost-env").exists());
     assert!(!orb.join("work/caches/home/.paloma-secrets").exists());
     assert!(!orb.join("work/mission-a/.paloma-secrets").exists());
     assert!(!home.join(".paloma-secrets").exists());
@@ -4642,4 +4708,97 @@ fn secrets_wipe_deletes_secrets_and_prunes_heavy_build_and_cache_trees() {
         .join("work/caches/rustup/toolchains/stable/marker")
         .exists());
     assert!(home.join("repo/node_modules/pkg/index.js").exists());
+}
+
+#[tokio::test]
+async fn boost_saturation_auto_skips_in_default_provider_and_rejects_explicit_with_503() {
+    use axum::{routing::get, Json, Router};
+
+    let app = Router::new().route(
+        "/v1/vms/capabilities",
+        get(|| async {
+            Json(serde_json::json!({
+                "principal": {"workspace_id": "ws-1", "principal_type": "api_token", "isolation_mode": "shared"},
+                "quota": {"scope": "workspace", "max_vcpus": 64, "used_vcpus": 64, "available_vcpus": 0, "active_vms": 2},
+                "pool": {"online_engines": 1, "free_vcpus": 0, "free_memory_mib": 0, "largest_single_vm": {"vcpus": 0, "memory_mib": 0}},
+                "effective": {"schedulable_vcpus": 0, "schedulable_memory_mib": 0, "largest_bootable_vm": {"vcpus": 0, "memory_mib": 0}, "queued_spawns": 0},
+                "profiles": [
+                    {"runner_label": "boost-4vcpu-ubuntu-2604", "vcpus": 4, "default_memory_mib": 16384, "max_launchable_now": 0, "blocking_reason": "quota_vcpus"}
+                ]
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = settings();
+    cfg.provider = "boost".into();
+    let m = Arc::new(ManagedManager::new(cfg, None, dir.path(), 3000));
+    let boost_p = Arc::new(boost::BoostProvider::new(
+        format!("http://{addr}"),
+        "bst_test",
+    ));
+    let hz_p = NamedFakeProvider::new("hetzner");
+    m.register_provider(boost_p.clone());
+    m.register_provider(hz_p);
+
+    m.refresh_provider_availabilities().await;
+    assert_eq!(
+        m.default_provider().map(|p| p.name()),
+        Some("hetzner"),
+        "default_provider() must skip saturated boost in favor of available hetzner"
+    );
+
+    // Explicit `provider: Some("boost")` fails fast in quote_spawn with 503 provider_at_capacity and zero orphan rows.
+    let err = m
+        .spawn(SpawnRequest {
+            provider: Some("boost".into()),
+            size: Some("boost-4vcpu-ubuntu-2604".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.error, "provider_at_capacity");
+    assert_eq!(err.status, 503);
+    assert!(m.machines_snapshot().await.is_empty());
+
+    // Arbitrary or snapshot-like `image` strings on `boost` are rejected at image resolution.
+    let img_err = m
+        .spawn(SpawnRequest {
+            provider: Some("boost".into()),
+            image: Some("orb-snap-other-tenant-1234".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(img_err.error, "image_unknown");
+    assert_eq!(img_err.status, 400);
+
+    // Boost-only parameters on non-boost providers fail validation cleanly.
+    let extra_err = m
+        .spawn(SpawnRequest {
+            provider: Some("hetzner".into()),
+            size: Some("cpx32".into()),
+            repo: Some("Layr-Labs/evm.fast".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(extra_err.error, "invalid_boost_parameter");
+    assert_eq!(extra_err.status, 400);
+
+    // Secret broker blocks BOOST_API_KEY and BOOST_TOKEN from mission harnesses.
+    assert!(crate::api::secret_broker::is_core_reserved_compute_secret(
+        "BOOST_API_KEY"
+    ));
+    assert!(crate::api::secret_broker::is_core_reserved_compute_secret(
+        "boost_token"
+    ));
 }

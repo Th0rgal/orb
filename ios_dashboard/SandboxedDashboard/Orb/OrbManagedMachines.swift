@@ -64,6 +64,19 @@ struct OrbManagedSize: Codable, Equatable, Sendable {
     var min_billing_hours: Int?
 }
 
+struct OrbManagedProviderAvailability: Codable, Equatable, Sendable {
+    var status: String
+    var reason: String?
+    var schedulable_vcpus: Int?
+    var schedulable_memory_mib: Int?
+    var largest_bootable_vcpus: Int?
+    var largest_bootable_memory_mib: Int?
+    var online_engines: Int?
+    var active_vms: Int?
+    var queued_spawns: Int?
+    var checked_at: String?
+}
+
 struct OrbManagedProviderInfo: Codable, Equatable, Identifiable, Sendable {
     var provider: String
     var display_name: String
@@ -74,6 +87,7 @@ struct OrbManagedProviderInfo: Codable, Equatable, Identifiable, Sendable {
     var region: String?
     var project_id: String?
     var max_concurrent: Int?
+    var availability: OrbManagedProviderAvailability?
     var supports_snapshots: Bool
     var supports_free_stop: Bool
     var sizes: [OrbManagedSize]
@@ -172,6 +186,7 @@ enum OrbManaged {
     static func providerLabel(_ provider: String?) -> String {
         switch (provider ?? "boat").lowercased() {
         case "boat": return "boat.dev"
+        case "boost", "boost.ci": return "boost.ci"
         case "hetzner": return "Hetzner"
         case "vastai": return "Vast.ai"
         case "scaleway": return "Scaleway"
@@ -209,7 +224,7 @@ enum OrbManaged {
             if !order.contains(key) { order.append(key) }
         }
         for p in providers ?? [] { push(p.provider) }
-        for p in ["boat", "hetzner", "vastai", "scaleway"] { push(p) }
+        for p in ["boat", "boost", "hetzner", "vastai", "scaleway"] { push(p) }
         for key in seenOrder { push(key) }
         return order.compactMap { key in
             guard let list = buckets[key], !list.isEmpty else { return nil }
@@ -233,7 +248,7 @@ enum OrbManaged {
     }
 
     static func nodeProvider(_ node: OrbJSON) -> String? {
-        let known: Set<String> = ["boat", "hetzner", "vastai", "scaleway"]
+        let known: Set<String> = ["boat", "boost", "hetzner", "vastai", "scaleway"]
         for item in node["labels"].items {
             let l = item.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if l.hasPrefix("provider=") { return String(l.dropFirst("provider=".count)) }
@@ -263,8 +278,13 @@ enum OrbManaged {
         let enabled = isProviderEnabled(p)
         if !p.configured { return enabled ? "Not configured" : "Disabled · Not configured" }
         let cred = [credentialSourceLabel(p.credential_source), p.key_hint ?? ""].filter { !$0.isEmpty }.joined(separator: " ")
+        let avail = enabled
+            ? (p.availability?.status == "saturated" ? "At capacity"
+                : p.availability?.status == "degraded" ? "Limited capacity" : "")
+            : ""
         return [
             enabled ? "Configured" : "Disabled",
+            avail,
             cred,
             p.region ?? "",
             (p.project_id?.isEmpty == false) ? "proj \(p.project_id!)" : "",
@@ -465,7 +485,8 @@ enum OrbManaged {
         }
         let prefix = code == "budget_exceeded" ? "Daily budget reached"
             : code == "quota_exceeded" ? "Machine limit reached"
-            : code == "provider_disabled" ? "Provider disabled" : ""
+            : code == "provider_disabled" ? "Provider disabled"
+            : code == "provider_at_capacity" ? "Provider at capacity" : ""
         if !prefix.isEmpty { return text.isEmpty ? "\(prefix)." : "\(prefix): \(text)" }
         return text.isEmpty ? "Request failed (\(http.status))" : text
     }
@@ -892,7 +913,9 @@ struct OrbNewManagedMachineSheet: View {
         self.response = response
         self.onCreate = onCreate
         let usable = (response.providers ?? []).filter(OrbManaged.isProviderUsable)
-        let initProv = usable.first(where: { $0.provider == "boat" })?.provider ?? usable.first?.provider ?? "boat"
+        let initProv = usable.first(where: { $0.provider == "boat" && $0.availability?.status != "saturated" })?.provider
+            ?? usable.first(where: { $0.availability?.status != "saturated" })?.provider
+            ?? usable.first?.provider ?? "boat"
         let initSizes = usable.first(where: { $0.provider == initProv })?.sizes ?? response.sizes
         let initSize = initSizes.first(where: { $0.size == response.budget.default_size })?.size ?? initSizes.first?.size ?? "small"
         let defTtl = response.budget.default_ttl_minutes ?? 60
@@ -991,7 +1014,11 @@ struct OrbMachineProvidersSection: View {
                 let enabled = OrbManaged.isProviderEnabled(pr)
                 HStack(spacing: 10) {
                     Circle()
-                        .fill(OrbManaged.isProviderUsable(pr) ? OrbStyle.success : OrbStyle.textMuted)
+                        .fill(
+                            !OrbManaged.isProviderUsable(pr) ? OrbStyle.textMuted
+                                : pr.availability?.status == "saturated" ? OrbStyle.warning
+                                : OrbStyle.success
+                        )
                         .frame(width: 8, height: 8)
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
@@ -1092,6 +1119,17 @@ struct OrbConfigureMachineProviderSheet: View {
                         Text("Preferred Hetzner Cloud location (falls back across fsn1, hel1, nbg1 if unavailable).")
                     }
                 }
+                if provider.provider == "boost" {
+                    Section {
+                        TextField("Auto-detected from token", text: $projectID)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    } header: {
+                        Text("Workspace ID")
+                    } footer: {
+                        Text("Optional boost.ci workspace identifier. Leave blank to use the token's default workspace.")
+                    }
+                }
                 if provider.provider == "scaleway" {
                     Section("Scaleway settings") {
                         TextField("Default zone (e.g. fr-par-1)", text: $region)
@@ -1137,7 +1175,7 @@ struct OrbConfigureMachineProviderSheet: View {
             if provider.provider == "hetzner" || provider.provider == "scaleway" {
                 patch["region"] = .string(region.trimmingCharacters(in: .whitespacesAndNewlines))
             }
-            if provider.provider == "scaleway" {
+            if provider.provider == "scaleway" || provider.provider == "boost" {
                 patch["project_id"] = .string(projectID.trimmingCharacters(in: .whitespacesAndNewlines))
             }
             if maxChanged {

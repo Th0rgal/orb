@@ -3680,6 +3680,16 @@ async fn discover_managed_providers_from_bitwarden(
             tracing::info!("Registered managed provider 'boat' from Bitwarden vault");
         }
     }
+    if !manager.has_base_credential("boost") {
+        if let Some(key) = read_secret(&["BOOST_API_KEY", "BOOST_TOKEN"]).await {
+            let ws_id = std::env::var("BOOST_WORKSPACE_ID")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or(read_secret(&["BOOST_WORKSPACE_ID"]).await);
+            manager.register_base_credential("boost", "bitwarden", key, None, ws_id);
+            tracing::info!("Registered managed provider 'boost' from Bitwarden vault");
+        }
+    }
     if !manager.has_base_credential("hetzner") {
         if let Some(key) = read_secret(&["HETZNER_CLOUD_APIKEY", "HCLOUD_TOKEN"]).await {
             let loc = std::env::var("HETZNER_DEFAULT_LOCATION")

@@ -17447,6 +17447,7 @@ async fn child_missions_default_to_boat_and_two_pass_mcp_actions_succeed_without
         snap_dir.join("managed_snapshots.json"),
         serde_json::to_vec(&vec![crate::managed::snapshots::ManagedSnapshot {
             provisioning_mode: crate::managed::ProvisioningMode::Worker,
+            provider: Some("boat".into()),
             name: "lido-warm".into(),
             label: "warm".into(),
             project: Some("lido".into()),

@@ -127,6 +127,18 @@ pub struct CreateMissionRequest {
     /// Explicit confirmation for 24h minimum-lease hardware with `auto-managed:scaleway:M2-*`.
     #[serde(default)]
     pub managed_allow_24h_commitment: Option<bool>,
+    /// Optional `boost.ci` warm repository (`"owner/name"`, e.g. `"Layr-Labs/evm.fast"`) for `auto-managed:boost:...`.
+    #[serde(default)]
+    pub managed_repo: Option<String>,
+    /// Optional `boost.ci` 64-hex warm base key for `auto-managed:boost:...`.
+    #[serde(default)]
+    pub managed_base_key: Option<String>,
+    /// Optional `boost.ci` Lean overlay mode (`"auto"`, `"cache-only"`, `"off"`).
+    #[serde(default)]
+    pub managed_lean_mode: Option<String>,
+    /// Optional `boost.ci` RAM override in MiB (`4096..=131072`, multiple of `1024`).
+    #[serde(default)]
+    pub managed_memory_mib: Option<u32>,
     /// Optional managed-machine spending budget (USD) for this mission and
     /// its descendants. Under an ancestor budget it is a sub-budget and must
     /// fit the ancestor pool's remaining amount.
@@ -1026,6 +1038,10 @@ pub(in crate::api) async fn create_mission_inner(
         managed_ttl_minutes: None,
         managed_from_snapshot: None,
         managed_allow_24h_commitment: None,
+        managed_repo: None,
+        managed_base_key: None,
+        managed_lean_mode: None,
+        managed_memory_mib: None,
         budget_usd: None,
         validate_only: None,
         extra: Default::default(),
@@ -2274,6 +2290,10 @@ pub(in crate::api) async fn create_mission_inner(
             sub_budget_usd: req.budget_usd,
             reuse_idle: Some(true),
             wait: Some(true),
+            repo: req.managed_repo.clone(),
+            base_key: req.managed_base_key.clone(),
+            lean_mode: req.managed_lean_mode.clone(),
+            memory_mib: req.managed_memory_mib,
         };
         let (machine, reused) = crate::api::managed_machines::spawn_for_inner(
             &state,
@@ -3161,7 +3181,10 @@ pub(crate) fn parse_auto_managed_spec(raw: &str) -> Option<(Option<String>, Opti
         ));
     }
     let lower = rest.to_ascii_lowercase();
-    if matches!(lower.as_str(), "boat" | "hetzner" | "vastai" | "scaleway") {
+    if matches!(
+        lower.as_str(),
+        "boat" | "boost" | "hetzner" | "vastai" | "scaleway"
+    ) {
         Some((Some(lower), None))
     } else {
         Some((None, Some(rest.to_string())))
