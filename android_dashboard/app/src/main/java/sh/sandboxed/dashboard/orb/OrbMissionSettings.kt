@@ -177,6 +177,7 @@ data class OrbMissionBudget(
         const val MAX_VM_CONCURRENCY = 128
         val PROVIDERS: List<Pair<String, String>> = listOf(
             "boat" to "boat.dev",
+            "boost" to "boost.ci",
             "hetzner" to "Hetzner",
             "vastai" to "Vast.ai",
             "scaleway" to "Scaleway",

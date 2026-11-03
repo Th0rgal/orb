@@ -301,20 +301,27 @@ async fn reuse_idle_sibling(
     provider: &str,
     size: &str,
 ) -> Option<crate::managed::ManagedMachine> {
+    let clean_opt = |opt: &Option<String>| {
+        opt.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    // Do not reuse an idle VM if warm Boost checkout parameters are specified:
+    // a fresh or mismatched warm overlay could silently point at the wrong base.
+    if clean_opt(&req.repo).is_some()
+        || clean_opt(&req.base_key).is_some()
+        || clean_opt(&req.lean_mode).is_some()
+        || req.memory_mib.is_some()
+    {
+        return None;
+    }
     let image = if m
         .provider_for(provider)
-        .is_some_and(|p| p.uses_cloud_init_bootstrap())
+        .is_some_and(|p| p.uses_cloud_init_bootstrap() || p.bootstraps_worker_via_exec())
         && req.image.is_none()
     {
-        match provider {
-            "hetzner" => "ubuntu-24.04".to_string(),
-            "vastai" => "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04".to_string(),
-            "scaleway" if crate::managed::scaleway::is_apple_silicon_type(size) => {
-                "macos-15".to_string()
-            }
-            "scaleway" => "ubuntu_noble".to_string(),
-            _ => "ubuntu-24.04".to_string(),
-        }
+        ManagedManager::resolve_cloud_image(provider, size, None).ok()?
     } else {
         ManagedManager::resolve_image(&m.settings, req.image.as_deref()).ok()?
     };
@@ -509,7 +516,10 @@ async fn get_settings() -> Response {
 
 async fn get_providers() -> Response {
     match manager() {
-        Ok(m) => Json(json!({ "providers": m.provider_catalog() })).into_response(),
+        Ok(m) => {
+            m.refresh_provider_availabilities().await;
+            Json(json!({ "providers": m.provider_catalog() })).into_response()
+        }
         Err(r) => r,
     }
 }

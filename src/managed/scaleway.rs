@@ -1037,6 +1037,10 @@ mod tests {
             exclude_offer_ids: Vec::new(),
             allow_24h_commitment: false,
             provisioning_mode: super::super::ProvisioningMode::Worker,
+            repo: None,
+            base_key: None,
+            lean_mode: None,
+            memory_mib: None,
         };
         let machine = provider.spawn(&spec).await.unwrap();
         assert_eq!(machine.provider_id, "instance:fr-par-1:srv-123");

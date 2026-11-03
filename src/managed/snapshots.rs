@@ -40,7 +40,7 @@ const SNAPSHOT_PREFIX: &str = "orb-snap-";
 /// toolchain/build/VCS trees so warm snapshot hydration never times out; non-zero
 /// exit on failure.
 pub const SECRETS_WIPE_NO_SYNC: &str = concat!(
-    "sudo rm -rf /run/user/*/paloma-secrets /var/lib/orb-node/.paloma-secrets /var/lib/orb-node/work/caches/home/.paloma-secrets && ",
+    "sudo rm -rf /run/user/*/paloma-secrets /var/lib/orb-node/.paloma-secrets /var/lib/orb-node/.boost-env /var/lib/orb-node/work/caches/home/.paloma-secrets && ",
     "sudo find /var/lib/orb-node /home -maxdepth 6 ",
     "\\( -path '/var/lib/orb-node/work/caches/elan' ",
     "-o -path '/var/lib/orb-node/work/caches/rustup' ",
@@ -53,7 +53,7 @@ pub const SECRETS_WIPE_NO_SYNC: &str = concat!(
 /// Deletes every delivered secret file on a VM and flushes disk buffers before
 /// snapshot/fork capture; non-zero exit on failure.
 pub const SECRETS_WIPE: &str = concat!(
-    "sudo rm -rf /run/user/*/paloma-secrets /var/lib/orb-node/.paloma-secrets /var/lib/orb-node/work/caches/home/.paloma-secrets && ",
+    "sudo rm -rf /run/user/*/paloma-secrets /var/lib/orb-node/.paloma-secrets /var/lib/orb-node/.boost-env /var/lib/orb-node/work/caches/home/.paloma-secrets && ",
     "sudo find /var/lib/orb-node /home -maxdepth 6 ",
     "\\( -path '/var/lib/orb-node/work/caches/elan' ",
     "-o -path '/var/lib/orb-node/work/caches/rustup' ",
@@ -68,6 +68,9 @@ pub const SECRETS_WIPE: &str = concat!(
 pub struct ManagedSnapshot {
     #[serde(default)]
     pub provisioning_mode: ProvisioningMode,
+    /// Cloud provider that owns this snapshot (`"boat"` on legacy rows when `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// Provider name (unique): `orb-snap-<project>-<label>-<suffix>`.
     pub name: String,
     /// The name the agent chose.
@@ -227,11 +230,21 @@ impl ManagedManager {
         all
     }
 
-    /// Newest `ready` worker snapshot visible to `(tenant, project)`, if any.
+    /// Newest `ready` worker snapshot visible to `(tenant, project)` on `provider_filter`, if any.
     pub async fn newest_ready_worker_snapshot(
         &self,
         tenant: Option<&str>,
         project: Option<&str>,
+    ) -> Option<String> {
+        self.newest_ready_worker_snapshot_for_provider(tenant, project, None)
+            .await
+    }
+
+    pub async fn newest_ready_worker_snapshot_for_provider(
+        &self,
+        tenant: Option<&str>,
+        project: Option<&str>,
+        provider_filter: Option<&str>,
     ) -> Option<String> {
         let project = project.map(str::trim).filter(|p| !p.is_empty())?;
         self.snapshots
@@ -239,12 +252,45 @@ impl ManagedManager {
             .await
             .iter()
             .filter(|s| {
+                let snap_prov = s.provider.as_deref().unwrap_or("boat");
                 s.status == "ready"
                     && s.provisioning_mode.is_worker()
+                    && provider_filter.is_none_or(|want| snap_prov == want)
                     && snapshot_visible(s, tenant, Some(project))
             })
             .max_by_key(|s| s.created_at)
             .map(|s| s.name.clone())
+    }
+
+    /// Look up the provider that owns a visible snapshot (`"boat"` on legacy rows).
+    pub async fn snapshot_provider(
+        &self,
+        name: &str,
+        tenant: Option<&str>,
+        project: Option<&str>,
+    ) -> Option<String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("none")
+            || trimmed.eq_ignore_ascii_case("base")
+            || trimmed.eq_ignore_ascii_case("light")
+        {
+            return None;
+        }
+        let resolved_name = if trimmed.eq_ignore_ascii_case("latest") {
+            self.newest_ready_worker_snapshot(tenant, project).await?
+        } else {
+            trimmed.to_string()
+        };
+        self.snapshots
+            .lock()
+            .await
+            .iter()
+            .find(|s| {
+                (s.name == resolved_name || s.label == resolved_name)
+                    && snapshot_visible(s, tenant, project)
+            })
+            .map(|s| s.provider.clone().unwrap_or_else(|| "boat".into()))
     }
 
     /// Image, source snapshot and fork source for a spawn request.
@@ -300,11 +346,17 @@ impl ManagedManager {
                 && !n.eq_ignore_ascii_case("base")
                 && !n.eq_ignore_ascii_case("light")
         }) {
+            let requested_prov = req
+                .provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty());
             let latest_name = if name.eq_ignore_ascii_case("latest") {
                 Some(
-                    self.newest_ready_worker_snapshot(
+                    self.newest_ready_worker_snapshot_for_provider(
                         req.owner_user_id.as_deref(),
                         req.snapshot_project.as_deref(),
+                        requested_prov,
                     )
                     .await
                     .ok_or_else(|| {
@@ -337,6 +389,19 @@ impl ManagedManager {
                         format!("Unknown snapshot '{name}'; see list_managed_snapshots"),
                     )
                 })?;
+            if let Some(want_prov) = requested_prov {
+                let snap_prov = snap.provider.as_deref().unwrap_or("boat");
+                if !want_prov.eq_ignore_ascii_case(snap_prov) {
+                    return Err(ManagedError::new(
+                        "provider_mismatch",
+                        409,
+                        format!(
+                            "Snapshot '{}' belongs to provider '{}', not '{}'",
+                            snap.label, snap_prov, want_prov
+                        ),
+                    ));
+                }
+            }
             if snap.status != "ready" {
                 return Err(ManagedError::new(
                     "snapshot_not_ready",
@@ -472,6 +537,7 @@ impl ManagedManager {
             .map_err(|e| ManagedError::new("provider_error", 502, e))?;
         let snap = ManagedSnapshot {
             provisioning_mode: m.provisioning_mode,
+            provider: Some(m.provider.clone()),
             name: name.clone(),
             label,
             project: project.map(str::to_string),
@@ -549,8 +615,9 @@ impl ManagedManager {
                 "A machine is being created from this snapshot; retry when it is online",
             ));
         }
+        let snap_prov = snap.provider.as_deref().unwrap_or("boat");
         if let Some(p) = self
-            .provider_for("boat")
+            .provider_for(snap_prov)
             .or_else(|| self.default_provider())
         {
             p.delete_snapshot(&snap.name)
@@ -597,10 +664,15 @@ impl ManagedManager {
             return plan;
         }
         let mut deleted = Vec::new();
-        let snap_provider = self
-            .provider_for("boat")
-            .or_else(|| self.default_provider());
         for name in plan {
+            let snap_prov = snaps
+                .iter()
+                .find(|s| s.name == name)
+                .and_then(|s| s.provider.as_deref())
+                .unwrap_or("boat");
+            let snap_provider = self
+                .provider_for(snap_prov)
+                .or_else(|| self.default_provider());
             let ok = match &snap_provider {
                 Some(p) => p.delete_snapshot(&name).await.is_ok(),
                 None => true,

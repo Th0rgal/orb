@@ -190,7 +190,7 @@ function ConfigureMachineProviderDialog(p: { provider: ManagedProviderInfo; onCl
       const patch: ManagedProviderPatch = patchOverride ?? {
         ...(apiKey().trim() ? { api_key: apiKey().trim(), enabled: true } : {}),
         ...(p.provider.provider === "hetzner" || p.provider.provider === "scaleway" ? { region: region().trim() } : {}),
-        ...(p.provider.provider === "scaleway" ? { project_id: projectId().trim() } : {}),
+        ...(p.provider.provider === "scaleway" || p.provider.provider === "boost" ? { project_id: projectId().trim() } : {}),
         ...maxPatch,
       };
       const updated = await updateManagedProvider(p.provider.provider, patch);
@@ -219,6 +219,11 @@ function ConfigureMachineProviderDialog(p: { provider: ManagedProviderInfo; onCl
       <Field label="Max concurrent VMs" description="Global ceiling on simultaneous live VMs for this provider. Leave blank for unlimited.">
         <input type="text" inputmode="numeric" class="s-input" aria-label="Max concurrent VMs" placeholder="Unlimited" value={maxConcurrent()} onInput={e => setMaxConcurrent(e.currentTarget.value)} />
       </Field>
+      <Show when={p.provider.provider === "boost"}>
+        <Field label="Workspace ID" description="Optional boost.ci workspace UUID override when the API token has access to multiple workspaces.">
+          <input type="text" class="s-input" aria-label="Workspace ID" placeholder="Optional" value={projectId()} onInput={e => setProjectId(e.currentTarget.value)} />
+        </Field>
+      </Show>
       <Show when={p.provider.provider === "hetzner"}>
         <Field label="Default location" description="Preferred Hetzner Cloud location (falls back across fsn1, hel1, nbg1 if out of capacity).">
           <input type="text" class="s-input" aria-label="Default location" placeholder="fsn1" value={region()} onInput={e => setRegion(e.currentTarget.value)} />
@@ -320,7 +325,7 @@ export function MachineProvidersCard(p: { providers?: readonly ManagedProviderIn
           const label = () => pr().display_name || providerLabel(pr().provider);
           return <Show when={rows().some(r => r.provider === id)}>
             <div class="managed-provider-row" data-provider={id}>
-              <span class={`m-dot ${isProviderUsable(pr()) ? "on" : ""}`} />
+              <span class={`m-dot ${isProviderUsable(pr()) ? (pr().availability?.status === "saturated" ? "warn" : "on") : ""}`} />
               <div class="managed-provider-info">
                 <div class="s-row-title">{label()}</div>
                 <div class="s-row-desc">{providerStatusLine(pr())}</div>
@@ -355,7 +360,10 @@ export function MachineProvidersCard(p: { providers?: readonly ManagedProviderIn
 
 function NewManagedMachine(p: { data: ManagedMachinesResponse; onClose: () => void; onCreate: (request: CreateManagedMachine, size: ManagedSize) => void }) {
   const usableProviders = () => (p.data.providers ?? []).filter(isProviderUsable);
-  const initialProvider = usableProviders().find(pr => pr.provider === "boat")?.provider ?? usableProviders()[0]?.provider ?? "boat";
+  const initialProvider = usableProviders().find(pr => pr.provider === "boat" && pr.availability?.status !== "saturated")?.provider
+    ?? usableProviders().find(pr => pr.availability?.status !== "saturated")?.provider
+    ?? usableProviders()[0]?.provider
+    ?? "boat";
   const [provider, setProvider] = createSignal(initialProvider);
   const sizes = createMemo(() => {
     const pr = usableProviders().find(x => x.provider === provider());

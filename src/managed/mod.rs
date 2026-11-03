@@ -33,6 +33,7 @@
 //! Lifecycle (ownership, reaping, reconciliation): `docs/specs/managed-vm-lifecycle.md`.
 
 pub mod boat;
+pub mod boost;
 pub mod budget;
 pub mod hetzner;
 pub mod lifecycle;
@@ -225,6 +226,40 @@ pub struct SpawnSpec {
     pub exclude_offer_ids: Vec<String>,
     pub allow_24h_commitment: bool,
     pub provisioning_mode: ProvisioningMode,
+    pub repo: Option<String>,
+    pub base_key: Option<String>,
+    pub lean_mode: Option<String>,
+    pub memory_mib: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AvailabilityStatus {
+    Available,
+    Degraded,
+    Saturated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderAvailability {
+    pub status: AvailabilityStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedulable_vcpus: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedulable_memory_mib: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub largest_bootable_vcpus: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub largest_bootable_memory_mib: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online_engines: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_vms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_spawns: Option<u32>,
+    pub checked_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +300,17 @@ pub trait ManagedProvider: Send + Sync {
     }
     fn uses_cloud_init_bootstrap(&self) -> bool {
         false
+    }
+    /// Boots a clean base Linux image and installs/starts `sandboxed-node`
+    /// over `write_file` + `exec` right after the VM reaches ready state.
+    fn bootstraps_worker_via_exec(&self) -> bool {
+        false
+    }
+    fn cached_availability(&self) -> Option<ProviderAvailability> {
+        None
+    }
+    async fn refresh_availability(&self) -> Result<ProviderAvailability, String> {
+        Err("live availability probe not implemented".into())
     }
     fn is_ready_state(&self, state: &str) -> bool {
         boat::is_ready_state(state)
@@ -523,7 +569,7 @@ pub fn default_provider_max_concurrent(provider: &str) -> Option<usize> {
                 .as_deref(),
             DEFAULT_BOAT_MAX_CONCURRENT,
         ),
-        "hetzner" | "vastai" | "scaleway" => {
+        "boost" | "hetzner" | "vastai" | "scaleway" => {
             let key = format!(
                 "SANDBOXED_MANAGED_{}_MAX_CONCURRENT",
                 provider.to_ascii_uppercase()
@@ -793,6 +839,15 @@ pub struct ManagedMachine {
     /// Monotone sticky flag set once the node has executed at least one job.
     #[serde(default)]
     pub has_executed_job: bool,
+    /// Optional warm GitHub repository (`owner/name`) mounted on `boost.ci`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// Optional 64-hex warm base key mounted on `boost.ci`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_key: Option<String>,
+    /// Optional Lean overlay mode (`"auto"`, `"cache-only"`, `"off"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lean_mode: Option<String>,
 }
 
 impl ManagedMachine {
@@ -893,7 +948,7 @@ pub struct SpawnRequest {
     /// requester) has ended, inside its grace window, over a fresh rent.
     #[serde(default)]
     pub reuse_idle: Option<bool>,
-    /// Cloud provider (`"boat"`, `"hetzner"`, `"vastai"`, `"scaleway"`).
+    /// Cloud provider (`"boat"`, `"boost"`, `"hetzner"`, `"vastai"`, `"scaleway"`).
     /// Defaults to `"boat"` (or the first configured provider).
     #[serde(default)]
     pub provider: Option<String>,
@@ -909,6 +964,18 @@ pub struct SpawnRequest {
     /// Explicit confirmation required for 24h minimum-lease hardware (Scaleway Apple Silicon).
     #[serde(default)]
     pub allow_24h_commitment: Option<bool>,
+    /// Optional `boost.ci` warm repository (`"owner/name"`, e.g. `"Layr-Labs/evm.fast"`).
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Optional `boost.ci` 64-hex warm commit base key.
+    #[serde(default)]
+    pub base_key: Option<String>,
+    /// Optional `boost.ci` Lean overlay mode (`"auto"`, `"cache-only"`, `"off"`).
+    #[serde(default)]
+    pub lean_mode: Option<String>,
+    /// Optional `boost.ci` RAM override in MiB (`4096..=131072`, multiple of `1024`).
+    #[serde(default)]
+    pub memory_mib: Option<u32>,
     /// Root ancestor mission ID resolved server-side from mission lineage.
     #[serde(skip)]
     pub root_mission_id: Option<String>,
@@ -960,11 +1027,25 @@ impl ManagedError {
                 ),
             );
         }
+        if lower.contains("provider_at_capacity")
+            || lower.contains("no_online_engines")
+            || lower.contains("pool_memory")
+            || lower.contains("pool_vcpus")
+        {
+            return Self::new(
+                "provider_at_capacity",
+                503,
+                format!(
+                    "{err} — provider pool is temporarily out of capacity; pick a smaller profile, wait for a running VM to finish, or switch provider"
+                ),
+            );
+        }
         if lower.contains("resource_limit_exceeded")
             || lower.contains("core limit exceeded")
             || lower.contains("server_limit_exceeded")
             || lower.contains("quota_exceeded")
             || lower.contains("quotas_exceeded")
+            || lower.contains("quota_vcpus")
             || ((lower.contains("http 403") || lower.contains("http 429"))
                 && lower.contains("quota")
                 && lower.contains("exceed"))
@@ -1246,7 +1327,7 @@ struct Persisted {
     machines: Vec<ManagedMachine>,
 }
 
-pub const CANONICAL_PROVIDERS: [&str; 4] = ["boat", "hetzner", "vastai", "scaleway"];
+pub const CANONICAL_PROVIDERS: [&str; 5] = ["boat", "boost", "hetzner", "vastai", "scaleway"];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderMeta {
@@ -1533,12 +1614,15 @@ pub struct ProviderCatalogEntry {
     pub project_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub availability: Option<ProviderAvailability>,
     pub sizes: Vec<SizeSpec>,
 }
 
 pub fn provider_display_name(provider: &str) -> &'static str {
     match provider {
         "boat" => "boat.dev",
+        "boost" => "boost.ci",
         "hetzner" => "Hetzner Cloud",
         "vastai" => "Vast.ai",
         "scaleway" => "Scaleway",
@@ -1667,6 +1751,14 @@ pub fn daily_spend(machines: &[ManagedMachine], days: u32, now: DateTime<Utc>) -
 
 type BuiltCloudProvider = (Arc<dyn ManagedProvider>, Option<String>, Option<String>);
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ValidatedBoostExtras {
+    pub repo: Option<String>,
+    pub base_key: Option<String>,
+    pub lean_mode: Option<String>,
+    pub memory_mib: Option<u32>,
+}
+
 impl ManagedManager {
     pub fn new(
         settings: ManagedSettings,
@@ -1754,21 +1846,45 @@ impl ManagedManager {
     }
 
     pub fn default_provider(&self) -> Option<Arc<dyn ManagedProvider>> {
+        let is_not_saturated = |p: &Arc<dyn ManagedProvider>| {
+            p.cached_availability()
+                .is_none_or(|a| a.status != AvailabilityStatus::Saturated)
+        };
         let name = self
             .default_provider_name
             .read()
             .ok()
             .map(|s| s.clone())
             .unwrap_or_else(|| "boat".into());
-        if self.is_provider_enabled(&name) {
-            if let Some(p) = self
-                .provider_for(&name)
+        let preferred = if self.is_provider_enabled(&name) {
+            self.provider_for(&name)
                 .filter(|p| self.is_provider_enabled(p.name()))
-            {
-                return Some(p);
-            }
+        } else {
+            None
+        };
+        if let Some(p) = preferred.as_ref().filter(|p| is_not_saturated(p)) {
+            return Some(Arc::clone(p));
         }
         let map = self.providers.read().ok()?;
+        for id in CANONICAL_PROVIDERS {
+            if self.is_provider_enabled(id) {
+                if let Some(p) = map.get(id).filter(|p| is_not_saturated(p)) {
+                    return Some(Arc::clone(p));
+                }
+            }
+        }
+        if let Some(p) = map
+            .values()
+            .find(|p| self.is_provider_enabled(p.name()) && is_not_saturated(p))
+        {
+            return Some(Arc::clone(p));
+        }
+        // If every enabled provider is currently reporting `Saturated`, fall
+        // back to the operator's enabled order so preflight returns a clear
+        // `provider_at_capacity` error instead of a false `provider_disabled`.
+        if let Some(p) = preferred {
+            return Some(p);
+        }
         for id in CANONICAL_PROVIDERS {
             if self.is_provider_enabled(id) {
                 if let Some(p) = map.get(id) {
@@ -1779,6 +1895,18 @@ impl ManagedManager {
         map.values()
             .find(|p| self.is_provider_enabled(p.name()))
             .cloned()
+    }
+
+    /// Refresh live availability for providers that implement a cached probe.
+    pub async fn refresh_provider_availabilities(&self) {
+        let providers: Vec<Arc<dyn ManagedProvider>> = self
+            .providers
+            .read()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default();
+        for p in providers {
+            let _ = p.refresh_availability().await;
+        }
     }
 
     #[cfg(test)]
@@ -1822,8 +1950,9 @@ impl ManagedManager {
             .map(|m| m.clone())
             .unwrap_or_default();
         let disabled = self.runtime_settings().disabled_providers;
-        let canonical: [(&str, bool, bool, &[SizeSpec]); 4] = [
+        let canonical: [(&str, bool, bool, &[SizeSpec]); 5] = [
             ("boat", true, true, &SIZES),
+            ("boost", false, true, &boost::BOOST_SIZES),
             ("hetzner", false, false, &hetzner::HETZNER_SIZES),
             ("vastai", false, false, &vastai::VASTAI_SIZES),
             ("scaleway", false, false, scaleway::SCALEWAY_WORKER_SIZES),
@@ -1847,6 +1976,7 @@ impl ManagedManager {
                     region: meta.and_then(|m| m.region.clone()),
                     project_id: meta.and_then(|m| m.project_id.clone()),
                     max_concurrent,
+                    availability: p.cached_availability(),
                     sizes: p.sizes().to_vec(),
                 });
             } else {
@@ -1862,6 +1992,7 @@ impl ManagedManager {
                     region: st.and_then(|s| s.region.clone()),
                     project_id: st.and_then(|s| s.project_id.clone()),
                     max_concurrent,
+                    availability: None,
                     sizes: fallback_sizes.to_vec(),
                 });
             }
@@ -1887,6 +2018,7 @@ impl ManagedManager {
                     region: meta.and_then(|m| m.region.clone()),
                     project_id: meta.and_then(|m| m.project_id.clone()),
                     max_concurrent: self.provider_max_concurrent(id),
+                    availability: p.cached_availability(),
                     sizes: p.sizes().to_vec(),
                 });
             }
@@ -2064,6 +2196,18 @@ impl ManagedManager {
                 let base = std::env::var("BOAT_API_BASE")
                     .unwrap_or_else(|_| boat::DEFAULT_API_BASE.to_string());
                 Some((Arc::new(boat::BoatProvider::new(base, api_key)), None, None))
+            }
+            "boost" => {
+                let base = std::env::var("BOOST_API_BASE")
+                    .or_else(|_| std::env::var("BOOST_API_URL"))
+                    .unwrap_or_else(|_| boost::DEFAULT_API_BASE.to_string());
+                let p = boost::BoostProvider::with_workspace(
+                    base,
+                    api_key,
+                    project_id.map(str::to_string),
+                );
+                let ws = p.configured_workspace_id().map(str::to_string);
+                Some((Arc::new(p), None, ws))
             }
             "hetzner" => {
                 let base = std::env::var("HETZNER_API_BASE")
@@ -2966,6 +3110,7 @@ impl ManagedManager {
             .collect();
         machines.sort_by_key(|m| std::cmp::Reverse(m.created_at));
         let daily_spend = self.daily_spend(SPEND_DAYS).await;
+        self.refresh_provider_availabilities().await;
         let default_prov = self.default_provider();
         let provider_name = default_prov
             .as_ref()
@@ -3016,11 +3161,25 @@ impl ManagedManager {
         }
     }
 
-    fn resolve_cloud_image(
+    pub(crate) fn resolve_cloud_image(
         provider_name: &str,
         size: &str,
         requested: Option<&str>,
     ) -> Result<String, ManagedError> {
+        if provider_name.eq_ignore_ascii_case("boost") {
+            return match requested.map(str::trim).filter(|s| !s.is_empty()) {
+                None | Some("ubuntu-26.04") | Some("provider-default") => {
+                    Ok("ubuntu-26.04".into())
+                }
+                Some(other) => Err(ManagedError::new(
+                    "image_unknown",
+                    400,
+                    format!(
+                        "Image '{other}' is not allowed on boost.ci; omit image (ubuntu-26.04), pass from_snapshot for an authorized project snapshot, or pass repo/base_key for a warm overlay"
+                    ),
+                )),
+            };
+        }
         if let Some(raw) = requested.map(str::trim).filter(|s| !s.is_empty()) {
             if !raw
                 .chars()
@@ -3035,11 +3194,111 @@ impl ManagedManager {
             return Ok(raw.to_string());
         }
         Ok(match provider_name {
+            "boost" => "ubuntu-26.04".into(),
             "hetzner" => "ubuntu-24.04".into(),
             "vastai" => "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04".into(),
             "scaleway" if scaleway::is_apple_silicon_type(size) => "macos-15".into(),
             "scaleway" => "ubuntu_noble".into(),
             _ => "ubuntu-24.04".into(),
+        })
+    }
+
+    pub(crate) fn validate_boost_extras(
+        provider_name: &str,
+        req: &SpawnRequest,
+    ) -> Result<ValidatedBoostExtras, ManagedError> {
+        let clean = |opt: &Option<String>| {
+            opt.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let repo = clean(&req.repo);
+        let base_key = clean(&req.base_key);
+        let lean_mode = clean(&req.lean_mode);
+        let memory_mib = req.memory_mib;
+
+        if !provider_name.eq_ignore_ascii_case("boost")
+            && (repo.is_some() || base_key.is_some() || lean_mode.is_some() || memory_mib.is_some())
+        {
+            return Err(ManagedError::new(
+                "invalid_boost_parameter",
+                400,
+                format!(
+                    "repo, base_key, lean_mode, and memory_mib are only supported on provider 'boost' (got '{provider_name}')"
+                ),
+            ));
+        }
+
+        if let Some(r) = &repo {
+            let valid = r.split_once('/').is_some_and(|(owner, name)| {
+                !owner.is_empty()
+                    && !name.is_empty()
+                    && !name.contains('/')
+                    && owner
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            });
+            if !valid {
+                return Err(ManagedError::new(
+                    "invalid_repo",
+                    400,
+                    format!("Invalid warm repo '{r}'; expected 'owner/name' (e.g. 'Layr-Labs/evm.fast')"),
+                ));
+            }
+        }
+
+        if let Some(k) = &base_key {
+            if k.len() != 64 || !k.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(ManagedError::new(
+                    "invalid_base_key",
+                    400,
+                    "Invalid base_key; expected 64-character hex digest",
+                ));
+            }
+        }
+
+        if repo.is_some() && base_key.is_some() {
+            return Err(ManagedError::new(
+                "invalid_boost_parameter",
+                400,
+                "Pass either 'repo' or 'base_key', not both",
+            ));
+        }
+
+        let normalized_lean_mode = match lean_mode {
+            None => None,
+            Some(m) => {
+                let lower = m.to_ascii_lowercase();
+                if !matches!(lower.as_str(), "auto" | "cache-only" | "off") {
+                    return Err(ManagedError::new(
+                        "invalid_lean_mode",
+                        400,
+                        format!("Invalid lean_mode '{m}'; use 'auto', 'cache-only', or 'off'"),
+                    ));
+                }
+                Some(lower)
+            }
+        };
+
+        if let Some(mib) = memory_mib {
+            if !(4096..=131_072).contains(&mib) || mib % 1024 != 0 {
+                return Err(ManagedError::new(
+                    "invalid_memory_mib",
+                    400,
+                    "memory_mib must be between 4096 and 131072 in multiples of 1024",
+                ));
+            }
+        }
+
+        Ok(ValidatedBoostExtras {
+            repo,
+            base_key: base_key.map(|s| s.to_ascii_lowercase()),
+            lean_mode: normalized_lean_mode,
+            memory_mib,
         })
     }
 
@@ -3105,7 +3364,34 @@ impl ManagedManager {
             })
         };
 
+        let validated_memory_mib = Self::validate_boost_extras(&prov, req)?.memory_mib;
         let (spec, boat_rank_pair) = match prov.as_str() {
+            "boost" => {
+                let mut s = match (requested_size, req.cpu, req.ram_gb) {
+                    (Some(name), _, _) => boost::boost_size_spec(name)
+                        .ok_or_else(|| {
+                            ManagedError::new(
+                                "invalid_size",
+                                400,
+                                format!(
+                                    "Unknown boost.ci size '{name}'; use boost-2vcpu-ubuntu-2604, boost-4vcpu-ubuntu-2604, boost-8vcpu-ubuntu-2604, boost-16vcpu-ubuntu-2604, boost-24vcpu-ubuntu-2604, boost-32vcpu-96gb or boost-32vcpu-ubuntu-2604"
+                                ),
+                            )
+                        })?,
+                    (None, None, None) => boost::BOOST_SIZES[1],
+                    (None, _, _) => find_smallest(&boost::BOOST_SIZES).ok_or_else(|| {
+                        ManagedError::new(
+                            "invalid_size",
+                            400,
+                            "No boost.ci runner profile satisfies the requested CPU/RAM/arch (max 32 vCPU / 128 GB x86_64)",
+                        )
+                    })?,
+                };
+                if let Some(mib) = validated_memory_mib {
+                    s.ram_gb = mib / 1024;
+                }
+                (check_spec(s)?, (0u8, 0u8))
+            }
             "hetzner" => {
                 let s = match (requested_size, req.cpu, req.ram_gb) {
                     (Some(name), _, _) => hetzner::hetzner_size_spec(name, requested_arch)
@@ -3406,6 +3692,53 @@ impl ManagedManager {
                     }
                 })?
             }
+        } else if let Some(snap_name) = req.from_snapshot.as_deref() {
+            if let Some(snap_prov) = self
+                .snapshot_provider(
+                    snap_name,
+                    req.owner_user_id.as_deref(),
+                    req.snapshot_project.as_deref(),
+                )
+                .await
+            {
+                let p = self
+                    .provider_for(&snap_prov)
+                    .or_else(|| self.default_provider())
+                    .ok_or_else(|| {
+                        ManagedError::new(
+                            "disabled",
+                            503,
+                            "No managed-machine provider is configured",
+                        )
+                    })?;
+                if !self.is_provider_enabled(p.name()) {
+                    return Err(ManagedError::new(
+                        "provider_disabled",
+                        409,
+                        format!(
+                            "Provider '{}' is disabled in Settings",
+                            provider_display_name(p.name())
+                        ),
+                    ));
+                }
+                p
+            } else {
+                self.default_provider().ok_or_else(|| {
+                    if any_configured {
+                        ManagedError::new(
+                            "provider_disabled",
+                            409,
+                            "All configured machine providers are disabled in Settings",
+                        )
+                    } else {
+                        ManagedError::new(
+                            "disabled",
+                            503,
+                            "No managed-machine provider is configured",
+                        )
+                    }
+                })?
+            }
         } else {
             self.default_provider().ok_or_else(|| {
                 if any_configured {
@@ -3425,14 +3758,21 @@ impl ManagedManager {
                 "snapshots_unsupported",
                 400,
                 format!(
-                    "Provider '{}' does not support warm snapshots or forks; use boat or spawn fresh",
+                    "Provider '{}' does not support warm snapshots or forks; use boat, boost or spawn fresh",
                     provider.name()
                 ),
             ));
         }
+        let ValidatedBoostExtras {
+            repo: validated_repo,
+            base_key: validated_base_key,
+            lean_mode: validated_lean_mode,
+            memory_mib: validated_memory_mib,
+        } = Self::validate_boost_extras(provider.name(), &req)?;
         let (spec, ttl_minutes) = Self::plan_for_provider(&self.settings, provider.name(), &req)?;
-        let (image, source_snapshot, fork_source, provisioning_mode) = if provider
+        let (image, source_snapshot, fork_source, provisioning_mode) = if (provider
             .uses_cloud_init_bootstrap()
+            || provider.bootstraps_worker_via_exec())
             && req.fork_of.is_none()
             && req.from_snapshot.is_none()
         {
@@ -3455,7 +3795,13 @@ impl ManagedManager {
         let quote = if fork_source.is_none() {
             let quote_spec = SpawnSpec {
                 machine_id: String::new(),
-                size: spec.size.into(),
+                size: req
+                    .size
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| s.eq_ignore_ascii_case("boost-32vcpu-vanilla"))
+                    .unwrap_or(spec.size)
+                    .into(),
                 cpu: min_cpu,
                 ram_gb: min_ram_gb,
                 ttl_seconds: ttl_minutes * 60 + 300,
@@ -3470,6 +3816,10 @@ impl ManagedManager {
                 exclude_offer_ids: Vec::new(),
                 allow_24h_commitment: req.allow_24h_commitment.unwrap_or(false),
                 provisioning_mode,
+                repo: validated_repo.clone(),
+                base_key: validated_base_key.clone(),
+                lean_mode: validated_lean_mode.clone(),
+                memory_mib: validated_memory_mib,
             };
             provider
                 .quote_spawn(&quote_spec)
@@ -3676,6 +4026,9 @@ impl ManagedManager {
                 active_mission_ids: Vec::new(),
                 deletable_at: is_apple_silicon.then(|| now + chrono::Duration::hours(24)),
                 has_executed_job: false,
+                repo: validated_repo.clone(),
+                base_key: validated_base_key.clone(),
+                lean_mode: validated_lean_mode.clone(),
             };
             self.machines.lock().await.push(machine.clone());
             self.persist().await;
@@ -3684,6 +4037,16 @@ impl ManagedManager {
         };
         self.ledger("spawn_requested", &machine);
 
+        let effective_lean_mode = if req
+            .size
+            .as_deref()
+            .is_some_and(|s| s.trim().eq_ignore_ascii_case("boost-32vcpu-vanilla"))
+            && validated_lean_mode.is_none()
+        {
+            Some("off".into())
+        } else {
+            validated_lean_mode
+        };
         let extras = SpawnExtras {
             gpu: req.gpu.clone(),
             arch: req.arch.clone(),
@@ -3692,6 +4055,10 @@ impl ManagedManager {
             min_cpu: Some(min_cpu),
             min_ram_gb: Some(min_ram_gb),
             allow_24h_commitment: req.allow_24h_commitment.unwrap_or(false),
+            repo: validated_repo,
+            base_key: validated_base_key,
+            lean_mode: effective_lean_mode,
+            memory_mib: validated_memory_mib,
         };
         let this = Arc::clone(self);
         let id = machine.id.clone();
@@ -3796,6 +4163,10 @@ impl ManagedManager {
                 exclude_offer_ids,
                 allow_24h_commitment: extras.allow_24h_commitment,
                 provisioning_mode: m.provisioning_mode,
+                repo: extras.repo.clone().or_else(|| m.repo.clone()),
+                base_key: extras.base_key.clone().or_else(|| m.base_key.clone()),
+                lean_mode: extras.lean_mode.clone().or_else(|| m.lean_mode.clone()),
+                memory_mib: extras.memory_mib,
             }
         };
         let created = match m.fork_source_provider_id.clone() {
@@ -3979,6 +4350,77 @@ impl ManagedManager {
             // Cloud-init / onstart script already writes enroll.env, runs
             // PROVISION_SCRIPT and starts sandboxed-node inside the guest.
             (0u64, Ok(()))
+        } else if provider.bootstraps_worker_via_exec() {
+            let capacity = (m.cpu / 2).max(1);
+            let job_memory = managed_job_memory_bytes(m.ram_gb);
+            let bootstrap = cloud_bootstrap_script(
+                core_url,
+                id,
+                &m.node_id,
+                &enroll_token,
+                capacity,
+                job_memory,
+                &m.provider,
+                &m.size,
+                &m.image,
+            );
+            let bootstrap_path = "/tmp/orb-bootstrap.sh";
+            let provision_started = tokio::time::Instant::now();
+            let mut boot_res = Err(String::new());
+            for attempt in 0..4 {
+                let Some(rem) = wall_deadline.checked_duration_since(tokio::time::Instant::now())
+                else {
+                    boot_res = Err(format!("exceeded {wall_timeout}s provisioning budget"));
+                    break;
+                };
+                let exec_timeout = rem.as_secs().clamp(15, 240);
+                let call_started = tokio::time::Instant::now();
+                boot_res = match provider
+                    .write_file(&provider_id, bootstrap_path, &bootstrap)
+                    .await
+                {
+                    Ok(()) => provider
+                        .exec(
+                            &provider_id,
+                            &format!(
+                                "bash {bootstrap_path} </dev/null >/dev/null 2>&1; rc=$?; rm -f {bootstrap_path}; exit $rc"
+                            ),
+                            exec_timeout,
+                        )
+                        .await
+                        .and_then(|v| match exec_exit_code(&v) {
+                            Some(code) if code != 0 => {
+                                let stderr = v
+                                    .get("stderr")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or("no stderr");
+                                Err(format!("exit code {code}: {stderr}"))
+                            }
+                            _ => Ok(()),
+                        }),
+                    Err(e) => Err(e),
+                };
+                let full_timeout = exec_timeout >= 20
+                    && call_started.elapsed()
+                        >= Duration::from_secs(exec_timeout.saturating_sub(5));
+                if boot_res.is_ok()
+                    || boot_res
+                        .as_ref()
+                        .err()
+                        .is_none_or(|e| !is_retryable_exec_error(e))
+                    || (full_timeout && attempt >= 1)
+                {
+                    break;
+                }
+                if attempt + 1 < 4 {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+            }
+            let provision_ms = provision_started.elapsed().as_millis() as u64;
+            boot_res.map_err(|e| format!("bootstrap orb-node via exec: {e}"))?;
+            (provision_ms, Ok(()))
         } else {
             let capacity = (m.cpu / 2).max(1);
             let job_memory = managed_job_memory_bytes(m.ram_gb);
@@ -4480,9 +4922,13 @@ impl ManagedManager {
                     }
                 }
             }
-            Err(_) if !m.state.is_live() && provider.uses_cloud_init_bootstrap() => {
-                // Cloud providers (Hetzner, Vast.ai, Scaleway) erase the instance
-                // record immediately on `DELETE`; keep the accrued `estimated_cost`
+            Err(_)
+                if !m.state.is_live()
+                    && (provider.uses_cloud_init_bootstrap()
+                        || provider.bootstraps_worker_via_exec()) =>
+            {
+                // Cloud providers (Hetzner, Vast.ai, Scaleway, Boost) may erase
+                // the instance record on `DELETE`; keep the accrued `estimated_cost`
                 // and close the ledger so the reaper stops polling a deleted ID.
                 if let Some(m) = self.update(id, |m| m.ledger_closed = true).await {
                     self.ledger("ledger_closed", &m);
@@ -4794,6 +5240,7 @@ impl ManagedManager {
         let mut first_err: Option<String> = None;
 
         for provider in &providers {
+            let _ = provider.refresh_availability().await;
             let prov_name = provider.name();
             let remote = match provider.list().await {
                 Ok(r) => r,
@@ -6006,6 +6453,10 @@ struct SpawnExtras {
     min_cpu: Option<u32>,
     min_ram_gb: Option<u32>,
     allow_24h_commitment: bool,
+    repo: Option<String>,
+    base_key: Option<String>,
+    lean_mode: Option<String>,
+    memory_mib: Option<u32>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6157,11 +6608,15 @@ pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<Managed
         val
     };
     let boat_key = take_env(&["BOAT_API_KEY"]);
+    let boost_key = take_env(&["BOOST_API_KEY", "BOOST_TOKEN"]);
     let hetzner_key = take_env(&["HETZNER_CLOUD_APIKEY", "HCLOUD_TOKEN"]);
     let vastai_key = take_env(&["VASTAI_API_KEY", "VAST_API_KEY"]);
     let scaleway_key = take_env(&["SCALEWAY_SECRET_KEY", "SCW_SECRET_KEY"]);
     let scaleway_access_key = take_env(&["SCALEWAY_KEY_ID", "SCW_ACCESS_KEY"]);
 
+    let boost_ws = std::env::var("BOOST_WORKSPACE_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
     let hetzner_loc = std::env::var("HETZNER_DEFAULT_LOCATION")
         .ok()
         .filter(|s| !s.trim().is_empty());
@@ -6178,6 +6633,7 @@ pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<Managed
         .filter(|s| !s.trim().is_empty());
 
     let any_provider = boat_key.is_some()
+        || boost_key.is_some()
         || hetzner_key.is_some()
         || vastai_key.is_some()
         || scaleway_key.is_some();
@@ -6185,6 +6641,9 @@ pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<Managed
     let manager = Arc::new(ManagedManager::new(settings, None, working_dir, core_port));
     if let Some(key) = boat_key {
         manager.register_base_credential("boat", "environment", key, None, None);
+    }
+    if let Some(key) = boost_key {
+        manager.register_base_credential("boost", "environment", key, None, boost_ws);
     }
     if let Some(key) = hetzner_key {
         manager.register_base_credential("hetzner", "environment", key, hetzner_loc, None);

@@ -56,6 +56,19 @@ data class ManagedSize(
     val minBillingHours: Int? = null
 )
 
+data class ManagedProviderAvailability(
+    val status: String,
+    val reason: String? = null,
+    val schedulableVcpus: Int? = null,
+    val schedulableMemoryMib: Int? = null,
+    val largestBootableVcpus: Int? = null,
+    val largestBootableMemoryMib: Int? = null,
+    val onlineEngines: Int? = null,
+    val activeVms: Int? = null,
+    val queuedSpawns: Int? = null,
+    val checkedAt: String? = null
+)
+
 data class ManagedProviderInfo(
     val provider: String,
     val displayName: String,
@@ -68,7 +81,8 @@ data class ManagedProviderInfo(
     val keyHint: String? = null,
     val region: String? = null,
     val projectId: String? = null,
-    val maxConcurrent: Int? = null
+    val maxConcurrent: Int? = null,
+    val availability: ManagedProviderAvailability? = null
 )
 
 data class ManagedProviderGroup(
@@ -131,6 +145,23 @@ object OrbManagedMachines {
         )
     }
 
+    fun parseAvailability(raw: Any?): ManagedProviderAvailability? {
+        val d = OrbJSON.dict(raw) ?: return null
+        val status = OrbJSON.str(d, "status") ?: return null
+        return ManagedProviderAvailability(
+            status = status,
+            reason = OrbJSON.str(d, "reason"),
+            schedulableVcpus = OrbJSON.int(d, "schedulable_vcpus"),
+            schedulableMemoryMib = OrbJSON.int(d, "schedulable_memory_mib"),
+            largestBootableVcpus = OrbJSON.int(d, "largest_bootable_vcpus"),
+            largestBootableMemoryMib = OrbJSON.int(d, "largest_bootable_memory_mib"),
+            onlineEngines = OrbJSON.int(d, "online_engines"),
+            activeVms = OrbJSON.int(d, "active_vms"),
+            queuedSpawns = OrbJSON.int(d, "queued_spawns"),
+            checkedAt = OrbJSON.str(d, "checked_at")
+        )
+    }
+
     fun parseProvider(d: OrbDict): ManagedProviderInfo? {
         val p = OrbJSON.str(d, "provider") ?: return null
         return ManagedProviderInfo(
@@ -145,7 +176,8 @@ object OrbManagedMachines {
             keyHint = OrbJSON.str(d, "key_hint"),
             region = OrbJSON.str(d, "region"),
             projectId = OrbJSON.str(d, "project_id"),
-            maxConcurrent = OrbJSON.int(d, "max_concurrent")
+            maxConcurrent = OrbJSON.int(d, "max_concurrent"),
+            availability = parseAvailability(d["availability"])
         )
     }
 
@@ -267,7 +299,7 @@ object OrbManagedMachines {
         (node.raw["labels"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
 
     fun nodeProvider(labels: List<String>?): String? {
-        val known = setOf("boat", "hetzner", "vastai", "scaleway")
+        val known = setOf("boat", "boost", "hetzner", "vastai", "scaleway")
         for (raw in labels.orEmpty()) {
             val l = raw.trim().lowercase(Locale.US)
             if (l.startsWith("provider=")) return l.removePrefix("provider=")
@@ -292,8 +324,14 @@ object OrbManagedMachines {
         val cred = listOf(credentialSourceLabel(p.credentialSource), p.keyHint.orEmpty())
             .filter { it.isNotEmpty() }
             .joinToString(" ")
+        val avail = if (p.enabled) when (p.availability?.status) {
+            "saturated" -> "At capacity"
+            "degraded" -> "Limited capacity"
+            else -> ""
+        } else ""
         return listOf(
             if (p.enabled) "Configured" else "Disabled",
+            avail,
             cred,
             p.region.orEmpty(),
             if (!p.projectId.isNullOrEmpty()) "proj ${p.projectId}" else "",
@@ -346,6 +384,7 @@ object OrbManagedMachines {
 
     fun providerLabel(provider: String?): String = when ((provider ?: "boat").lowercase(Locale.US)) {
         "boat" -> "boat.dev"
+        "boost", "boost.ci" -> "boost.ci"
         "hetzner" -> "Hetzner"
         "vastai" -> "Vast.ai"
         "scaleway" -> "Scaleway"
@@ -380,7 +419,7 @@ object OrbManagedMachines {
             if (key !in order) order.add(key)
         }
         for (p in providers) push(p.provider)
-        for (p in listOf("boat", "hetzner", "vastai", "scaleway")) push(p)
+        for (p in listOf("boat", "boost", "hetzner", "vastai", "scaleway")) push(p)
         for (key in buckets.keys) push(key)
         return order.mapNotNull { key ->
             val list = buckets[key]?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
@@ -616,6 +655,7 @@ object OrbManagedMachines {
             "budget_exceeded" -> "Daily budget reached"
             "quota_exceeded" -> "Machine limit reached"
             "provider_disabled" -> "Provider disabled"
+            "provider_at_capacity" -> "Provider at capacity"
             else -> ""
         }
         if (prefix.isNotEmpty()) return if (message.isNotEmpty()) "$prefix: $message" else "$prefix."

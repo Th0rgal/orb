@@ -50,6 +50,19 @@ export interface ManagedSize {
   min_billing_hours?: number | null;
 }
 
+export interface ManagedProviderAvailability {
+  status: "available" | "degraded" | "saturated" | string;
+  reason?: string | null;
+  schedulable_vcpus?: number | null;
+  schedulable_memory_mib?: number | null;
+  largest_bootable_vcpus?: number | null;
+  largest_bootable_memory_mib?: number | null;
+  online_engines?: number | null;
+  active_vms?: number | null;
+  queued_spawns?: number | null;
+  checked_at?: string | null;
+}
+
 export interface ManagedProviderInfo {
   provider: string;
   display_name: string;
@@ -60,6 +73,7 @@ export interface ManagedProviderInfo {
   region?: string | null;
   project_id?: string | null;
   max_concurrent?: number | null;
+  availability?: ManagedProviderAvailability | null;
   supports_snapshots: boolean;
   supports_free_stop: boolean;
   sizes: ManagedSize[];
@@ -192,12 +206,16 @@ export const isProviderUsable = (p: Pick<ManagedProviderInfo, "configured" | "en
 export const credentialSourceLabel = (source?: string | null): string =>
   source === "settings" ? "Settings" : source === "bitwarden" ? "Bitwarden" : source === "environment" ? "Environment" : source || "";
 
-export function providerStatusLine(p: Pick<ManagedProviderInfo, "configured" | "enabled" | "credential_source" | "key_hint" | "region" | "project_id" | "max_concurrent">): string {
+export function providerStatusLine(p: Pick<ManagedProviderInfo, "configured" | "enabled" | "credential_source" | "key_hint" | "region" | "project_id" | "max_concurrent" | "availability">): string {
   const enabled = isProviderEnabled(p);
   if (!p.configured) return enabled ? "Not configured" : "Disabled · Not configured";
   const cred = [credentialSourceLabel(p.credential_source), p.key_hint ?? ""].filter(Boolean).join(" ");
+  const cap = enabled
+    ? (p.availability?.status === "saturated" ? "At capacity" : p.availability?.status === "degraded" ? "Limited capacity" : "")
+    : "";
   return [
     enabled ? "Configured" : "Disabled",
+    cap,
     cred,
     p.region ?? "",
     p.project_id ? `proj ${p.project_id}` : "",
@@ -269,6 +287,7 @@ export const sizeSpec = (s: Pick<ManagedSize, "cpu" | "ram_gb"> & { disk_gb?: nu
 export const providerLabel = (provider?: string | null): string => {
   const key = (provider ?? "boat").toLowerCase();
   if (key === "boat") return "boat.dev";
+  if (key === "boost" || key === "boost.ci") return "boost.ci";
   if (key === "hetzner") return "Hetzner";
   if (key === "vastai") return "Vast.ai";
   if (key === "scaleway") return "Scaleway";
@@ -315,7 +334,7 @@ export function groupMachinesByProvider<M extends Pick<ManagedMachine, "provider
     if (!order.includes(key)) order.push(key);
   };
   for (const p of providers ?? []) push(p.provider);
-  for (const p of ["boat", "hetzner", "vastai", "scaleway"]) push(p);
+  for (const p of ["boat", "boost", "hetzner", "vastai", "scaleway"]) push(p);
   for (const key of buckets.keys()) push(key);
   return order
     .filter(key => (buckets.get(key)?.length ?? 0) > 0)
@@ -409,6 +428,7 @@ export function managedError(error: unknown): string {
   try { const body = JSON.parse(error.detail); code = body?.error ?? ""; message = body?.message ?? ""; } catch { message = error.detail; }
   const prefix = code === "budget_exceeded" ? "Daily budget reached"
     : code === "quota_exceeded" ? "Machine limit reached"
+    : code === "provider_at_capacity" ? "Provider at capacity"
     : code === "provider_disabled" ? "Provider disabled" : "";
   if (prefix) return message ? `${prefix}: ${message}` : `${prefix}.`;
   return message || `Request failed (${error.status})`;

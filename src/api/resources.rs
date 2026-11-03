@@ -92,6 +92,7 @@ fn machine_class_for_managed(provider: &str, size: &str) -> (String, String) {
     let s = size.trim().to_ascii_lowercase();
     let prov_title = match p.as_str() {
         "boat" => "Boat",
+        "boost" | "boost.ci" => "boost.ci",
         "hetzner" => "Hetzner",
         "vast" | "vastai" | "vast.ai" => "Vast.ai",
         "scaleway" => "Scaleway",

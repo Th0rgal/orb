@@ -13,6 +13,7 @@ export type PoolUsage = {
 
 export const MANAGED_PROVIDERS = [
   { id: "boat", label: "boat.dev" },
+  { id: "boost", label: "boost.ci" },
   { id: "hetzner", label: "Hetzner" },
   { id: "vastai", label: "Vast.ai" },
   { id: "scaleway", label: "Scaleway" },

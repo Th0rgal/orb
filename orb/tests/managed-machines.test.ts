@@ -187,15 +187,20 @@ describe("ownership and reaping", () => {
     expect(resp.enabled).toBe(true);
     expect(resp.providers?.map(p => [p.provider, p.display_name, p.configured, isProviderEnabled(p), isProviderUsable(p), p.supports_free_stop, p.supports_snapshots])).toEqual([
       ["boat", "boat.dev", true, true, true, true, true],
+      ["boost", "boost.ci", true, true, true, false, true],
       ["hetzner", "Hetzner Cloud", true, true, true, false, false],
       ["vastai", "Vast.ai", false, true, false, false, false],
       ["scaleway", "Scaleway", false, false, false, false, false],
     ]);
     expect(resp.providers![0]!.max_concurrent).toBe(100);
+    expect(resp.providers![1]!.availability?.status).toBe("degraded");
+    expect(resp.providers![1]!.availability?.reason).toBe("pool_memory");
     expect(providerStatusLine(resp.providers![0]!)).toBe("Configured · Bitwarden ••••1234 · up to 100 VMs");
-    expect(providerStatusLine(resp.providers![1]!)).toBe("Configured · Settings ••••5678 · fsn1");
-    expect(providerStatusLine(resp.providers![2]!)).toBe("Not configured");
-    expect(providerStatusLine(resp.providers![3]!)).toBe("Disabled · Not configured");
+    expect(providerStatusLine(resp.providers![1]!)).toBe("Configured · Limited capacity · Settings ••••9012 · proj ws-evm-fast");
+    expect(providerStatusLine({ ...resp.providers![1]!, availability: { status: "saturated", reason: "quota_vcpus" } })).toBe("Configured · At capacity · Settings ••••9012 · proj ws-evm-fast");
+    expect(providerStatusLine(resp.providers![2]!)).toBe("Configured · Settings ••••5678 · fsn1");
+    expect(providerStatusLine(resp.providers![3]!)).toBe("Not configured");
+    expect(providerStatusLine(resp.providers![4]!)).toBe("Disabled · Not configured");
     expect(managedSectionTitle(resp.providers, resp.machines)).toBe("Managed cloud");
     expect(canStopMachine(resp.machines[0]!, resp.providers)).toBe(false);
     expect(resp.machines[0]!.size).toBe("cpx42");

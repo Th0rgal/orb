@@ -284,7 +284,13 @@ fun OrbManagedMachinesBlock(
                             modifier = Modifier
                                 .size(7.dp)
                                 .clip(CircleShape)
-                                .background(if (usable) OrbStyle.success else OrbStyle.textMuted)
+                                .background(
+                                    when {
+                                        !usable -> OrbStyle.textMuted
+                                        pr.availability?.status == "saturated" -> OrbStyle.warning
+                                        else -> OrbStyle.success
+                                    }
+                                )
                         )
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(pr.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -896,7 +902,7 @@ private fun ManagedConfigureProviderDialog(
                     if (provider.provider == "hetzner" || provider.provider == "scaleway") {
                         put("region", region.trim())
                     }
-                    if (provider.provider == "scaleway") {
+                    if (provider.provider == "scaleway" || provider.provider == "boost") {
                         put("project_id", projectId.trim())
                     }
                     if (includeMax) {
@@ -946,6 +952,13 @@ private fun ManagedConfigureProviderDialog(
                         onValueChange = { region = it }
                     )
                 }
+                if (provider.provider == "boost") {
+                    OrbMiniField(
+                        label = "Workspace ID (optional)",
+                        value = projectId,
+                        onValueChange = { projectId = it }
+                    )
+                }
                 if (provider.provider == "scaleway") {
                     OrbMiniField(
                         label = "Default zone (e.g. fr-par-1)",
@@ -983,7 +996,9 @@ private fun ManagedNewMachineDialog(
     onCreate: (provider: String?, size: String, ttlMinutes: Int, allow24h: Boolean) -> Unit
 ) {
     val usable = response.providers.filter { OrbManagedMachines.isProviderUsable(it) }
-    val initProv = usable.firstOrNull { it.provider == "boat" }?.provider ?: usable.firstOrNull()?.provider ?: "boat"
+    val initProv = usable.firstOrNull { it.provider == "boat" && it.availability?.status != "saturated" }?.provider
+        ?: usable.firstOrNull { it.availability?.status != "saturated" }?.provider
+        ?: usable.firstOrNull()?.provider ?: "boat"
     var provider by remember { mutableStateOf(initProv) }
     val sizes = usable.firstOrNull { it.provider == provider }?.sizes?.takeIf { it.isNotEmpty() } ?: response.sizes
     var size by remember(provider) {

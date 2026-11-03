@@ -490,6 +490,7 @@ pub(crate) fn is_uncertain_dispatch_error(tool: &str, error: &str) -> bool {
             || stripped.starts_with("provision_failed (502")
             || stripped.starts_with("provision_failed (500")
             || stripped.starts_with("provider_quote_failed (502")
+            || stripped.starts_with("provider_at_capacity (")
             || stripped.starts_with("provider_billing_required (")
             || stripped.starts_with("provider_quota_exceeded (")
             || stripped.starts_with("provider_auth_failed (")
@@ -497,6 +498,7 @@ pub(crate) fn is_uncertain_dispatch_error(tool: &str, error: &str) -> bool {
             || (tool == "start_mission"
                 && (stripped.contains(": provision_failed:")
                     || stripped.contains(": provider_quote_failed:")
+                    || stripped.contains(": provider_at_capacity:")
                     || stripped.contains(": provider_billing_required:")
                     || stripped.contains(": provider_quota_exceeded:")
                     || stripped.contains(": provider_auth_failed:")

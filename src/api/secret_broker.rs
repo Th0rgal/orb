@@ -386,6 +386,8 @@ pub fn is_core_reserved_compute_secret(key: &str) -> bool {
     matches!(
         key.trim().to_ascii_uppercase().as_str(),
         "BOAT_API_KEY"
+            | "BOOST_API_KEY"
+            | "BOOST_TOKEN"
             | "HETZNER_CLOUD_APIKEY"
             | "HCLOUD_TOKEN"
             | "SCALEWAY_SECRET_KEY"
