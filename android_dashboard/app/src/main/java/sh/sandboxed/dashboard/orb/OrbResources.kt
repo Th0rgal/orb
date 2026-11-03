@@ -142,6 +142,7 @@ object OrbResourcesModel {
         val label: String,
         val section: String,
         val role: String = "worker",
+        val nodeId: String? = null,
         val startOffsetSecs: Double,
         val durationSecs: Double,
         val etaRemainingSecs: Double? = null,
@@ -149,8 +150,18 @@ object OrbResourcesModel {
         val afterIds: List<String> = emptyList(),
     )
 
-    data class DagRowLayout(
+    data class DagSpanLayout(
         val bar: DagBarInput,
+        val startFrac: Double,
+        val endFrac: Double,
+        val etaEndFrac: Double?,
+    )
+
+    data class DagRowLayout(
+        val id: String,
+        val bar: DagBarInput,
+        val spans: List<DagSpanLayout>,
+        val totalDurationSecs: Double,
         val sectionHeader: String?,
         val startFrac: Double,
         val endFrac: Double,
@@ -456,21 +467,156 @@ object OrbResourcesModel {
         )
     }
 
+    private fun stripVmSectionAffix(section: String): String {
+        val trimmed = section.trim()
+        if (trimmed.endsWith(" VMs")) {
+            val cut = trimmed.dropLast(4).trim()
+            return cut.ifEmpty { section }
+        }
+        return trimmed.ifEmpty { section }
+    }
+
+    private fun normalizeDagBarsForLanes(bars: List<DagBarInput>): List<DagBarInput> {
+        val vmClassByNode = mutableMapOf<String, String>()
+        val nodesWithWorkers = mutableSetOf<String>()
+
+        for (b in bars) {
+            val nid = b.nodeId?.trim().orEmpty()
+            if (nid.isEmpty()) continue
+            if (b.role == "vm") {
+                vmClassByNode[nid] = stripVmSectionAffix(b.section)
+            } else {
+                nodesWithWorkers.add(nid)
+            }
+        }
+
+        val out = mutableListOf<DagBarInput>()
+        for (b in bars) {
+            val nid = b.nodeId?.trim().orEmpty()
+            if (b.role == "vm") {
+                if (nid.isNotEmpty() && nodesWithWorkers.contains(nid)) {
+                    continue
+                }
+                out.add(if (nid.isNotEmpty()) b.copy(section = stripVmSectionAffix(b.section)) else b)
+                continue
+            }
+
+            val roleLc = b.role.lowercase(Locale.US)
+            val sec = when {
+                roleLc == "coordinator" || roleLc == "boss" || roleLc == "orchestrator" ->
+                    b.section.ifEmpty { "Orchestrator" }
+                nid.isNotEmpty() && vmClassByNode.containsKey(nid) ->
+                    vmClassByNode.getValue(nid)
+                nid.isNotEmpty() && nid != "core" && nid != "local" -> when {
+                    nid.startsWith("managed-") -> if (b.section.contains("·")) stripVmSectionAffix(b.section) else "Cloud VMs"
+                    nid.startsWith("spark") -> "DGX Spark"
+                    else -> "Static fleet"
+                }
+                else -> b.section
+            }
+            out.add(b.copy(section = sec))
+        }
+        return out
+    }
+
     fun layoutDagRows(bars: List<DagBarInput>, horizonSecs: Double): List<DagRowLayout> {
         val safeH = max(60.0, horizonSecs)
-        var prevSection: String? = null
-        return bars.map { b ->
-            val hdr = if (b.section != prevSection) b.section else null
-            prevSection = b.section
-            val sFrac = min(1.0, max(0.0, b.startOffsetSecs / safeH))
-            val eFrac = min(1.0, max(sFrac + 0.01, (b.startOffsetSecs + max(30.0, b.durationSecs)) / safeH))
-            val etaFrac = if (b.etaRemainingSecs != null && b.etaRemainingSecs > 0.0 && b.state == "active") {
-                min(1.0, max(eFrac, (b.startOffsetSecs + b.durationSecs + b.etaRemainingSecs) / safeH))
-            } else {
-                null
+        val normalized = normalizeDagBarsForLanes(bars)
+        val sectionOrder = mutableListOf<String>()
+        val bySection = mutableMapOf<String, MutableList<DagBarInput>>()
+        for (b in normalized) {
+            if (!bySection.containsKey(b.section)) {
+                sectionOrder.add(b.section)
+                bySection[b.section] = mutableListOf()
             }
-            DagRowLayout(bar = b, sectionHeader = hdr, startFrac = sFrac, endFrac = eFrac, etaEndFrac = etaFrac)
+            bySection.getValue(b.section).add(b)
         }
+        val orchIdx = sectionOrder.indexOf("Orchestrator")
+        if (orchIdx > 0) {
+            sectionOrder.removeAt(orchIdx)
+            sectionOrder.add(0, "Orchestrator")
+        }
+
+        class Lane(
+            var lastEndSecs: Double,
+            var lastOccFrac: Double,
+            var lastNodeId: String?,
+            val spans: MutableList<DagSpanLayout>,
+        )
+
+        val rows = mutableListOf<DagRowLayout>()
+        for (sec in sectionOrder) {
+            val secBars = (bySection[sec] ?: emptyList()).sortedWith(
+                compareBy<DagBarInput> { it.startOffsetSecs }
+                    .thenByDescending { it.durationSecs }
+                    .thenBy { it.id },
+            )
+            val lanes = mutableListOf<Lane>()
+            for (b in secBars) {
+                val dur = max(30.0, b.durationSecs)
+                val sFrac = min(1.0, max(0.0, b.startOffsetSecs / safeH))
+                val eFrac = min(1.0, max(sFrac + 0.008, (b.startOffsetSecs + dur) / safeH))
+                val etaFrac = if (b.etaRemainingSecs != null && b.etaRemainingSecs > 0.0 && b.state == "active") {
+                    min(1.0, max(eFrac, (b.startOffsetSecs + b.durationSecs + b.etaRemainingSecs) / safeH))
+                } else {
+                    null
+                }
+                val occEndSecs = b.startOffsetSecs + dur + (if (b.state == "active" && (b.etaRemainingSecs ?: 0.0) > 0.0) (b.etaRemainingSecs ?: 0.0) else 0.0)
+                val occEndFrac = etaFrac ?: eFrac
+                val nid = b.nodeId?.trim()?.takeIf { it.isNotEmpty() }
+
+                var chosen = -1
+                if (nid != null) {
+                    for (i in lanes.indices) {
+                        val ln = lanes[i]
+                        if (ln.lastNodeId == nid && ln.lastEndSecs <= b.startOffsetSecs + 5.0 && ln.lastOccFrac <= sFrac + 0.002) {
+                            chosen = i
+                            break
+                        }
+                    }
+                }
+                if (chosen < 0) {
+                    for (i in lanes.indices) {
+                        val ln = lanes[i]
+                        if (ln.lastEndSecs <= b.startOffsetSecs + 5.0 && ln.lastOccFrac <= sFrac + 0.002) {
+                            chosen = i
+                            break
+                        }
+                    }
+                }
+
+                val span = DagSpanLayout(bar = b, startFrac = sFrac, endFrac = eFrac, etaEndFrac = etaFrac)
+                if (chosen < 0) {
+                    lanes.add(Lane(occEndSecs, occEndFrac, nid, mutableListOf(span)))
+                } else {
+                    val ln = lanes[chosen]
+                    ln.lastEndSecs = max(ln.lastEndSecs, occEndSecs)
+                    ln.lastOccFrac = max(ln.lastOccFrac, occEndFrac)
+                    if (nid != null) ln.lastNodeId = nid
+                    ln.spans.add(span)
+                }
+            }
+
+            lanes.forEachIndexed { li, ln ->
+                val hdr = if (li == 0) sec else null
+                val primarySpan = ln.spans.lastOrNull { it.bar.state == "active" } ?: ln.spans.last()
+                val totalDur = ln.spans.sumOf { max(0.0, it.bar.durationSecs) }
+                val rowId = if (ln.spans.size == 1) primarySpan.bar.id else "lane:$sec:$li:${ln.spans.first().bar.id}"
+                rows.add(
+                    DagRowLayout(
+                        id = rowId,
+                        bar = primarySpan.bar,
+                        spans = ln.spans,
+                        totalDurationSecs = totalDur,
+                        sectionHeader = hdr,
+                        startFrac = primarySpan.startFrac,
+                        endFrac = primarySpan.endFrac,
+                        etaEndFrac = primarySpan.etaEndFrac,
+                    ),
+                )
+            }
+        }
+        return rows
     }
 
     fun parseColor(hex: String): Color {
@@ -1060,6 +1206,7 @@ private fun MissionFastDagCard(
                 label = OrbJSON.str(b, "label") ?: "Subagent",
                 section = OrbJSON.str(b, "section") ?: "Workers",
                 role = OrbJSON.str(b, "role") ?: "worker",
+                nodeId = OrbJSON.str(b, "node_id"),
                 startOffsetSecs = OrbJSON.double(b, "start_offset_secs") ?: 0.0,
                 durationSecs = OrbJSON.double(b, "duration_secs") ?: 60.0,
                 etaRemainingSecs = OrbJSON.double(b, "eta_remaining_secs"),
@@ -1067,14 +1214,14 @@ private fun MissionFastDagCard(
             )
         }
         val rows = OrbResourcesModel.layoutDagRows(bars, horizonSecs)
-        val vmCount = bars.count { it.role == "vm" }
-        val spanCount = bars.size - vmCount
+        val laneCount = rows.size
+        val spanCount = rows.sumOf { it.spans.size }
 
         Text(
-            text = if (vmCount > 0) {
-                "Execution Fast-DAG · ${OrbResourcesModel.formatLargeNumber(vmCount.toDouble())} VMs · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
+            text = if (laneCount > 0 && spanCount > laneCount) {
+                "Execution Fast-DAG · ${OrbResourcesModel.formatLargeNumber(laneCount.toDouble())} lanes · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
             } else {
-                "Subagent Execution Fast-DAG · ${OrbResourcesModel.formatLargeNumber(bars.size.toDouble())} spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
+                "Subagent Execution Fast-DAG · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
             },
             color = OrbStyle.textSecondary,
             fontSize = 11.sp,
@@ -1097,8 +1244,13 @@ private fun MissionFastDagCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text(row.bar.label, color = Color.White, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    val durText = if (row.spans.size > 1) {
+                        "${row.spans.size}× ${OrbResourcesModel.formatDurationCompact(row.totalDurationSecs)}"
+                    } else {
+                        OrbResourcesModel.formatDurationCompact(row.bar.durationSecs)
+                    }
                     Text(
-                        OrbResourcesModel.formatDurationCompact(row.bar.durationSecs),
+                        durText,
                         color = OrbStyle.textSecondary,
                         fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace,
@@ -1115,39 +1267,47 @@ private fun MissionFastDagCard(
                         size = size,
                         cornerRadius = CornerRadius(4f, 4f),
                     )
-                    val barColor = if (row.bar.role == "vm") {
-                        when (row.bar.state) {
-                            "active" -> Color(0xFF22959D)
-                            "done" -> Color(0xFF1D9A78)
-                            "capped" -> Color(0xFFD9B23A)
-                            else -> Color(0xFF6A6A6A)
+                    row.spans.forEachIndexed { spIdx, sp ->
+                        val barColor = if (sp.bar.role == "vm") {
+                            when (sp.bar.state) {
+                                "active" -> Color(0xFF22959D)
+                                "done" -> Color(0xFF1D9A78)
+                                "capped" -> Color(0xFFD9B23A)
+                                else -> Color(0xFF6A6A6A)
+                            }
+                        } else {
+                            when (sp.bar.state) {
+                                "done" -> Color(0xFF80B28D)
+                                "active" -> Color(0xFF86AEE4)
+                                "capped" -> Color(0xFFD9B23A)
+                                "cancelled" -> Color(0xFF7D8590).copy(alpha = 0.55f)
+                                else -> Color(0xFF6A6A6A)
+                            }
                         }
-                    } else {
-                        when (row.bar.state) {
-                            "done" -> Color(0xFF80B28D)
-                            "active" -> Color(0xFF86AEE4)
-                            "capped" -> Color(0xFFD9B23A)
-                            "cancelled" -> Color(0xFF7D8590).copy(alpha = 0.55f)
-                            else -> Color(0xFF6A6A6A)
+                        val x0 = (sp.startFrac * w).toFloat()
+                        val rawBw = max(6f, ((sp.endFrac - sp.startFrac) * w).toFloat())
+                        val bw = if (spIdx + 1 < row.spans.size) {
+                            val nextX = (row.spans[spIdx + 1].startFrac * w).toFloat() - 2f
+                            max(4f, min(rawBw, nextX - x0))
+                        } else {
+                            rawBw
                         }
-                    }
-                    val x0 = (row.startFrac * w).toFloat()
-                    val bw = max(8f, ((row.endFrac - row.startFrac) * w).toFloat())
-                    drawRoundRect(
-                        color = barColor,
-                        topLeft = Offset(x0, 0f),
-                        size = Size(bw, size.height),
-                        cornerRadius = CornerRadius(4f, 4f),
-                    )
-                    row.etaEndFrac?.let { etaEnd ->
-                        val ew = max(0f, ((etaEnd - row.endFrac) * w).toFloat())
-                        if (ew > 2f) {
-                            drawRoundRect(
-                                color = barColor.copy(alpha = 0.25f),
-                                topLeft = Offset(x0 + bw, 0f),
-                                size = Size(ew, size.height),
-                                cornerRadius = CornerRadius(4f, 4f),
-                            )
+                        drawRoundRect(
+                            color = barColor,
+                            topLeft = Offset(x0, 0f),
+                            size = Size(bw, size.height),
+                            cornerRadius = CornerRadius(4f, 4f),
+                        )
+                        sp.etaEndFrac?.let { etaEnd ->
+                            val ew = max(0f, ((etaEnd - sp.endFrac) * w).toFloat())
+                            if (ew > 2f) {
+                                drawRoundRect(
+                                    color = barColor.copy(alpha = 0.25f),
+                                    topLeft = Offset(x0 + bw, 0f),
+                                    size = Size(ew, size.height),
+                                    cornerRadius = CornerRadius(4f, 4f),
+                                )
+                            }
                         }
                     }
                 }

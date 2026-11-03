@@ -68,26 +68,38 @@ export interface SankeyLayoutResult {
   columns: number;
 }
 
+export interface DagBarItem {
+  id: string;
+  mission_id?: string | null;
+  label: string;
+  section: string;
+  role?: string;
+  model?: string | null;
+  node_id?: string | null;
+  vcpu?: number;
+  compute_usd_per_h?: number;
+  b_tok_per_h?: number;
+  inference_usd_per_h?: number;
+  start_offset_secs: number;
+  duration_secs: number;
+  eta_remaining_secs?: number | null;
+  eta_basis?: string | null;
+  state: string;
+  after_ids: string[];
+}
+
+export interface DagSpanLayout {
+  bar: DagBarItem;
+  startFrac: number;
+  endFrac: number;
+  etaEndFrac: number | null;
+}
+
 export interface DagRowLayout {
-  bar: {
-    id: string;
-    mission_id?: string | null;
-    label: string;
-    section: string;
-    role?: string;
-    model?: string | null;
-    node_id?: string | null;
-    vcpu?: number;
-    compute_usd_per_h?: number;
-    b_tok_per_h?: number;
-    inference_usd_per_h?: number;
-    start_offset_secs: number;
-    duration_secs: number;
-    eta_remaining_secs?: number | null;
-    eta_basis?: string | null;
-    state: string;
-    after_ids: string[];
-  };
+  id: string;
+  bar: DagBarItem;
+  spans: DagSpanLayout[];
+  totalDurationSecs: number;
   index: number;
   sectionHeader: string | null;
   y: number;
@@ -544,8 +556,67 @@ export function computeSankeyLayout(
   };
 }
 
+function stripVmSectionAffix(section: string): string {
+  const trimmed = section.trim();
+  if (trimmed.endsWith(" VMs")) {
+    return trimmed.slice(0, -4).trim() || section;
+  }
+  return trimmed || section;
+}
+
+function normalizeDagBarsForLanes(bars: DagBarItem[]): DagBarItem[] {
+  const vmClassByNode = new Map<string, string>();
+  const nodesWithWorkers = new Set<string>();
+
+  for (const b of bars) {
+    const nid = b.node_id?.trim() || "";
+    if (!nid) continue;
+    if (b.role === "vm") {
+      vmClassByNode.set(nid, stripVmSectionAffix(b.section));
+    } else {
+      nodesWithWorkers.add(nid);
+    }
+  }
+
+  const out: DagBarItem[] = [];
+  for (const b of bars) {
+    const nid = b.node_id?.trim() || "";
+    if (b.role === "vm") {
+      // Only render a VM lease bar when NO subagent span already represents work on that node;
+      // this keeps direct-compute (`remote_jobs`) or idle leased VMs visible without cluttering
+      // agent swimlanes with idle handoff fragments between waves.
+      if (nid && nodesWithWorkers.has(nid)) {
+        continue;
+      }
+      out.push({
+        ...b,
+        section: nid ? stripVmSectionAffix(b.section) : b.section,
+      });
+      continue;
+    }
+
+    let section = b.section;
+    const role = (b.role ?? "worker").toLowerCase();
+    if (role === "coordinator" || role === "boss" || role === "orchestrator") {
+      section = b.section || "Orchestrator";
+    } else if (nid && vmClassByNode.has(nid)) {
+      section = vmClassByNode.get(nid)!;
+    } else if (nid && nid !== "core" && nid !== "local") {
+      if (nid.startsWith("managed-")) {
+        section = b.section.includes("·") ? stripVmSectionAffix(b.section) : "Cloud VMs";
+      } else if (nid.startsWith("spark")) {
+        section = "DGX Spark";
+      } else {
+        section = "Static fleet";
+      }
+    }
+    out.push({ ...b, section });
+  }
+  return out;
+}
+
 export function layoutDagRows(
-  bars: DagRowLayout["bar"][],
+  bars: DagBarItem[],
   horizonSecs: number,
   options?: {
     rowHeight?: number;
@@ -558,66 +629,179 @@ export function layoutDagRows(
   const topPadding = options?.topPadding ?? 8;
   const safeHorizon = Math.max(60, horizonSecs);
 
-  const rows: DagRowLayout[] = [];
-  const byId = new Map<string, DagRowLayout>();
-  let cursorY = topPadding;
-  let prevSection: string | null = null;
-
-  for (let i = 0; i < bars.length; i++) {
-    const b = bars[i];
-    const sectionHeader = b.section !== prevSection ? b.section : null;
-    prevSection = b.section;
-    if (sectionHeader !== null) {
-      cursorY += sectionHeaderHeight;
+  const normalized = normalizeDagBarsForLanes(bars);
+  const sectionOrder: string[] = [];
+  const bySection = new Map<string, DagBarItem[]>();
+  for (const b of normalized) {
+    let list = bySection.get(b.section);
+    if (!list) {
+      list = [];
+      bySection.set(b.section, list);
+      sectionOrder.push(b.section);
     }
-    const barHeight = 16;
-    const barY = cursorY + (rowHeight - barHeight) / 2;
-    const startFrac = Math.max(0, Math.min(1, b.start_offset_secs / safeHorizon));
-    const endFrac = Math.max(
-      startFrac + 0.008,
-      Math.min(1, (b.start_offset_secs + Math.max(30, b.duration_secs)) / safeHorizon),
-    );
-    const etaEndFrac =
-      b.eta_remaining_secs != null && b.eta_remaining_secs > 0 && b.state === "active"
-        ? Math.max(
-            endFrac,
-            Math.min(
-              1,
-              (b.start_offset_secs + b.duration_secs + b.eta_remaining_secs) / safeHorizon,
-            ),
-          )
-        : null;
+    list.push(b);
+  }
+  // Place Orchestrator section at the very top when present alongside hardware sections
+  const orchIdx = sectionOrder.indexOf("Orchestrator");
+  if (orchIdx > 0) {
+    sectionOrder.splice(orchIdx, 1);
+    sectionOrder.unshift("Orchestrator");
+  }
 
-    const row: DagRowLayout = {
-      bar: b,
-      index: i,
-      sectionHeader,
-      y: cursorY,
-      barY,
-      barHeight,
-      startFrac,
-      endFrac,
-      etaEndFrac,
-    };
-    rows.push(row);
-    byId.set(b.id, row);
-    cursorY += rowHeight;
+  const rows: DagRowLayout[] = [];
+  const spanLookup = new Map<string, { centerY: number; span: DagSpanLayout }>();
+  let cursorY = topPadding;
+  let rowIndex = 0;
+
+  for (const sec of sectionOrder) {
+    const secBars = (bySection.get(sec) ?? []).slice().sort(
+      (a, b) =>
+        a.start_offset_secs - b.start_offset_secs ||
+        b.duration_secs - a.duration_secs ||
+        a.id.localeCompare(b.id),
+    );
+
+    const lanes: Array<{
+      lastEndSecs: number;
+      lastOccFrac: number;
+      lastNodeId: string | null;
+      spans: DagSpanLayout[];
+    }> = [];
+
+    for (const b of secBars) {
+      const dur = Math.max(30, b.duration_secs);
+      const startFrac = Math.max(0, Math.min(1, b.start_offset_secs / safeHorizon));
+      const endFrac = Math.max(
+        startFrac + 0.008,
+        Math.min(1, (b.start_offset_secs + dur) / safeHorizon),
+      );
+      const etaEndFrac =
+        b.eta_remaining_secs != null && b.eta_remaining_secs > 0 && b.state === "active"
+          ? Math.max(
+              endFrac,
+              Math.min(
+                1,
+                (b.start_offset_secs + b.duration_secs + b.eta_remaining_secs) / safeHorizon,
+              ),
+            )
+          : null;
+      const occEndSecs =
+        b.start_offset_secs +
+        dur +
+        (b.state === "active" && b.eta_remaining_secs && b.eta_remaining_secs > 0
+          ? b.eta_remaining_secs
+          : 0);
+      const occEndFrac = etaEndFrac ?? endFrac;
+      const nid = b.node_id?.trim() || null;
+
+      let chosen = -1;
+      if (nid) {
+        for (let i = 0; i < lanes.length; i++) {
+          const ln = lanes[i];
+          if (
+            ln.lastNodeId === nid &&
+            ln.lastEndSecs <= b.start_offset_secs + 5 &&
+            ln.lastOccFrac <= startFrac + 0.002
+          ) {
+            chosen = i;
+            break;
+          }
+        }
+      }
+      if (chosen < 0) {
+        for (let i = 0; i < lanes.length; i++) {
+          const ln = lanes[i];
+          if (
+            ln.lastEndSecs <= b.start_offset_secs + 5 &&
+            ln.lastOccFrac <= startFrac + 0.002
+          ) {
+            chosen = i;
+            break;
+          }
+        }
+      }
+
+      const span: DagSpanLayout = { bar: b, startFrac, endFrac, etaEndFrac };
+      if (chosen < 0) {
+        lanes.push({
+          lastEndSecs: occEndSecs,
+          lastOccFrac: occEndFrac,
+          lastNodeId: nid,
+          spans: [span],
+        });
+      } else {
+        lanes[chosen].lastEndSecs = Math.max(lanes[chosen].lastEndSecs, occEndSecs);
+        lanes[chosen].lastOccFrac = Math.max(lanes[chosen].lastOccFrac, occEndFrac);
+        if (nid) lanes[chosen].lastNodeId = nid;
+        lanes[chosen].spans.push(span);
+      }
+    }
+
+    for (let li = 0; li < lanes.length; li++) {
+      const ln = lanes[li];
+      const sectionHeader = li === 0 ? sec : null;
+      if (sectionHeader !== null) {
+        cursorY += sectionHeaderHeight;
+      }
+      const barHeight = 16;
+      const barY = cursorY + (rowHeight - barHeight) / 2;
+      const centerY = barY + barHeight / 2;
+
+      let primarySpan = ln.spans[ln.spans.length - 1];
+      for (let si = ln.spans.length - 1; si >= 0; si--) {
+        if (ln.spans[si].bar.state === "active") {
+          primarySpan = ln.spans[si];
+          break;
+        }
+      }
+      const totalDurationSecs = ln.spans.reduce(
+        (acc, sp) => acc + Math.max(0, sp.bar.duration_secs),
+        0,
+      );
+      const rowId =
+        ln.spans.length === 1
+          ? primarySpan.bar.id
+          : `lane:${sec}:${li}:${ln.spans[0].bar.id}`;
+
+      const row: DagRowLayout = {
+        id: rowId,
+        bar: primarySpan.bar,
+        spans: ln.spans,
+        totalDurationSecs,
+        index: rowIndex++,
+        sectionHeader,
+        y: cursorY,
+        barY,
+        barHeight,
+        startFrac: primarySpan.startFrac,
+        endFrac: primarySpan.endFrac,
+        etaEndFrac: primarySpan.etaEndFrac,
+      };
+      rows.push(row);
+      for (const sp of ln.spans) {
+        spanLookup.set(sp.bar.id, { centerY, span: sp });
+      }
+      cursorY += rowHeight;
+    }
   }
 
   const edges: DagDependencyEdge[] = [];
   for (const row of rows) {
-    for (const depId of row.bar.after_ids) {
-      const pred = byId.get(depId);
-      if (!pred) continue;
-      edges.push({
-        id: `${depId}->${row.bar.id}`,
-        fromId: depId,
-        toId: row.bar.id,
-        fromEndFrac: pred.endFrac,
-        fromCenterY: pred.barY + pred.barHeight / 2,
-        toStartFrac: row.startFrac,
-        toCenterY: row.barY + row.barHeight / 2,
-      });
+    for (const sp of row.spans) {
+      const toCenterY = row.barY + row.barHeight / 2;
+      for (const depId of sp.bar.after_ids) {
+        const pred = spanLookup.get(depId);
+        if (!pred) continue;
+        edges.push({
+          id: `${depId}->${sp.bar.id}`,
+          fromId: depId,
+          toId: sp.bar.id,
+          fromEndFrac: pred.span.endFrac,
+          fromCenterY: pred.centerY,
+          toStartFrac: sp.startFrac,
+          toCenterY,
+        });
+      }
     }
   }
 

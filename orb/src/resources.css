@@ -31,6 +31,7 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .res-seg {
@@ -124,7 +125,9 @@
   border-radius: var(--radius-md);
   background: var(--bg-inset);
   border: 1px solid var(--stroke-soft);
-  max-width: 320px;
+  max-width: 210px;
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 .res-mission-crumb-title {
@@ -417,10 +420,35 @@
 }
 
 .res-dag-row-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-family: var(--mono);
   font-size: 10px;
   color: var(--fg-3);
   flex-shrink: 0;
+}
+
+.res-dag-lane-count {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-inset);
+  color: var(--fg-2);
+  font-size: 9.5px;
+  line-height: 1.2;
+}
+
+.res-dag-bar-inline-label {
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 500;
+  fill: #ffffff;
+  fill-opacity: 0.92;
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.38);
+  stroke-width: 2px;
+  stroke-linejoin: round;
 }
 
 .res-dag-canvas {

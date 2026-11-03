@@ -79,8 +79,13 @@ describe("resourcesModel shared spec", () => {
     expect(dag.rows.map((r) => r.sectionHeader)).toEqual(
       fixture.dag.expected_section_headers,
     );
+    expect(dag.rows.map((r) => r.spans.length)).toEqual(
+      fixture.dag.expected_span_counts,
+    );
     expect(dag.edges.map((e) => e.id)).toEqual(["b1->b2", "b2->b3"]);
-    expect(dag.rows[1].startFrac).toBeCloseTo(1800 / 21600, 4);
+    expect(dag.rows[0].spans[0].startFrac).toBeCloseTo(0, 4);
+    expect(dag.rows[0].spans[1].startFrac).toBeCloseTo(1800 / 21600, 4);
+    expect(dag.rows[1].startFrac).toBeCloseTo(3600 / 21600, 4);
   });
 
   it("builds non-overshooting monotone curves", () => {
@@ -413,6 +418,9 @@ describe("resourcesModel shared spec", () => {
     expect(sharedVmDag.rows.map((r) => r.sectionHeader)).toEqual(
       fixture.dag_parallel_vms.expected_section_headers,
     );
+    expect(sharedVmDag.rows.map((r) => r.spans.length)).toEqual(
+      fixture.dag_parallel_vms.expected_span_counts,
+    );
     sharedVmDag.rows.forEach((r, idx) => {
       expect(r.startFrac).toBeCloseTo(fixture.dag_parallel_vms.expected_x0[idx], 5);
       expect(r.endFrac).toBeCloseTo(fixture.dag_parallel_vms.expected_x1[idx], 5);
@@ -423,5 +431,60 @@ describe("resourcesModel shared spec", () => {
         expect(r.etaEndFrac).toBeNull();
       }
     });
+  });
+
+  it("packs sequential workers on the same Boat hardware onto shared swimlanes and deduplicates covered VM leases", () => {
+    const dag = layoutDagRows(
+      [
+        {
+          id: "vm:xl-a",
+          mission_id: "root",
+          label: "Boat · xlarge · xlarge-a (16 vCPU)",
+          section: "Boat · xlarge VMs",
+          role: "vm",
+          node_id: "managed-xla",
+          start_offset_secs: 0,
+          duration_secs: 7200,
+          eta_remaining_secs: 1800,
+          state: "active",
+          after_ids: [],
+        },
+        {
+          id: "w-step1",
+          mission_id: "m-step1",
+          label: "Wave8 R14 Integrator-A",
+          section: "wave8-r14",
+          role: "worker",
+          node_id: "managed-xla",
+          start_offset_secs: 60,
+          duration_secs: 3000,
+          eta_remaining_secs: null,
+          state: "done",
+          after_ids: [],
+        },
+        {
+          id: "w-step2",
+          mission_id: "m-step2",
+          label: "Wave8 R16e StageTransfer",
+          section: "wave8-r16e",
+          role: "worker",
+          node_id: "managed-xla",
+          start_offset_secs: 3600,
+          duration_secs: 3600,
+          eta_remaining_secs: 900,
+          state: "active",
+          after_ids: ["w-step1"],
+        },
+      ],
+      21600,
+    );
+
+    // Covered VM interval on `managed-xla` is absorbed; both sequential workers pack onto 1 Boat · xlarge lane
+    expect(dag.rows).toHaveLength(1);
+    expect(dag.rows[0].sectionHeader).toBe("Boat · xlarge");
+    expect(dag.rows[0].spans.map((sp) => sp.bar.id)).toEqual(["w-step1", "w-step2"]);
+    expect(dag.rows[0].bar.id).toBe("w-step2");
+    expect(dag.edges.map((e) => e.id)).toEqual(["w-step1->w-step2"]);
+    expect(dag.edges[0].fromCenterY).toBe(dag.edges[0].toCenterY);
   });
 });

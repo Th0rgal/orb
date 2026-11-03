@@ -341,13 +341,26 @@ export default function Resources(props: {
   });
 
   const dagRowMap = createMemo(
-    () => new Map((dagLayout()?.rows ?? []).map((r) => [r.bar.id, r])),
+    () => new Map((dagLayout()?.rows ?? []).map((r) => [r.id, r])),
   );
   const dagRowIds = createMemo(
-    () => dagLayout()?.rows.map((r) => r.bar.id) ?? [],
+    () => dagLayout()?.rows.map((r) => r.id) ?? [],
     [],
     { equals: eqIds },
   );
+  const dagBarById = createMemo(() => {
+    type DagBar = MissionResourcesResponse["dag"]["bars"][number];
+    const map = new Map<string, DagBar>();
+    for (const row of dagLayout()?.rows ?? []) {
+      for (const sp of row.spans) {
+        map.set(sp.bar.id, sp.bar as DagBar);
+      }
+    }
+    for (const b of detail()?.dag.bars ?? []) {
+      if (!map.has(b.id)) map.set(b.id, b);
+    }
+    return map;
+  });
   const dagEdgeMap = createMemo(
     () => new Map((dagLayout()?.edges ?? []).map((e) => [e.id, e])),
   );
@@ -453,7 +466,7 @@ export default function Resources(props: {
       }
     }
     if (hoveredBarId() && detail()) {
-      const bar = detail()!.dag.bars.find((b) => b.id === hoveredBarId());
+      const bar = dagBarById().get(hoveredBarId()!);
       if (bar) {
         const effLens = bar.role === "vm" ? "compute" : l;
         const rateVal =
@@ -1156,12 +1169,12 @@ export default function Resources(props: {
               <div class="res-card-head-left">
                 <span class="res-col-title">
                   {(() => {
-                    const bars = detail()?.dag.bars ?? [];
-                    const vmCount = bars.filter((b) => b.role === "vm").length;
-                    const spanCount = bars.length - vmCount;
-                    return vmCount > 0
-                      ? `Execution DAG · ${formatLargeNumber(vmCount)} VMs · ${formatLargeNumber(spanCount)} spans`
-                      : `Subagent Execution DAG · ${formatLargeNumber(bars.length)} spans`;
+                    const rows = dagLayout()?.rows ?? [];
+                    const laneCount = rows.length;
+                    const spanCount = rows.reduce((s, r) => s + r.spans.length, 0);
+                    return laneCount > 0 && spanCount > laneCount
+                      ? `Execution DAG · ${formatLargeNumber(laneCount)} ${laneCount === 1 ? "lane" : "lanes"} · ${formatLargeNumber(spanCount)} spans`
+                      : `Subagent Execution DAG · ${formatLargeNumber(spanCount)} ${spanCount === 1 ? "span" : "spans"}`;
                   })()}
                 </span>
               </div>
@@ -1205,44 +1218,70 @@ export default function Resources(props: {
                     >
                       <div class="res-dag-labels">
                         <For each={dagRowIds()}>
-                          {(barId) => {
-                            const row = () => dagRowMap().get(barId);
+                          {(rowId) => {
+                            const row = () => dagRowMap().get(rowId);
                             return (
                               <Show when={row()}>
-                                {(rw) => (
-                                  <>
-                                    <Show when={rw().sectionHeader}>
-                                      {(sec) => (
-                                        <div
-                                          class="res-dag-sec-hdr"
-                                          style={{ top: `${rw().y - 20}px` }}
-                                        >
-                                          {sec()}
-                                        </div>
-                                      )}
-                                    </Show>
-                                    <button
-                                      type="button"
-                                      class={`res-dag-row-label ${hoveredBarId() === barId ? "is-hovered" : ""}`}
-                                      style={{ top: `${rw().y + 2}px` }}
-                                      data-testid={`res-dag-row-${barId}`}
-                                      onMouseEnter={() => setHoveredBarId(barId)}
-                                      onMouseLeave={() =>
-                                        setHoveredBarId((prev) => (prev === barId ? null : prev))
-                                      }
-                                      onClick={() => {
-                                        const mid = rw().bar.mission_id;
-                                        if (mid) props.onOpen(`m:${mid}`);
-                                      }}
-                                      title={rw().bar.label}
-                                    >
-                                      <span class="res-dag-row-title">{rw().bar.label}</span>
-                                      <span class="res-dag-row-meta">
-                                        {formatDurationCompact(rw().bar.duration_secs)}
-                                      </span>
-                                    </button>
-                                  </>
-                                )}
+                                {(rw) => {
+                                  const activeSpan = () => {
+                                    const hid = hoveredBarId();
+                                    if (!hid) return null;
+                                    return rw().spans.find((sp) => sp.bar.id === hid) ?? null;
+                                  };
+                                  const dispBar = () => activeSpan()?.bar ?? rw().bar;
+                                  return (
+                                    <>
+                                      <Show when={rw().sectionHeader}>
+                                        {(sec) => (
+                                          <div
+                                            class="res-dag-sec-hdr"
+                                            style={{ top: `${rw().y - 20}px` }}
+                                          >
+                                            {sec()}
+                                          </div>
+                                        )}
+                                      </Show>
+                                      <button
+                                        type="button"
+                                        class={`res-dag-row-label ${activeSpan() ? "is-hovered" : ""}`}
+                                        style={{ top: `${rw().y + 2}px` }}
+                                        data-testid={`res-dag-row-${rw().bar.id}`}
+                                        onMouseEnter={() => setHoveredBarId(rw().bar.id)}
+                                        onMouseLeave={() =>
+                                          setHoveredBarId((prev) =>
+                                            prev === rw().bar.id ? null : prev,
+                                          )
+                                        }
+                                        onClick={() => {
+                                          const mid = dispBar().mission_id;
+                                          if (mid) props.onOpen(`m:${mid}`);
+                                        }}
+                                        title={
+                                          rw().spans.length > 1
+                                            ? rw()
+                                                .spans.map((sp) => sp.bar.label)
+                                                .join(" → ")
+                                            : rw().bar.label
+                                        }
+                                      >
+                                        <span class="res-dag-row-title">{dispBar().label}</span>
+                                        <span class="res-dag-row-meta">
+                                          <Show
+                                            when={!activeSpan() && rw().spans.length > 1}
+                                            fallback={formatDurationCompact(
+                                              dispBar().duration_secs,
+                                            )}
+                                          >
+                                            <span class="res-dag-lane-count">
+                                              {rw().spans.length}×
+                                            </span>
+                                            {formatDurationCompact(rw().totalDurationSecs)}
+                                          </Show>
+                                        </span>
+                                      </button>
+                                    </>
+                                  );
+                                }}
                               </Show>
                             );
                           }}
@@ -1288,9 +1327,15 @@ export default function Resources(props: {
                                     const x0 = () => 8 + ed().fromEndFrac * plotW();
                                     const x1 = () => 8 + ed().toStartFrac * plotW();
                                     const mx = () => (x0() + x1()) / 2;
+                                    const sameLane = () =>
+                                      Math.abs(ed().fromCenterY - ed().toCenterY) < 0.5;
                                     return (
                                       <path
-                                        d={`M ${x0()} ${ed().fromCenterY} C ${mx()} ${ed().fromCenterY}, ${mx()} ${ed().toCenterY}, ${x1()} ${ed().toCenterY}`}
+                                        d={
+                                          sameLane()
+                                            ? `M ${x0()} ${ed().fromCenterY} L ${x1()} ${ed().toCenterY}`
+                                            : `M ${x0()} ${ed().fromCenterY} C ${mx()} ${ed().fromCenterY}, ${mx()} ${ed().toCenterY}, ${x1()} ${ed().toCenterY}`
+                                        }
                                         fill="none"
                                         stroke="var(--stroke-strong)"
                                         stroke-width="1.2"
@@ -1302,73 +1347,130 @@ export default function Resources(props: {
                             }}
                           </For>
 
-                          {/* Execution bars + forward ETA extensions */}
+                          {/* Execution lanes: shared hardware/category swimlanes + sequential spans */}
                           <For each={dagRowIds()}>
-                            {(barId) => {
-                              const row = () => dagRowMap().get(barId);
+                            {(rowId) => {
+                              const row = () => dagRowMap().get(rowId);
                               return (
                                 <Show when={row()}>
                                   {(rw) => {
                                     const plotW = () => Math.max(40, dagLaneWidth() - 16);
-                                    const xStart = () => 8 + rw().startFrac * plotW();
-                                    const barW = () =>
-                                      Math.max(6, (rw().endFrac - rw().startFrac) * plotW());
-                                    const etaW = () =>
-                                      rw().etaEndFrac != null
-                                        ? Math.max(0, (rw().etaEndFrac! - rw().endFrac) * plotW())
-                                        : 0;
+                                    const centerY = () => rw().barY + rw().barHeight / 2;
                                     return (
-                                      <g
-                                        style={{
-                                          cursor: rw().bar.mission_id ? "pointer" : "default",
-                                        }}
-                                        onMouseEnter={() => setHoveredBarId(barId)}
-                                        onMouseLeave={() =>
-                                          setHoveredBarId((prev) => (prev === barId ? null : prev))
-                                        }
-                                        onClick={() => {
-                                          const mid = rw().bar.mission_id;
-                                          if (mid) props.onOpen(`m:${mid}`);
-                                        }}
-                                      >
-                                        <rect
-                                          x={xStart()}
-                                          y={rw().barY}
-                                          width={barW()}
-                                          height={rw().barHeight}
-                                          rx={4}
-                                          fill={barColorForState(
-                                            rw().bar.state,
-                                            rw().bar.role,
-                                          )}
-                                          opacity={
-                                            hoveredBarId() === barId
-                                              ? 1
-                                              : rw().bar.state === "cancelled"
-                                                ? 0.48
-                                                : 0.86
-                                          }
-                                        />
-                                        <Show when={etaW() > 2}>
-                                          <rect
-                                            x={xStart() + barW()}
-                                            y={rw().barY}
-                                            width={etaW()}
-                                            height={rw().barHeight}
-                                            rx={4}
-                                            fill={barColorForState(
-                                              rw().bar.state,
-                                              rw().bar.role,
-                                            )}
-                                            fill-opacity="0.18"
-                                            stroke={barColorForState(
-                                              rw().bar.state,
-                                              rw().bar.role,
-                                            )}
-                                            stroke-width="1"
-                                            stroke-dasharray="3 2"
+                                      <g data-testid={`res-dag-lane-${rw().index}`}>
+                                        <Show when={rw().spans.length > 1}>
+                                          <line
+                                            x1={8}
+                                            y1={centerY()}
+                                            x2={8 + plotW()}
+                                            y2={centerY()}
+                                            stroke="var(--stroke-soft)"
+                                            stroke-width="2"
+                                            stroke-linecap="round"
                                           />
                                         </Show>
+                                        <For each={rw().spans}>
+                                          {(sp, spIdx) => {
+                                            const xStart = () => 8 + sp.startFrac * plotW();
+                                            const barW = () => {
+                                              const raw = Math.max(
+                                                6,
+                                                (sp.endFrac - sp.startFrac) * plotW(),
+                                              );
+                                              const nxt = rw().spans[spIdx() + 1];
+                                              if (!nxt) return raw;
+                                              const nextX = 8 + nxt.startFrac * plotW() - 2;
+                                              return Math.max(4, Math.min(raw, nextX - xStart()));
+                                            };
+                                            const etaW = () =>
+                                              sp.etaEndFrac != null
+                                                ? Math.max(
+                                                    0,
+                                                    (sp.etaEndFrac - sp.endFrac) * plotW(),
+                                                  )
+                                                : 0;
+                                            const inlineLabel = () => {
+                                              if (rw().spans.length <= 1) return null;
+                                              const w = barW();
+                                              if (w < 68) return null;
+                                              const maxChars = Math.max(
+                                                6,
+                                                Math.floor((w - 12) / 5.8),
+                                              );
+                                              return sp.bar.label.length > maxChars
+                                                ? `${sp.bar.label.slice(0, Math.max(4, maxChars - 1))}…`
+                                                : sp.bar.label;
+                                            };
+                                            return (
+                                              <g
+                                                data-testid={`res-dag-bar-${sp.bar.id}`}
+                                                style={{
+                                                  cursor: sp.bar.mission_id ? "pointer" : "default",
+                                                }}
+                                                onMouseEnter={() => setHoveredBarId(sp.bar.id)}
+                                                onMouseLeave={() =>
+                                                  setHoveredBarId((prev) =>
+                                                    prev === sp.bar.id ? null : prev,
+                                                  )
+                                                }
+                                                onClick={() => {
+                                                  const mid = sp.bar.mission_id;
+                                                  if (mid) props.onOpen(`m:${mid}`);
+                                                }}
+                                              >
+                                                <rect
+                                                  x={xStart()}
+                                                  y={rw().barY}
+                                                  width={barW()}
+                                                  height={rw().barHeight}
+                                                  rx={4}
+                                                  fill={barColorForState(
+                                                    sp.bar.state,
+                                                    sp.bar.role ?? "worker",
+                                                  )}
+                                                  opacity={
+                                                    hoveredBarId() === sp.bar.id
+                                                      ? 1
+                                                      : sp.bar.state === "cancelled"
+                                                        ? 0.48
+                                                        : 0.86
+                                                  }
+                                                />
+                                                <Show when={inlineLabel()}>
+                                                  {(lbl) => (
+                                                    <text
+                                                      x={xStart() + 6}
+                                                      y={rw().barY + rw().barHeight / 2 + 3.5}
+                                                      class="res-dag-bar-inline-label"
+                                                    >
+                                                      {lbl()}
+                                                    </text>
+                                                  )}
+                                                </Show>
+                                                <Show when={etaW() > 2}>
+                                                  <rect
+                                                    x={xStart() + barW()}
+                                                    y={rw().barY}
+                                                    width={etaW()}
+                                                    height={rw().barHeight}
+                                                    rx={4}
+                                                    fill={barColorForState(
+                                                      sp.bar.state,
+                                                      sp.bar.role ?? "worker",
+                                                    )}
+                                                    fill-opacity="0.18"
+                                                    stroke={barColorForState(
+                                                      sp.bar.state,
+                                                      sp.bar.role ?? "worker",
+                                                    )}
+                                                    stroke-width="1"
+                                                    stroke-dasharray="3 2"
+                                                  />
+                                                </Show>
+                                              </g>
+                                            );
+                                          }}
+                                        </For>
                                       </g>
                                     );
                                   }}
