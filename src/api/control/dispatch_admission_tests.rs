@@ -1024,6 +1024,7 @@ fn isolated_track_http_test(test_name: &str) -> bool {
             ])
             .env(CHILD, test_name)
             .env("MISSION_DISK_EMERGENCY_RESERVE_GB", "0")
+            .env("MISSION_DISK_DEFAULT_ESTIMATE_GIB", "1")
             // Fixture project names must not be rewritten by the host's
             // live controller routes (for example lido -> verity-lido).
             .env_remove("HERMES_PROJECTS_DIR")
