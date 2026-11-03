@@ -867,10 +867,9 @@ export function liveTail(items: StreamItem[]): boolean {
  * when no live row is visible, with the elapsed turn time. */
 function WorkingRow(p: { items: StreamItem[]; label?: string; onForceSlot?: () => void; forceSlotPending?: boolean }) {
   const now = useNow(1000);
-  const seen = Date.now();
-  const started = createMemo(() => turnStartedAt(p.items) ?? seen);
+  const started = createMemo(() => turnStartedAt(p.items));
   // The label is the announced status; the ticking time is not read out.
   return <Show when={!["tool", "think"].includes(p.items.at(-1)?.kind ?? "")}><div class="st-think st-working">
-    <div class="st-think-head"><span class="shimmer agent-wait-status" role="status" aria-live="polite">{p.label || "Working"}</span><Show when={p.onForceSlot}><button type="button" class="force-slot-btn" disabled={p.forceSlotPending} title="Bypass the worker slot queue using the 1-extra operator slot" onClick={() => p.onForceSlot?.()}>{p.forceSlotPending ? "Starting…" : "Run now"}</button></Show><span class="st-working-time" aria-hidden="true">{formatElapsed(now() - started())}</span></div>
+    <div class="st-think-head"><span class="shimmer agent-wait-status" role="status" aria-live="polite">{p.label || "Working"}</span><Show when={p.onForceSlot}><button type="button" class="force-slot-btn" disabled={p.forceSlotPending} title="Bypass the worker slot queue using the 1-extra operator slot" onClick={() => p.onForceSlot?.()}>{p.forceSlotPending ? "Starting…" : "Run now"}</button></Show><Show when={started() !== undefined}><span class="st-working-time" aria-hidden="true">{formatElapsed(now() - started()!)}</span></Show></div>
   </div></Show>;
 }

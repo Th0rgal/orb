@@ -463,3 +463,32 @@ it('lets the user arm a clean side session from the panel header',async()=>{
  expect((btn as HTMLButtonElement).disabled).toBe(true);
  expect(screen.getByPlaceholderText('Ask in a new side session…')).toBeTruthy();
 });
+
+it('anchors Working elapsed time on the turn start timestamp across page reloads and turn rollovers',async()=>{
+ const twoMinFiveSecAgo=new Date(Date.now()-125_000).toISOString();
+ sessionMock.current={id:'side-elapsed',question:'Long proof summary?',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,startedAt:twoMinFiveSecAgo};
+ let emitWatch:((event:any)=>void)|undefined;
+ watchMock.fn=(_parent,_signal,receive)=>new Promise<void>(resolve=>{
+  emitWatch=(event:any)=>{receive(event);if(event.type==='done')resolve();};
+  receive({type:'start',model:'opencode · builtin/smart',startedAt:twoMinFiveSecAgo});
+  receive({type:'status',text:'Working…'});
+ });
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ await writeSideQuestion(sideQuestionKey('elapsed-reload-test'),{
+  history:[],draft:'',model:'opencode · builtin/smart',open:true,docked:true,
+ });
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="elapsed-reload-test" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await waitFor(()=>{
+  const progress=document.querySelector('.btw-progress')?.textContent??'';
+  expect(progress).toContain('Working… · 2 min');
+ });
+ // Rolling over to a newly dequeued turn resets the timer to the new turn's timestamp:
+ const oneSecAgo=new Date(Date.now()-1_000).toISOString();
+ emitWatch!({type:'turn',question:'Quick follow-up?',startedAt:oneSecAgo,completed:{question:'Long proof summary?',answer:'Summary complete.'}});
+ emitWatch!({type:'status',text:'Working…'});
+ await waitFor(()=>{
+  const progress=document.querySelector('.btw-progress')?.textContent??'';
+  expect(progress).toBe('Working…');
+ });
+});

@@ -80,6 +80,7 @@ export function withInitialPrompt(items: StreamItem[], mission: Mission | null, 
     return first < 0 ? [...expanded, ...items] : [...items.slice(0, first), ...expanded, ...items.slice(first + 1)];
   }
   const key = receipt?.messageKey ?? `initial:${mission?.id ?? "launch"}`;
+  const initialAt = mission?.created_at || undefined;
   if (first < 0) {
     if (awaiting && mission?.history && mission.history.length > 1) {
       const seeded: StreamItem[] = [];
@@ -89,18 +90,18 @@ export function withInitialPrompt(items: StreamItem[], mission: Mission | null, 
         if (entry.role === "user") {
           const isFirst = !usedInitialKey;
           usedInitialKey = true;
-          seeded.push({ kind: "user", key: isFirst ? key : `history:${mission.id}:${index}`, text: entry.content, ...(isFirst && receipt?.images ? { images: receipt.images } : {}) });
+          seeded.push({ kind: "user", key: isFirst ? key : `history:${mission.id}:${index}`, text: entry.content, ...(isFirst && initialAt ? { at: initialAt } : {}), ...(isFirst && receipt?.images ? { images: receipt.images } : {}) });
         } else if (entry.role === "assistant") {
           seeded.push({ kind: "text", key: `history:${mission.id}:${index}`, text: entry.content, live: false });
         }
       });
       if (seeded.length) return [...seeded, ...items];
     }
-    return prompt ? [{kind:"user",key,text:prompt,images:receipt?.images}, ...items] : items;
+    return prompt ? [{kind:"user",key,text:prompt,images:receipt?.images,...(initialAt ? { at: initialAt } : {})}, ...items] : items;
   }
   // Keep the initial user turn mounted when its canonical event arrives so
   // reconciling turns never tears down the top of the transcript.
-  return (receipt || prompt) ? items.map((item,index) => index === first ? {...item,key,...(receipt?.replacement && item.kind === "user" ? {text:receipt.prompt} : {})} : item) : items;
+  return (receipt || prompt) ? items.map((item,index) => index === first ? {...item,key,...(item.kind === "user" && !item.at && initialAt ? { at: initialAt } : {}),...(receipt?.replacement && item.kind === "user" ? {text:receipt.prompt} : {})} : item) : items;
 }
 export const TYPED_LAUNCH_UNSUPPORTED = "This backend does not support structured remote launches. Update the connected backend to enable them. Your draft and selection are kept; no mission was submitted.";
 export type RemoteSupport = "supported" | "unsupported" | "unknown";

@@ -190,4 +190,52 @@ class OrbTurnRecapTest {
         assertTrue(wrapped.contains("Q: First?\nA: Answer 1"))
         assertEquals("Next question?", OrbSideAgent.extractQuestion(wrapped))
     }
+
+    @Test
+    fun sideAgentTurnStartAnchorsOnOpenTurnTimestampInsteadOfSheetOpenTime() {
+        val serverStart = "2026-11-03T01:00:00Z"
+        val missionStart = "2026-11-03T00:55:00Z"
+        val serverMs = OrbJSON.dateEpochMs(serverStart)!!
+        val missionMs = OrbJSON.dateEpochMs(missionStart)!!
+
+        // Server openTurn.at wins over optimistic localAskedAtMs and mission created_at:
+        assertEquals(
+            serverMs,
+            OrbSideAgent.turnStartMs(
+                openAt = serverStart,
+                localAskedAtMs = serverMs + 5_000L,
+                missionStartedAt = missionStart,
+                hasPriorTurns = true
+            )
+        )
+        // Optimistic local send uses localAskedAtMs before Core echoes the user_message:
+        assertEquals(
+            123_456L,
+            OrbSideAgent.turnStartMs(
+                openAt = null,
+                localAskedAtMs = 123_456L,
+                missionStartedAt = missionStart,
+                hasPriorTurns = true
+            )
+        )
+        // Reopening a single-turn side mission before events arrive falls back to missionStartedAt:
+        assertEquals(
+            missionMs,
+            OrbSideAgent.turnStartMs(
+                openAt = "",
+                localAskedAtMs = null,
+                missionStartedAt = missionStart,
+                hasPriorTurns = false
+            )
+        )
+        // Reopening a multi-turn side mission before openTurn resolves returns null instead of sheet-open time:
+        assertNull(
+            OrbSideAgent.turnStartMs(
+                openAt = null,
+                localAskedAtMs = null,
+                missionStartedAt = missionStart,
+                hasPriorTurns = true
+            )
+        )
+    }
 }

@@ -27,6 +27,7 @@ import { MdView } from './Markdown';
 import { ErrorNotice } from './ErrorNotice';
 import { remoteLog } from './remoteLog';
 import { sideContext, sideAttachments, type SideAttachment, type SideExchange } from './sideQuestionClient';
+import { formatElapsed, useNow } from './time';
 import type { StreamItem } from './transcriptModel';
 import * as Ic from './icons';
 // A finished answer may already be in Core's history (a reconcile ran first).
@@ -59,6 +60,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const [notSent,setNotSent]=createSignal(false);
  const [draftRevision,setDraftRevision]=createSignal<{text:string;append?:boolean}|undefined>();
  const [question,setQuestion]=createSignal(''),[answer,setAnswer]=createSignal(''),[narration,setNarration]=createSignal<string[]>([]),[draft,setDraft]=createSignal(''),[error,setError]=createSignal(''),[model,setModel]=createSignal('');
+ const [startedAt,setStartedAt]=createSignal<string|undefined>();
  let abort:AbortController|undefined;
  // Set while this panel itself is launching/answering a question.
  let asking=false;
@@ -120,7 +122,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  let watchActiveSession:((agent:NonNullable<ReturnType<typeof btwSession>>,initialAttachments?:SideAttachment[])=>void)|undefined;
  createEffect(on(key,current=>{
   abort?.abort();queuedEdit.finish(true);
-  setLoadedKey('');setBusy(false);setHistory([]);setError('');setQueue([]);setQueueToast('');
+  setLoadedKey('');setBusy(false);setHistory([]);setError('');setQueue([]);setQueueToast('');setStartedAt(undefined);
   setSideSessionId('');setSideSessionLocal(false);
   setPendingQueued([]);setConfirmedQueued([]);setDeliveredQueuedIds([]);setRemoteQueuedIds([]);setHandoffId(undefined);
   let stale=false;onCleanup(()=>{stale=true;});
@@ -136,6 +138,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   };
   const watchActive=(agent:NonNullable<ReturnType<typeof btwSession>>,initialAttachments?:SideAttachment[])=>{
    refreshSideSession(missionId,agent);
+   if(agent.startedAt)setStartedAt(agent.startedAt);
    abort?.abort();
    const controller=new AbortController();abort=controller;setBusy(true);setQuestion(agent.question);setAnswer('');setNarration([]);setError('');setNotSent(false);
    if(initialAttachments)setPendingAttachments(initialAttachments);
@@ -143,7 +146,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    let currentAttachments=initialAttachments;
    void watchBtw(missionId,controller.signal,event=>{
     if(stale||controller.signal.aborted)return;
-    if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
+    if(event.type==='start'){setModel(event.model);if(event.startedAt)setStartedAt(event.startedAt);setRunStatus('Starting side agent…');}
     if(event.type==='status')setRunStatus(event.text);
     if(event.type==='snapshot'){setAnswer(event.text);setNarration(event.narration??[]);}
     if(event.type==='turn'){
@@ -155,6 +158,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      currentAttachments=undefined;
      markDelivered(event.messageId);
      setTurnId((event.messageId as ReturnType<typeof crypto.randomUUID>)??crypto.randomUUID());
+     setStartedAt(event.startedAt??new Date().toISOString());
      setQuestion(event.question);setAnswer('');setNarration([]);setError('');setNotSent(false);setPendingAttachments([]);
      setRunStatus('Starting side agent…');
      refreshSideSession(missionId);
@@ -165,7 +169,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      const narrated=event.narration?.length?{narration:event.narration}:{};
      const attached=currentAttachments?.length?{attachments:currentAttachments}:{};
      setHistory(rows=>rows.some(row=>row.answer.trim()===event.answer.trim()&&row.question.trim()===currentQuestion.trim())?rows:appendTurn(rows,{id:turnId(),question:currentQuestion,answer:event.answer,...narrated,...attached}));
-     setBusy(false);setRunStatus('');setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());resync?.();
+     setBusy(false);setStartedAt(undefined);setRunStatus('');setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());resync?.();
      if(remoteQueuedIds().length){setTimeout(()=>{if(!stale)resync?.();},350);}
      queueMicrotask(sendNext);}
    }).catch(e=>{
@@ -177,7 +181,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      setTimeout(()=>{if(!stale)resync?.();},250);
      return;
     }
-    setError(e instanceof Error?e.message:String(e));setBusy(false);
+    setError(e instanceof Error?e.message:String(e));setBusy(false);setStartedAt(undefined);
    });
   };
   watchActiveSession=watchActive;
@@ -220,6 +224,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   unmigratedLegacyQueue=hasReconcile&&hasQueueFollowUp()?[...legacySavedQueue]:[];
   setQueue(legacySavedQueue);
   const agent=refreshSideSession(missionId);
+  setStartedAt(agent?.startedAt??saved?.pending?.startedAt);
   const lastSaved=saved?.history.at(-1);
   const lastAnswer=lastSaved?.answer;
   const emptyReply=lastAnswer!==undefined&&(lastAnswer==='The side agent finished without a text response.'||!lastAnswer.replace(/[.\s…]/g,''));
@@ -233,7 +238,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     if(stale||key()!==current)return;
     const launched=btwSession(missionId);
     if(launched?.active)watchActive(launched);
-    else{setBusy(false);setError(interruptedError);}
+    else{setBusy(false);setStartedAt(undefined);setError(interruptedError);}
    });
   }else if(agent&&(agent.active||emptyReply)){
    watchActive(agent);
@@ -274,6 +279,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      if(stale||key()!==current||mine!==generation)return;
      if(reconciled.latest)setSideSessionId(prev=>prev||reconciled.latest!);
      refreshSideSession(missionId,reconciled.activeSession);
+     if(reconciled.activeSession?.startedAt)setStartedAt(reconciled.activeSession.startedAt);
      follow(reconciled.latest);
      const changed=reconciled.history.length!==history().length||reconciled.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
      if(changed)setHistory(reconciled.history);
@@ -310,7 +316,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      // Core has since answered is finished: show Core's answer instead of a stale spinner.
      if(pendingQ&&busy()&&!asking&&!reconciled.activeSession&&reconciled.history.some(h=>h.question.trim()===pendingQ)){
       awaitingServerPending=false;
-      abort?.abort();setBusy(false);setRunStatus('');setQuestion('');setAnswer('');setNarration([]);setTurnId(crypto.randomUUID());
+      abort?.abort();setBusy(false);setStartedAt(undefined);setRunStatus('');setQuestion('');setAnswer('');setNarration([]);setTurnId(crypto.randomUUID());
       queueMicrotask(sendNext);
      }
      if(reconciled.activeSession&&(!busy()||(awaitingServerPending&&!asking)||handoffId())){
@@ -319,12 +325,12 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
       watchActive(reconciled.activeSession);
      }else if(awaitingServerPending&&!asking&&!reconciled.activeSession){
       awaitingServerPending=false;
-      setBusy(false);setRunStatus('');setError(interruptedError);
+      setBusy(false);setStartedAt(undefined);setRunStatus('');setError(interruptedError);
      }
     }).catch(e=>{
      if(!stale&&key()===current&&mine===generation&&awaitingServerPending&&!asking){
       awaitingServerPending=false;
-      setBusy(false);setRunStatus('');setError(interruptedError);
+      setBusy(false);setStartedAt(undefined);setRunStatus('');setError(interruptedError);
      }
      swallow("sideQuestions.reconcile")(e);
     }).finally(()=>{inFlight=Math.max(0,inFlight-1);});
@@ -337,7 +343,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  createEffect(()=>{
   const current=key();
   const snapshot={history:history(),draft:draft(),model:model(),open:side?side.visible():open(),docked:true,
-    pending:(busy()||error())?{question:question(),answer:answer(),error:error(),attachments:pendingAttachments(),turnId:turnId(),...(notSent()?{notSent:true}:{})}:undefined,
+    pending:(busy()||error())?{question:question(),answer:answer(),error:error(),attachments:pendingAttachments(),turnId:turnId(),...(startedAt()?{startedAt:startedAt()}:{}),...(notSent()?{notSent:true}:{})}:undefined,
     queue:queue()};
   if(loadedKey()===current)void writeSideQuestion(current,snapshot).then(saved=>{if(key()===current)setStorageError(!saved);});
  });
@@ -389,7 +395,9 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     }else{
      // The running turn finished right before Core admitted our message, so Core started this turn immediately.
      setDeliveredQueuedIds(rows=>rows.includes(res.id)?rows:[...rows,res.id]);
-     const active={...(refreshSideSession(missionId)??{id:res.missionId,question:text,harness:btwConfig().harness,model:btwConfig().model,local:false,active:true,baseline:0}),question:text,active:true};
+     const existing=refreshSideSession(missionId);
+     const active={...(existing??{id:res.missionId,question:text,harness:btwConfig().harness,model:btwConfig().model,local:false,active:true,baseline:0}),question:text,active:true,startedAt:existing?.startedAt??new Date().toISOString()};
+     setStartedAt(active.startedAt);
      setTurnId(res.id as ReturnType<typeof crypto.randomUUID>);
      watchActiveSession?.(active,attachments);
     }
@@ -412,9 +420,10 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setPreparing(false);
   const current=key(),missionId=p.mission,activeTurnId=turnId(),context=sideContext(p.items,true),controller=new AbortController(),launchController=new AbortController();abort=controller;launchAbort=launchController;
   let attachments:SideAttachment[];
-  setBusy(true);setRunStatus('Sending…');
+  const askedAt=new Date().toISOString();
+  setStartedAt(askedAt);setBusy(true);setRunStatus('Sending…');
   try { attachments=retryAttachments??await sideAttachments(images,files); }
-  catch(e){setBusy(false);setRunStatus('');throw e;}
+  catch(e){setBusy(false);setStartedAt(undefined);setRunStatus('');throw e;}
   if(launchController.signal.aborted)return false;
   for(const file of files)text=text.replaceAll(uploadToken(file.path),`[File: ${file.source.name}]`);
   if(current===key()){
@@ -427,7 +436,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   void askBtwAgent(missionId,text,context,history(),controller.signal,event=>{
    if(current!==key()||controller.signal.aborted)return;
    refreshSideSession(missionId);
-   if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
+   if(event.type==='start'){setModel(event.model);if(event.startedAt)setStartedAt(event.startedAt);setRunStatus('Starting side agent…');}
    if(event.type==='status')setRunStatus(event.text);
    if(event.type==='snapshot'){setAnswer(event.text);setNarration(event.narration??[]);}
    if(event.type==='delta')setAnswer(value=>value+event.text);
@@ -443,13 +452,14 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      if(handoffId()===event.messageId)setHandoffId(undefined);
      setTurnId(event.messageId as ReturnType<typeof crypto.randomUUID>);
     }else setTurnId(crypto.randomUUID());
+    setStartedAt(event.startedAt??new Date().toISOString());
     setQuestion(event.question);setAnswer('');setNarration([]);setError('');setNotSent(false);setPendingAttachments([]);
     setRunStatus('Starting side agent…');
    }
    if(event.type==='done'){
     setAnswer(event.answer);setNarration(event.narration??[]);
     const next=appendTurn(history(),{id:turnId(),question:currentQuestion,answer:event.answer,...(event.narration?.length?{narration:event.narration}:{}),...(currentQuestion===text?{attachments}:{})});
-    setHistory(next);setBusy(false);setRunStatus('');
+    setHistory(next);setBusy(false);setStartedAt(undefined);setRunStatus('');
    }
   },attachments,launchController.signal,activeTurnId).catch(e=>{
    if(current!==key()||controller.signal.aborted)return;
@@ -459,7 +469,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   .finally(()=>{
    if(abort===controller)asking=false;
    refreshSideSession(missionId);
-   if(current===key()&&abort===controller&&!handoffId()){setBusy(false);setRunStatus('');queueMicrotask(sendNext);}
+   if(current===key()&&abort===controller&&!handoffId()){setBusy(false);setStartedAt(undefined);setRunStatus('');queueMicrotask(sendNext);}
   });
   return true;
  };
@@ -485,6 +495,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   }
   const presented=messagePresentation(first.content).text;
   setTurnId(first.id as ReturnType<typeof crypto.randomUUID>);
+  setStartedAt(new Date().toISOString());
   setBusy(true);setQuestion(presented);setAnswer('');setNarration([]);setError('');setNotSent(false);setRunStatus('Starting side agent…');
  };
  const sendQueueFromSideComposer=()=>{
@@ -516,9 +527,9 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  };
  onMount(()=>window.addEventListener('keydown',escape));
  onCleanup(()=>window.removeEventListener('keydown',escape));
- const cancel=()=>{launchAbort?.abort();void stopBtw(p.mission).then(()=>{abort?.abort();setConfirmedQueued([]);setPendingQueued([]);setBusy(false);setRunStatus('');setError('Side agent stopped.');}).catch(e=>setError(String(e)));};
+ const cancel=()=>{launchAbort?.abort();void stopBtw(p.mission).then(()=>{abort?.abort();setConfirmedQueued([]);setPendingQueued([]);setBusy(false);setStartedAt(undefined);setRunStatus('');setError('Side agent stopped.');}).catch(e=>setError(String(e)));};
  const retry=()=>{const asked=question(),files=pendingAttachments();void ask(asked,[],[],files,true);};
- const dismiss=()=>{setError('');setNotSent(false);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);queueMicrotask(sendNext);};
+ const dismiss=()=>{setError('');setNotSent(false);setStartedAt(undefined);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);queueMicrotask(sendNext);};
  // Reconcile the same turn through preparation, streaming and persistence.
  const [turns,setTurns]=createStore<Array<SideExchange & {id:string;pending?:boolean;error?:string}>>([]);
  createEffect(()=>{
@@ -533,9 +544,14 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setOpen(true);side?.show();revealSentQuestion();
  };
  let inline!:HTMLDivElement;
- // Keep a live stage and elapsed time visible throughout an active turn, even after partial text streams.
- const [elapsed,setElapsed]=createSignal(0);
- createEffect(on(busy,b=>{setElapsed(0);if(!b)return;const started=Date.now(),t=setInterval(()=>setElapsed(Math.floor((Date.now()-started)/1000)),1000);onCleanup(()=>clearInterval(t));}));
+ // Keep a live stage and elapsed time visible throughout an active turn, anchored to the turn's start timestamp.
+ const now=useNow(1000);
+ const elapsedMs=()=>{
+  if(!busy())return 0;
+  const raw=startedAt();
+  const ms=raw?Date.parse(raw):NaN;
+  return Number.isFinite(ms)?Math.max(0,now()-ms):0;
+ };
  return <>
   <div ref={inline}/>
   <Show when={!side&&!open()&&(history().length||busy()||error())}><button class="btw-reopen" onClick={reveal}>Side questions {busy()?'· Answering…':`· ${history().length}`}</button></Show>
@@ -562,7 +578,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     <Show when={busy()}><p class="dim btw-progress" role="status">{
       // Queue states ("Waiting to start…") are stale once the side agent has acted.
       btwActivities(p.mission).some(a => a.kind !== "status" && a.id !== "antigravity:status") || answer() || narration().length ? "Working…" : runStatus() || "Thinking…"
-    }<Show when={elapsed() >= 3}> · {elapsed()} s</Show></p></Show>
+    }<Show when={elapsedMs() >= 3000}> · {formatElapsed(elapsedMs())}</Show></p></Show>
     <AgentActivity items={btwActivities(p.mission)} running={busy()} completed={!busy() && !error()}/>
     <Show when={btwSession(p.mission) && busy()}><NativeInteraction mission={btwSession(p.mission)!.id} active={busy()} remote={!btwSession(p.mission)!.local} items={btwItems(p.mission)}/></Show>
    </div>

@@ -10,7 +10,7 @@ export type SavedSideQuestion = {
   docked: boolean;
   /** `turnId` is the turn's client message id, reused by Retry; `notSent` means
    * Core never accepted the question. */
-  pending?: { question: string; answer: string; error?: string; attachments?:SideAttachment[]; turnId?: string; notSent?: boolean };
+  pending?: { question: string; answer: string; error?: string; attachments?:SideAttachment[]; turnId?: string; startedAt?: string; notSent?: boolean };
   /** Questions typed while the side agent was answering, oldest first. */
   queue?: QueuedSideQuestion[];
 };
