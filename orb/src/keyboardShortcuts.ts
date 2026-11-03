@@ -6,6 +6,7 @@ export const navigationShortcuts = [
   {id:'machines', code:'Digit3', label:'⌘3', title:'Machines'},
   {id:'providers', code:'Digit4', label:'⌘4', title:'Inference'},
   {id:'projects', code:'Digit5', label:'⌘5', title:'Projects'},
+  {id:'resources', code:'Digit6', label:'⌘6', title:'Resources'},
 ] as const;
 export function navigationShortcut(event: KeyboardEvent) {
   if (event.isComposing || event.defaultPrevented || !hasPrimaryModifier(event) || event.altKey || event.shiftKey) return;

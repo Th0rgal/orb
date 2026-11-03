@@ -22,6 +22,8 @@ mod board;
 mod import;
 mod paloma;
 mod queue;
+#[path = "sqlite_resources.rs"]
+pub mod resources;
 pub(crate) mod search_index;
 mod telegram;
 mod usage;
@@ -476,6 +478,7 @@ impl SqliteMissionStore {
             conn.execute_batch(include_str!("transfer_cleanup.sql"))
                 .map_err(|e| format!("Failed to install transfer cleanup: {e}"))?;
             let needs_search_backfill = search_index::ensure_schema(&conn)?;
+            let needs_resources_backfill = resources::ensure_schema(&conn)?;
 
             let read_pool_size = sqlite_read_connections();
             let mut readers = Vec::with_capacity(read_pool_size);
@@ -486,14 +489,22 @@ impl SqliteMissionStore {
                 readers.push(Arc::new(Mutex::new(reader)));
             }
 
-            Ok::<_, String>((conn, readers, needs_search_backfill))
+            Ok::<_, String>((
+                conn,
+                readers,
+                needs_search_backfill,
+                needs_resources_backfill,
+            ))
         })
         .await
         .map_err(|e| format!("Task join error: {}", e))??;
-        let (conn, readers, needs_search_backfill) = conn;
+        let (conn, readers, needs_search_backfill, needs_resources_backfill) = conn;
         let conn_arc = Arc::new(Mutex::new(conn));
         if needs_search_backfill {
             search_index::spawn_background_backfill(Arc::downgrade(&conn_arc), content_dir.clone());
+        }
+        if needs_resources_backfill {
+            resources::spawn_background_backfill(Arc::downgrade(&conn_arc));
         }
 
         Ok(Self {
@@ -1253,6 +1264,26 @@ impl MissionStore for SqliteMissionStore {
         record: &super::ProxyUsageRecord,
     ) -> Result<(), String> {
         SqliteMissionStore::record_proxy_usage_attributed(self, record).await
+    }
+    async fn record_compute_samples(
+        &self,
+        samples: &[resources::ComputeMinuteSample],
+    ) -> Result<(), String> {
+        self.record_compute_samples_sqlite(samples).await
+    }
+    async fn query_resources_overview(
+        &self,
+        since_unix_min: i64,
+    ) -> Result<resources::ResourcesStoreOverview, String> {
+        self.query_resources_overview_sqlite(since_unix_min).await
+    }
+    async fn query_mission_resources(
+        &self,
+        mission_id: Uuid,
+        since_unix_min: i64,
+    ) -> Result<Option<resources::MissionResourcesStoreSnapshot>, String> {
+        self.query_mission_resources_sqlite(mission_id, since_unix_min)
+            .await
     }
     async fn get_usage_records(
         &self,

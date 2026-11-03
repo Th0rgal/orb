@@ -45,6 +45,7 @@ enum class OrbSettingsSection(val id: String, val label: String, val subtitle: S
                 Triple("btw-settings", "Quick questions (/btw)", OrbSettingsRoute.SideQuestions),
                 Triple("inbox-summaries", "Inbox & summaries", OrbSettingsRoute.InboxSummaries),
                 Triple("machines", "Machines", OrbSettingsRoute.Machines),
+                Triple("resources", "Resources", OrbSettingsRoute.Resources),
             )
             Security -> listOf(
                 Triple("security-settings", "Access", OrbSettingsRoute.Secrets),

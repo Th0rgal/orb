@@ -91,6 +91,7 @@ pub(crate) mod proxy_reliability;
 pub(crate) mod proxy_timing;
 pub(crate) mod reconcile;
 pub(crate) mod remote_build;
+pub mod resources;
 pub(crate) mod routes;
 pub(crate) mod runners;
 pub mod scope_reaper;

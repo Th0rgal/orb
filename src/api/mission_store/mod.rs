@@ -12,6 +12,7 @@ pub mod transfer;
 
 pub use file::FileMissionStore;
 pub use memory::InMemoryMissionStore;
+pub use sqlite::resources as sqlite_resources;
 pub use sqlite::SqliteMissionStore;
 
 use crate::api::control::{AgentEvent, AgentTreeNode, DesktopSessionInfo, MissionStatus};
@@ -3726,6 +3727,31 @@ pub trait MissionStore: Send + Sync {
     /// Record the outcome of one routed /v1 request (reliability metrics).
     async fn record_proxy_outcome(&self, _record: &ProxyOutcomeRecord) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Record 1-minute fleet compute attribution samples for the Resources view.
+    async fn record_compute_samples(
+        &self,
+        _samples: &[sqlite_resources::ComputeMinuteSample],
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Read compact 1-minute usage/compute rollups and root mission metadata for `/api/resources/overview`.
+    async fn query_resources_overview(
+        &self,
+        _since_unix_min: i64,
+    ) -> Result<sqlite_resources::ResourcesStoreOverview, String> {
+        Ok(sqlite_resources::ResourcesStoreOverview::default())
+    }
+
+    /// Read subagent tree, board tasks, native spans, runs, and per-child rollups for `/api/resources/missions/:id`.
+    async fn query_mission_resources(
+        &self,
+        _mission_id: Uuid,
+        _since_unix_min: i64,
+    ) -> Result<Option<sqlite_resources::MissionResourcesStoreSnapshot>, String> {
+        Ok(None)
     }
 
     /// Router request outcomes on or after `since` (RFC3339), oldest first.
