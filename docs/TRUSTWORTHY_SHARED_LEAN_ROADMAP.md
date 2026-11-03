@@ -30,7 +30,7 @@ added the repo-owned 270-case (`135 * 2` on current manifest) Ed25519-signed loc
 receipt and `ORB_KERNEL_BACKEND=stock-c` default rollback without retroactively
 relabeling the `3c70e5ada` multi-target run.
 
-That local evidence is not phase acceptance: **49 partial / 86 unconnected**
+That local evidence is not phase acceptance: **78 partial / 57 unconnected**
 coverage entries remain across the current 135-entry manifest (`acceptance:
 INCOMPLETE`; 23 partial / 106 unconnected at `3c70e5ada`); physical iPhone 13
 mini and Pixel 8 stay `BLOCKED_PHYSICAL_DEVICE`, the MacBook Air host is
@@ -58,7 +58,7 @@ those checks.
 
 The coverage registry remains incomplete: 106 entries were unconnected and 23
 had explicit partial evidence in `shared/orb-spec/coverage_evidence.json` at the
-2026-10-28 handoff (on current `master`, after `#1488`, live node capacity / coordinator lane exports, Phase R1 host-gate evidence, and Phase R2b `OrbWire` slice I/O evidence, 86 entries are unconnected and 49 partial across 135
+2026-10-28 handoff (on current `master`, after `#1488`, live node capacity / coordinator lane exports, Phase R1 host-gate evidence, Phase R2b `OrbWire` slice I/O evidence, and Phase R3 authoritative Cluster 1–4 evidence, 57 entries are unconnected and 78 partial across 135
 manifest entries: 101 `orb_*` + 33 `leansys_*` + 1 compiler helper).
 Source hashes bind local host-test receipts to the linked theorem declarations
 and observers; these links do not establish authoritative callers or adapter parity.

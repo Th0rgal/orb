@@ -1,143 +1,29 @@
-    Finished `test` profile [unoptimized] target(s) in 0.05s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-ec7999243a6baae1)
+    Finished `test` profile [unoptimized] target(s) in 0.07s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-d791927b4d2534f0)
 
 running 1 test
 test shadow::tests::phase5_privd_command_and_ssh_identity_confinement_replays ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 38 filtered out; finished in 0.00s
 
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7420:50
-     |
-7420 | ...                   .fetch_update(
-     |                        ^^^^^^^^^^^^
-     |
-     = note: `#[warn(deprecated)]` on by default
-help: replace the use of the deprecated method
-     |
-7420 -                                                 .fetch_update(
-7420 +                                                 .try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7427:78
-     |
-7427 | ...                   let _ = runner.active_tool_calls.fetch_update(
-     |                                                        ^^^^^^^^^^^^
-     |
-help: replace the use of the deprecated method
-     |
-7427 -                                             let _ = runner.active_tool_calls.fetch_update(
-7427 +                                             let _ = runner.active_tool_calls.try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
-   --> src/node/runner.rs:988:14
-    |
-988 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |              ^^^^^^^^^^^^
-    |
-help: replace the use of the deprecated method
-    |
-988 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-988 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |
-
-warning: `sandboxed_sh` (lib test) generated 3 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 3 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c29a904789290e9f)
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-36a550f36c0ebdd4)
 
 running 1 test
 test api::privilege_broker::tests::phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3719 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3719 filtered out; finished in 0.03s
 
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7420:50
-     |
-7420 | ...                   .fetch_update(
-     |                        ^^^^^^^^^^^^
-     |
-     = note: `#[warn(deprecated)]` on by default
-help: replace the use of the deprecated method
-     |
-7420 -                                                 .fetch_update(
-7420 +                                                 .try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7427:78
-     |
-7427 | ...                   let _ = runner.active_tool_calls.fetch_update(
-     |                                                        ^^^^^^^^^^^^
-     |
-help: replace the use of the deprecated method
-     |
-7427 -                                             let _ = runner.active_tool_calls.fetch_update(
-7427 +                                             let _ = runner.active_tool_calls.try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
-   --> src/node/runner.rs:988:14
-    |
-988 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |              ^^^^^^^^^^^^
-    |
-help: replace the use of the deprecated method
-    |
-988 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-988 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |
-
-warning: `sandboxed_sh` (lib test) generated 3 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 3 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 0.13s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c29a904789290e9f)
+    Finished `test` profile [unoptimized] target(s) in 0.19s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-36a550f36c0ebdd4)
 
 running 1 test
 test api::control::remote_jobs::boot_leftover_tests::phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3719 filtered out; finished in 0.00s
 
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7420:50
-     |
-7420 | ...                   .fetch_update(
-     |                        ^^^^^^^^^^^^
-     |
-     = note: `#[warn(deprecated)]` on by default
-help: replace the use of the deprecated method
-     |
-7420 -                                                 .fetch_update(
-7420 +                                                 .try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7427:78
-     |
-7427 | ...                   let _ = runner.active_tool_calls.fetch_update(
-     |                                                        ^^^^^^^^^^^^
-     |
-help: replace the use of the deprecated method
-     |
-7427 -                                             let _ = runner.active_tool_calls.fetch_update(
-7427 +                                             let _ = runner.active_tool_calls.try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
-   --> src/node/runner.rs:988:14
-    |
-988 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |              ^^^^^^^^^^^^
-    |
-help: replace the use of the deprecated method
-    |
-988 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-988 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |
-
-warning: `sandboxed_sh` (lib test) generated 3 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 3 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c29a904789290e9f)
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-36a550f36c0ebdd4)
 
 running 13 tests
 test api::mission_access::tests::a_revoke_that_cannot_be_saved_changes_nothing ... ok
@@ -154,48 +40,10 @@ test api::mission_access::tests::scope_hint_points_reads_and_control_to_the_tool
 test api::mission_access::tests::state_survives_restart ... ok
 test api::mission_access::tests::ttl_is_clamped_and_self_requests_refused ... ok
 
-test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.02s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.09s
 
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7420:50
-     |
-7420 | ...                   .fetch_update(
-     |                        ^^^^^^^^^^^^
-     |
-     = note: `#[warn(deprecated)]` on by default
-help: replace the use of the deprecated method
-     |
-7420 -                                                 .fetch_update(
-7420 +                                                 .try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7427:78
-     |
-7427 | ...                   let _ = runner.active_tool_calls.fetch_update(
-     |                                                        ^^^^^^^^^^^^
-     |
-help: replace the use of the deprecated method
-     |
-7427 -                                             let _ = runner.active_tool_calls.fetch_update(
-7427 +                                             let _ = runner.active_tool_calls.try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
-   --> src/node/runner.rs:988:14
-    |
-988 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |              ^^^^^^^^^^^^
-    |
-help: replace the use of the deprecated method
-    |
-988 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-988 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |
-
-warning: `sandboxed_sh` (lib test) generated 3 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 3 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 0.13s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c29a904789290e9f)
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-36a550f36c0ebdd4)
 
 running 21 tests
 test remote_node::job_ledger::tests::accepted_handle_replaces_pre_submit_tentative_handle ... ok
@@ -220,140 +68,26 @@ test remote_node::job_ledger::tests::submission_sequence_breaks_equal_timestamp_
 test remote_node::job_ledger::tests::tentative_handles_round_trip ... ok
 test remote_node::job_ledger::tests::terminal_tentative_handle_never_becomes_validation_receipt ... ok
 
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3699 filtered out; finished in 0.48s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3699 filtered out; finished in 6.57s
 
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7420:50
-     |
-7420 | ...                   .fetch_update(
-     |                        ^^^^^^^^^^^^
-     |
-     = note: `#[warn(deprecated)]` on by default
-help: replace the use of the deprecated method
-     |
-7420 -                                                 .fetch_update(
-7420 +                                                 .try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7427:78
-     |
-7427 | ...                   let _ = runner.active_tool_calls.fetch_update(
-     |                                                        ^^^^^^^^^^^^
-     |
-help: replace the use of the deprecated method
-     |
-7427 -                                             let _ = runner.active_tool_calls.fetch_update(
-7427 +                                             let _ = runner.active_tool_calls.try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
-   --> src/node/runner.rs:988:14
-    |
-988 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |              ^^^^^^^^^^^^
-    |
-help: replace the use of the deprecated method
-    |
-988 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-988 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |
-
-warning: `sandboxed_sh` (lib test) generated 3 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 3 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 0.19s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c29a904789290e9f)
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-36a550f36c0ebdd4)
 
 running 1 test
 test api::proxy::latency_tests::keepalives_fill_long_pauses_between_events_only ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3719 filtered out; finished in 0.00s
 
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7420:50
-     |
-7420 | ...                   .fetch_update(
-     |                        ^^^^^^^^^^^^
-     |
-     = note: `#[warn(deprecated)]` on by default
-help: replace the use of the deprecated method
-     |
-7420 -                                                 .fetch_update(
-7420 +                                                 .try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7427:78
-     |
-7427 | ...                   let _ = runner.active_tool_calls.fetch_update(
-     |                                                        ^^^^^^^^^^^^
-     |
-help: replace the use of the deprecated method
-     |
-7427 -                                             let _ = runner.active_tool_calls.fetch_update(
-7427 +                                             let _ = runner.active_tool_calls.try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
-   --> src/node/runner.rs:988:14
-    |
-988 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |              ^^^^^^^^^^^^
-    |
-help: replace the use of the deprecated method
-    |
-988 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-988 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |
-
-warning: `sandboxed_sh` (lib test) generated 3 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 3 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c29a904789290e9f)
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-36a550f36c0ebdd4)
 
 running 1 test
 test api::proxy::latency_tests::stall_before_output_is_rerouted_transparently ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3719 filtered out; finished in 0.00s
 
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7420:50
-     |
-7420 | ...                   .fetch_update(
-     |                        ^^^^^^^^^^^^
-     |
-     = note: `#[warn(deprecated)]` on by default
-help: replace the use of the deprecated method
-     |
-7420 -                                                 .fetch_update(
-7420 +                                                 .try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
-    --> src/api/control/actor.rs:7427:78
-     |
-7427 | ...                   let _ = runner.active_tool_calls.fetch_update(
-     |                                                        ^^^^^^^^^^^^
-     |
-help: replace the use of the deprecated method
-     |
-7427 -                                             let _ = runner.active_tool_calls.fetch_update(
-7427 +                                             let _ = runner.active_tool_calls.try_update(
-     |
-
-warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
-   --> src/node/runner.rs:988:14
-    |
-988 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |              ^^^^^^^^^^^^
-    |
-help: replace the use of the deprecated method
-    |
-988 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-988 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-    |
-
-warning: `sandboxed_sh` (lib test) generated 3 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 3 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 0.15s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c29a904789290e9f)
+    Finished `test` profile [unoptimized] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-36a550f36c0ebdd4)
 
 running 1 test
 test api::proxy::latency_tests::stall_after_output_is_surfaced_not_retried ... ok
