@@ -50,6 +50,7 @@ mod session_preview;
 mod skills;
 mod sync_util;
 mod transfers;
+mod transport_proxy;
 mod uploads;
 mod voice;
 
@@ -273,6 +274,7 @@ fn main() {
             session_preview::local_session_git,
             connection_store::desktop_connection_load,
             connection_store::desktop_connection_save,
+            transport_proxy::transport_bridge_configure,
             uploads::pick_upload_files,
             uploads::pick_upload_folder,
             uploads::grant_upload_folder,

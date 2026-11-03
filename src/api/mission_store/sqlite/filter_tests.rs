@@ -488,3 +488,59 @@ async fn stale_active_scan_keeps_hermes_ownership_tags() {
         found.project.tags
     );
 }
+
+#[tokio::test]
+async fn updated_since_filter_returns_only_missions_updated_after_cursor() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = store(&dir).await;
+    let old_id = seed(&store, "", None, None, None).await;
+    let fresh_id = seed(&store, "", None, None, None).await;
+    let meta_only_id = seed(&store, "", None, None, None).await;
+    store
+        .force_backdate_for_test(old_id, "2026-10-01T00:00:00+00:00")
+        .await
+        .expect("backdate older");
+    store
+        .force_backdate_for_test(fresh_id, "2026-11-03T06:00:00+00:00")
+        .await
+        .expect("backdate newer");
+    store
+        .force_backdate_for_test(meta_only_id, "2026-10-01T00:00:00+00:00")
+        .await
+        .expect("backdate meta_only");
+    store
+        .update_mission_metadata(
+            meta_only_id,
+            Some(Some("renamed")),
+            None,
+            Some(Some("user")),
+            None,
+            None,
+        )
+        .await
+        .expect("touch metadata_updated_at");
+    store
+        .force_backdate_for_test(meta_only_id, "2026-10-01T00:00:00+00:00")
+        .await
+        .expect("backdate updated_at while preserving metadata_updated_at");
+
+    let rows = store
+        .list_missions_filtered(
+            &MissionFilter {
+                updated_since: Some("2026-11-01T00:00:00+00:00".into()),
+                attention_only: true,
+                ..Default::default()
+            },
+            50,
+            0,
+        )
+        .await
+        .expect("updated_since query");
+    let ids: Vec<_> = rows.iter().map(|m| m.id).collect();
+    assert!(ids.contains(&fresh_id), "fresh mission must match");
+    assert!(
+        ids.contains(&meta_only_id),
+        "metadata-updated mission must match even when updated_at is older"
+    );
+    assert!(!ids.contains(&old_id), "old mission must be excluded");
+}

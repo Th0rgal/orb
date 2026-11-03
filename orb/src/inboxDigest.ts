@@ -1,5 +1,15 @@
 import { createSignal } from "solid-js";
-import { connectionVersion, getApiUrl, getJwt, isConnected, type Mission } from "./api";
+import * as apiModule from "./api";
+import type { Mission } from "./api";
+
+const { connectionVersion, getApiUrl, getJwt, isConnected } = apiModule;
+
+function digestFetch(path: string, init?: RequestInit): Promise<Response> {
+  if ("transportFetch" in apiModule && typeof apiModule.transportFetch === "function") {
+    return apiModule.transportFetch(path, init);
+  }
+  return fetch(`${getApiUrl().trim().replace(/\/+$/, "")}${path}`, init);
+}
 import { backgroundWake as parseBackgroundWake } from "./backgroundWake";
 import { formatToolDetail, isSyntheticUserMessage } from "./inboxModel";
 import { inboxConfig, saveInboxConfig } from "./inboxSettings";
@@ -382,7 +392,7 @@ export function parseDigestJson(
 
 async function fetchSharedDigest(missionId: string, model: string, updatedMs: number): Promise<InboxDigest | null> {
   const version = connectionVersion();
-  const response = await fetch(`${getApiUrl()}/api/control/missions/${encodeURIComponent(missionId)}/inbox-digest`, {
+  const response = await digestFetch(`/api/control/missions/${encodeURIComponent(missionId)}/inbox-digest`, {
     method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${getJwt() ?? ""}` },
     body: JSON.stringify({ model }), signal: AbortSignal.timeout(100_000),
   });

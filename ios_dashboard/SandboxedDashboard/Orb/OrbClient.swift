@@ -84,6 +84,7 @@ final class OrbCore {
     @ObservationIgnored private var cachedBaseURL: String?
     @ObservationIgnored private var cachedTokenEndpoint: String?
     @ObservationIgnored private var cachedJwtToken: String?
+    @ObservationIgnored private var endpointCooldowns: [String: Date] = [:]
 
     var baseURL: String {
         get {
@@ -100,6 +101,7 @@ final class OrbCore {
             cachedBaseURL = resolved
             cachedTokenEndpoint = nil
             cachedJwtToken = nil
+            endpointCooldowns.removeAll()
             #if DEBUG
             // UI tests point the app at loopback fixtures with `-api_base_url`; never let a
             // test that edits the server URL overwrite the operator's saved endpoint.
@@ -827,27 +829,89 @@ final class OrbCore {
         return (try await decode(T.self, from: data, label: label), response)
     }
 
-    /// The single transport: performs the request, maps failures to
-    /// `OrbHTTPError`, expires the session on a 401 for the current token, and
-    /// records failures in the diagnostics ring.
+    private func orderedCandidateEndpoints(for primary: String) -> [String] {
+        let candidates = OrbConnection.candidateEndpoints(for: primary)
+        guard candidates.count > 1 else { return candidates }
+        let now = Date()
+        var healthy: [String] = []
+        var cooling: [String] = []
+        for url in candidates {
+            if let until = endpointCooldowns[url], until > now {
+                cooling.append(url)
+            } else {
+                healthy.append(url)
+            }
+        }
+        return healthy + cooling
+    }
+
+    private func sendAttempt(_ request: URLRequest, session: URLSession, currentEndpoint: String, failure: String) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw OrbHTTPError.invalidResponse }
+        if http.statusCode == 401 {
+            // A rejected login or an old in-flight request must not clear a newer session.
+            let candidates = OrbConnection.candidateEndpoints(for: currentEndpoint)
+            let matchesEndpoint = candidates.contains { request.url?.absoluteString.hasPrefix($0 + "/") == true }
+            if let authorization = request.value(forHTTPHeaderField: "Authorization"),
+               authorization == "Bearer \(authToken ?? "")",
+               matchesEndpoint {
+                markSessionExpired()
+            }
+            throw OrbHTTPError.unauthorized
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let text = String(data: data, encoding: .utf8) ?? ""
+            throw OrbHTTPError(status: http.statusCode, detail: text.isEmpty ? failure : text)
+        }
+        return (data, http)
+    }
+
+    /// The single transport: performs the request (with 1 fast retry and multi-path
+    /// failover on idempotent GET/HEAD requests), maps failures to `OrbHTTPError`,
+    /// expires the session on a 401 for the current token, and records failures.
     private func send(_ request: URLRequest, session: URLSession, label: String, failure: String) async throws -> (Data, HTTPURLResponse) {
+        let method = (request.httpMethod ?? "GET").uppercased()
+        let idempotent = method == "GET" || method == "HEAD"
+        let currentEndpoint = endpoint
+        let suffix: String? = {
+            guard idempotent, !currentEndpoint.isEmpty,
+                  let abs = request.url?.absoluteString,
+                  abs.hasPrefix(currentEndpoint + "/") else { return nil }
+            return String(abs.dropFirst(currentEndpoint.count))
+        }()
+        let candidates = suffix != nil ? orderedCandidateEndpoints(for: currentEndpoint) : [currentEndpoint]
+
         do {
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else { throw OrbHTTPError.invalidResponse }
-            if http.statusCode == 401 {
-                // A rejected login or an old in-flight request must not clear a newer session.
-                if let authorization = request.value(forHTTPHeaderField: "Authorization"),
-                   authorization == "Bearer \(authToken ?? "")",
-                   request.url?.absoluteString.hasPrefix(endpoint + "/") == true {
-                    markSessionExpired()
+            var lastError: Error?
+            for (idx, base) in candidates.enumerated() {
+                let isLastCandidate = idx + 1 == candidates.count
+                var candidateReq = request
+                if let suffix, base != currentEndpoint, let rewritten = URL(string: base + suffix) {
+                    candidateReq.url = rewritten
                 }
-                throw OrbHTTPError.unauthorized
+                let maxAttempts = idempotent ? 2 : 1
+                for attempt in 0..<maxAttempts {
+                    try Task.checkCancellation()
+                    do {
+                        let out = try await sendAttempt(candidateReq, session: session, currentEndpoint: currentEndpoint, failure: failure)
+                        endpointCooldowns.removeValue(forKey: base)
+                        return out
+                    } catch {
+                        lastError = error
+                        if error is CancellationError || !OrbConnection.isFastRetryableGetError(error) || !idempotent {
+                            throw error
+                        }
+                        if attempt + 1 < maxAttempts {
+                            try await Task.sleep(nanoseconds: 250_000_000)
+                            continue
+                        }
+                        if !isLastCandidate {
+                            endpointCooldowns[base] = Date().addingTimeInterval(20)
+                        }
+                    }
+                }
             }
-            guard (200..<300).contains(http.statusCode) else {
-                let text = String(data: data, encoding: .utf8) ?? ""
-                throw OrbHTTPError(status: http.statusCode, detail: text.isEmpty ? failure : text)
-            }
-            return (data, http)
+            throw lastError ?? OrbHTTPError.invalidResponse
         } catch {
             ErrorRing.shared.recordRequest(path: label, error: error)
             throw error

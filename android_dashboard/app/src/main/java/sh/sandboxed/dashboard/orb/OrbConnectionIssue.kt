@@ -25,10 +25,27 @@ data class OrbConnectionIssue(
 
 object OrbConnection {
     const val DEFAULT_BASE_URL = "https://agent-backend.thomas.md"
+    const val KNOWN_DIRECT_BASE_URL = "https://agent-backend.nico-best-pc-ever.ovh"
 
     fun normalize(url: String): String = url.trim().trimEnd('/')
 
     fun isDefault(url: String): Boolean = normalize(url).equals(DEFAULT_BASE_URL, ignoreCase = true)
+
+    /** Ordered candidate origins for multi-path failover (mirrors Desktop/Tauri/iOS). */
+    fun candidateEndpoints(primary: String): List<String> {
+        val clean = normalize(primary)
+        if (clean.isEmpty()) return emptyList()
+        val lower = clean.lowercase()
+        if (lower == KNOWN_DIRECT_BASE_URL || (lower.endsWith(".thomas.md") && lower != DEFAULT_BASE_URL)) {
+            return listOf(clean, DEFAULT_BASE_URL)
+        }
+        if (lower == DEFAULT_BASE_URL) {
+            return listOf(clean, KNOWN_DIRECT_BASE_URL)
+        }
+        return listOf(clean)
+    }
+
+    fun isFastRetryableStatus(status: Int): Boolean = status in setOf(502, 503, 504, 522, 524)
 
     /** Host of [url] or null when it does not parse. */
     fun host(url: String): String? = try {

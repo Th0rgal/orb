@@ -43,6 +43,7 @@ import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import sh.sandboxed.dashboard.util.TokenCrypto
 import java.io.File
+import java.io.IOException
 import java.net.URLEncoder
 import java.security.MessageDigest
 import java.time.Instant
@@ -1394,6 +1395,7 @@ class OrbCore private constructor(context: Context) {
         _lastError.value = null
         _lastErrorLog.value = null
         _connectionIssue.value = null
+        endpointCooldownUntilMs.clear()
     }
 
     /** Fresh rows update known missions without removing older rows absent from the global page. */
@@ -1662,8 +1664,22 @@ class OrbCore private constructor(context: Context) {
         _isLoading.value = false
     }
 
-    fun makeURL(path: String): String {
-        val base = _baseURL.value.trim().trimEnd('/')
+    private val endpointCooldownUntilMs = ConcurrentHashMap<String, Long>()
+
+    private fun orderedCandidateEndpoints(primary: String): List<String> {
+        val candidates = OrbConnection.candidateEndpoints(primary)
+        if (candidates.size <= 1) return candidates
+        val now = System.currentTimeMillis()
+        val healthy = mutableListOf<String>()
+        val cooling = mutableListOf<String>()
+        for (url in candidates) {
+            if ((endpointCooldownUntilMs[url] ?: 0L) > now) cooling.add(url) else healthy.add(url)
+        }
+        return healthy + cooling
+    }
+
+    fun makeURL(path: String, explicitBase: String? = null): String {
+        val base = (explicitBase ?: _baseURL.value).trim().trimEnd('/')
         if (base.isEmpty()) throw OrbError("No server URL configured")
         val normalized = if (path.startsWith("/")) path else "/$path"
         return "$base$normalized"
@@ -1678,38 +1694,78 @@ class OrbCore private constructor(context: Context) {
         /** Exact JSON text to send (device-signed requests hash these bytes). */
         rawBody: String? = null
     ): Any? = withContext(Dispatchers.IO) {
-        val url = makeURL(path)
-        val reqBuilder = Request.Builder().url(url)
-        reqBuilder.header("Accept", "application/json")
+        val upperMethod = method.uppercase()
+        val idempotent = upperMethod == "GET" || upperMethod == "HEAD"
+        val primaryBase = _baseURL.value.trim().trimEnd('/')
+        if (primaryBase.isEmpty()) throw OrbError("No server URL configured")
+        val candidates = if (idempotent) orderedCandidateEndpoints(primaryBase) else listOf(primaryBase)
+
         val cleanToken = _token.value?.trim()?.takeIf { it.isNotEmpty() }
-        if (cleanToken != null) {
-            reqBuilder.header("Authorization", "Bearer $cleanToken")
-        }
-        for ((k, v) in headers) {
-            reqBuilder.header(k, v)
-        }
         val requestBody = when {
             rawBody != null -> rawBody.toRequestBody("application/json; charset=utf-8".toMediaType())
             body != null -> {
                 val jsonText = OrbJSON.stringify(body)
                 jsonText.toRequestBody("application/json; charset=utf-8".toMediaType())
             }
-            method.uppercase() in setOf("POST", "PUT", "PATCH") -> {
+            upperMethod in setOf("POST", "PUT", "PATCH") -> {
                 "".toRequestBody("application/json; charset=utf-8".toMediaType())
             }
             else -> null
         }
-        reqBuilder.method(method.uppercase(), requestBody)
 
-        val startedNs = System.nanoTime()
-        val response = httpClient.newCall(reqBuilder.build()).execute()
-        val code = response.code
-        val bytes = response.body?.bytes() ?: ByteArray(0)
-        response.close()
-        val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000L
-        if (elapsedMs >= 1_500L) {
-            OrbPerfMonitor.recordSlowRequest(method.uppercase(), path, elapsedMs, bytes.size)
+        var code = 599
+        var bytes = ByteArray(0)
+        var lastIoError: IOException? = null
+        outer@ for ((idx, base) in candidates.withIndex()) {
+            val isLastCandidate = idx + 1 == candidates.size
+            val maxAttempts = if (idempotent) 2 else 1
+            for (attempt in 0 until maxAttempts) {
+                val url = makeURL(path, explicitBase = base)
+                val reqBuilder = Request.Builder().url(url).header("Accept", "application/json")
+                if (cleanToken != null) {
+                    reqBuilder.header("Authorization", "Bearer $cleanToken")
+                }
+                for ((k, v) in headers) {
+                    reqBuilder.header(k, v)
+                }
+                reqBuilder.method(upperMethod, requestBody)
+                val startedNs = System.nanoTime()
+                try {
+                    val response = httpClient.newCall(reqBuilder.build()).execute()
+                    code = response.code
+                    bytes = response.body?.bytes() ?: ByteArray(0)
+                    response.close()
+                    val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000L
+                    if (elapsedMs >= 1_500L) {
+                        OrbPerfMonitor.recordSlowRequest(upperMethod, path, elapsedMs, bytes.size)
+                    }
+                    lastIoError = null
+                    if (idempotent && OrbConnection.isFastRetryableStatus(code)) {
+                        if (attempt + 1 < maxAttempts) {
+                            delay(250L)
+                            continue
+                        }
+                        if (!isLastCandidate) {
+                            endpointCooldownUntilMs[base] = System.currentTimeMillis() + 20_000L
+                            continue@outer
+                        }
+                    }
+                    if (code < 500) endpointCooldownUntilMs.remove(base)
+                    break@outer
+                } catch (io: IOException) {
+                    lastIoError = io
+                    if (!idempotent) throw io
+                    if (attempt + 1 < maxAttempts) {
+                        delay(250L)
+                        continue
+                    }
+                    if (!isLastCandidate) {
+                        endpointCooldownUntilMs[base] = System.currentTimeMillis() + 20_000L
+                    }
+                }
+            }
         }
+        if (lastIoError != null) throw lastIoError
 
         if (code == 401 && allowAuthRetry && path != "/api/auth/login") {
             if (renewSessionFromSavedCredentials()) {

@@ -278,7 +278,9 @@ fn context_listener(
     let token = request.token.clone();
     let project = request.project.clone();
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
+        let client = crate::transport_proxy::resilient_client_builder()
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         // Failed connects back off 3 s → 60 s; a healthy stream resets it. A fixed 3 s retry
         // from every project's worker turned a Core error into a request storm.
         let mut backoff = std::time::Duration::from_secs(3);

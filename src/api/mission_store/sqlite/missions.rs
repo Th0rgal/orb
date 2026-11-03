@@ -316,6 +316,13 @@ impl SqliteMissionStore {
             if let Some(v) = filter.origin_session_id.as_deref() {
                 bind("origin_session_id = ?n", v, &mut clauses, &mut binds);
             }
+            if let Some(v) = filter.updated_since.as_deref() {
+                binds.push(v.to_string());
+                let idx = binds.len();
+                clauses.push(format!(
+                    "(updated_at >= ?{idx} OR (metadata_updated_at IS NOT NULL AND metadata_updated_at >= ?{idx}))"
+                ));
+            }
             if let Some(v) = filter.tag.as_deref() {
                 // Match the tag's JSON *serialization*, quotes included: a tag
                 // holding a quote/backslash/newline is escaped inside the

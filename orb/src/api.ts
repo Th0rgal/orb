@@ -16,13 +16,137 @@ export { btwParentId, excludeBtwMissions, isBtwMission };
 const URL_KEY = "orb.apiUrl";
 const JWT_KEY = "orb.jwt";
 const DEFAULT_URL = "https://agent-backend.thomas.md";
+const KNOWN_DIRECT_URL = "https://agent-backend.nico-best-pc-ever.ovh";
+const ENDPOINT_COOLDOWN_MS = 20_000;
 
 export function getApiUrl(): string {
   return localStorage.getItem(URL_KEY) ?? DEFAULT_URL;
 }
 
+/** Ordered candidate origins for multi-path failover (mirrors Rust/Swift/Kotlin). */
+export function candidateApiUrls(primary = getApiUrl()): string[] {
+  const clean = primary.trim().replace(/\/+$/, "");
+  if (!clean) return [];
+  const lower = clean.toLowerCase();
+  if (lower === KNOWN_DIRECT_URL || (lower.endsWith(".thomas.md") && lower !== DEFAULT_URL)) {
+    return [clean, DEFAULT_URL];
+  }
+  if (lower === DEFAULT_URL) {
+    return [clean, KNOWN_DIRECT_URL];
+  }
+  return [clean];
+}
+
+let transportBridgeEnabled = false;
+let bridgeTarget: string | null = null;
+let bridgeBaseUrl: string | null = null;
+let bridgePending: Promise<string | null> | null = null;
+const endpointCooldownUntil = new Map<string, number>();
+
+function resetTransportState() {
+  bridgeTarget = null;
+  bridgeBaseUrl = null;
+  bridgePending = null;
+  endpointCooldownUntil.clear();
+}
+
+/** Enable or disable the Tauri loopback HTTP bridge (enabled by `restoreDesktopConnection`). */
+export function setTransportBridgeEnabled(enabled: boolean): void {
+  transportBridgeEnabled = enabled;
+  if (!enabled) {
+    bridgeTarget = null;
+    bridgeBaseUrl = null;
+    bridgePending = null;
+  }
+}
+
+function orderedApiCandidates(primary: string): string[] {
+  const list = candidateApiUrls(primary);
+  if (list.length <= 1) return list;
+  const now = Date.now();
+  const healthy: string[] = [];
+  const cooling: string[] = [];
+  for (const url of list) {
+    if ((endpointCooldownUntil.get(url) ?? 0) > now) cooling.push(url);
+    else healthy.push(url);
+  }
+  return [...healthy, ...cooling];
+}
+
+/** Resolve the native loopback transport URL (`http://127.0.0.1:<port>/__orb_tx/<token>`)
+ * when running inside Tauri desktop; returns `null` in web/test environments. */
+export async function resolveTransportBase(apiUrl = getApiUrl()): Promise<string | null> {
+  if (!transportBridgeEnabled) return null;
+  const invoke = nativeInvoke();
+  if (!invoke) return null;
+  const clean = apiUrl.trim().replace(/\/+$/, "");
+  if (bridgeTarget === clean && bridgeBaseUrl) return bridgeBaseUrl;
+  if (bridgePending && bridgeTarget === clean) return bridgePending;
+  bridgeTarget = clean;
+  const pending = invoke<{ proxy_base_url?: string; configured_target?: string }>("transport_bridge_configure", { apiUrl: clean })
+    .then((info) => {
+      const proxy = typeof info?.proxy_base_url === "string" && info.proxy_base_url.startsWith("http://127.0.0.1:")
+        ? info.proxy_base_url.replace(/\/+$/, "")
+        : null;
+      if (bridgeTarget === clean) bridgeBaseUrl = proxy;
+      return proxy;
+    })
+    .catch(() => {
+      if (bridgeTarget === clean) bridgeBaseUrl = null;
+      return null;
+    })
+    .finally(() => {
+      if (bridgePending === pending) bridgePending = null;
+    });
+  bridgePending = pending;
+  return pending;
+}
+
+/** Perform `fetch` against `path` using the Tauri loopback transport when active
+ * (eliminating `WKWebView` CORS preflights and DNS stalls), or ordered direct/fallback
+ * origins synchronously when no native bridge is active. */
+export function transportFetch(path: string, init?: RequestInit, explicitBase?: string): Promise<Response> {
+  const target = (explicitBase ?? getApiUrl()).trim().replace(/\/+$/, "");
+  if (transportBridgeEnabled && nativeInvoke()) {
+    if (bridgeTarget === target && bridgeBaseUrl) {
+      return fetch(`${bridgeBaseUrl}${path}`, init);
+    }
+    return resolveTransportBase(target).then((proxy) =>
+      proxy ? fetch(`${proxy}${path}`, init) : transportFetchDirect(target, path, init),
+    );
+  }
+  return transportFetchDirect(target, path, init);
+}
+
+async function transportFetchDirect(target: string, path: string, init?: RequestInit): Promise<Response> {
+  const candidates = orderedApiCandidates(target);
+  const method = (init?.method ?? "GET").toUpperCase();
+  const idempotent = method === "GET" || method === "HEAD";
+  let lastError: unknown;
+  for (let i = 0; i < candidates.length; i++) {
+    const base = candidates[i];
+    const isLast = i + 1 === candidates.length;
+    try {
+      const res = await fetch(`${base}${path}`, init);
+      if (idempotent && !isLast && [502, 503, 504, 522, 524].includes(res.status)) {
+        endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
+        continue;
+      }
+      if (res.status < 500) endpointCooldownUntil.delete(base);
+      return res;
+    } catch (err) {
+      lastError = err;
+      if (isAbortError(err) || !idempotent || isLast) throw err;
+      endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
+    }
+  }
+  throw lastError ?? new TypeError("Load failed");
+}
+
 export function setApiUrl(url: string) {
-  localStorage.setItem(URL_KEY, url.trim().replace(/\/+$/, ""));
+  const clean = url.trim().replace(/\/+$/, "");
+  if (clean !== getApiUrl()) resetTransportState();
+  localStorage.setItem(URL_KEY, clean);
 }
 
 export function getJwt(): string | null {
@@ -81,7 +205,7 @@ export function clearConnection() {
 }
 
 export async function login(password: string): Promise<void> {
-  const res = await fetch(`${getApiUrl()}/api/auth/login`, {
+  const res = await transportFetch("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password }),
@@ -177,7 +301,27 @@ function stickMissionRows<T>(path: string, result: T): T {
   if (Array.isArray(result)) return (result.some(isMissionRow) ? result.map(row => isMissionRow(row) ? stickHierarchy(row) : row) : result) as T;
   return (isMissionRow(result) ? stickHierarchy(result) : result) as T;
 }
+function isFastRetryableGetError(error: unknown, init?: RequestInit): boolean {
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD") return false;
+  if (init?.signal?.aborted) return false;
+  if (error instanceof RequestTimeoutError || isAbortError(error) || error instanceof InvalidApiResponseError) return false;
+  return error instanceof TypeError && /load failed|failed to fetch|networkerror|network connection|internet connection|could not connect/i.test(error.message);
+}
+
 async function sendRequest<T>(path: string, init?: RequestInit, text = false): Promise<T> {
+  try {
+    return await sendRequestOnce<T>(path, init, text);
+  } catch (error) {
+    if (!isFastRetryableGetError(error, init)) throw error;
+    const delayMs = 200 + Math.floor(Math.random() * 200);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (init?.signal?.aborted) throw error;
+    return sendRequestOnce<T>(path, init, text);
+  }
+}
+
+async function sendRequestOnce<T>(path: string, init?: RequestInit, text = false): Promise<T> {
   const version = connectionVersion();
   const jwt = getJwt();
   const headers: Record<string, string> = {
@@ -187,7 +331,7 @@ async function sendRequest<T>(path: string, init?: RequestInit, text = false): P
   const started = performance.now();
   let res: Response;
   try {
-    res = await fetch(`${getApiUrl()}${path}`, { ...init, headers, signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    res = await transportFetch(path, { ...init, headers, signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   } catch (error) {
     if (!isAbortError(error)) throw error;
     const reason = abortReason(init?.signal);
@@ -1026,10 +1170,12 @@ export async function deleteProjectFile(slug: string, path: string): Promise<voi
   });
 }
 
-export async function listMissions(limit = 200): Promise<Mission[]> {
+export async function listMissions(limit = 200, options?: { updatedSince?: string }): Promise<Mission[]> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const local = excludeBtwMissions(await origins.localOrigins());
-  try { const remote = await includeAncestors(await api<Mission[]>(`/api/control/missions?limit=${limit}`)); await origins.rememberCoreState(local,[...remote,...await origins.unlistedCoreState(local,remote,id=>api<Mission>(`/api/control/missions/${id}`))],observedAt); const pending=excludeBtwMissions(local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id))))); return [...pending,...excludeBtwMissions(remote).filter(row=>!pending.some(item=>item.id===row.id))]; }
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (options?.updatedSince) params.set("updated_since", options.updatedSince);
+  try { const remote = await includeAncestors(await api<Mission[]>(`/api/control/missions?${params}`)); await origins.rememberCoreState(local,[...remote,...await origins.unlistedCoreState(local,remote,id=>api<Mission>(`/api/control/missions/${id}`))],observedAt); const pending=excludeBtwMissions(local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id))))); return [...pending,...excludeBtwMissions(remote).filter(row=>!pending.some(item=>item.id===row.id))]; }
   catch(error){if(local.length)return partialList(local);throw error;}
 }
 

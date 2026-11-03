@@ -39,6 +39,40 @@ pub struct ListMissionsQuery {
     /// hide (e.g. a project's full history view). Ignored when `status` is set.
     #[serde(default)]
     pub all: Option<bool>,
+    /// Optional RFC3339 lower bound on `updated_at` (or `metadata_updated_at`)
+    /// so connected clients can refresh only changed rows.
+    #[serde(default)]
+    pub updated_since: Option<String>,
+}
+
+/// Cap `goal_objective` in list projections so a mission carrying a multi-hundred-KB
+/// prompt/base64 objective never bloats `GET /api/control/missions` into multi-MB
+/// transfers. Single-mission `GET /api/control/missions/:id` still returns the full
+/// `goal_objective`.
+pub(super) const LIST_GOAL_OBJECTIVE_MAX_CHARS: usize = 1024;
+
+pub(super) fn compact_list_goal_objective(value: &mut serde_json::Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let Some(raw) = object.get("goal_objective").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let mut chars = raw.char_indices();
+    let Some((byte_end, _)) = chars.nth(LIST_GOAL_OBJECTIVE_MAX_CHARS) else {
+        return;
+    };
+    let mut clipped = String::with_capacity(byte_end + 4);
+    clipped.push_str(&raw[..byte_end]);
+    clipped.push('…');
+    object.insert(
+        "goal_objective".to_string(),
+        serde_json::Value::String(clipped),
+    );
+    object.insert(
+        "goal_objective_truncated".to_string(),
+        serde_json::Value::Bool(true),
+    );
 }
 
 pub(super) fn mission_execution_projection(
@@ -530,6 +564,12 @@ pub async fn list_missions(
         track: query.track.clone(),
         tag: query.tag.clone(),
         origin_session_id: query.origin_session_id.clone(),
+        updated_since: query
+            .updated_since
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
         // Default listings (no explicit status) hide acknowledged / completed /
         // absorbed attempts. An explicit status is a precise query; `all=true`
         // opts out for callers that want full history (project views).
@@ -646,7 +686,8 @@ pub async fn list_missions(
     let mut values: Vec<serde_json::Value> = missions
         .into_iter()
         .map(|mission| {
-            let value = serde_json::to_value(&mission).unwrap_or(serde_json::Value::Null);
+            let mut value = serde_json::to_value(&mission).unwrap_or(serde_json::Value::Null);
+            compact_list_goal_objective(&mut value);
             let value = attach_execution_to_mission_value(
                 value,
                 &mission,
@@ -1181,5 +1222,37 @@ pub(super) async fn populate_workspace_names(state: &Arc<AppState>, missions: &m
         if let Some(workspace) = state.workspaces.get(mission.workspace_id).await {
             mission.workspace_name = Some(workspace.name);
         }
+    }
+}
+
+#[cfg(test)]
+mod list_projection_tests {
+    use super::*;
+
+    #[test]
+    fn list_projection_truncates_oversized_goal_objective_safely_at_char_boundary() {
+        let short = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "goal_objective": "Verify Lean kernel invariants"
+        });
+        let mut short_out = short.clone();
+        compact_list_goal_objective(&mut short_out);
+        assert_eq!(short_out["goal_objective"], short["goal_objective"]);
+        assert!(short_out.get("goal_objective_truncated").is_none());
+
+        // Multi-byte UTF-8 around the 1024-char boundary must never panic or split scalar values.
+        let oversized = format!("{}🚀{}", "a".repeat(1023), "b".repeat(50_000));
+        let mut long_out = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "goal_objective": oversized,
+        });
+        compact_list_goal_objective(&mut long_out);
+        let clipped = long_out["goal_objective"].as_str().expect("string");
+        assert_eq!(clipped.chars().count(), LIST_GOAL_OBJECTIVE_MAX_CHARS + 1);
+        assert!(clipped.ends_with("🚀…"));
+        assert_eq!(
+            long_out["goal_objective_truncated"],
+            serde_json::json!(true)
+        );
     }
 }

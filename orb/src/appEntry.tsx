@@ -1,4 +1,4 @@
-import { restoreDesktopConnection } from "./api";
+import { resolveTransportBase, restoreDesktopConnection, setTransportBridgeEnabled } from "./api";
 import { render } from "solid-js/web";
 import App from "./App";
 import { FindBar } from "./FindBar";
@@ -8,9 +8,11 @@ import { startDiagnostics } from "./diagnostics";
 
 export async function mountApp(root: HTMLElement): Promise<void> {
   startDiagnostics();
+  setTransportBridgeEnabled(true);
   await restoreDesktopConnection().catch(() => {
     console.warn("Orb could not restore the saved desktop connection");
   });
+  await resolveTransportBase().catch(() => null);
   root.replaceChildren();
   render(() => <><App /><FindBar /><Toaster /></>, root);
 }

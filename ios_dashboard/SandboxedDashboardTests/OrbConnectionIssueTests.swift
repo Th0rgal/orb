@@ -68,4 +68,30 @@ final class OrbConnectionIssueTests: XCTestCase {
         XCTAssertFalse(OrbConnection.shouldProbeDefault(serverURL: "https://orb.example.com", unreachable: true))
         XCTAssertFalse(OrbConnection.shouldProbeDefault(serverURL: "http://192.168.1.5:8080", unreachable: false))
     }
+
+    func testCandidateEndpointsPairDirectAndFallback() {
+        XCTAssertEqual(
+            OrbConnection.candidateEndpoints(for: "https://agent-backend.nico-best-pc-ever.ovh/"),
+            ["https://agent-backend.nico-best-pc-ever.ovh", "https://agent-backend.thomas.md"]
+        )
+        XCTAssertEqual(
+            OrbConnection.candidateEndpoints(for: "https://agent-backend.thomas.md"),
+            ["https://agent-backend.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"]
+        )
+        XCTAssertEqual(
+            OrbConnection.candidateEndpoints(for: "https://orb.example.com"),
+            ["https://orb.example.com"]
+        )
+    }
+
+    func testFastRetryableGetErrorClassification() {
+        XCTAssertTrue(OrbConnection.isFastRetryableGetError(URLError(.cannotFindHost)))
+        XCTAssertTrue(OrbConnection.isFastRetryableGetError(URLError(.dnsLookupFailed)))
+        XCTAssertTrue(OrbConnection.isFastRetryableGetError(URLError(.networkConnectionLost)))
+        XCTAssertTrue(OrbConnection.isFastRetryableGetError(OrbHTTPError(status: 502, detail: "Bad Gateway")))
+        XCTAssertTrue(OrbConnection.isFastRetryableGetError(OrbHTTPError(status: 524, detail: "Origin Timeout")))
+        XCTAssertFalse(OrbConnection.isFastRetryableGetError(URLError(.timedOut)))
+        XCTAssertFalse(OrbConnection.isFastRetryableGetError(OrbHTTPError(status: 401, detail: "Unauthorized")))
+        XCTAssertFalse(OrbConnection.isFastRetryableGetError(OrbHTTPError(status: 500, detail: "Internal")))
+    }
 }

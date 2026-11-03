@@ -71,6 +71,9 @@ pub struct MissionFilter {
     pub tag: Option<String>,
     /// The conversation a mission was launched from (Hermes session id).
     pub origin_session_id: Option<String>,
+    /// Optional RFC3339 lower bound on `updated_at` (or `metadata_updated_at`)
+    /// for incremental delta sync.
+    pub updated_since: Option<String>,
     /// When true, keep only live / waiting / blocked / unabsorbed-failed
     /// attempts. Default listings set this; internal scanners do not.
     pub attention_only: bool,
@@ -400,6 +403,13 @@ impl MissionFilter {
                 .origin_session_id
                 .as_deref()
                 .is_none_or(|s| mission.origin_session_id.as_deref() == Some(s))
+            && self.updated_since.as_deref().is_none_or(|since| {
+                mission.updated_at.as_str() >= since
+                    || mission
+                        .metadata_updated_at
+                        .as_deref()
+                        .is_some_and(|meta| meta >= since)
+            })
     }
 }
 

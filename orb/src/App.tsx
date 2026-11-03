@@ -61,7 +61,15 @@ const SkillPage = lazy(() => import("./SkillPage").then(module => ({ default: mo
 import { quotaStatus, usageWindows } from "./providerUsage";
 import { ProviderLogo } from "./ProviderLogo";
 import { SessionPreview, type SessionPreviewData } from "./SessionPreview";
-import { RoutingSettings, confirmLeaveRouting } from "./RoutingSettings";
+let routingConfirmLeave: ((onDiscard?: () => void) => boolean) | null = null;
+const confirmLeaveRouting = (onDiscard: () => void = () => {}) =>
+  routingConfirmLeave ? routingConfirmLeave(onDiscard) : true;
+const RoutingSettings = lazy(() =>
+  import("./RoutingSettings").then((module) => {
+    routingConfirmLeave = module.confirmLeaveRouting;
+    return { default: module.RoutingSettings };
+  }),
+);
 const Machines = lazy(() => import("./Machines").then(module => ({ default: module.Machines })));
 import { MACHINES, isManagedNode, managedFleetLabel, nodeSize } from "./machines/nodes";
 const Providers=lazy(()=>import("./Providers").then(module=>({default:module.Providers})));
@@ -71,7 +79,7 @@ import { mdSource, toggleMdSource } from "./Markdown";
 import { applyPendingMoves } from "./missionMove";
 import { cacheRecents } from "./pageCache";
 import { effortLabel, normalizeEffort } from "./effort";
-import { loadTranscript, peekReadyTranscript, prefetchTranscript, transcriptVersion } from "./missionCache";
+import { loadTranscript, peekReadyTranscript, prefetchTranscript, selectLivePrefetchIds, transcriptVersion } from "./missionCache";
 import { mergeById, pollWhileVisible } from "./poll";
 import { syncApprovalQueue, syncBunkerNotice } from "./approvalQueueNotices";
 import { getApprovalQueue } from "./approvalQueue";
@@ -335,7 +343,7 @@ export default function App() {
           }
         }
       }
-      for (const m of fresh) if (isLive(m.status)) prefetchTranscript(m.id);
+      for (const id of selectLivePrefetchIds(fresh, isLive)) prefetchTranscript(id);
       for (const key of cacheRecents()) {
         if (key.startsWith("m:") && !isMissionDeleting(key.slice(2))) prefetchTranscript(key.slice(2));
       }
@@ -882,6 +890,8 @@ export default function App() {
     // they never overwrite mission status or transcript revisions directly.
     let stopPresentation: (() => void) | undefined;
     let presentationTimer: ReturnType<typeof setTimeout> | undefined;
+    let presentationConnected = false;
+    let missionPollTick = 0;
     const changed = new Set<string>();
     let needsList = false;
     const flushPresentation = () => {
@@ -892,27 +902,41 @@ export default function App() {
     };
     const connectPresentation = () => {
       stopPresentation?.(); stopPresentation = undefined;
+      presentationConnected = false;
       changed.clear(); needsList = false; clearTimeout(presentationTimer); presentationTimer = undefined;
       if (document.hidden || !isConnected()) return;
-      stopPresentation = streamMission(null, event => {
-        if (event.type !== "mission_presentation") return;
-        const id = event.data.mission_id;
-        if (event.data.kind === "mission_activity") {
-          if (typeof id === "string") recordPresentationActivity(id, event.data.label);
-          return;
-        }
-        if (typeof id === "string" && changed.size < 12) changed.add(id);
-        if (event.data.kind !== "mission_activity") needsList = true;
-        presentationTimer ??= setTimeout(flushPresentation, 1000);
-      }, () => { void refreshMissions(); }, undefined, "presentation");
+      stopPresentation = streamMission(
+        null,
+        event => {
+          if (event.type !== "mission_presentation") return;
+          const id = event.data.mission_id;
+          if (event.data.kind === "mission_activity") {
+            if (typeof id === "string") recordPresentationActivity(id, event.data.label);
+            return;
+          }
+          if (typeof id === "string" && changed.size < 12) changed.add(id);
+          if (event.data.kind !== "mission_activity") needsList = true;
+          presentationTimer ??= setTimeout(flushPresentation, 1000);
+        },
+        () => { void refreshMissions(); },
+        () => { presentationConnected = true; },
+        "presentation",
+        undefined,
+        () => { presentationConnected = false; },
+      );
     };
     createEffect(() => { connectionVersion(); connectPresentation(); });
     document.addEventListener("visibilitychange", connectPresentation);
     onCleanup(() => {
+      presentationConnected = false;
       stopPresentation?.(); clearTimeout(presentationTimer);
       document.removeEventListener("visibilitychange", connectPresentation);
     });
-    const stopMissions = pollWhileVisible(() => (isConnected() ? refreshMissions() : undefined), 5000, "app.missions");
+    const stopMissions = pollWhileVisible(() => {
+      if (!isConnected()) return undefined;
+      if (presentationConnected && ++missionPollTick % 6 !== 0) return undefined;
+      return refreshMissions();
+    }, 5000, "app.missions");
     const stopFleet = pollWhileVisible(() => (isConnected() ? refreshFleet() : undefined), 15000, "app.fleet");
     // Learn this Mac's approval device id so notifications sign approvals too.
     // An unenrolled device that could approve puts a dot on Security.

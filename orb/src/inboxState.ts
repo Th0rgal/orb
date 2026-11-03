@@ -1,9 +1,18 @@
 import { isRecord, readJson, writeJson } from "./storage";
 import { swallow } from "./log";
-import { connectionVersion, getApiUrl, getJwt, isConnected } from "./api";
+import * as apiModule from "./api";
 import { sideQuestionKey } from "./sideQuestionStorage";
-
 import type { InboxSummaryMode } from "./inboxPolicy";
+
+const { connectionVersion, getApiUrl, getJwt, isConnected } = apiModule;
+
+function doFetch(path: string, init?: RequestInit, explicitBase?: string): Promise<Response> {
+  if ("transportFetch" in apiModule && typeof apiModule.transportFetch === "function") {
+    return apiModule.transportFetch(path, init, explicitBase);
+  }
+  const base = (explicitBase ?? getApiUrl()).trim().replace(/\/+$/, "");
+  return fetch(`${base}${path}`, init);
+}
 
 export type SharedInboxPreferences = {
   inboxEnabled?: boolean;
@@ -51,10 +60,10 @@ export function writeInboxState(path: string, input: unknown): void {
   pending++;
   writes = writes.catch(() => {}).then(async () => {
     if (connectionVersion() !== version || loadOutbox() !== key) return;
-    const response = await fetch(`${base}/api/control/inbox-state/${path}`, {
+    const response = await doFetch(`/api/control/inbox-state/${path}`, {
       method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify(body), signal: AbortSignal.timeout(10_000),
-    });
+    }, base);
     // Deleted or no-longer-accessible missions cannot receive a read receipt.
     // Drop only that terminal receipt; retain preferences and transient failures.
     if (!response.ok && !(response.status === 404 && path.startsWith("seen/"))) throw new Error("Inbox state write failed");
@@ -69,7 +78,7 @@ export async function readInboxState(): Promise<SharedInboxState | undefined> {
   if (unsent.length) { for (const [path, entry] of unsent) writeInboxState(path, entry.body); return; }
   const version = connectionVersion(), serial = mutation;
   try {
-    const response = await fetch(`${getApiUrl()}/api/control/inbox-state`, {
+    const response = await doFetch("/api/control/inbox-state", {
       headers: { Authorization: `Bearer ${getJwt()}` }, signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) return;

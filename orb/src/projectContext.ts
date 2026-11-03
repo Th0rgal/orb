@@ -1,6 +1,6 @@
 import {createRoot,createEffect,onCleanup} from "solid-js";
 import {followNative} from "./nativeInteractionStream";
-import {api,getApiUrl,getJwt,connectionVersion} from './api';
+import {api,getApiUrl,getJwt,connectionVersion,transportFetch} from './api';
 import {nativeInvoke} from './clientRuns';
 export interface ContextEntry {hash:string|null; directory:boolean; revision:number; size:number}
 export interface ContextManifest {revision:number; entries:Record<string,ContextEntry>}
@@ -20,8 +20,8 @@ export async function readProjectFileVersion(slug:string,path:string){
  return api<{content:string;revision?:number}>(`/api/projects/${encodeURIComponent(slug)}/file?path=${encodeURIComponent(path)}`);
 }
 export async function contextBlob(slug:string,hash:string):Promise<Blob>{
- const {getApiUrl,getJwt}=await import('./api');
- const response=await fetch(`${getApiUrl()}${route(slug)}/blobs/${encodeURIComponent(hash)}`,{headers:{Authorization:`Bearer ${getJwt()??''}`}});
+ const {getJwt,transportFetch}=await import('./api');
+ const response=await transportFetch(`${route(slug)}/blobs/${encodeURIComponent(hash)}`,{headers:{Authorization:`Bearer ${getJwt()??''}`}});
  if(!response.ok)throw new Error(`Cannot load context version (${response.status})`);
  return response.blob();
 }
@@ -48,7 +48,7 @@ function followContext(slug:string,changed:()=>void,failed:(error:unknown)=>void
   const connect=async()=>{
    abort=new AbortController();
    try{
-    const response=await fetch(`${endpoint}${route(slug)}/stream`,{headers:{Authorization:`Bearer ${token??''}`},signal:abort.signal});
+    const response=await transportFetch(`${route(slug)}/stream`,{headers:{Authorization:`Bearer ${token??''}`},signal:abort.signal},endpoint);
     if(!response.ok||!response.body)throw Error(`Context stream failed (${response.status})`);
     publish();const reader=response.body.getReader(),decoder=new TextDecoder();let pending='';
     while(!stopped){const chunk=await reader.read();if(chunk.done)throw Error('Context stream interrupted');pending+=decoder.decode(chunk.value,{stream:true}).replace(/\r\n/g,'\n');let end:number;while((end=pending.indexOf('\n\n'))>=0){const event=pending.slice(0,end);pending=pending.slice(end+2);if(event.includes('data:'))publish();}}
