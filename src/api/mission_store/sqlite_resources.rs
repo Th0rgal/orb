@@ -1908,7 +1908,7 @@ mod tests {
 
         // Compute sample attributed to child under root
         store
-            .record_compute_samples(&[ComputeMinuteSample {
+            .record_compute_samples_sqlite(&[ComputeMinuteSample {
                 bucket_unix_min: now_min,
                 machine_class: "ephemeral_hetzner".to_string(),
                 node_id: "hz-cpx51-1".to_string(),
@@ -1924,7 +1924,10 @@ mod tests {
             .unwrap();
 
         // Query overview
-        let ov = store.query_resources_overview(now_min - 60).await.unwrap();
+        let ov = store
+            .query_resources_overview_sqlite(now_min - 60)
+            .await
+            .unwrap();
         let total_tok: u64 = ov
             .usage_rows
             .iter()
@@ -1944,7 +1947,7 @@ mod tests {
 
         // Query mission resources snapshot
         let msnap = store
-            .query_mission_resources(root.id, now_min - 60)
+            .query_mission_resources_sqlite(root.id, now_min - 60)
             .await
             .unwrap()
             .expect("mission snapshot exists");
@@ -1962,7 +1965,10 @@ mod tests {
             conn.execute_batch("DELETE FROM usage_rollup_1m;").unwrap();
             backfill_recent_sync(&conn).unwrap();
         }
-        let ov_after = store.query_resources_overview(now_min - 60).await.unwrap();
+        let ov_after = store
+            .query_resources_overview_sqlite(now_min - 60)
+            .await
+            .unwrap();
         let backfilled_tok: u64 = ov_after
             .usage_rows
             .iter()

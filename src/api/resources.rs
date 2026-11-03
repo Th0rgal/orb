@@ -18,11 +18,24 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::auth::AuthUser;
-use super::mission_store::sqlite_resources::{
-    parse_rfc3339_unix_secs, pool_label_for_id, resolve_inference_pool, ComputeMinuteSample,
-    ComputeRollupRow, ResourcesStoreOverview,
+use super::mission_store::sqlite::lookup_sqlite_store;
+use super::mission_store::sqlite::resources::{
+    self as sqlite_resources, parse_rfc3339_unix_secs, pool_label_for_id, resolve_inference_pool,
+    ComputeMinuteSample, ComputeRollupRow, ResourcesStoreOverview,
 };
 use super::routes::AppState;
+
+fn sqlite_store_for_user(
+    state: &AppState,
+    user_id: &str,
+) -> Option<super::mission_store::SqliteMissionStore> {
+    let base_dir = state
+        .config
+        .working_dir
+        .join(".sandboxed-sh")
+        .join("missions");
+    lookup_sqlite_store(&base_dir, user_id)
+}
 
 /// Amortized reference hourly USD per vCPU when a host/static node has no provider bill.
 const STATIC_VCPU_USD_PER_HOUR: f64 = 0.0045;
@@ -57,13 +70,19 @@ async fn sample_all_loaded_stores(state: &AppState) {
         return;
     }
     let now_min = Utc::now().timestamp().div_euclid(60);
-    for (user_id, cs) in sessions {
-        let Ok(overview) = cs.mission_store.query_resources_overview(now_min - 2).await else {
+    for (user_id, _cs) in sessions {
+        let Some(sqlite_store) = sqlite_store_for_user(state, &user_id) else {
+            continue;
+        };
+        let Ok(overview) = sqlite_store
+            .query_resources_overview_sqlite(now_min - 2)
+            .await
+        else {
             continue;
         };
         let samples = build_live_compute_samples(state, &user_id, now_min, &overview).await;
         if !samples.is_empty() {
-            let _ = cs.mission_store.record_compute_samples(&samples).await;
+            let _ = sqlite_store.record_compute_samples_sqlite(&samples).await;
         }
     }
 }
@@ -526,12 +545,16 @@ async fn get_overview(
     let first_bucket_min = now_min - (num_buckets as i64 - 1) * spec.step_minutes;
     let bucket_seconds = spec.step_minutes * 60;
 
-    let control_state = state.control.get_or_spawn(&user).await;
-    let mut snap = control_state
-        .mission_store
-        .query_resources_overview(first_bucket_min)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let _control_state = state.control.get_or_spawn(&user).await;
+    let sqlite_store = sqlite_store_for_user(&state, &user.id);
+    let mut snap = if let Some(ref store) = sqlite_store {
+        store
+            .query_resources_overview_sqlite(first_bucket_min)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    } else {
+        ResourcesStoreOverview::default()
+    };
 
     // Synthesize and merge live current-minute compute attribution so freshly booted servers
     // and newly spawned VMs appear immediately without waiting for the 60s background tick.
@@ -541,10 +564,9 @@ async fn get_overview(
         .iter()
         .any(|r| r.bucket_unix_min == now_min);
     if !has_current_min && !live_samples.is_empty() {
-        let _ = control_state
-            .mission_store
-            .record_compute_samples(&live_samples)
-            .await;
+        if let Some(ref store) = sqlite_store {
+            let _ = store.record_compute_samples_sqlite(&live_samples).await;
+        }
         for s in &live_samples {
             snap.compute_rows.push(ComputeRollupRow {
                 bucket_unix_min: s.bucket_unix_min,
@@ -1247,10 +1269,12 @@ async fn get_mission_resources(
     let now_secs = now.timestamp();
     let since_8d_min = (now_secs - 8 * 86_400).div_euclid(60);
 
-    let control_state = state.control.get_or_spawn(&user).await;
-    let Some(snap) = control_state
-        .mission_store
-        .query_mission_resources(id, since_8d_min)
+    let _control_state = state.control.get_or_spawn(&user).await;
+    let Some(sqlite_store) = sqlite_store_for_user(&state, &user.id) else {
+        return Err((StatusCode::NOT_FOUND, format!("Mission {id} not found")));
+    };
+    let Some(snap) = sqlite_store
+        .query_mission_resources_sqlite(id, since_8d_min)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
     else {
@@ -1322,10 +1346,8 @@ async fn get_mission_resources(
 
     // Map board task_key -> bar_id (either spawned worker_mission_id or `board:<id>`)
     let mut task_key_to_bar_id: HashMap<String, String> = HashMap::new();
-    let mut board_by_worker: HashMap<
-        String,
-        &super::mission_store::sqlite_resources::BoardTaskResourceRow,
-    > = HashMap::new();
+    let mut board_by_worker: HashMap<String, &sqlite_resources::BoardTaskResourceRow> =
+        HashMap::new();
     for bt in &snap.board_tasks {
         let bid = bt
             .worker_mission_id
@@ -1398,12 +1420,11 @@ async fn get_mission_resources(
     let has_sub_units =
         !snap.children.is_empty() || !snap.board_tasks.is_empty() || !snap.native_spans.is_empty();
 
-    let nodes_to_render: Vec<&super::mission_store::sqlite_resources::MissionNodeRow> =
-        if has_sub_units {
-            snap.children.iter().collect()
-        } else {
-            vec![&snap.root]
-        };
+    let nodes_to_render: Vec<&sqlite_resources::MissionNodeRow> = if has_sub_units {
+        snap.children.iter().collect()
+    } else {
+        vec![&snap.root]
+    };
 
     for child in nodes_to_render {
         let bt = board_by_worker.get(&child.id).copied();

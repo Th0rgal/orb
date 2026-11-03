@@ -1224,20 +1224,21 @@ export default function App() {
         </div>
         {/* A mission view portals its Chapters navigation here, beside the title-bar icons. */}
         <div class="tb-tools" id="tb-tools" />
+        <FilePanelButton />
         <Show when={currentMissionId()}>
           {(mid) => (
             <button
-              class="icon-btn"
+              class="files-toggle"
+              style={{ "margin-left": "0" }}
               title="Resources & Fast-DAG"
               aria-label="Resources & Fast-DAG"
               data-testid="tb-mission-resources"
               onClick={() => open(`rm:${mid()}`)}
             >
-              <Ic.ResourcesIcon />
+              <Ic.ResourcesIcon size={16} />
             </button>
           )}
         </Show>
-        <FilePanelButton />
       </header>
 
       <main class="main">

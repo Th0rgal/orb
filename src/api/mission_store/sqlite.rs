@@ -146,6 +146,7 @@ const TELEGRAM_MEMORY_SEARCH_STOPWORDS: &[&str] = &[
 /// Content size threshold for inline storage (64KB).
 const CONTENT_SIZE_THRESHOLD: usize = 64 * 1024;
 
+#[derive(Clone)]
 pub struct SqliteMissionStore {
     conn: Arc<Mutex<Connection>>,
     /// Read-only connections for the queries clients poll. In WAL mode they
@@ -154,6 +155,24 @@ pub struct SqliteMissionStore {
     readers: Arc<Vec<Arc<Mutex<Connection>>>>,
     next_reader: Arc<std::sync::atomic::AtomicUsize>,
     content_dir: PathBuf,
+}
+
+static SQLITE_STORE_REGISTRY: std::sync::OnceLock<
+    std::sync::RwLock<HashMap<PathBuf, SqliteMissionStore>>,
+> = std::sync::OnceLock::new();
+
+fn sqlite_store_registry() -> &'static std::sync::RwLock<HashMap<PathBuf, SqliteMissionStore>> {
+    SQLITE_STORE_REGISTRY.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+
+pub(crate) fn lookup_sqlite_store(
+    base_dir: &std::path::Path,
+    user_id: &str,
+) -> Option<SqliteMissionStore> {
+    let sanitized = sanitize_filename(user_id);
+    let db_path = base_dir.join(format!("missions-{}.db", sanitized));
+    let reg = sqlite_store_registry().read().ok()?;
+    reg.get(&db_path).cloned()
 }
 
 /// Decisions kept for the audit views, and how often an insert trims the rest.
@@ -441,6 +460,7 @@ impl SqliteMissionStore {
     pub async fn new(base_dir: PathBuf, user_id: &str) -> Result<Self, String> {
         let sanitized = sanitize_filename(user_id);
         let db_path = base_dir.join(format!("missions-{}.db", sanitized));
+        let registry_key = db_path.clone();
         let content_dir = base_dir.join("mission_data").join(&sanitized);
 
         // Create directories
@@ -507,12 +527,16 @@ impl SqliteMissionStore {
             resources::spawn_background_backfill(Arc::downgrade(&conn_arc));
         }
 
-        Ok(Self {
+        let store = Self {
             conn: conn_arc,
             readers: Arc::new(readers),
             next_reader: Arc::default(),
             content_dir,
-        })
+        };
+        if let Ok(mut reg) = sqlite_store_registry().write() {
+            reg.insert(registry_key, store.clone());
+        }
+        Ok(store)
     }
 
     /// Open only an existing store for admission recovery. The caller holds
@@ -1264,26 +1288,6 @@ impl MissionStore for SqliteMissionStore {
         record: &super::ProxyUsageRecord,
     ) -> Result<(), String> {
         SqliteMissionStore::record_proxy_usage_attributed(self, record).await
-    }
-    async fn record_compute_samples(
-        &self,
-        samples: &[resources::ComputeMinuteSample],
-    ) -> Result<(), String> {
-        self.record_compute_samples_sqlite(samples).await
-    }
-    async fn query_resources_overview(
-        &self,
-        since_unix_min: i64,
-    ) -> Result<resources::ResourcesStoreOverview, String> {
-        self.query_resources_overview_sqlite(since_unix_min).await
-    }
-    async fn query_mission_resources(
-        &self,
-        mission_id: Uuid,
-        since_unix_min: i64,
-    ) -> Result<Option<resources::MissionResourcesStoreSnapshot>, String> {
-        self.query_mission_resources_sqlite(mission_id, since_unix_min)
-            .await
     }
     async fn get_usage_records(
         &self,
