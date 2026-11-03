@@ -6,7 +6,7 @@ import {askBtwAgent,watchBtw,stopBtw,btwSession,btwActivities,btwItems,btwThough
 import {streamMission} from "./stream";
 import {btwConfig} from "./btwSettings";
 import {AgentActivity} from "./AgentActivity";
-import { Composer } from "./composer/Composer";
+import { Composer, floatingDock } from "./composer/Composer";
 import type { DraftImage } from "./imageAttachments";
 import { uploadToken, type UploadedFile } from "./uploads";
 import { Portal } from 'solid-js/web';
@@ -349,16 +349,6 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  });
  side?.register(()=>setOpen(true));
  onCleanup(()=>{abort?.abort();side?.register(undefined);});
- function observeBtwDock(el:HTMLDivElement){
-  const update=()=>{
-   const h=el.getBoundingClientRect().height;
-   if(h>0)el.parentElement?.style.setProperty('--btw-dock-height',`${Math.ceil(h)}px`);
-  };
-  if(typeof ResizeObserver==='undefined'){queueMicrotask(update);return;}
-  const observer=new ResizeObserver(update);
-  queueMicrotask(()=>{update();observer.observe(el);});
-  onCleanup(()=>{observer.disconnect();el.parentElement?.style.removeProperty('--btw-dock-height');});
- }
  const submitQueuedFollowUp=async(
   text:string,
   images:DraftImage[],
@@ -582,8 +572,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     <AgentActivity items={btwActivities(p.mission)} running={busy()} completed={!busy() && !error()}/>
     <Show when={btwSession(p.mission) && busy()}><NativeInteraction mission={btwSession(p.mission)!.id} active={busy()} remote={!btwSession(p.mission)!.local} items={btwItems(p.mission)}/></Show>
    </div>
-   <Show when={storageError()}><p class="dim" role="status">Local storage is unavailable. This side conversation may be lost on refresh.</p></Show>
-   <div class="btw-composer-dock" ref={observeBtwDock}>
+   <div class="btw-composer-dock" ref={floatingDock}>
+    <Show when={storageError()}><p class="dim" role="status">Local storage is unavailable. This side conversation may be lost on refresh.</p></Show>
     <Show when={hasQueueFollowUp()&&(sideSessionId()||pendingQueued().length)}>
      <Show when={!sideSessionLocal()} fallback={
       <QueuedMessages

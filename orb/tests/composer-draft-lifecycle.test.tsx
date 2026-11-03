@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { afterEach, expect, it, vi } from "vitest";
 import { Composer } from "../src/composer/Composer";
 import { readComposerDraft, saveComposerDraft } from "../src/composerDrafts";
@@ -44,4 +45,23 @@ it("cancels a pending debounced draft save when a message is sent quickly so rem
     vi.useRealTimers();
   }
 });
+
+it("collapses an expanded multiline textarea when switching to a scope without a stored draft", async () => {
+  vi.mocked(readComposerDraft).mockResolvedValue(undefined);
+  const [scope, setScope] = createSignal("m:expanded");
+  render(() => <Composer scope={scope()} placeholder="Reply" busy={false} onSend={() => {}} />);
+  await vi.waitFor(() => expect(readComposerDraft).toHaveBeenCalledWith("m:expanded"));
+  const input = screen.getByPlaceholderText("Reply") as HTMLTextAreaElement;
+  const composer = input.closest(".composer") as HTMLElement;
+  input.value = "line 1\nline 2\nline 3\nline 4";
+  fireEvent.input(input, { target: { value: input.value } });
+  expect(composer.classList.contains("tall")).toBe(true);
+
+  setScope("m:clean");
+  await vi.waitFor(() => expect(readComposerDraft).toHaveBeenCalledWith("m:clean"));
+  expect(input.value).toBe("");
+  expect(input.style.height).toBe("");
+  expect(composer.classList.contains("tall")).toBe(false);
+});
+
 
