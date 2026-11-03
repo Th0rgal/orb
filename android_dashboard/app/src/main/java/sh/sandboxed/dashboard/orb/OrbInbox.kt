@@ -1502,6 +1502,7 @@ object OrbInboxModel {
         var trimmed = raw.trim()
         if (trimmed.isEmpty()) return ""
         if (Regex("^[a-z0-9_]+$").matches(trimmed)) return ""
+        if (Regex("(?i)^Parallel mission [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} cancellation requested$").matches(trimmed)) return ""
         trimmed = trimmed.replace(Regex("(?i);\\s*error:\\s*command exited with (?:Some\\()?(-?\\d+)\\)?"), "")
         trimmed = trimmed.replace(Regex("\\(exit Some\\((-?\\d+)\\)\\)"), "(exit $1)")
         trimmed = trimmed.replace(Regex("\\bSome\\((-?\\d+)\\)"), "$1")

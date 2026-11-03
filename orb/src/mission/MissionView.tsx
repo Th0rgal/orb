@@ -325,11 +325,15 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   createEffect(()=>{
     const ids=new Set([
       ...items().filter(i=>i.kind==='user').map(i=>i.kind==='user'?i.messageId??'':''),
+      ...remoteQueuedIds(),
       ...queuedLocalMessages(p.id).map(row=>row.id),
       ...acceptedLocalMessages(p.id).map(row=>row.id),
     ]);
     // Remove the projection only after its canonical identity is visible.
-    drafts.reconcile(ids);
+    if (drafts.reconcile(ids) && !optimisticList().some(item => item.failed)) {
+      if (retryMessage && ids.has(retryMessage.id)) retryMessage = null;
+      setSendError(null);
+    }
     forgetAcceptedLocalMessages(ids);
   });
   let sideQuestions: SideQuestionsHandle | undefined;
@@ -856,7 +860,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     try {
       const sent = imagePrompt(text, await stageRemoteImages(images, mission()), images);
       if (staleMission() || p.id !== targetMissionId) throw new Error("Conversation changed. Your draft is kept.");
-      const result = await sendMissionMessage(targetMissionId, sent, attachments, explicitId ?? retryMessage.id);
+      const result = await sendMissionMessage(targetMissionId, sent, attachments, explicitId ?? retryMessage.id, mission());
       retryMessage = null;
       if (staleMission()) return true;
       if (result.replacement) {

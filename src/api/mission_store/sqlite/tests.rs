@@ -5122,3 +5122,70 @@ async fn proxy_outcomes_round_trip_and_filter_by_since() {
         .expect("since");
     assert_eq!(since, vec![recent]);
 }
+
+#[tokio::test]
+async fn get_mission_activity_returns_latest_event_and_latest_output_via_indexes() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "activity-user")
+        .await
+        .expect("sqlite store");
+    let m1 = store
+        .create_mission(Some("m1"), None, None, None, None, Some("opencode"), None)
+        .await
+        .unwrap();
+    let m2 = store
+        .create_mission(Some("m2"), None, None, None, None, Some("opencode"), None)
+        .await
+        .unwrap();
+    let m3 = store
+        .create_mission(Some("m3"), None, None, None, None, Some("opencode"), None)
+        .await
+        .unwrap();
+
+    {
+        let conn = store.conn.lock().await;
+        conn.execute(
+            "INSERT INTO mission_events (mission_id, sequence, event_type, timestamp, content) VALUES (?1, 1, 'user_message', '2026-11-02T01:00:00Z', 'hi')",
+            params![m1.id.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mission_events (mission_id, sequence, event_type, timestamp, content) VALUES (?1, 2, 'assistant_message', '2026-11-02T01:02:00Z', 'out1')",
+            params![m1.id.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mission_events (mission_id, sequence, event_type, timestamp, content) VALUES (?1, 3, 'assistant_message_canonical', '2026-11-02T01:05:00Z', 'out2')",
+            params![m1.id.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mission_events (mission_id, sequence, event_type, timestamp, content) VALUES (?1, 4, 'tool_call', '2026-11-02T01:09:00Z', 'bash')",
+            params![m1.id.to_string()],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO mission_events (mission_id, sequence, event_type, timestamp, content) VALUES (?1, 1, 'user_message', '2026-11-02T02:00:00Z', 'only user')",
+            params![m2.id.to_string()],
+        )
+        .unwrap();
+    }
+
+    let activity = store
+        .get_mission_activity(&[m1.id, m2.id, m3.id])
+        .await
+        .expect("activity");
+    assert_eq!(
+        activity.get(&m1.id),
+        Some(&(
+            Some("2026-11-02T01:09:00Z".to_string()),
+            Some("2026-11-02T01:05:00Z".to_string()),
+        ))
+    );
+    assert_eq!(
+        activity.get(&m2.id),
+        Some(&(Some("2026-11-02T02:00:00Z".to_string()), None))
+    );
+    assert!(!activity.contains_key(&m3.id));
+}

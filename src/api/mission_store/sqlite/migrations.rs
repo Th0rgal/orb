@@ -213,6 +213,7 @@ CREATE TABLE IF NOT EXISTS automation_executions (
 CREATE INDEX IF NOT EXISTS idx_executions_automation ON automation_executions(automation_id, triggered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_executions_mission ON automation_executions(mission_id, triggered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_executions_status ON automation_executions(status);
+CREATE INDEX IF NOT EXISTS idx_executions_durable_schedule ON automation_executions(triggered_at, id) WHERE trigger_source = 'durable_schedule' AND status NOT IN ('cancelled', 'skipped');
 
 -- Telegram channels (communication bridges between Telegram and missions)
 CREATE TABLE IF NOT EXISTS telegram_channels (
@@ -1332,6 +1333,12 @@ impl SqliteMissionStore {
             )
             .map_err(|e| format!("Failed to create automation webhook index: {}", e))?;
         }
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_executions_durable_schedule ON automation_executions(triggered_at, id) WHERE trigger_source = 'durable_schedule' AND status NOT IN ('cancelled', 'skipped')",
+            [],
+        )
+        .map_err(|e| format!("Failed to create durable_schedule execution index: {}", e))?;
 
         for (column, ddl_type) in [
             (

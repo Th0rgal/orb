@@ -251,6 +251,89 @@ pub(super) fn take_queued_by_id(
     None
 }
 
+/// Remove a queued message by ID for promotion, regardless of whether the
+/// active harness supports mid-turn live injection.
+pub(super) fn take_queued_for_promotion(
+    message_id: Uuid,
+    running_mission_id: Option<Uuid>,
+    queue: &mut VecDeque<ControlQueueEntry>,
+    parallel_runners: &mut std::collections::HashMap<
+        Uuid,
+        super::super::mission_runner::MissionRunner,
+    >,
+) -> Option<(
+    Option<Uuid>,
+    QueuedAt,
+    super::super::mission_runner::QueuedMessage,
+)> {
+    if let Some(position) = queue.iter().position(|entry| entry.0 == message_id) {
+        let (id, content, agent, target_mid, source) = queue.remove(position)?;
+        let mid = target_mid.or(running_mission_id);
+        return Some((
+            mid,
+            QueuedAt::Main(position),
+            super::super::mission_runner::QueuedMessage {
+                id,
+                content,
+                agent,
+                source,
+            },
+        ));
+    }
+    for (mid, runner) in parallel_runners.iter_mut() {
+        if let Some(position) = runner.queue.iter().position(|qm| qm.id == message_id) {
+            let message = runner.queue.remove(position)?;
+            return Some((Some(*mid), QueuedAt::Runner(position), message));
+        }
+    }
+    None
+}
+
+/// Reinsert a promoted message ahead of any other queued entries targeting its mission.
+pub(super) fn push_front_promoted_message(
+    mission_id: Option<Uuid>,
+    position: QueuedAt,
+    message: super::super::mission_runner::QueuedMessage,
+    queue: &mut VecDeque<ControlQueueEntry>,
+    parallel_runners: &mut std::collections::HashMap<
+        Uuid,
+        super::super::mission_runner::MissionRunner,
+    >,
+) {
+    match position {
+        QueuedAt::Runner(_) => {
+            if let Some(mid) = mission_id {
+                if let Some(runner) = parallel_runners.get_mut(&mid) {
+                    runner.queue.push_front(message);
+                    return;
+                }
+            }
+            queue.push_front((
+                message.id,
+                message.content,
+                message.agent,
+                mission_id,
+                message.source,
+            ));
+        }
+        QueuedAt::Main(_) => {
+            let first_for_mission =
+                mission_id.and_then(|mid| queue.iter().position(|entry| entry.3 == Some(mid)));
+            let idx = first_for_mission.unwrap_or(0);
+            queue.insert(
+                idx.min(queue.len()),
+                (
+                    message.id,
+                    message.content,
+                    message.agent,
+                    mission_id,
+                    message.source,
+                ),
+            );
+        }
+    }
+}
+
 // Park the whole mission together so a blocked writer does not starve unrelated
 // missions, and later messages for that writer cannot overtake its first one.
 pub(super) fn park_followup(queue: &mut VecDeque<ControlQueueEntry>, first: ControlQueueEntry) {

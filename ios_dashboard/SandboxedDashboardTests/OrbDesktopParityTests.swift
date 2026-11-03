@@ -122,6 +122,10 @@ final class OrbDesktopParityTests: XCTestCase {
             "Remote codex run on ashur failed (exit 1)"
         )
         XCTAssertEqual(OrbInboxModel.humanizeStatusText("remote_node_job"), "")
+        XCTAssertEqual(
+            OrbInboxModel.humanizeStatusText("Parallel mission 0f48caee-6c61-4fa7-979f-64277e2889e1 cancellation requested"),
+            ""
+        )
 
         let projects: [OrbRow] = [
             OrbRow(.object(["slug": .string("orb"), "title": .string("Orb")]), project: true),

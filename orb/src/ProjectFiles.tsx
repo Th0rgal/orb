@@ -875,20 +875,35 @@ export function LiveProjectsSection(p: {
       if (document.visibilityState === "visible") pumpWarmup();
     };
     document.addEventListener("visibilitychange", onVisible);
-    // Mission statuses under expanded projects would otherwise freeze at
-    // expand time (the flat "Sandboxed" list polls, this tree didn't).
-    const stop = pollWhileVisible(() => {
-      if (!isConnected()) return;
-      if (error()) refresh();
-      for (const project of projects()) {
-        if (!expanded[project.slug]) continue;
-        loadMissions(project.slug);
-        loadController(project.slug);
-        loadCrons(project.slug);
-        void loadDir(project.slug,"",true);
-        for (const key of Object.keys(expanded)) {
-          if(expanded[key] && key.startsWith(`${project.slug}:`))void loadDir(project.slug,key.slice(project.slug.length+1),true);
+    // Mission statuses under expanded projects already react immediately to
+    // `activityMissions` (SSE + global poll); keep a calm, concurrency-bounded
+    // fallback sweep so 7+ expanded projects never fire 35+ simultaneous HTTP/2
+    // requests on a single tick.
+    let projectSweepBusy = false;
+    const stop = pollWhileVisible(async () => {
+      if (!isConnected() || projectSweepBusy) return;
+      projectSweepBusy = true;
+      try {
+        if (error()) refresh();
+        const slugs = projects().map(proj => proj.slug).filter(slug => expanded[slug]);
+        for (let i = 0; i < slugs.length; i += 2) {
+          if (!isConnected()) break;
+          await Promise.all(slugs.slice(i, i + 2).map(async (slug) => {
+            if (!expanded[slug]) return;
+            const subdirs = Object.keys(expanded)
+              .filter(key => expanded[key] && key.startsWith(`${slug}:`))
+              .map(key => key.slice(slug.length + 1));
+            await Promise.all([
+              loadMissions(slug),
+              loadController(slug),
+              loadCrons(slug),
+              loadDir(slug, "", true),
+              ...subdirs.map(sub => loadDir(slug, sub, true)),
+            ]);
+          }));
         }
+      } finally {
+        projectSweepBusy = false;
       }
     }, 10000);
     onCleanup(() => {

@@ -3,7 +3,7 @@ import { isFailedStatus } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { deferredMessages } from "./deferredMessages";
 import { orbTranscriptFoldStep } from "./orbKernel";
-import { isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
+import { isCancellationRequestedNotice, isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
 
 export type StreamItem =
   | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; eventId?: string; sequence?: number; source?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
@@ -170,6 +170,7 @@ export class TranscriptReducer {
     const d = ev.data;
     // Status notifications are not assistant completions: do not close live text/tools.
     if (ev.type === "assistant_message" && d.success !== false && isGeneratedRemoteJobStatus({content: str(d.content), metadata: d})) return;
+    if (ev.type === "error" && isCancellationRequestedNotice(str(d.message))) return;
     // A message has one identity and a monotonic queued -> delivered lifecycle.
     // Process it before event dedupe and channel sequence checks: receipt, queue
     // snapshot, stored history and SSE may arrive in any order.

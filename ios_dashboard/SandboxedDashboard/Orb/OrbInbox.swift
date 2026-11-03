@@ -909,6 +909,9 @@ enum OrbInboxModel {
         if trimmed.range(of: #"^[a-z0-9_]+$"#, options: .regularExpression) != nil {
             return ""
         }
+        if trimmed.range(of: #"(?i)^Parallel mission [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} cancellation requested$"#, options: .regularExpression) != nil {
+            return ""
+        }
         trimmed = trimmed.replacingOccurrences(
             of: #"(?i);\s*error:\s*command exited with (?:Some\()?(-?\d+)\)?"#,
             with: "",

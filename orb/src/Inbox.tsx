@@ -704,6 +704,7 @@ export function InboxPage(p: {
         "Continue from where you left off.",
         [],
         msgId,
+        item.mission,
       );
       if (result.replacement) {
         p.onMissionUpdated?.(result.replacement);
@@ -888,7 +889,7 @@ export function InboxPage(p: {
       } else {
         const attachments = chips.map(chipToAttachment);
         const sent = imagePrompt(text, await stageRemoteImages(images, mission), images);
-        const result = await sendMissionMessage(item.id, sent, attachments, msgId);
+        const result = await sendMissionMessage(item.id, sent, attachments, msgId, mission);
         if (result.replacement) {
           p.onMissionUpdated?.(result.replacement);
         } else {
