@@ -17,6 +17,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  min-height: 32px;
   flex-wrap: wrap;
 }
 
@@ -155,13 +156,18 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 10px;
+  height: 28px;
+  box-sizing: border-box;
+  padding: 0 10px;
   border-radius: var(--radius-md);
   background: var(--bg-inset);
   border: 1px solid var(--stroke-soft);
   font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
   font-size: 11.5px;
+  line-height: 1;
   color: var(--fg-2);
+  white-space: nowrap;
 }
 
 .res-stamp strong {
@@ -204,18 +210,33 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 10px 14px;
+  height: 38px;
+  min-height: 38px;
+  box-sizing: border-box;
+  padding: 0 14px;
   border-bottom: 1px solid var(--stroke-soft);
   font-size: 11.5px;
+  line-height: 1;
   color: var(--fg-3);
+  flex-shrink: 0;
 }
 
-.res-card-head-left,
-.res-card-head-right {
+.res-card-head-left {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  flex-shrink: 0;
+}
+
+.res-card-head-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .res-col-title {
@@ -224,17 +245,39 @@
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--fg-3);
+  white-space: nowrap;
+}
+
+.res-head-hint {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  box-sizing: border-box;
+  padding: 0 2px;
+  border: 1px solid transparent;
+  font-size: 11.5px;
+  line-height: 1;
+  color: var(--fg-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .res-hover-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  box-sizing: border-box;
   font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
   font-size: 11px;
+  line-height: 1;
   color: var(--fg-2);
   background: var(--bg-inset);
   border: 1px solid var(--stroke-soft);
   border-radius: var(--radius-sm);
-  padding: 3px 8px;
-  max-width: 480px;
+  padding: 0 8px;
+  max-width: 520px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -244,12 +287,16 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  height: 22px;
+  box-sizing: border-box;
   background: color-mix(in srgb, var(--blue) 12%, var(--bg-inset));
   border: 1px solid color-mix(in srgb, var(--blue) 30%, var(--stroke));
   color: var(--fg-strong);
   border-radius: var(--radius-sm);
-  padding: 2px 7px;
+  padding: 0 7px;
   font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
   outline: none;
   box-shadow: none;
@@ -270,9 +317,8 @@
 }
 
 .res-sankey-link {
-  fill: none;
   cursor: pointer;
-  transition: stroke-opacity 120ms ease;
+  transition: fill-opacity 120ms ease, stroke-opacity 120ms ease;
 }
 
 .res-sankey-node-group {
@@ -284,19 +330,35 @@
   font-size: 12px;
   font-weight: 500;
   fill: var(--fg-strong);
+  pointer-events: none;
+}
+
+.res-sankey-node-label.is-middle {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.res-sankey-mid-pill {
+  fill: color-mix(in srgb, var(--bg-elev) 88%, var(--bg));
+  stroke: var(--stroke-soft);
+  stroke-width: 1;
+  pointer-events: none;
 }
 
 .res-sankey-node-sub {
   font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
   font-size: 10.5px;
   fill: var(--fg-3);
+  pointer-events: none;
 }
 
 /* Fast-DAG view */
 .res-dag-scroll {
   overflow-x: hidden;
   overflow-y: auto;
-  max-height: 440px;
+  height: 368px;
+  max-height: 368px;
   position: relative;
 }
 
@@ -395,7 +457,10 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  height: 20px;
+  min-height: 20px;
   font-size: 11.5px;
+  line-height: 1;
   color: var(--fg-3);
 }
 
@@ -403,9 +468,13 @@
   display: inline-flex;
   align-items: center;
   gap: 12px;
+  height: 20px;
   font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
   font-size: 11px;
+  line-height: 1;
   color: var(--fg-3);
+  white-space: nowrap;
 }
 
 .res-curve-svg {

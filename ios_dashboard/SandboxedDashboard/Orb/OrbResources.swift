@@ -48,6 +48,7 @@ enum OrbResourcesModel {
         var x1: Double
         var y0: Double
         var y1: Double
+        var showLabel: Bool = true
     }
 
     struct SankeyLayoutLink: Identifiable, Equatable {
@@ -62,6 +63,7 @@ enum OrbResourcesModel {
         var targetX: Double
         var y0: Double
         var y1: Double
+        var sourceWidth: Double
         var width: Double
     }
 
@@ -244,8 +246,16 @@ enum OrbResourcesModel {
             let effPad = nodePadding * compress
             let finalH = heights.reduce(0) { $0 + $1 * compress } + Double(max(0, cols[c].count - 1)) * effPad
             var cursorY = marginY + max(0, (innerH - finalH) / 2)
+            var lastLabelBottom = -Double.infinity
             for i in 0..<cols[c].count {
                 let h = max(4.0, heights[i] * compress)
+                let midY = cursorY + h / 2.0
+                if midY - 7.0 >= lastLabelBottom + 2.0 {
+                    cols[c][i].showLabel = true
+                    lastLabelBottom = midY + 7.0
+                } else {
+                    cols[c][i].showLabel = false
+                }
                 cols[c][i].y0 = cursorY
                 cols[c][i].y1 = cursorY + h
                 nodeMap[cols[c][i].id] = cols[c][i]
@@ -263,7 +273,7 @@ enum OrbResourcesModel {
             inByTarget[l.target, default: []].append(l)
         }
 
-        var sourceY: [String: Double] = [:]
+        var sourceYW: [String: (Double, Double)] = [:]
         for (srcId, var list) in outBySource {
             guard let src = nodeMap[srcId] else { continue }
             list.sort { (nodeMap[$0.target]?.y0 ?? 0) < (nodeMap[$1.target]?.y0 ?? 0) }
@@ -273,7 +283,7 @@ enum OrbResourcesModel {
             for l in list {
                 let mv = max(1e-6, metric == .usd ? l.estUsdPerH : l.value)
                 let w = (mv / sumM) * nodeH
-                sourceY[l.id] = off + w / 2
+                sourceYW[l.id] = (off + w / 2, w)
                 off += w
             }
         }
@@ -297,7 +307,7 @@ enum OrbResourcesModel {
         for l in inputLinks {
             guard let src = nodeMap[l.source],
                   let dst = nodeMap[l.target],
-                  let y0 = sourceY[l.id],
+                  let (y0, sw) = sourceYW[l.id],
                   let (y1, w) = targetYW[l.id]
             else { continue }
             outLinks.append(
@@ -313,6 +323,7 @@ enum OrbResourcesModel {
                     targetX: dst.x0,
                     y0: y0,
                     y1: y1,
+                    sourceWidth: max(1.5, sw),
                     width: max(1.5, w)
                 )
             )
@@ -358,7 +369,7 @@ enum OrbResourcesModel {
 struct OrbResourcesView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var client = OrbSettingsClient()
-    @State private var lens: OrbResourcesModel.Lens = .compute
+    @State private var lens: OrbResourcesModel.Lens = .inference
     @State private var metric: OrbResourcesModel.Metric = .raw
     @State private var range: String = "6h"
     @State private var horizon: String = "6h"
@@ -389,8 +400,8 @@ struct OrbResourcesView: View {
                         }
 
                         Picker("Lens", selection: $lens) {
-                            Text("Compute").tag(OrbResourcesModel.Lens.compute)
                             Text("Inference").tag(OrbResourcesModel.Lens.inference)
+                            Text("Compute").tag(OrbResourcesModel.Lens.compute)
                         }
                         .pickerStyle(.segmented)
 
@@ -488,25 +499,42 @@ struct OrbResourcesView: View {
                             for link in layout.links {
                                 var p = Path()
                                 let mx = (link.sourceX + link.targetX) / 2
-                                p.move(to: CGPoint(x: link.sourceX, y: link.y0))
+                                let syTop = link.y0 - link.sourceWidth / 2
+                                let syBot = link.y0 + link.sourceWidth / 2
+                                let tyTop = link.y1 - link.width / 2
+                                let tyBot = link.y1 + link.width / 2
+                                p.move(to: CGPoint(x: link.sourceX, y: syTop))
                                 p.addCurve(
-                                    to: CGPoint(x: link.targetX, y: link.y1),
-                                    control1: CGPoint(x: mx, y: link.y0),
-                                    control2: CGPoint(x: mx, y: link.y1)
+                                    to: CGPoint(x: link.targetX, y: tyTop),
+                                    control1: CGPoint(x: mx, y: syTop),
+                                    control2: CGPoint(x: mx, y: tyTop)
                                 )
-                                ctx.stroke(
-                                    p,
-                                    with: .color(OrbResourcesModel.hexColor(link.colorHex).opacity(0.38)),
-                                    style: StrokeStyle(lineWidth: link.width, dash: link.degraded ? [4, 3] : [])
+                                p.addLine(to: CGPoint(x: link.targetX, y: tyBot))
+                                p.addCurve(
+                                    to: CGPoint(x: link.sourceX, y: syBot),
+                                    control1: CGPoint(x: mx, y: tyBot),
+                                    control2: CGPoint(x: mx, y: syBot)
                                 )
+                                p.closeSubpath()
+                                let col = OrbResourcesModel.hexColor(link.colorHex)
+                                ctx.fill(p, with: .color(col.opacity(0.34)))
+                                if link.degraded {
+                                    ctx.stroke(
+                                        p,
+                                        with: .color(col.opacity(0.65)),
+                                        style: StrokeStyle(lineWidth: 1, dash: [4, 3])
+                                    )
+                                }
                             }
                             for node in layout.nodes {
                                 let rect = CGRect(x: node.x0, y: node.y0, width: node.x1 - node.x0, height: max(4, node.y1 - node.y0))
                                 ctx.fill(Path(roundedRect: rect, cornerRadius: 3), with: .color(OrbResourcesModel.hexColor(node.colorHex)))
-                                let isLeft = node.column == 0
-                                let tx = isLeft ? node.x0 - 6 : node.x1 + 6
-                                let label = Text(node.label.prefix(14)).font(.caption2.weight(.medium))
-                                ctx.draw(label, at: CGPoint(x: tx, y: rect.midY), anchor: isLeft ? .trailing : .leading)
+                                if node.showLabel {
+                                    let isLeft = node.column == 0
+                                    let tx = isLeft ? node.x0 - 6 : node.x1 + 6
+                                    let label = Text(node.label.prefix(14)).font(.caption2.weight(.medium))
+                                    ctx.draw(label, at: CGPoint(x: tx, y: rect.midY), anchor: isLeft ? .trailing : .leading)
+                                }
                             }
                         }
                     }
@@ -723,12 +751,33 @@ struct OrbResourcesView: View {
                 ))
             }
         } else {
-            for (idx, p) in ov["inference"]["pools"].items.enumerated() {
+            let activeIds = Set(
+                ov["links"].items
+                    .filter { $0["kind"].text == "inference" && ($0["value"].doubleValue ?? 0) > 0 }
+                    .map { $0["source_id"].text }
+            )
+            let allPools = ov["inference"]["pools"].items
+            let filteredPools = allPools.filter {
+                activeIds.contains($0["id"].text)
+                    || ($0["current_b_tok_per_h"].doubleValue ?? 0) > 0
+                    || ($0["est_usd_per_h"].doubleValue ?? 0) > 0
+            }
+            let pools = filteredPools.isEmpty ? Array(allPools.prefix(5)) : filteredPools
+            for (idx, p) in pools.enumerated() {
+                let rawSub = p["sublabel"].text
+                let remPct = p["remaining_pct"].doubleValue
+                let hasLeft = rawSub.range(of: "% left", options: .caseInsensitive) != nil
+                let sub: String
+                if let rem = remPct, !hasLeft {
+                    sub = rawSub.isEmpty ? "\(Int(rem.rounded()))% left" : "\(Int(rem.rounded()))% left · \(rawSub)"
+                } else {
+                    sub = rawSub
+                }
                 nodes.append(.init(
                     id: p["id"].text,
                     column: 0,
                     label: p["label"].text,
-                    sub: p["sublabel"].text,
+                    sub: sub,
                     colorHex: Self.palette[idx % Self.palette.count],
                     fallbackValue: p["current_b_tok_per_h"].doubleValue ?? 0,
                     fallbackUsd: p["est_usd_per_h"].doubleValue ?? 0
@@ -736,7 +785,23 @@ struct OrbResourcesView: View {
             }
         }
 
-        for (idx, m) in ov["missions"].items.enumerated() {
+        let maxCol1 = 7
+        let sortedMissions = ov["missions"].items.sorted {
+            let aVal = lens == .compute
+                ? (metric == .usd ? ($0["compute_usd_per_h"].doubleValue ?? 0) : ($0["vcpu"].doubleValue ?? 0))
+                : (metric == .usd ? ($0["inference_usd_per_h"].doubleValue ?? 0) : ($0["b_tok_per_h"].doubleValue ?? 0))
+            let bVal = lens == .compute
+                ? (metric == .usd ? ($1["compute_usd_per_h"].doubleValue ?? 0) : ($1["vcpu"].doubleValue ?? 0))
+                : (metric == .usd ? ($1["inference_usd_per_h"].doubleValue ?? 0) : ($1["b_tok_per_h"].doubleValue ?? 0))
+            return aVal > bVal
+        }
+        let capMissions = sortedMissions.count > maxCol1 + 1
+        let visibleMissions = capMissions ? Array(sortedMissions.prefix(maxCol1)) : sortedMissions
+        let overflowMissions = capMissions ? Array(sortedMissions.dropFirst(maxCol1)) : []
+        let overflowIds = Set(overflowMissions.map { $0["id"].text })
+        let tailId = "__other_missions__"
+
+        for (idx, m) in visibleMissions.enumerated() {
             let mid = m["id"].text
             nodes.append(.init(
                 id: mid,
@@ -749,15 +814,54 @@ struct OrbResourcesView: View {
                 fallbackUsd: lens == .compute ? (m["compute_usd_per_h"].doubleValue ?? 0) : (m["inference_usd_per_h"].doubleValue ?? 0)
             ))
         }
+        if !overflowMissions.isEmpty {
+            let sumRaw = overflowMissions.reduce(0.0) {
+                $0 + (lens == .compute ? ($1["vcpu"].doubleValue ?? 0) : ($1["b_tok_per_h"].doubleValue ?? 0))
+            }
+            let sumUsd = overflowMissions.reduce(0.0) {
+                $0 + (lens == .compute ? ($1["compute_usd_per_h"].doubleValue ?? 0) : ($1["inference_usd_per_h"].doubleValue ?? 0))
+            }
+            nodes.append(.init(
+                id: tailId,
+                column: 1,
+                label: "+\(overflowMissions.count) missions",
+                sub: "grouped",
+                colorHex: "#6b7280",
+                missionId: nil,
+                fallbackValue: sumRaw,
+                fallbackUsd: sumUsd
+            ))
+        }
 
+        var tailBySource: [String: (val: Double, usd: Double, deg: Bool)] = [:]
         for (idx, l) in ov["links"].items.enumerated() where l["kind"].text == lens.rawValue {
+            let src = l["source_id"].text
+            let tgt = l["mission_id"].text
+            let v = l["value"].doubleValue ?? 0
+            let u = l["est_usd_per_h"].doubleValue ?? 0
+            let deg = l["degraded"].flag
+            if overflowIds.contains(tgt) {
+                let prev = tailBySource[src] ?? (0, 0, false)
+                tailBySource[src] = (prev.val + v, prev.usd + u, prev.deg || deg)
+                continue
+            }
             links.append(.init(
                 id: "l-\(idx)",
-                source: l["source_id"].text,
-                target: l["mission_id"].text,
-                value: l["value"].doubleValue ?? 0,
-                estUsdPerH: l["est_usd_per_h"].doubleValue ?? 0,
-                degraded: l["degraded"].flag
+                source: src,
+                target: tgt,
+                value: v,
+                estUsdPerH: u,
+                degraded: deg
+            ))
+        }
+        for (src, agg) in tailBySource {
+            links.append(.init(
+                id: "l-tail-\(src)",
+                source: src,
+                target: tailId,
+                value: agg.val,
+                estUsdPerH: agg.usd,
+                degraded: agg.deg
             ))
         }
         return (nodes, links)
