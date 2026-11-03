@@ -85,6 +85,22 @@ final class OrbCore {
     @ObservationIgnored private var cachedTokenEndpoint: String?
     @ObservationIgnored private var cachedJwtToken: String?
     @ObservationIgnored private var endpointCooldowns: [String: Date] = [:]
+    @ObservationIgnored private var missionDeltaScope: String = ""
+    @ObservationIgnored private var missionDeltaCursor: String?
+    @ObservationIgnored private var missionDeltaPolls: Int = 0
+    @ObservationIgnored private var missionDeltaLastFullSync: Date = .distantPast
+    @ObservationIgnored private var missionDeltaCache: [OrbJSON] = []
+    @ObservationIgnored private var syncHub: ControlSyncHub?
+
+    private func resetMissionDeltaState() {
+        missionDeltaScope = ""
+        missionDeltaCursor = nil
+        missionDeltaPolls = 0
+        missionDeltaLastFullSync = .distantPast
+        missionDeltaCache.removeAll()
+        syncHub?.closeAll()
+        syncHub = nil
+    }
 
     var baseURL: String {
         get {
@@ -102,6 +118,7 @@ final class OrbCore {
             cachedTokenEndpoint = nil
             cachedJwtToken = nil
             endpointCooldowns.removeAll()
+            resetMissionDeltaState()
             #if DEBUG
             // UI tests point the app at loopback fixtures with `-api_base_url`; never let a
             // test that edits the server URL overwrite the operator's saved endpoint.
@@ -235,6 +252,7 @@ final class OrbCore {
         OrbKeychain.saveCredentials(nil, for: baseURL)
         jwtToken = nil
         authSessionExpired = false
+        resetMissionDeltaState()
         // Mission titles must not stay on the Lock Screen after sign-out.
         OrbFleetActivityController.shared.endAll()
     }
@@ -357,14 +375,22 @@ final class OrbCore {
         onEvent: @escaping (String, [String: Any]) -> Void
     ) -> Task<Void, Never> {
         let token = jwtToken
+        #if DEBUG
+        let isUITestMock = ProcessInfo.processInfo.arguments.contains("-api_base_url")
+        #else
+        let isUITestMock = false
+        #endif
+        let canMultiplex = !isUITestMock && preferWebSocket && token != nil &&
+            (kinds == nil || kinds == ["presentation"] || kinds == ["fido"]) &&
+            webSocketOpenFailureStreak < Self.webSocketMaxOpenFailures
 
         return Task { [weak self] in
             guard let self else { return }
-            // The WebSocket transport has no kind filter; a filtered stream is SSE only.
-            if preferWebSocket, kinds == nil, token != nil, self.webSocketOpenFailureStreak < Self.webSocketMaxOpenFailures {
-                let opened = await self.runControlWebSocket(
+            if canMultiplex, let token {
+                let opened = await self.runMultiplexedControlSync(
                     missionId: missionId,
                     sinceSeq: sinceSeq,
+                    kinds: kinds,
                     token: token,
                     generation: generation,
                     onDiagnostic: onDiagnostic,
@@ -383,7 +409,7 @@ final class OrbCore {
                     host: nil,
                     status: nil,
                     bytes: nil,
-                    error: "WebSocket did not open; falling back to SSE",
+                    error: "Multiplexed sync WebSocket did not open; falling back to SSE",
                     eventType: nil,
                     generation: generation,
                     onDiagnostic: onDiagnostic
@@ -533,93 +559,277 @@ final class OrbCore {
         }
     }
 
-    /// Returns true after the socket opened. A false return means callers may
-    /// try SSE fallback immediately.
-    private func runControlWebSocket(
+    @MainActor
+    private final class ControlSyncHub {
+        struct Subscriber {
+            let id: UUID
+            let missionId: String?
+            let kinds: [String]?
+            let sinceSeq: Int64?
+            let generation: Int
+            let onDiagnostic: ((ControlStreamDiagnostic) -> Void)?
+            let onEvent: (String, [String: Any]) -> Void
+            var openedNotified: Bool
+            let finish: (Bool) -> Void
+        }
+
+        let scope: String
+        let candidates: [String]
+        let token: String
+        private(set) var opened = false
+        private(set) var closed = false
+        private var subscribers: [UUID: Subscriber] = [:]
+        private var subscribedMissions: Set<String> = []
+        private var presentationSent: Bool?
+        private var wsTask: URLSessionWebSocketTask?
+        private var runnerTask: Task<Void, Never>?
+
+        init(scope: String, candidates: [String], token: String) {
+            self.scope = scope
+            self.candidates = candidates
+            self.token = token
+            self.runnerTask = Task { @MainActor [weak self] in
+                await self?.run()
+            }
+        }
+
+        func addSubscriber(_ sub: Subscriber) {
+            guard !closed else {
+                sub.finish(opened)
+                return
+            }
+            var entry = sub
+            if opened {
+                entry.openedNotified = true
+                entry.onEvent("connected", ["type": "connected", "transport": ControlStreamTransport.webSocket.rawValue])
+            }
+            subscribers[entry.id] = entry
+            syncSubscriptions()
+        }
+
+        func removeSubscriber(_ id: UUID) {
+            guard let removed = subscribers.removeValue(forKey: id) else { return }
+            removed.finish(opened)
+            syncSubscriptions()
+            if subscribers.isEmpty {
+                closeAll()
+            }
+        }
+
+        func closeAll() {
+            guard !closed else { return }
+            closed = true
+            let wasOpened = opened
+            let subs = Array(subscribers.values)
+            subscribers.removeAll()
+            wsTask?.cancel(with: .normalClosure, reason: nil)
+            wsTask = nil
+            runnerTask?.cancel()
+            runnerTask = nil
+            for sub in subs {
+                sub.finish(wasOpened || sub.openedNotified)
+            }
+        }
+
+        private func sendJSON(_ obj: [String: Any]) {
+            guard opened, let task = wsTask,
+                  let data = try? JSONSerialization.data(withJSONObject: obj),
+                  let text = String(data: data, encoding: .utf8) else { return }
+            Task { try? await task.send(.string(text)) }
+        }
+
+        private func syncSubscriptions() {
+            guard opened, !closed else { return }
+            let wantPresentation = subscribers.values.contains { $0.kinds == ["presentation"] }
+            if presentationSent != wantPresentation {
+                presentationSent = wantPresentation
+                sendJSON(["op": "set_presentation", "enabled": wantPresentation])
+            }
+            var wantedMissions: [String: Int64?] = [:]
+            for sub in subscribers.values {
+                guard let mid = sub.missionId, !mid.isEmpty else { continue }
+                if let existing = wantedMissions[mid] {
+                    if let a = existing, let b = sub.sinceSeq {
+                        wantedMissions[mid] = min(a, b)
+                    } else {
+                        wantedMissions[mid] = nil
+                    }
+                } else {
+                    wantedMissions[mid] = sub.sinceSeq
+                }
+            }
+            for mid in Array(subscribedMissions) where wantedMissions[mid] == nil {
+                subscribedMissions.remove(mid)
+                sendJSON(["op": "unsubscribe", "mission_id": mid])
+            }
+            for (mid, seq) in wantedMissions where !subscribedMissions.contains(mid) {
+                subscribedMissions.insert(mid)
+                var msg: [String: Any] = ["op": "subscribe", "mission_id": mid]
+                if let seq { msg["since_seq"] = seq }
+                sendJSON(msg)
+            }
+        }
+
+        private static func makeWSURL(base: String, path: String) -> URL? {
+            let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard var comp = URLComponents(string: trimmed + path) else { return nil }
+            switch comp.scheme?.lowercased() {
+            case "https": comp.scheme = "wss"
+            case "http": comp.scheme = "ws"
+            default: return nil
+            }
+            return comp.url
+        }
+
+        private func run() async {
+            for base in candidates {
+                if Task.isCancelled || closed { break }
+                guard let url = Self.makeWSURL(base: base, path: "/api/control/sync") else { continue }
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 8
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                let task = OrbCore.streamSession.webSocketTask(with: request)
+                self.wsTask = task
+                self.subscribedMissions.removeAll()
+                self.presentationSent = nil
+                task.resume()
+
+                let pingLoop = Task { @MainActor [weak self] in
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .seconds(10))
+                        guard let self, !self.closed, self.opened else { continue }
+                        self.sendJSON(["op": "ping", "ts": Int64(Date().timeIntervalSince1970 * 1000)])
+                    }
+                }
+
+                do {
+                    while !Task.isCancelled && !closed {
+                        let message = try await task.receive()
+                        let text: String
+                        switch message {
+                        case .string(let s): text = s
+                        case .data(let d): text = String(data: d, encoding: .utf8) ?? ""
+                        @unknown default: continue
+                        }
+                        guard !text.isEmpty,
+                              let data = text.data(using: .utf8),
+                              let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any] else {
+                            continue
+                        }
+                        if !opened {
+                            opened = true
+                            for key in Array(subscribers.keys) {
+                                guard var sub = subscribers[key], !sub.openedNotified else { continue }
+                                sub.openedNotified = true
+                                subscribers[key] = sub
+                                sub.onEvent("connected", ["type": "connected", "transport": ControlStreamTransport.webSocket.rawValue])
+                            }
+                            syncSubscriptions()
+                        }
+                        let eventType = obj["type"] as? String ?? ""
+                        if eventType.isEmpty || eventType == "sync_ready" || eventType == "subscribed" || eventType == "unsubscribed" {
+                            continue
+                        }
+                        if eventType == "heartbeat" || eventType == "pong" {
+                            for sub in subscribers.values {
+                                sub.onEvent("heartbeat", ["type": "heartbeat", "transport": ControlStreamTransport.webSocket.rawValue])
+                            }
+                            continue
+                        }
+                        if eventType == "mission_presentation" {
+                            for sub in subscribers.values where sub.kinds == ["presentation"] {
+                                sub.onEvent(eventType, obj)
+                            }
+                            continue
+                        }
+                        if eventType == "fido_sign_request" {
+                            for sub in subscribers.values where sub.kinds == ["fido"] || sub.missionId != nil {
+                                sub.onEvent(eventType, obj)
+                            }
+                            continue
+                        }
+                        let targetMid = obj["mission_id"] as? String
+                        for sub in subscribers.values {
+                            if let mid = sub.missionId {
+                                if targetMid == nil || targetMid == mid {
+                                    sub.onEvent(eventType, obj)
+                                }
+                            } else if sub.kinds == nil {
+                                sub.onEvent(eventType, obj)
+                            }
+                        }
+                    }
+                } catch {
+                    pingLoop.cancel()
+                    task.cancel(with: .normalClosure, reason: nil)
+                    if opened {
+                        // Socket was established and later dropped; finish active tasks so callers reconnect cleanly.
+                        break
+                    }
+                    // Try next candidate endpoint before falling back to SSE.
+                    continue
+                }
+                pingLoop.cancel()
+                break
+            }
+            closeAll()
+        }
+    }
+
+    /// Multiplexes presentation, FIDO, and per-mission subscriptions onto one shared
+    /// `/api/control/sync` WebSocket. Returns `true` if the socket opened; `false` triggers SSE fallback.
+    private func runMultiplexedControlSync(
         missionId: String?,
         sinceSeq: Int64?,
-        token: String?,
+        kinds: [String]?,
+        token: String,
         generation: Int,
         onDiagnostic: ((ControlStreamDiagnostic) -> Void)?,
         onEvent: @escaping (String, [String: Any]) -> Void
     ) async -> Bool {
-        guard let url = makeWebSocketURL("/api/control/ws", queryItems: missionId.map { [URLQueryItem(name: "mission", value: $0)] } ?? []) else {
-            emitDiagnostic(transport: .webSocket, phase: .error, host: nil, status: nil, bytes: nil, error: "Invalid WebSocket URL", eventType: nil, generation: generation, onDiagnostic: onDiagnostic)
-            onEvent("error", ["message": "Invalid server URL", "reason": "invalid_configuration"])
-            return false
+        let currentEndpoint = endpoint
+        let scope = "\(currentEndpoint)|\(token)"
+        if let existing = syncHub, existing.closed || existing.scope != scope {
+            existing.closeAll()
+            syncHub = nil
+        }
+        let hub: ControlSyncHub
+        if let existing = syncHub {
+            hub = existing
+        } else {
+            let candidates = orderedCandidateEndpoints(for: currentEndpoint)
+            guard !candidates.isEmpty else { return false }
+            let created = ControlSyncHub(scope: scope, candidates: candidates, token: token)
+            syncHub = created
+            hub = created
         }
 
-        emitDiagnostic(transport: .webSocket, phase: .connecting, host: url.host, status: nil, bytes: nil, error: nil, eventType: nil, generation: generation, onDiagnostic: onDiagnostic)
-
-        var request = URLRequest(url: url)
-        if let token {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-        let task = Self.streamSession.webSocketTask(with: request)
-        task.resume()
-
-        var opened = false
-        var bytesRead = 0
-        do {
-            if let sinceSeq {
-                let resume = ["type": "resume", "since_seq": sinceSeq] as [String: Any]
-                let data = try JSONSerialization.data(withJSONObject: resume)
-                if let string = String(data: data, encoding: .utf8) {
-                    try await task.send(.string(string))
-                }
+        let subId = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                var resumed = false
+                let sub = ControlSyncHub.Subscriber(
+                    id: subId,
+                    missionId: missionId,
+                    kinds: kinds,
+                    sinceSeq: sinceSeq,
+                    generation: generation,
+                    onDiagnostic: onDiagnostic,
+                    onEvent: onEvent,
+                    openedNotified: false,
+                    finish: { didOpen in
+                        guard !resumed else { return }
+                        resumed = true
+                        continuation.resume(returning: didOpen)
+                    }
+                )
+                hub.addSubscriber(sub)
             }
-
-            while !Task.isCancelled {
-                let message = try await task.receive()
-                let text: String
-                switch message {
-                case .string(let value):
-                    text = value
-                case .data(let data):
-                    text = String(data: data, encoding: .utf8) ?? ""
-                @unknown default:
-                    continue
-                }
-                guard !text.isEmpty else { continue }
-                bytesRead += text.utf8.count
-                if !opened {
-                    opened = true
-                    emitDiagnostic(transport: .webSocket, phase: .open, host: url.host, status: 101, bytes: bytesRead, error: nil, eventType: nil, generation: generation, onDiagnostic: onDiagnostic)
-                    onEvent("connected", ["type": "connected", "transport": ControlStreamTransport.webSocket.rawValue])
-                }
-                guard let data = text.data(using: .utf8),
-                      let obj = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any] else {
-                    onEvent("parseError", ["raw": text, "reason": "invalid websocket json"])
-                    continue
-                }
-
-                if let seq = obj["seq"] as? Int64 ?? (obj["seq"] as? Int).map(Int64.init),
-                   obj["type"] == nil {
-                    emitDiagnostic(transport: .webSocket, phase: .heartbeat, host: url.host, status: nil, bytes: bytesRead, error: nil, eventType: "heartbeat", generation: generation, onDiagnostic: onDiagnostic)
-                    onEvent("heartbeat", ["type": "heartbeat", "transport": ControlStreamTransport.webSocket.rawValue, "seq": seq])
-                    continue
-                }
-
-                let eventType = obj["type"] as? String ?? "message"
-                emitDiagnostic(transport: .webSocket, phase: .event, host: url.host, status: nil, bytes: bytesRead, error: nil, eventType: eventType, generation: generation, onDiagnostic: onDiagnostic)
-                onEvent(eventType, obj)
+        } onCancel: {
+            Task { @MainActor [weak hub] in
+                hub?.removeSubscriber(subId)
             }
-        } catch is CancellationError {
-            task.cancel(with: .normalClosure, reason: nil)
-            return opened
-        } catch {
-            let nsError = error as NSError
-            emitDiagnostic(transport: .webSocket, phase: .error, host: url.host, status: nsError.code, bytes: bytesRead, error: error.localizedDescription, eventType: nil, generation: generation, onDiagnostic: onDiagnostic)
-            onEvent("error", [
-                "message": opened
-                    ? "WebSocket stream failed: \(error.localizedDescription)"
-                    : "WebSocket failed to open: \(error.localizedDescription)",
-                "reason": opened ? "web_socket_failed" : "web_socket_open_failed",
-                "transport": ControlStreamTransport.webSocket.rawValue
-            ])
         }
-        task.cancel(with: .normalClosure, reason: nil)
-        return opened
     }
 
     /// Flush a complete SSE event. `dataLines` are joined with `\n` per spec —
@@ -789,6 +999,70 @@ final class OrbCore {
         return OrbMissionTree.filterMobile(scoped)
     }
 
+    private func advanceMissionDeltaCursor(with items: [OrbJSON]) {
+        var maxDate: Date? = missionDeltaCursor.flatMap { OrbDateCache.parse($0) }
+        for item in items {
+            let stamp = item["updated_at"].text.isEmpty ? item["created_at"].text : item["updated_at"].text
+            if let parsed = OrbDateCache.parse(stamp) {
+                if maxDate == nil || parsed > maxDate! {
+                    maxDate = parsed
+                }
+            }
+        }
+        if let maxDate {
+            let overlapped = maxDate.addingTimeInterval(-2.0)
+            missionDeltaCursor = overlapped.ISO8601Format()
+        }
+    }
+
+    /// Incremental global mission sync (`?updated_since=` with `-2s` overlap margin,
+    /// full sync on cold start and every 20 polls / 10 minutes), matching desktop `listMissions`.
+    func syncRecentMissions(limit: Int = 100, includeAll: Bool = true, forceFull: Bool = false) async throws -> OrbJSON {
+        let currentScope = "\(endpoint)|\(authToken ?? "")|\(limit)|\(includeAll)"
+        let now = Date()
+        let needFull = forceFull ||
+            missionDeltaScope != currentScope ||
+            missionDeltaCursor == nil ||
+            missionDeltaCache.isEmpty ||
+            missionDeltaPolls >= 20 ||
+            now.timeIntervalSince(missionDeltaLastFullSync) >= 600
+
+        let baseQuery = "/api/control/missions?limit=\(limit)\(includeAll ? "&all=true" : "")"
+        if needFull {
+            let raw = try await call(baseQuery)
+            missionDeltaScope = currentScope
+            missionDeltaCache = raw.items
+            missionDeltaPolls = 0
+            missionDeltaLastFullSync = now
+            missionDeltaCursor = nil
+            advanceMissionDeltaCursor(with: raw.items)
+            return raw
+        }
+
+        let cursor = missionDeltaCursor ?? ""
+        let delta = try await call("\(baseQuery)&updated_since=\(Self.escape(cursor))")
+        missionDeltaPolls += 1
+        if !delta.items.isEmpty {
+            var byId: [String: OrbJSON] = [:]
+            for existing in missionDeltaCache {
+                let id = existing["id"].text
+                if !id.isEmpty { byId[id] = existing }
+            }
+            for updated in delta.items {
+                let id = updated["id"].text
+                if !id.isEmpty { byId[id] = updated }
+            }
+            let merged = byId.values.sorted { a, b in
+                let ta = a["updated_at"].text.isEmpty ? a["created_at"].text : a["updated_at"].text
+                let tb = b["updated_at"].text.isEmpty ? b["created_at"].text : b["updated_at"].text
+                return ta > tb
+            }
+            missionDeltaCache = Array(merged.prefix(limit))
+            advanceMissionDeltaCursor(with: delta.items)
+        }
+        return .array(missionDeltaCache)
+    }
+
     private func get<T: Decodable>(_ path: String, authenticated: Bool = true) async throws -> T {
         try await getWithResponse(path, authenticated: authenticated).0
     }
@@ -867,15 +1141,26 @@ final class OrbCore {
     }
 
     /// The single transport: performs the request (with 1 fast retry and multi-path
-    /// failover on idempotent GET/HEAD requests), maps failures to `OrbHTTPError`,
-    /// expires the session on a 401 for the current token, and records failures.
+    /// failover on idempotent GET/HEAD and `Idempotency-Key` writes), maps failures to
+    /// `OrbHTTPError`, expires the session on a 401 for the current token, and records failures.
     private func send(_ request: URLRequest, session: URLSession, label: String, failure: String) async throws -> (Data, HTTPURLResponse) {
         let method = (request.httpMethod ?? "GET").uppercased()
-        let idempotent = method == "GET" || method == "HEAD"
         let currentEndpoint = endpoint
+        var baseRequest = request
+        if (baseRequest.value(forHTTPHeaderField: "Idempotency-Key") ?? "").isEmpty,
+           !currentEndpoint.isEmpty,
+           let abs = baseRequest.url?.absoluteString,
+           abs.hasPrefix(currentEndpoint + "/") {
+            let suffixPath = String(abs.dropFirst(currentEndpoint.count))
+            if OrbConnection.shouldAttachIdempotencyKey(method: method, path: suffixPath) {
+                baseRequest.setValue(UUID().uuidString, forHTTPHeaderField: "Idempotency-Key")
+            }
+        }
+        let hasIdempotencyKey = !(baseRequest.value(forHTTPHeaderField: "Idempotency-Key") ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+        let idempotent = method == "GET" || method == "HEAD" || hasIdempotencyKey
         let suffix: String? = {
             guard idempotent, !currentEndpoint.isEmpty,
-                  let abs = request.url?.absoluteString,
+                  let abs = baseRequest.url?.absoluteString,
                   abs.hasPrefix(currentEndpoint + "/") else { return nil }
             return String(abs.dropFirst(currentEndpoint.count))
         }()
@@ -885,7 +1170,7 @@ final class OrbCore {
             var lastError: Error?
             for (idx, base) in candidates.enumerated() {
                 let isLastCandidate = idx + 1 == candidates.count
-                var candidateReq = request
+                var candidateReq = baseRequest
                 if let suffix, base != currentEndpoint, let rewritten = URL(string: base + suffix) {
                     candidateReq.url = rewritten
                 }

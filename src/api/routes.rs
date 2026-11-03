@@ -822,6 +822,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         )
         // WebSocket system monitoring uses subprotocol-based auth
         .route("/api/monitoring/ws", get(monitoring::monitoring_ws))
+        // Multiplexed control sync WebSocket (Bearer header or `orb-sync.v1, jwt.<token>` subprotocol)
+        .route("/api/control/sync", get(control::control_sync_ws))
         // Hermes remote access: pass-through to the host Hermes API server so
         // a desktop Hermes can connect via GATEWAY_PROXY_URL/GATEWAY_PROXY_KEY.
         // Auth is the API_SERVER_KEY bearer token enforced by Hermes itself.
@@ -1644,7 +1646,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             "/api/backends/:id/config",
             axum::routing::put(backends_api::update_backend_config),
         )
-        // Inner layer: runs after require_auth, on protected operations only.
+        // Inner layer: runs after require_auth + require_device_approval on protected writes.
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            super::idempotency::handle_idempotency_key,
+        ))
+        // Runs after require_auth, on protected operations only.
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             super::approvals::require_device_approval,

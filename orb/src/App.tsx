@@ -108,6 +108,7 @@ import {
   listMissions,
   listProjectMissions,
   listProjects,
+  readMissionSyncCursor,
   shortModelLabel,
   createProject,
   bumpProjects,
@@ -299,22 +300,27 @@ export default function App() {
   const [completedMissions, setCompletedMissions] = createSignal<Mission[]>([]);
   const listMisses: Misses = new Map();
   let missionRefreshRevision = 0, missionAppliedRevision = 0;
-  const refreshMissions = async () => {
+  let initialFullMissionSyncDone = false;
+  createEffect(on(connectionVersion, () => { initialFullMissionSyncDone = false; }, { defer: true }));
+  const refreshMissions = async (forceFull = false) => {
     const revision = ++missionRefreshRevision, connection = connectionVersion();
     try {
       const prev = missions().filter(m => !isMissionDeleting(m.id));
+      const syncCursor = !forceFull && initialFullMissionSyncDone ? readMissionSyncCursor() : null;
+      const useDelta = Boolean(syncCursor && syncCursor.polls < 20 && Date.now() - syncCursor.syncedAt < 10 * 60_000);
       const [rawFresh, rawCompleted] = await Promise.all([
-        listMissions(200),
-        listCompletedMissions(100),
+        listMissions(200, useDelta ? { updatedSince: syncCursor!.cursor } : undefined),
+        useDelta ? Promise.resolve(null) : listCompletedMissions(100),
       ]);
       if (revision < missionAppliedRevision || connection !== connectionVersion()) return;
       missionAppliedRevision = revision;
+      if (!useDelta) initialFullMissionSyncDone = true;
       const partial = isPartialList(rawFresh);
       const fresh = rawFresh.filter(m => !isMissionDeleting(m.id));
       // No answer keeps the completed list on screen; it never empties it.
       if (rawCompleted) { const completed = rawCompleted.filter(m => !isMissionDeleting(m.id)); setCompletedMissions(current => mergeById(current, completed)); }
       const freshIds = new Set(fresh.map(m => m.id));
-      const vanished = prev.filter(m => !freshIds.has(m.id));
+      const vanished = partial ? [] : prev.filter(m => !freshIds.has(m.id));
       // Reconcile, never replace: a short answer during a restart keeps what is on screen.
       setMissions((current) => applyPendingMoves(mergeById(current, reconcileMissionList(current.filter(m => !isMissionDeleting(m.id)), fresh, listMisses, partial))));
       recordMissions(fresh);

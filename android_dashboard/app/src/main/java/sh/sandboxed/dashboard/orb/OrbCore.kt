@@ -38,6 +38,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
@@ -1138,11 +1140,13 @@ class OrbCore private constructor(context: Context) {
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS)
         .writeTimeout(45, TimeUnit.SECONDS)
+        .pingInterval(15, TimeUnit.SECONDS)
         .build()
 
     val sseHttpClient: OkHttpClient = httpClient.newBuilder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
+        .pingInterval(15, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
@@ -1396,6 +1400,7 @@ class OrbCore private constructor(context: Context) {
         _lastErrorLog.value = null
         _connectionIssue.value = null
         endpointCooldownUntilMs.clear()
+        resetMissionDeltaState()
     }
 
     /** Fresh rows update known missions without removing older rows absent from the global page. */
@@ -1494,6 +1499,68 @@ class OrbCore private constructor(context: Context) {
     private val quietRefreshMutex = Mutex()
     @Volatile private var lastMissionsDiskWriteAtMs: Long = 0L
     @Volatile private var dirtyMissionsSnapshot: Pair<List<OrbRow>, List<OrbRow>>? = null
+    @Volatile private var missionDeltaScope: String = ""
+    @Volatile private var missionDeltaCursor: String? = null
+    @Volatile private var missionDeltaPolls: Int = 0
+    @Volatile private var missionDeltaLastFullAtMs: Long = 0L
+    @Volatile private var missionDeltaCache: List<OrbRow> = emptyList()
+
+    private fun resetMissionDeltaState() {
+        missionDeltaScope = ""
+        missionDeltaCursor = null
+        missionDeltaPolls = 0
+        missionDeltaLastFullAtMs = 0L
+        missionDeltaCache = emptyList()
+        closeSyncHub()
+    }
+
+    private fun advanceMissionDeltaCursor(rows: List<OrbRow>) {
+        var maxEpoch = OrbJSON.dateEpochMs(missionDeltaCursor) ?: 0L
+        for (row in rows) {
+            val epoch = OrbJSON.dateEpochMs(row.str("updated_at", "created_at")) ?: 0L
+            if (epoch > maxEpoch) maxEpoch = epoch
+        }
+        if (maxEpoch > 0L) {
+            missionDeltaCursor = Instant.ofEpochMilli(maxOf(0L, maxEpoch - 2_000L)).toString()
+        }
+    }
+
+    private suspend fun syncRecentMissions(limit: Int = 100, forceFull: Boolean = false): List<OrbRow> {
+        val currentScope = "${_baseURL.value.trim()}|${_token.value.orEmpty()}|$limit"
+        val now = System.currentTimeMillis()
+        val needFull = forceFull ||
+            missionDeltaScope != currentScope ||
+            missionDeltaCursor == null ||
+            missionDeltaCache.isEmpty() ||
+            missionDeltaPolls >= 20 ||
+            (now - missionDeltaLastFullAtMs) >= 600_000L
+
+        if (needFull) {
+            val full = fetchRows("/api/control/missions?limit=$limit&all=true", null)
+            missionDeltaScope = currentScope
+            missionDeltaCache = full
+            missionDeltaPolls = 0
+            missionDeltaLastFullAtMs = now
+            missionDeltaCursor = null
+            advanceMissionDeltaCursor(full)
+            return full
+        }
+
+        val cursor = missionDeltaCursor.orEmpty()
+        val delta = fetchRows("/api/control/missions?limit=$limit&all=true&updated_since=${encodeComponent(cursor)}", null)
+        missionDeltaPolls += 1
+        if (delta.isNotEmpty()) {
+            val byId = LinkedHashMap<String, OrbRow>()
+            for (existing in missionDeltaCache) byId[existing.id] = existing
+            for (updated in delta) byId[updated.id] = updated
+            val merged = byId.values.sortedByDescending {
+                OrbJSON.dateEpochMs(it.str("updated_at", "created_at")) ?: 0L
+            }.take(limit)
+            missionDeltaCache = merged
+            advanceMissionDeltaCursor(delta)
+        }
+        return missionDeltaCache
+    }
 
     fun onForeground() {
         val wasBackground = !_isForeground.value
@@ -1534,7 +1601,7 @@ class OrbCore private constructor(context: Context) {
         if (!quietRefreshMutex.tryLock()) return
         try {
             coroutineScope {
-                val mDeferred = async { fetchRows("/api/control/missions?limit=100&all=true", null) }
+                val mDeferred = async { syncRecentMissions(limit = 100, forceFull = false) }
                 val pDeferred = async { fetchRows("/api/projects", "projects") }
                 val m = OrbMissionTree.filterMobile(mDeferred.await())
                 val p = pDeferred.await()
@@ -1572,7 +1639,7 @@ class OrbCore private constructor(context: Context) {
 
         coroutineScope {
             val pTask = async { orbTry(OrbLog.Category.Network, "/api/projects") { fetchRows("/api/projects", "projects") } }
-            val mTask = async { orbTry(OrbLog.Category.Network, "/api/control/missions") { fetchRows("/api/control/missions?limit=100&all=true", null) } }
+            val mTask = async { orbTry(OrbLog.Category.Network, "/api/control/missions") { syncRecentMissions(limit = 100, forceFull = true) } }
             val wTask = async { orbTry(OrbLog.Category.Network, "/api/workspaces") { fetchRows("/api/workspaces", null) } }
             val bTask = async { orbTry(OrbLog.Category.Network, "/api/backends") { fetchRows("/api/backends", null) } }
             val bmTask = async { orbTry(OrbLog.Category.Network, "/api/providers/backend-models") { fetchDict("/api/providers/backend-models") } }
@@ -1695,7 +1762,16 @@ class OrbCore private constructor(context: Context) {
         rawBody: String? = null
     ): Any? = withContext(Dispatchers.IO) {
         val upperMethod = method.uppercase()
-        val idempotent = upperMethod == "GET" || upperMethod == "HEAD"
+        val effectiveHeaders = LinkedHashMap<String, String>(headers)
+        if (effectiveHeaders.keys.none { it.equals("Idempotency-Key", ignoreCase = true) } &&
+            OrbConnection.shouldAttachIdempotencyKey(upperMethod, path)
+        ) {
+            effectiveHeaders["Idempotency-Key"] = UUID.randomUUID().toString()
+        }
+        val hasIdemKey = effectiveHeaders.entries.any {
+            it.key.equals("Idempotency-Key", ignoreCase = true) && it.value.isNotBlank()
+        }
+        val idempotent = upperMethod == "GET" || upperMethod == "HEAD" || hasIdemKey
         val primaryBase = _baseURL.value.trim().trimEnd('/')
         if (primaryBase.isEmpty()) throw OrbError("No server URL configured")
         val candidates = if (idempotent) orderedCandidateEndpoints(primaryBase) else listOf(primaryBase)
@@ -1725,7 +1801,7 @@ class OrbCore private constructor(context: Context) {
                 if (cleanToken != null) {
                     reqBuilder.header("Authorization", "Bearer $cleanToken")
                 }
-                for ((k, v) in headers) {
+                for ((k, v) in effectiveHeaders) {
                     reqBuilder.header(k, v)
                 }
                 reqBuilder.method(upperMethod, requestBody)
@@ -1773,7 +1849,7 @@ class OrbCore private constructor(context: Context) {
                     path = path,
                     method = method,
                     body = body,
-                    headers = headers,
+                    headers = effectiveHeaders,
                     allowAuthRetry = false,
                     rawBody = rawBody
                 )
@@ -1921,7 +1997,333 @@ class OrbCore private constructor(context: Context) {
         return emptyList()
     }
 
+    private data class SyncStreamSub(
+        val id: String,
+        val missionId: String?,
+        val kindFilter: String?,
+        val sinceSeq: Long?,
+        val request: Request,
+        val onEvent: (eventType: String?, data: String) -> Unit,
+        val onClosed: (Throwable?) -> Unit,
+        val fallbackFactory: () -> EventSource,
+        @Volatile var delegateSource: EventSource? = null
+    )
+
+    private inner class ControlSyncHub(
+        val hubScope: String,
+        private val candidates: List<String>,
+        private val token: String
+    ) {
+        private val lock = Any()
+        private val subs = LinkedHashMap<String, SyncStreamSub>()
+        private val subscribedMissions = HashSet<String>()
+        private var presentationSent: Boolean? = null
+        @Volatile var opened = false
+        @Volatile var closed = false
+        private var candidateIndex = 0
+        private var ws: WebSocket? = null
+        private var pingJob: Job? = null
+
+        init {
+            connectCandidate()
+        }
+
+        private fun toWsUrl(base: String): String {
+            val trimmed = base.trim().trimEnd('/')
+            return when {
+                trimmed.startsWith("https://", ignoreCase = true) -> "wss://${trimmed.substring(8)}/api/control/sync"
+                trimmed.startsWith("http://", ignoreCase = true) -> "ws://${trimmed.substring(7)}/api/control/sync"
+                else -> "$trimmed/api/control/sync"
+            }
+        }
+
+        private fun connectCandidate() {
+            if (closed || candidates.isEmpty()) {
+                fallbackOrCloseAll(IOException("No sync candidates"))
+                return
+            }
+            val base = candidates[candidateIndex % candidates.size]
+            val req = Request.Builder()
+                .url(toWsUrl(base))
+                .header("Authorization", "Bearer $token")
+                .build()
+            synchronized(lock) {
+                subscribedMissions.clear()
+                presentationSent = null
+            }
+            ws = sseHttpClient.newWebSocket(req, object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    if (closed) {
+                        webSocket.close(1000, null)
+                        return
+                    }
+                    opened = true
+                    webSocketOpenFailures = 0
+                    syncSubscriptions()
+                    pingJob?.cancel()
+                    pingJob = scope.launch(Dispatchers.IO) {
+                        while (isActive && !closed) {
+                            delay(10_000L)
+                            if (!closed && opened) {
+                                webSocket.send(OrbJSON.stringify(mapOf("op" to "ping", "ts" to System.currentTimeMillis())))
+                            }
+                        }
+                    }
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    if (closed || text.isEmpty()) return
+                    val parsed = OrbJSON.dict(OrbJSON.parse(text)) ?: return
+                    val eventType = OrbJSON.str(parsed, "type") ?: return
+                    if (eventType in setOf("sync_ready", "heartbeat", "pong", "subscribed", "unsubscribed")) return
+                    val snapshot = synchronized(lock) { subs.values.toList() }
+                    if (eventType == "mission_presentation") {
+                        for (sub in snapshot) {
+                            if (sub.kindFilter == "presentation") sub.onEvent(eventType, text)
+                        }
+                        return
+                    }
+                    if (eventType == "fido_sign_request") {
+                        for (sub in snapshot) {
+                            if (sub.kindFilter == "fido" || sub.missionId != null) sub.onEvent(eventType, text)
+                        }
+                        return
+                    }
+                    val targetMid = OrbJSON.str(parsed, "mission_id")
+                    for (sub in snapshot) {
+                        if (sub.missionId != null) {
+                            if (targetMid == null || targetMid == sub.missionId) sub.onEvent(eventType, text)
+                        } else if (sub.kindFilter == null) {
+                            sub.onEvent(eventType, text)
+                        }
+                    }
+                }
+
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    handleDisconnect(null)
+                }
+
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    handleDisconnect(t)
+                }
+            })
+        }
+
+        private fun handleDisconnect(err: Throwable?) {
+            pingJob?.cancel()
+            pingJob = null
+            if (closed) return
+            if (!opened && candidateIndex + 1 < candidates.size) {
+                candidateIndex += 1
+                connectCandidate()
+                return
+            }
+            fallbackOrCloseAll(err)
+        }
+
+        private fun fallbackOrCloseAll(err: Throwable?) {
+            val wasOpened = opened
+            val remaining: List<SyncStreamSub>
+            synchronized(lock) {
+                if (closed) return
+                closed = true
+                remaining = subs.values.toList()
+                subs.clear()
+            }
+            ws?.cancel()
+            ws = null
+            if (activeSyncHub === this) activeSyncHub = null
+            if (!wasOpened) {
+                webSocketOpenFailures += 1
+                for (sub in remaining) {
+                    sub.delegateSource = sub.fallbackFactory()
+                }
+            } else {
+                for (sub in remaining) {
+                    sub.onClosed(err)
+                }
+            }
+        }
+
+        private fun sendJson(payload: Map<String, Any?>) {
+            val socket = ws ?: return
+            if (!opened || closed) return
+            socket.send(OrbJSON.stringify(payload))
+        }
+
+        private fun syncSubscriptions() {
+            if (!opened || closed) return
+            val commands = mutableListOf<Map<String, Any?>>()
+            synchronized(lock) {
+                val wantPres = subs.values.any { it.kindFilter == "presentation" }
+                if (presentationSent != wantPres) {
+                    presentationSent = wantPres
+                    commands.add(mapOf("op" to "set_presentation", "enabled" to wantPres))
+                }
+                val wantedMissions = LinkedHashMap<String, Long?>()
+                for (sub in subs.values) {
+                    val mid = sub.missionId ?: continue
+                    if (!wantedMissions.containsKey(mid)) {
+                        wantedMissions[mid] = sub.sinceSeq
+                    } else {
+                        val prev = wantedMissions[mid]
+                        wantedMissions[mid] = if (prev != null && sub.sinceSeq != null) minOf(prev, sub.sinceSeq) else null
+                    }
+                }
+                val toRemove = subscribedMissions.filter { it !in wantedMissions }
+                for (mid in toRemove) {
+                    subscribedMissions.remove(mid)
+                    commands.add(mapOf("op" to "unsubscribe", "mission_id" to mid))
+                }
+                for ((mid, seq) in wantedMissions) {
+                    if (subscribedMissions.add(mid)) {
+                        val cmd = LinkedHashMap<String, Any?>()
+                        cmd["op"] = "subscribe"
+                        cmd["mission_id"] = mid
+                        if (seq != null) cmd["since_seq"] = seq
+                        commands.add(cmd)
+                    }
+                }
+            }
+            for (cmd in commands) sendJson(cmd)
+        }
+
+        fun register(sub: SyncStreamSub) {
+            val useFallback = synchronized(lock) {
+                if (closed) true else {
+                    subs[sub.id] = sub
+                    false
+                }
+            }
+            if (useFallback) {
+                sub.delegateSource = sub.fallbackFactory()
+                return
+            }
+            syncSubscriptions()
+        }
+
+        fun unregister(id: String) {
+            val removed: SyncStreamSub?
+            val emptyNow: Boolean
+            synchronized(lock) {
+                removed = subs.remove(id)
+                emptyNow = subs.isEmpty()
+            }
+            removed?.delegateSource?.cancel()
+            if (emptyNow) {
+                close()
+            } else {
+                syncSubscriptions()
+            }
+        }
+
+        fun close() {
+            val toNotify: List<SyncStreamSub>
+            synchronized(lock) {
+                if (closed) return
+                closed = true
+                toNotify = subs.values.toList()
+                subs.clear()
+            }
+            pingJob?.cancel()
+            pingJob = null
+            ws?.close(1000, null)
+            ws = null
+            if (activeSyncHub === this) activeSyncHub = null
+            for (sub in toNotify) {
+                sub.delegateSource?.cancel()
+            }
+        }
+    }
+
+    @Volatile private var activeSyncHub: ControlSyncHub? = null
+    @Volatile private var webSocketOpenFailures: Int = 0
+
+    private fun closeSyncHub() {
+        activeSyncHub?.close()
+        activeSyncHub = null
+    }
+
+    private fun parseControlStreamQuery(path: String): Triple<String?, String?, Long?>? {
+        if (!path.startsWith("/api/control/stream")) return null
+        val qIdx = path.indexOf('?')
+        if (qIdx < 0) return Triple(null, null, null)
+        var missionId: String? = null
+        var profile: String? = null
+        var kinds: String? = null
+        var sinceSeq: Long? = null
+        for (part in path.substring(qIdx + 1).split('&')) {
+            val eq = part.indexOf('=')
+            if (eq <= 0) continue
+            val k = part.substring(0, eq)
+            val v = java.net.URLDecoder.decode(part.substring(eq + 1), Charsets.UTF_8.name())
+            when (k) {
+                "mission" -> missionId = v.takeIf { it.isNotEmpty() }
+                "profile" -> profile = v
+                "kinds" -> kinds = v
+                "since_seq" -> sinceSeq = v.toLongOrNull()
+            }
+        }
+        val kindFilter = when {
+            missionId != null -> null
+            profile == "presentation" || kinds == "mission_presentation" -> "presentation"
+            kinds == "fido" -> "fido"
+            else -> return null
+        }
+        return Triple(missionId, kindFilter, sinceSeq)
+    }
+
     fun openSSE(
+        path: String,
+        onEvent: (eventType: String?, data: String) -> Unit,
+        onClosed: (Throwable?) -> Unit = {}
+    ): EventSource {
+        val cleanToken = _token.value?.trim()?.takeIf { it.isNotEmpty() }
+        val primaryBase = _baseURL.value.trim().trimEnd('/')
+        val parsedSync = if (cleanToken != null && primaryBase.isNotEmpty() && webSocketOpenFailures < 3) {
+            parseControlStreamQuery(path)
+        } else {
+            null
+        }
+        if (parsedSync != null && cleanToken != null) {
+            val (missionId, kindFilter, sinceSeq) = parsedSync
+            val scopeKey = "$primaryBase|$cleanToken"
+            val hub = synchronized(this) {
+                val cur = activeSyncHub
+                if (cur != null && !cur.closed && cur.hubScope == scopeKey) {
+                    cur
+                } else {
+                    cur?.close()
+                    ControlSyncHub(scopeKey, orderedCandidateEndpoints(primaryBase), cleanToken).also {
+                        activeSyncHub = it
+                    }
+                }
+            }
+            val subId = UUID.randomUUID().toString()
+            val placeholderReq = Request.Builder().url(makeURL(path)).build()
+            val sub = SyncStreamSub(
+                id = subId,
+                missionId = missionId,
+                kindFilter = kindFilter,
+                sinceSeq = sinceSeq,
+                request = placeholderReq,
+                onEvent = onEvent,
+                onClosed = onClosed,
+                fallbackFactory = { openRawSSE(path, onEvent, onClosed) }
+            )
+            hub.register(sub)
+            return object : EventSource {
+                override fun request(): Request = sub.delegateSource?.request() ?: placeholderReq
+                override fun cancel() {
+                    sub.delegateSource?.cancel()
+                    hub.unregister(subId)
+                }
+            }
+        }
+        return openRawSSE(path, onEvent, onClosed)
+    }
+
+    private fun openRawSSE(
         path: String,
         onEvent: (eventType: String?, data: String) -> Unit,
         onClosed: (Throwable?) -> Unit = {}

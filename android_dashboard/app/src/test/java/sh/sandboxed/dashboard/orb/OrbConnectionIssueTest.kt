@@ -86,11 +86,27 @@ class OrbConnectionIssueTest {
 
     @Test fun candidateEndpointsPairDirectAndFallback() {
         assertEquals(
-            listOf("https://agent-backend.nico-best-pc-ever.ovh", "https://agent-backend.thomas.md"),
+            listOf(
+                "https://orbcore.thomas.md",
+                "https://agent-backend.nico-best-pc-ever.ovh",
+                "https://agent-backend.thomas.md"
+            ),
+            OrbConnection.candidateEndpoints("https://orbcore.thomas.md/")
+        )
+        assertEquals(
+            listOf(
+                "https://agent-backend.nico-best-pc-ever.ovh",
+                "https://orbcore.thomas.md",
+                "https://agent-backend.thomas.md"
+            ),
             OrbConnection.candidateEndpoints("https://agent-backend.nico-best-pc-ever.ovh/")
         )
         assertEquals(
-            listOf("https://agent-backend.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"),
+            listOf(
+                "https://agent-backend.thomas.md",
+                "https://orbcore.thomas.md",
+                "https://agent-backend.nico-best-pc-ever.ovh"
+            ),
             OrbConnection.candidateEndpoints("https://agent-backend.thomas.md")
         )
         assertEquals(
@@ -101,5 +117,14 @@ class OrbConnectionIssueTest {
         assertTrue(OrbConnection.isFastRetryableStatus(524))
         assertFalse(OrbConnection.isFastRetryableStatus(500))
         assertFalse(OrbConnection.isFastRetryableStatus(401))
+    }
+
+    @Test fun idempotencyKeyAttachmentEligibility() {
+        assertTrue(OrbConnection.shouldAttachIdempotencyKey("POST", "/api/control/missions"))
+        assertTrue(OrbConnection.shouldAttachIdempotencyKey("PATCH", "/api/control/missions/m1/settings"))
+        assertTrue(OrbConnection.shouldAttachIdempotencyKey("DELETE", "/api/control/missions/m1"))
+        assertFalse(OrbConnection.shouldAttachIdempotencyKey("GET", "/api/control/missions"))
+        assertFalse(OrbConnection.shouldAttachIdempotencyKey("POST", "/api/auth/login"))
+        assertFalse(OrbConnection.shouldAttachIdempotencyKey("POST", "/api/voice/transcribe?language=en"))
     }
 }

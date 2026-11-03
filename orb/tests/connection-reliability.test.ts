@@ -3,13 +3,18 @@ import {
   api,
   candidateApiUrls,
   clearConnection,
+  flushDurableWriteOutbox,
   listMissions,
+  markMissionOpened,
+  readMissionSyncCursor,
   resolveTransportBase,
   setApiUrl,
   setConnection,
   setTransportBridgeEnabled,
   transportFetch,
+  withIdempotencyKey,
 } from "../src/api";
+import { isPartialList } from "../src/missionHierarchy";
 import { cachePut, cacheReset } from "../src/pageCache";
 import {
   MAX_LIVE_PREFETCH,
@@ -19,6 +24,7 @@ import {
   selectLivePrefetchIds,
 } from "../src/missionCache";
 import { SOFTWARE_CONCURRENCY, refreshSoftware } from "../src/softwareInventory";
+import { setMultiplexSyncEnabledForTest, streamMission, type StreamEvent } from "../src/stream";
 
 beforeEach(() => {
   localStorage.clear();
@@ -29,6 +35,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setMultiplexSyncEnabledForTest(false);
   clearConnection();
   setTransportBridgeEnabled(false);
   forgetPrefetchPauses();
@@ -37,15 +44,24 @@ afterEach(() => {
 });
 
 describe("connection reliability transport & prefetch bounds", () => {
-  it("retries idempotent GET once on transient TypeError(Load failed), never POST", async () => {
+  it("fast-retries idempotent GET on single-origin Load failed while leaving caller-owned POST retry state machines intact", async () => {
     let getCalls = 0;
-    let postCalls = 0;
+    let rawPostCalls = 0;
+    let idemPostCalls = 0;
+    const seenIdemKeys: string[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
         const method = (init?.method ?? "GET").toUpperCase();
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        const idemKey = headers["Idempotency-Key"];
         if (method === "POST") {
-          postCalls++;
+          if (idemKey) {
+            seenIdemKeys.push(idemKey);
+            if (++idemPostCalls === 1) throw new TypeError("Load failed");
+            return Response.json({ created: true, attempt: idemPostCalls });
+          }
+          rawPostCalls++;
           throw new TypeError("Load failed");
         }
         if (++getCalls === 1) {
@@ -62,16 +78,32 @@ describe("connection reliability transport & prefetch bounds", () => {
     expect(getCalls).toBe(2);
 
     await expect(api("/api/control/missions", { method: "POST", body: "{}" })).rejects.toThrow("Load failed");
-    expect(postCalls).toBe(1);
+    expect(rawPostCalls).toBe(1);
+
+    // Single-origin POST surfaces lost-reply uncertainty to caller retry UX, then replays the same Idempotency-Key.
+    const idemInit = withIdempotencyKey({ method: "POST", body: "{}" }, "idem-fixed-1");
+    await expect(api("/api/control/missions", idemInit)).rejects.toThrow("Load failed");
+    await expect(api<{ created: boolean; attempt: number }>("/api/control/missions", idemInit)).resolves.toEqual({
+      created: true,
+      attempt: 2,
+    });
+    expect(seenIdemKeys).toEqual(["idem-fixed-1", "idem-fixed-1"]);
   });
 
-  it("fails over idempotent GET across paired direct and fallback endpoints", async () => {
+  it("fails over idempotent GET and Idempotency-Key POST across the 3-way orbcore failover ring", async () => {
+    expect(candidateApiUrls("https://orbcore.thomas.md")).toEqual([
+      "https://orbcore.thomas.md",
+      "https://agent-backend.nico-best-pc-ever.ovh",
+      "https://agent-backend.thomas.md",
+    ]);
     expect(candidateApiUrls("https://agent-backend.nico-best-pc-ever.ovh")).toEqual([
       "https://agent-backend.nico-best-pc-ever.ovh",
+      "https://orbcore.thomas.md",
       "https://agent-backend.thomas.md",
     ]);
     expect(candidateApiUrls("https://agent-backend.thomas.md")).toEqual([
       "https://agent-backend.thomas.md",
+      "https://orbcore.thomas.md",
       "https://agent-backend.nico-best-pc-ever.ovh",
     ]);
 
@@ -93,8 +125,16 @@ describe("connection reliability transport & prefetch bounds", () => {
     expect(await res.json()).toEqual({ healthy: true });
     expect(seenUrls).toEqual([
       "https://agent-backend.nico-best-pc-ever.ovh/api/health",
-      "https://agent-backend.thomas.md/api/health",
+      "https://orbcore.thomas.md/api/health",
     ]);
+
+    // Subsequent Idempotency-Key POST skips the cooling-down .ovh endpoint and hits orbcore immediately.
+    const postRes = await transportFetch(
+      "/api/control/missions/m1/opened",
+      withIdempotencyKey({ method: "POST" }, "open-m1"),
+    );
+    expect(await postRes.json()).toEqual({ healthy: true });
+    expect(seenUrls[seenUrls.length - 1]).toBe("https://orbcore.thomas.md/api/control/missions/m1/opened");
   });
 
   it("routes requests through Tauri loopback transport bridge when available", async () => {
@@ -121,15 +161,156 @@ describe("connection reliability transport & prefetch bounds", () => {
     expect(invoke).toHaveBeenCalledTimes(1);
   });
 
-  it("passes updated_since when explicitly requested on listMissions", async () => {
+  it("persists updated_since cursor with -2s overlap and marks delta responses as partialList", async () => {
+    setConnection("http://cursor.test", "tok");
+    let calls = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      expect(String(input)).toContain("updated_since=2026-11-03T07%3A00%3A00Z");
+      calls++;
+      const url = String(input);
+      if (calls === 1) {
+        expect(url).not.toContain("updated_since=");
+        return Response.json([
+          { id: "m-1", title: "One", status: "active", updated_at: "2026-11-03T07:00:10.000Z" },
+        ]);
+      }
+      expect(url).toContain("updated_since=2026-11-03T07%3A00%3A08.000Z");
       return Response.json([]);
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await listMissions(200, { updatedSince: "2026-11-03T07:00:00Z" });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const full = await listMissions(200);
+    expect(isPartialList(full)).toBe(false);
+    const cursor = readMissionSyncCursor();
+    expect(cursor?.cursor).toBe("2026-11-03T07:00:08.000Z");
+    expect(cursor?.polls).toBe(0);
+
+    const delta = await listMissions(200, { updatedSince: cursor!.cursor });
+    expect(isPartialList(delta)).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("queues background idempotent writes in durable outbox offline and replays with original key", async () => {
+    setConnection("http://outbox.test", "tok");
+    let offline = true;
+    const seenKeys: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        if (headers["Idempotency-Key"]) seenKeys.push(headers["Idempotency-Key"]);
+        if (offline) throw new TypeError("Load failed");
+        return Response.json({ ok: true });
+      }),
+    );
+
+    await expect(markMissionOpened("m-offline")).resolves.toBeUndefined();
+    expect(seenKeys).toHaveLength(1);
+    const originalKey = seenKeys[0];
+
+    offline = false;
+    const flushed = await flushDurableWriteOutbox();
+    expect(flushed).toBe(1);
+    expect(seenKeys).toEqual([originalKey, originalKey]);
+    expect(await flushDurableWriteOutbox()).toBe(0);
+  });
+
+  it("multiplexes presentation and mission subscriptions over one /api/control/sync WebSocket and falls back to SSE on handshake failure", async () => {
+    setConnection("http://sync.test", "secret-jwt");
+    setMultiplexSyncEnabledForTest(true);
+
+    class FakeSocket {
+      static instances: FakeSocket[] = [];
+      static OPEN = 1;
+      static failConnect = false;
+      readyState = 0;
+      sent: Record<string, unknown>[] = [];
+      onopen: (() => void) | null = null;
+      onmessage: ((ev: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor(public url: string, public protocols?: string | string[]) {
+        FakeSocket.instances.push(this);
+        queueMicrotask(() => {
+          if (FakeSocket.failConnect) {
+            this.readyState = 3;
+            this.onerror?.();
+            this.onclose?.();
+            return;
+          }
+          this.readyState = FakeSocket.OPEN;
+          this.onopen?.();
+        });
+      }
+      send(payload: string) {
+        this.sent.push(JSON.parse(payload) as Record<string, unknown>);
+      }
+      close() {
+        this.readyState = 3;
+        this.onclose?.();
+      }
+    }
+    vi.stubGlobal("WebSocket", FakeSocket as unknown as typeof WebSocket);
+
+    const presEvents: StreamEvent[] = [];
+    const missionEvents: StreamEvent[] = [];
+    const stopPres = streamMission(null, (ev) => presEvents.push(ev), () => {}, undefined, "presentation");
+    const stopM1 = streamMission("m-1", (ev) => missionEvents.push(ev), () => {});
+
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+    const sock = FakeSocket.instances[0];
+    expect(sock.url).toBe("ws://sync.test/api/control/sync");
+    expect(sock.protocols).toEqual(["orb-sync.v1", "jwt.secret-jwt"]);
+    await vi.waitFor(() =>
+      expect(sock.sent).toEqual(
+        expect.arrayContaining([
+          { op: "set_presentation", enabled: true },
+          { op: "subscribe", mission_id: "m-1" },
+        ]),
+      ),
+    );
+
+    sock.onmessage?.({
+      data: JSON.stringify({ type: "mission_presentation", mission_id: "m-1", activity: "working" }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({ type: "mission_status_changed", mission_id: "m-1", sequence: 7, status: "active" }),
+    });
+    expect(presEvents).toHaveLength(1);
+    expect(presEvents[0].type).toBe("mission_presentation");
+    expect(missionEvents).toHaveLength(1);
+    expect(missionEvents[0].sequence).toBe(7);
+
+    stopM1();
+    expect(sock.sent).toContainEqual({ op: "unsubscribe", mission_id: "m-1" });
+    stopPres();
+    setMultiplexSyncEnabledForTest(false);
+
+    // Verify clean fallback to /api/control/stream SSE when WS upgrade fails across candidates.
+    FakeSocket.instances = [];
+    FakeSocket.failConnect = true;
+    setMultiplexSyncEnabledForTest(true);
+    let sseRequested = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).includes("/api/control/stream")) {
+          sseRequested = true;
+          return new Response(
+            "event: mission_status_changed\ndata: {\"type\":\"mission_status_changed\",\"status\":\"completed\"}\n\n",
+            {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            },
+          );
+        }
+        return Response.json({});
+      }),
+    );
+    const fallbackEvents: StreamEvent[] = [];
+    const stopFallback = streamMission("m-2", (ev) => fallbackEvents.push(ev), () => {});
+    await vi.waitFor(() => expect(sseRequested).toBe(true), { timeout: 2500 });
+    await vi.waitFor(() => expect(fallbackEvents.some((e) => e.type === "mission_status_changed")).toBe(true));
+    stopFallback();
   });
 
   it("bounds live prefetch selection and pauses evicted transcripts instead of LRU-thrashing", async () => {

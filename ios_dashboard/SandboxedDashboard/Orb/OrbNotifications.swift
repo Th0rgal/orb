@@ -469,7 +469,7 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
     @discardableResult
     func pollHybridMissionsOnce() async -> Bool {
         await OrbSharedInboxState.shared.refresh()
-        guard let rawMissions = await Log.attempt(.notifications, "hybrid missions poll", { try await OrbCore.shared.call("/api/control/missions?limit=100&all=true") }) else { return false }
+        guard let rawMissions = await Log.attempt(.notifications, "hybrid missions poll", { try await OrbCore.shared.syncRecentMissions(limit: 100, includeAll: true) }) else { return false }
         OrbReadCache.seedFromGlobalMissions(rawMissions.items)
         OrbDisk.saveAsync(rawMissions, key: "inbox:missions")
         let rows = rawMissions.items.map { OrbRow($0) }.filter(\.mobile)

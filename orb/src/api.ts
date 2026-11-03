@@ -16,23 +16,31 @@ export { btwParentId, excludeBtwMissions, isBtwMission };
 const URL_KEY = "orb.apiUrl";
 const JWT_KEY = "orb.jwt";
 const DEFAULT_URL = "https://agent-backend.thomas.md";
+const ORBCORE_URL = "https://orbcore.thomas.md";
 const KNOWN_DIRECT_URL = "https://agent-backend.nico-best-pc-ever.ovh";
 const ENDPOINT_COOLDOWN_MS = 20_000;
+const DELTA_CURSOR_OVERLAP_MS = 2_000;
 
 export function getApiUrl(): string {
   return localStorage.getItem(URL_KEY) ?? DEFAULT_URL;
 }
 
-/** Ordered candidate origins for multi-path failover (mirrors Rust/Swift/Kotlin). */
+/** Ordered candidate origins for 3-way multi-path failover (mirrors Rust/Swift/Kotlin). */
 export function candidateApiUrls(primary = getApiUrl()): string[] {
   const clean = primary.trim().replace(/\/+$/, "");
   if (!clean) return [];
   const lower = clean.toLowerCase();
-  if (lower === KNOWN_DIRECT_URL || (lower.endsWith(".thomas.md") && lower !== DEFAULT_URL)) {
-    return [clean, DEFAULT_URL];
+  if (lower === ORBCORE_URL) {
+    return [clean, KNOWN_DIRECT_URL, DEFAULT_URL];
+  }
+  if (lower === KNOWN_DIRECT_URL) {
+    return [clean, ORBCORE_URL, DEFAULT_URL];
   }
   if (lower === DEFAULT_URL) {
-    return [clean, KNOWN_DIRECT_URL];
+    return [clean, ORBCORE_URL, KNOWN_DIRECT_URL];
+  }
+  if (lower.endsWith(".thomas.md")) {
+    return [clean, ORBCORE_URL, DEFAULT_URL];
   }
   return [clean];
 }
@@ -60,7 +68,7 @@ export function setTransportBridgeEnabled(enabled: boolean): void {
   }
 }
 
-function orderedApiCandidates(primary: string): string[] {
+export function orderedApiCandidates(primary = getApiUrl()): string[] {
   const list = candidateApiUrls(primary);
   if (list.length <= 1) return list;
   const now = Date.now();
@@ -118,26 +126,61 @@ export function transportFetch(path: string, init?: RequestInit, explicitBase?: 
   return transportFetchDirect(target, path, init);
 }
 
+function headerValue(headers: HeadersInit | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  if (headers instanceof Headers) return headers.get(name) ?? undefined;
+  if (Array.isArray(headers)) {
+    const found = headers.find(([k]) => k.toLowerCase() === name.toLowerCase());
+    return found?.[1];
+  }
+  const rec = headers as Record<string, string | undefined>;
+  for (const [k, v] of Object.entries(rec)) {
+    if (k.toLowerCase() === name.toLowerCase() && v) return v;
+  }
+  return undefined;
+}
+
+export function withIdempotencyKey(init: RequestInit | undefined, key: string = crypto.randomUUID()): RequestInit {
+  const existing = headerValue(init?.headers, "Idempotency-Key");
+  if (existing) return init ?? {};
+  return {
+    ...(init ?? {}),
+    headers: {
+      ...((init?.headers as Record<string, string> | undefined) ?? {}),
+      "Idempotency-Key": key,
+    },
+  };
+}
+
 async function transportFetchDirect(target: string, path: string, init?: RequestInit): Promise<Response> {
   const candidates = orderedApiCandidates(target);
   const method = (init?.method ?? "GET").toUpperCase();
-  const idempotent = method === "GET" || method === "HEAD";
+  // Browser fetch() cannot distinguish pre-connect DNS/TCP errors from mid-flight
+  // response drops (both surface as TypeError). Only safe reads walk multiple
+  // origins inside a single call; writes cool down the failing origin so the
+  // caller's own retry / outbox replays the same Idempotency-Key onto the next
+  // healthy standby origin without multiplying attempts behind UI state machines.
+  const safeMethod = method === "GET" || method === "HEAD";
+  const attempts = safeMethod ? candidates.length : Math.min(candidates.length, 1);
   let lastError: unknown;
-  for (let i = 0; i < candidates.length; i++) {
+  for (let i = 0; i < attempts; i++) {
     const base = candidates[i];
-    const isLast = i + 1 === candidates.length;
+    const isLast = i + 1 === attempts;
     try {
       const res = await fetch(`${base}${path}`, init);
-      if (idempotent && !isLast && [502, 503, 504, 522, 524].includes(res.status)) {
+      if ([502, 503, 504, 522, 524].includes(res.status)) {
         endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
-        continue;
+        if (safeMethod && !isLast) continue;
+      } else if (res.status < 500) {
+        endpointCooldownUntil.delete(base);
       }
-      if (res.status < 500) endpointCooldownUntil.delete(base);
       return res;
     } catch (err) {
       lastError = err;
-      if (isAbortError(err) || !idempotent || isLast) throw err;
-      endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
+      if (!isAbortError(err)) {
+        endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
+      }
+      if (isAbortError(err) || !safeMethod || isLast) throw err;
     }
   }
   throw lastError ?? new TypeError("Load failed");
@@ -301,7 +344,7 @@ function stickMissionRows<T>(path: string, result: T): T {
   if (Array.isArray(result)) return (result.some(isMissionRow) ? result.map(row => isMissionRow(row) ? stickHierarchy(row) : row) : result) as T;
   return (isMissionRow(result) ? stickHierarchy(result) : result) as T;
 }
-function isFastRetryableGetError(error: unknown, init?: RequestInit): boolean {
+function isFastRetryableError(error: unknown, init?: RequestInit): boolean {
   const method = (init?.method ?? "GET").toUpperCase();
   if (method !== "GET" && method !== "HEAD") return false;
   if (init?.signal?.aborted) return false;
@@ -313,7 +356,7 @@ async function sendRequest<T>(path: string, init?: RequestInit, text = false): P
   try {
     return await sendRequestOnce<T>(path, init, text);
   } catch (error) {
-    if (!isFastRetryableGetError(error, init)) throw error;
+    if (!isFastRetryableError(error, init)) throw error;
     const delayMs = 200 + Math.floor(Math.random() * 200);
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     if (init?.signal?.aborted) throw error;
@@ -1170,13 +1213,158 @@ export async function deleteProjectFile(slug: string, path: string): Promise<voi
   });
 }
 
+type OutboxEntry = {
+  key: string;
+  path: string;
+  method: string;
+  body?: string;
+  at: number;
+};
+const OUTBOX_MAX = 32;
+const OUTBOX_TTL_MS = 24 * 3600_000;
+let outboxFlushing = false;
+
+function outboxStorageKey(): string {
+  return catalogStorageKey("/api/control/outbox");
+}
+
+function readOutbox(storageKey = outboxStorageKey()): OutboxEntry[] {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const cutoff = Date.now() - OUTBOX_TTL_MS;
+    return parsed.filter((row): row is OutboxEntry =>
+      !!row && typeof row.key === "string" && typeof row.path === "string" && typeof row.method === "string" && typeof row.at === "number" && row.at >= cutoff,
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeOutbox(entries: OutboxEntry[], storageKey = outboxStorageKey()): void {
+  try {
+    if (!entries.length) localStorage.removeItem(storageKey);
+    else localStorage.setItem(storageKey, JSON.stringify(entries.slice(-OUTBOX_MAX)));
+  } catch { /* ignore quota errors */ }
+}
+
+/** Queue a background idempotent mutation in the durable localStorage outbox when offline,
+ * and replay queued mutations automatically once connectivity returns. */
+export async function flushDurableWriteOutbox(): Promise<number> {
+  if (outboxFlushing || !getJwt()) return 0;
+  const storageKey = outboxStorageKey();
+  const pending = readOutbox(storageKey);
+  if (!pending.length) return 0;
+  outboxFlushing = true;
+  let flushed = 0;
+  try {
+    const remaining: OutboxEntry[] = [];
+    for (let i = 0; i < pending.length; i++) {
+      const item = pending[i];
+      if (outboxStorageKey() !== storageKey) break;
+      try {
+        await api(item.path, withIdempotencyKey({
+          method: item.method,
+          headers: item.body ? { "Content-Type": "application/json" } : undefined,
+          body: item.body,
+        }, item.key));
+        flushed++;
+      } catch (err) {
+        if (isTransientNetworkError(err)) {
+          remaining.push(item, ...pending.slice(i + 1));
+          break;
+        }
+        // Deterministic 4xx validation error — drop rather than poison queue.
+      }
+    }
+    if (outboxStorageKey() === storageKey) writeOutbox(remaining, storageKey);
+    return flushed;
+  } finally {
+    outboxFlushing = false;
+  }
+}
+
+async function idempotentBackgroundWrite(path: string, method: string, body?: unknown, key: string = crypto.randomUUID()): Promise<void> {
+  const serialized = body !== undefined ? JSON.stringify(body) : undefined;
+  try {
+    await api(path, withIdempotencyKey({
+      method,
+      headers: serialized ? { "Content-Type": "application/json" } : undefined,
+      body: serialized,
+    }, key));
+  } catch (err) {
+    if (!isTransientNetworkError(err)) throw err;
+    const storageKey = outboxStorageKey();
+    const cur = readOutbox(storageKey).filter((e) => !(e.path === path && e.method === method));
+    cur.push({ key, path, method, body: serialized, at: Date.now() });
+    writeOutbox(cur, storageKey);
+  }
+}
+
+type MissionDeltaCursorState = { cursor: string; syncedAt: number; polls: number };
+function missionCursorStorageKey(): string {
+  return catalogStorageKey("/api/control/missions:cursor");
+}
+
+export function readMissionSyncCursor(): MissionDeltaCursorState | null {
+  try {
+    const raw = localStorage.getItem(missionCursorStorageKey());
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<MissionDeltaCursorState>;
+    if (typeof parsed?.cursor !== "string" || !parsed.cursor) return null;
+    return {
+      cursor: parsed.cursor,
+      syncedAt: typeof parsed.syncedAt === "number" ? parsed.syncedAt : 0,
+      polls: typeof parsed.polls === "number" ? parsed.polls : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function recordMissionSyncCursor(rows: readonly Mission[], fullSync: boolean): void {
+  const prev = readMissionSyncCursor();
+  let maxMs = prev ? (Date.parse(prev.cursor) || 0) : 0;
+  for (const row of rows) {
+    const ms = Date.parse(row.updated_at || row.created_at || "");
+    if (Number.isFinite(ms) && ms > maxMs) maxMs = ms;
+  }
+  if (maxMs <= 0) return;
+  const cursorIso = new Date(Math.max(0, maxMs - DELTA_CURSOR_OVERLAP_MS)).toISOString();
+  const next: MissionDeltaCursorState = {
+    cursor: cursorIso,
+    syncedAt: fullSync ? Date.now() : (prev?.syncedAt ?? Date.now()),
+    polls: fullSync ? 0 : ((prev?.polls ?? 0) + 1),
+  };
+  try {
+    localStorage.setItem(missionCursorStorageKey(), JSON.stringify(next));
+  } catch { /* ignore storage errors */ }
+}
+
 export async function listMissions(limit = 200, options?: { updatedSince?: string }): Promise<Mission[]> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const local = excludeBtwMissions(await origins.localOrigins());
+  const isDelta = Boolean(options?.updatedSince);
   const params = new URLSearchParams({ limit: String(limit) });
   if (options?.updatedSince) params.set("updated_since", options.updatedSince);
-  try { const remote = await includeAncestors(await api<Mission[]>(`/api/control/missions?${params}`)); await origins.rememberCoreState(local,[...remote,...await origins.unlistedCoreState(local,remote,id=>api<Mission>(`/api/control/missions/${id}`))],observedAt); const pending=excludeBtwMissions(local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id))))); return [...pending,...excludeBtwMissions(remote).filter(row=>!pending.some(item=>item.id===row.id))]; }
-  catch(error){if(local.length)return partialList(local);throw error;}
+  try {
+    const remote = await includeAncestors(await api<Mission[]>(`/api/control/missions?${params}`));
+    recordMissionSyncCursor(remote, !isDelta);
+    if (!isDelta) {
+      await origins.rememberCoreState(local, [...remote, ...await origins.unlistedCoreState(local, remote, id => api<Mission>(`/api/control/missions/${id}`))], observedAt);
+    } else if (remote.length) {
+      await origins.rememberCoreState(local, remote, observedAt);
+    }
+    const pending = excludeBtwMissions(local.filter(origins.localPending).map(row => stickHierarchy(origins.withCoreEffort(row, remote.find(m => m.id === row.id)))));
+    const merged = [...pending, ...excludeBtwMissions(remote).filter(row => !pending.some(item => item.id === row.id))];
+    void flushDurableWriteOutbox();
+    return isDelta ? partialList(merged) : merged;
+  } catch (error) {
+    if (local.length) return partialList(local);
+    throw error;
+  }
 }
 
 /** `null` when Core did not answer: the caller keeps the list it shows. */
@@ -1222,11 +1410,12 @@ export async function createMission(body: CreateMissionBody): Promise<Mission> {
   // provisioning on the server. Send the exact selection; never generate shell
   // or proxy credentials here. Unsupported/older servers reject explicitly
   // without client fallback.
-  return api("/api/control/missions", {
+  const init: RequestInit = {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  });
+  };
+  return api("/api/control/missions", body.idempotency_key ? withIdempotencyKey(init, body.idempotency_key) : init);
 }
 
 export interface QueuedMessage {
@@ -1369,11 +1558,11 @@ export async function sendMissionMessage(
   let mission = usedKnownMission ? knownMission! : await getMission(id);
   if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
   if (mission.status === "acknowledged" || mission.status === "paused") {
-    await api(`/api/control/missions/${encodeURIComponent(id)}/status`, {
+    await api(`/api/control/missions/${encodeURIComponent(id)}/status`, withIdempotencyKey({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: "awaiting_user" }),
-    });
+    }, `status-awaiting:${id}:${clientMessageId}`));
     if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
     await confirmCoreChange({ id, status: "awaiting_user" });
     mission = { ...mission, status: "awaiting_user" };
@@ -1385,11 +1574,11 @@ export async function sendMissionMessage(
     ? { project: mission.project ?? null, track: mission.track, github_pr: mission.github_pr ?? null }
     : undefined;
   let receipt: MessageReceipt;
-  const post = () => api<MessageReceipt>("/api/control/message", {
+  const post = () => api<MessageReceipt>("/api/control/message", withIdempotencyKey({
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content: text, mission_id: id, queue_followup: true, client_message_id: clientMessageId, ...(continue_identity ? { continue_identity } : {}), ...(attachments?.length ? { attachments } : {}) }),
-  });
+  }, `msg:${id}:${clientMessageId}`));
   try {
     receipt = await postWhileTurnRuns(post, () => connectionVersion() !== version);
   } catch (error) {
@@ -1443,27 +1632,29 @@ export async function getProjectSteers(slug: string): Promise<ProjectSteers> {
 }
 
 export async function addProjectSteer(slug: string, body: string, origin = "orb"): Promise<ProjectSteers> {
-  return api(`/api/projects/${encodeURIComponent(slug)}/steers`, {
+  return api(`/api/projects/${encodeURIComponent(slug)}/steers`, withIdempotencyKey({
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ body, origin }),
-  });
+  }));
 }
 
-export async function appendClientTranscript(id: string, role: "user" | "assistant", content: string, eventId = crypto.randomUUID(), receipt?: ClientRunReceipt): Promise<void> {
-  await api(`/api/control/missions/${id}/client-transcript`, {
+export async function appendClientTranscript(id: string, role: "user" | "assistant", content: string, eventId: string = crypto.randomUUID(), receipt?: ClientRunReceipt): Promise<void> {
+  await api(`/api/control/missions/${id}/client-transcript`, withIdempotencyKey({
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id: eventId, role, content, ...(receipt ?? await import("./clientRuns").then(m => m.clientRunReceipt(id))) }),
-  });
+  }, `tx:${id}:${eventId}`));
 }
 
 export async function setClientMissionStatus(id: string, status: "completed" | "failed" | "interrupted" | "awaiting_user", receipt?: ClientRunReceipt, scheduledExecutionId?: string): Promise<void> {
-  await api(`/api/control/missions/${id}/client-status`, {
+  const resolvedReceipt = receipt ?? await import("./clientRuns").then(m => m.clientRunReceipt(id));
+  const runPart = (resolvedReceipt as { run_id?: string } | undefined)?.run_id || scheduledExecutionId || crypto.randomUUID();
+  await api(`/api/control/missions/${id}/client-status`, withIdempotencyKey({
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status, ...(scheduledExecutionId ? {scheduled_execution_id: scheduledExecutionId} : {}), ...(receipt ?? await import("./clientRuns").then(m => m.clientRunReceipt(id))) }),
-  });
+    body: JSON.stringify({ status, ...(scheduledExecutionId ? {scheduled_execution_id: scheduledExecutionId} : {}), ...resolvedReceipt }),
+  }, `cstatus:${id}:${runPart}:${status}`));
 }
 
 /** Explicitly archived conversations, independent of project expansion. */
@@ -1482,11 +1673,11 @@ export async function archiveMission(id: string): Promise<void> {
     return;
   }
   if (!isArchivable(mission.status)) throw new Error("Wait for the mission to stop before archiving it.");
-  await api(`/api/control/missions/${encodeURIComponent(id)}/status`, {
+  await api(`/api/control/missions/${encodeURIComponent(id)}/status`, withIdempotencyKey({
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status: "acknowledged" }),
-  });
+  }));
   await confirmCoreChange({ id, status: "acknowledged" });
 }
 
@@ -1501,20 +1692,20 @@ export async function reopenMission(id: string): Promise<void> {
     return;
   }
   if (!isReopenable(mission.status)) throw new Error("This mission is no longer finished. Refresh its status before reopening it.");
-  await api(`/api/control/missions/${encodeURIComponent(id)}/status`, {
+  await api(`/api/control/missions/${encodeURIComponent(id)}/status`, withIdempotencyKey({
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status: "paused" }),
-  });
+  }));
   await confirmCoreChange({ id, status: "paused" });
 }
 
 /** Rename the conversation without changing its execution settings. */
 export async function renameMission(id: string, title: string): Promise<void> {
-  await api(`/api/control/missions/${encodeURIComponent(id)}/title`, {
+  await api(`/api/control/missions/${encodeURIComponent(id)}/title`, withIdempotencyKey({
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
-  });
+  }));
   await confirmCoreChange({ id, title });
 }
 /** Core accepted the change just now: any list requested earlier is older than this. */
@@ -1523,16 +1714,16 @@ async function confirmCoreChange(change: { id: string; status?: string; title?: 
 }
 
 export async function cancelMission(id: string): Promise<void> {
-  await api<void>(`/api/control/missions/${id}/cancel`, { method: "POST" });
+  await api<void>(`/api/control/missions/${id}/cancel`, withIdempotencyKey({ method: "POST" }));
 }
 
 /** Force-start a slot-queued mission immediately using the bounded 1-extra operator bypass slot. */
 export async function forceMissionSlot(id: string): Promise<Mission> {
-  return api<Mission>(`/api/control/missions/${encodeURIComponent(id)}/force-slot`, { method: "POST" });
+  return api<Mission>(`/api/control/missions/${encodeURIComponent(id)}/force-slot`, withIdempotencyKey({ method: "POST" }));
 }
 
 export async function markMissionOpened(id: string): Promise<void> {
-  await api(`/api/control/missions/${encodeURIComponent(id)}/opened`, { method: "POST" });
+  await idempotentBackgroundWrite(`/api/control/missions/${encodeURIComponent(id)}/opened`, "POST");
 }
 
 /** Next-turn settings. A running turn keeps its current settings; its successor uses these.
@@ -1543,11 +1734,11 @@ export async function updateMissionSettings(
   id: string,
   body: { model_override?: string; backend?: string; model_effort?: string; service_tier?: CodexServiceTier },
 ): Promise<Mission> {
-  return api(`/api/control/missions/${id}/settings`, {
+  return api(`/api/control/missions/${id}/settings`, withIdempotencyKey({
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  });
+  }));
 }
 
 /**
