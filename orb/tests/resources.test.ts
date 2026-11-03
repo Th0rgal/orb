@@ -309,4 +309,109 @@ describe("resourcesModel shared spec", () => {
     const blended = stabilizeTrailingOpenBucket([0.9, 1.4, 0.04], true, 0.1);
     expect(blended[2]).toBeGreaterThan(1.0);
   });
+
+  it("positions parallel Boat VMs and staggered wave spans at exact non-zero offsets without double-counting ETA", () => {
+    const dag = layoutDagRows(
+      [
+        {
+          id: "vm:boat-1",
+          mission_id: "root",
+          label: "Boat · xlarge · xlarge-a (16 vCPU)",
+          section: "Boat · xlarge VMs",
+          role: "vm",
+          vcpu: 16,
+          compute_usd_per_h: 1.6,
+          b_tok_per_h: 0,
+          inference_usd_per_h: 0,
+          start_offset_secs: 1800,
+          duration_secs: 7200,
+          eta_remaining_secs: null,
+          state: "done",
+          after_ids: [],
+        },
+        {
+          id: "vm:boat-2",
+          mission_id: "root",
+          label: "Boat · xlarge · xlarge-b (16 vCPU)",
+          section: "Boat · xlarge VMs",
+          role: "vm",
+          vcpu: 16,
+          compute_usd_per_h: 1.6,
+          b_tok_per_h: 0,
+          inference_usd_per_h: 0,
+          start_offset_secs: 5400,
+          duration_secs: 10800,
+          eta_remaining_secs: 3600,
+          state: "active",
+          after_ids: [],
+        },
+        {
+          id: "sub:wave-r16",
+          mission_id: "sub-1",
+          label: "R16f-Wk01-NodeFn-Close",
+          section: "wave8-r16f",
+          role: "worker",
+          vcpu: 16,
+          compute_usd_per_h: 1.6,
+          b_tok_per_h: 0.12,
+          inference_usd_per_h: 2.4,
+          start_offset_secs: 14400,
+          duration_secs: 1800,
+          eta_remaining_secs: 900,
+          state: "active",
+          after_ids: [],
+        },
+      ],
+      21600,
+    );
+
+    expect(dag.rows).toHaveLength(3);
+    // Shared VM section header renders once for both parallel Boat VMs
+    expect(dag.rows[0].sectionHeader).toBe("Boat · xlarge VMs");
+    expect(dag.rows[1].sectionHeader).toBeNull();
+    expect(dag.rows[2].sectionHeader).toBe("wave8-r16f");
+
+    // Staggered historical start offsets (NOT pinned to t=0)
+    expect(dag.rows[0].startFrac).toBeCloseTo(1800 / 21600, 4);
+    expect(dag.rows[1].startFrac).toBeCloseTo(5400 / 21600, 4);
+    expect(dag.rows[2].startFrac).toBeCloseTo(14400 / 21600, 4);
+
+    // Solid bar ends at `now` (5400 + 10800 = 16200), dashed ETA extends to 19800
+    expect(dag.rows[1].endFrac).toBeCloseTo(16200 / 21600, 4);
+    expect(dag.rows[1].etaEndFrac).toBeCloseTo(19800 / 21600, 4);
+
+    // Also verify shared cross-client fixture `dag_parallel_vms`
+    const sharedVmDag = layoutDagRows(
+      fixture.dag_parallel_vms.bars.map((b: any) => ({
+        id: b.id,
+        mission_id: null,
+        label: b.label,
+        section: b.section,
+        role: b.role ?? "worker",
+        vcpu: 16,
+        compute_usd_per_h: 1.6,
+        b_tok_per_h: 0,
+        inference_usd_per_h: 0,
+        start_offset_secs: b.start_offset_secs,
+        duration_secs: b.duration_secs,
+        eta_remaining_secs: b.eta_remaining_secs ?? null,
+        state: b.state,
+        after_ids: [],
+      })),
+      fixture.dag_parallel_vms.horizon_secs,
+    );
+    expect(sharedVmDag.rows.map((r) => r.sectionHeader)).toEqual(
+      fixture.dag_parallel_vms.expected_section_headers,
+    );
+    sharedVmDag.rows.forEach((r, idx) => {
+      expect(r.startFrac).toBeCloseTo(fixture.dag_parallel_vms.expected_x0[idx], 5);
+      expect(r.endFrac).toBeCloseTo(fixture.dag_parallel_vms.expected_x1[idx], 5);
+      const expProj = fixture.dag_parallel_vms.expected_proj_x1[idx];
+      if (expProj !== null) {
+        expect(r.etaEndFrac).toBeCloseTo(expProj, 5);
+      } else {
+        expect(r.etaEndFrac).toBeNull();
+      }
+    });
+  });
 });

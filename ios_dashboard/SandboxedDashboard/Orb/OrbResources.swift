@@ -80,6 +80,7 @@ enum OrbResourcesModel {
         var missionId: String?
         var label: String
         var section: String
+        var role: String = "worker"
         var startOffsetSecs: Double
         var durationSecs: Double
         var etaRemainingSecs: Double?
@@ -592,8 +593,11 @@ struct OrbResourcesView: View {
                 let horizonSecs = det["dag"]["horizon_secs"].doubleValue ?? 21600
                 let rows = OrbResourcesModel.layoutDagRows(bars, horizonSecs: horizonSecs)
 
+                let vmCount = bars.filter { $0.role == "vm" }.count
+                let spanCount = bars.count - vmCount
+
                 HStack {
-                    Text("\(bars.count) spans")
+                    Text(vmCount > 0 ? "\(vmCount) VMs · \(spanCount) spans" : "\(bars.count) spans")
                         .font(.caption.weight(.semibold))
                     if let eta = det["mission"]["eta_remaining_secs"].doubleValue, eta > 0 {
                         Text("· ETA ~\(OrbResourcesModel.formatDurationCompact(eta))")
@@ -638,13 +642,13 @@ struct OrbResourcesView: View {
                                     ZStack(alignment: .leading) {
                                         Capsule().fill(Color.secondary.opacity(0.12)).frame(height: 8)
                                         Capsule()
-                                            .fill(barColor(row.bar.state))
+                                            .fill(barColor(row.bar.state, role: row.bar.role))
                                             .frame(width: bw, height: 8)
                                             .offset(x: x0)
                                         if let etaEnd = row.etaEndFrac {
                                             let ew = max(0, (etaEnd - row.endFrac) * w)
                                             Capsule()
-                                                .fill(barColor(row.bar.state).opacity(0.25))
+                                                .fill(barColor(row.bar.state, role: row.bar.role).opacity(0.25))
                                                 .frame(width: ew, height: 8)
                                                 .offset(x: x0 + bw)
                                         }
@@ -708,12 +712,21 @@ struct OrbResourcesView: View {
         }
     }
 
-    private func barColor(_ state: String) -> Color {
+    private func barColor(_ state: String, role: String = "worker") -> Color {
+        if role == "vm" {
+            switch state {
+            case "active": return .teal
+            case "done": return .mint
+            case "capped": return .orange
+            default: return .secondary
+            }
+        }
         switch state {
-        case "done": .green
-        case "active": .blue
-        case "capped": .orange
-        default: .secondary
+        case "done": return .green
+        case "active": return .blue
+        case "capped": return .orange
+        case "cancelled": return .secondary.opacity(0.65)
+        default: return .secondary
         }
     }
 
@@ -879,6 +892,7 @@ struct OrbResourcesView: View {
                 missionId: b["mission_id"].text.isEmpty ? nil : b["mission_id"].text,
                 label: b["label"].text,
                 section: b["section"].text,
+                role: b["role"].text.isEmpty ? "worker" : b["role"].text,
                 startOffsetSecs: b["start_offset_secs"].doubleValue ?? 0,
                 durationSecs: b["duration_secs"].doubleValue ?? 60,
                 etaRemainingSecs: b["eta_remaining_secs"].doubleValue,

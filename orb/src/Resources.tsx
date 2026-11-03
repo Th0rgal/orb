@@ -43,7 +43,13 @@ const FLEET_RANGES: Array<{ id: ResourcesWindowRange; label: string }> = [
   { id: "7d", label: "7d" },
 ];
 
-function barColorForState(state: string): string {
+function barColorForState(state: string, role?: string): string {
+  if (role === "vm") {
+    if (state === "active") return "#22959d";
+    if (state === "done") return "#1d9a78";
+    if (state === "capped") return "var(--amber)";
+    return "var(--fg-4)";
+  }
   switch (state) {
     case "done":
       return "var(--green)";
@@ -51,6 +57,8 @@ function barColorForState(state: string): string {
       return "var(--blue)";
     case "capped":
       return "var(--amber)";
+    case "cancelled":
+      return "var(--fg-3)";
     default:
       return "var(--fg-4)";
   }
@@ -361,8 +369,17 @@ export default function Resources(props: {
     if (isMissionMode()) {
       const det = detail();
       if (!det) return { primary: "—", secondary: null, warn: null };
-      const sumVcpu = det.flow.subagents.reduce((s, a) => s + a.vcpu, 0);
-      const sumCu = det.flow.subagents.reduce((s, a) => s + a.compute_usd_per_h, 0);
+      const activeVmBars = det.dag.bars.filter(
+        (b) => b.role === "vm" && b.state === "active",
+      );
+      const sumVcpu =
+        activeVmBars.length > 0
+          ? activeVmBars.reduce((s, b) => s + b.vcpu, 0)
+          : det.flow.subagents.reduce((s, a) => s + a.vcpu, 0);
+      const sumCu =
+        activeVmBars.length > 0
+          ? activeVmBars.reduce((s, b) => s + b.compute_usd_per_h, 0)
+          : det.flow.subagents.reduce((s, a) => s + a.compute_usd_per_h, 0);
       const sumBtok = det.flow.subagents.reduce((s, a) => s + a.b_tok_per_h, 0);
       const sumIu = det.flow.subagents.reduce((s, a) => s + a.inference_usd_per_h, 0);
       const primary =
@@ -441,8 +458,9 @@ export default function Resources(props: {
     if (hoveredBarId() && detail()) {
       const bar = detail()!.dag.bars.find((b) => b.id === hoveredBarId());
       if (bar) {
+        const effLens = bar.role === "vm" ? "compute" : l;
         const rateVal =
-          l === "compute"
+          effLens === "compute"
             ? m === "usd"
               ? bar.compute_usd_per_h
               : bar.vcpu
@@ -451,11 +469,15 @@ export default function Resources(props: {
               : bar.b_tok_per_h;
         const parts = [
           bar.label,
-          formatResourceRate(rateVal, l, m, true),
+          formatResourceRate(rateVal, effLens, m, true),
           formatDurationCompact(bar.duration_secs),
         ];
-        if (bar.eta_remaining_secs && bar.eta_remaining_secs > 0) {
-          parts.push(`~${formatDurationCompact(bar.eta_remaining_secs)} left`);
+        if (bar.eta_remaining_secs && bar.eta_remaining_secs > 0 && bar.state === "active") {
+          parts.push(
+            bar.role === "vm"
+              ? `lease ~${formatDurationCompact(bar.eta_remaining_secs)}`
+              : `~${formatDurationCompact(bar.eta_remaining_secs)} left`,
+          );
         }
         return parts.join(" · ");
       }
@@ -1139,7 +1161,14 @@ export default function Resources(props: {
             <div class="res-card-head">
               <div class="res-card-head-left">
                 <span class="res-col-title">
-                  Subagent Execution DAG · {detail()?.mission.subagent_count ?? 0} spans
+                  {(() => {
+                    const bars = detail()?.dag.bars ?? [];
+                    const vmCount = bars.filter((b) => b.role === "vm").length;
+                    const spanCount = bars.length - vmCount;
+                    return vmCount > 0
+                      ? `Execution DAG · ${vmCount} VMs · ${spanCount} spans`
+                      : `Subagent Execution DAG · ${bars.length} spans`;
+                  })()}
                 </span>
               </div>
               <div class="res-card-head-right">
@@ -1314,8 +1343,17 @@ export default function Resources(props: {
                                           width={barW()}
                                           height={rw().barHeight}
                                           rx={4}
-                                          fill={barColorForState(rw().bar.state)}
-                                          opacity={hoveredBarId() === barId ? 1 : 0.84}
+                                          fill={barColorForState(
+                                            rw().bar.state,
+                                            rw().bar.role,
+                                          )}
+                                          opacity={
+                                            hoveredBarId() === barId
+                                              ? 1
+                                              : rw().bar.state === "cancelled"
+                                                ? 0.48
+                                                : 0.86
+                                          }
                                         />
                                         <Show when={etaW() > 2}>
                                           <rect
@@ -1324,9 +1362,15 @@ export default function Resources(props: {
                                             width={etaW()}
                                             height={rw().barHeight}
                                             rx={4}
-                                            fill={barColorForState(rw().bar.state)}
+                                            fill={barColorForState(
+                                              rw().bar.state,
+                                              rw().bar.role,
+                                            )}
                                             fill-opacity="0.18"
-                                            stroke={barColorForState(rw().bar.state)}
+                                            stroke={barColorForState(
+                                              rw().bar.state,
+                                              rw().bar.role,
+                                            )}
                                             stroke-width="1"
                                             stroke-dasharray="3 2"
                                           />

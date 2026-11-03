@@ -140,6 +140,7 @@ object OrbResourcesModel {
         val missionId: String? = null,
         val label: String,
         val section: String,
+        val role: String = "worker",
         val startOffsetSecs: Double,
         val durationSecs: Double,
         val etaRemainingSecs: Double? = null,
@@ -1004,6 +1005,7 @@ private fun MissionFastDagCard(
                 missionId = OrbJSON.str(b, "mission_id"),
                 label = OrbJSON.str(b, "label") ?: "Subagent",
                 section = OrbJSON.str(b, "section") ?: "Workers",
+                role = OrbJSON.str(b, "role") ?: "worker",
                 startOffsetSecs = OrbJSON.double(b, "start_offset_secs") ?: 0.0,
                 durationSecs = OrbJSON.double(b, "duration_secs") ?: 60.0,
                 etaRemainingSecs = OrbJSON.double(b, "eta_remaining_secs"),
@@ -1011,9 +1013,15 @@ private fun MissionFastDagCard(
             )
         }
         val rows = OrbResourcesModel.layoutDagRows(bars, horizonSecs)
+        val vmCount = bars.count { it.role == "vm" }
+        val spanCount = bars.size - vmCount
 
         Text(
-            text = "Subagent Execution Fast-DAG · ${bars.size} spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})",
+            text = if (vmCount > 0) {
+                "Execution Fast-DAG · $vmCount VMs · $spanCount spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
+            } else {
+                "Subagent Execution Fast-DAG · ${bars.size} spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
+            },
             color = OrbStyle.textSecondary,
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
@@ -1053,11 +1061,21 @@ private fun MissionFastDagCard(
                         size = size,
                         cornerRadius = CornerRadius(4f, 4f),
                     )
-                    val barColor = when (row.bar.state) {
-                        "done" -> Color(0xFF80B28D)
-                        "active" -> Color(0xFF86AEE4)
-                        "capped" -> Color(0xFFD9B23A)
-                        else -> Color(0xFF6A6A6A)
+                    val barColor = if (row.bar.role == "vm") {
+                        when (row.bar.state) {
+                            "active" -> Color(0xFF22959D)
+                            "done" -> Color(0xFF1D9A78)
+                            "capped" -> Color(0xFFD9B23A)
+                            else -> Color(0xFF6A6A6A)
+                        }
+                    } else {
+                        when (row.bar.state) {
+                            "done" -> Color(0xFF80B28D)
+                            "active" -> Color(0xFF86AEE4)
+                            "capped" -> Color(0xFFD9B23A)
+                            "cancelled" -> Color(0xFF7D8590).copy(alpha = 0.55f)
+                            else -> Color(0xFF6A6A6A)
+                        }
                     }
                     val x0 = (row.startFrac * w).toFloat()
                     val bw = max(8f, ((row.endFrac - row.startFrac) * w).toFloat())

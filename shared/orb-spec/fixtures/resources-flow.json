@@ -34,5 +34,18 @@
       { "id": "b3", "label": "Prove theorems", "section": "Provers", "start_offset_secs": 3600, "duration_secs": 5400, "state": "pending", "after_ids": ["b2"] }
     ],
     "expected_section_headers": ["Bootstrap", null, "Provers"]
+  },
+  "dag_parallel_vms": {
+    "horizon_secs": 21600,
+    "bars": [
+      { "id": "vm-1", "label": "boat-xl-01 · Boat · xlarge", "role": "vm", "section": "Cloud VMs · Boat · xlarge", "start_offset_secs": 3600, "duration_secs": 7200, "state": "done" },
+      { "id": "vm-2", "label": "boat-xl-02 · Boat · xlarge", "role": "vm", "section": "Cloud VMs · Boat · xlarge", "start_offset_secs": 7200, "duration_secs": 10800, "eta_remaining_secs": 1800, "state": "active" },
+      { "id": "w-1", "label": "wave8 Step0 race", "role": "worker", "section": "evm-fast-wave8", "start_offset_secs": 10800, "duration_secs": 1200, "state": "cancelled" },
+      { "id": "w-2", "label": "wave8 R16F prover", "role": "worker", "section": "evm-fast-wave8", "start_offset_secs": 14400, "duration_secs": 3600, "eta_remaining_secs": 900, "state": "active" }
+    ],
+    "expected_section_headers": ["Cloud VMs · Boat · xlarge", null, "evm-fast-wave8", null],
+    "expected_x0": [0.1666666667, 0.3333333333, 0.5, 0.6666666667],
+    "expected_x1": [0.5, 0.8333333333, 0.5555555556, 0.8333333333],
+    "expected_proj_x1": [null, 0.9166666667, null, 0.875]
   }
 }
