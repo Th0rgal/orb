@@ -67,10 +67,14 @@ submitted while a side turn is running enter the same durable server-backed queu
 worker for client-placed local runs) as the main conversation, with `Edit`,
 `Send now` (interrupt and promote), and `Remove` across desktop, iOS, and Android.
 `.btw-thread` uses the shared `createPinnedScroll` owner
-(`overflow-anchor: none` + `scrollKeeper` during panel divider drags) so narrowing
-or resizing the side panel keeps a bottom-pinned side conversation at the bottom and
-preserves the top visible line when scrolled up. Local execution still requires the
-owning Orb process/computer.
+(`overflow-anchor: none` + `scrollKeeper` during panel divider drags and dock
+height changes) and `.btw-composer-dock` uses the shared `floatingDock` observer
+to publish `--btw-dock-height` from `ResizeObserverEntry.borderBoxSize` without
+applying `--btw-dock-height` back as `min-height` on the dock itself — so
+expanding and shrinking the composer, draining queued follow-ups, hiding/re-showing
+the sidebar, or resizing the divider keeps the bottom fade mask aligned with the
+live composer height and never cuts the thread above a single-line input. Local
+execution still requires the owning Orb process/computer.
 
 Verification: frontend unit tests cover separate child creation, continuation,
 local placement, and cancellation; WebKit tests cover panel persistence and

@@ -2601,9 +2601,11 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-panel .btw-composer-dock form { margin-left:0; margin-right:0; }
 .btw-sidebar .btw-panel header { display:none; }
 /* Same soft fade as the main transcript above its composer; padding keeps the last line clear of it. */
-.btw-sidebar .btw-thread { padding-top:max(12px, var(--tb-h, 35px)); padding-bottom:calc(var(--btw-dock-height, 96px) + 24px); -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - var(--btw-dock-height, 96px) - 16px), transparent calc(100% - var(--btw-dock-height, 96px) + 10px)); mask-image:linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - var(--btw-dock-height, 96px) - 16px), transparent calc(100% - var(--btw-dock-height, 96px) + 10px)); }
-/* The side composer floats over its thread like the main dock, so the transcript fades out behind it. */
-.btw-sidebar .btw-panel .btw-composer-dock { position:relative; z-index:1; margin-top:calc(-1 * var(--btw-dock-height, 96px)); min-height:var(--btw-dock-height, 96px); display:flex; flex-direction:column; justify-content:flex-end; pointer-events:none; }
+.btw-sidebar .btw-thread { --btw-dock-fade:calc(100% - var(--btw-dock-height, 0px)); padding-top:max(12px, var(--tb-h, 35px)); padding-bottom:calc(var(--btw-dock-height, 96px) + 24px); -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(var(--btw-dock-fade) - 16px), transparent calc(var(--btw-dock-fade) + 10px)); mask-image:linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(var(--btw-dock-fade) - 16px), transparent calc(var(--btw-dock-fade) + 10px)); }
+/* The side composer floats over its thread like the main dock, so the transcript fades out behind it.
+   Never apply min-height: var(--btw-dock-height) here: --btw-dock-height is measured from this box,
+   so a self-referential min-height ratchets to the tallest draft/queue and never lets the dock shrink. */
+.btw-sidebar .btw-panel .btw-composer-dock { position:relative; z-index:1; margin-top:calc(-1 * var(--btw-dock-height, 0px)); display:flex; flex-direction:column; pointer-events:none; }
 .btw-sidebar .btw-composer-dock > * { pointer-events:auto; }
 .btw-sidebar .btw-panel .btw-composer-dock form { box-shadow:0 4px 18px rgb(0 0 0 / 8%); }
 .btw-sidebar .btw-composer-dock { margin:0 24px; padding-bottom:max(16px, calc(var(--composer-bottom-space, 44px) - 28px)); }

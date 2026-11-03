@@ -258,3 +258,62 @@ test('a follow-up that never reaches Core stays as a not-sent bubble whose Retry
  await expect(page.getByText('Second answer.',{exact:true})).toBeVisible({timeout:15000});
  expect(new Set(ids).size).toBe(1);
 });
+
+test('expanding and shrinking the /btw composer recomputes --btw-dock-height without cutting the thread',async({page})=>{
+ const longAnswer=Array.from({length:28},(_,i)=>`Paragraph ${i+1}: verified leaf shard and prefix checks without regressions.`).join('\n\n')+'\n\nFINAL UNMASKED SIDE LINE';
+ await mockAgent(page,longAnswer);
+ await page.goto('/tests/side-questions.html');
+ await page.getByPlaceholder('Send follow-up').fill('/btw Check campaign status');
+ await page.getByTitle('Ask side question',{exact:true}).click();
+ const thread=page.locator('.btw-sidebar .btw-thread');
+ const input=page.getByPlaceholder('Ask a side question…');
+ await expect(thread).toContainText('FINAL UNMASKED SIDE LINE');
+
+ const metrics=()=>page.locator('.btw-sidebar .btw-panel').evaluate(panel=>{
+  const d=panel.querySelector<HTMLElement>('.btw-composer-dock')!;
+  const t=panel.querySelector<HTMLElement>('.btw-thread')!;
+  return {
+   dockHeight:d.getBoundingClientRect().height,
+   dockVar:parseFloat(panel.style.getPropertyValue('--btw-dock-height')||'0'),
+   scrollGap:t.scrollHeight-t.scrollTop-t.clientHeight,
+   lastLineBottom:t.querySelector('article:last-of-type')!.getBoundingClientRect().bottom,
+   dockTop:d.getBoundingClientRect().top,
+  };
+ });
+
+ await expect.poll(async()=>(await metrics()).dockVar).toBeGreaterThan(60);
+ const compact=await metrics();
+ expect(Math.abs(compact.dockVar-compact.dockHeight)).toBeLessThanOrEqual(1);
+ expect(compact.scrollGap).toBeLessThan(2);
+ expect(compact.lastLineBottom).toBeLessThanOrEqual(compact.dockTop+4);
+
+ // Expand composer to its max multi-line height (220px textarea).
+ await input.fill(Array.from({length:16},(_,i)=>`Expanded draft line ${i+1}`).join('\n'));
+ await expect.poll(async()=>(await metrics()).dockVar).toBeGreaterThan(compact.dockVar+150);
+ const expanded=await metrics();
+ expect(Math.abs(expanded.dockVar-expanded.dockHeight)).toBeLessThanOrEqual(1);
+ // Pinned thread settles to the taller dock padding so the last line stays above the expanded composer.
+ expect(expanded.scrollGap).toBeLessThan(2);
+ expect(expanded.lastLineBottom).toBeLessThanOrEqual(expanded.dockTop+4);
+
+ // Shrink back to empty single-line: dock height and --btw-dock-height must drop back immediately (no min-height ratchet).
+ await input.fill('');
+ await expect.poll(async()=>Math.abs((await metrics()).dockVar-compact.dockVar)).toBeLessThanOrEqual(2);
+ const shrunk=await metrics();
+ expect(Math.abs(shrunk.dockHeight-compact.dockHeight)).toBeLessThanOrEqual(2);
+ expect(shrunk.scrollGap).toBeLessThan(2);
+
+ // Sending a multi-line follow-up also collapses the dock cleanly and leaves no stale cut after hiding/re-showing.
+ await input.fill(Array.from({length:10},(_,i)=>`Follow-up line ${i+1}`).join('\n'));
+ await expect.poll(async()=>(await metrics()).dockVar).toBeGreaterThan(compact.dockVar+120);
+ await input.press('Enter');
+ await expect(page.locator('.btw-sidebar [data-side-turn]')).toHaveCount(2);
+ await expect.poll(async()=>Math.abs((await metrics()).dockVar-compact.dockVar)).toBeLessThanOrEqual(2);
+ await page.getByRole('button',{name:'Files',exact:true}).click();
+ await expect(page.locator('.btw-sidebar')).not.toBeVisible();
+ await page.getByRole('button',{name:'Side question',exact:true}).click();
+ await expect(page.locator('.btw-sidebar .btw-panel')).toBeVisible();
+ const reopened=await metrics();
+ expect(Math.abs(reopened.dockVar-compact.dockVar)).toBeLessThanOrEqual(2);
+ expect(Math.abs(reopened.dockHeight-compact.dockHeight)).toBeLessThanOrEqual(2);
+});

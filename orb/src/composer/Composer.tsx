@@ -23,6 +23,7 @@ import * as Ic from "../icons";
 import { defaultEffortLabel, effortLabel, harnessSupportsEffort, normalizeEffort, supportedEfforts } from "../effort";
 import { VoiceButton, ensureVoiceProbe, voiceAvailable } from "../VoiceButton";
 import { insertAtCaret } from "../voice";
+import { scrollKeeper } from "../mission/scrollPolicy";
 import {
   localInstalled,
   refreshLocalAgents,
@@ -299,7 +300,13 @@ export function Composer(p: {
   const [mode, setMode] = createSignal<ComposerMode | null>(null);
   const [draftReady, setDraftReady] = createSignal(false);
   createEffect(on(() => p.scope, (scope, previous) => {
-    if (previous !== undefined && previous !== scope) { setText(""); setImages([]); setMode(null); uploaded = []; bumpUploads(n => n + 1); folderUploads().forEach(upload => { upload.cancel(); dropFolder(upload); }); setPendingFolder(null); setStaleFiles([]); }
+    if (previous !== undefined && previous !== scope) {
+      setText(""); setImages([]); setMode(null); setMultiline(false);
+      uploaded = []; bumpUploads(n => n + 1);
+      folderUploads().forEach(upload => { upload.cancel(); dropFolder(upload); });
+      setPendingFolder(null); setStaleFiles([]);
+      if (ta?.isConnected) { ta.value = ""; resize(); }
+    }
     setDraftReady(false);
     if (!scope) { setDraftReady(true); return; }
     let current=true;
@@ -493,9 +500,15 @@ export function Composer(p: {
     measureCtx.font = getComputedStyle(ta).font;
     return measureCtx.measureText(value).width < compactWidth - 24;
   };
+  let wasHidden = false;
   onMount(() => {
     if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(([entry]) => { if (!multiline()) compactWidth = entry.contentRect.width; });
+    const observer = new ResizeObserver(([entry]) => {
+      const width = entry.contentRect.width;
+      if (width <= 0) { wasHidden = true; return; }
+      if (!multiline()) compactWidth = width;
+      if (wasHidden) { wasHidden = false; if (ta.value) resize(); }
+    });
     observer.observe(ta);
     onCleanup(() => observer.disconnect());
   });
@@ -534,7 +547,9 @@ export function Composer(p: {
     composer.classList.toggle("tall", Boolean(p.tall || images().length || wrapped));
     // Compact drafts return to their intrinsic single-line height, including
     // after a soft wrap; retaining a measured height leaves the controls below the text.
-    ta.style.height = wrapped ? Math.min(ta.scrollHeight, 220) + "px" : "";
+    // Never commit a 0px inline height when hidden (`display: none`); the observer above
+    // re-measures once the container becomes visible.
+    ta.style.height = wrapped && ta.scrollHeight > 0 ? Math.min(ta.scrollHeight, 220) + "px" : "";
     ta.style.minHeight = "";
     composer.style.minHeight = "";
     ta.scrollTop = follow ? ta.scrollHeight : top;
@@ -1082,16 +1097,41 @@ export function Composer(p: {
 // Keep the last message reachable while the transparent dock floats over the transcript.
 export function floatingDock(el: HTMLDivElement) {
   let parent: HTMLElement | null = null;
-  const update = () => {
-    const bounds = el.getBoundingClientRect();
-    parent?.style.setProperty("--dock-height", `${bounds.height}px`);
-    const composer = el.querySelector<HTMLElement>(".composer");
-    if (composer) el.closest<HTMLElement>(".app")?.style.setProperty(
-      "--composer-bottom-space", `${bounds.bottom - composer.getBoundingClientRect().bottom}px`,
-    );
+  let isSide = false;
+  let prop = "--dock-height";
+  let lastHeight = -1;
+  const update = (entries?: ResizeObserverEntry[]) => {
+    const entry = entries?.[0];
+    const height = entry?.borderBoxSize?.[0]?.blockSize ?? el.getBoundingClientRect().height;
+    if (height <= 0 || height === lastHeight) return;
+    lastHeight = height;
+    parent?.style.setProperty(prop, `${height}px`);
+    const scroller = parent?.querySelector<HTMLElement>(":scope > .scroll, :scope > .btw-thread");
+    scrollKeeper(scroller)?.();
+    if (!isSide) {
+      const bounds = el.getBoundingClientRect();
+      const composer = el.querySelector<HTMLElement>(".composer");
+      if (composer) el.closest<HTMLElement>(".app")?.style.setProperty(
+        "--composer-bottom-space", `${bounds.bottom - composer.getBoundingClientRect().bottom}px`,
+      );
+    }
   };
+  const init = () => {
+    parent = el.parentElement;
+    isSide = el.classList.contains("btw-composer-dock");
+    prop = isSide ? "--btw-dock-height" : "--dock-height";
+    update();
+  };
+  if (typeof ResizeObserver === "undefined") {
+    queueMicrotask(init);
+    return;
+  }
   const observer = new ResizeObserver(update);
-  queueMicrotask(() => { parent = el.parentElement; update(); observer.observe(el); });
-  onCleanup(() => { observer.disconnect(); parent?.style.removeProperty("--dock-height"); el.closest<HTMLElement>(".app")?.style.removeProperty("--composer-bottom-space"); });
+  queueMicrotask(() => { init(); observer.observe(el); });
+  onCleanup(() => {
+    observer.disconnect();
+    parent?.style.removeProperty(prop);
+    if (!isSide) el.closest<HTMLElement>(".app")?.style.removeProperty("--composer-bottom-space");
+  });
 }
 
