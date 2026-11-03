@@ -1383,6 +1383,7 @@ async fn run_codex_turn(
         );
     }
     if let Some(endpoint) = codex_proxy.as_ref() {
+        route_codex_config_to_endpoint(mission_id, mission_work_dir, endpoint);
         // `config.toml` declares `[model_providers.cliproxy]` with
         // `env_key = "OPENAI_API_KEY"`; Codex resolves it from the process env.
         extra_env.insert("OPENAI_API_KEY".into(), endpoint.api_key.clone());
@@ -2103,10 +2104,89 @@ Update it to the latest version (`npm install -g @openai/codex@latest`) and retr
     result
 }
 
+/// Point the mission's `[model_providers.cliproxy]` section at this attempt's
+/// endpoint. Mission preparation writes the CLIProxyAPI URL itself, but a
+/// speed-scoped endpoint (`control::speed_proxy::register`) is Core's own
+/// `/api/llm/codex-speed` route, and its token is valid only there: sent to
+/// CLIProxyAPI it is refused with 401 "Invalid API key". An operator-set
+/// `model_provider` is left alone, as at preparation.
+fn route_codex_config_to_endpoint(
+    mission_id: Uuid,
+    mission_work_dir: &std::path::Path,
+    endpoint: &crate::api::oauth_owner::CliProxyEndpoint,
+) {
+    let config_path = mission_work_dir.join(".codex").join("config.toml");
+    let Ok(existing) = std::fs::read_to_string(&config_path) else {
+        return;
+    };
+    let routed =
+        crate::workspace::config::ensure_codex_model_provider(&existing, &endpoint.openai_v1_url());
+    if routed == existing {
+        return;
+    }
+    if let Err(e) = std::fs::write(&config_path, &routed) {
+        tracing::warn!(
+            mission_id = %mission_id,
+            path = %config_path.display(),
+            error = %e,
+            "Failed to point the Codex model provider at this attempt's endpoint"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{codex_transport_failure_stage, codex_transport_reason_is_retryable};
     use crate::agents::TerminalReason;
+
+    /// Replays the failing order: the mission is prepared with the
+    /// CLIProxyAPI URL, then the attempt runs with a speed-scoped endpoint
+    /// whose token only Core's speed route accepts.
+    #[test]
+    fn proxied_attempt_routes_codex_to_its_scoped_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        let prepared = crate::workspace::config::ensure_codex_model_provider(
+            "model = \"gpt-5.5\"\n",
+            "http://127.0.0.1:8317/v1",
+        );
+        std::fs::write(codex.join("config.toml"), &prepared).unwrap();
+        let scoped = crate::api::oauth_owner::CliProxyEndpoint {
+            base_url: "http://127.0.0.1:3000/api/llm/codex-speed".into(),
+            api_key: "scoped-token".into(),
+            identity_url: Some("http://127.0.0.1:8317".into()),
+        };
+
+        super::route_codex_config_to_endpoint(uuid::Uuid::nil(), dir.path(), &scoped);
+
+        let routed = std::fs::read_to_string(codex.join("config.toml")).unwrap();
+        assert!(routed.contains("base_url = \"http://127.0.0.1:3000/api/llm/codex-speed/v1\""));
+        assert!(!routed.contains("127.0.0.1:8317"));
+        assert_eq!(routed.matches("[model_providers.cliproxy]").count(), 1);
+        assert!(routed.contains("model = \"gpt-5.5\""));
+    }
+
+    #[test]
+    fn operator_model_provider_is_not_rerouted() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        let operator = "model_provider = \"azure\"\n";
+        std::fs::write(codex.join("config.toml"), operator).unwrap();
+        let scoped = crate::api::oauth_owner::CliProxyEndpoint {
+            base_url: "http://127.0.0.1:3000/api/llm/codex-speed".into(),
+            api_key: "scoped-token".into(),
+            identity_url: None,
+        };
+
+        super::route_codex_config_to_endpoint(uuid::Uuid::nil(), dir.path(), &scoped);
+
+        assert_eq!(
+            std::fs::read_to_string(codex.join("config.toml")).unwrap(),
+            operator
+        );
+    }
 
     #[tokio::test]
     async fn native_goal_stop_without_chat_output_is_resumable_not_auth_failure() {
