@@ -69,7 +69,7 @@
         },
         {
           "path": "src/api/control/dispatch_admission_tests.rs",
-          "sha256": "f55a305eae1ac57430836618a80e1f4245b7159043292b959e4d00b55adaee62"
+          "sha256": "d59dfa6af9eba9f76e931746771c2a76923b60c46f913d88c9de05e84ae717fe"
         }
       ],
       "execution": {
@@ -3708,7 +3708,7 @@
         },
         {
           "path": "src/api/control/dispatch_admission_tests.rs",
-          "sha256": "f55a305eae1ac57430836618a80e1f4245b7159043292b959e4d00b55adaee62"
+          "sha256": "d59dfa6af9eba9f76e931746771c2a76923b60c46f913d88c9de05e84ae717fe"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
