@@ -650,6 +650,29 @@ export function computeMonotoneCurve(
   return { linePath: d, areaPath };
 }
 
+/**
+ * Stabilize a rolling consumption series whose final bucket (`now`) is still open
+ * and accumulating in-flight LLM turns (tokens are billed on turn completion).
+ * If the fleet has live runs right now (`hasActiveMissions`) and the incomplete
+ * final bucket currently reads `0` while the preceding settled bucket was `> 0`,
+ * carry the settled rate forward so the `now` endpoint doesn't artificially dive to `0`.
+ */
+export function stabilizeTrailingOpenBucket(
+  values: number[],
+  hasActiveMissions: boolean,
+): number[] {
+  if (values.length < 2 || !hasActiveMissions) return values;
+  const lastIdx = values.length - 1;
+  const lastVal = values[lastIdx] ?? 0;
+  const prevVal = values[lastIdx - 1] ?? 0;
+  if (lastVal <= 0 && prevVal > 0) {
+    const copy = values.slice();
+    copy[lastIdx] = prevVal;
+    return copy;
+  }
+  return values;
+}
+
 export function buildOverviewSankeyInput(
   overview: ResourcesOverviewResponse,
   lens: ResourceLens,

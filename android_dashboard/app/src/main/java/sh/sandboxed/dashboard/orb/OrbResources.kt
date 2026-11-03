@@ -1120,6 +1120,13 @@ private fun ConsumptionCurveCard(
                     for (i in sums.indices) sums[i] += (arr.getOrNull(i) as? Number)?.toDouble() ?: 0.0
                 }
             }
+            val hasActiveFleet = OrbJSON.dictList(ov["missions"]).any { m ->
+                val st = OrbJSON.str(m, "status")
+                st == "active" || st == "waiting_background" || (OrbJSON.int(m, "subagent_running") ?: 0) > 0
+            } || (OrbJSON.double(OrbJSON.dict(ov["compute"]), "active_vcpu") ?: 0.0) > 0.0
+            if (hasActiveFleet && sums.size >= 2 && sums[sums.size - 1] <= 0.0 && sums[sums.size - 2] > 0.0) {
+                sums[sums.size - 1] = sums[sums.size - 2]
+            }
             sums.toList()
         }
     }

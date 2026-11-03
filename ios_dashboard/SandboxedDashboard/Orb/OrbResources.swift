@@ -926,6 +926,13 @@ struct OrbResourcesView: View {
                 }
             }
         }
+        let hasActiveFleet = ov["missions"].items.contains {
+            let st = $0["status"].text
+            return st == "active" || st == "waiting_background" || ($0["subagent_running"].doubleValue ?? 0) > 0
+        } || (ov["compute"]["active_vcpu"].doubleValue ?? 0) > 0
+        if hasActiveFleet, sums.count >= 2, sums[sums.count - 1] <= 0, sums[sums.count - 2] > 0 {
+            sums[sums.count - 1] = sums[sums.count - 2]
+        }
         return sums
     }
 

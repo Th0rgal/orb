@@ -540,10 +540,21 @@ async fn get_overview(
 ) -> Result<Json<ResourcesOverviewResponse>, (StatusCode, String)> {
     let spec = parse_range(query.range.as_deref()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let now = Utc::now();
-    let now_min = now.timestamp().div_euclid(60);
+    let now_secs = now.timestamp();
+    let now_min = now_secs.div_euclid(60);
     let num_buckets = (spec.minutes / spec.step_minutes).max(2) as usize;
     let first_bucket_min = now_min - (num_buckets as i64 - 1) * spec.step_minutes;
     let bucket_seconds = spec.step_minutes * 60;
+    let last_bucket_start_secs =
+        (first_bucket_min + (num_buckets as i64 - 1) * spec.step_minutes) * 60;
+    // The final bucket spans `[last_bucket_start_secs, now_secs]` and is still accumulating
+    // in-flight requests. Normalize its rate by the actual elapsed seconds (floored at 60s
+    // so sub-minute bursts don't spike 60x), and count how many 1-minute compute samples
+    // can actually exist inside it (`elapsed_mins_in_last_bucket`).
+    let last_bucket_elapsed_secs =
+        (now_secs - last_bucket_start_secs).clamp(60, bucket_seconds) as f64;
+    let last_bucket_comp_mins =
+        ((now_secs - last_bucket_start_secs).div_euclid(60) + 1).clamp(1, spec.step_minutes) as f64;
 
     let _control_state = state.control.get_or_spawn(&user).await;
     let sqlite_store = sqlite_store_for_user(&state, &user.id);
@@ -668,10 +679,15 @@ async fn get_overview(
         let Some(bi) = bucket_idx_of(row.bucket_unix_min) else {
             continue;
         };
-        let vcpu_step = row.vcpu_allocated / step_f;
-        // millicents in bucket -> USD/h: (mc / 100_000) * (3600 / bucket_seconds)
-        let usd_h_step =
-            (row.cost_millicents as f64 / 100_000.0) * (3600.0 / bucket_seconds as f64);
+        let eff_comp_mins = if bi + 1 == num_buckets {
+            last_bucket_comp_mins
+        } else {
+            step_f
+        };
+        let eff_comp_secs = eff_comp_mins * 60.0;
+        let vcpu_step = row.vcpu_allocated / eff_comp_mins;
+        // millicents in bucket -> USD/h: (mc / 100_000) * (3600 / eff_comp_secs)
+        let usd_h_step = (row.cost_millicents as f64 / 100_000.0) * (3600.0 / eff_comp_secs);
 
         class_series_vcpu
             .entry(row.machine_class.clone())
@@ -742,8 +758,13 @@ async fn get_overview(
         total_429 += row.rate_limit_429_count;
         *pool_429.entry(row.pool_id.clone()).or_insert(0) += row.rate_limit_429_count;
 
-        let btok_h = (row.total_tokens as f64 / 1e9) * (3600.0 / bucket_seconds as f64);
-        let usd_h = (row.est_cost_millicents as f64 / 100_000.0) * (3600.0 / bucket_seconds as f64);
+        let eff_inf_secs = if bi + 1 == num_buckets {
+            last_bucket_elapsed_secs
+        } else {
+            bucket_seconds as f64
+        };
+        let btok_h = (row.total_tokens as f64 / 1e9) * (3600.0 / eff_inf_secs);
+        let usd_h = (row.est_cost_millicents as f64 / 100_000.0) * (3600.0 / eff_inf_secs);
 
         pool_series_btok
             .entry(row.pool_id.clone())

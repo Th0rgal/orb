@@ -8,6 +8,7 @@ import {
   computeSankeyLayout,
   formatResourceRate,
   layoutDagRows,
+  stabilizeTrailingOpenBucket,
   type ResourceLens,
   type ResourceMetric,
 } from "../src/resourcesModel";
@@ -278,5 +279,21 @@ describe("resourcesModel shared spec", () => {
       metric: "usd",
     });
     expect(layout.totalUsd).toBeCloseTo(40.0, 5);
+  });
+
+  it("stabilizes an open trailing 0 bucket when active missions are running", () => {
+    expect(stabilizeTrailingOpenBucket([0.9, 1.4, 1.8, 0], true)).toEqual([
+      0.9, 1.4, 1.8, 1.8,
+    ]);
+    // Genuine idle fleet keeps trailing 0
+    expect(stabilizeTrailingOpenBucket([0.9, 1.4, 1.8, 0], false)).toEqual([
+      0.9, 1.4, 1.8, 0,
+    ]);
+    // Already-idle series stays 0 even if missions exist
+    expect(stabilizeTrailingOpenBucket([0.9, 0, 0], true)).toEqual([0.9, 0, 0]);
+    // Non-zero open bucket is preserved untouched
+    expect(stabilizeTrailingOpenBucket([0.9, 1.4, 0.72], true)).toEqual([
+      0.9, 1.4, 0.72,
+    ]);
   });
 });

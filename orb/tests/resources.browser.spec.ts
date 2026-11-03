@@ -519,10 +519,10 @@ test("Resources page handles dense 30+ mission fleet and 500-span mission Flow c
             window_est_usd: 1534,
             throttled_429_count: 0,
             pools: [
-              { id: "google:gemini", label: "Google · Gemini", sublabel: "metered", provider: "google", quota_pct_remaining: null, reset_at: null, current_b_tok_per_h: 3.1, est_usd_per_h: 145, health: "ok", series_b_tok_per_h: [3, 3.1, 3.1], series_usd_per_h: [140, 145, 145] },
-              { id: "antigravity:gemini", label: "AGY · Gemini", sublabel: "14% left", provider: "antigravity", quota_pct_remaining: 14, reset_at: null, current_b_tok_per_h: 1.9, est_usd_per_h: 92, health: "ok", series_b_tok_per_h: [1.8, 1.9, 1.9], series_usd_per_h: [88, 92, 92] },
-              { id: "xai:grok", label: "xAI · Grok", sublabel: "33% left", provider: "xai", quota_pct_remaining: 33, reset_at: null, current_b_tok_per_h: 0.25, est_usd_per_h: 14.98, health: "ok", series_b_tok_per_h: [0.2, 0.25, 0.25], series_usd_per_h: [12, 14.98, 14.98] },
-              { id: "antigravity:claude", label: "AGY · Claude", sublabel: "0% left", provider: "antigravity", quota_pct_remaining: 0, reset_at: null, current_b_tok_per_h: 0.15, est_usd_per_h: 3.93, health: "exhausted", series_b_tok_per_h: [0.15, 0.15, 0.15], series_usd_per_h: [3.93, 3.93, 3.93] },
+              { id: "google:gemini", label: "Google · Gemini", sublabel: "metered", provider: "google", quota_pct_remaining: null, reset_at: null, current_b_tok_per_h: 3.1, est_usd_per_h: 145, health: "ok", series_b_tok_per_h: [3, 3.1, 0], series_usd_per_h: [140, 145, 0] },
+              { id: "antigravity:gemini", label: "AGY · Gemini", sublabel: "14% left", provider: "antigravity", quota_pct_remaining: 14, reset_at: null, current_b_tok_per_h: 1.9, est_usd_per_h: 92, health: "ok", series_b_tok_per_h: [1.8, 1.9, 0], series_usd_per_h: [88, 92, 0] },
+              { id: "xai:grok", label: "xAI · Grok", sublabel: "33% left", provider: "xai", quota_pct_remaining: 33, reset_at: null, current_b_tok_per_h: 0.25, est_usd_per_h: 14.98, health: "ok", series_b_tok_per_h: [0.2, 0.25, 0], series_usd_per_h: [12, 14.98, 0] },
+              { id: "antigravity:claude", label: "AGY · Claude", sublabel: "0% left", provider: "antigravity", quota_pct_remaining: 0, reset_at: null, current_b_tok_per_h: 0.15, est_usd_per_h: 3.93, health: "exhausted", series_b_tok_per_h: [0.15, 0.15, 0], series_usd_per_h: [3.93, 3.93, 0] },
               { id: "openai:codex", label: "OpenAI · Codex", sublabel: "0% left", provider: "openai", quota_pct_remaining: 0, reset_at: null, current_b_tok_per_h: 0, est_usd_per_h: 0, health: "exhausted", series_b_tok_per_h: [0, 0, 0], series_usd_per_h: [0, 0, 0] },
             ],
           },
@@ -671,6 +671,14 @@ test("Resources page handles dense 30+ mission fleet and 500-span mission Flow c
   const agyNodeText = await page.getByTestId("res-node-antigravity:gemini").textContent();
   expect(agyNodeText ?? "").not.toContain("14% left · 14% left");
   expect(await page.locator('[data-testid="res-node-openai:codex"]').count()).toBe(0);
+
+  // Scrubbing the rightmost ("now") point of the consumption curve must NOT dive to 0 when active missions run
+  const curveSvg = page.locator(".res-curve-svg");
+  const cbox = (await curveSvg.boundingBox())!;
+  await page.mouse.move(cbox.x + cbox.width - 2, cbox.y + cbox.height / 2);
+  await expect(page.getByTestId("res-consumption-card")).toContainText("$256/h");
+  await expect(page.getByTestId("res-consumption-card")).not.toContainText("$0.00/h");
+  await page.mouse.move(10, 10);
 
   const svgBox = (await page.getByTestId("res-sankey-svg").boundingBox())!;
   const textBoxes = await page

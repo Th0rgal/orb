@@ -28,6 +28,7 @@ import {
   formatTokenTotalCompact,
   layoutDagRows,
   pickFastDagCandidate,
+  stabilizeTrailingOpenBucket,
   type MissionDetailSubmode,
   type ResourceLens,
   type ResourceMetric,
@@ -589,10 +590,19 @@ export default function Resources(props: {
       }
     }
 
-    const peak = values.reduce((a, b) => Math.max(a, b), 0);
+    const hasActiveFleet =
+      ov.missions.some(
+        (ms) =>
+          ms.status === "active" ||
+          ms.status === "waiting_background" ||
+          ms.subagent_running > 0,
+      ) || ov.compute.active_vcpu > 0;
+    const displayValues = stabilizeTrailingOpenBucket(values, hasActiveFleet);
+
+    const peak = displayValues.reduce((a, b) => Math.max(a, b), 0);
     const denom = peak > 0 ? peak * 1.12 : 1;
     const n = Math.max(1, len - 1);
-    const pts = values.map((v, i) => ({
+    const pts = displayValues.map((v, i) => ({
       x: padX + (i / n) * plotW,
       y: baseY - (v / denom) * plotH,
     }));
@@ -613,7 +623,7 @@ export default function Resources(props: {
         const idx = Math.min(len - 1, Math.max(0, Math.round(frac * n)));
         return {
           timeLabel: formatClockTick(ov.timestamps_ms[idx], ov.range),
-          valLabel: formatResourceRate(values[idx] ?? 0, l, m, true),
+          valLabel: formatResourceRate(displayValues[idx] ?? 0, l, m, true),
         };
       },
     };
