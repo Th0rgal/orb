@@ -333,11 +333,17 @@ export function computeSankeyLayout(
 
   // Shared scale across all columns so conserved mass has identical pixel height
   let sharedScale = Infinity;
+  const isGroupedTailNode = (id: string) => id.includes("__other");
   for (let c = 0; c < columns; c++) {
     const colNodes = nodesByCol[c];
     if (!colNodes || colNodes.length === 0) continue;
-    // Sort descending by value with stable id tie-breaker to prevent order jitter
-    colNodes.sort((a, b) => b.value - a.value || a.id.localeCompare(b.id));
+    // Sort descending by value with stable id tie-breaker, pinning grouped tail buckets last
+    colNodes.sort((a, b) => {
+      const aTail = isGroupedTailNode(a.id);
+      const bTail = isGroupedTailNode(b.id);
+      if (aTail !== bTail) return aTail ? 1 : -1;
+      return b.value - a.value || a.id.localeCompare(b.id);
+    });
     const sumVal = colNodes.reduce((acc, n) => acc + Math.max(n.value, 0), 0);
     const padTotal = Math.max(0, colNodes.length - 1) * nodePadding;
     const availH = Math.max(36, innerH - padTotal);
@@ -354,7 +360,7 @@ export function computeSankeyLayout(
     const colNodes = nodesByCol[c];
     if (!colNodes || colNodes.length === 0) continue;
     const isMiddleCol = columns > 2 && c > 0 && c < columns - 1;
-    const minRowGap = colNodes.length <= 10 ? 14 : nodePadding;
+    const minRowGap = colNodes.length <= 12 ? 15 : nodePadding;
     const heights = colNodes.map((n) => Math.max(minBarH, n.value * sharedScale));
     const totalColH =
       heights.reduce((a, b) => a + b, 0) + Math.max(0, colNodes.length - 1) * minRowGap;
@@ -375,17 +381,22 @@ export function computeSankeyLayout(
           ? y1 + effPad + Math.max(5, heights[i + 1] * compress) / 2
           : Infinity;
 
-      const labelTop = centerY - 12;
-      if (labelTop >= lastLabelBottom + 3) {
+      const twoLineTop = centerY - 15;
+      const singleLineTop = centerY - 9;
+      if (singleLineTop >= lastLabelBottom + 3) {
         colNodes[i].showLabel = true;
         // Middle columns in 3-col Flow only show compact 1-line labels so ribbons stay clean
         const subBottom = centerY + 12;
-        if (!isMiddleCol && nextCenterY - 12 >= subBottom + 3) {
+        if (
+          !isMiddleCol &&
+          twoLineTop >= lastLabelBottom + 3 &&
+          nextCenterY - 9 >= subBottom + 4
+        ) {
           colNodes[i].showSub = true;
           lastLabelBottom = subBottom;
         } else {
           colNodes[i].showSub = false;
-          lastLabelBottom = centerY + 4;
+          lastLabelBottom = centerY + 7;
         }
       } else {
         colNodes[i].showLabel = false;
@@ -654,20 +665,37 @@ export function computeMonotoneCurve(
  * Stabilize a rolling consumption series whose final bucket (`now`) is still open
  * and accumulating in-flight LLM turns (tokens are billed on turn completion).
  * If the fleet has live runs right now (`hasActiveMissions`) and the incomplete
- * final bucket currently reads `0` while the preceding settled bucket was `> 0`,
- * carry the settled rate forward so the `now` endpoint doesn't artificially dive to `0`.
+ * final bucket currently reads `0` (or is an early partial bucket dipping well below
+ * the settled preceding bucket), carry/blend the settled rate so the `now` endpoint
+ * doesn't artificially dive to `0`.
  */
 export function stabilizeTrailingOpenBucket(
   values: number[],
   hasActiveMissions: boolean,
+  openBucketElapsedFrac?: number,
 ): number[] {
   if (values.length < 2 || !hasActiveMissions) return values;
   const lastIdx = values.length - 1;
   const lastVal = values[lastIdx] ?? 0;
   const prevVal = values[lastIdx - 1] ?? 0;
-  if (lastVal <= 0 && prevVal > 0) {
+  if (prevVal <= 0) return values;
+  if (lastVal <= 0) {
     const copy = values.slice();
     copy[lastIdx] = prevVal;
+    return copy;
+  }
+  if (
+    openBucketElapsedFrac != null &&
+    Number.isFinite(openBucketElapsedFrac) &&
+    openBucketElapsedFrac < 0.7 &&
+    lastVal < prevVal * 0.45
+  ) {
+    const frac = Math.max(0.08, Math.min(0.7, openBucketElapsedFrac));
+    const rescaled = Math.min(prevVal * 1.15, lastVal / Math.max(0.25, frac));
+    const w = Math.min(1, frac / 0.7);
+    const blended = prevVal * (1 - w) + Math.max(lastVal, rescaled) * w;
+    const copy = values.slice();
+    copy[lastIdx] = blended;
     return copy;
   }
   return values;
@@ -677,6 +705,7 @@ export function buildOverviewSankeyInput(
   overview: ResourcesOverviewResponse,
   lens: ResourceLens,
   metric: ResourceMetric = "raw",
+  canvasHeight = 368,
 ): { nodes: SankeyInputNode[]; links: SankeyInputLink[] } {
   const nodes: SankeyInputNode[] = [];
   const links: SankeyInputLink[] = [];
@@ -695,17 +724,31 @@ export function buildOverviewSankeyInput(
       });
     });
   } else {
+    const maxPoolBtok = overview.inference.pools.reduce(
+      (mx, p) => Math.max(mx, p.current_b_tok_per_h),
+      0,
+    );
+    const maxPoolUsd = overview.inference.pools.reduce(
+      (mx, p) => Math.max(mx, p.est_usd_per_h),
+      0,
+    );
     const activeSourceIds = new Set(
       overview.links
-        .filter((l) => l.kind === "inference" && (l.value > 0 || l.est_usd_per_h > 0))
+        .filter(
+          (l) =>
+            l.kind === "inference" &&
+            (l.value >= Math.max(1e-6, maxPoolBtok * 0.002) ||
+              l.est_usd_per_h >= Math.max(1e-4, maxPoolUsd * 0.002)),
+        )
         .map((l) => l.source_id),
     );
-    const activePools = overview.inference.pools.filter(
-      (pool) =>
-        activeSourceIds.has(pool.id) ||
-        pool.current_b_tok_per_h > 0 ||
-        pool.est_usd_per_h > 0,
-    );
+    const activePools = overview.inference.pools.filter((pool) => {
+      const significant =
+        maxPoolBtok >= 0.02
+          ? pool.current_b_tok_per_h >= 0.0005 || pool.est_usd_per_h >= 0.01
+          : pool.current_b_tok_per_h > 0 || pool.est_usd_per_h > 0;
+      return significant || activeSourceIds.has(pool.id);
+    });
     const poolsToRender =
       activePools.length > 0 ? activePools : overview.inference.pools.slice(0, 5);
     poolsToRender.forEach((pool, idx) => {
@@ -744,7 +787,10 @@ export function buildOverviewSankeyInput(
         ? m.inference_usd_per_h
         : m.b_tok_per_h;
 
-  const MAX_COL1_MISSIONS = 9;
+  const maxCol1Missions = Math.max(
+    9,
+    Math.min(18, Math.floor((Math.max(340, canvasHeight) - 32) / 34)),
+  );
   const candidateMissions = overview.missions
     .filter((m) => {
       const hasMass =
@@ -755,12 +801,12 @@ export function buildOverviewSankeyInput(
     .slice()
     .sort((a, b) => missionScore(b) - missionScore(a) || a.id.localeCompare(b.id));
 
-  const needsTailBucket = candidateMissions.length > MAX_COL1_MISSIONS + 1;
+  const needsTailBucket = candidateMissions.length > maxCol1Missions + 1;
   const visibleMissions = needsTailBucket
-    ? candidateMissions.slice(0, MAX_COL1_MISSIONS)
+    ? candidateMissions.slice(0, maxCol1Missions)
     : candidateMissions;
   const overflowMissions = needsTailBucket
-    ? candidateMissions.slice(MAX_COL1_MISSIONS)
+    ? candidateMissions.slice(maxCol1Missions)
     : [];
   const overflowSet = new Set(overflowMissions.map((m) => m.id));
   const tailBucketId = "__other_missions__";
@@ -859,6 +905,7 @@ export function buildMissionFlowSankeyInput(
   detail: MissionResourcesResponse,
   lens: ResourceLens,
   metric: ResourceMetric = "raw",
+  canvasHeight = 368,
 ): { nodes: SankeyInputNode[]; links: SankeyInputLink[] } {
   const nodes: SankeyInputNode[] = [];
   const links: SankeyInputLink[] = [];
@@ -917,13 +964,16 @@ export function buildMissionFlowSankeyInput(
   const candidateTracks =
     tracksWithFlow.length > 0 ? tracksWithFlow : detail.flow.tracks.slice(0, 5);
 
-  const MAX_COL1_TRACKS = 7;
+  const maxCol1Tracks = Math.max(
+    7,
+    Math.min(14, Math.floor((Math.max(340, canvasHeight) - 36) / 47)),
+  );
   const sortedTracks = candidateTracks
     .slice()
     .sort((a, b) => trackScore(b.id) - trackScore(a.id) || a.id.localeCompare(b.id));
-  const capTracks = sortedTracks.length > MAX_COL1_TRACKS + 1;
-  const visibleTracks = capTracks ? sortedTracks.slice(0, MAX_COL1_TRACKS) : sortedTracks;
-  const overflowTracks = capTracks ? sortedTracks.slice(MAX_COL1_TRACKS) : [];
+  const capTracks = sortedTracks.length > maxCol1Tracks + 1;
+  const visibleTracks = capTracks ? sortedTracks.slice(0, maxCol1Tracks) : sortedTracks;
+  const overflowTracks = capTracks ? sortedTracks.slice(maxCol1Tracks) : [];
   const overflowTrackSet = new Set(overflowTracks.map((t) => t.id));
   const tailTrackId = "track:__other__";
 
@@ -965,13 +1015,16 @@ export function buildMissionFlowSankeyInput(
   const candidateSubs =
     subsWithMass.length > 0 ? subsWithMass : detail.flow.subagents.slice(0, 6);
 
-  const MAX_COL2_SUBAGENTS = 9;
+  const maxCol2Subagents = Math.max(
+    9,
+    Math.min(18, Math.floor((Math.max(340, canvasHeight) - 32) / 34)),
+  );
   const sortedSubagents = candidateSubs
     .slice()
     .sort((a, b) => subScore(b) - subScore(a) || a.id.localeCompare(b.id));
-  const capSubs = sortedSubagents.length > MAX_COL2_SUBAGENTS + 1;
-  const visibleSubs = capSubs ? sortedSubagents.slice(0, MAX_COL2_SUBAGENTS) : sortedSubagents;
-  const overflowSubList = capSubs ? sortedSubagents.slice(MAX_COL2_SUBAGENTS) : [];
+  const capSubs = sortedSubagents.length > maxCol2Subagents + 1;
+  const visibleSubs = capSubs ? sortedSubagents.slice(0, maxCol2Subagents) : sortedSubagents;
+  const overflowSubList = capSubs ? sortedSubagents.slice(maxCol2Subagents) : [];
   const overflowSubSet = new Set(overflowSubList.map((s) => s.id));
   const tailSubId = "sub:__other__";
 

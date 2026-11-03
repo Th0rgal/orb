@@ -177,6 +177,16 @@ describe("resourcesModel shared spec", () => {
     expect(layout.totalRaw).toBeCloseTo(423, 5);
     expect(layout.totalUsd).toBeCloseTo(42.3, 5);
 
+    // Grouped tail bucket is always pinned to the very bottom of column 1
+    const col1LaidOut = layout.nodes.filter((n) => n.column === 1);
+    expect(col1LaidOut[col1LaidOut.length - 1]?.id).toBe("__other_missions__");
+
+    // Taller viewport canvases expand visible ungrouped missions automatically
+    const tallInput = buildOverviewSankeyInput(ov, "compute", "raw", 620);
+    expect(tallInput.nodes.filter((n) => n.column === 1).length).toBeGreaterThan(
+      col1.length,
+    );
+
     // Ensure any two visible labels in the same column maintain non-overlapping vertical centers
     for (const col of [0, 1]) {
       const labeled = layout.nodes.filter((n) => n.column === col && n.showLabel);
@@ -281,7 +291,7 @@ describe("resourcesModel shared spec", () => {
     expect(layout.totalUsd).toBeCloseTo(40.0, 5);
   });
 
-  it("stabilizes an open trailing 0 bucket when active missions are running", () => {
+  it("stabilizes an open trailing 0 or early partial bucket when active missions are running", () => {
     expect(stabilizeTrailingOpenBucket([0.9, 1.4, 1.8, 0], true)).toEqual([
       0.9, 1.4, 1.8, 1.8,
     ]);
@@ -291,9 +301,12 @@ describe("resourcesModel shared spec", () => {
     ]);
     // Already-idle series stays 0 even if missions exist
     expect(stabilizeTrailingOpenBucket([0.9, 0, 0], true)).toEqual([0.9, 0, 0]);
-    // Non-zero open bucket is preserved untouched
+    // Non-zero settled bucket is preserved untouched
     expect(stabilizeTrailingOpenBucket([0.9, 1.4, 0.72], true)).toEqual([
       0.9, 1.4, 0.72,
     ]);
+    // Early partial bucket (e.g. 10% elapsed with tiny initial completion) blends smoothly without diving near 0
+    const blended = stabilizeTrailingOpenBucket([0.9, 1.4, 0.04], true, 0.1);
+    expect(blended[2]).toBeGreaterThan(1.0);
   });
 });

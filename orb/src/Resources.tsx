@@ -86,7 +86,8 @@ function eqIds(a: string[], b: string[]): boolean {
   return true;
 }
 
-const SANKEY_CANVAS_HEIGHT = 368;
+const MIN_SANKEY_CANVAS_HEIGHT = 330;
+const CARD_HEAD_HEIGHT = 38;
 
 export default function Resources(props: {
   missionId?: string | null;
@@ -110,9 +111,11 @@ export default function Resources(props: {
   const [hoverFrac, setHoverFrac] = createSignal<number | null>(null);
 
   const [sankeyWidth, setSankeyWidth] = createSignal<number>(920);
+  const [sankeyHeight, setSankeyHeight] = createSignal<number>(368);
   const [dagLaneWidth, setDagLaneWidth] = createSignal<number>(720);
   const [curveWidth, setCurveWidth] = createSignal<number>(920);
 
+  let cardMainEl: HTMLDivElement | undefined;
   let sankeyEl: HTMLDivElement | undefined;
   let dagLaneEl: HTMLDivElement | undefined;
   let curveSvgEl: SVGSVGElement | undefined;
@@ -130,9 +133,30 @@ export default function Resources(props: {
     if (cw > 40) apply(cw);
   }
 
+  function observeCardMainHeight(el: HTMLDivElement | undefined) {
+    if (!el || !ro) return;
+    if (!observedEls.has(el)) {
+      observedEls.add(el);
+      ro.observe(el);
+    }
+    const ch = Math.floor(el.clientHeight || el.getBoundingClientRect().height);
+    if (ch > CARD_HEAD_HEIGHT + 80) {
+      const bodyH = Math.max(MIN_SANKEY_CANVAS_HEIGHT, ch - CARD_HEAD_HEIGHT);
+      setSankeyHeight((prev) => (Math.abs(prev - bodyH) >= 1 ? bodyH : prev));
+    }
+  }
+
   onMount(() => {
     ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
+        if (entry.target === cardMainEl) {
+          const ch = Math.floor(entry.contentRect.height);
+          if (ch > CARD_HEAD_HEIGHT + 80) {
+            const bodyH = Math.max(MIN_SANKEY_CANVAS_HEIGHT, ch - CARD_HEAD_HEIGHT);
+            setSankeyHeight((prev) => (Math.abs(prev - bodyH) >= 1 ? bodyH : prev));
+          }
+          continue;
+        }
         const w = Math.floor(entry.contentRect.width);
         if (w <= 40) continue;
         if (entry.target === sankeyEl) {
@@ -146,6 +170,7 @@ export default function Resources(props: {
         }
       }
     });
+    observeCardMainHeight(cardMainEl);
     observeWidth(sankeyEl, (w) => setSankeyWidth(w));
     observeWidth(dagLaneEl, (w) => setDagLaneWidth(w));
     observeWidth(curveSvgEl, (w) => setCurveWidth(w));
@@ -226,6 +251,7 @@ export default function Resources(props: {
     void _sub;
     void _ld;
     queueMicrotask(() => {
+      observeCardMainHeight(cardMainEl);
       observeWidth(sankeyEl, (w) =>
         setSankeyWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev)),
       );
@@ -250,11 +276,11 @@ export default function Resources(props: {
     const l = lens();
     const m = metric();
     const w = sankeyWidth();
-    const h = SANKEY_CANVAS_HEIGHT;
+    const h = sankeyHeight();
     if (isMissionMode()) {
       const det = detail();
       if (!det) return null;
-      const { nodes, links } = buildMissionFlowSankeyInput(det, l, m);
+      const { nodes, links } = buildMissionFlowSankeyInput(det, l, m, h);
       return {
         height: h,
         layout: computeSankeyLayout(nodes, links, {
@@ -268,7 +294,7 @@ export default function Resources(props: {
     }
     const ov = overview();
     if (!ov) return null;
-    const { nodes, links } = buildOverviewSankeyInput(ov, l, m);
+    const { nodes, links } = buildOverviewSankeyInput(ov, l, m, h);
     return {
       height: h,
       layout: computeSankeyLayout(nodes, links, {
@@ -597,7 +623,17 @@ export default function Resources(props: {
           ms.status === "waiting_background" ||
           ms.subagent_running > 0,
       ) || ov.compute.active_vcpu > 0;
-    const displayValues = stabilizeTrailingOpenBucket(values, hasActiveFleet);
+    const asOfMs = Date.parse(ov.as_of);
+    const lastBucketStartMs = ov.timestamps_ms[len - 1] ?? 0;
+    const openElapsedFrac =
+      Number.isFinite(asOfMs) && ov.bucket_seconds > 0
+        ? Math.max(0, Math.min(1, (asOfMs - lastBucketStartMs) / (ov.bucket_seconds * 1000)))
+        : undefined;
+    const displayValues = stabilizeTrailingOpenBucket(
+      values,
+      hasActiveFleet,
+      openElapsedFrac,
+    );
 
     const peak = displayValues.reduce((a, b) => Math.max(a, b), 0);
     const denom = peak > 0 ? peak * 1.12 : 1;
@@ -830,7 +866,7 @@ export default function Resources(props: {
       </Show>
 
       {/* Main Flow / Fast-DAG Card */}
-      <div class="res-card res-card-main">
+      <div class="res-card res-card-main" ref={cardMainEl}>
         <Show
           when={!loading()}
           fallback={
@@ -839,10 +875,10 @@ export default function Resources(props: {
                 <div class="res-skel" style={{ height: "14px", width: "210px" }} />
                 <div class="res-skel" style={{ height: "14px", width: "180px" }} />
               </div>
-              <div style={{ padding: "14px" }}>
+              <div style={{ padding: "14px", flex: "1 1 0", "min-height": "0" }}>
                 <div
                   class="res-skel"
-                  style={{ height: `${SANKEY_CANVAS_HEIGHT - 28}px`, width: "100%" }}
+                  style={{ height: "100%", width: "100%" }}
                 />
               </div>
             </>
@@ -900,7 +936,6 @@ export default function Resources(props: {
                       <div
                         class="res-empty"
                         data-testid="res-empty-state"
-                        style={{ height: `${SANKEY_CANVAS_HEIGHT}px` }}
                       >
                         <div class="res-empty-title">
                           No {lens()} flow recorded in this window
@@ -916,8 +951,8 @@ export default function Resources(props: {
                     <svg
                       class="res-sankey-svg"
                       data-testid="res-sankey-svg"
-                      viewBox={`0 0 ${sankeyWidth()} ${SANKEY_CANVAS_HEIGHT}`}
-                      style={{ height: `${SANKEY_CANVAS_HEIGHT}px` }}
+                      viewBox={`0 0 ${sankeyWidth()} ${sankeyHeight()}`}
+                      style={{ height: `${sankeyHeight()}px` }}
                     >
                       <g>
                         <For each={sankeyLinkIds()}>
@@ -1124,7 +1159,7 @@ export default function Resources(props: {
             <Show
               when={dagLayout() && dagLayout()!.rows.length > 0 ? dagLayout() : null}
               fallback={
-                <div class="res-empty" style={{ height: `${SANKEY_CANVAS_HEIGHT}px` }}>
+                <div class="res-empty">
                   <div class="res-empty-title">No subagent spans recorded yet</div>
                 </div>
               }

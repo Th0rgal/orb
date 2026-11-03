@@ -6,7 +6,10 @@
   max-width: 1240px;
   margin: 0 auto;
   padding: 16px 22px 20px;
-  min-height: calc(100vh - var(--tb-h, 35px));
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
   box-sizing: border-box;
   color: var(--fg);
   font-family: var(--sans);
@@ -19,6 +22,7 @@
   gap: 10px;
   min-height: 32px;
   flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
 .res-topbar-left,
@@ -201,8 +205,8 @@
 }
 
 .res-card-main {
-  flex: 1 1 auto;
-  min-height: 330px;
+  flex: 1 1 0;
+  min-height: 368px;
 }
 
 .res-card-head {
@@ -305,8 +309,9 @@
 .res-sankey-wrap {
   position: relative;
   width: 100%;
-  min-height: 300px;
-  flex: 1 1 auto;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .res-sankey-svg {
@@ -357,8 +362,8 @@
 .res-dag-scroll {
   overflow-x: hidden;
   overflow-y: auto;
-  height: 368px;
-  max-height: 368px;
+  flex: 1 1 0;
+  min-height: 0;
   position: relative;
 }
 
@@ -450,6 +455,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 .res-curve-head {
@@ -495,6 +501,7 @@
   background: var(--bg-elev);
   border: 1px solid var(--stroke);
   border-radius: var(--radius-lg);
+  flex-shrink: 0;
 }
 
 .res-timeline-left {
@@ -526,7 +533,9 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
+  flex: 1 1 0;
   min-height: 260px;
+  height: 100%;
   padding: 28px;
   text-align: center;
   color: var(--fg-3);

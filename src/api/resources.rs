@@ -796,6 +796,40 @@ async fn get_overview(
         }
     }
 
+    // If the open trailing bucket just started (< 90s elapsed) and missions are actively
+    // executing, in-flight LLM turns have not yet emitted their completion billing row.
+    // Smoothly carry/blend the preceding settled bucket so the `now` endpoint doesn't dive to 0.
+    let raw_last_elapsed = (now_secs - last_bucket_start_secs).max(0) as f64;
+    let has_active_runs = !snap.active_runs.is_empty();
+    if has_active_runs && num_buckets >= 2 && raw_last_elapsed < 90.0 {
+        let last_i = num_buckets - 1;
+        let prev_i = num_buckets - 2;
+        let w = (raw_last_elapsed / 90.0).clamp(0.0, 1.0);
+        let stabilize = |series: &mut Vec<f64>| {
+            let prev = series[prev_i];
+            let curr = series[last_i];
+            if prev > 0.0 && curr < prev * 0.45 {
+                series[last_i] = if curr <= 0.0 {
+                    prev
+                } else {
+                    prev * (1.0 - w) + curr * w
+                };
+            }
+        };
+        for s in pool_series_btok.values_mut() {
+            stabilize(s);
+        }
+        for s in pool_series_usd.values_mut() {
+            stabilize(s);
+        }
+        for s in mission_series_btok.values_mut() {
+            stabilize(s);
+        }
+        for s in mission_series_inf_usd.values_mut() {
+            stabilize(s);
+        }
+    }
+
     let window_hours = (spec.minutes as f64 / 60.0).max(0.5);
 
     // Build ComputeSourceSummary list

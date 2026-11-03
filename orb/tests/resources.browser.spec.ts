@@ -661,11 +661,17 @@ test("Resources page handles dense 30+ mission fleet and 500-span mission Flow c
     return route.fulfill({ json: {} });
   });
 
-  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.setViewportSize({ width: 1280, height: 960 });
   await page.goto("/");
   await page.getByTestId("sb-resources").click();
   await page.getByTestId("res-metric-usd").click();
   await expect(page.getByTestId("res-sankey-svg")).toBeVisible();
+
+  // Verify the Sankey diagram dynamically fills 100% of `.res-card-main`'s available body height
+  const cardMainBox = (await page.locator(".res-card-main").boundingBox())!;
+  const svgBox = (await page.getByTestId("res-sankey-svg").boundingBox())!;
+  expect(svgBox.height).toBeGreaterThan(480);
+  expect(Math.abs(svgBox.height - (cardMainBox.height - 38))).toBeLessThanOrEqual(3);
 
   // Ensure no duplicate "14% left · 14% left" text and zero horizontal clipping of SVG text
   const agyNodeText = await page.getByTestId("res-node-antigravity:gemini").textContent();
@@ -680,7 +686,6 @@ test("Resources page handles dense 30+ mission fleet and 500-span mission Flow c
   await expect(page.getByTestId("res-consumption-card")).not.toContainText("$0.00/h");
   await page.mouse.move(10, 10);
 
-  const svgBox = (await page.getByTestId("res-sankey-svg").boundingBox())!;
   const textBoxes = await page
     .locator(".res-sankey-svg text")
     .evaluateAll((els) => els.map((el) => el.getBoundingClientRect()));
@@ -699,11 +704,13 @@ test("Resources page handles dense 30+ mission fleet and 500-span mission Flow c
   await page.getByTestId("res-lens-inference").click();
   await page.getByTestId("res-fast-dag-jump").click();
   await expect(page.getByTestId("res-dag-view")).toBeVisible();
+  const dagScrollBox = (await page.getByTestId("res-dag-view").boundingBox())!;
+  expect(Math.abs(dagScrollBox.height - (cardMainBox.height - 38))).toBeLessThanOrEqual(3);
   await page.getByTestId("res-submode-flow").click();
   await expect(page.getByTestId("res-sankey-svg")).toBeVisible();
 
   const flowNodeCount = await page.locator(".res-sankey-node-group").count();
-  expect(flowNodeCount).toBeLessThanOrEqual(22);
+  expect(flowNodeCount).toBeLessThanOrEqual(34);
 
   // Verify Flow SVG text labels also fit horizontally without clipping
   const flowSvgBox = (await page.getByTestId("res-sankey-svg").boundingBox())!;

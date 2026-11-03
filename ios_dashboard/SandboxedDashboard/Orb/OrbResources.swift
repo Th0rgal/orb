@@ -231,7 +231,12 @@ enum OrbResourcesModel {
 
         var sharedScale = Double.infinity
         for c in 0..<columns where !cols[c].isEmpty {
-            cols[c].sort { $0.value > $1.value }
+            cols[c].sort { a, b in
+                let aTail = a.id.contains("__other")
+                let bTail = b.id.contains("__other")
+                if aTail != bTail { return !aTail }
+                return a.value > b.value
+            }
             let sumVal = cols[c].reduce(0.0) { $0 + max(0, $1.value) }
             let padTotal = Double(max(0, cols[c].count - 1)) * nodePadding
             let availH = max(32, innerH - padTotal)
@@ -930,8 +935,27 @@ struct OrbResourcesView: View {
             let st = $0["status"].text
             return st == "active" || st == "waiting_background" || ($0["subagent_running"].doubleValue ?? 0) > 0
         } || (ov["compute"]["active_vcpu"].doubleValue ?? 0) > 0
-        if hasActiveFleet, sums.count >= 2, sums[sums.count - 1] <= 0, sums[sums.count - 2] > 0 {
-            sums[sums.count - 1] = sums[sums.count - 2]
+        if hasActiveFleet, sums.count >= 2, sums[sums.count - 2] > 0 {
+            let prevVal = sums[sums.count - 2]
+            let lastVal = sums[sums.count - 1]
+            if lastVal <= 0 {
+                sums[sums.count - 1] = prevVal
+            } else if lastVal < prevVal * 0.45,
+                      let lastStartMs = ov["timestamps_ms"].items.last?.doubleValue,
+                      let bucketSecs = ov["bucket_seconds"].doubleValue, bucketSecs > 0 {
+                let isoFmt = ISO8601DateFormatter()
+                isoFmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                let asOfDate = isoFmt.date(from: ov["as_of"].text) ?? ISO8601DateFormatter().date(from: ov["as_of"].text)
+                if let asOfMs = asOfDate.map({ $0.timeIntervalSince1970 * 1000.0 }) {
+                    let rawFrac = (asOfMs - lastStartMs) / (bucketSecs * 1000.0)
+                    if rawFrac < 0.7 {
+                        let frac = min(0.7, max(0.08, rawFrac))
+                        let rescaled = min(prevVal * 1.15, lastVal / max(0.25, frac))
+                        let w = min(1.0, frac / 0.7)
+                        sums[sums.count - 1] = prevVal * (1.0 - w) + max(lastVal, rescaled) * w
+                    }
+                }
+            }
         }
         return sums
     }

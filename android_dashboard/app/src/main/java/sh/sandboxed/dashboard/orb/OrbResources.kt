@@ -293,7 +293,15 @@ object OrbResourcesModel {
         for (c in 0 until columns) {
             val col = cols[c]
             if (col.isEmpty()) continue
-            col.sortByDescending { it.value }
+            col.sortWith { a, b ->
+                val aTail = a.id.contains("__other")
+                val bTail = b.id.contains("__other")
+                if (aTail != bTail) {
+                    if (aTail) 1 else -1
+                } else {
+                    b.value.compareTo(a.value)
+                }
+            }
             val sumVal = col.sumOf { max(0.0, it.value) }
             val padTotal = max(0, col.size - 1) * nodePadding
             val availH = max(32.0, innerH - padTotal)
@@ -1124,8 +1132,25 @@ private fun ConsumptionCurveCard(
                 val st = OrbJSON.str(m, "status")
                 st == "active" || st == "waiting_background" || (OrbJSON.int(m, "subagent_running") ?: 0) > 0
             } || (OrbJSON.double(OrbJSON.dict(ov["compute"]), "active_vcpu") ?: 0.0) > 0.0
-            if (hasActiveFleet && sums.size >= 2 && sums[sums.size - 1] <= 0.0 && sums[sums.size - 2] > 0.0) {
-                sums[sums.size - 1] = sums[sums.size - 2]
+            if (hasActiveFleet && sums.size >= 2 && sums[sums.size - 2] > 0.0) {
+                val prevVal = sums[sums.size - 2]
+                val lastVal = sums[sums.size - 1]
+                if (lastVal <= 0.0) {
+                    sums[sums.size - 1] = prevVal
+                } else if (lastVal < prevVal * 0.45) {
+                    val lastStartMs = (ts.lastOrNull() as? Number)?.toDouble()
+                    val bucketSecs = OrbJSON.double(ov, "bucket_seconds") ?: 0.0
+                    val asOfMs = runCatching { java.time.Instant.parse(OrbJSON.str(ov, "as_of") ?: "").toEpochMilli().toDouble() }.getOrNull()
+                    if (lastStartMs != null && asOfMs != null && bucketSecs > 0.0) {
+                        val rawFrac = (asOfMs - lastStartMs) / (bucketSecs * 1000.0)
+                        if (rawFrac < 0.7) {
+                            val frac = min(0.7, max(0.08, rawFrac))
+                            val rescaled = min(prevVal * 1.15, lastVal / max(0.25, frac))
+                            val w = min(1.0, frac / 0.7)
+                            sums[sums.size - 1] = prevVal * (1.0 - w) + max(lastVal, rescaled) * w
+                        }
+                    }
+                }
             }
             sums.toList()
         }
