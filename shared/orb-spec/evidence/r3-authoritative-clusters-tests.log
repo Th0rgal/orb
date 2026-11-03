@@ -1,14 +1,14 @@
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `orb-spec` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-d90d3a715a28a904)
+    Finished `test` profile [unoptimized] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
 
 running 39 tests
 test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
@@ -53,11 +53,11 @@ test tests::writer_reuse_gate_enforces_continuation_and_retag_rules ... ok
 
 test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/connection-reliability)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -234,18 +234,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 34.85s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 32.01s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test provider_health::tests::subscription_cooldown_classifies_empty_chain_as_retryable ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.01s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -422,18 +422,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.63s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test provider_health::tests::account_error_cooldown_doubles_from_ten_minutes_to_six_hours ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -610,18 +610,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test provider_health::tests::provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -798,18 +798,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.22s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test cost::tests::test_cost_calculation_basic ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -986,18 +986,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.28s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::control::host_goal::tests::armed_wakeup_gives_paused ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -1174,18 +1174,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::reconcile::tests::active_mission_with_any_liveness_signal_is_kept ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -1362,18 +1362,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.25s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::control::tests::queue_snapshot_replays_prepared_parallel_message_until_run_exists ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -1550,18 +1550,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.15s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::control::dispatch_admission_tests::rejected_actor_dispatch_with_failed_rollback_is_durably_recoverable ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.11s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.12s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -1738,18 +1738,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.16s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::usage_attribution::tests::forged_hints_are_rejected_and_keep_the_principal ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -1926,18 +1926,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::control::automation_scheduler::native_schedule_bounds_tests::native_schedule_stops_after_ttl_or_a_finished_mission ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -2114,18 +2114,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::mission_stats::tests::mission_and_subtree_totals_are_conserved_and_replays_count_once ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -2302,18 +2302,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::privilege_broker::tests::grant_lifecycle_audit_log_session_reap_and_bunker_lockdown ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.01s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -2490,18 +2490,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::system::tests::orb_and_sandboxed_service_aliases_map_to_same_deploy_tiers ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -2678,18 +2678,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test managed::tests::budget_and_concurrency_are_hard_refusals ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -2866,18 +2866,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.15s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test managed::lifecycle::tests::busy_lease_protects_everything_but_ttl ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -3054,18 +3054,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test managed::tests::claim_moves_ownership_to_the_served_mission_only ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.02s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -3242,18 +3242,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.15s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::secret_broker::tests::compute_secret_confinement_blocks_reserved_keys_and_untrusted_nodes ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -3430,18 +3430,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test node::capacity::tests::shrink_with_jobs_in_flight_never_revokes_and_blocks_until_under_cap ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.02s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -3618,18 +3618,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.16s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::runners::stream_guard::tests::matches_exhaustive_oracle_on_unicode_and_partial_repeats ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.04s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.02s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -3806,18 +3806,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::control::remote_grok::tests::phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -3994,18 +3994,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::mission_store::harness_session_tests::phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.05s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.04s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -4182,18 +4182,18 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.15s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::approval_queue::tests::admit_is_the_shared_gate ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.00s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -4370,24 +4370,24 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+    Finished `test` profile [unoptimized] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3707 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.01s
 
 warning: function `check_fence_at_line_start` is never used
-    --> crates/orb-spec/src/lib.rs:5133:8
+    --> crates/orb-spec/src/lib.rs:5264:8
      |
-5133 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+5264 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `orb-spec` (lib) generated 1 warning
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/connection-reliability)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -4613,8 +4613,8 @@ warning: function `check_schema` is never used
   |        ^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib) generated 21 warnings (run `cargo fix --lib -p sandboxed_sh` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 30s
-     Running unittests src/bin/palomactl.rs (target/debug/deps/palomactl-3f2a469eae49bccc)
+    Finished `test` profile [unoptimized] target(s) in 3m 50s
+     Running unittests src/bin/palomactl.rs (target/debug/deps/palomactl-440e1b3636867d05)
 
 running 1 test
 test tests::pr_103_green_but_conflicting_recommends_conflict_resolution ... ok

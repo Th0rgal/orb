@@ -65,11 +65,11 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
-          "sha256": "1156765122ff753bf68572c6f538809ae4dc4dfc74db8a2fe3aa818e3eaa8a03"
+          "sha256": "36e826f7a5ae539c6bd93d011cb6171e1da2df67d7b3c7f89190727cf2205967"
         },
         {
           "path": "src/api/control/dispatch_admission_tests.rs",
-          "sha256": "d59dfa6af9eba9f76e931746771c2a76923b60c46f913d88c9de05e84ae717fe"
+          "sha256": "1903931a096464f216ad8d3e61e54c3395b5e8cf0321091093c2a768310ad290"
         }
       ],
       "execution": {
@@ -866,7 +866,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "5581f2733011a06ab70fda5be81f64e430b04e2d3f207b32ef5e96ce77c8584f"
+          "sha256": "a0c4f4f77736ca5e721d5788f75307acefc3e11c9aacb4d6183ad151605b0588"
         }
       ],
       "execution": {
@@ -938,7 +938,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "5581f2733011a06ab70fda5be81f64e430b04e2d3f207b32ef5e96ce77c8584f"
+          "sha256": "a0c4f4f77736ca5e721d5788f75307acefc3e11c9aacb4d6183ad151605b0588"
         }
       ],
       "execution": {
@@ -1023,7 +1023,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "5581f2733011a06ab70fda5be81f64e430b04e2d3f207b32ef5e96ce77c8584f"
+          "sha256": "a0c4f4f77736ca5e721d5788f75307acefc3e11c9aacb4d6183ad151605b0588"
         }
       ],
       "execution": {
@@ -1108,7 +1108,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "5581f2733011a06ab70fda5be81f64e430b04e2d3f207b32ef5e96ce77c8584f"
+          "sha256": "a0c4f4f77736ca5e721d5788f75307acefc3e11c9aacb4d6183ad151605b0588"
         }
       ],
       "execution": {
@@ -1193,7 +1193,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "5581f2733011a06ab70fda5be81f64e430b04e2d3f207b32ef5e96ce77c8584f"
+          "sha256": "a0c4f4f77736ca5e721d5788f75307acefc3e11c9aacb4d6183ad151605b0588"
         }
       ],
       "execution": {
@@ -1278,7 +1278,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "5581f2733011a06ab70fda5be81f64e430b04e2d3f207b32ef5e96ce77c8584f"
+          "sha256": "a0c4f4f77736ca5e721d5788f75307acefc3e11c9aacb4d6183ad151605b0588"
         }
       ],
       "execution": {
@@ -1363,7 +1363,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "5581f2733011a06ab70fda5be81f64e430b04e2d3f207b32ef5e96ce77c8584f"
+          "sha256": "a0c4f4f77736ca5e721d5788f75307acefc3e11c9aacb4d6183ad151605b0588"
         }
       ],
       "execution": {
@@ -1449,15 +1449,15 @@
         },
         {
           "path": "src/managed/mod.rs",
-          "sha256": "8ff468ee59507e2675835e703d09127f86ed97cafe3e89047a71a7362823bbd4"
+          "sha256": "074376b693e5d95677efe481551e6ce6bd6ce3a2442afc24dd012164ef71d814"
         },
         {
           "path": "src/managed/tests.rs",
-          "sha256": "cedf1f05e12a88cc12ec781c6e9713b2ccfa025a729be15b860d698d22d1d744"
+          "sha256": "348e858b37eb88c9a40d97a6ca8f65e6c1876ad0289e97bc13eba7c557bd7126"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "5581f2733011a06ab70fda5be81f64e430b04e2d3f207b32ef5e96ce77c8584f"
+          "sha256": "a0c4f4f77736ca5e721d5788f75307acefc3e11c9aacb4d6183ad151605b0588"
         }
       ],
       "execution": {
@@ -1555,7 +1555,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "5581f2733011a06ab70fda5be81f64e430b04e2d3f207b32ef5e96ce77c8584f"
+          "sha256": "a0c4f4f77736ca5e721d5788f75307acefc3e11c9aacb4d6183ad151605b0588"
         }
       ],
       "execution": {
@@ -1600,7 +1600,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "5581f2733011a06ab70fda5be81f64e430b04e2d3f207b32ef5e96ce77c8584f"
+          "sha256": "a0c4f4f77736ca5e721d5788f75307acefc3e11c9aacb4d6183ad151605b0588"
         }
       ],
       "execution": {
@@ -1669,15 +1669,15 @@
         },
         {
           "path": "src/managed/mod.rs",
-          "sha256": "8ff468ee59507e2675835e703d09127f86ed97cafe3e89047a71a7362823bbd4"
+          "sha256": "074376b693e5d95677efe481551e6ce6bd6ce3a2442afc24dd012164ef71d814"
         },
         {
           "path": "src/managed/tests.rs",
-          "sha256": "cedf1f05e12a88cc12ec781c6e9713b2ccfa025a729be15b860d698d22d1d744"
+          "sha256": "348e858b37eb88c9a40d97a6ca8f65e6c1876ad0289e97bc13eba7c557bd7126"
         },
         {
           "path": "shared/orb-spec/evidence/mission-vm-limits-tests.log",
-          "sha256": "734c03471812f999b9a65c84c0229c51018368302e4ac59f2efe8c4cdde29a38"
+          "sha256": "9f267850433586e096399c869c437dba90db10fe38753e154000d36776d3a52a"
         }
       ],
       "execution": {
@@ -3220,7 +3220,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -3281,7 +3281,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -3342,7 +3342,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -3403,7 +3403,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -3464,7 +3464,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -3525,7 +3525,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -3586,7 +3586,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -3651,7 +3651,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -3708,7 +3708,7 @@
         },
         {
           "path": "src/api/control/dispatch_admission_tests.rs",
-          "sha256": "d59dfa6af9eba9f76e931746771c2a76923b60c46f913d88c9de05e84ae717fe"
+          "sha256": "1903931a096464f216ad8d3e61e54c3395b5e8cf0321091093c2a768310ad290"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
@@ -3716,7 +3716,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -3777,7 +3777,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -3838,7 +3838,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -3899,7 +3899,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -3960,7 +3960,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4021,7 +4021,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4082,7 +4082,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4135,11 +4135,11 @@
         },
         {
           "path": "src/managed/mod.rs",
-          "sha256": "8ff468ee59507e2675835e703d09127f86ed97cafe3e89047a71a7362823bbd4"
+          "sha256": "074376b693e5d95677efe481551e6ce6bd6ce3a2442afc24dd012164ef71d814"
         },
         {
           "path": "src/managed/tests.rs",
-          "sha256": "cedf1f05e12a88cc12ec781c6e9713b2ccfa025a729be15b860d698d22d1d744"
+          "sha256": "348e858b37eb88c9a40d97a6ca8f65e6c1876ad0289e97bc13eba7c557bd7126"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
@@ -4147,7 +4147,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4208,7 +4208,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4261,11 +4261,11 @@
         },
         {
           "path": "src/managed/mod.rs",
-          "sha256": "8ff468ee59507e2675835e703d09127f86ed97cafe3e89047a71a7362823bbd4"
+          "sha256": "074376b693e5d95677efe481551e6ce6bd6ce3a2442afc24dd012164ef71d814"
         },
         {
           "path": "src/managed/tests.rs",
-          "sha256": "cedf1f05e12a88cc12ec781c6e9713b2ccfa025a729be15b860d698d22d1d744"
+          "sha256": "348e858b37eb88c9a40d97a6ca8f65e6c1876ad0289e97bc13eba7c557bd7126"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
@@ -4273,7 +4273,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4326,7 +4326,7 @@
         },
         {
           "path": "src/api/secret_broker.rs",
-          "sha256": "8e7cae374af158de2382d82c576d2a5b0b6281fb62651f4c3d9e1edb8f1ce241"
+          "sha256": "976649f7d3e21074946a81d57a5a62826107a7a8765be4317320710bac5876d5"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
@@ -4334,7 +4334,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4395,7 +4395,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4456,7 +4456,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4517,7 +4517,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4578,7 +4578,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4639,7 +4639,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4700,7 +4700,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4761,7 +4761,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4822,7 +4822,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4883,7 +4883,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
@@ -4944,7 +4944,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-          "sha256": "2f1cdf1f29674bbde778df3ad1bf2a7104c8635b1e920584cd9e659c565511f2"
+          "sha256": "ee72588ab01d3c125e71fad1a91e6949d178c24b18b09b66823facb8bb303bcd"
         }
       ],
       "execution": {
