@@ -2,7 +2,7 @@ import { createSignal } from "solid-js";
 import { connectionVersion, listQueuedMessages } from "./api";
 import { applyStreamEvent, applyStreamEvents, buildTranscript, type StreamItem } from "./transcriptModel";
 import { getMissionEventPage, getMissionEventPreview, storedToStream, type StoredEvent, type StreamEvent } from "./stream";
-import { cacheDelete, cachePeek, cachePut } from "./pageCache";
+import { cacheDelete, cachePeek, cachePut, onCacheEvict } from "./pageCache";
 
 export type TranscriptSnap = { activity?: string; items: StreamItem[]; stream: StreamEvent[]; fromLog?: boolean; detailsPending?: boolean; spineComplete?: boolean; queueError?: string; cursor?: number; before?: number; hasOlder?: boolean };
 
@@ -156,11 +156,27 @@ export function refreshTranscript(id:string):Promise<TranscriptSnap>{
 export function loadTranscript(id:string):Promise<TranscriptSnap>{
  const cached=peekReadyTranscript(id);return cached?Promise.resolve(cached):transcriptJob(id,'initial',()=>fetchTranscript(id));
 }
-// A transcript the cache cannot hold (too large) or could not load is not
-// fetched again at every list refresh: that re-read whole event logs of large
-// live missions every 5 s.
+// A transcript the cache cannot hold (too large), evicted under LRU pressure,
+// or that could not load is not speculatively fetched again at every list
+// refresh: that re-read whole event logs of large live fleets every 5 s.
 const prefetchPaused=new Map<string,number>();
 const PREFETCH_PAUSE_MS=10*60_000,PREFETCH_RETRY_MS=60_000;
+export const MAX_LIVE_PREFETCH=8;
+onCacheEvict((evictedKey)=>{
+ if(evictedKey.endsWith(':tx')&&!active.has(evictedKey)){
+  prefetchPaused.set(evictedKey,Date.now()+PREFETCH_PAUSE_MS);
+ }
+});
+/** Pick at most `max` live missions ordered by most recent `updated_at` so a
+ * 50-mission fleet never overflows `pageCache` (`MAX = 64`) in an infinite loop. */
+export function selectLivePrefetchIds(missions: ReadonlyArray<{ id: string; status: string; updated_at?: string; created_at?: string }>, isLiveFn: (status: string) => boolean, max = MAX_LIVE_PREFETCH): string[] {
+ return missions
+  .filter(m => isLiveFn(m.status))
+  .slice()
+  .sort((a, b) => (Date.parse(b.updated_at || b.created_at || "") || 0) - (Date.parse(a.updated_at || a.created_at || "") || 0))
+  .slice(0, max)
+  .map(m => m.id);
+}
 // Keep speculative reads from occupying every connection when a conversation opens.
 const prefetchQueue=new Map<string,string>();
 let prefetchActive=0;

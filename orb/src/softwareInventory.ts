@@ -20,6 +20,7 @@ export function newer(latest:string|null,current:string|null){
  const a=version(latest),b=version(current);if(!a||!b)return false;
  for(let i=0;i<3;i++){if(a[i]!==b[i])return a[i]>b[i];}return false;
 }
+export const SOFTWARE_CONCURRENCY=4;
 let flight:Promise<void>|undefined;
 let generation=0;
 let scope="";
@@ -40,7 +41,9 @@ export function refreshSoftware(force=false):Promise<void>{
    if(epoch===generation&&connection===connectionVersion())setMachines(previous=>previous.map(m=>m.id===machine.id?machine:m));
    return machine;
   };
-  const result=await Promise.all(targets.map(async target=>{
+  const result=new Array<SoftwareMachine>(targets.length);
+  let nextIdx=0;
+  const loadTarget=async(target:SoftwareMachine):Promise<SoftwareMachine>=>{
    const old=machines().find(m=>m.id===target.id);
    if(!target.online)return publish({...target,inventory:old?.inventory,error:target.id==='local'?'Available in Orb desktop':'Offline'});
    try{
@@ -48,6 +51,13 @@ export function refreshSoftware(force=false):Promise<void>{
     if(!inventory||!Array.isArray(inventory.components)||!Array.isArray(inventory.jobs)||!inventory.runtime||!Number.isFinite(inventory.checked_at))throw new Error('Invalid software inventory');
     return publish({...target,inventory});
    }catch(e){const message=String(e);return publish({...target,inventory:old?.inventory,error:/404|unknown command|not found|not allowed|Runtime update required/i.test(message)?'Runtime update required':message});}
+  };
+  await Promise.all(Array.from({length:Math.min(SOFTWARE_CONCURRENCY,targets.length)},async()=>{
+   while(nextIdx<targets.length){
+    const idx=nextIdx++;
+    if(epoch!==generation||connection!==connectionVersion())return;
+    result[idx]=await loadTarget(targets[idx]);
+   }
   }));
   if(epoch!==generation||connection!==connectionVersion())return;
   setMachines(result);writeJson(key,result);

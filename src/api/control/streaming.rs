@@ -21,6 +21,11 @@ pub struct StreamQuery {
     pub kinds: Option<String>,
     #[serde(default)]
     pub profile: Option<String>,
+    /// Optional resume cursor (`sequence > since_seq`) for per-mission SSE
+    /// reconnects so brief transport drops replay missed persisted events
+    /// directly on the stream before live frames continue.
+    #[serde(default)]
+    pub since_seq: Option<i64>,
 }
 
 /// Bounded offscreen hints never contain prompts, tool arguments or results.
@@ -673,6 +678,7 @@ pub async fn stream(
     let control = control_for_user(&state, &user).await;
     let presentation = query.profile.as_deref() == Some("presentation");
     let mission_filter = query.mission;
+    let resume_since_seq = query.since_seq.filter(|&seq| seq >= 0);
     // Clients also send kinds=mission_presentation: older servers then send
     // no mission payloads instead of silently falling back to a full stream.
     let kinds_filter = if presentation {
@@ -736,6 +742,7 @@ pub async fn stream(
     // Clone the metrics Arc into the stream closure so we can record
     // each delivered chunk + per-mission broadcast count (P0-#3).
     let metrics = state.control_metrics.clone();
+    let replay_store = control.mission_store.clone();
 
     let stream = async_stream::stream! {
         let _guard = drop_guard;
@@ -757,6 +764,62 @@ pub async fn stream(
         shutdown_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut text_op_buffers: HashMap<Uuid, String> = HashMap::new();
         let mut activity_sent: HashMap<Uuid, std::time::Instant> = HashMap::new();
+
+        if !presentation {
+            if let (Some(mid), Some(since_seq)) = (mission_filter, resume_since_seq) {
+                const SSE_RESUME_LIMIT: usize = 500;
+                match replay_store
+                    .get_events_since(mid, since_seq, None, Some(SSE_RESUME_LIMIT + 1))
+                    .await
+                {
+                    Ok(replayed) if replayed.len() > SSE_RESUME_LIMIT => {
+                        if let Ok(sse) = Event::default()
+                            .event("stream_lagged")
+                            .json_data(serde_json::json!({ "dropped": replayed.len() }))
+                        {
+                            yield Ok(sse);
+                        }
+                    }
+                    Ok(replayed) => {
+                        for stored in replayed {
+                            let seq = stored.sequence;
+                            let Some(agent_ev) = stored_event_to_agent_event(&stored) else {
+                                continue;
+                            };
+                            if let Some(kinds) = kinds_filter.as_deref() {
+                                if !stream_kind_matches(kinds, agent_ev.event_name()) {
+                                    continue;
+                                }
+                            }
+                            let outbound = text_op_events_for_stream(agent_ev, &mut text_op_buffers);
+                            for ev in outbound {
+                                if let Ok(mut value) = deferred_messages::stream_payload(&ev)
+                                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw))
+                                {
+                                    if let Some(obj) = value.as_object_mut() {
+                                        obj.entry("sequence".to_string())
+                                            .or_insert_with(|| serde_json::json!(seq));
+                                    }
+                                    if let Ok(payload) = serde_json::to_string(&value) {
+                                        metrics.record_sse_chunk(payload.len());
+                                        yield Ok(Event::default().event(ev.event_name()).data(payload));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(mission_id = %mid, since_seq, error = %e, "SSE resume replay failed; signalling lag");
+                        if let Ok(sse) = Event::default()
+                            .event("stream_lagged")
+                            .json_data(serde_json::json!({ "dropped": 1 }))
+                        {
+                            yield Ok(sse);
+                        }
+                    }
+                }
+            }
+        }
 
         loop {
             tokio::select! {

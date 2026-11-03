@@ -1,6 +1,6 @@
 import {batch} from "solid-js";
-import { api, clearConnection, getApiUrl, getJwt, connectionVersion } from "./api";
-import { streamLoad, timed } from "./diagnostics";
+import { api, clearConnection, getJwt, connectionVersion, isAbortError, isTransientNetworkError, noteAbort, REQUEST_TIMEOUT_MS, RequestTimeoutError, transportFetch } from "./api";
+import { requestDone, streamLoad, timed } from "./diagnostics";
 import { orbStreamBoundedCommitStep } from "./orbKernel";
 
 export const STREAM_MAX_OPEN_TAIL_BYTES = 16_384;
@@ -82,13 +82,23 @@ export interface StreamEvent {
   data: Record<string, unknown>;
 }
 
-async function apiRaw(path: string): Promise<Response> {
+async function apiRawOnce(path: string): Promise<Response> {
   const version = connectionVersion();
   const jwt = getJwt();
-  const res = await fetch(`${getApiUrl()}${path}`, {
-    headers: jwt ? { Authorization: `Bearer ${jwt}` } : {},
-    signal: AbortSignal.timeout(30_000),
-  });
+  const started = performance.now();
+  let res: Response;
+  try {
+    res = await transportFetch(path, {
+      headers: jwt ? { Authorization: `Bearer ${jwt}` } : {},
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (isAbortError(error)) {
+      noteAbort(`GET ${path}`, "timeout", performance.now() - started);
+      throw new RequestTimeoutError();
+    }
+    throw error;
+  }
   if (connectionVersion() !== version) throw new Error("Connection changed");
   if (res.status === 401) {
     clearConnection();
@@ -96,6 +106,25 @@ async function apiRaw(path: string): Promise<Response> {
   }
   if (!res.ok) throw new Error(`${res.status} ${await res.text().catch(() => "")}`.trim());
   return res;
+}
+
+async function apiRaw(path: string): Promise<Response> {
+  const from = performance.now(), label = `GET ${path.slice(0, 160)}`;
+  try {
+    let res: Response;
+    try {
+      res = await apiRawOnce(path);
+    } catch (error) {
+      if (error instanceof RequestTimeoutError || !isTransientNetworkError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 200 + Math.floor(Math.random() * 200)));
+      res = await apiRawOnce(path);
+    }
+    requestDone(label, performance.now() - from, true);
+    return res;
+  } catch (error) {
+    requestDone(label, performance.now() - from, false, error instanceof Error ? error.message : String(error));
+    throw error;
+  }
 }
 
 export interface EventPage { activity?: string; events: StoredEvent[]; nextCursor?: number; pageMax?: number; reset?:boolean; hasMore: boolean }
@@ -232,14 +261,16 @@ export function streamMission(
   onReady?:()=>void,
   profile?: "presentation",
   onBatch?: (evs: StreamEvent[]) => void,
+  onDisconnected?: () => void,
 ): () => void {
   let stopped = false;
+  let highestSeq: number | undefined;
   let fragments:StreamEvent[]=[],paint:ReturnType<typeof setTimeout>|undefined;
   const flush=()=>{clearTimeout(paint);paint=undefined;const pending=fragments;fragments=[];if(pending.length)timed('stream text',()=>batch(()=>{if(onBatch)onBatch(pending);else for(const event of pending)onEvent(event);}));};
   // Thinking deltas carry the whole thought so far; applied one by one each
   // re-renders a growing block (up to 70 ms each on a long thought). They are
   // painted together with text, once per frame.
-  const deliver=(event:StreamEvent)=>{if(event.type==='text_delta'||event.type==='text_op'||(event.type==='thinking'&&event.data.done!==true)){fragments.push(event);paint??=setTimeout(flush,16);}else{flush();timed(`stream ${event.type}`,()=>onEvent(event));}};
+  const deliver=(event:StreamEvent)=>{if(typeof event.sequence==="number"&&Number.isSafeInteger(event.sequence))highestSeq=highestSeq===undefined?event.sequence:Math.max(highestSeq,event.sequence);if(event.type==='text_delta'||event.type==='text_op'||(event.type==='thinking'&&event.data.done!==true)){fragments.push(event);paint??=setTimeout(flush,16);}else{flush();timed(`stream ${event.type}`,()=>onEvent(event));}};
   let retry = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let controller: AbortController | undefined;
@@ -249,7 +280,12 @@ export function streamMission(
     controller = new AbortController();
     try {
       const jwt = getJwt();
-      const res = await fetch(`${getApiUrl()}/api/control/stream?${new URLSearchParams(missionId ? {mission: missionId} : {profile: profile ?? "presentation", kinds: "mission_presentation"})}`, {
+      const params = new URLSearchParams(
+        missionId
+          ? { mission: missionId, ...(highestSeq !== undefined ? { since_seq: String(highestSeq) } : {}) }
+          : { profile: profile ?? "presentation", kinds: "mission_presentation" },
+      );
+      const res = await transportFetch(`/api/control/stream?${params}`, {
         headers: {
           Accept: "text/event-stream",
           ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
@@ -318,6 +354,7 @@ export function streamMission(
       throw new Error("stream ended");
     } catch (e) {
       if (stopped || (e instanceof DOMException && e.name === "AbortError")) return;
+      onDisconnected?.();
       if(retry===0)onLagged();
       retry = Math.min(retry + 1, 5);
       timer = setTimeout(() => void connect(), Math.min(1000 * 2 ** retry, 15000));

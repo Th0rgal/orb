@@ -80,7 +80,7 @@ import {
 } from "./clipboard";
 import { CronForm } from "./ControllerSettings";
 import { getProjectCronFromJob } from "./cronSchema";
-import { loadTranscript, prefetchTranscript } from "./missionCache";
+import { loadTranscript, prefetchTranscript, selectLivePrefetchIds } from "./missionCache";
 import { cacheCanPrefetch, cachePeek, cachePrefetch, cachePut, cacheRemember } from "./pageCache";
 import { SidebarTree } from "./Tree";
 import { type TreeRow } from "./treeModel";
@@ -942,7 +942,7 @@ export function LiveProjectsSection(p: {
         p.onProjectMissions?.(slug, merged);
         if (opts?.transcripts === false) return;
         const deleting = deletingIds();
-        for (const m of merged) if (isLive(m.status) && !deleting.has(m.id)) prefetchTranscript(m.id);
+        for (const id of selectLivePrefetchIds(merged.filter(m => !deleting.has(m.id)), isLive)) prefetchTranscript(id);
       })
       .catch(() => {
         if (currentConnection(version) && !missions[slug]) setMissions(slug, []);

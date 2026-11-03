@@ -202,7 +202,7 @@ async fn start_worker(path: PathBuf, c: Connection) {
             workers().lock().await.remove(&path);
             return;
         }
-        let client = reqwest::Client::builder()
+        let client = crate::transport_proxy::resilient_client_builder()
             .timeout(std::time::Duration::from_secs(8))
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -542,7 +542,7 @@ pub async fn local_origin_launch(
     // Core must know the durable identity before it can issue this mission's
     // MCP grant. Registering the snapshot never dispatches a second harness.
     let started = async {
-        let response = reqwest::Client::builder()
+        let response = crate::transport_proxy::resilient_client_builder()
             .timeout(std::time::Duration::from_secs(20))
             .redirect(reqwest::redirect::Policy::none())
             .build()

@@ -83,4 +83,23 @@ class OrbConnectionIssueTest {
         assertNull(issue.proxy)
         assertTrue(issue.recommendDefault)
     }
+
+    @Test fun candidateEndpointsPairDirectAndFallback() {
+        assertEquals(
+            listOf("https://agent-backend.nico-best-pc-ever.ovh", "https://agent-backend.thomas.md"),
+            OrbConnection.candidateEndpoints("https://agent-backend.nico-best-pc-ever.ovh/")
+        )
+        assertEquals(
+            listOf("https://agent-backend.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"),
+            OrbConnection.candidateEndpoints("https://agent-backend.thomas.md")
+        )
+        assertEquals(
+            listOf("https://orb.example.com"),
+            OrbConnection.candidateEndpoints("https://orb.example.com")
+        )
+        assertTrue(OrbConnection.isFastRetryableStatus(502))
+        assertTrue(OrbConnection.isFastRetryableStatus(524))
+        assertFalse(OrbConnection.isFastRetryableStatus(500))
+        assertFalse(OrbConnection.isFastRetryableStatus(401))
+    }
 }

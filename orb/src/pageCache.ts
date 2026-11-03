@@ -28,6 +28,11 @@ const recentsKey = "orb.recentPages";
 type Entry<T> = { value: T; at: number; bytes: number };
 const store = new Map<string, Entry<unknown>>();
 const inflight = new Map<string, Promise<unknown>>();
+const evictionListeners = new Set<(key: string) => void>();
+export function onCacheEvict(listener: (key: string) => void): () => void {
+  evictionListeners.add(listener);
+  return () => { evictionListeners.delete(listener); };
+}
 let recents: string[] = loadRecents();
 
 function loadRecents(): string[] {
@@ -69,6 +74,7 @@ export function cachePut<T>(key: string, value: T): T {
     const oldest = store.keys().next().value;
     if (oldest === undefined) break;
     remove(oldest); evictions++;
+    evictionListeners.forEach((fn) => fn(oldest));
   }
   return value;
 }

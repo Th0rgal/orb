@@ -10,7 +10,7 @@ tauri-build = { version = "2", features = [] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 notify = "8"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-tokio = { version = "1", features = ["time", "sync", "macros"] }
+tokio = { version = "1", features = ["time", "sync", "macros", "net", "io-util"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 sha2 = "0.10"

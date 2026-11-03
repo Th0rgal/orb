@@ -18,11 +18,42 @@ struct OrbConnectionIssue: Equatable {
 
 enum OrbConnection {
     static let defaultBaseURL = "https://agent-backend.thomas.md"
+    static let knownDirectBaseURL = "https://agent-backend.nico-best-pc-ever.ovh"
 
     static func normalize(_ url: String) -> String {
         var s = url.trimmingCharacters(in: .whitespacesAndNewlines)
         while s.hasSuffix("/") { s.removeLast() }
         return s
+    }
+
+    /// Ordered candidate origins for multi-path failover (mirrors Desktop/Tauri/Android).
+    static func candidateEndpoints(for primary: String) -> [String] {
+        let clean = normalize(primary)
+        guard !clean.isEmpty else { return [] }
+        let lower = clean.lowercased()
+        if lower == knownDirectBaseURL || (lower.hasSuffix(".thomas.md") && lower != defaultBaseURL) {
+            return [clean, defaultBaseURL]
+        }
+        if lower == defaultBaseURL {
+            return [clean, knownDirectBaseURL]
+        }
+        return [clean]
+    }
+
+    static func isFastRetryableGetError(_ error: Error) -> Bool {
+        if let http = error as? OrbHTTPError {
+            return [502, 503, 504, 522, 524].contains(http.status)
+        }
+        if let u = error as? URLError {
+            switch u.code {
+            case .cannotConnectToHost, .cannotFindHost, .networkConnectionLost,
+                 .dnsLookupFailed, .secureConnectionFailed, .cannotLoadFromNetwork:
+                return true
+            default:
+                return false
+            }
+        }
+        return false
     }
 
     static func isDefault(_ url: String) -> Bool { normalize(url).caseInsensitiveCompare(defaultBaseURL) == .orderedSame }
