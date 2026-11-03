@@ -13,7 +13,9 @@ const realFetch=window.fetch;
 w.legacyCore=false;
 const legacyPrivilege={id:'p9',state:'pending',scope:'service_deploy',target_host:'agent-core',requester_mission_id:'7c1d2e3f-0000-4000-8000-000000000001',requester_title:'Ship usage fix',reason:'Deploy the approval queue to prod.',ttl_minutes:240,session_scoped:true,created_at:'2026-10-27T10:00:00Z'};
 const json=(v:unknown,status=200)=>new Response(JSON.stringify(v),{status,headers:{'Content-Type':'application/json'}});
+w.failApprove=false;
 window.fetch=(async(input:any,init?:any)=>{const url=String(input);if(url.includes('/api/')){w.calls.push({url,method:init?.method??'GET',body:init?.body});const path=new URL(url,location.origin).pathname;
+ if(w.failApprove&&path==='/api/approvals/approve-all')return new Response('Core requires an enrolled device for this. Enroll this Mac in Settings → Security → Approval devices.',{status:403});
  if(w.legacyCore&&path==='/api/approvals/queue')return new Response('Not Found',{status:404});
  if(w.legacyCore&&path==='/api/privilege-access')return json({bunker_state:0,requests:[legacyPrivilege],audit:[],command_audit:[]});
  if(w.legacyCore&&path==='/api/bitwarden/broker')return json({requests:[],grants:[],audit:[]});
@@ -28,5 +30,9 @@ w.addDock=()=>{
  dock.innerHTML='<div class="col"><div class="composer" style="height:80px"></div></div>';document.body.appendChild(dock);
  const side=document.createElement('div');side.style.cssText='position:fixed;right:0;bottom:0;width:200px';
  side.innerHTML='<div class="composer" style="height:40px"></div>';document.body.appendChild(side);
+};
+w.addSettings=()=>{
+ const main=document.createElement('main');main.className='main';main.style.cssText='position:fixed;left:220px;right:0;top:35px;bottom:0';
+ main.innerHTML='<div class="s-body settings-body settings-page"><div class="s-inner"><div class="s-card" style="height:120px"></div></div></div>';document.body.appendChild(main);
 };
 w.show('one');

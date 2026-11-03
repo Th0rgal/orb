@@ -103,6 +103,23 @@ test('the card is centred on the conversation composer and as wide',async({page}
   }).toBe(true);
  }
 });
+test('without a composer, the card and approval errors span the main column and deduplicate',async({page})=>{
+ await page.setViewportSize({width:1200,height:900});
+ await page.goto('/tests/approval-queue.html');
+ await page.evaluate(()=>{const w=window as any;localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');w.failApprove=true;w.addSettings();w.show('many');});
+ const card=page.getByTestId('approval-queue-card');
+ await expect(card).toBeVisible();
+ await card.getByTestId('approval-queue-row').nth(0).getByRole('button',{name:'Allow'}).click();
+ await expect(page.getByRole('alert')).toHaveCount(1);
+ await card.getByTestId('approval-queue-row').nth(1).getByRole('button',{name:'Allow'}).click();
+ await expect(page.getByRole('alert')).toHaveCount(1);
+ await expect.poll(async()=>{
+  const c=await page.locator('.toast').filter({has:card}).boundingBox();
+  const err=await page.getByRole('alert').boundingBox();
+  const s=await page.locator('.main .s-card').boundingBox();
+  return Math.abs((c!.x+c!.width/2)-(s!.x+s!.width/2))<=1&&Math.abs(c!.width-s!.width)<=1&&Math.abs(err!.x-c!.x)<=1&&Math.abs(err!.width-c!.width)<=1;
+ }).toBe(true);
+});
 test('a Core without the queue still shows a pending privilege request, approved through its own route',async({page})=>{
  await page.goto('/tests/approval-queue.html');
  await page.evaluate(()=>(window as any).loadFromLegacyCore());
