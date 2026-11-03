@@ -122,42 +122,27 @@ pub fn evaluate_stream_bounded_commit_gate(
         prev_checkpoint
     };
     let host_forced = valid && host_next_checkpoint > next_commit;
-    let sim = crate::orb_spec::shadow::RefinementSimulation::<
-        (bool, u32),
-        (bool, u32),
-        crate::orb_spec::StreamBoundedCommitInput,
-        u8,
-        u8,
-    > {
-        subsystem: "orb_stream_bounded_commit_step",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    stream_bounded_commit_shadow_counter().observe_transition(
+        "orb_stream_bounded_commit_step",
+        (false, prev_checkpoint),
+        (valid, host_next_checkpoint),
+        input,
+        &[u8::from(host_forced)],
+        |_, ev, _| {
             let v = crate::orb_spec::stream_bounded_commit_step(*ev);
             (
                 (v.admitted, v.next_checkpoint),
                 vec![u8::from(v.checkpoint_forced)],
             )
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let ctx = crate::orb_spec::shadow::EventContext {
-        now_ms: u64::from(new_len),
-        fresh_nonce: u64::from(prev_len),
-        idempotency_key: u64::from(raw_commit),
-        boot_id_matches: true,
-        schema_id: 2,
-    };
-    stream_bounded_commit_shadow_counter().with_ring(|ring| {
-        let _ = sim.observe_step(
-            &(false, prev_checkpoint),
-            &(valid, host_next_checkpoint),
-            &input,
-            &[u8::from(host_forced)],
-            ctx,
-            ring,
-        );
-    });
+        crate::orb_spec::shadow::EventContext {
+            now_ms: u64::from(new_len),
+            fresh_nonce: u64::from(prev_len),
+            idempotency_key: u64::from(raw_commit),
+            boot_id_matches: true,
+            schema_id: 2,
+        },
+    );
     verdict
 }
 

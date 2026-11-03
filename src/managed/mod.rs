@@ -172,42 +172,27 @@ pub fn evaluate_resource_ledger_gate(
     } else {
         active_slots
     } as u16;
-    let sim = crate::orb_spec::shadow::RefinementSimulation::<
-        (bool, u16, u16),
-        (bool, u16, u16),
-        crate::orb_spec::ResourceLedgerStepInput,
-        u8,
-        u8,
-    > {
-        subsystem: "orb_resource_ledger_step",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    resource_ledger_shadow_counter().observe_transition(
+        "orb_resource_ledger_step",
+        (false, reserved_slots as u16, active_slots as u16),
+        (host_admitted, host_next_reserved, host_next_active),
+        input,
+        &[u8::from(state_valid)],
+        |_, ev, _| {
             let v = crate::orb_spec::resource_ledger_step(*ev);
             (
                 (v.admitted, v.next_reserved_slots, v.next_active_slots),
                 vec![u8::from(v.state_valid)],
             )
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let ctx = crate::orb_spec::shadow::EventContext {
-        now_ms: now_tick,
-        fresh_nonce: ttl_expiry_tick,
-        idempotency_key: cost_delta_cents,
-        boot_id_matches: true,
-        schema_id: 2,
-    };
-    resource_ledger_shadow_counter().with_ring(|ring| {
-        let _ = sim.observe_step(
-            &(false, reserved_slots as u16, active_slots as u16),
-            &(host_admitted, host_next_reserved, host_next_active),
-            &input,
-            &[u8::from(state_valid)],
-            ctx,
-            ring,
-        );
-    });
+        crate::orb_spec::shadow::EventContext {
+            now_ms: now_tick,
+            fresh_nonce: ttl_expiry_tick,
+            idempotency_key: cost_delta_cents,
+            boot_id_matches: true,
+            schema_id: 2,
+        },
+    );
     verdict
 }
 const TOKEN_ENV_PREFIX: &str = "SANDBOXED_MANAGED_TOKEN_";

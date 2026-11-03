@@ -565,39 +565,24 @@ pub fn evaluate_outbox_crash_reconcile_gate(
     } else {
         3u8
     };
-    let sim = crate::orb_spec::shadow::RefinementSimulation::<
-        (bool, u32),
-        (bool, u32),
-        crate::orb_spec::OutboxCrashReconcileInput,
-        u8,
-        u8,
-    > {
-        subsystem: "orb_outbox_crash_reconcile_step",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    outbox_crash_reconcile_shadow_counter().observe_transition(
+        "orb_outbox_crash_reconcile_step",
+        (false, 0u32),
+        (host_admitted, host_unacked),
+        input,
+        &[host_action_code],
+        |_, ev, _| {
             let v = crate::orb_spec::outbox_crash_reconcile_step(*ev);
             ((v.admitted, v.unacked_depth), vec![v.action_code])
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let ctx = crate::orb_spec::shadow::EventContext {
-        now_ms: node_boot_epoch,
-        fresh_nonce: lease_boot_epoch,
-        idempotency_key: u64::from(req_owner),
-        boot_id_matches: !crash_reset,
-        schema_id: 2,
-    };
-    outbox_crash_reconcile_shadow_counter().with_ring(|ring| {
-        let _ = sim.observe_step(
-            &(false, 0),
-            &(host_admitted, host_unacked),
-            &input,
-            &[host_action_code],
-            ctx,
-            ring,
-        );
-    });
+        crate::orb_spec::shadow::EventContext {
+            now_ms: node_boot_epoch,
+            fresh_nonce: lease_boot_epoch,
+            idempotency_key: u64::from(req_owner),
+            boot_id_matches: !crash_reset,
+            schema_id: 2,
+        },
+    );
     verdict
 }
 

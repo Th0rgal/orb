@@ -201,11 +201,12 @@ pub struct ProxyShadowSnapshot {
     pub recent_divergences: usize,
 }
 
-static PROXY_SHADOW_RING: std::sync::LazyLock<
-    std::sync::Mutex<crate::orb_spec::shadow::ShadowDivergenceRing<256>>,
-> = std::sync::LazyLock::new(|| {
-    std::sync::Mutex::new(crate::orb_spec::shadow::ShadowDivergenceRing::<256>::new())
-});
+static PROXY_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
+    std::sync::OnceLock::new();
+
+fn proxy_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    PROXY_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
 
 static PROVIDER_ATTEMPT_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
     std::sync::OnceLock::new();
@@ -270,53 +271,36 @@ pub fn evaluate_provider_attempt_gate(
     } else {
         1u8
     };
-    let sim = crate::orb_spec::shadow::RefinementSimulation::<
-        (bool, u32),
-        (bool, u32),
-        crate::orb_spec::ProviderAttemptStepInput,
-        u8,
-        u8,
-    > {
-        subsystem: "orb_provider_attempt_step",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    provider_attempt_shadow_counter().observe_transition(
+        "orb_provider_attempt_step",
+        (first_byte_committed, attempts_used),
+        (host_admitted, host_next_attempts),
+        input,
+        &[host_action_code],
+        |_, ev, _| {
             let v = crate::orb_spec::provider_attempt_step(*ev);
             ((v.admitted, v.next_attempts_used), vec![v.action_code])
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let ctx = crate::orb_spec::shadow::EventContext {
-        now_ms: upstream_now_epoch.saturating_mul(1000),
-        fresh_nonce: u64::from(attempts_used),
-        idempotency_key: u64::from(candidate_account_id),
-        boot_id_matches: true,
-        schema_id: 2,
-    };
-    provider_attempt_shadow_counter().with_ring(|ring| {
-        let _ = sim.observe_step(
-            &(first_byte_committed, attempts_used),
-            &(host_admitted, host_next_attempts),
-            &input,
-            &[host_action_code],
-            ctx,
-            ring,
-        );
-    });
+        crate::orb_spec::shadow::EventContext {
+            now_ms: upstream_now_epoch.saturating_mul(1000),
+            fresh_nonce: u64::from(attempts_used),
+            idempotency_key: u64::from(candidate_account_id),
+            boot_id_matches: true,
+            schema_id: 2,
+        },
+    );
     verdict
 }
 
 /// Snapshot the live proxy shadow-mode counters (`total_steps`, `total_divergences`) for
 /// `/api/model-routing/shadow` and structured telemetry.
 pub fn proxy_shadow_snapshot() -> ProxyShadowSnapshot {
-    let ring = PROXY_SHADOW_RING
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let snap = proxy_shadow_counter().snapshot("proxy_provider_pool");
     ProxyShadowSnapshot {
-        subsystem: "proxy_provider_pool",
-        total_steps: ring.total_events,
-        total_divergences: ring.unexpected_divergences,
-        recent_divergences: ring.entries().len(),
+        subsystem: snap.subsystem,
+        total_steps: snap.total_events,
+        total_divergences: snap.total_divergences,
+        recent_divergences: snap.recent_divergences,
     }
 }
 
@@ -330,56 +314,40 @@ pub fn verify_account_dispatch_candidate(
     crate::orb_spec::provider_pool_step(input)
 }
 
-/// Run `verify_account_dispatch_candidate` in lockstep with the host decision via
-/// `RefinementSimulation::observe_step` and record the comparison in `PROXY_SHADOW_RING`.
+/// Run `verify_account_dispatch_candidate` in lockstep with the host decision
+/// and record the comparison in `PROXY_SHADOW_COUNTER`.
 pub fn observe_account_candidate_shadow(
     input: crate::orb_spec::ProviderPoolStepInput,
     host_admits: bool,
 ) -> crate::orb_spec::ProviderPoolStepVerdict {
     let verdict = verify_account_dispatch_candidate(input);
-    let sim = crate::orb_spec::shadow::RefinementSimulation::<
-        bool,
-        bool,
-        crate::orb_spec::ProviderPoolStepInput,
-        u32,
-        u32,
-    > {
-        subsystem: "proxy_provider_pool",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    let host_effects: Vec<u32> = host_admits
+        .then_some(input.candidate_account_id)
+        .into_iter()
+        .collect();
+    proxy_shadow_counter().observe_transition(
+        "proxy_provider_pool",
+        input.first_byte_sent,
+        input.first_byte_sent || host_admits,
+        input,
+        &host_effects,
+        |_, ev, _| {
             let v = verify_account_dispatch_candidate(*ev);
-            let effs = if v.emit_dispatch_effect {
-                vec![v.dispatched_account_id]
-            } else {
-                Vec::new()
-            };
+            let effs = v
+                .emit_dispatch_effect
+                .then_some(v.dispatched_account_id)
+                .into_iter()
+                .collect();
             (v.first_byte_locked_next, effs)
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let host_effects = if host_admits {
-        vec![input.candidate_account_id]
-    } else {
-        Vec::new()
-    };
-    let ctx = crate::orb_spec::shadow::EventContext {
-        now_ms: input.now_epoch.saturating_mul(1000),
-        fresh_nonce: input.attempts as u64,
-        idempotency_key: input.candidate_account_id as u64,
-        boot_id_matches: true,
-        schema_id: 1,
-    };
-    if let Ok(mut ring) = PROXY_SHADOW_RING.lock() {
-        let _ = sim.observe_step(
-            &input.first_byte_sent,
-            &verdict.first_byte_locked_next,
-            &input,
-            &host_effects,
-            ctx,
-            &mut ring,
-        );
-    }
+        crate::orb_spec::shadow::EventContext {
+            now_ms: input.now_epoch.saturating_mul(1000),
+            fresh_nonce: input.attempts as u64,
+            idempotency_key: input.candidate_account_id as u64,
+            boot_id_matches: true,
+            schema_id: 1,
+        },
+    );
     verdict
 }
 
@@ -405,7 +373,7 @@ pub fn select_argmin_account_candidate(
 }
 
 /// Run `select_argmin_account_candidate` in shadow lockstep with the host's top account pick
-/// via `RefinementSimulation::observe_step` into `PROXY_SHADOW_RING`.
+/// into `PROXY_SHADOW_COUNTER`.
 pub fn observe_argmin_selection_shadow(
     bound_account_id: Option<u32>,
     now_epoch: u64,
@@ -421,35 +389,33 @@ pub fn observe_argmin_selection_shadow(
         now_epoch,
         candidates,
     );
-    let sim =
-        crate::orb_spec::shadow::RefinementSimulation::<Option<u32>, Option<u32>, u64, u32, u32> {
-            subsystem: "proxy_argmin_route_fold",
-            abs_state: |s| *s,
-            norm_effects: |effs| effs.to_vec(),
-            lean_step: |s, _ev, _ctx| {
-                let effs = s.iter().copied().collect();
-                (*s, effs)
-            },
-            classify_known_legacy_bug: |_, _, _, _| None,
-        };
     let host_effects: Vec<u32> = host_selected_id.into_iter().collect();
-    let ctx = crate::orb_spec::shadow::EventContext {
-        now_ms: now_epoch.saturating_mul(1000),
-        fresh_nonce: 0,
-        idempotency_key: host_selected_id.unwrap_or(0) as u64,
-        boot_id_matches: true,
-        schema_id: 1,
-    };
-    if let Ok(mut ring) = PROXY_SHADOW_RING.lock() {
-        let _ = sim.observe_step(
-            &lean_selected,
-            &host_selected_id,
-            &now_epoch,
-            &host_effects,
-            ctx,
-            &mut ring,
-        );
-    }
+    proxy_shadow_counter().observe_transition(
+        "proxy_argmin_route_fold",
+        None,
+        host_selected_id,
+        (bound_account_id, now_epoch, candidates.to_vec()),
+        &host_effects,
+        |_, (bound, now, cands), _| {
+            let sel = select_argmin_account_candidate(
+                *bound,
+                false,
+                false,
+                0,
+                (cands.len() as u32).max(1),
+                *now,
+                cands,
+            );
+            (sel, sel.into_iter().collect())
+        },
+        crate::orb_spec::shadow::EventContext {
+            now_ms: now_epoch.saturating_mul(1000),
+            fresh_nonce: 0,
+            idempotency_key: host_selected_id.unwrap_or(0) as u64,
+            boot_id_matches: true,
+            schema_id: 1,
+        },
+    );
     lean_selected
 }
 
@@ -5807,5 +5773,40 @@ mod tests {
         let snap = provider_attempt_shadow_counter().snapshot("orb_provider_attempt_step");
         assert!(snap.total_events >= 4);
         assert_eq!(snap.total_divergences, 0);
+
+        let pool_ok = observe_account_candidate_shadow(
+            crate::orb_spec::ProviderPoolStepInput {
+                bound_account_id: Some(2),
+                candidate_account_id: 2,
+                is_rejected: false,
+                first_byte_sent: false,
+                is_failover_attempt: false,
+                attempts: 0,
+                max_attempts: 3,
+                now_epoch: 1000,
+                reset_epoch: 0,
+            },
+            true,
+        );
+        assert!(pool_ok.emit_dispatch_effect);
+        let cands = [
+            crate::orb_spec::RouteCandidate {
+                account_id: 7,
+                score: 5,
+                is_rejected: false,
+                reset_epoch: 0,
+            },
+            crate::orb_spec::RouteCandidate {
+                account_id: 3,
+                score: 2,
+                is_rejected: false,
+                reset_epoch: 0,
+            },
+        ];
+        assert_eq!(
+            observe_argmin_selection_shadow(None, 1000, &cands, Some(3)),
+            Some(3)
+        );
+        assert_eq!(super::proxy_shadow_snapshot().total_divergences, 0);
     }
 }

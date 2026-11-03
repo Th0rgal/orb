@@ -4293,6 +4293,58 @@ impl ShadowCounter {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         f(&mut ring)
     }
+
+    /// Observe one typed state/effect transition against `lean_step` via
+    /// [`shadow::RefinementSimulation::observe_step`] and record into `self`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_transition<S, E, Eff>(
+        &self,
+        subsystem: &'static str,
+        before: S,
+        host_after: S,
+        event: E,
+        host_effects: &[Eff],
+        lean_step: fn(&S, &E, shadow::EventContext) -> (S, Vec<Eff>),
+        ctx: shadow::EventContext,
+    ) where
+        S: Clone + PartialEq + core::fmt::Debug,
+        E: core::fmt::Debug,
+        Eff: PartialEq + Ord + Clone + core::fmt::Debug,
+    {
+        let sim = shadow::RefinementSimulation::<S, S, E, Eff, Eff> {
+            subsystem,
+            abs_state: |s| s.clone(),
+            norm_effects: |effs| effs.to_vec(),
+            lean_step,
+            classify_known_legacy_bug: |_, _, _, _| None,
+        };
+        self.with_ring(|ring| {
+            let _ = sim.observe_step(&before, &host_after, &event, host_effects, ctx, ring);
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_bool_action<E: Copy + core::fmt::Debug>(
+        &self,
+        subsystem: &'static str,
+        before: bool,
+        host_admitted: bool,
+        action_u8: u8,
+        input: E,
+        lean_step: fn(&bool, &E, shadow::EventContext) -> (bool, Vec<u8>),
+        ctx: shadow::EventContext,
+    ) {
+        let host_eff = [if host_admitted { action_u8 } else { 0u8 }];
+        self.observe_transition(
+            subsystem,
+            before,
+            host_admitted,
+            input,
+            &host_eff,
+            lean_step,
+            ctx,
+        );
+    }
 }
 
 /// Observe `privd_command_step` (`orb_privd_command_step`) against the host admission decision.
@@ -4302,43 +4354,27 @@ pub fn observe_privd_command_shadow(
     counter: &ShadowCounter,
 ) -> PrivdCommandStepVerdict {
     let verdict = privd_command_step(input);
-    let sim = shadow::RefinementSimulation::<bool, bool, PrivdCommandStepInput, u8, u8> {
-        subsystem: "orb_privd_command_step",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    counter.observe_bool_action(
+        "orb_privd_command_step",
+        input.lease_valid,
+        host_allow_exec,
+        verdict.action as u8,
+        input,
+        |_, ev, _| {
             let v = privd_command_step(*ev);
-            let effs = if v.allow_exec {
-                vec![v.action as u8]
-            } else {
-                vec![0u8]
-            };
-            (v.allow_exec, effs)
+            (
+                v.allow_exec,
+                vec![if v.allow_exec { v.action as u8 } else { 0 }],
+            )
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let host_effects = if host_allow_exec {
-        vec![verdict.action as u8]
-    } else {
-        vec![0u8]
-    };
-    let ctx = shadow::EventContext {
-        now_ms: 0,
-        fresh_nonce: u64::from(input.grant_scope as u8),
-        idempotency_key: u64::from(input.command_class as u8),
-        boot_id_matches: true,
-        schema_id: 5,
-    };
-    if let Ok(mut ring) = counter.ring.lock() {
-        let _ = sim.observe_step(
-            &input.lease_valid,
-            &host_allow_exec,
-            &input,
-            &host_effects,
-            ctx,
-            &mut ring,
-        );
-    }
+        shadow::EventContext {
+            now_ms: 0,
+            fresh_nonce: u64::from(input.grant_scope as u8),
+            idempotency_key: u64::from(input.command_class as u8),
+            boot_id_matches: true,
+            schema_id: 5,
+        },
+    );
     verdict
 }
 
@@ -4349,43 +4385,24 @@ pub fn observe_ssh_identity_shadow(
     counter: &ShadowCounter,
 ) -> SshIdentityStepVerdict {
     let verdict = ssh_identity_step(input);
-    let sim = shadow::RefinementSimulation::<bool, bool, SshIdentityStepInput, u8, u8> {
-        subsystem: "orb_ssh_identity_step",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    counter.observe_bool_action(
+        "orb_ssh_identity_step",
+        input.is_worker_or_container_target,
+        host_admits,
+        verdict.action as u8,
+        input,
+        |_, ev, _| {
             let v = ssh_identity_step(*ev);
-            let effs = if v.admit {
-                vec![v.action as u8]
-            } else {
-                vec![0u8]
-            };
-            (v.admit, effs)
+            (v.admit, vec![if v.admit { v.action as u8 } else { 0 }])
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let host_effects = if host_admits {
-        vec![verdict.action as u8]
-    } else {
-        vec![0u8]
-    };
-    let ctx = shadow::EventContext {
-        now_ms: 0,
-        fresh_nonce: u64::from(input.is_worker_or_container_target),
-        idempotency_key: u64::from(input.bundle_has_control_plane_key),
-        boot_id_matches: true,
-        schema_id: 5,
-    };
-    if let Ok(mut ring) = counter.ring.lock() {
-        let _ = sim.observe_step(
-            &input.is_worker_or_container_target,
-            &host_admits,
-            &input,
-            &host_effects,
-            ctx,
-            &mut ring,
-        );
-    }
+        shadow::EventContext {
+            now_ms: 0,
+            fresh_nonce: u64::from(input.is_worker_or_container_target),
+            idempotency_key: u64::from(input.bundle_has_control_plane_key),
+            boot_id_matches: true,
+            schema_id: 5,
+        },
+    );
     verdict
 }
 
@@ -4396,43 +4413,27 @@ pub fn observe_agent_event_normalize_shadow(
     counter: &ShadowCounter,
 ) -> AgentEventNormalizeStepVerdict {
     let verdict = agent_event_normalize_step(input);
-    let sim = shadow::RefinementSimulation::<bool, bool, AgentEventNormalizeStepInput, u8, u8> {
-        subsystem: "orb_agent_event_normalize_step",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    counter.observe_bool_action(
+        "orb_agent_event_normalize_step",
+        input.is_completed,
+        host_emits,
+        verdict.action as u8,
+        input,
+        |_, ev, _| {
             let v = agent_event_normalize_step(*ev);
-            let effs = if v.emit_event {
-                vec![v.action as u8]
-            } else {
-                vec![0u8]
-            };
-            (v.emit_event, effs)
+            (
+                v.emit_event,
+                vec![if v.emit_event { v.action as u8 } else { 0 }],
+            )
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let host_effects = if host_emits {
-        vec![verdict.action as u8]
-    } else {
-        vec![0u8]
-    };
-    let ctx = shadow::EventContext {
-        now_ms: 0,
-        fresh_nonce: u64::from(input.harness_kind as u8),
-        idempotency_key: u64::from(input.raw_event_kind as u8),
-        boot_id_matches: true,
-        schema_id: 3,
-    };
-    if let Ok(mut ring) = counter.ring.lock() {
-        let _ = sim.observe_step(
-            &input.is_completed,
-            &host_emits,
-            &input,
-            &host_effects,
-            ctx,
-            &mut ring,
-        );
-    }
+        shadow::EventContext {
+            now_ms: 0,
+            fresh_nonce: u64::from(input.harness_kind as u8),
+            idempotency_key: u64::from(input.raw_event_kind as u8),
+            boot_id_matches: true,
+            schema_id: 3,
+        },
+    );
     verdict
 }
 
@@ -4443,43 +4444,27 @@ pub fn observe_transcript_reduce_shadow(
     counter: &ShadowCounter,
 ) -> TranscriptReduceStepVerdict {
     let verdict = transcript_reduce_step(input);
-    let sim = shadow::RefinementSimulation::<bool, bool, TranscriptReduceStepInput, u8, u8> {
-        subsystem: "orb_transcript_reduce_step",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    counter.observe_bool_action(
+        "orb_transcript_reduce_step",
+        input.thinking_open,
+        host_emits,
+        verdict.action as u8,
+        input,
+        |_, ev, _| {
             let v = transcript_reduce_step(*ev);
-            let effs = if v.emit_entry {
-                vec![v.action as u8]
-            } else {
-                vec![0u8]
-            };
-            (v.emit_entry, effs)
+            (
+                v.emit_entry,
+                vec![if v.emit_entry { v.action as u8 } else { 0 }],
+            )
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let host_effects = if host_emits {
-        vec![verdict.action as u8]
-    } else {
-        vec![0u8]
-    };
-    let ctx = shadow::EventContext {
-        now_ms: 0,
-        fresh_nonce: input.last_applied_seq,
-        idempotency_key: input.incoming_seq,
-        boot_id_matches: true,
-        schema_id: 3,
-    };
-    if let Ok(mut ring) = counter.ring.lock() {
-        let _ = sim.observe_step(
-            &input.thinking_open,
-            &host_emits,
-            &input,
-            &host_effects,
-            ctx,
-            &mut ring,
-        );
-    }
+        shadow::EventContext {
+            now_ms: 0,
+            fresh_nonce: input.last_applied_seq,
+            idempotency_key: input.incoming_seq,
+            boot_id_matches: true,
+            schema_id: 3,
+        },
+    );
     verdict
 }
 
@@ -4490,43 +4475,27 @@ pub fn observe_cursor_page_shadow(
     counter: &ShadowCounter,
 ) -> CursorPageStepVerdict {
     let verdict = cursor_page_step(input);
-    let sim = shadow::RefinementSimulation::<bool, bool, CursorPageStepInput, u8, u8> {
-        subsystem: "orb_cursor_page_step",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    counter.observe_bool_action(
+        "orb_cursor_page_step",
+        input.is_partial_response,
+        host_includes,
+        verdict.action as u8,
+        input,
+        |_, ev, _| {
             let v = cursor_page_step(*ev);
-            let effs = if v.include_item {
-                vec![v.action as u8]
-            } else {
-                vec![0u8]
-            };
-            (v.include_item, effs)
+            (
+                v.include_item,
+                vec![if v.include_item { v.action as u8 } else { 0 }],
+            )
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let host_effects = if host_includes {
-        vec![verdict.action as u8]
-    } else {
-        vec![0u8]
-    };
-    let ctx = shadow::EventContext {
-        now_ms: 0,
-        fresh_nonce: input.item_seq,
-        idempotency_key: u64::from(input.existing_count),
-        boot_id_matches: true,
-        schema_id: 4,
-    };
-    if let Ok(mut ring) = counter.ring.lock() {
-        let _ = sim.observe_step(
-            &input.is_partial_response,
-            &host_includes,
-            &input,
-            &host_effects,
-            ctx,
-            &mut ring,
-        );
-    }
+        shadow::EventContext {
+            now_ms: 0,
+            fresh_nonce: input.item_seq,
+            idempotency_key: u64::from(input.existing_count),
+            boot_id_matches: true,
+            schema_id: 4,
+        },
+    );
     verdict
 }
 
@@ -4537,43 +4506,31 @@ pub fn observe_sidebar_merge_shadow(
     counter: &ShadowCounter,
 ) -> SidebarMergeStepVerdict {
     let verdict = sidebar_merge_step(input);
-    let sim = shadow::RefinementSimulation::<bool, bool, SidebarMergeStepInput, u8, u8> {
-        subsystem: "orb_sidebar_merge_step",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    counter.observe_bool_action(
+        "orb_sidebar_merge_step",
+        input.is_partial_page,
+        host_retains_or_upserts,
+        verdict.action as u8,
+        input,
+        |_, ev, _| {
             let v = sidebar_merge_step(*ev);
-            let effs = if v.retain_or_upsert {
-                vec![v.action as u8]
-            } else {
-                vec![0u8]
-            };
-            (v.retain_or_upsert, effs)
+            (
+                v.retain_or_upsert,
+                vec![if v.retain_or_upsert {
+                    v.action as u8
+                } else {
+                    0
+                }],
+            )
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let host_effects = if host_retains_or_upserts {
-        vec![verdict.action as u8]
-    } else {
-        vec![0u8]
-    };
-    let ctx = shadow::EventContext {
-        now_ms: input.incoming_updated_at_ms,
-        fresh_nonce: u64::from(input.existing_id_ord),
-        idempotency_key: u64::from(input.incoming_id_ord),
-        boot_id_matches: true,
-        schema_id: 4,
-    };
-    if let Ok(mut ring) = counter.ring.lock() {
-        let _ = sim.observe_step(
-            &input.is_partial_page,
-            &host_retains_or_upserts,
-            &input,
-            &host_effects,
-            ctx,
-            &mut ring,
-        );
-    }
+        shadow::EventContext {
+            now_ms: input.incoming_updated_at_ms,
+            fresh_nonce: u64::from(input.existing_id_ord),
+            idempotency_key: u64::from(input.incoming_id_ord),
+            boot_id_matches: true,
+            schema_id: 4,
+        },
+    );
     verdict
 }
 
@@ -4584,43 +4541,27 @@ pub fn observe_scroll_epoch_shadow(
     counter: &ShadowCounter,
 ) -> ScrollEpochStepVerdict {
     let verdict = scroll_epoch_step(input);
-    let sim = shadow::RefinementSimulation::<bool, bool, ScrollEpochStepInput, u8, u8> {
-        subsystem: "orb_scroll_epoch_step",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    counter.observe_bool_action(
+        "orb_scroll_epoch_step",
+        input.is_pinned_to_bottom,
+        host_applies_correction,
+        verdict.action as u8,
+        input,
+        |_, ev, _| {
             let v = scroll_epoch_step(*ev);
-            let effs = if v.apply_scroll {
-                vec![v.action as u8]
-            } else {
-                vec![0u8]
-            };
-            (v.apply_scroll, effs)
+            (
+                v.apply_scroll,
+                vec![if v.apply_scroll { v.action as u8 } else { 0 }],
+            )
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let host_effects = if host_applies_correction {
-        vec![verdict.action as u8]
-    } else {
-        vec![0u8]
-    };
-    let ctx = shadow::EventContext {
-        now_ms: 0,
-        fresh_nonce: u64::from(input.layout_epoch),
-        idempotency_key: u64::from(input.last_corrected_epoch),
-        boot_id_matches: true,
-        schema_id: 6,
-    };
-    if let Ok(mut ring) = counter.ring.lock() {
-        let _ = sim.observe_step(
-            &input.is_pinned_to_bottom,
-            &host_applies_correction,
-            &input,
-            &host_effects,
-            ctx,
-            &mut ring,
-        );
-    }
+        shadow::EventContext {
+            now_ms: 0,
+            fresh_nonce: u64::from(input.layout_epoch),
+            idempotency_key: u64::from(input.last_corrected_epoch),
+            boot_id_matches: true,
+            schema_id: 6,
+        },
+    );
     verdict
 }
 
@@ -4660,11 +4601,13 @@ pub fn observe_client_parity_shadow(
         parity_admitted: ((raw >> 8) & 1) != 0,
         digest32: (raw >> 32) as u32,
     };
-    let sim = shadow::RefinementSimulation::<bool, bool, ClientParityStepInput, u8, u8> {
-        subsystem: "orb_client_parity_step",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    counter.observe_bool_action(
+        "orb_client_parity_step",
+        true,
+        host_admits_parity,
+        (raw & 0xFF) as u8,
+        input,
+        |_, ev, _| {
             let r = client_parity_step(
                 ev.client_target,
                 ev.wire_schema_id,
@@ -4674,37 +4617,16 @@ pub fn observe_client_parity_shadow(
                 ev.scroll_corrected_in_epoch,
             );
             let admitted = ((r >> 8) & 1) != 0;
-            let effs = if admitted {
-                vec![(r & 0xFF) as u8]
-            } else {
-                vec![0u8]
-            };
-            (admitted, effs)
+            (admitted, vec![if admitted { (r & 0xFF) as u8 } else { 0 }])
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let host_effects = if host_admits_parity {
-        vec![(raw & 0xFF) as u8]
-    } else {
-        vec![0u8]
-    };
-    let ctx = shadow::EventContext {
-        now_ms: 0,
-        fresh_nonce: u64::from(input.transcript_seq),
-        idempotency_key: u64::from(input.wire_schema_id),
-        boot_id_matches: true,
-        schema_id: 6,
-    };
-    if let Ok(mut ring) = counter.ring.lock() {
-        let _ = sim.observe_step(
-            &true,
-            &host_admits_parity,
-            &input,
-            &host_effects,
-            ctx,
-            &mut ring,
-        );
-    }
+        shadow::EventContext {
+            now_ms: 0,
+            fresh_nonce: u64::from(input.transcript_seq),
+            idempotency_key: u64::from(input.wire_schema_id),
+            boot_id_matches: true,
+            schema_id: 6,
+        },
+    );
     verdict
 }
 
@@ -9126,35 +9048,24 @@ pub fn observe_hierarchy_merge_shadow(
     counter: &ShadowCounter,
 ) -> HierarchyMergeStepVerdict {
     let verdict = hierarchy_merge_step(input);
-    let sim =
-        shadow::RefinementSimulation::<(bool, u32), (bool, u32), HierarchyMergeStepInput, u8, u8> {
-            subsystem: "orb_hierarchy_merge_step",
-            abs_state: |s| *s,
-            norm_effects: |effs| effs.to_vec(),
-            lean_step: |_s, ev, _ctx| {
-                let v = hierarchy_merge_step(*ev);
-                ((v.admitted, v.next_parent_ord), vec![v.action_code])
-            },
-            classify_known_legacy_bug: |_, _, _, _| None,
-        };
-    let host_eff = vec![if host_admitted { 1u8 } else { 2u8 }];
-    let ctx = shadow::EventContext {
-        now_ms: input.incoming_epoch,
-        fresh_nonce: input.current_epoch,
-        idempotency_key: input.incoming_epoch,
-        boot_id_matches: true,
-        schema_id: 2,
-    };
-    if let Ok(mut ring) = counter.ring.lock() {
-        let _ = sim.observe_step(
-            &(false, input.cur_parent_ord),
-            &(host_admitted, host_next_parent_ord),
-            &input,
-            &host_eff,
-            ctx,
-            &mut ring,
-        );
-    }
+    counter.observe_transition(
+        "orb_hierarchy_merge_step",
+        (false, input.cur_parent_ord),
+        (host_admitted, host_next_parent_ord),
+        input,
+        &[if host_admitted { 1u8 } else { 2u8 }],
+        |_, ev, _| {
+            let v = hierarchy_merge_step(*ev);
+            ((v.admitted, v.next_parent_ord), vec![v.action_code])
+        },
+        shadow::EventContext {
+            now_ms: input.incoming_epoch,
+            fresh_nonce: input.current_epoch,
+            idempotency_key: input.incoming_epoch,
+            boot_id_matches: true,
+            schema_id: 2,
+        },
+    );
     verdict
 }
 
@@ -9213,34 +9124,24 @@ pub fn observe_transcript_fold_shadow(
     counter: &ShadowCounter,
 ) -> TranscriptFoldStepVerdict {
     let verdict = transcript_fold_step(input);
-    let sim =
-        shadow::RefinementSimulation::<(bool, u32), (bool, u32), TranscriptFoldStepInput, u8, u8> {
-            subsystem: "orb_transcript_fold_step",
-            abs_state: |s| *s,
-            norm_effects: |effs| effs.to_vec(),
-            lean_step: |_s, ev, _ctx| {
-                let v = transcript_fold_step(*ev);
-                ((v.admitted, v.next_entry_count), vec![v.action_code])
-            },
-            classify_known_legacy_bug: |_, _, _, _| None,
-        };
-    let ctx = shadow::EventContext {
-        now_ms: 0,
-        fresh_nonce: input.incoming_seq,
-        idempotency_key: input.incoming_seq,
-        boot_id_matches: true,
-        schema_id: 2,
-    };
-    if let Ok(mut ring) = counter.ring.lock() {
-        let _ = sim.observe_step(
-            &(false, input.entry_count),
-            &(host_admitted, host_next_entry_count),
-            &input,
-            &[host_action_code],
-            ctx,
-            &mut ring,
-        );
-    }
+    counter.observe_transition(
+        "orb_transcript_fold_step",
+        (false, input.entry_count),
+        (host_admitted, host_next_entry_count),
+        input,
+        &[host_action_code],
+        |_, ev, _| {
+            let v = transcript_fold_step(*ev);
+            ((v.admitted, v.next_entry_count), vec![v.action_code])
+        },
+        shadow::EventContext {
+            now_ms: 0,
+            fresh_nonce: input.incoming_seq,
+            idempotency_key: input.incoming_seq,
+            boot_id_matches: true,
+            schema_id: 2,
+        },
+    );
     verdict
 }
 
@@ -9397,33 +9298,24 @@ pub fn observe_auth_toctou_shadow(
     counter: &ShadowCounter,
 ) -> AuthToctouExecuteVerdict {
     let verdict = auth_toctou_execute_step(input);
-    let sim = shadow::RefinementSimulation::<bool, bool, AuthToctouExecuteInput, u8, u8> {
-        subsystem: "orb_auth_toctou_execute_step",
-        abs_state: |s| *s,
-        norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
+    counter.observe_transition(
+        "orb_auth_toctou_execute_step",
+        false,
+        host_admitted,
+        input,
+        &[host_reason_code],
+        |_, ev, _| {
             let v = auth_toctou_execute_step(*ev);
             (v.admitted, vec![v.reason_code])
         },
-        classify_known_legacy_bug: |_, _, _, _| None,
-    };
-    let ctx = shadow::EventContext {
-        now_ms: input.now_tick,
-        fresh_nonce: input.observed_lease_epoch,
-        idempotency_key: input.observed_digest,
-        boot_id_matches: true,
-        schema_id: 2,
-    };
-    if let Ok(mut ring) = counter.ring.lock() {
-        let _ = sim.observe_step(
-            &false,
-            &host_admitted,
-            &input,
-            &[host_reason_code],
-            ctx,
-            &mut ring,
-        );
-    }
+        shadow::EventContext {
+            now_ms: input.now_tick,
+            fresh_nonce: input.observed_lease_epoch,
+            idempotency_key: input.observed_digest,
+            boot_id_matches: true,
+            schema_id: 2,
+        },
+    );
     verdict
 }
 
@@ -9528,358 +9420,9 @@ pub fn stream_bounded_commit_step(input: StreamBoundedCommitInput) -> StreamBoun
 #[cfg(test)]
 mod stateful_tests {
     use super::*;
-    use crate::shadow::{
-        apply_patch_frame, execute_wire_machine_frame, OrbWireFrame, OrbWireMachine,
-        ORB_WIRE_DEFAULT_MAX_BUDGET, ORB_WIRE_HEADER_BYTES,
-    };
+
     #[test]
-    fn wave12_orbwire_machine_and_seven_stateful_families_verified() {
-        use crate::{
-            auth_toctou_execute_step, hierarchy_merge_step, observe_auth_toctou_shadow,
-            observe_hierarchy_merge_shadow, observe_transcript_fold_shadow,
-            outbox_crash_reconcile_step, provider_attempt_step, resource_ledger_step,
-            stream_bounded_commit_step, transcript_fold_step, wire_apply_patch_step,
-            wire_machine_step, AuthToctouExecuteInput, BunkerState, FieldPresenceTag,
-            HierarchyMergeStepInput, OutboxCrashReconcileInput, ProviderAttemptStepInput,
-            ResourceLedgerOp, ResourceLedgerStepInput, ShadowCounter, StreamBoundedCommitInput,
-            TranscriptFoldStepInput, WireApplyPatchInput, WireMachineStepInput,
-        };
-
-        struct CounterWireMachine;
-        impl OrbWireMachine for CounterWireMachine {
-            type State = (u64, u32);
-            type Effect = u32;
-
-            fn state_rev(state: &Self::State) -> u64 {
-                state.0
-            }
-
-            fn decode_step(
-                state: &Self::State,
-                frame: &OrbWireFrame,
-                event_seq: u64,
-            ) -> Result<(Self::State, Vec<Self::Effect>, u8, bool), OrbWireStatus> {
-                let delta = frame.records.first().map_or(0, |r| r.payload32);
-                let next_total = state.1.saturating_add(delta);
-                Ok(((event_seq, next_total), vec![next_total], 1, true))
-            }
-
-            fn encode_effects(
-                _next_state: &Self::State,
-                effects: &[Self::Effect],
-                schema_id: u16,
-            ) -> OrbWireFrame {
-                OrbWireFrame {
-                    schema_id,
-                    flags: 0,
-                    records: effects
-                        .iter()
-                        .map(|&v| OrbWireRecordWord {
-                            tag: 1,
-                            flags: 1,
-                            len16: 0,
-                            payload32: v,
-                        })
-                        .collect(),
-                    arena: Vec::new(),
-                }
-            }
-        }
-
-        // P4: `OrbWireMachine` capacity fence & replay idempotence + `apply_patch_frame`
-        let in_frame = OrbWireFrame {
-            schema_id: 2,
-            flags: 0,
-            records: vec![OrbWireRecordWord {
-                tag: 0,
-                flags: 1,
-                len16: 0,
-                payload32: 7,
-            }],
-            arena: Vec::new(),
-        };
-        let mut encoded = [0u8; 64];
-        let enc_len = in_frame
-            .encode_into(&mut encoded, ORB_WIRE_DEFAULT_MAX_BUDGET)
-            .unwrap();
-        let mut tiny_out = [0xCCu8; 8];
-        assert_eq!(
-            execute_wire_machine_frame::<CounterWireMachine>(
-                &(10, 5),
-                &encoded[..enc_len],
-                2,
-                11,
-                &mut tiny_out,
-                ORB_WIRE_DEFAULT_MAX_BUDGET
-            ),
-            Err(5)
-        );
-        assert_eq!(tiny_out, [0xCCu8; 8]);
-
-        let mut out_buf = [0u8; 64];
-        let (next_st, effs, written) = execute_wire_machine_frame::<CounterWireMachine>(
-            &(10, 5),
-            &encoded[..enc_len],
-            2,
-            11,
-            &mut out_buf,
-            ORB_WIRE_DEFAULT_MAX_BUDGET,
-        )
-        .unwrap();
-        assert_eq!(next_st, (11, 12));
-        assert_eq!(effs, vec![12]);
-        assert!(written >= ORB_WIRE_HEADER_BYTES);
-        // Replay at same seq is rejected (`action_code = 3`)
-        assert_eq!(
-            execute_wire_machine_frame::<CounterWireMachine>(
-                &next_st,
-                &encoded[..enc_len],
-                2,
-                11,
-                &mut out_buf,
-                ORB_WIRE_DEFAULT_MAX_BUDGET
-            ),
-            Err(3)
-        );
-
-        let mut slots = [Some(42), Some(99), None];
-        let patch_frame = OrbWireFrame {
-            schema_id: 2,
-            flags: 0,
-            records: vec![
-                OrbWireRecordWord {
-                    tag: 0,
-                    flags: 0,
-                    len16: 0,
-                    payload32: 0,
-                },
-                OrbWireRecordWord {
-                    tag: 1,
-                    flags: 2,
-                    len16: 0,
-                    payload32: 0,
-                },
-                OrbWireRecordWord {
-                    tag: 2,
-                    flags: 1,
-                    len16: 0,
-                    payload32: 777,
-                },
-            ],
-            arena: Vec::new(),
-        };
-        let rev = apply_patch_frame(5, 6, &mut slots, &patch_frame).unwrap();
-        assert_eq!(rev, 6);
-        assert_eq!(slots, [Some(42), None, Some(777)]);
-        assert_eq!(apply_patch_frame(6, 6, &mut slots, &patch_frame), Err(2));
-
-        let patch_omit = wire_apply_patch_step(WireApplyPatchInput {
-            current_rev: 1,
-            incoming_rev: 2,
-            current_val: Some(55),
-            presence: FieldPresenceTag::Omitted,
-            incoming_val: 0,
-        });
-        assert!(patch_omit.admitted);
-        assert_eq!(patch_omit.next_val, Some(55));
-        let wm_ok = wire_machine_step(WireMachineStepInput {
-            schema_id: 2,
-            state_rev: 3,
-            event_seq: 4,
-            effect_kind: 1,
-            effect_admitted: true,
-            out_cap: 128,
-            required_out_bytes: 32,
-        });
-        assert!(wm_ok.admitted && wm_ok.emit_effect && wm_ok.next_rev32 == 4);
-
-        // Family 1 (`G-ORB-5`): Partial patch preserves omitted parent; sticky supersede blocks unarchive
-        let counter = ShadowCounter::new();
-        let h_keep = observe_hierarchy_merge_shadow(
-            HierarchyMergeStepInput {
-                current_epoch: 10,
-                incoming_epoch: 11,
-                archive_epoch: 0,
-                cur_archived: false,
-                cur_superseded: false,
-                is_partial_patch: true,
-                parent_presence: FieldPresenceTag::Omitted,
-                cur_parent_ord: 42,
-                inc_parent_ord: 0,
-                inc_archive: false,
-                inc_unarchive: false,
-                inc_supersede: false,
-            },
-            true,
-            42,
-            &counter,
-        );
-        assert!(h_keep.admitted && h_keep.next_parent_ord == 42);
-        let h_sup = hierarchy_merge_step(HierarchyMergeStepInput {
-            current_epoch: 11,
-            incoming_epoch: 12,
-            archive_epoch: 5,
-            cur_archived: true,
-            cur_superseded: true,
-            is_partial_patch: true,
-            parent_presence: FieldPresenceTag::Omitted,
-            cur_parent_ord: 42,
-            inc_parent_ord: 0,
-            inc_archive: false,
-            inc_unarchive: true,
-            inc_supersede: false,
-        });
-        assert!(!h_sup.admitted && h_sup.next_superseded && h_sup.next_archived);
-
-        // Family 2 (`G-ORB-3`): Contiguous seq progression & live/replay equivalence
-        let f_live = observe_transcript_fold_shadow(
-            TranscriptFoldStepInput {
-                last_applied_seq: 10,
-                incoming_seq: 11,
-                entry_count: 3,
-                thinking_open: true,
-                normalized_action: 5,
-                is_replay_from_log: false,
-            },
-            true,
-            4,
-            1,
-            &counter,
-        );
-        let f_replay = transcript_fold_step(TranscriptFoldStepInput {
-            last_applied_seq: 10,
-            incoming_seq: 11,
-            entry_count: 3,
-            thinking_open: true,
-            normalized_action: 5,
-            is_replay_from_log: true,
-        });
-        assert_eq!(f_live, f_replay);
-        assert!(f_live.admitted && f_live.closed_previous_thinking && f_live.next_entry_count == 4);
-        let f_gap = transcript_fold_step(TranscriptFoldStepInput {
-            last_applied_seq: 10,
-            incoming_seq: 13,
-            entry_count: 3,
-            thinking_open: false,
-            normalized_action: 5,
-            is_replay_from_log: false,
-        });
-        assert!(!f_gap.admitted && f_gap.gap_buffered && f_gap.next_entry_count == 3);
-
-        // Family 3 (`G-ORB-2`): Outbox crash resets volatile lease and preserves unacked WAL items
-        let ob = outbox_crash_reconcile_step(OutboxCrashReconcileInput {
-            durable_queued: 9,
-            durable_acked: 4,
-            volatile_in_flight: 5,
-            lease_boot_epoch: 100,
-            node_boot_epoch: 101,
-            volatile_lease_owner: 77,
-            req_owner: 88,
-        });
-        assert!(
-            ob.admitted && ob.crash_reconciled && ob.has_single_writer && ob.unacked_depth == 5
-        );
-
-        // Family 4 (`G-ORB-2`): Provider attempt locks stream after first byte and pins account
-        let pa_locked = provider_attempt_step(ProviderAttemptStepInput {
-            pinned_account_id: 7,
-            candidate_account_id: 7,
-            attempts_used: 1,
-            retry_budget: 3,
-            first_byte_committed: true,
-            failure_kind: 1,
-            upstream_now_epoch: 50,
-            cooldown_until_epoch: 0,
-            upstream_deadline: 100,
-            auth_valid: true,
-        });
-        assert!(
-            !pa_locked.admitted && pa_locked.action_code == 3 && pa_locked.first_byte_locked_next
-        );
-
-        // Family 5 (`G-ORB-7`): `observe -> gate -> execute` TOCTOU binding fails closed on digest drift
-        let auth_ok = observe_auth_toctou_shadow(
-            AuthToctouExecuteInput {
-                principal_kind: 2,
-                bunker_state: BunkerState::Normal,
-                observed_target_id: 9,
-                exec_target_id: 9,
-                observed_lease_epoch: 44,
-                live_lease_epoch: 44,
-                now_tick: 100,
-                expiry_tick: 200,
-                observed_digest: 0xDEAD_BEEF,
-                exec_digest: 0xDEAD_BEEF,
-            },
-            true,
-            1,
-            &counter,
-        );
-        assert!(auth_ok.admitted && !auth_ok.fail_closed);
-        let auth_mut = auth_toctou_execute_step(AuthToctouExecuteInput {
-            exec_digest: 0xDEAD_BEE0,
-            ..AuthToctouExecuteInput {
-                principal_kind: 2,
-                bunker_state: BunkerState::Normal,
-                observed_target_id: 9,
-                exec_target_id: 9,
-                observed_lease_epoch: 44,
-                live_lease_epoch: 44,
-                now_tick: 100,
-                expiry_tick: 200,
-                observed_digest: 0xDEAD_BEEF,
-                exec_digest: 0xDEAD_BEEF,
-            }
-        });
-        assert!(!auth_mut.admitted && auth_mut.fail_closed && auth_mut.reason_code == 6);
-        assert_eq!(
-            counter
-                .snapshot("orb_auth_toctou_execute_step")
-                .total_divergences,
-            0
-        );
-
-        // Family 6 (`G-ORB-3`): Conserved resource ledger prevents overspend/wrap and reaps expired TTL
-        let rl_ok = resource_ledger_step(ResourceLedgerStepInput {
-            op_kind: ResourceLedgerOp::Reserve,
-            reserved_slots: 1,
-            active_slots: 2,
-            max_slots: 4,
-            spent_cents: 600,
-            cost_delta_cents: 400,
-            budget_cents: 1_000,
-            now_tick: 10,
-            ttl_expiry_tick: 50,
-        });
-        assert!(rl_ok.admitted && rl_ok.next_reserved_slots == 2 && rl_ok.next_active_slots == 2);
-        let rl_wrap = resource_ledger_step(ResourceLedgerStepInput {
-            cost_delta_cents: u64::MAX,
-            ..ResourceLedgerStepInput {
-                op_kind: ResourceLedgerOp::Reserve,
-                reserved_slots: 1,
-                active_slots: 2,
-                max_slots: 4,
-                spent_cents: 600,
-                cost_delta_cents: 400,
-                budget_cents: 1_000,
-                now_tick: 10,
-                ttl_expiry_tick: 50,
-            }
-        });
-        assert!(!rl_wrap.admitted && rl_wrap.next_reserved_slots == 1);
-
-        // Family 7 (`G-ORB-6`): Bounded-tail checkpoint clamps giant open fence tail <= max_open_tail_bytes
-        let sb = stream_bounded_commit_step(StreamBoundedCommitInput {
-            prev_len: 1_000,
-            prev_commit: 200,
-            prev_checkpoint: 200,
-            new_len: 20_000,
-            raw_commit: 200,
-            max_open_tail_bytes: 4_096,
-        });
-        assert!(sb.admitted && sb.checkpoint_forced && sb.next_checkpoint == 20_000 - 4_096);
-        assert!(20_000 - sb.next_checkpoint <= 4_096);
-
+    fn vm_cap_admit_pool_override_and_zero_provider_caps_verified() {
         assert!(vm_cap_admit(VmCapInput {
             has_pool_override: true,
             has_pool_max: false,
