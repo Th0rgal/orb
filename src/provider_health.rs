@@ -328,7 +328,7 @@ pub fn observe_account_candidate_shadow(
     proxy_shadow_counter().observe_transition(
         "proxy_provider_pool",
         input.first_byte_sent,
-        input.first_byte_sent || host_admits,
+        input.first_byte_sent,
         input,
         &host_effects,
         |_, ev, _| {
