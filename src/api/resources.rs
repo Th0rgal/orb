@@ -540,10 +540,21 @@ async fn get_overview(
 ) -> Result<Json<ResourcesOverviewResponse>, (StatusCode, String)> {
     let spec = parse_range(query.range.as_deref()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let now = Utc::now();
-    let now_min = now.timestamp().div_euclid(60);
+    let now_secs = now.timestamp();
+    let now_min = now_secs.div_euclid(60);
     let num_buckets = (spec.minutes / spec.step_minutes).max(2) as usize;
     let first_bucket_min = now_min - (num_buckets as i64 - 1) * spec.step_minutes;
     let bucket_seconds = spec.step_minutes * 60;
+    let last_bucket_start_secs =
+        (first_bucket_min + (num_buckets as i64 - 1) * spec.step_minutes) * 60;
+    // The final bucket spans `[last_bucket_start_secs, now_secs]` and is still accumulating
+    // in-flight requests. Normalize its rate by the actual elapsed seconds (floored at 60s
+    // so sub-minute bursts don't spike 60x), and count how many 1-minute compute samples
+    // can actually exist inside it (`elapsed_mins_in_last_bucket`).
+    let last_bucket_elapsed_secs =
+        (now_secs - last_bucket_start_secs).clamp(60, bucket_seconds) as f64;
+    let last_bucket_comp_mins =
+        ((now_secs - last_bucket_start_secs).div_euclid(60) + 1).clamp(1, spec.step_minutes) as f64;
 
     let _control_state = state.control.get_or_spawn(&user).await;
     let sqlite_store = sqlite_store_for_user(&state, &user.id);
@@ -668,10 +679,15 @@ async fn get_overview(
         let Some(bi) = bucket_idx_of(row.bucket_unix_min) else {
             continue;
         };
-        let vcpu_step = row.vcpu_allocated / step_f;
-        // millicents in bucket -> USD/h: (mc / 100_000) * (3600 / bucket_seconds)
-        let usd_h_step =
-            (row.cost_millicents as f64 / 100_000.0) * (3600.0 / bucket_seconds as f64);
+        let eff_comp_mins = if bi + 1 == num_buckets {
+            last_bucket_comp_mins
+        } else {
+            step_f
+        };
+        let eff_comp_secs = eff_comp_mins * 60.0;
+        let vcpu_step = row.vcpu_allocated / eff_comp_mins;
+        // millicents in bucket -> USD/h: (mc / 100_000) * (3600 / eff_comp_secs)
+        let usd_h_step = (row.cost_millicents as f64 / 100_000.0) * (3600.0 / eff_comp_secs);
 
         class_series_vcpu
             .entry(row.machine_class.clone())
@@ -742,8 +758,13 @@ async fn get_overview(
         total_429 += row.rate_limit_429_count;
         *pool_429.entry(row.pool_id.clone()).or_insert(0) += row.rate_limit_429_count;
 
-        let btok_h = (row.total_tokens as f64 / 1e9) * (3600.0 / bucket_seconds as f64);
-        let usd_h = (row.est_cost_millicents as f64 / 100_000.0) * (3600.0 / bucket_seconds as f64);
+        let eff_inf_secs = if bi + 1 == num_buckets {
+            last_bucket_elapsed_secs
+        } else {
+            bucket_seconds as f64
+        };
+        let btok_h = (row.total_tokens as f64 / 1e9) * (3600.0 / eff_inf_secs);
+        let usd_h = (row.est_cost_millicents as f64 / 100_000.0) * (3600.0 / eff_inf_secs);
 
         pool_series_btok
             .entry(row.pool_id.clone())
@@ -772,6 +793,40 @@ async fn get_overview(
             l.0 += row.total_tokens;
             l.1 += row.est_cost_millicents;
             l.2 += row.rate_limit_429_count;
+        }
+    }
+
+    // If the open trailing bucket just started (< 90s elapsed) and missions are actively
+    // executing, in-flight LLM turns have not yet emitted their completion billing row.
+    // Smoothly carry/blend the preceding settled bucket so the `now` endpoint doesn't dive to 0.
+    let raw_last_elapsed = (now_secs - last_bucket_start_secs).max(0) as f64;
+    let has_active_runs = !snap.active_runs.is_empty();
+    if has_active_runs && num_buckets >= 2 && raw_last_elapsed < 90.0 {
+        let last_i = num_buckets - 1;
+        let prev_i = num_buckets - 2;
+        let w = (raw_last_elapsed / 90.0).clamp(0.0, 1.0);
+        let stabilize = |series: &mut Vec<f64>| {
+            let prev = series[prev_i];
+            let curr = series[last_i];
+            if prev > 0.0 && curr < prev * 0.45 {
+                series[last_i] = if curr <= 0.0 {
+                    prev
+                } else {
+                    prev * (1.0 - w) + curr * w
+                };
+            }
+        };
+        for s in pool_series_btok.values_mut() {
+            stabilize(s);
+        }
+        for s in pool_series_usd.values_mut() {
+            stabilize(s);
+        }
+        for s in mission_series_btok.values_mut() {
+            stabilize(s);
+        }
+        for s in mission_series_inf_usd.values_mut() {
+            stabilize(s);
         }
     }
 
@@ -1248,15 +1303,94 @@ pub struct MissionTimelineSeries {
 }
 
 fn normalize_bar_state(status: &str, stall_kind: Option<&str>) -> &'static str {
-    if stall_kind.is_some() || status == "blocked" {
+    if stall_kind.is_some() || status == "blocked" || status == "failed" {
         return "capped";
     }
     match status {
         "completed" | "acknowledged" | "done" => "done",
         "active" | "waiting_background" | "running" => "active",
-        "failed" | "cancelled" | "interrupted" => "capped",
+        "cancelled" | "interrupted" => "cancelled",
         _ => "pending",
     }
+}
+
+/// Group noisy per-worker track slugs (e.g. `evm-fast-wave8-step0-astra6`,
+/// `wave8-r16f-wk01-nodefn`, `mission-6d7cab4e`) into clean wave/family section
+/// headers so Fast-DAG doesn't repeat a 1-row uppercase banner above every bar.
+fn normalize_dag_section(raw_track: Option<&str>, role: &str) -> String {
+    let trimmed = raw_track.map(str::trim).unwrap_or("");
+    if !trimmed.is_empty() {
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("mission-") && lower.len() >= 12 {
+            return "Active Workers".to_string();
+        }
+        let tokens: Vec<&str> = trimmed
+            .split(['-', '_', '/', ':'])
+            .filter(|t| !t.is_empty())
+            .collect();
+        if let Some(wave_idx) = tokens
+            .iter()
+            .position(|t| t.to_ascii_lowercase().starts_with("wave"))
+        {
+            let mut end = (wave_idx + 1).min(tokens.len());
+            if end < tokens.len() {
+                let nxt = tokens[end].to_ascii_lowercase();
+                let is_round = nxt.starts_with('r')
+                    && nxt.len() <= 6
+                    && nxt.chars().nth(1).is_some_and(|c| c.is_ascii_digit());
+                if is_round {
+                    end += 1;
+                }
+            }
+            return tokens[..end].join("-");
+        }
+        if tokens.len() >= 4 {
+            return tokens[..2].join("-");
+        }
+        return trimmed.to_string();
+    }
+    let mut ch = role.chars();
+    match ch.next() {
+        Some(f) => format!("{}{}", f.to_ascii_uppercase(), ch.as_str()),
+        None => "Workers".to_string(),
+    }
+}
+
+/// Clip an execution span `[start_s, end_s]` against `[origin_secs, horizon_end_secs]`.
+/// Returns `None` if the span completed before `origin_secs` or starts after `horizon_end_secs`.
+/// Never adds `eta_remaining_secs` into `duration_secs` (clients draw `eta_remaining_secs`
+/// as a separate dashed forward projection after `start_offset_secs + duration_secs`).
+fn clip_span_to_horizon(
+    start_s: i64,
+    end_s: Option<i64>,
+    state_norm: &str,
+    origin_secs: i64,
+    horizon_end_secs: i64,
+    now_secs: i64,
+    cohort_p50_secs: i64,
+) -> Option<(i64, i64)> {
+    if state_norm == "pending" {
+        if start_s > horizon_end_secs {
+            return None;
+        }
+        let clipped_start = start_s.max(origin_secs);
+        return Some((clipped_start - origin_secs, cohort_p50_secs.max(60)));
+    }
+    let actual_end = if state_norm == "active" {
+        now_secs.max(start_s)
+    } else {
+        end_s.unwrap_or(now_secs).max(start_s)
+    };
+    if state_norm != "active" && actual_end < origin_secs {
+        return None;
+    }
+    if start_s > horizon_end_secs {
+        return None;
+    }
+    let clipped_start = start_s.max(origin_secs);
+    let start_off = (clipped_start - origin_secs).max(0);
+    let dur_secs = (actual_end - clipped_start).max(30);
+    Some((start_off, dur_secs))
 }
 
 async fn get_mission_resources(
@@ -1412,9 +1546,200 @@ async fn get_mission_resources(
         }
     }
 
-    // Build unified subagent bars + flow nodes
-    let mut bars: Vec<MissionDagBar> = Vec::new();
+    // Build unified subagent + parallel managed VM bars + flow nodes
+    let mut vm_bars: Vec<MissionDagBar> = Vec::new();
+    let mut subagent_bars: Vec<MissionDagBar> = Vec::new();
     let mut subagents: Vec<MissionFlowSubagentNode> = Vec::new();
+    let horizon_end_secs = origin_secs + horizon_secs;
+
+    // Collect full mission lineage IDs (`root` + all descendants) so parallel Boat/cloud VMs
+    // and remote jobs leased by the boss or any subagent are historically attributed.
+    let mut lineage_ids: HashSet<String> = HashSet::with_capacity(snap.children.len() + 1);
+    lineage_ids.insert(snap.root.id.clone());
+    for c in &snap.children {
+        lineage_ids.insert(c.id.clone());
+    }
+
+    // Query `remote_jobs` in `projects.db` for any `node_id` that executed jobs for this lineage
+    let projects_store = Arc::clone(&state.projects);
+    let lineage_for_jobs = lineage_ids.clone();
+    let remote_job_nodes = tokio::task::spawn_blocking(move || {
+        projects_store
+            .remote_job_nodes_for_missions(&lineage_for_jobs)
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+
+    // Historical & live Managed Cloud VMs (Boat, Hetzner, Vast.ai, Scaleway)
+    // Track `(class_id, start_s, end_s, vcpu, usd_per_h, owner_mid, degraded)` for Flow + Timeline
+    let mut vm_intervals: Vec<(String, i64, i64, f64, f64, String, bool)> = Vec::new();
+    let mut matched_vm_node_ids: HashSet<String> = HashSet::new();
+    if let Some(manager) = state.managed() {
+        let all_machines = manager.machines_snapshot().await;
+        for m in all_machines {
+            let tenant_ok = m.owner_user_id.as_deref().is_none_or(|u| u == user.id);
+            if !tenant_ok {
+                continue;
+            }
+            let rj_match = remote_job_nodes.get(&m.node_id);
+            let in_lineage = m.root_mission_id.as_deref() == Some(snap.root.id.as_str())
+                || m.owner_mission_id
+                    .as_deref()
+                    .is_some_and(|oid| lineage_ids.contains(oid))
+                || m.requested_by_mission_id
+                    .as_deref()
+                    .is_some_and(|rid| lineage_ids.contains(rid))
+                || m.active_mission_ids
+                    .iter()
+                    .any(|aid| lineage_ids.contains(aid))
+                || rj_match.is_some();
+            if !in_lineage {
+                continue;
+            }
+            // Skip provisioning attempts that failed immediately before ever coming online or running a job
+            if m.state == crate::managed::MachineState::Failed
+                && m.online_at.is_none()
+                && !m.has_executed_job
+                && rj_match.is_none()
+            {
+                continue;
+            }
+
+            let start_s = m
+                .online_at
+                .or(m.run_started_at)
+                .map(|dt| dt.timestamp())
+                .or_else(|| rj_match.and_then(|s| parse_rfc3339_unix_secs(&s.first_started_at)))
+                .unwrap_or_else(|| m.created_at.timestamp());
+            let is_live = m.state.is_live();
+            let end_opt = if is_live {
+                None
+            } else {
+                m.destroyed_at
+                    .or(m.stopped_at)
+                    .map(|dt| dt.timestamp())
+                    .or_else(|| {
+                        rj_match.and_then(|s| {
+                            s.last_finished_at
+                                .as_deref()
+                                .and_then(parse_rfc3339_unix_secs)
+                        })
+                    })
+                    .or(Some(m.expires_at.timestamp().min(now_secs)))
+            };
+            let actual_end = end_opt.unwrap_or(now_secs).max(start_s);
+            let vm_state = if is_live {
+                "active"
+            } else if m.state == crate::managed::MachineState::Failed {
+                "capped"
+            } else {
+                "done"
+            };
+
+            let (class_id, class_lbl) = machine_class_for_managed(&m.provider, &m.size);
+            let owner_mid = m
+                .owner_mission_id
+                .as_deref()
+                .filter(|oid| lineage_ids.contains(*oid))
+                .map(str::to_string)
+                .or_else(|| rj_match.map(|s| s.latest_mission_id.clone()))
+                .unwrap_or_else(|| snap.root.id.clone());
+            let vcpu_val = (m.cpu.max(1)) as f64;
+            matched_vm_node_ids.insert(m.node_id.clone());
+            vm_intervals.push((
+                class_id,
+                start_s,
+                actual_end,
+                vcpu_val,
+                m.usd_per_hour,
+                owner_mid.clone(),
+                !is_live && m.state == crate::managed::MachineState::Stopped,
+            ));
+
+            if let Some((start_off, dur_secs)) = clip_span_to_horizon(
+                start_s,
+                end_opt,
+                vm_state,
+                origin_secs,
+                horizon_end_secs,
+                now_secs,
+                snap.cohort_p50_secs,
+            ) {
+                let short_name = if !m.name.trim().is_empty() {
+                    m.name.trim().to_string()
+                } else {
+                    m.node_id
+                        .strip_prefix("managed-")
+                        .unwrap_or(&m.node_id)
+                        .chars()
+                        .take(8)
+                        .collect()
+                };
+                let eta_rem = if is_live {
+                    let lease_end = m.reap_at.unwrap_or(m.expires_at).timestamp();
+                    Some((lease_end - now_secs).clamp(60, 14_400))
+                } else {
+                    None
+                };
+                vm_bars.push(MissionDagBar {
+                    id: format!("vm:{}", m.id),
+                    mission_id: Some(owner_mid),
+                    label: format!("{class_lbl} · {short_name} ({} vCPU)", m.cpu.max(1)),
+                    section: format!("{class_lbl} VMs"),
+                    role: "vm".to_string(),
+                    model: Some(format!("{} vCPU · {} GB", m.cpu.max(1), m.ram_gb)),
+                    node_id: Some(m.node_id.clone()),
+                    vcpu: vcpu_val,
+                    compute_usd_per_h: m.usd_per_hour,
+                    b_tok_per_h: 0.0,
+                    inference_usd_per_h: 0.0,
+                    start_offset_secs: start_off,
+                    duration_secs: dur_secs,
+                    eta_remaining_secs: eta_rem,
+                    eta_basis: eta_rem.map(|_| "lease_ttl".to_string()),
+                    state: vm_state.to_string(),
+                    after_ids: Vec::new(),
+                });
+            }
+        }
+    }
+    vm_bars.sort_by(|a, b| {
+        a.section
+            .cmp(&b.section)
+            .then_with(|| a.start_offset_secs.cmp(&b.start_offset_secs))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+
+    // Backfill `m_class_comp` from historical VM intervals whenever `compute_rollup_1m` lacks
+    // samples for those VMs inside `[origin_secs, now_secs]`, so Compute Flow & stamp match DAG!
+    let window_end_secs = root_end_secs.unwrap_or(now_secs).max(origin_secs + 60);
+    let effective_comp_secs = (window_end_secs - origin_secs).max(60) as f64;
+    let has_rollup_managed = m_class_comp
+        .keys()
+        .any(|(cid, _)| cid != "core:host" && cid != "static:fleet" && cid != "spark:gpu");
+    if !has_rollup_managed && !vm_intervals.is_empty() {
+        for (cid, st_s, en_s, vcpu_v, usd_h, owner_mid, idle_stop) in &vm_intervals {
+            let ov_start = (*st_s).max(origin_secs);
+            let ov_end = (*en_s).min(window_end_secs);
+            if ov_end <= ov_start {
+                continue;
+            }
+            let overlap_mins = (ov_end - ov_start) as f64 / 60.0;
+            let mc = (usd_h * 100_000.0 * (overlap_mins / 60.0)).round() as u64;
+            let ce = m_class_comp
+                .entry((cid.clone(), owner_mid.clone()))
+                .or_insert((0.0, 0, false));
+            ce.0 += vcpu_v * overlap_mins;
+            ce.1 += mc;
+            ce.2 |= *idle_stop;
+        }
+    }
+    let norm_comp_mins = if !has_rollup_managed && !vm_intervals.is_empty() {
+        (effective_comp_secs / 60.0).max(1.0)
+    } else {
+        obs_comp_mins
+    };
 
     // If the root mission has no child missions/board tasks/native spans yet, represent the root agent itself
     let has_sub_units =
@@ -1439,17 +1764,7 @@ async fn get_mission_resources(
                     "worker".to_string()
                 }
             });
-        let section = child
-            .track
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| {
-                let mut ch = role.chars();
-                match ch.next() {
-                    Some(f) => format!("{}{}", f.to_ascii_uppercase(), ch.as_str()),
-                    None => "Workers".to_string(),
-                }
-            });
+        let section = normalize_dag_section(child.track.as_deref(), &role);
 
         let raw_deps = if !child.depends_on.is_empty() {
             &child.depends_on
@@ -1481,29 +1796,41 @@ async fn get_mission_resources(
             .and_then(parse_rfc3339_unix_secs);
         let state_norm = normalize_bar_state(&child.status, child.stall_kind.as_deref());
 
-        let (start_off, dur_secs) = if state_norm == "pending" {
-            let off = (start_s - origin_secs).max(0);
-            (off, snap.cohort_p50_secs)
-        } else {
-            let actual_end = end_s.unwrap_or(now_secs);
-            let off = (start_s - origin_secs).max(0);
-            let obs = (actual_end - start_s).max(45);
-            let total_dur = obs + child.eta_remaining_secs.unwrap_or(0);
-            (off, total_dur)
+        let Some((start_off, dur_secs)) = clip_span_to_horizon(
+            start_s,
+            end_s,
+            state_norm,
+            origin_secs,
+            horizon_end_secs,
+            now_secs,
+            snap.cohort_p50_secs,
+        ) else {
+            continue;
         };
 
         let (tok, inf_mc, inferred_model) = m_tok.get(&child.id).cloned().unwrap_or((0, 0, None));
         let (sum_vcpu, comp_mc, _) = m_comp.get(&child.id).copied().unwrap_or((0.0, 0, false));
 
+        let node_id = child
+            .placement_node_id
+            .clone()
+            .or_else(|| child.remote_node_id.clone());
         let vcpu = if sum_vcpu > 0.0 {
-            sum_vcpu / obs_comp_mins
+            sum_vcpu / norm_comp_mins
         } else if state_norm == "active" {
-            2.0
+            if node_id
+                .as_deref()
+                .is_some_and(|nid| matched_vm_node_ids.contains(nid))
+            {
+                16.0
+            } else {
+                2.0
+            }
         } else {
             0.0
         };
         let comp_usd_h = if comp_mc > 0 {
-            (comp_mc as f64 / 100_000.0) * (60.0 / obs_comp_mins)
+            (comp_mc as f64 / 100_000.0) * (60.0 / norm_comp_mins)
         } else {
             vcpu * LOCAL_HOST_VCPU_USD_PER_HOUR
         };
@@ -1514,12 +1841,8 @@ async fn get_mission_resources(
             .clone()
             .or(inferred_model)
             .or_else(|| Some(child.backend.clone()));
-        let node_id = child
-            .placement_node_id
-            .clone()
-            .or_else(|| child.remote_node_id.clone());
 
-        bars.push(MissionDagBar {
+        subagent_bars.push(MissionDagBar {
             id: child.id.clone(),
             mission_id: Some(child.id.clone()),
             label: child.title.clone(),
@@ -1557,7 +1880,7 @@ async fn get_mission_resources(
     }
 
     // Add unspawned queued `board_tasks` so future DAG waves render with their `depends_on` edges!
-    let mut bar_end_by_id: HashMap<String, i64> = bars
+    let mut bar_end_by_id: HashMap<String, i64> = subagent_bars
         .iter()
         .map(|b| (b.id.clone(), b.start_offset_secs + b.duration_secs))
         .collect();
@@ -1586,13 +1909,9 @@ async fn get_mission_resources(
         let dur_secs = snap.cohort_p50_secs;
         bar_end_by_id.insert(bar_id.clone(), start_off + dur_secs);
 
-        let mut role_ch = bt.role.chars();
-        let section = match role_ch.next() {
-            Some(f) => format!("{}{}", f.to_ascii_uppercase(), role_ch.as_str()),
-            None => "Queued".to_string(),
-        };
+        let section = normalize_dag_section(None, &bt.role);
 
-        bars.push(MissionDagBar {
+        subagent_bars.push(MissionDagBar {
             id: bar_id.clone(),
             mission_id: None,
             label: bt.title.clone(),
@@ -1617,16 +1936,22 @@ async fn get_mission_resources(
     for sp in &snap.native_spans {
         let start_s = parse_rfc3339_unix_secs(&sp.started_at).unwrap_or(origin_secs);
         let end_s = sp.completed_at.as_deref().and_then(parse_rfc3339_unix_secs);
-        if end_s.is_some_and(|e| e < origin_secs) {
-            continue;
-        }
-        let start_off = (start_s - origin_secs).max(0);
-        let dur_secs = (end_s.unwrap_or(now_secs) - start_s).max(30);
         let st = normalize_bar_state(&sp.state, None);
+        let Some((start_off, dur_secs)) = clip_span_to_horizon(
+            start_s,
+            end_s,
+            st,
+            origin_secs,
+            horizon_end_secs,
+            now_secs,
+            snap.cohort_p50_secs,
+        ) else {
+            continue;
+        };
         let sid = format!("span:{}", sp.tool_call_id);
         let section = "In-harness subagents".to_string();
 
-        bars.push(MissionDagBar {
+        subagent_bars.push(MissionDagBar {
             id: sid.clone(),
             mission_id: Some(sp.mission_id.clone()),
             label: sp.name.clone(),
@@ -1663,10 +1988,51 @@ async fn get_mission_resources(
         });
     }
 
-    // Extend horizon if projected queued waves reach past `horizon_secs`
+    // Group subagent bars by section (active sections first, then chronological wave order)
+    // so parallel bars within each wave render side-by-side in time without fragmented headers.
+    let mut section_meta: HashMap<String, (bool, i64)> = HashMap::new();
+    for b in &subagent_bars {
+        let is_act = b.state == "active" || b.state == "pending";
+        section_meta
+            .entry(b.section.clone())
+            .and_modify(|m| {
+                m.0 |= is_act;
+                m.1 = m.1.min(b.start_offset_secs);
+            })
+            .or_insert((is_act, b.start_offset_secs));
+    }
+    subagent_bars.sort_by(|a, b| {
+        let ma = section_meta
+            .get(&a.section)
+            .copied()
+            .unwrap_or((false, a.start_offset_secs));
+        let mb = section_meta
+            .get(&b.section)
+            .copied()
+            .unwrap_or((false, b.start_offset_secs));
+        mb.0.cmp(&ma.0)
+            .then_with(|| ma.1.cmp(&mb.1))
+            .then_with(|| a.section.cmp(&b.section))
+            .then_with(|| a.start_offset_secs.cmp(&b.start_offset_secs))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+
+    // Combine parallel cloud VMs first, followed by subagent execution waves
+    let mut bars: Vec<MissionDagBar> = Vec::with_capacity(vm_bars.len() + subagent_bars.len());
+    bars.extend(vm_bars);
+    bars.extend(subagent_bars);
+
+    // Extend horizon if projected queued waves or active ETA extensions reach past `horizon_secs`
     let max_bar_end = bars
         .iter()
-        .map(|b| b.start_offset_secs + b.duration_secs)
+        .map(|b| {
+            let eta = if b.state == "active" {
+                b.eta_remaining_secs.unwrap_or(0)
+            } else {
+                0
+            };
+            b.start_offset_secs + b.duration_secs + eta
+        })
         .max()
         .unwrap_or(horizon_secs);
     let effective_horizon_secs = horizon_secs.max(((max_bar_end as f64) * 1.05) as i64);
@@ -1720,8 +2086,8 @@ async fn get_mission_resources(
             .get(mid)
             .cloned()
             .unwrap_or_else(|| default_track_id.clone());
-        let v = *sum_v / obs_comp_mins;
-        let u = (*sum_mc as f64 / 100_000.0) * (60.0 / obs_comp_mins);
+        let v = *sum_v / norm_comp_mins;
+        let u = (*sum_mc as f64 / 100_000.0) * (60.0 / norm_comp_mins);
         let ci = comp_in_by_class.entry(cid.clone()).or_insert((0.0, 0.0));
         ci.0 += v;
         ci.1 += u;
@@ -1854,6 +2220,15 @@ async fn get_mission_resources(
     let offsets_secs: Vec<i64> = (0..steps)
         .map(|i| ((i as i64) * effective_horizon_secs) / (steps as i64 - 1))
         .collect();
+    let step_secs = (effective_horizon_secs / (steps as i64 - 1)).max(60);
+    let step_mins = (step_secs / 60).max(1);
+
+    let mut usage_by_min: HashMap<i64, (u64, u64)> = HashMap::new();
+    for u in &snap.usage_by_mission {
+        let e = usage_by_min.entry(u.bucket_unix_min).or_insert((0, 0));
+        e.0 += u.total_tokens;
+        e.1 += u.est_cost_millicents;
+    }
 
     let mut obs_vcpu = vec![None; steps];
     let mut proj_vcpu = vec![None; steps];
@@ -1871,34 +2246,121 @@ async fn get_mission_resources(
         .saturating_sub(1);
 
     for (i, &off) in offsets_secs.iter().enumerate() {
+        let abs_secs = origin_secs + off;
+        // Compute rate: sum parallel Managed Cloud VMs active at `off` + non-VM subagent spans
         let mut v_sum = 0.0;
         let mut cu_sum = 0.0;
-        let mut b_sum = 0.0;
-        let mut iu_sum = 0.0;
+        let mut b_proj_sum = 0.0;
+        let mut iu_proj_sum = 0.0;
         for b in &bars {
-            if off >= b.start_offset_secs && off <= b.start_offset_secs + b.duration_secs {
+            let proj_end = if b.state == "active" {
+                b.start_offset_secs + b.duration_secs + b.eta_remaining_secs.unwrap_or(0)
+            } else {
+                b.start_offset_secs + b.duration_secs
+            };
+            let active_at_off = if i <= pivot_idx {
+                off >= b.start_offset_secs && off <= b.start_offset_secs + b.duration_secs
+            } else {
+                (b.state == "active" || b.state == "pending")
+                    && off >= b.start_offset_secs
+                    && off <= proj_end
+            };
+            if !active_at_off {
+                continue;
+            }
+            if b.role == "vm" {
                 v_sum += b.vcpu;
                 cu_sum += b.compute_usd_per_h;
-                b_sum += b.b_tok_per_h;
-                iu_sum += b.inference_usd_per_h;
+            } else {
+                let on_counted_vm = b
+                    .node_id
+                    .as_deref()
+                    .is_some_and(|nid| matched_vm_node_ids.contains(nid));
+                if !on_counted_vm {
+                    v_sum += b.vcpu;
+                    cu_sum += b.compute_usd_per_h;
+                }
+                b_proj_sum += b.b_tok_per_h;
+                iu_proj_sum += b.inference_usd_per_h;
             }
         }
+
+        // Observed inference rate: aggregate real 1-minute token buckets around `abs_secs`
+        let center_min = abs_secs.div_euclid(60);
+        let win_start_min = center_min - (step_mins / 2);
+        let win_end_min = (win_start_min + step_mins - 1).min(now_secs.div_euclid(60));
+        let (b_obs_sum, iu_obs_sum) = if !usage_by_min.is_empty() && win_end_min >= win_start_min {
+            let mut sum_tok = 0u64;
+            let mut sum_mc = 0u64;
+            let cnt = (win_end_min - win_start_min + 1).max(1) as f64;
+            for m in win_start_min..=win_end_min {
+                if let Some((t, mc)) = usage_by_min.get(&m) {
+                    sum_tok += *t;
+                    sum_mc += *mc;
+                }
+            }
+            let hours = cnt / 60.0;
+            (
+                (sum_tok as f64 / 1e9) / hours,
+                (sum_mc as f64 / 100_000.0) / hours,
+            )
+        } else {
+            (b_proj_sum, iu_proj_sum)
+        };
+
         if i <= pivot_idx {
             obs_vcpu[i] = Some(v_sum);
             obs_cu[i] = Some(cu_sum);
-            obs_btok[i] = Some(b_sum);
-            obs_iu[i] = Some(iu_sum);
+            obs_btok[i] = Some(b_obs_sum);
+            obs_iu[i] = Some(iu_obs_sum);
         }
         if i >= pivot_idx && now_offset_secs < effective_horizon_secs {
+            let b_val = if i == pivot_idx {
+                b_obs_sum
+            } else {
+                b_proj_sum
+            };
+            let iu_val = if i == pivot_idx {
+                iu_obs_sum
+            } else {
+                iu_proj_sum
+            };
             proj_vcpu[i] = Some(v_sum);
             proj_cu[i] = Some(cu_sum);
-            proj_btok[i] = Some(b_sum);
-            proj_iu[i] = Some(iu_sum);
+            proj_btok[i] = Some(b_val);
+            proj_iu[i] = Some(iu_val);
+        }
+    }
+
+    // Stabilize trailing open observed point (`pivot_idx`) if the current minute bucket just opened
+    if pivot_idx >= 1 && (now_secs % 60) < 40 {
+        if let (Some(prev_b), Some(cur_b)) = (obs_btok[pivot_idx - 1], obs_btok[pivot_idx]) {
+            if prev_b > 0.0 && cur_b < prev_b * 0.35 {
+                let blended = prev_b * 0.7 + cur_b * 0.3;
+                obs_btok[pivot_idx] = Some(blended);
+                if proj_btok[pivot_idx].is_some() {
+                    proj_btok[pivot_idx] = Some(blended);
+                }
+            }
+        }
+        if let (Some(prev_u), Some(cur_u)) = (obs_iu[pivot_idx - 1], obs_iu[pivot_idx]) {
+            if prev_u > 0.0 && cur_u < prev_u * 0.35 {
+                let blended = prev_u * 0.7 + cur_u * 0.3;
+                obs_iu[pivot_idx] = Some(blended);
+                if proj_iu[pivot_idx].is_some() {
+                    proj_iu[pivot_idx] = Some(blended);
+                }
+            }
         }
     }
 
     let subagent_count = subagents.len();
     let track_count = tracks.len();
+    let mission_eta = bars
+        .iter()
+        .filter(|b| b.role != "vm")
+        .filter_map(|b| b.eta_remaining_secs)
+        .max();
 
     Ok(Json(MissionResourcesResponse {
         as_of: now.to_rfc3339(),
@@ -1910,7 +2372,7 @@ async fn get_mission_resources(
             started_at: snap.root.first_started_at.unwrap_or(snap.root.created_at),
             completed_at: snap.root.completed_at,
             elapsed_secs: full_elapsed,
-            eta_remaining_secs: bars.iter().filter_map(|b| b.eta_remaining_secs).max(),
+            eta_remaining_secs: mission_eta,
             subagent_count,
             track_count,
         },
@@ -1941,4 +2403,81 @@ async fn get_mission_resources(
             projected_inference_usd_per_h: proj_iu,
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clip_span_filters_completed_pre_horizon_and_avoids_double_eta() {
+        let origin = 100_000;
+        let horizon_end = origin + 21_600;
+        let now = origin + 16_200;
+
+        // Span completed 2 days before the 6h window opened -> excluded, NOT clamped to t=0!
+        assert_eq!(
+            clip_span_to_horizon(
+                origin - 172_800,
+                Some(origin - 171_600),
+                "done",
+                origin,
+                horizon_end,
+                now,
+                900,
+            ),
+            None
+        );
+
+        // Span started 1h before `origin` and finished 30m into the window -> starts at 0, clipped duration 30m
+        assert_eq!(
+            clip_span_to_horizon(
+                origin - 3_600,
+                Some(origin + 1_800),
+                "done",
+                origin,
+                horizon_end,
+                now,
+                900,
+            ),
+            Some((0, 1_800))
+        );
+
+        // Parallel Boat VM or worker launched 2h into the window and still active -> starts at +7200s, ends at `now`
+        assert_eq!(
+            clip_span_to_horizon(
+                origin + 7_200,
+                None,
+                "active",
+                origin,
+                horizon_end,
+                now,
+                900,
+            ),
+            Some((7_200, 9_000))
+        );
+    }
+
+    #[test]
+    fn normalize_dag_section_groups_wave_slugs_and_interrupted_racers() {
+        assert_eq!(
+            normalize_dag_section(Some("evm-fast-wave8-step0-astra6"), "worker"),
+            "evm-fast-wave8"
+        );
+        assert_eq!(
+            normalize_dag_section(Some("wave8-r16f-wk01-nodefn"), "worker"),
+            "wave8-r16f"
+        );
+        assert_eq!(
+            normalize_dag_section(Some("mission-6d7cab4e"), "worker"),
+            "Active Workers"
+        );
+        assert_eq!(normalize_bar_state("interrupted", None), "cancelled");
+        assert_eq!(normalize_bar_state("cancelled", None), "cancelled");
+        assert_eq!(normalize_bar_state("failed", None), "capped");
+        assert_eq!(
+            normalize_bar_state("active", Some("rate_limited")),
+            "capped"
+        );
+    }
 }

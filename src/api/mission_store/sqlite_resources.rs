@@ -463,7 +463,22 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<bool, String> {
         )
         .unwrap_or(false);
 
-    if !rollup_empty && !meta_empty {
+    let has_missing_meta: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM missions m
+                LEFT JOIN mission_orchestration_meta om ON om.mission_id = m.id
+                WHERE om.mission_id IS NULL
+                  AND (m.status IN ('pending', 'active', 'waiting_background', 'blocked')
+                       OR m.updated_at >= datetime('now', '-8 days'))
+                LIMIT 1
+            )",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+
+    if !rollup_empty && !meta_empty && !has_missing_meta {
         return Ok(false);
     }
 
@@ -1046,6 +1061,18 @@ pub(crate) fn on_event_logged_sync(
         }
         AgentEvent::MissionStatusChanged { status, .. } => {
             let status_s = status.to_string();
+            let is_active = matches!(
+                status_s.as_str(),
+                "pending" | "active" | "waiting_background"
+            );
+            if is_active {
+                let _ = conn.execute(
+                    "UPDATE mission_orchestration_meta
+                     SET completed_at = NULL, stall_kind = NULL
+                     WHERE mission_id = ?1",
+                    params![mid],
+                );
+            }
             let is_terminal = matches!(
                 status_s.as_str(),
                 "completed" | "acknowledged" | "failed" | "cancelled" | "interrupted"
@@ -1057,7 +1084,7 @@ pub(crate) fn on_event_logged_sync(
                         (mission_id, root_mission_id, queued_at, completed_at)
                      VALUES (?1, ?2, ?3, ?3)
                      ON CONFLICT(mission_id) DO UPDATE SET
-                        completed_at = COALESCE(mission_orchestration_meta.completed_at, excluded.completed_at)",
+                        completed_at = excluded.completed_at",
                     params![mid, root_id, timestamp],
                 );
             }
@@ -1084,6 +1111,7 @@ pub(crate) fn on_run_started_sync(conn: &Connection, run: &MissionRun) {
          VALUES (?1, ?2, ?3, ?3, ?4)
          ON CONFLICT(mission_id) DO UPDATE SET
             first_started_at = COALESCE(mission_orchestration_meta.first_started_at, excluded.first_started_at),
+            completed_at = NULL,
             placement_node_id = COALESCE(excluded.placement_node_id, mission_orchestration_meta.placement_node_id)",
         params![mid, root_id, run.started_at, placement],
     );
@@ -1478,13 +1506,19 @@ impl SqliteMissionStore {
                     .as_deref()
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or_default();
+                let status: String = r.get(5)?;
+                let is_non_terminal = matches!(
+                    status.as_str(),
+                    "pending" | "active" | "waiting_background" | "blocked" | "awaiting_user"
+                );
+                let completed_at: Option<String> = if is_non_terminal { None } else { r.get(15)? };
                 Ok(MissionNodeRow {
                     id: r.get(0)?,
                     parent_mission_id: r.get(1)?,
                     title: r.get(2)?,
                     project: r.get(3)?,
                     track: r.get(4)?,
-                    status: r.get(5)?,
+                    status,
                     backend: r.get(6)?,
                     model_override: r.get(7)?,
                     remote_node_id: r.get(8)?,
@@ -1494,7 +1528,7 @@ impl SqliteMissionStore {
                     depends_on,
                     role: r.get(13)?,
                     first_started_at: r.get(14)?,
-                    completed_at: r.get(15)?,
+                    completed_at,
                     active_run_ms: r.get::<_, Option<i64>>(16)?.unwrap_or(0),
                     placement_node_id: r.get(17)?,
                     stall_kind: r.get(18)?,
@@ -1509,7 +1543,11 @@ impl SqliteMissionStore {
                             COALESCE(NULLIF(TRIM(m.title), ''), 'Untitled mission'),
                             m.project, m.track, m.status, m.backend, m.model_override,
                             om.placement_node_id, m.created_at, m.updated_at, m.terminal_reason,
-                            om.depends_on_json, om.role, om.first_started_at, om.completed_at,
+                            om.depends_on_json, om.role,
+                            COALESCE(om.first_started_at, (SELECT MIN(r.started_at) FROM mission_runs r WHERE r.mission_id = m.id)),
+                            CASE WHEN m.status IN ('pending', 'active', 'waiting_background', 'blocked', 'awaiting_user') THEN NULL
+                                 ELSE COALESCE(om.completed_at, (SELECT MAX(r.ended_at) FROM mission_runs r WHERE r.mission_id = m.id AND r.ended_at IS NOT NULL), m.updated_at)
+                            END,
                             om.active_run_ms, om.placement_node_id, om.stall_kind
                      FROM missions m
                      LEFT JOIN mission_orchestration_meta om ON om.mission_id = m.id
@@ -1538,7 +1576,11 @@ impl SqliteMissionStore {
                             COALESCE(NULLIF(TRIM(m.title), ''), 'Subagent'),
                             m.project, m.track, m.status, m.backend, m.model_override,
                             om.placement_node_id, m.created_at, m.updated_at, m.terminal_reason,
-                            om.depends_on_json, om.role, om.first_started_at, om.completed_at,
+                            om.depends_on_json, om.role,
+                            COALESCE(om.first_started_at, (SELECT MIN(r.started_at) FROM mission_runs r WHERE r.mission_id = m.id)),
+                            CASE WHEN m.status IN ('pending', 'active', 'waiting_background', 'blocked', 'awaiting_user') THEN NULL
+                                 ELSE COALESCE(om.completed_at, (SELECT MAX(r.ended_at) FROM mission_runs r WHERE r.mission_id = m.id AND r.ended_at IS NOT NULL), m.updated_at)
+                            END,
                             om.active_run_ms, om.placement_node_id, om.stall_kind
                      FROM tree
                      JOIN missions m ON m.id = tree.id
@@ -1764,7 +1806,8 @@ mod tests {
     use super::*;
     use crate::api::control::AgentEvent;
     use crate::api::mission_store::{
-        BoardTaskRole, MissionStore, NewBoardTask, ProxyOutcomeRecord, ProxyUsageRecord,
+        BoardTaskRole, MissionStatus, MissionStore, NewBoardTask, ProxyOutcomeRecord,
+        ProxyUsageRecord,
     };
     use serde_json::json;
 
@@ -1958,6 +2001,56 @@ mod tests {
         assert_eq!(msnap.native_spans.len(), 1);
         assert_eq!(msnap.native_spans[0].name, "Lemma Explorer");
         assert_eq!(msnap.native_spans[0].state, "done");
+
+        // Verify completing and then resuming child clears stale completed_at in DAG snapshot
+        store
+            .update_mission_status(child.id, MissionStatus::Completed)
+            .await
+            .unwrap();
+        store
+            .log_event(
+                child.id,
+                &AgentEvent::MissionStatusChanged {
+                    execution: None,
+                    completion: None,
+                    mission_id: child.id,
+                    status: MissionStatus::Completed,
+                    summary: None,
+                },
+            )
+            .await
+            .unwrap();
+        let msnap_done = store
+            .query_mission_resources_sqlite(root.id, now_min - 60)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(msnap_done.children[0].completed_at.is_some());
+
+        store
+            .update_mission_status(child.id, MissionStatus::Active)
+            .await
+            .unwrap();
+        store
+            .log_event(
+                child.id,
+                &AgentEvent::MissionStatusChanged {
+                    execution: None,
+                    completion: None,
+                    mission_id: child.id,
+                    status: MissionStatus::Active,
+                    summary: None,
+                },
+            )
+            .await
+            .unwrap();
+        let msnap_resumed = store
+            .query_mission_resources_sqlite(root.id, now_min - 60)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(msnap_resumed.children[0].status, "active");
+        assert!(msnap_resumed.children[0].completed_at.is_none());
 
         // Verify startup backfill restores usage_rollup_1m if cleared
         {

@@ -28,6 +28,7 @@ import {
   formatTokenTotalCompact,
   layoutDagRows,
   pickFastDagCandidate,
+  stabilizeTrailingOpenBucket,
   type MissionDetailSubmode,
   type ResourceLens,
   type ResourceMetric,
@@ -42,7 +43,13 @@ const FLEET_RANGES: Array<{ id: ResourcesWindowRange; label: string }> = [
   { id: "7d", label: "7d" },
 ];
 
-function barColorForState(state: string): string {
+function barColorForState(state: string, role?: string): string {
+  if (role === "vm") {
+    if (state === "active") return "#22959d";
+    if (state === "done") return "#1d9a78";
+    if (state === "capped") return "var(--amber)";
+    return "var(--fg-4)";
+  }
   switch (state) {
     case "done":
       return "var(--green)";
@@ -50,6 +57,8 @@ function barColorForState(state: string): string {
       return "var(--blue)";
     case "capped":
       return "var(--amber)";
+    case "cancelled":
+      return "var(--fg-3)";
     default:
       return "var(--fg-4)";
   }
@@ -77,11 +86,22 @@ function formatClockTick(ms: number, range: string): string {
   return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
+function eqIds(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+const MIN_SANKEY_CANVAS_HEIGHT = 330;
+const CARD_HEAD_HEIGHT = 38;
+
 export default function Resources(props: {
   missionId?: string | null;
   onOpen: (page: string | null) => void;
 }) {
-  const [lens, setLens] = createSignal<ResourceLens>("compute");
+  const [lens, setLens] = createSignal<ResourceLens>("inference");
   const [metric, setMetric] = createSignal<ResourceMetric>("raw");
   const [range, setRange] = createSignal<ResourcesWindowRange>("6h");
   const [horizon, setHorizon] = createSignal<string>("6h");
@@ -99,27 +119,69 @@ export default function Resources(props: {
   const [hoverFrac, setHoverFrac] = createSignal<number | null>(null);
 
   const [sankeyWidth, setSankeyWidth] = createSignal<number>(920);
+  const [sankeyHeight, setSankeyHeight] = createSignal<number>(368);
   const [dagLaneWidth, setDagLaneWidth] = createSignal<number>(720);
   const [curveWidth, setCurveWidth] = createSignal<number>(920);
 
+  let cardMainEl: HTMLDivElement | undefined;
   let sankeyEl: HTMLDivElement | undefined;
   let dagLaneEl: HTMLDivElement | undefined;
   let curveSvgEl: SVGSVGElement | undefined;
   let ro: ResizeObserver | undefined;
 
+  const observedEls = new WeakSet<Element>();
+
+  function observeWidth(el: Element | undefined, apply: (w: number) => void) {
+    if (!el || !ro) return;
+    if (!observedEls.has(el)) {
+      observedEls.add(el);
+      ro.observe(el);
+    }
+    const cw = Math.floor((el as HTMLElement).clientWidth || el.getBoundingClientRect().width);
+    if (cw > 40) apply(cw);
+  }
+
+  function observeCardMainHeight(el: HTMLDivElement | undefined) {
+    if (!el || !ro) return;
+    if (!observedEls.has(el)) {
+      observedEls.add(el);
+      ro.observe(el);
+    }
+    const ch = Math.floor(el.clientHeight || el.getBoundingClientRect().height);
+    if (ch > CARD_HEAD_HEIGHT + 80) {
+      const bodyH = Math.max(MIN_SANKEY_CANVAS_HEIGHT, ch - CARD_HEAD_HEIGHT);
+      setSankeyHeight((prev) => (Math.abs(prev - bodyH) >= 1 ? bodyH : prev));
+    }
+  }
+
   onMount(() => {
     ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
+        if (entry.target === cardMainEl) {
+          const ch = Math.floor(entry.contentRect.height);
+          if (ch > CARD_HEAD_HEIGHT + 80) {
+            const bodyH = Math.max(MIN_SANKEY_CANVAS_HEIGHT, ch - CARD_HEAD_HEIGHT);
+            setSankeyHeight((prev) => (Math.abs(prev - bodyH) >= 1 ? bodyH : prev));
+          }
+          continue;
+        }
         const w = Math.floor(entry.contentRect.width);
         if (w <= 40) continue;
-        if (entry.target === sankeyEl) setSankeyWidth(w);
-        if (entry.target === dagLaneEl) setDagLaneWidth(w);
-        if (entry.target === curveSvgEl) setCurveWidth(w);
+        if (entry.target === sankeyEl) {
+          setSankeyWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev));
+        }
+        if (entry.target === dagLaneEl) {
+          setDagLaneWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev));
+        }
+        if (entry.target === curveSvgEl) {
+          setCurveWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev));
+        }
       }
     });
-    if (sankeyEl) ro.observe(sankeyEl);
-    if (dagLaneEl) ro.observe(dagLaneEl);
-    if (curveSvgEl) ro.observe(curveSvgEl);
+    observeCardMainHeight(cardMainEl);
+    observeWidth(sankeyEl, (w) => setSankeyWidth(w));
+    observeWidth(dagLaneEl, (w) => setDagLaneWidth(w));
+    observeWidth(curveSvgEl, (w) => setCurveWidth(w));
     onCleanup(() => ro?.disconnect());
   });
 
@@ -197,18 +259,16 @@ export default function Resources(props: {
     void _sub;
     void _ld;
     queueMicrotask(() => {
-      if (sankeyEl) {
-        ro?.observe(sankeyEl);
-        if (sankeyEl.clientWidth > 40) setSankeyWidth(sankeyEl.clientWidth);
-      }
-      if (dagLaneEl) {
-        ro?.observe(dagLaneEl);
-        if (dagLaneEl.clientWidth > 40) setDagLaneWidth(dagLaneEl.clientWidth);
-      }
-      if (curveSvgEl) {
-        ro?.observe(curveSvgEl);
-        if (curveSvgEl.clientWidth > 40) setCurveWidth(curveSvgEl.clientWidth);
-      }
+      observeCardMainHeight(cardMainEl);
+      observeWidth(sankeyEl, (w) =>
+        setSankeyWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev)),
+      );
+      observeWidth(dagLaneEl, (w) =>
+        setDagLaneWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev)),
+      );
+      observeWidth(curveSvgEl, (w) =>
+        setCurveWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev)),
+      );
     });
   });
 
@@ -224,43 +284,82 @@ export default function Resources(props: {
     const l = lens();
     const m = metric();
     const w = sankeyWidth();
+    const h = sankeyHeight();
     if (isMissionMode()) {
       const det = detail();
       if (!det) return null;
-      const { nodes, links } = buildMissionFlowSankeyInput(det, l);
-      const h = Math.max(280, Math.min(480, Math.max(nodes.length * 26, 300)));
+      const { nodes, links } = buildMissionFlowSankeyInput(det, l, m, h);
       return {
         height: h,
         layout: computeSankeyLayout(nodes, links, {
           width: w,
           height: h,
           metric: m,
-          marginX: 164,
+          marginX: 204,
+          marginY: 16,
         }),
       };
     }
     const ov = overview();
     if (!ov) return null;
-    const { nodes, links } = buildOverviewSankeyInput(ov, l);
-    const col0Count = nodes.filter((n) => n.column === 0).length;
-    const col1Count = nodes.filter((n) => n.column === 1).length;
-    const h = Math.max(290, Math.min(500, Math.max(col0Count, col1Count) * 44 + 40));
+    const { nodes, links } = buildOverviewSankeyInput(ov, l, m, h);
     return {
       height: h,
       layout: computeSankeyLayout(nodes, links, {
         width: w,
         height: h,
         metric: m,
-        marginX: 176,
+        marginX: 204,
+        marginY: 16,
       }),
     };
   });
+
+  const sankeyLinkMap = createMemo(
+    () => new Map((sankeyGraph()?.layout.links ?? []).map((l) => [l.id, l])),
+  );
+  const sankeyLinkIds = createMemo(
+    () => sankeyGraph()?.layout.links.map((l) => l.id) ?? [],
+    [],
+    { equals: eqIds },
+  );
+  const sankeyNodeMap = createMemo(
+    () => new Map((sankeyGraph()?.layout.nodes ?? []).map((n) => [n.id, n])),
+  );
+  const sankeyNodeIds = createMemo(
+    () => sankeyGraph()?.layout.nodes.map((n) => n.id) ?? [],
+    [],
+    { equals: eqIds },
+  );
 
   // Fast-DAG layout memo
   const dagLayout = createMemo(() => {
     const det = detail();
     if (!det) return null;
     return layoutDagRows(det.dag.bars, det.dag.horizon_secs);
+  });
+
+  const dagRowMap = createMemo(
+    () => new Map((dagLayout()?.rows ?? []).map((r) => [r.bar.id, r])),
+  );
+  const dagRowIds = createMemo(
+    () => dagLayout()?.rows.map((r) => r.bar.id) ?? [],
+    [],
+    { equals: eqIds },
+  );
+  const dagEdgeMap = createMemo(
+    () => new Map((dagLayout()?.edges ?? []).map((e) => [e.id, e])),
+  );
+  const dagEdgeIds = createMemo(
+    () => dagLayout()?.edges.map((e) => e.id) ?? [],
+    [],
+    { equals: eqIds },
+  );
+
+  const isolatedLabel = createMemo(() => {
+    const id = isolatedId();
+    if (!id) return null;
+    return sankeyNodeMap().get(id)?.label ?? id;
   });
 
   // Header live summary stamp
@@ -270,8 +369,17 @@ export default function Resources(props: {
     if (isMissionMode()) {
       const det = detail();
       if (!det) return { primary: "—", secondary: null, warn: null };
-      const sumVcpu = det.flow.subagents.reduce((s, a) => s + a.vcpu, 0);
-      const sumCu = det.flow.subagents.reduce((s, a) => s + a.compute_usd_per_h, 0);
+      const activeVmBars = det.dag.bars.filter(
+        (b) => b.role === "vm" && b.state === "active",
+      );
+      const sumVcpu =
+        activeVmBars.length > 0
+          ? activeVmBars.reduce((s, b) => s + b.vcpu, 0)
+          : det.flow.subagents.reduce((s, a) => s + a.vcpu, 0);
+      const sumCu =
+        activeVmBars.length > 0
+          ? activeVmBars.reduce((s, b) => s + b.compute_usd_per_h, 0)
+          : det.flow.subagents.reduce((s, a) => s + a.compute_usd_per_h, 0);
       const sumBtok = det.flow.subagents.reduce((s, a) => s + a.b_tok_per_h, 0);
       const sumIu = det.flow.subagents.reduce((s, a) => s + a.inference_usd_per_h, 0);
       const primary =
@@ -319,12 +427,12 @@ export default function Resources(props: {
   const activeReadout = createMemo(() => {
     const l = lens();
     const m = metric();
-    const g = sankeyGraph();
-    if (hoveredLinkId() && g) {
-      const link = g.layout.links.find((x) => x.id === hoveredLinkId());
+    const hlId = hoveredLinkId();
+    if (hlId) {
+      const link = sankeyLinkMap().get(hlId);
       if (link) {
-        const src = g.layout.nodes.find((n) => n.id === link.source)?.label ?? link.source;
-        const dst = g.layout.nodes.find((n) => n.id === link.target)?.label ?? link.target;
+        const src = sankeyNodeMap().get(link.source)?.label ?? link.source;
+        const dst = sankeyNodeMap().get(link.target)?.label ?? link.target;
         const val = formatResourceRate(
           m === "usd" ? link.usdValue : link.rawValue,
           l,
@@ -334,8 +442,9 @@ export default function Resources(props: {
         return `${src} → ${dst} · ${val}`;
       }
     }
-    if (hoveredNodeId() && g) {
-      const node = g.layout.nodes.find((n) => n.id === hoveredNodeId());
+    const hnId = hoveredNodeId();
+    if (hnId) {
+      const node = sankeyNodeMap().get(hnId);
       if (node) {
         const val = formatResourceRate(
           m === "usd" ? node.usdValue : node.rawValue,
@@ -343,14 +452,15 @@ export default function Resources(props: {
           m,
           true,
         );
-        return `${node.label} · ${val}`;
+        return node.sub ? `${node.label} · ${val} · ${node.sub}` : `${node.label} · ${val}`;
       }
     }
     if (hoveredBarId() && detail()) {
       const bar = detail()!.dag.bars.find((b) => b.id === hoveredBarId());
       if (bar) {
+        const effLens = bar.role === "vm" ? "compute" : l;
         const rateVal =
-          l === "compute"
+          effLens === "compute"
             ? m === "usd"
               ? bar.compute_usd_per_h
               : bar.vcpu
@@ -359,11 +469,15 @@ export default function Resources(props: {
               : bar.b_tok_per_h;
         const parts = [
           bar.label,
-          formatResourceRate(rateVal, l, m, true),
+          formatResourceRate(rateVal, effLens, m, true),
           formatDurationCompact(bar.duration_secs),
         ];
-        if (bar.eta_remaining_secs && bar.eta_remaining_secs > 0) {
-          parts.push(`~${formatDurationCompact(bar.eta_remaining_secs)} left`);
+        if (bar.eta_remaining_secs && bar.eta_remaining_secs > 0 && bar.state === "active") {
+          parts.push(
+            bar.role === "vm"
+              ? `lease ~${formatDurationCompact(bar.eta_remaining_secs)}`
+              : `~${formatDurationCompact(bar.eta_remaining_secs)} left`,
+          );
         }
         return parts.join(" · ");
       }
@@ -464,6 +578,11 @@ export default function Resources(props: {
     const len = ov.timestamps_ms.length;
     const filterId = isolatedId();
     const values = new Array<number>(len).fill(0);
+    const visibleCol1Ids = new Set(
+      (sankeyGraph()?.layout.nodes ?? [])
+        .filter((n) => n.column === 1 && n.id !== "__other_missions__")
+        .map((n) => n.id),
+    );
 
     if (l === "compute") {
       const srcMatch = filterId
@@ -477,6 +596,12 @@ export default function Resources(props: {
         const arr =
           m === "usd" ? misMatch.series_compute_usd_per_h : misMatch.series_vcpu;
         for (let i = 0; i < len; i++) values[i] = arr[i] ?? 0;
+      } else if (filterId === "__other_missions__") {
+        for (const ms of ov.missions) {
+          if (visibleCol1Ids.has(ms.id)) continue;
+          const arr = m === "usd" ? ms.series_compute_usd_per_h : ms.series_vcpu;
+          for (let i = 0; i < len; i++) values[i] += arr[i] ?? 0;
+        }
       } else {
         for (const s of ov.compute.sources) {
           const arr = m === "usd" ? s.series_usd_per_h : s.series_vcpu;
@@ -497,7 +622,14 @@ export default function Resources(props: {
           m === "usd"
             ? misMatch.series_inference_usd_per_h
             : misMatch.series_b_tok_per_h;
-        for (let i = 0; i < len; i++) values[i] += arr[i] ?? 0;
+        for (let i = 0; i < len; i++) values[i] = arr[i] ?? 0;
+      } else if (filterId === "__other_missions__") {
+        for (const ms of ov.missions) {
+          if (visibleCol1Ids.has(ms.id)) continue;
+          const arr =
+            m === "usd" ? ms.series_inference_usd_per_h : ms.series_b_tok_per_h;
+          for (let i = 0; i < len; i++) values[i] += arr[i] ?? 0;
+        }
       } else {
         for (const p of ov.inference.pools) {
           const arr = m === "usd" ? p.series_usd_per_h : p.series_b_tok_per_h;
@@ -506,10 +638,29 @@ export default function Resources(props: {
       }
     }
 
-    const peak = values.reduce((a, b) => Math.max(a, b), 0);
+    const hasActiveFleet =
+      ov.missions.some(
+        (ms) =>
+          ms.status === "active" ||
+          ms.status === "waiting_background" ||
+          ms.subagent_running > 0,
+      ) || ov.compute.active_vcpu > 0;
+    const asOfMs = Date.parse(ov.as_of);
+    const lastBucketStartMs = ov.timestamps_ms[len - 1] ?? 0;
+    const openElapsedFrac =
+      Number.isFinite(asOfMs) && ov.bucket_seconds > 0
+        ? Math.max(0, Math.min(1, (asOfMs - lastBucketStartMs) / (ov.bucket_seconds * 1000)))
+        : undefined;
+    const displayValues = stabilizeTrailingOpenBucket(
+      values,
+      hasActiveFleet,
+      openElapsedFrac,
+    );
+
+    const peak = displayValues.reduce((a, b) => Math.max(a, b), 0);
     const denom = peak > 0 ? peak * 1.12 : 1;
     const n = Math.max(1, len - 1);
-    const pts = values.map((v, i) => ({
+    const pts = displayValues.map((v, i) => ({
       x: padX + (i / n) * plotW,
       y: baseY - (v / denom) * plotH,
     }));
@@ -530,7 +681,7 @@ export default function Resources(props: {
         const idx = Math.min(len - 1, Math.max(0, Math.round(frac * n)));
         return {
           timeLabel: formatClockTick(ov.timestamps_ms[idx], ov.range),
-          valLabel: formatResourceRate(values[idx] ?? 0, l, m, true),
+          valLabel: formatResourceRate(displayValues[idx] ?? 0, l, m, true),
         };
       },
     };
@@ -557,9 +708,15 @@ export default function Resources(props: {
       setIsolatedId((prev) => (prev === node.id ? null : node.id));
       return;
     }
-    if (node.missionId) {
+    if (node.column === 2 && node.missionId) {
       props.onOpen(`m:${node.missionId}`);
+      return;
     }
+    if (node.id === "sub:__other__") {
+      setSubmode("dag");
+      return;
+    }
+    setIsolatedId((prev) => (prev === node.id ? null : node.id));
   }
 
   function handleLinkClick(link: { source: string; target: string }) {
@@ -620,22 +777,22 @@ export default function Resources(props: {
             <button
               type="button"
               role="tab"
-              aria-selected={lens() === "compute"}
-              class={`res-seg-btn ${lens() === "compute" ? "is-active" : ""}`}
-              data-testid="res-lens-compute"
-              onClick={() => setLens("compute")}
-            >
-              Compute
-            </button>
-            <button
-              type="button"
-              role="tab"
               aria-selected={lens() === "inference"}
               class={`res-seg-btn ${lens() === "inference" ? "is-active" : ""}`}
               data-testid="res-lens-inference"
               onClick={() => setLens("inference")}
             >
               Inference
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={lens() === "compute"}
+              class={`res-seg-btn ${lens() === "compute" ? "is-active" : ""}`}
+              data-testid="res-lens-compute"
+              onClick={() => setLens("compute")}
+            >
+              Compute
             </button>
           </div>
 
@@ -731,14 +888,22 @@ export default function Resources(props: {
       </Show>
 
       {/* Main Flow / Fast-DAG Card */}
-      <div class="res-card res-card-main">
+      <div class="res-card res-card-main" ref={cardMainEl}>
         <Show
           when={!loading()}
           fallback={
-            <div style={{ padding: "16px", display: "flex", "flex-direction": "column", gap: "12px", flex: "1" }}>
-              <div class="res-skel" style={{ height: "20px", width: "36%" }} />
-              <div class="res-skel" style={{ flex: "1", "min-height": "260px" }} />
-            </div>
+            <>
+              <div class="res-card-head">
+                <div class="res-skel" style={{ height: "14px", width: "210px" }} />
+                <div class="res-skel" style={{ height: "14px", width: "180px" }} />
+              </div>
+              <div style={{ padding: "14px", flex: "1 1 0", "min-height": "0" }}>
+                <div
+                  class="res-skel"
+                  style={{ height: "100%", width: "100%" }}
+                />
+              </div>
+            </>
           }
         >
           <Show
@@ -752,15 +917,15 @@ export default function Resources(props: {
                         ? `${lens() === "compute" ? "Machines" : "Pools"} → Tracks → Subagents`
                         : `${lens() === "compute" ? "Inputs · Machines" : "Inputs · Quota Pools"} → Missions`}
                     </span>
-                    <Show when={isolatedId()}>
-                      {(iso) => (
+                    <Show when={isolatedLabel()}>
+                      {(isoLabel) => (
                         <button
                           type="button"
                           class="res-filter-chip"
                           data-testid="res-clear-filter"
                           onClick={() => setIsolatedId(null)}
                         >
-                          Filtered: {iso()} ×
+                          Filtered: {isoLabel()} ×
                         </button>
                       )}
                     </Show>
@@ -769,7 +934,7 @@ export default function Resources(props: {
                     <Show
                       when={activeReadout()}
                       fallback={
-                        <span>
+                        <span class="res-head-hint">
                           {isMissionMode()
                             ? "Click subagent to open transcript"
                             : "Click a mission to inspect subagent DAG"}
@@ -790,7 +955,10 @@ export default function Resources(props: {
                         sankeyGraph()!.layout.nodes.some((n) => n.value > 0))
                     }
                     fallback={
-                      <div class="res-empty" data-testid="res-empty-state">
+                      <div
+                        class="res-empty"
+                        data-testid="res-empty-state"
+                      >
                         <div class="res-empty-title">
                           No {lens()} flow recorded in this window
                         </div>
@@ -805,103 +973,180 @@ export default function Resources(props: {
                     <svg
                       class="res-sankey-svg"
                       data-testid="res-sankey-svg"
-                      viewBox={`0 0 ${sankeyWidth()} ${sankeyGraph()!.height}`}
-                      style={{ height: `${sankeyGraph()!.height}px` }}
+                      viewBox={`0 0 ${sankeyWidth()} ${sankeyHeight()}`}
+                      style={{ height: `${sankeyHeight()}px` }}
                     >
                       <g>
-                        <For each={sankeyGraph()!.layout.links}>
-                          {(link) => (
-                            <path
-                              class="res-sankey-link"
-                              data-testid={`res-link-${link.source}-${link.target}`}
-                              d={link.path}
-                              stroke={link.color}
-                              stroke-width={link.width}
-                              stroke-dasharray={link.degraded ? "5 3" : undefined}
-                              stroke-opacity={
-                                isLinkDimmed(link.id, link.source, link.target)
-                                  ? 0.12
-                                  : hoveredLinkId() === link.id
-                                    ? 0.62
-                                    : 0.36
-                              }
-                              onMouseEnter={() => setHoveredLinkId(link.id)}
-                              onMouseLeave={() => setHoveredLinkId(null)}
-                              onClick={() => handleLinkClick(link)}
-                            />
-                          )}
+                        <For each={sankeyLinkIds()}>
+                          {(id) => {
+                            const link = () => sankeyLinkMap().get(id);
+                            return (
+                              <Show when={link()}>
+                                {(lk) => {
+                                  const dimmed = () =>
+                                    isLinkDimmed(id, lk().source, lk().target);
+                                  const isHov = () => hoveredLinkId() === id;
+                                  return (
+                                    <path
+                                      class="res-sankey-link"
+                                      data-testid={`res-link-${lk().source}-${lk().target}`}
+                                      d={lk().path}
+                                      fill={lk().color}
+                                      fill-opacity={dimmed() ? 0.1 : isHov() ? 0.56 : 0.32}
+                                      stroke={lk().degraded ? lk().color : "none"}
+                                      stroke-width={lk().degraded ? 1.1 : 0}
+                                      stroke-dasharray={lk().degraded ? "4 3" : undefined}
+                                      stroke-opacity={dimmed() ? 0.16 : isHov() ? 0.85 : 0.55}
+                                      onMouseEnter={() => setHoveredLinkId(id)}
+                                      onMouseLeave={() =>
+                                        setHoveredLinkId((prev) => (prev === id ? null : prev))
+                                      }
+                                      onClick={() => handleLinkClick(lk())}
+                                    />
+                                  );
+                                }}
+                              </Show>
+                            );
+                          }}
                         </For>
                       </g>
 
                       <g>
-                        <For each={sankeyGraph()!.layout.nodes}>
-                          {(node) => {
-                            const isLeft = () => node.column === 0;
-                            const isRight = () =>
-                              node.column === sankeyGraph()!.layout.columns - 1;
-                            const centerY = () => (node.y0 + node.y1) / 2;
-                            const valStr = () =>
-                              formatResourceRate(
-                                metric() === "usd" ? node.usdValue : node.rawValue,
-                                lens(),
-                                metric(),
-                                true,
-                              );
+                        <For each={sankeyNodeIds()}>
+                          {(id) => {
+                            const node = () => sankeyNodeMap().get(id);
                             return (
-                              <g
-                                class="res-sankey-node-group"
-                                data-testid={`res-node-${node.id}`}
-                                onMouseEnter={() => setHoveredNodeId(node.id)}
-                                onMouseLeave={() => setHoveredNodeId(null)}
-                                onClick={() => handleNodeClick(node)}
-                              >
-                                <rect
-                                  x={node.x0}
-                                  y={node.y0}
-                                  width={node.x1 - node.x0}
-                                  height={Math.max(4, node.y1 - node.y0)}
-                                  rx={3}
-                                  fill={node.color}
-                                  opacity={
-                                    isolatedId() && isolatedId() !== node.id ? 0.45 : 0.95
-                                  }
-                                />
-                                <text
-                                  class="res-sankey-node-label"
-                                  x={
+                              <Show when={node()}>
+                                {(nd) => {
+                                  const isLeft = () => nd().column === 0;
+                                  const isRight = () =>
+                                    nd().column === (sankeyGraph()?.layout.columns ?? 2) - 1;
+                                  const isMiddle = () => !isLeft() && !isRight();
+                                  const centerY = () => (nd().y0 + nd().y1) / 2;
+                                  const barH = () => Math.max(5, nd().y1 - nd().y0);
+                                  const valStr = () =>
+                                    formatResourceRate(
+                                      metric() === "usd" ? nd().usdValue : nd().rawValue,
+                                      lens(),
+                                      metric(),
+                                      true,
+                                    );
+                                  const labelText = () => {
+                                    const maxLen = isMiddle() ? 18 : 24;
+                                    return nd().label.length > maxLen
+                                      ? `${nd().label.slice(0, maxLen - 1)}…`
+                                      : nd().label;
+                                  };
+                                  const subText = () => {
+                                    if (!nd().sub) return valStr();
+                                    const rawSub =
+                                      nd().sub.length > 18
+                                        ? `${nd().sub.slice(0, 17)}…`
+                                        : nd().sub;
+                                    return `${valStr()} · ${rawSub}`;
+                                  };
+                                  const hitX = () =>
                                     isLeft()
-                                      ? node.x0 - 10
-                                      : isRight()
-                                        ? node.x1 + 10
-                                        : (node.x0 + node.x1) / 2
-                                  }
-                                  y={centerY() - 5}
-                                  text-anchor={
-                                    isLeft() ? "end" : isRight() ? "start" : "middle"
-                                  }
-                                >
-                                  {node.label.length > 22
-                                    ? `${node.label.slice(0, 21)}…`
-                                    : node.label}
-                                </text>
-                                <text
-                                  class="res-sankey-node-sub"
-                                  x={
+                                      ? Math.max(0, nd().x0 - (nd().showLabel ? 192 : 18))
+                                      : isMiddle()
+                                        ? nd().x0 - (nd().showLabel ? 72 : 10)
+                                        : nd().x0 - 6;
+                                  const hitW = () =>
                                     isLeft()
-                                      ? node.x0 - 10
+                                      ? nd().x1 - hitX() + 6
                                       : isRight()
-                                        ? node.x1 + 10
-                                        : (node.x0 + node.x1) / 2
-                                  }
-                                  y={centerY() + 9}
-                                  text-anchor={
-                                    isLeft() ? "end" : isRight() ? "start" : "middle"
-                                  }
-                                >
-                                  {valStr()}
-                                  {node.sub ? ` · ${node.sub.slice(0, 20)}` : ""}
-                                </text>
-                              </g>
+                                        ? (nd().showLabel ? 196 : 22) + (nd().x1 - nd().x0)
+                                        : nd().showLabel
+                                          ? 156
+                                          : nd().x1 - nd().x0 + 20;
+                                  return (
+                                    <g
+                                      class="res-sankey-node-group"
+                                      data-testid={`res-node-${id}`}
+                                      onMouseEnter={() => setHoveredNodeId(id)}
+                                      onMouseLeave={() =>
+                                        setHoveredNodeId((prev) => (prev === id ? null : prev))
+                                      }
+                                      onClick={() => handleNodeClick(nd())}
+                                    >
+                                      <title>
+                                        {`${nd().label} · ${valStr()}${nd().sub ? ` (${nd().sub})` : ""}`}
+                                      </title>
+                                      <rect
+                                        x={hitX()}
+                                        y={nd().y0 - 3}
+                                        width={hitW()}
+                                        height={Math.max(12, barH() + 6)}
+                                        fill="transparent"
+                                      />
+                                      <rect
+                                        x={nd().x0}
+                                        y={nd().y0}
+                                        width={nd().x1 - nd().x0}
+                                        height={barH()}
+                                        rx={3}
+                                        fill={nd().color}
+                                        opacity={
+                                          isolatedId() && isolatedId() !== id
+                                            ? 0.42
+                                            : hoveredNodeId() === id
+                                              ? 1
+                                              : 0.92
+                                        }
+                                      />
+                                      <Show when={nd().showLabel}>
+                                        <Show when={isMiddle()}>
+                                          <rect
+                                            class="res-sankey-mid-pill"
+                                            x={
+                                              (nd().x0 + nd().x1) / 2 -
+                                              (labelText().length * 3.4 + 8)
+                                            }
+                                            y={centerY() - 9}
+                                            width={labelText().length * 6.8 + 16}
+                                            height={18}
+                                            rx={5}
+                                          />
+                                        </Show>
+                                        <text
+                                          class={`res-sankey-node-label ${isMiddle() ? "is-middle" : ""}`}
+                                          x={
+                                            isLeft()
+                                              ? nd().x0 - 10
+                                              : isRight()
+                                                ? nd().x1 + 10
+                                                : (nd().x0 + nd().x1) / 2
+                                          }
+                                          y={nd().showSub ? centerY() - 5 : centerY() + 4}
+                                          text-anchor={
+                                            isLeft() ? "end" : isRight() ? "start" : "middle"
+                                          }
+                                        >
+                                          {labelText()}
+                                        </text>
+                                      </Show>
+                                      <Show when={nd().showSub}>
+                                        <text
+                                          class="res-sankey-node-sub"
+                                          x={
+                                            isLeft()
+                                              ? nd().x0 - 10
+                                              : isRight()
+                                                ? nd().x1 + 10
+                                                : (nd().x0 + nd().x1) / 2
+                                          }
+                                          y={centerY() + 9}
+                                          text-anchor={
+                                            isLeft() ? "end" : isRight() ? "start" : "middle"
+                                          }
+                                        >
+                                          {subText()}
+                                        </text>
+                                      </Show>
+                                    </g>
+                                  );
+                                }}
+                              </Show>
                             );
                           }}
                         </For>
@@ -916,13 +1161,24 @@ export default function Resources(props: {
             <div class="res-card-head">
               <div class="res-card-head-left">
                 <span class="res-col-title">
-                  Subagent Execution DAG · {detail()?.mission.subagent_count ?? 0} spans
+                  {(() => {
+                    const bars = detail()?.dag.bars ?? [];
+                    const vmCount = bars.filter((b) => b.role === "vm").length;
+                    const spanCount = bars.length - vmCount;
+                    return vmCount > 0
+                      ? `Execution DAG · ${vmCount} VMs · ${spanCount} spans`
+                      : `Subagent Execution DAG · ${bars.length} spans`;
+                  })()}
                 </span>
               </div>
               <div class="res-card-head-right">
                 <Show
                   when={activeReadout()}
-                  fallback={<span>Hover to scrub · Click subagent to open transcript</span>}
+                  fallback={
+                    <span class="res-head-hint">
+                      Hover to scrub · Click subagent to open transcript
+                    </span>
+                  }
                 >
                   {(txt) => <span class="res-hover-pill">{txt()}</span>}
                 </Show>
@@ -954,40 +1210,48 @@ export default function Resources(props: {
                       style={{ height: `${dag().totalHeight}px` }}
                     >
                       <div class="res-dag-labels">
-                        <For each={dag().rows}>
-                          {(row) => (
-                            <>
-                              <Show when={row.sectionHeader}>
-                                {(sec) => (
-                                  <div
-                                    class="res-dag-sec-hdr"
-                                    style={{ top: `${row.y - 20}px` }}
-                                  >
-                                    {sec()}
-                                  </div>
+                        <For each={dagRowIds()}>
+                          {(barId) => {
+                            const row = () => dagRowMap().get(barId);
+                            return (
+                              <Show when={row()}>
+                                {(rw) => (
+                                  <>
+                                    <Show when={rw().sectionHeader}>
+                                      {(sec) => (
+                                        <div
+                                          class="res-dag-sec-hdr"
+                                          style={{ top: `${rw().y - 20}px` }}
+                                        >
+                                          {sec()}
+                                        </div>
+                                      )}
+                                    </Show>
+                                    <button
+                                      type="button"
+                                      class={`res-dag-row-label ${hoveredBarId() === barId ? "is-hovered" : ""}`}
+                                      style={{ top: `${rw().y + 2}px` }}
+                                      data-testid={`res-dag-row-${barId}`}
+                                      onMouseEnter={() => setHoveredBarId(barId)}
+                                      onMouseLeave={() =>
+                                        setHoveredBarId((prev) => (prev === barId ? null : prev))
+                                      }
+                                      onClick={() => {
+                                        const mid = rw().bar.mission_id;
+                                        if (mid) props.onOpen(`m:${mid}`);
+                                      }}
+                                      title={rw().bar.label}
+                                    >
+                                      <span class="res-dag-row-title">{rw().bar.label}</span>
+                                      <span class="res-dag-row-meta">
+                                        {formatDurationCompact(rw().bar.duration_secs)}
+                                      </span>
+                                    </button>
+                                  </>
                                 )}
                               </Show>
-                              <button
-                                type="button"
-                                class={`res-dag-row-label ${hoveredBarId() === row.bar.id ? "is-hovered" : ""}`}
-                                style={{ top: `${row.y + 2}px` }}
-                                data-testid={`res-dag-row-${row.bar.id}`}
-                                onMouseEnter={() => setHoveredBarId(row.bar.id)}
-                                onMouseLeave={() => setHoveredBarId(null)}
-                                onClick={() => {
-                                  if (row.bar.mission_id) {
-                                    props.onOpen(`m:${row.bar.mission_id}`);
-                                  }
-                                }}
-                                title={row.bar.label}
-                              >
-                                <span class="res-dag-row-title">{row.bar.label}</span>
-                                <span class="res-dag-row-meta">
-                                  {formatDurationCompact(row.bar.duration_secs)}
-                                </span>
-                              </button>
-                            </>
-                          )}
+                            );
+                          }}
                         </For>
                       </div>
 
@@ -1020,69 +1284,101 @@ export default function Resources(props: {
                           </For>
 
                           {/* Dependency connectors (`after_ids`) */}
-                          <For each={dag().edges}>
-                            {(edge) => {
-                              const plotW = () => Math.max(40, dagLaneWidth() - 16);
-                              const x0 = () => 8 + edge.fromEndFrac * plotW();
-                              const x1 = () => 8 + edge.toStartFrac * plotW();
-                              const mx = () => (x0() + x1()) / 2;
+                          <For each={dagEdgeIds()}>
+                            {(edgeId) => {
+                              const edge = () => dagEdgeMap().get(edgeId);
                               return (
-                                <path
-                                  d={`M ${x0()} ${edge.fromCenterY} C ${mx()} ${edge.fromCenterY}, ${mx()} ${edge.toCenterY}, ${x1()} ${edge.toCenterY}`}
-                                  fill="none"
-                                  stroke="var(--stroke-strong)"
-                                  stroke-width="1.2"
-                                />
+                                <Show when={edge()}>
+                                  {(ed) => {
+                                    const plotW = () => Math.max(40, dagLaneWidth() - 16);
+                                    const x0 = () => 8 + ed().fromEndFrac * plotW();
+                                    const x1 = () => 8 + ed().toStartFrac * plotW();
+                                    const mx = () => (x0() + x1()) / 2;
+                                    return (
+                                      <path
+                                        d={`M ${x0()} ${ed().fromCenterY} C ${mx()} ${ed().fromCenterY}, ${mx()} ${ed().toCenterY}, ${x1()} ${ed().toCenterY}`}
+                                        fill="none"
+                                        stroke="var(--stroke-strong)"
+                                        stroke-width="1.2"
+                                      />
+                                    );
+                                  }}
+                                </Show>
                               );
                             }}
                           </For>
 
                           {/* Execution bars + forward ETA extensions */}
-                          <For each={dag().rows}>
-                            {(row) => {
-                              const plotW = () => Math.max(40, dagLaneWidth() - 16);
-                              const xStart = () => 8 + row.startFrac * plotW();
-                              const barW = () =>
-                                Math.max(6, (row.endFrac - row.startFrac) * plotW());
-                              const etaW = () =>
-                                row.etaEndFrac != null
-                                  ? Math.max(0, (row.etaEndFrac - row.endFrac) * plotW())
-                                  : 0;
+                          <For each={dagRowIds()}>
+                            {(barId) => {
+                              const row = () => dagRowMap().get(barId);
                               return (
-                                <g
-                                  style={{ cursor: row.bar.mission_id ? "pointer" : "default" }}
-                                  onMouseEnter={() => setHoveredBarId(row.bar.id)}
-                                  onMouseLeave={() => setHoveredBarId(null)}
-                                  onClick={() => {
-                                    if (row.bar.mission_id) {
-                                      props.onOpen(`m:${row.bar.mission_id}`);
-                                    }
+                                <Show when={row()}>
+                                  {(rw) => {
+                                    const plotW = () => Math.max(40, dagLaneWidth() - 16);
+                                    const xStart = () => 8 + rw().startFrac * plotW();
+                                    const barW = () =>
+                                      Math.max(6, (rw().endFrac - rw().startFrac) * plotW());
+                                    const etaW = () =>
+                                      rw().etaEndFrac != null
+                                        ? Math.max(0, (rw().etaEndFrac! - rw().endFrac) * plotW())
+                                        : 0;
+                                    return (
+                                      <g
+                                        style={{
+                                          cursor: rw().bar.mission_id ? "pointer" : "default",
+                                        }}
+                                        onMouseEnter={() => setHoveredBarId(barId)}
+                                        onMouseLeave={() =>
+                                          setHoveredBarId((prev) => (prev === barId ? null : prev))
+                                        }
+                                        onClick={() => {
+                                          const mid = rw().bar.mission_id;
+                                          if (mid) props.onOpen(`m:${mid}`);
+                                        }}
+                                      >
+                                        <rect
+                                          x={xStart()}
+                                          y={rw().barY}
+                                          width={barW()}
+                                          height={rw().barHeight}
+                                          rx={4}
+                                          fill={barColorForState(
+                                            rw().bar.state,
+                                            rw().bar.role,
+                                          )}
+                                          opacity={
+                                            hoveredBarId() === barId
+                                              ? 1
+                                              : rw().bar.state === "cancelled"
+                                                ? 0.48
+                                                : 0.86
+                                          }
+                                        />
+                                        <Show when={etaW() > 2}>
+                                          <rect
+                                            x={xStart() + barW()}
+                                            y={rw().barY}
+                                            width={etaW()}
+                                            height={rw().barHeight}
+                                            rx={4}
+                                            fill={barColorForState(
+                                              rw().bar.state,
+                                              rw().bar.role,
+                                            )}
+                                            fill-opacity="0.18"
+                                            stroke={barColorForState(
+                                              rw().bar.state,
+                                              rw().bar.role,
+                                            )}
+                                            stroke-width="1"
+                                            stroke-dasharray="3 2"
+                                          />
+                                        </Show>
+                                      </g>
+                                    );
                                   }}
-                                >
-                                  <rect
-                                    x={xStart()}
-                                    y={row.barY}
-                                    width={barW()}
-                                    height={row.barHeight}
-                                    rx={4}
-                                    fill={barColorForState(row.bar.state)}
-                                    opacity={hoveredBarId() === row.bar.id ? 1 : 0.84}
-                                  />
-                                  <Show when={etaW() > 2}>
-                                    <rect
-                                      x={xStart() + barW()}
-                                      y={row.barY}
-                                      width={etaW()}
-                                      height={row.barHeight}
-                                      rx={4}
-                                      fill={barColorForState(row.bar.state)}
-                                      fill-opacity="0.18"
-                                      stroke={barColorForState(row.bar.state)}
-                                      stroke-width="1"
-                                      stroke-dasharray="3 2"
-                                    />
-                                  </Show>
-                                </g>
+                                </Show>
                               );
                             }}
                           </For>

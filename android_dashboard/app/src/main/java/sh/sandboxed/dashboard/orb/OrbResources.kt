@@ -123,6 +123,7 @@ object OrbResourcesModel {
         val targetX: Double,
         val y0: Double,
         val y1: Double,
+        val sourceWidth: Double,
         val width: Double,
     )
 
@@ -139,6 +140,7 @@ object OrbResourcesModel {
         val missionId: String? = null,
         val label: String,
         val section: String,
+        val role: String = "worker",
         val startOffsetSecs: Double,
         val durationSecs: Double,
         val etaRemainingSecs: Double? = null,
@@ -292,7 +294,15 @@ object OrbResourcesModel {
         for (c in 0 until columns) {
             val col = cols[c]
             if (col.isEmpty()) continue
-            col.sortByDescending { it.value }
+            col.sortWith { a, b ->
+                val aTail = a.id.contains("__other")
+                val bTail = b.id.contains("__other")
+                if (aTail != bTail) {
+                    if (aTail) 1 else -1
+                } else {
+                    b.value.compareTo(a.value)
+                }
+            }
             val sumVal = col.sumOf { max(0.0, it.value) }
             val padTotal = max(0, col.size - 1) * nodePadding
             val availH = max(32.0, innerH - padTotal)
@@ -328,7 +338,7 @@ object OrbResourcesModel {
             inByTarget.getOrPut(l.target) { mutableListOf() }.add(l)
         }
 
-        val sourceY = mutableMapOf<String, Double>()
+        val sourceYW = mutableMapOf<String, Pair<Double, Double>>()
         for ((srcId, list) in outBySource) {
             val src = nodeMap[srcId] ?: continue
             list.sortBy { nodeMap[it.target]?.y0 ?: 0.0 }
@@ -338,7 +348,7 @@ object OrbResourcesModel {
             for (l in list) {
                 val mv = max(1e-6, if (metric == Metric.Usd) l.estUsdPerH else l.value)
                 val w = (mv / sumM) * nodeH
-                sourceY[l.id] = off + w / 2.0
+                sourceYW[l.id] = (off + w / 2.0) to w
                 off += w
             }
         }
@@ -362,7 +372,7 @@ object OrbResourcesModel {
         for (l in inputLinks) {
             val src = nodeMap[l.source] ?: continue
             val dst = nodeMap[l.target] ?: continue
-            val y0 = sourceY[l.id] ?: continue
+            val (y0, sw) = sourceYW[l.id] ?: continue
             val (y1, w) = targetYW[l.id] ?: continue
             outLinks.add(
                 SankeyLayoutLink(
@@ -377,6 +387,7 @@ object OrbResourcesModel {
                     targetX = dst.x0,
                     y0 = y0,
                     y1 = y1,
+                    sourceWidth = max(1.5, sw),
                     width = max(1.5, w),
                 ),
             )
@@ -431,7 +442,7 @@ fun OrbResourcesSettingsPage(
     onBack: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    var lens by remember { mutableStateOf(OrbResourcesModel.Lens.Compute) }
+    var lens by remember { mutableStateOf(OrbResourcesModel.Lens.Inference) }
     var metric by remember { mutableStateOf(OrbResourcesModel.Metric.Raw) }
     var range by remember { mutableStateOf("6h") }
     var horizon by remember { mutableStateOf("6h") }
@@ -544,8 +555,8 @@ fun OrbResourcesSettingsPage(
                 ) {
                     SegmentedPillRow(
                         options = listOf(
-                            OrbResourcesModel.Lens.Compute to "Compute",
                             OrbResourcesModel.Lens.Inference to "Inference",
+                            OrbResourcesModel.Lens.Compute to "Compute",
                         ),
                         selected = lens,
                         onSelect = { lens = it },
@@ -747,13 +758,32 @@ private fun FleetSankeyCard(
                 )
             }
         } else {
-            OrbJSON.dictList(inference["pools"]).forEachIndexed { i, p ->
+            val activeIds = links
+                .filter { OrbJSON.str(it, "kind") == "inference" && (OrbJSON.double(it, "value") ?: 0.0) > 0.0 }
+                .mapNotNull { OrbJSON.str(it, "source_id") }
+                .toSet()
+            val allPools = OrbJSON.dictList(inference["pools"])
+            val filtered = allPools.filter {
+                activeIds.contains(OrbJSON.str(it, "id") ?: "") ||
+                    (OrbJSON.double(it, "current_b_tok_per_h") ?: 0.0) > 0.0 ||
+                    (OrbJSON.double(it, "est_usd_per_h") ?: 0.0) > 0.0
+            }
+            val pools = if (filtered.isNotEmpty()) filtered else allPools.take(5)
+            pools.forEachIndexed { i, p ->
+                val rawSub = OrbJSON.str(p, "sublabel") ?: ""
+                val remPct = OrbJSON.double(p, "remaining_pct")
+                val hasLeft = rawSub.contains("% left", ignoreCase = true)
+                val sub = if (remPct != null && !hasLeft) {
+                    if (rawSub.isEmpty()) "${remPct.roundToInt()}% left" else "${remPct.roundToInt()}% left · $rawSub"
+                } else {
+                    rawSub
+                }
                 inputNodes.add(
                     OrbResourcesModel.SankeyInputNode(
                         id = OrbJSON.str(p, "id") ?: "pool-$i",
                         column = 0,
                         label = OrbJSON.str(p, "label") ?: "Pool",
-                        sub = OrbJSON.str(p, "sublabel") ?: "",
+                        sub = sub,
                         colorHex = RESOURCES_PALETTE[i % RESOURCES_PALETTE.size],
                         fallbackValue = OrbJSON.double(p, "current_b_tok_per_h") ?: 0.0,
                         fallbackUsd = OrbJSON.double(p, "est_usd_per_h") ?: 0.0,
@@ -761,7 +791,21 @@ private fun FleetSankeyCard(
                 )
             }
         }
-        missions.forEachIndexed { i, m ->
+        val maxCol1 = 7
+        val sortedMissions = missions.sortedByDescending { m ->
+            if (lens == OrbResourcesModel.Lens.Compute) {
+                if (metric == OrbResourcesModel.Metric.Usd) OrbJSON.double(m, "compute_usd_per_h") ?: 0.0 else OrbJSON.double(m, "vcpu") ?: 0.0
+            } else {
+                if (metric == OrbResourcesModel.Metric.Usd) OrbJSON.double(m, "inference_usd_per_h") ?: 0.0 else OrbJSON.double(m, "b_tok_per_h") ?: 0.0
+            }
+        }
+        val capMissions = sortedMissions.size > maxCol1 + 1
+        val visibleMissions = if (capMissions) sortedMissions.take(maxCol1) else sortedMissions
+        val overflowMissions = if (capMissions) sortedMissions.drop(maxCol1) else emptyList()
+        val overflowIds = overflowMissions.mapNotNull { OrbJSON.str(it, "id") }.toSet()
+        val tailId = "__other_missions__"
+
+        visibleMissions.forEachIndexed { i, m ->
             val mid = OrbJSON.str(m, "id") ?: "m-$i"
             inputNodes.add(
                 OrbResourcesModel.SankeyInputNode(
@@ -776,18 +820,63 @@ private fun FleetSankeyCard(
                 ),
             )
         }
-        val inputLinks = links
-            .filter { OrbJSON.str(it, "kind") == lens.id }
-            .mapIndexed { i, l ->
-                OrbResourcesModel.SankeyInputLink(
-                    id = "l-$i",
-                    source = OrbJSON.str(l, "source_id") ?: "",
-                    target = OrbJSON.str(l, "mission_id") ?: "",
-                    value = OrbJSON.double(l, "value") ?: 0.0,
-                    estUsdPerH = OrbJSON.double(l, "est_usd_per_h") ?: 0.0,
-                    degraded = l["degraded"] == true,
+        if (overflowMissions.isNotEmpty()) {
+            val sumRaw = overflowMissions.sumOf {
+                if (lens == OrbResourcesModel.Lens.Compute) (OrbJSON.double(it, "vcpu") ?: 0.0) else (OrbJSON.double(it, "b_tok_per_h") ?: 0.0)
+            }
+            val sumUsd = overflowMissions.sumOf {
+                if (lens == OrbResourcesModel.Lens.Compute) (OrbJSON.double(it, "compute_usd_per_h") ?: 0.0) else (OrbJSON.double(it, "inference_usd_per_h") ?: 0.0)
+            }
+            inputNodes.add(
+                OrbResourcesModel.SankeyInputNode(
+                    id = tailId,
+                    column = 1,
+                    label = "+${overflowMissions.size} missions",
+                    sub = "grouped",
+                    colorHex = "#6b7280",
+                    missionId = null,
+                    fallbackValue = sumRaw,
+                    fallbackUsd = sumUsd,
+                ),
+            )
+        }
+
+        val inputLinks = mutableListOf<OrbResourcesModel.SankeyInputLink>()
+        val tailAgg = mutableMapOf<String, Triple<Double, Double, Boolean>>()
+        links.filter { OrbJSON.str(it, "kind") == lens.id }.forEachIndexed { i, l ->
+            val src = OrbJSON.str(l, "source_id") ?: ""
+            val tgt = OrbJSON.str(l, "mission_id") ?: ""
+            val v = OrbJSON.double(l, "value") ?: 0.0
+            val u = OrbJSON.double(l, "est_usd_per_h") ?: 0.0
+            val deg = l["degraded"] == true
+            if (overflowIds.contains(tgt)) {
+                val prev = tailAgg[src] ?: Triple(0.0, 0.0, false)
+                tailAgg[src] = Triple(prev.first + v, prev.second + u, prev.third || deg)
+            } else {
+                inputLinks.add(
+                    OrbResourcesModel.SankeyInputLink(
+                        id = "l-$i",
+                        source = src,
+                        target = tgt,
+                        value = v,
+                        estUsdPerH = u,
+                        degraded = deg,
+                    ),
                 )
             }
+        }
+        for ((src, agg) in tailAgg) {
+            inputLinks.add(
+                OrbResourcesModel.SankeyInputLink(
+                    id = "l-tail-$src",
+                    source = src,
+                    target = tailId,
+                    value = agg.first,
+                    estUsdPerH = agg.second,
+                    degraded = agg.third,
+                ),
+            )
+        }
 
         if (inputNodes.isNotEmpty()) {
             Canvas(
@@ -806,18 +895,32 @@ private fun FleetSankeyCard(
                 )
                 for (link in layout.links) {
                     val mx = ((link.sourceX + link.targetX) / 2.0).toFloat()
+                    val syTop = (link.y0 - link.sourceWidth / 2.0).toFloat()
+                    val syBot = (link.y0 + link.sourceWidth / 2.0).toFloat()
+                    val tyTop = (link.y1 - link.width / 2.0).toFloat()
+                    val tyBot = (link.y1 + link.width / 2.0).toFloat()
                     val path = Path().apply {
-                        moveTo(link.sourceX.toFloat(), link.y0.toFloat())
-                        cubicTo(mx, link.y0.toFloat(), mx, link.y1.toFloat(), link.targetX.toFloat(), link.y1.toFloat())
+                        moveTo(link.sourceX.toFloat(), syTop)
+                        cubicTo(mx, syTop, mx, tyTop, link.targetX.toFloat(), tyTop)
+                        lineTo(link.targetX.toFloat(), tyBot)
+                        cubicTo(mx, tyBot, mx, syBot, link.sourceX.toFloat(), syBot)
+                        close()
                     }
+                    val col = OrbResourcesModel.parseColor(link.colorHex)
                     drawPath(
                         path = path,
-                        color = OrbResourcesModel.parseColor(link.colorHex).copy(alpha = 0.40f),
-                        style = Stroke(
-                            width = link.width.toFloat(),
-                            pathEffect = if (link.degraded) PathEffect.dashPathEffect(floatArrayOf(10f, 6f)) else null,
-                        ),
+                        color = col.copy(alpha = 0.36f),
                     )
+                    if (link.degraded) {
+                        drawPath(
+                            path = path,
+                            color = col.copy(alpha = 0.68f),
+                            style = Stroke(
+                                width = 2f,
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f)),
+                            ),
+                        )
+                    }
                 }
                 for (node in layout.nodes) {
                     drawRoundRect(
@@ -902,6 +1005,7 @@ private fun MissionFastDagCard(
                 missionId = OrbJSON.str(b, "mission_id"),
                 label = OrbJSON.str(b, "label") ?: "Subagent",
                 section = OrbJSON.str(b, "section") ?: "Workers",
+                role = OrbJSON.str(b, "role") ?: "worker",
                 startOffsetSecs = OrbJSON.double(b, "start_offset_secs") ?: 0.0,
                 durationSecs = OrbJSON.double(b, "duration_secs") ?: 60.0,
                 etaRemainingSecs = OrbJSON.double(b, "eta_remaining_secs"),
@@ -909,9 +1013,15 @@ private fun MissionFastDagCard(
             )
         }
         val rows = OrbResourcesModel.layoutDagRows(bars, horizonSecs)
+        val vmCount = bars.count { it.role == "vm" }
+        val spanCount = bars.size - vmCount
 
         Text(
-            text = "Subagent Execution Fast-DAG · ${bars.size} spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})",
+            text = if (vmCount > 0) {
+                "Execution Fast-DAG · $vmCount VMs · $spanCount spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
+            } else {
+                "Subagent Execution Fast-DAG · ${bars.size} spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
+            },
             color = OrbStyle.textSecondary,
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
@@ -951,11 +1061,21 @@ private fun MissionFastDagCard(
                         size = size,
                         cornerRadius = CornerRadius(4f, 4f),
                     )
-                    val barColor = when (row.bar.state) {
-                        "done" -> Color(0xFF80B28D)
-                        "active" -> Color(0xFF86AEE4)
-                        "capped" -> Color(0xFFD9B23A)
-                        else -> Color(0xFF6A6A6A)
+                    val barColor = if (row.bar.role == "vm") {
+                        when (row.bar.state) {
+                            "active" -> Color(0xFF22959D)
+                            "done" -> Color(0xFF1D9A78)
+                            "capped" -> Color(0xFFD9B23A)
+                            else -> Color(0xFF6A6A6A)
+                        }
+                    } else {
+                        when (row.bar.state) {
+                            "done" -> Color(0xFF80B28D)
+                            "active" -> Color(0xFF86AEE4)
+                            "capped" -> Color(0xFFD9B23A)
+                            "cancelled" -> Color(0xFF7D8590).copy(alpha = 0.55f)
+                            else -> Color(0xFF6A6A6A)
+                        }
                     }
                     val x0 = (row.startFrac * w).toFloat()
                     val bw = max(8f, ((row.endFrac - row.startFrac) * w).toFloat())
@@ -1024,6 +1144,30 @@ private fun ConsumptionCurveCard(
                 for (p in OrbJSON.dictList(OrbJSON.dict(ov["inference"])?.get("pools"))) {
                     val arr = (p[key] as? List<*>) ?: continue
                     for (i in sums.indices) sums[i] += (arr.getOrNull(i) as? Number)?.toDouble() ?: 0.0
+                }
+            }
+            val hasActiveFleet = OrbJSON.dictList(ov["missions"]).any { m ->
+                val st = OrbJSON.str(m, "status")
+                st == "active" || st == "waiting_background" || (OrbJSON.int(m, "subagent_running") ?: 0) > 0
+            } || (OrbJSON.double(OrbJSON.dict(ov["compute"]), "active_vcpu") ?: 0.0) > 0.0
+            if (hasActiveFleet && sums.size >= 2 && sums[sums.size - 2] > 0.0) {
+                val prevVal = sums[sums.size - 2]
+                val lastVal = sums[sums.size - 1]
+                if (lastVal <= 0.0) {
+                    sums[sums.size - 1] = prevVal
+                } else if (lastVal < prevVal * 0.45) {
+                    val lastStartMs = (ts.lastOrNull() as? Number)?.toDouble()
+                    val bucketSecs = OrbJSON.double(ov, "bucket_seconds") ?: 0.0
+                    val asOfMs = runCatching { java.time.Instant.parse(OrbJSON.str(ov, "as_of") ?: "").toEpochMilli().toDouble() }.getOrNull()
+                    if (lastStartMs != null && asOfMs != null && bucketSecs > 0.0) {
+                        val rawFrac = (asOfMs - lastStartMs) / (bucketSecs * 1000.0)
+                        if (rawFrac < 0.7) {
+                            val frac = min(0.7, max(0.08, rawFrac))
+                            val rescaled = min(prevVal * 1.15, lastVal / max(0.25, frac))
+                            val w = min(1.0, frac / 0.7)
+                            sums[sums.size - 1] = prevVal * (1.0 - w) + max(lastVal, rescaled) * w
+                        }
+                    }
                 }
             }
             sums.toList()

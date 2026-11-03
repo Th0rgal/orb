@@ -39,6 +39,8 @@ export interface SankeyLayoutNode extends SankeyInputNode {
   x1: number;
   y0: number;
   y1: number;
+  showLabel: boolean;
+  showSub: boolean;
 }
 
 export interface SankeyLayoutLink {
@@ -224,9 +226,23 @@ export function sankeyRibbonPath(
   targetX: number,
   y0: number,
   y1: number,
+  w0: number,
+  w1?: number,
 ): string {
   const mx = (sourceX + targetX) / 2;
-  return `M ${sourceX.toFixed(2)} ${y0.toFixed(2)} C ${mx.toFixed(2)} ${y0.toFixed(2)}, ${mx.toFixed(2)} ${y1.toFixed(2)}, ${targetX.toFixed(2)} ${y1.toFixed(2)}`;
+  const sw = Math.max(1.5, w0);
+  const tw = Math.max(1.5, w1 ?? w0);
+  const syTop = y0 - sw / 2;
+  const syBot = y0 + sw / 2;
+  const tyTop = y1 - tw / 2;
+  const tyBot = y1 + tw / 2;
+  return [
+    `M ${sourceX.toFixed(2)} ${syTop.toFixed(2)}`,
+    `C ${mx.toFixed(2)} ${syTop.toFixed(2)}, ${mx.toFixed(2)} ${tyTop.toFixed(2)}, ${targetX.toFixed(2)} ${tyTop.toFixed(2)}`,
+    `L ${targetX.toFixed(2)} ${tyBot.toFixed(2)}`,
+    `C ${mx.toFixed(2)} ${tyBot.toFixed(2)}, ${mx.toFixed(2)} ${syBot.toFixed(2)}, ${sourceX.toFixed(2)} ${syBot.toFixed(2)}`,
+    "Z",
+  ].join(" ");
 }
 
 export function computeSankeyLayout(
@@ -308,6 +324,8 @@ export function computeSankeyLayout(
       x1: x0 + nodeWidth,
       y0: 0,
       y1: 0,
+      showLabel: true,
+      showSub: true,
     };
     nodesByCol[n.column]?.push(ln);
     nodeMap.set(n.id, ln);
@@ -315,11 +333,17 @@ export function computeSankeyLayout(
 
   // Shared scale across all columns so conserved mass has identical pixel height
   let sharedScale = Infinity;
+  const isGroupedTailNode = (id: string) => id.includes("__other");
   for (let c = 0; c < columns; c++) {
     const colNodes = nodesByCol[c];
     if (!colNodes || colNodes.length === 0) continue;
-    // Sort descending by value for clean reading order
-    colNodes.sort((a, b) => b.value - a.value);
+    // Sort descending by value with stable id tie-breaker, pinning grouped tail buckets last
+    colNodes.sort((a, b) => {
+      const aTail = isGroupedTailNode(a.id);
+      const bTail = isGroupedTailNode(b.id);
+      if (aTail !== bTail) return aTail ? 1 : -1;
+      return b.value - a.value || a.id.localeCompare(b.id);
+    });
     const sumVal = colNodes.reduce((acc, n) => acc + Math.max(n.value, 0), 0);
     const padTotal = Math.max(0, colNodes.length - 1) * nodePadding;
     const availH = Math.max(36, innerH - padTotal);
@@ -331,23 +355,56 @@ export function computeSankeyLayout(
     sharedScale = 1;
   }
 
-  const minBarH = 6;
+  const minBarH = 8;
   for (let c = 0; c < columns; c++) {
     const colNodes = nodesByCol[c];
     if (!colNodes || colNodes.length === 0) continue;
+    const isMiddleCol = columns > 2 && c > 0 && c < columns - 1;
+    const minRowGap = colNodes.length <= 12 ? 15 : nodePadding;
     const heights = colNodes.map((n) => Math.max(minBarH, n.value * sharedScale));
     const totalColH =
-      heights.reduce((a, b) => a + b, 0) + Math.max(0, colNodes.length - 1) * nodePadding;
+      heights.reduce((a, b) => a + b, 0) + Math.max(0, colNodes.length - 1) * minRowGap;
     const compress = totalColH > innerH ? innerH / totalColH : 1;
-    const effPad = nodePadding * compress;
+    const effPad = minRowGap * compress;
     const finalTotalH =
       heights.reduce((a, b) => a + b * compress, 0) +
       Math.max(0, colNodes.length - 1) * effPad;
     let cursorY = marginY + Math.max(0, (innerH - finalTotalH) / 2);
+    let lastLabelBottom = -Infinity;
     for (let i = 0; i < colNodes.length; i++) {
-      const h = Math.max(4, heights[i] * compress);
-      colNodes[i].y0 = cursorY;
-      colNodes[i].y1 = cursorY + h;
+      const h = Math.max(5, heights[i] * compress);
+      const y0 = cursorY;
+      const y1 = cursorY + h;
+      const centerY = (y0 + y1) / 2;
+      const nextCenterY =
+        i + 1 < colNodes.length
+          ? y1 + effPad + Math.max(5, heights[i + 1] * compress) / 2
+          : Infinity;
+
+      const twoLineTop = centerY - 15;
+      const singleLineTop = centerY - 9;
+      if (singleLineTop >= lastLabelBottom + 3) {
+        colNodes[i].showLabel = true;
+        // Middle columns in 3-col Flow only show compact 1-line labels so ribbons stay clean
+        const subBottom = centerY + 12;
+        if (
+          !isMiddleCol &&
+          twoLineTop >= lastLabelBottom + 3 &&
+          nextCenterY - 9 >= subBottom + 4
+        ) {
+          colNodes[i].showSub = true;
+          lastLabelBottom = subBottom;
+        } else {
+          colNodes[i].showSub = false;
+          lastLabelBottom = centerY + 7;
+        }
+      } else {
+        colNodes[i].showLabel = false;
+        colNodes[i].showSub = false;
+      }
+
+      colNodes[i].y0 = y0;
+      colNodes[i].y1 = y1;
       cursorY += h + effPad;
     }
   }
@@ -367,10 +424,14 @@ export function computeSankeyLayout(
     inByTarget.set(l.target, ins);
   }
 
-  const sourceOffsets = new Map<string, number>();
+  const sourceOffsets = new Map<string, { center: number; width: number }>();
   for (const [srcId, list] of outBySource) {
     const src = nodeMap.get(srcId)!;
-    list.sort((a, b) => (nodeMap.get(a.target)?.y0 ?? 0) - (nodeMap.get(b.target)?.y0 ?? 0));
+    list.sort(
+      (a, b) =>
+        (nodeMap.get(a.target)?.y0 ?? 0) - (nodeMap.get(b.target)?.y0 ?? 0) ||
+        a.id.localeCompare(b.id),
+    );
     const nodeH = Math.max(4, src.y1 - src.y0);
     const sumMetric = list.reduce(
       (s, l) => s + Math.max(1e-6, metric === "usd" ? l.est_usd_per_h : l.value),
@@ -380,7 +441,7 @@ export function computeSankeyLayout(
     for (const l of list) {
       const mv = Math.max(1e-6, metric === "usd" ? l.est_usd_per_h : l.value);
       const w = (mv / sumMetric) * nodeH;
-      sourceOffsets.set(l.id, offset + w / 2);
+      sourceOffsets.set(l.id, { center: offset + w / 2, width: w });
       offset += w;
     }
   }
@@ -388,7 +449,11 @@ export function computeSankeyLayout(
   const targetOffsets = new Map<string, { center: number; width: number }>();
   for (const [dstId, list] of inByTarget) {
     const dst = nodeMap.get(dstId)!;
-    list.sort((a, b) => (nodeMap.get(a.source)?.y0 ?? 0) - (nodeMap.get(b.source)?.y0 ?? 0));
+    list.sort(
+      (a, b) =>
+        (nodeMap.get(a.source)?.y0 ?? 0) - (nodeMap.get(b.source)?.y0 ?? 0) ||
+        a.id.localeCompare(b.id),
+    );
     const nodeH = Math.max(4, dst.y1 - dst.y0);
     const sumMetric = list.reduce(
       (s, l) => s + Math.max(1e-6, metric === "usd" ? l.est_usd_per_h : l.value),
@@ -407,10 +472,11 @@ export function computeSankeyLayout(
   for (const l of inputLinks) {
     const src = nodeMap.get(l.source);
     const dst = nodeMap.get(l.target);
-    const y0 = sourceOffsets.get(l.id);
+    const srcSlot = sourceOffsets.get(l.id);
     const tgt = targetOffsets.get(l.id);
-    if (!src || !dst || y0 == null || !tgt) continue;
+    if (!src || !dst || !srcSlot || !tgt) continue;
     const mv = Math.max(0, metric === "usd" ? l.est_usd_per_h : l.value);
+    const sWidthPx = Math.max(1.5, srcSlot.width);
     const widthPx = Math.max(1.5, tgt.width);
     laidOutLinks.push({
       id: l.id,
@@ -423,10 +489,10 @@ export function computeSankeyLayout(
       color: l.color ?? src.color,
       sourceX: src.x1,
       targetX: dst.x0,
-      y0,
+      y0: srcSlot.center,
       y1: tgt.center,
       width: widthPx,
-      path: sankeyRibbonPath(src.x1, dst.x0, y0, tgt.center),
+      path: sankeyRibbonPath(src.x1, dst.x0, srcSlot.center, tgt.center, sWidthPx, widthPx),
     });
   }
 
@@ -595,9 +661,51 @@ export function computeMonotoneCurve(
   return { linePath: d, areaPath };
 }
 
+/**
+ * Stabilize a rolling consumption series whose final bucket (`now`) is still open
+ * and accumulating in-flight LLM turns (tokens are billed on turn completion).
+ * If the fleet has live runs right now (`hasActiveMissions`) and the incomplete
+ * final bucket currently reads `0` (or is an early partial bucket dipping well below
+ * the settled preceding bucket), carry/blend the settled rate so the `now` endpoint
+ * doesn't artificially dive to `0`.
+ */
+export function stabilizeTrailingOpenBucket(
+  values: number[],
+  hasActiveMissions: boolean,
+  openBucketElapsedFrac?: number,
+): number[] {
+  if (values.length < 2 || !hasActiveMissions) return values;
+  const lastIdx = values.length - 1;
+  const lastVal = values[lastIdx] ?? 0;
+  const prevVal = values[lastIdx - 1] ?? 0;
+  if (prevVal <= 0) return values;
+  if (lastVal <= 0) {
+    const copy = values.slice();
+    copy[lastIdx] = prevVal;
+    return copy;
+  }
+  if (
+    openBucketElapsedFrac != null &&
+    Number.isFinite(openBucketElapsedFrac) &&
+    openBucketElapsedFrac < 0.7 &&
+    lastVal < prevVal * 0.45
+  ) {
+    const frac = Math.max(0.08, Math.min(0.7, openBucketElapsedFrac));
+    const rescaled = Math.min(prevVal * 1.15, lastVal / Math.max(0.25, frac));
+    const w = Math.min(1, frac / 0.7);
+    const blended = prevVal * (1 - w) + Math.max(lastVal, rescaled) * w;
+    const copy = values.slice();
+    copy[lastIdx] = blended;
+    return copy;
+  }
+  return values;
+}
+
 export function buildOverviewSankeyInput(
   overview: ResourcesOverviewResponse,
   lens: ResourceLens,
+  metric: ResourceMetric = "raw",
+  canvasHeight = 368,
 ): { nodes: SankeyInputNode[]; links: SankeyInputLink[] } {
   const nodes: SankeyInputNode[] = [];
   const links: SankeyInputLink[] = [];
@@ -616,16 +724,49 @@ export function buildOverviewSankeyInput(
       });
     });
   } else {
-    overview.inference.pools.forEach((pool, idx) => {
+    const maxPoolBtok = overview.inference.pools.reduce(
+      (mx, p) => Math.max(mx, p.current_b_tok_per_h),
+      0,
+    );
+    const maxPoolUsd = overview.inference.pools.reduce(
+      (mx, p) => Math.max(mx, p.est_usd_per_h),
+      0,
+    );
+    const activeSourceIds = new Set(
+      overview.links
+        .filter(
+          (l) =>
+            l.kind === "inference" &&
+            (l.value >= Math.max(1e-6, maxPoolBtok * 0.002) ||
+              l.est_usd_per_h >= Math.max(1e-4, maxPoolUsd * 0.002)),
+        )
+        .map((l) => l.source_id),
+    );
+    const activePools = overview.inference.pools.filter((pool) => {
+      const significant =
+        maxPoolBtok >= 0.02
+          ? pool.current_b_tok_per_h >= 0.0005 || pool.est_usd_per_h >= 0.01
+          : pool.current_b_tok_per_h > 0 || pool.est_usd_per_h > 0;
+      return significant || activeSourceIds.has(pool.id);
+    });
+    const poolsToRender =
+      activePools.length > 0 ? activePools : overview.inference.pools.slice(0, 5);
+    poolsToRender.forEach((pool, idx) => {
       const remBadge =
         pool.quota_pct_remaining != null
           ? `${Math.round(pool.quota_pct_remaining)}% left`
           : null;
+      const baseSub = (pool.sublabel || "").trim();
+      const subHasPct = /%\s*left/i.test(baseSub);
+      const cleanSub =
+        subHasPct || !remBadge
+          ? baseSub
+          : [baseSub, remBadge].filter(Boolean).join(" · ");
       nodes.push({
         id: pool.id,
         column: 0,
         label: pool.label,
-        sub: remBadge ? `${pool.sublabel} · ${remBadge}` : pool.sublabel,
+        sub: cleanSub,
         color: colorForSource(pool.id, idx),
         health: pool.health,
         badge: remBadge,
@@ -637,12 +778,40 @@ export function buildOverviewSankeyInput(
 
   const relevantLinks = overview.links.filter((l) => l.kind === lens);
   const missionIdsWithFlow = new Set(relevantLinks.map((l) => l.mission_id));
+  const missionScore = (m: ResourcesOverviewResponse["missions"][number]) =>
+    lens === "compute"
+      ? metric === "usd"
+        ? m.compute_usd_per_h
+        : m.vcpu
+      : metric === "usd"
+        ? m.inference_usd_per_h
+        : m.b_tok_per_h;
 
-  overview.missions.forEach((m, idx) => {
-    const hasMass =
-      missionIdsWithFlow.has(m.id) ||
-      (lens === "compute" ? m.vcpu > 0 : m.b_tok_per_h > 0);
-    if (!hasMass && overview.missions.length > 6) return;
+  const maxCol1Missions = Math.max(
+    9,
+    Math.min(18, Math.floor((Math.max(340, canvasHeight) - 32) / 34)),
+  );
+  const candidateMissions = overview.missions
+    .filter((m) => {
+      const hasMass =
+        missionIdsWithFlow.has(m.id) ||
+        (lens === "compute" ? m.vcpu > 0 : m.b_tok_per_h > 0);
+      return hasMass || overview.missions.length <= 6;
+    })
+    .slice()
+    .sort((a, b) => missionScore(b) - missionScore(a) || a.id.localeCompare(b.id));
+
+  const needsTailBucket = candidateMissions.length > maxCol1Missions + 1;
+  const visibleMissions = needsTailBucket
+    ? candidateMissions.slice(0, maxCol1Missions)
+    : candidateMissions;
+  const overflowMissions = needsTailBucket
+    ? candidateMissions.slice(maxCol1Missions)
+    : [];
+  const overflowSet = new Set(overflowMissions.map((m) => m.id));
+  const tailBucketId = "__other_missions__";
+
+  visibleMissions.forEach((m) => {
     const subParts: string[] = [];
     if (m.subagent_total > 1) {
       subParts.push(
@@ -661,7 +830,7 @@ export function buildOverviewSankeyInput(
       column: 1,
       label: m.title || m.project || m.id.slice(0, 8),
       sub: subParts.join(" · "),
-      color: colorForMission(m.id, idx),
+      color: colorForMission(m.id, 0),
       health: m.stall_kind ? "stalled" : "ok",
       missionId: m.id,
       fallbackValue: lens === "compute" ? m.vcpu : m.b_tok_per_h,
@@ -669,9 +838,47 @@ export function buildOverviewSankeyInput(
     });
   });
 
-  relevantLinks.forEach((l, idx) => {
+  if (overflowMissions.length > 0) {
+    const sumRaw = overflowMissions.reduce(
+      (s, m) => s + (lens === "compute" ? m.vcpu : m.b_tok_per_h),
+      0,
+    );
+    const sumUsd = overflowMissions.reduce(
+      (s, m) => s + (lens === "compute" ? m.compute_usd_per_h : m.inference_usd_per_h),
+      0,
+    );
+    nodes.push({
+      id: tailBucketId,
+      column: 1,
+      label: `+${overflowMissions.length} smaller missions`,
+      sub: "long tail",
+      color: "#6b7280",
+      health: "ok",
+      missionId: null,
+      fallbackValue: sumRaw,
+      fallbackUsd: sumUsd,
+    });
+  }
+
+  const tailLinksBySource = new Map<
+    string,
+    { value: number; est_usd_per_h: number; degraded: boolean }
+  >();
+  relevantLinks.forEach((l) => {
+    if (overflowSet.has(l.mission_id)) {
+      const prev = tailLinksBySource.get(l.source_id) ?? {
+        value: 0,
+        est_usd_per_h: 0,
+        degraded: false,
+      };
+      prev.value += l.value;
+      prev.est_usd_per_h += l.est_usd_per_h;
+      prev.degraded = prev.degraded || l.degraded;
+      tailLinksBySource.set(l.source_id, prev);
+      return;
+    }
     links.push({
-      id: `${l.kind}:${l.source_id}->${l.mission_id}:${idx}`,
+      id: `${l.kind}:${l.source_id}->${l.mission_id}`,
       source: l.source_id,
       target: l.mission_id,
       value: l.value,
@@ -680,12 +887,25 @@ export function buildOverviewSankeyInput(
     });
   });
 
+  for (const [sourceId, agg] of tailLinksBySource) {
+    links.push({
+      id: `${lens}:${sourceId}->${tailBucketId}`,
+      source: sourceId,
+      target: tailBucketId,
+      value: agg.value,
+      est_usd_per_h: agg.est_usd_per_h,
+      degraded: agg.degraded,
+    });
+  }
+
   return { nodes, links };
 }
 
 export function buildMissionFlowSankeyInput(
   detail: MissionResourcesResponse,
   lens: ResourceLens,
+  metric: ResourceMetric = "raw",
+  canvasHeight = 368,
 ): { nodes: SankeyInputNode[]; links: SankeyInputLink[] } {
   const nodes: SankeyInputNode[] = [];
   const links: SankeyInputLink[] = [];
@@ -704,7 +924,60 @@ export function buildMissionFlowSankeyInput(
       });
     });
 
-  detail.flow.tracks.forEach((trk, idx) => {
+  const i2tFiltered = detail.flow.input_to_track.filter((e) => e.kind === lens);
+  const t2sFiltered = detail.flow.track_to_subagent.filter((e) => e.kind === lens);
+
+  const subRaw = (s: MissionResourcesResponse["flow"]["subagents"][number]) =>
+    lens === "compute" ? s.vcpu : s.b_tok_per_h;
+  const subUsd = (s: MissionResourcesResponse["flow"]["subagents"][number]) =>
+    lens === "compute" ? s.compute_usd_per_h : s.inference_usd_per_h;
+  const subScore = (s: MissionResourcesResponse["flow"]["subagents"][number]) =>
+    metric === "usd" ? subUsd(s) : subRaw(s);
+
+  const trackRaw = new Map<string, number>();
+  const trackUsd = new Map<string, number>();
+  for (const e of i2tFiltered) {
+    trackRaw.set(e.target_id, (trackRaw.get(e.target_id) ?? 0) + e.weight);
+    trackUsd.set(e.target_id, (trackUsd.get(e.target_id) ?? 0) + e.est_usd_per_h);
+  }
+  const subSumRawByTrack = new Map<string, number>();
+  const subSumUsdByTrack = new Map<string, number>();
+  for (const s of detail.flow.subagents) {
+    subSumRawByTrack.set(s.track_id, (subSumRawByTrack.get(s.track_id) ?? 0) + subRaw(s));
+    subSumUsdByTrack.set(s.track_id, (subSumUsdByTrack.get(s.track_id) ?? 0) + subUsd(s));
+  }
+  for (const [tid, r] of subSumRawByTrack) {
+    if ((trackRaw.get(tid) ?? 0) < r) trackRaw.set(tid, r);
+  }
+  for (const [tid, u] of subSumUsdByTrack) {
+    if ((trackUsd.get(tid) ?? 0) < u) trackUsd.set(tid, u);
+  }
+  const trackScore = (tid: string) =>
+    metric === "usd" ? (trackUsd.get(tid) ?? 0) : (trackRaw.get(tid) ?? 0);
+
+  const tracksWithFlow = detail.flow.tracks.filter(
+    (t) =>
+      (trackRaw.get(t.id) ?? 0) > 0 ||
+      (trackUsd.get(t.id) ?? 0) > 0 ||
+      detail.flow.tracks.length <= 5,
+  );
+  const candidateTracks =
+    tracksWithFlow.length > 0 ? tracksWithFlow : detail.flow.tracks.slice(0, 5);
+
+  const maxCol1Tracks = Math.max(
+    7,
+    Math.min(14, Math.floor((Math.max(340, canvasHeight) - 36) / 47)),
+  );
+  const sortedTracks = candidateTracks
+    .slice()
+    .sort((a, b) => trackScore(b.id) - trackScore(a.id) || a.id.localeCompare(b.id));
+  const capTracks = sortedTracks.length > maxCol1Tracks + 1;
+  const visibleTracks = capTracks ? sortedTracks.slice(0, maxCol1Tracks) : sortedTracks;
+  const overflowTracks = capTracks ? sortedTracks.slice(maxCol1Tracks) : [];
+  const overflowTrackSet = new Set(overflowTracks.map((t) => t.id));
+  const tailTrackId = "track:__other__";
+
+  visibleTracks.forEach((trk, idx) => {
     nodes.push({
       id: trk.id,
       column: 1,
@@ -712,48 +985,118 @@ export function buildMissionFlowSankeyInput(
       sub: trk.sub,
       color: MISSION_PALETTE[idx % MISSION_PALETTE.length],
       health: trk.state === "capped" ? "stalled" : "ok",
+      fallbackValue: trackRaw.get(trk.id) ?? 0,
+      fallbackUsd: trackUsd.get(trk.id) ?? 0,
     });
   });
+  if (overflowTracks.length > 0) {
+    nodes.push({
+      id: tailTrackId,
+      column: 1,
+      label: `+${overflowTracks.length} tracks`,
+      sub: "grouped",
+      color: "#6b7280",
+      health: "ok",
+      fallbackValue: overflowTracks.reduce((s, t) => s + (trackRaw.get(t.id) ?? 0), 0),
+      fallbackUsd: overflowTracks.reduce((s, t) => s + (trackUsd.get(t.id) ?? 0), 0),
+    });
+  }
 
-  detail.flow.subagents.forEach((sub, idx) => {
+  const subsWithEdge = new Set(
+    t2sFiltered.filter((e) => e.weight > 0 || e.est_usd_per_h > 0).map((e) => e.target_id),
+  );
+  const subsWithMass = detail.flow.subagents.filter(
+    (s) =>
+      subsWithEdge.has(s.id) ||
+      subRaw(s) > 0 ||
+      subUsd(s) > 0 ||
+      detail.flow.subagents.length <= 6,
+  );
+  const candidateSubs =
+    subsWithMass.length > 0 ? subsWithMass : detail.flow.subagents.slice(0, 6);
+
+  const maxCol2Subagents = Math.max(
+    9,
+    Math.min(18, Math.floor((Math.max(340, canvasHeight) - 32) / 34)),
+  );
+  const sortedSubagents = candidateSubs
+    .slice()
+    .sort((a, b) => subScore(b) - subScore(a) || a.id.localeCompare(b.id));
+  const capSubs = sortedSubagents.length > maxCol2Subagents + 1;
+  const visibleSubs = capSubs ? sortedSubagents.slice(0, maxCol2Subagents) : sortedSubagents;
+  const overflowSubList = capSubs ? sortedSubagents.slice(maxCol2Subagents) : [];
+  const overflowSubSet = new Set(overflowSubList.map((s) => s.id));
+  const tailSubId = "sub:__other__";
+
+  visibleSubs.forEach((sub) => {
     nodes.push({
       id: sub.id,
       column: 2,
       label: sub.label,
       sub: [sub.role, sub.model, sub.node_id].filter(Boolean).join(" · "),
-      color: colorForMission(sub.id, idx),
+      color: colorForMission(sub.id, 0),
       health: sub.state === "capped" ? "stalled" : "ok",
       missionId: sub.mission_id ?? null,
-      fallbackValue: lens === "compute" ? sub.vcpu : sub.b_tok_per_h,
-      fallbackUsd: lens === "compute" ? sub.compute_usd_per_h : sub.inference_usd_per_h,
+      fallbackValue: subRaw(sub),
+      fallbackUsd: subUsd(sub),
     });
   });
-
-  detail.flow.input_to_track
-    .filter((e) => e.kind === lens)
-    .forEach((e, idx) => {
-      links.push({
-        id: `i2t:${e.source_id}->${e.target_id}:${idx}`,
-        source: e.source_id,
-        target: e.target_id,
-        value: e.weight,
-        est_usd_per_h: e.est_usd_per_h,
-        degraded: e.degraded,
-      });
+  if (overflowSubList.length > 0) {
+    nodes.push({
+      id: tailSubId,
+      column: 2,
+      label: `+${overflowSubList.length} active spans`,
+      sub: "all in Fast-DAG",
+      color: "#6b7280",
+      health: "ok",
+      missionId: null,
+      fallbackValue: overflowSubList.reduce((s, x) => s + subRaw(x), 0),
+      fallbackUsd: overflowSubList.reduce((s, x) => s + subUsd(x), 0),
     });
+  }
 
-  detail.flow.track_to_subagent
-    .filter((e) => e.kind === lens)
-    .forEach((e, idx) => {
-      links.push({
-        id: `t2s:${e.source_id}->${e.target_id}:${idx}`,
-        source: e.source_id,
-        target: e.target_id,
-        value: e.weight,
-        est_usd_per_h: e.est_usd_per_h,
-        degraded: e.degraded,
-      });
+  const i2tAgg = new Map<string, { source: string; target: string; value: number; usd: number; degraded: boolean }>();
+  for (const e of i2tFiltered) {
+    const tgt = overflowTrackSet.has(e.target_id) ? tailTrackId : e.target_id;
+    const key = `${e.source_id}->${tgt}`;
+    const prev = i2tAgg.get(key) ?? { source: e.source_id, target: tgt, value: 0, usd: 0, degraded: false };
+    prev.value += e.weight;
+    prev.usd += e.est_usd_per_h;
+    prev.degraded = prev.degraded || e.degraded;
+    i2tAgg.set(key, prev);
+  }
+  for (const [key, agg] of i2tAgg) {
+    links.push({
+      id: `i2t:${key}`,
+      source: agg.source,
+      target: agg.target,
+      value: agg.value,
+      est_usd_per_h: agg.usd,
+      degraded: agg.degraded,
     });
+  }
+
+  const t2sAgg = new Map<string, { source: string; target: string; value: number; usd: number; degraded: boolean }>();
+  for (const e of t2sFiltered) {
+    const src = overflowTrackSet.has(e.source_id) ? tailTrackId : e.source_id;
+    const tgt = overflowSubSet.has(e.target_id) ? tailSubId : e.target_id;
+    const key = `${src}->${tgt}`;
+    const prev = t2sAgg.get(key) ?? { source: src, target: tgt, value: 0, usd: 0, degraded: false };
+    prev.value += e.weight;
+    prev.usd += e.est_usd_per_h;
+    prev.degraded = prev.degraded || e.degraded;
+    t2sAgg.set(key, prev);
+  }
+  for (const [key, agg] of t2sAgg) {
+    links.push({
+      id: `t2s:${key}`,
+      source: agg.source,
+      target: agg.target,
+      value: agg.value,
+      est_usd_per_h: agg.usd,
+      degraded: agg.degraded,
+    });
+  }
 
   return { nodes, links };
 }

@@ -73,5 +73,37 @@ final class OrbResourcesTests: XCTestCase {
         let dagRows = OrbResourcesModel.layoutDagRows(bars, horizonSecs: horizon)
         let expectedHeaders = try XCTUnwrap(dagSpec["expected_section_headers"] as? [Any]).map { $0 as? String }
         XCTAssertEqual(dagRows.map(\.sectionHeader), expectedHeaders)
+
+        // 4. Parallel Boat VMs + staggered wave spans at non-zero historical offsets
+        let vmDag = try XCTUnwrap(spec["dag_parallel_vms"] as? [String: Any])
+        let vmHorizon = (vmDag["horizon_secs"] as? NSNumber)?.doubleValue ?? 21600
+        let vmBars = try XCTUnwrap(vmDag["bars"] as? [[String: Any]]).map { b in
+            OrbResourcesModel.DagBarInput(
+                id: b["id"] as? String ?? "",
+                label: b["label"] as? String ?? "",
+                section: b["section"] as? String ?? "",
+                role: b["role"] as? String ?? "worker",
+                startOffsetSecs: (b["start_offset_secs"] as? NSNumber)?.doubleValue ?? 0,
+                durationSecs: (b["duration_secs"] as? NSNumber)?.doubleValue ?? 0,
+                etaRemainingSecs: (b["eta_remaining_secs"] as? NSNumber)?.doubleValue,
+                state: b["state"] as? String ?? "pending",
+                afterIds: b["after_ids"] as? [String] ?? []
+            )
+        }
+        let vmRows = OrbResourcesModel.layoutDagRows(vmBars, horizonSecs: vmHorizon)
+        let expVmHeaders = try XCTUnwrap(vmDag["expected_section_headers"] as? [Any]).map { $0 as? String }
+        XCTAssertEqual(vmRows.map(\.sectionHeader), expVmHeaders)
+        let expX0 = try XCTUnwrap(vmDag["expected_x0"] as? [NSNumber]).map(\.doubleValue)
+        let expX1 = try XCTUnwrap(vmDag["expected_x1"] as? [NSNumber]).map(\.doubleValue)
+        let expProj = try XCTUnwrap(vmDag["expected_proj_x1"] as? [Any]).map { ($0 as? NSNumber)?.doubleValue }
+        for (idx, r) in vmRows.enumerated() {
+            XCTAssertEqual(r.startFrac, expX0[idx], accuracy: 1e-5)
+            XCTAssertEqual(r.endFrac, expX1[idx], accuracy: 1e-5)
+            if let expP = expProj[idx] {
+                XCTAssertEqual(try XCTUnwrap(r.etaEndFrac), expP, accuracy: 1e-5)
+            } else {
+                XCTAssertNil(r.etaEndFrac)
+            }
+        }
     }
 }

@@ -76,4 +76,37 @@ class OrbResourcesTest {
         val expectedHeaders = (dag["expected_section_headers"] as List<*>).map { it as? String }
         assertEquals(expectedHeaders, rows.map { it.sectionHeader })
     }
+
+    @Test
+    fun dagParallelVmsPositionsHistoricalAndLiveSpansAtStaggeredOffsets() {
+        val dag = OrbJSON.dict(spec["dag_parallel_vms"])!!
+        val horizon = OrbJSON.double(dag, "horizon_secs")!!
+        val bars = OrbJSON.dictList(dag["bars"]).map { b ->
+            OrbResourcesModel.DagBarInput(
+                id = OrbJSON.str(b, "id")!!,
+                label = OrbJSON.str(b, "label")!!,
+                section = OrbJSON.str(b, "section")!!,
+                role = OrbJSON.str(b, "role") ?: "worker",
+                startOffsetSecs = OrbJSON.double(b, "start_offset_secs")!!,
+                durationSecs = OrbJSON.double(b, "duration_secs")!!,
+                etaRemainingSecs = OrbJSON.double(b, "eta_remaining_secs"),
+                state = OrbJSON.str(b, "state")!!,
+            )
+        }
+        val rows = OrbResourcesModel.layoutDagRows(bars, horizon)
+        val expectedHeaders = (dag["expected_section_headers"] as List<*>).map { it as? String }
+        assertEquals(expectedHeaders, rows.map { it.sectionHeader })
+        val expX0 = (dag["expected_x0"] as List<*>).map { (it as Number).toDouble() }
+        val expX1 = (dag["expected_x1"] as List<*>).map { (it as Number).toDouble() }
+        val expProj = (dag["expected_proj_x1"] as List<*>).map { (it as? Number)?.toDouble() }
+        rows.forEachIndexed { idx, r ->
+            assertEquals(expX0[idx], r.startFrac, 1e-5)
+            assertEquals(expX1[idx], r.endFrac, 1e-5)
+            if (expProj[idx] == null) {
+                assertEquals(null, r.etaEndFrac)
+            } else {
+                assertEquals(expProj[idx]!!, r.etaEndFrac!!, 1e-5)
+            }
+        }
+    }
 }

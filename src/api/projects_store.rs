@@ -441,6 +441,14 @@ pub struct ProjectsStore {
     pub(crate) connection: Mutex<Connection>,
 }
 
+/// Historical / live execution span for a remote node attributed to a mission lineage.
+#[derive(Debug, Clone)]
+pub struct RemoteJobNodeSpan {
+    pub first_started_at: String,
+    pub last_finished_at: Option<String>,
+    pub latest_mission_id: String,
+}
+
 impl ProjectsStore {
     pub fn open(path: PathBuf) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -1962,6 +1970,72 @@ impl ProjectsStore {
     }
 
     // ---- Authoritative project roster (projects / grant / tracks / decisions) ----
+
+    /// Distinct `node_id`s from `remote_jobs` that executed or accepted jobs
+    /// for any mission in `mission_ids`.
+    pub fn remote_job_nodes_for_missions(
+        &self,
+        mission_ids: &HashSet<String>,
+    ) -> Result<HashMap<String, RemoteJobNodeSpan>, String> {
+        if mission_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let connection = self.lock()?;
+        let mut out: HashMap<String, RemoteJobNodeSpan> = HashMap::new();
+        let ids_vec: Vec<&str> = mission_ids.iter().map(String::as_str).collect();
+        for chunk in ids_vec.chunks(400) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT node_id, mission_id, COALESCE(accepted_at, started_at), finished_at, state \
+                 FROM remote_jobs \
+                 WHERE mission_id IN ({placeholders}) AND kind != 'tentative' \
+                 ORDER BY started_at ASC"
+            );
+            let mut stmt = connection.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows.flatten() {
+                let (node_id, mid, started_at, finished_at, state) = row;
+                if node_id.trim().is_empty() {
+                    continue;
+                }
+                let is_live = matches!(state.as_str(), "submitting" | "accepted" | "running");
+                let eff_end = if is_live { None } else { finished_at };
+                out.entry(node_id)
+                    .and_modify(|entry| {
+                        if started_at < entry.first_started_at {
+                            entry.first_started_at = started_at.clone();
+                        }
+                        match (&entry.last_finished_at, &eff_end) {
+                            (None, _) => {}
+                            (_, None) => entry.last_finished_at = None,
+                            (Some(cur_e), Some(new_e)) if new_e > cur_e => {
+                                entry.last_finished_at = Some(new_e.clone());
+                            }
+                            _ => {}
+                        }
+                        entry.latest_mission_id = mid.clone();
+                    })
+                    .or_insert(RemoteJobNodeSpan {
+                        first_started_at: started_at,
+                        last_finished_at: eff_end,
+                        latest_mission_id: mid,
+                    });
+            }
+        }
+        Ok(out)
+    }
 
     /// Every project slug in the roster. This is what makes a project *exist*
     /// once the overview is seeded from the DB rather than the source union.
