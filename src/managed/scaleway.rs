@@ -136,6 +136,8 @@ pub struct ScalewayProvider {
     http: reqwest::Client,
     base: String,
     secret_key: String,
+    access_key: Option<String>,
+    configured_organization_id: Option<String>,
     project_id: tokio::sync::OnceCell<String>,
     configured_project_id: Option<String>,
     default_zone: String,
@@ -146,8 +148,39 @@ impl std::fmt::Debug for ScalewayProvider {
         f.debug_struct("ScalewayProvider")
             .field("base", &self.base)
             .field("default_zone", &self.default_zone)
+            .field("has_access_key", &self.access_key.is_some())
             .finish()
     }
+}
+
+fn clean_opt(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn extract_org_id_from_srn(srn: &str) -> Option<String> {
+    let (_, after) = srn.split_once("organization/")?;
+    let org = after
+        .split([':', '/'])
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    Some(org.to_string())
+}
+
+fn pick_project_from_list(projs: &Value) -> Option<String> {
+    projs
+        .get("projects")
+        .and_then(Value::as_array)
+        .and_then(|arr| {
+            arr.iter()
+                .find(|p| p.get("name").and_then(Value::as_str) == Some("default"))
+                .or_else(|| arr.first())
+        })
+        .and_then(|p| p.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 impl ScalewayProvider {
@@ -170,10 +203,7 @@ impl ScalewayProvider {
         project_id: Option<String>,
         default_zone: Option<String>,
     ) -> Self {
-        let default_zone = default_zone
-            .map(|z| z.trim().to_string())
-            .filter(|z| !z.trim().is_empty())
-            .unwrap_or_else(|| "fr-par-1".into());
+        let default_zone = clean_opt(default_zone).unwrap_or_else(|| "fr-par-1".into());
         Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
@@ -182,12 +212,22 @@ impl ScalewayProvider {
                 .unwrap_or_default(),
             base: base.into().trim_end_matches('/').to_string(),
             secret_key: secret_key.into(),
+            access_key: None,
+            configured_organization_id: None,
             project_id: tokio::sync::OnceCell::new(),
-            configured_project_id: project_id
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty()),
+            configured_project_id: clean_opt(project_id),
             default_zone,
         }
+    }
+
+    pub fn with_access_key(mut self, access_key: Option<String>) -> Self {
+        self.access_key = clean_opt(access_key);
+        self
+    }
+
+    pub fn with_organization_id(mut self, organization_id: Option<String>) -> Self {
+        self.configured_organization_id = clean_opt(organization_id);
+        self
     }
 
     pub fn default_zone(&self) -> &str {
@@ -203,6 +243,9 @@ impl ScalewayProvider {
             .or_else(|_| std::env::var("SCW_SECRET_KEY"))
             .ok()
             .filter(|k| !k.trim().is_empty())?;
+        let access_key = std::env::var("SCALEWAY_KEY_ID")
+            .or_else(|_| std::env::var("SCW_ACCESS_KEY"))
+            .ok();
         std::env::remove_var("SCALEWAY_SECRET_KEY");
         std::env::remove_var("SCW_SECRET_KEY");
         std::env::remove_var("SCALEWAY_KEY_ID");
@@ -210,9 +253,16 @@ impl ScalewayProvider {
         let project_id = std::env::var("SCALEWAY_PROJECT_ID")
             .or_else(|_| std::env::var("SCW_DEFAULT_PROJECT_ID"))
             .ok();
+        let org_id = std::env::var("SCALEWAY_ORGANIZATION_ID")
+            .or_else(|_| std::env::var("SCW_DEFAULT_ORGANIZATION_ID"))
+            .ok();
         let base =
             std::env::var("SCALEWAY_API_BASE").unwrap_or_else(|_| DEFAULT_API_BASE.to_string());
-        Some(Self::new(base, key.trim(), project_id))
+        Some(
+            Self::new(base, key.trim(), project_id)
+                .with_access_key(access_key)
+                .with_organization_id(org_id),
+        )
     }
 
     async fn resolve_project_id(&self) -> Result<String, String> {
@@ -221,35 +271,226 @@ impl ScalewayProvider {
         }
         self.project_id
             .get_or_try_init(|| async {
-                let orgs = self
-                    .call(reqwest::Method::GET, "/account/v3/organizations", None)
-                    .await?;
-                let org_id = orgs
-                    .get("organizations")
-                    .and_then(Value::as_array)
-                    .and_then(|arr| arr.first())
-                    .and_then(|o| o.get("id"))
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "scaleway: no organization found for key".to_string())?;
-                let projs = self
+                let mut candidate_org = self.configured_organization_id.clone();
+                let mut bearer_user_id: Option<String> = None;
+                let mut bearer_app_id: Option<String> = None;
+                let mut last_err: Option<String> = None;
+
+                // 1. Direct IAM API-key lookup when `SCALEWAY_KEY_ID` / `SCW_ACCESS_KEY` is known.
+                if let Some(ak) = self.access_key.as_deref() {
+                    if ak
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    {
+                        match self
+                            .call(
+                                reqwest::Method::GET,
+                                &format!("/iam/v1alpha1/api-keys/{ak}"),
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(info) => {
+                                if let Some(pid) = info
+                                    .get("default_project_id")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    return Ok(pid.to_string());
+                                }
+                                if candidate_org.is_none() {
+                                    candidate_org = info
+                                        .get("srn")
+                                        .and_then(Value::as_str)
+                                        .and_then(extract_org_id_from_srn);
+                                }
+                                bearer_user_id = info
+                                    .get("user_id")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_string);
+                                bearer_app_id = info
+                                    .get("application_id")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_string);
+                            }
+                            Err(e) => last_err = Some(e),
+                        }
+                    }
+                }
+
+                // 2. List IAM API keys visible to the token for `default_project_id` or `srn` org.
+                match self
                     .call(
                         reqwest::Method::GET,
-                        &format!("/account/v3/projects?organization_id={org_id}"),
+                        "/iam/v1alpha1/api-keys?page_size=100",
                         None,
                     )
-                    .await?;
-                projs
-                    .get("projects")
-                    .and_then(Value::as_array)
-                    .and_then(|arr| {
-                        arr.iter()
-                            .find(|p| p.get("name").and_then(Value::as_str) == Some("default"))
-                            .or_else(|| arr.first())
-                    })
-                    .and_then(|p| p.get("id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .ok_or_else(|| "scaleway: no project found for organization".to_string())
+                    .await
+                {
+                    Ok(keys_resp) => {
+                        if let Some(arr) = keys_resp.get("api_keys").and_then(Value::as_array) {
+                            let matched_or_first = self
+                                .access_key
+                                .as_deref()
+                                .and_then(|want| {
+                                    arr.iter().find(|k| {
+                                        k.get("access_key").and_then(Value::as_str) == Some(want)
+                                    })
+                                })
+                                .or_else(|| {
+                                    arr.iter().find(|k| {
+                                        k.get("default_project_id")
+                                            .and_then(Value::as_str)
+                                            .is_some_and(|s| !s.trim().is_empty())
+                                    })
+                                });
+                            if let Some(k) = matched_or_first {
+                                if let Some(pid) = k
+                                    .get("default_project_id")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    return Ok(pid.to_string());
+                                }
+                            }
+                            if candidate_org.is_none() {
+                                candidate_org = arr.iter().find_map(|k| {
+                                    k.get("srn")
+                                        .and_then(Value::as_str)
+                                        .and_then(extract_org_id_from_srn)
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if last_err.is_none() {
+                            last_err = Some(e);
+                        }
+                    }
+                }
+
+                // 3. Discover `organization_id` via IAM bearer / users / applications, then list Account v3 projects.
+                if candidate_org.is_none() {
+                    if let Some(uid) = bearer_user_id.as_deref() {
+                        if let Ok(u) = self
+                            .call(reqwest::Method::GET, &format!("/iam/v1alpha1/users/{uid}"), None)
+                            .await
+                        {
+                            candidate_org = u
+                                .get("organization_id")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string);
+                        }
+                    }
+                }
+                if candidate_org.is_none() {
+                    if let Some(aid) = bearer_app_id.as_deref() {
+                        if let Ok(a) = self
+                            .call(
+                                reqwest::Method::GET,
+                                &format!("/iam/v1alpha1/applications/{aid}"),
+                                None,
+                            )
+                            .await
+                        {
+                            candidate_org = a
+                                .get("organization_id")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string);
+                        }
+                    }
+                }
+                if candidate_org.is_none() {
+                    if let Ok(users) = self
+                        .call(
+                            reqwest::Method::GET,
+                            "/iam/v1alpha1/users?page_size=1",
+                            None,
+                        )
+                        .await
+                    {
+                        candidate_org = users
+                            .get("users")
+                            .and_then(Value::as_array)
+                            .and_then(|arr| arr.first())
+                            .and_then(|u| u.get("organization_id"))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
+                    }
+                }
+                if candidate_org.is_none() {
+                    if let Ok(apps) = self
+                        .call(
+                            reqwest::Method::GET,
+                            "/iam/v1alpha1/applications?page_size=1",
+                            None,
+                        )
+                        .await
+                    {
+                        candidate_org = apps
+                            .get("applications")
+                            .and_then(Value::as_array)
+                            .and_then(|arr| arr.first())
+                            .and_then(|a| a.get("organization_id"))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
+                    }
+                }
+
+                if let Some(org_id) = candidate_org.as_deref() {
+                    match self
+                        .call(
+                            reqwest::Method::GET,
+                            &format!("/account/v3/projects?organization_id={org_id}"),
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(projs) => {
+                            if let Some(pid) = pick_project_from_list(&projs) {
+                                return Ok(pid);
+                            }
+                        }
+                        Err(e) => last_err = Some(e),
+                    }
+                } else {
+                    match self
+                        .call(reqwest::Method::GET, "/account/v3/projects", None)
+                        .await
+                    {
+                        Ok(projs) => {
+                            if let Some(pid) = pick_project_from_list(&projs) {
+                                return Ok(pid);
+                            }
+                        }
+                        Err(e) => {
+                            if last_err.is_none() {
+                                last_err = Some(e);
+                            }
+                        }
+                    }
+                }
+
+                let detail = last_err
+                    .map(|e| format!(" ({e})"))
+                    .unwrap_or_default();
+                Err(format!(
+                    "scaleway: unable to resolve project_id via IAM or Account v3{detail}; configure SCALEWAY_PROJECT_ID (or SCALEWAY_KEY_ID with IAM ReadOnly access)"
+                ))
             })
             .await
             .cloned()
@@ -681,5 +922,191 @@ mod tests {
         assert!(is_apple_silicon_type("m2-pro"));
         assert!(!is_apple_silicon_type("PRO2-S"));
         assert!(!is_apple_silicon_type("H100-1-80G"));
+    }
+
+    #[test]
+    fn extracts_org_id_from_scaleway_srn() {
+        assert_eq!(
+            extract_org_id_from_srn(
+                "srn://iam:fr-par:organization/11111111-2222-3333-4444-555555555555:api-key/SCWABC"
+            )
+            .as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(extract_org_id_from_srn("invalid"), None);
+    }
+
+    #[tokio::test]
+    async fn resolve_project_id_uses_iam_api_key_and_never_calls_unimplemented_organizations_v3() {
+        use axum::{
+            extract::Path,
+            http::StatusCode,
+            routing::{get, patch, post},
+            Json, Router,
+        };
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let orgs_v3_calls = Arc::new(AtomicUsize::new(0));
+        let orgs_v3_route = Arc::clone(&orgs_v3_calls);
+        let created_project = Arc::new(std::sync::Mutex::new(None::<String>));
+        let created_project_route = Arc::clone(&created_project);
+
+        let app = Router::new()
+            .route(
+                "/account/v3/organizations",
+                get(move || {
+                    let orgs_v3_route = Arc::clone(&orgs_v3_route);
+                    async move {
+                        orgs_v3_route.fetch_add(1, Ordering::SeqCst);
+                        (
+                            StatusCode::NOT_IMPLEMENTED,
+                            Json(json!({"message": "method GetServiceInfo not implemented"})),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/iam/v1alpha1/api-keys/:access_key",
+                get(|Path(ak): Path<String>| async move {
+                    assert_eq!(ak, "SCWTESTKEY1234567");
+                    Json(json!({
+                        "access_key": ak,
+                        "default_project_id": "proj-from-iam-key"
+                    }))
+                }),
+            )
+            .route(
+                "/instance/v1/zones/fr-par-1/servers",
+                post(move |Json(body): Json<Value>| {
+                    let created_project_route = Arc::clone(&created_project_route);
+                    async move {
+                        *created_project_route.lock().unwrap() = body
+                            .get("project")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        Json(json!({
+                            "server": {
+                                "id": "srv-123",
+                                "name": "orb-managed-scw1",
+                                "state": "stopped"
+                            }
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/instance/v1/zones/fr-par-1/servers/srv-123/user_data/cloud-init",
+                patch(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/instance/v1/zones/fr-par-1/servers/srv-123/action",
+                post(|| async { Json(json!({"task": {"id": "t-1"}})) }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let provider = ScalewayProvider::with_config(
+            format!("http://{addr}"),
+            "scw-secret",
+            None,
+            Some("fr-par-1".into()),
+        )
+        .with_access_key(Some("SCWTESTKEY1234567".into()));
+
+        let spec = SpawnSpec {
+            machine_id: "scw1".into(),
+            size: "PRO2-M".into(),
+            cpu: 8,
+            ram_gb: 32,
+            ttl_seconds: 3600,
+            image: Some("ubuntu_noble".into()),
+            name: "orb-managed-scw1".into(),
+            idempotency_key: "orb-managed-scw1".into(),
+            bootstrap_script: Some("#!/bin/sh\necho hi\n".into()),
+            gpu: None,
+            arch: None,
+            max_hourly_usd: None,
+            preferred_offer_id: None,
+            exclude_offer_ids: Vec::new(),
+            allow_24h_commitment: false,
+            provisioning_mode: super::super::ProvisioningMode::Worker,
+        };
+        let machine = provider.spawn(&spec).await.unwrap();
+        assert_eq!(machine.provider_id, "instance:fr-par-1:srv-123");
+        assert_eq!(
+            created_project.lock().unwrap().as_deref(),
+            Some("proj-from-iam-key")
+        );
+        assert_eq!(
+            orgs_v3_calls.load(Ordering::SeqCst),
+            0,
+            "/account/v3/organizations must never be called"
+        );
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn resolve_project_id_falls_back_to_iam_users_and_account_v3_projects() {
+        use axum::{extract::Query, http::StatusCode, routing::get, Json, Router};
+        use std::collections::HashMap;
+
+        let app = Router::new()
+            .route(
+                "/iam/v1alpha1/api-keys",
+                get(|| async {
+                    (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"message": "insufficient permissions"})),
+                    )
+                }),
+            )
+            .route(
+                "/iam/v1alpha1/users",
+                get(|| async {
+                    Json(json!({
+                        "users": [
+                            {"id": "u-1", "organization_id": "org-fallback-99"}
+                        ]
+                    }))
+                }),
+            )
+            .route(
+                "/account/v3/projects",
+                get(|Query(q): Query<HashMap<String, String>>| async move {
+                    assert_eq!(
+                        q.get("organization_id").map(String::as_str),
+                        Some("org-fallback-99")
+                    );
+                    Json(json!({
+                        "projects": [
+                            {"id": "proj-secondary", "name": "staging", "organization_id": "org-fallback-99"},
+                            {"id": "proj-default-42", "name": "default", "organization_id": "org-fallback-99"}
+                        ]
+                    }))
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let provider = ScalewayProvider::with_config(
+            format!("http://{addr}"),
+            "scw-secret-only",
+            None,
+            Some("fr-par-1".into()),
+        );
+        let resolved = provider.resolve_project_id().await.unwrap();
+        assert_eq!(resolved, "proj-default-42");
+        srv.abort();
     }
 }

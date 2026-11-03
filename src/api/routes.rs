@@ -3690,15 +3690,32 @@ async fn discover_managed_providers_from_bitwarden(
     }
     if !manager.has_base_credential("scaleway") {
         if let Some(key) = read_secret(&["SCALEWAY_SECRET_KEY", "SCW_SECRET_KEY"]).await {
+            let access_key = read_secret(&["SCALEWAY_KEY_ID", "SCW_ACCESS_KEY"]).await;
             let zone = std::env::var("SCALEWAY_DEFAULT_ZONE")
                 .ok()
-                .filter(|s| !s.trim().is_empty());
+                .filter(|s| !s.trim().is_empty())
+                .or(read_secret(&["SCALEWAY_DEFAULT_ZONE", "SCW_DEFAULT_ZONE"]).await);
             let project_id = std::env::var("SCALEWAY_PROJECT_ID")
                 .or_else(|_| std::env::var("SCW_DEFAULT_PROJECT_ID"))
                 .ok()
                 .filter(|s| !s.trim().is_empty())
                 .or(read_secret(&["SCALEWAY_PROJECT_ID", "SCW_DEFAULT_PROJECT_ID"]).await);
-            manager.register_base_credential("scaleway", "bitwarden", key, zone, project_id);
+            let org_id = std::env::var("SCALEWAY_ORGANIZATION_ID")
+                .or_else(|_| std::env::var("SCW_DEFAULT_ORGANIZATION_ID"))
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or(
+                    read_secret(&["SCALEWAY_ORGANIZATION_ID", "SCW_DEFAULT_ORGANIZATION_ID"]).await,
+                );
+            manager.register_base_credential_with_extras(
+                "scaleway",
+                "bitwarden",
+                key,
+                access_key,
+                zone,
+                project_id,
+                org_id,
+            );
             tracing::info!("Registered managed provider 'scaleway' from Bitwarden vault");
         }
     }
