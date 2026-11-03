@@ -36,4 +36,33 @@ final class OrbOrchestrationTests: XCTestCase {
         XCTAssertEqual(boat.state, "destroyed")
         XCTAssertEqual(boat.costUSD, 0.0106)
     }
+
+    func testAutoManagedAsyncGetActionResolvesRunningAndConcreteNodeLabel() throws {
+        let events: [StoredEvent] = [
+            StoredEvent(id: 1, missionId: "p", sequence: 1, eventType: "tool_call", timestamp: "", eventId: nil,
+                        toolCallId: "c-start", toolName: "mcp__sandboxed__start_mission",
+                        content: #"{"title":"R15-EvmEkFk","backend":"opencode","model_override":"google/gemini-4-carbon-eap","remote_node_id":"auto-managed:boat:xlarge"}"#,
+                        metadata: [:]),
+            StoredEvent(id: 2, missionId: "p", sequence: 2, eventType: "tool_result", timestamp: "", eventId: nil,
+                        toolCallId: "c-start", toolName: "mcp__sandboxed__start_mission",
+                        content: #"{"content":[{"type":"text","text":"{\"accepted\":\"yes\",\"action_id\":\"act-1\",\"state\":\"queued\"}"}]}"#,
+                        metadata: [:]),
+            StoredEvent(id: 3, missionId: "p", sequence: 3, eventType: "tool_call", timestamp: "", eventId: nil,
+                        toolCallId: "c-poll", toolName: "mcp__sandboxed__get_action",
+                        content: #"{"action_id":"act-1"}"#,
+                        metadata: [:]),
+            StoredEvent(id: 4, missionId: "p", sequence: 4, eventType: "tool_result", timestamp: "", eventId: nil,
+                        toolCallId: "c-poll", toolName: "mcp__sandboxed__get_action",
+                        content: #"{"content":[{"type":"text","text":"{\"action_id\":\"act-1\",\"state\":\"succeeded\",\"result\":{\"mission\":{\"id\":\"005ca1ac-1111-2222-3333-444455556666\",\"status\":\"active\",\"execution\":{\"scope_unit\":\"remote-node:managed-mmf4ywkaxw\"}},\"managed_machine\":{\"id\":\"mmf4ywkaxw\",\"node_id\":\"managed-mmf4ywkaxw\",\"size\":\"xlarge\",\"state\":\"online\"}}}"}]}"#,
+                        metadata: [:]),
+        ]
+        let compacted = events.map(\.compacted)
+        let refs = OrbOrchestration.build(from: compacted)
+        let subagents = refs.compactMap { if case .subagent(let s) = $0 { return s } else { return nil } }
+        let child = try XCTUnwrap(subagents.first)
+        XCTAssertEqual(child.missionID, "005ca1ac-1111-2222-3333-444455556666")
+        XCTAssertEqual(child.status, "running")
+        XCTAssertEqual(child.nodeID, "managed-mmf4ywkaxw")
+        XCTAssertEqual(OrbOrchestration.nodeLabel(child.nodeID, refs: refs, fallbackSize: child.nodeSize), "xlarge · mmf4ywkaxw")
+    }
 }

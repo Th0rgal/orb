@@ -1,16 +1,3 @@
-
-running 1 test
-test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 38 filtered out; finished in 0.00s
-
-
-running 2 tests
-test managed::tests::mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_usd_budget ... ok
-test managed::tests::mission_vm_limits_bypass_saturated_global_pool_and_enforce_per_provider_caps ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3699 filtered out; finished in 0.03s
-
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5133:8
      |
@@ -20,9 +7,15 @@ warning: function `check_fence_at_line_start` is never used
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `orb-spec` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized] target(s) in 0.06s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-managed-provider-scaleway-and-errors)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/orb_spec-d90d3a715a28a904)
+
+running 1 test
+test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 38 filtered out; finished in 0.00s
+
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-managed-snapshot-wipe-and-followups)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5133:8
      |
@@ -203,5 +196,12 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 32.59s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.40s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-8a8ae3ebbd2678e3)
+
+running 2 tests
+test managed::tests::mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_usd_budget ... ok
+test managed::tests::mission_vm_limits_bypass_saturated_global_pool_and_enforce_per_provider_caps ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3704 filtered out; finished in 0.03s
+

@@ -130,7 +130,10 @@ export interface FollowUps {
   machines: Map<string, Record<string, unknown>>;
 }
 
-const FOLLOW_UP_OPS = new Set(["get_action", "get_mission", "get_mission_health", "get_mission_status", "list_managed_machines"]);
+const FOLLOW_UP_OPS = new Set([
+  "start_mission", "create_mission", "spawn_worker",
+  "get_action", "get_mission", "get_mission_health", "get_mission_status", "list_managed_machines",
+]);
 export function collectFollowUps(items: readonly StreamItem[]): FollowUps {
   const out: FollowUps = { actions: new Map(), missions: new Map(), machines: new Map() };
   const noteMachine = (m: Record<string, unknown> | null) => {
@@ -160,7 +163,9 @@ export function collectFollowUps(items: readonly StreamItem[]): FollowUps {
       const res = toolArgs(value?.result);
       out.actions.set(id, { value: res, error: error ?? (value?.error ? errorText(value) : undefined), state: s(value?.state) });
       noteMission(toolArgs(res?.mission));
-      noteMachine(toolArgs(res?.machine) ?? (s(res?.node_id) && s(res?.state) ? res : null));
+      noteMachine(toolArgs(res?.machine) ?? toolArgs(res?.managed_machine) ?? (s(res?.node_id) && s(res?.state) ? res : null));
+    } else if (op === "start_mission" || op === "create_mission" || op === "spawn_worker") {
+      noteMachine(toolArgs(value?.managed_machine) ?? toolArgs(value?.machine));
     } else if (op === "get_mission" || op === "get_mission_health" || op === "get_mission_status") {
       if (value) noteMission({ ...value, id: s(value.mission_id) ?? s(value.id) ?? s(toolArgs(item.args)?.mission_id) });
     } else if (op === "list_managed_machines" && value && Array.isArray(value.machines)) {
@@ -203,11 +208,14 @@ export function subagentRef(tool: Tool, follow: FollowUps, lookup: MissionLookup
   ref.actionId = s(value?.action_id);
   const direct = toolArgs(value?.mission) ?? (s(value?.mission_id) || s(value?.id) ? value : null);
   let mission = direct && (s(direct.mission_id) ?? s(direct.id)) ? direct : null;
+  let managedMachine = toolArgs(value?.managed_machine) ?? toolArgs(value?.machine);
   if (ref.actionId) {
     const act = follow.actions.get(ref.actionId);
     if (act?.error) { ref.status = "failed"; ref.error = act.error.replace(/^Outcome unconfirmed; inspect before retrying\.\s*/, ""); }
     const m = toolArgs(act?.value?.mission);
     if (m) mission = m;
+    const mm = toolArgs(act?.value?.managed_machine) ?? toolArgs(act?.value?.machine);
+    if (mm) managedMachine = mm;
   }
   const missionId = mission ? s(mission.mission_id) ?? s(mission.id) : undefined;
   if (missionId) {
@@ -217,7 +225,12 @@ export function subagentRef(tool: Tool, follow: FollowUps, lookup: MissionLookup
     ref.backend = s(facts.backend) ?? ref.backend;
     ref.model = s(facts.model_override) ?? ref.model;
     const scope = s(toolArgs(facts.execution)?.scope_unit);
-    if (!ref.nodeId && scope?.startsWith("remote-node:")) ref.nodeId = scope.slice("remote-node:".length);
+    const scopeNode = scope?.startsWith("remote-node:") ? scope.slice("remote-node:".length) : undefined;
+    const factNode = s(facts.remote_node_id);
+    const resolvedNode = s(managedMachine?.node_id)
+      ?? (factNode && !factNode.startsWith("auto-managed") ? factNode : undefined)
+      ?? scopeNode;
+    if (resolvedNode && (!ref.nodeId || ref.nodeId.startsWith("auto-managed"))) ref.nodeId = resolvedNode;
     if (ref.status !== "failed") ref.status = missionStatus(facts) ?? "running";
     const last = s(facts.last_assistant_message);
     if (last) ref.summary = firstLine(last);

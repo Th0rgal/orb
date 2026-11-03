@@ -13,8 +13,10 @@ ms() { echo $(( ($(date +%s%N) - t0) / 1000000 )); }
 
 # 1. opencode's scratch dir must be writable by the node user (boat's base
 #    creates it as user:user 0775, so every first clone failed).
-install -d -m 1777 /tmp/opencode
-chown -R "$NODE_USER:$NODE_USER" /tmp/opencode
+install -d -m 1777 -o "$NODE_USER" -g "$NODE_USER" /tmp/opencode
+if [ "$(stat -c '%U:%G' /tmp/opencode 2>/dev/null)" != "$NODE_USER:$NODE_USER" ]; then
+  chown -R "$NODE_USER:$NODE_USER" /tmp/opencode
+fi
 mkdir -p /etc/tmpfiles.d
 echo "d /tmp/opencode 1777 $NODE_USER $NODE_USER -" > /etc/tmpfiles.d/orb-opencode.conf
 
@@ -58,7 +60,11 @@ mkdir -p /etc/systemd/system/orb-node.service.d
   echo "Environment=GIT_TERMINAL_PROMPT=0"
   echo "Environment=OPENCODE_TMPDIR=/tmp/opencode"
   if [ -x "$CACHES/cargo/bin/rustup" ]; then
-    chown -R "$NODE_USER:$NODE_USER" "$CACHES/rustup" "$CACHES/cargo"
+    for d in "$CACHES/rustup" "$CACHES/cargo"; do
+      if [ -d "$d" ] && [ "$(stat -c '%U:%G' "$d" 2>/dev/null)" != "$NODE_USER:$NODE_USER" ]; then
+        chown -R "$NODE_USER:$NODE_USER" "$d"
+      fi
+    done
     echo "Environment=RUSTUP_HOME=$CACHES/rustup"
     echo "Environment=CARGO_HOME=$CACHES/cargo"
     echo "Environment=PATH=$CACHES/cargo/bin:$CACHES/elan/bin:$ORB_BIN:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
