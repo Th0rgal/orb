@@ -38,6 +38,16 @@ describe("producer transcript contract",()=>{
     expect(storedToStream(row("Dispatched job scheduling is now documented."))).toMatchObject({type:"assistant_message"});
     expect(storedToStream(row("Remote job scheduling is now fixed.",{kind:"remote_job_status"}))).toBeNull();
   });
+  it("hides legacy parallel cancellation requested notices while preserving genuine error events",()=>{
+    expect(storedToStream({id:1,sequence:1,event_type:"error",content:"Parallel mission 0f48caee-6c61-4fa7-979f-64277e2889e1 cancellation requested",timestamp:""})).toBeNull();
+    expect(storedToStream({id:2,sequence:2,event_type:"error",content:"OpenCode CLI exited with status 1",timestamp:""})).toMatchObject({type:"error",data:{message:"OpenCode CLI exited with status 1"}});
+    const items=buildTranscript([
+      ev("user_message",{id:"u1",content:"Stop and promote"}),
+      ev("error",{message:"Parallel mission 0f48caee-6c61-4fa7-979f-64277e2889e1 cancellation requested",resumable:true}),
+      ev("assistant_message",{id:"a1",content:"Mission cancelled",success:false,completion_evidence:{terminal_reason:"cancelled"}}),
+    ]);
+    expect(items.filter(x=>x.kind==="error"&&x.text.includes("cancellation requested"))).toHaveLength(0);
+  });
   it("preserves stored identities and rejects stale sequenced snapshots",()=>{
   const stored=storedToStream({id:7,event_id:"uuid",sequence:12,event_type:"text_delta",content:"Latest",timestamp:""})!;
   expect(stored).toMatchObject({storedId:7,eventId:"uuid",sequence:12});

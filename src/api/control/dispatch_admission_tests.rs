@@ -12539,6 +12539,55 @@ async fn send_queued_now_delivers_live_midturn_without_disturbing_other_queued_m
         rows_after.iter().map(|r| r.id).collect::<Vec<_>>(),
         vec![first_id]
     );
+
+    // Without a live midturn listener, ?interrupt=true promotes a host-queued
+    // follow-up to the front of its mission's queue while preserving other rows.
+    drop(_guard);
+    let third_id = Uuid::new_v4();
+    let resp = h
+        .request(
+            false,
+            m.id,
+            json!({
+                "content": "promote this host follow-up to the front",
+                "queue_followup": true,
+                "client_message_id": third_id,
+                "continue_identity": Harness::assertion(&m),
+            }),
+        )
+        .await;
+    assert!(resp.status().is_success());
+
+    let promote_resp = h
+        .state
+        .http_client
+        .post(format!(
+            "{}/queue/{third_id}/send-now?interrupt=true",
+            h.url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(promote_resp.status(), StatusCode::OK);
+    let promote_body: Value = promote_resp.json().await.unwrap();
+    assert_eq!(promote_body["ok"], true);
+    assert_eq!(promote_body["delivered"], false);
+    assert_eq!(promote_body["promoted"], true);
+
+    let rows_promoted: Vec<QueuedMessage> = h
+        .state
+        .http_client
+        .get(format!("{}/queue?mission_id={}", h.url, m.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows_promoted.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![third_id, first_id]
+    );
 }
 
 const VIBE_CONTROL_FIXTURE_CHILD: &str = "VIBE_CONTROL_DISPATCH_TEST_CHILD";

@@ -1701,34 +1701,57 @@ impl SqliteMissionStore {
             return Ok(std::collections::HashMap::new());
         }
         let conn = self.reader();
-        let id_strings: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        let ids: Vec<Uuid> = ids.to_vec();
         tokio::task::spawn_blocking(move || {
+            use rusqlite::OptionalExtension;
             let conn = conn.blocking_lock();
-            let placeholders = vec!["?"; id_strings.len()].join(",");
-            // last_agent_event_at = newest event of any kind; last_output_at =
-            // newest assistant message (assistant text is logged as either
-            // `assistant_message` or `assistant_message_canonical`). Backed by
-            // idx_events_mission_timestamp.
-            let sql = format!(
-                "SELECT mission_id, MAX(timestamp) AS last_event, \
-                 MAX(CASE WHEN event_type IN ('assistant_message', 'assistant_message_canonical') THEN timestamp END) AS last_output \
-                 FROM mission_events WHERE mission_id IN ({placeholders}) GROUP BY mission_id"
-            );
-            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map(rusqlite::params_from_iter(id_strings.iter()), |row| {
-                    let mid: String = row.get(0)?;
-                    let last_event: Option<String> = row.get(1)?;
-                    let last_output: Option<String> = row.get(2)?;
-                    Ok((mid, last_event, last_output))
-                })
+            // `WHERE mission_id IN (...) GROUP BY mission_id` with a conditional
+            // MAX(CASE WHEN event_type IN (...) THEN timestamp END) forces SQLite
+            // to scan every event row of every requested mission via idx_events_mission.
+            // Prepare three exact B-tree top-1 seeks instead:
+            //   - `last_event`: O(log n) covering seek on `idx_events_mission_timestamp`
+            //   - `last_output`: O(log n) seeks on `idx_events_mission_type_sequence`
+            let mut stmt_event = conn
+                .prepare_cached(
+                    "SELECT timestamp FROM mission_events \
+                     WHERE mission_id = ?1 ORDER BY timestamp DESC LIMIT 1",
+                )
                 .map_err(|e| e.to_string())?;
-            let mut out = std::collections::HashMap::new();
-            for row in rows {
-                let (mid, last_event, last_output) = row.map_err(|e| e.to_string())?;
-                if let Ok(uuid) = Uuid::parse_str(&mid) {
-                    out.insert(uuid, (last_event, last_output));
+            let mut stmt_out_msg = conn
+                .prepare_cached(
+                    "SELECT timestamp FROM mission_events \
+                     WHERE mission_id = ?1 AND event_type = 'assistant_message' \
+                     ORDER BY sequence DESC LIMIT 1",
+                )
+                .map_err(|e| e.to_string())?;
+            let mut stmt_out_canonical = conn
+                .prepare_cached(
+                    "SELECT timestamp FROM mission_events \
+                     WHERE mission_id = ?1 AND event_type = 'assistant_message_canonical' \
+                     ORDER BY sequence DESC LIMIT 1",
+                )
+                .map_err(|e| e.to_string())?;
+
+            let mut out = std::collections::HashMap::with_capacity(ids.len());
+            for uuid in ids {
+                let mid = uuid.to_string();
+                let last_event: Option<String> = stmt_event
+                    .query_row([mid.as_str()], |row| row.get(0))
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                if last_event.is_none() {
+                    continue;
                 }
+                let out_msg: Option<String> = stmt_out_msg
+                    .query_row([mid.as_str()], |row| row.get(0))
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                let out_canonical: Option<String> = stmt_out_canonical
+                    .query_row([mid.as_str()], |row| row.get(0))
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                let last_output = [out_msg, out_canonical].into_iter().flatten().max();
+                out.insert(uuid, (last_event, last_output));
             }
             Ok(out)
         })

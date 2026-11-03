@@ -1,7 +1,7 @@
 import { nativeInvoke } from "./native";
 import { missionNode } from "./machines/nodes";
 import { harnessRank, isHarness } from "./harnesses";
-import { isArchivable, isArchived, isReopenable } from "./missionStatus";
+import { isArchivable, isArchived, isReopenable, isWorking } from "./missionStatus";
 import { swallow } from "./log";
 import { sharedRead, invalidateReads } from "./sharedReads";
 import { cacheReset } from "./pageCache";
@@ -99,7 +99,7 @@ export class ApiError extends Error {
   constructor(public status: number, public detail: string) { super(`${status} ${detail}`.trim()); }
 }
 
-class InvalidApiResponseError extends Error {
+export class InvalidApiResponseError extends Error {
   constructor(path: string, options?: ErrorOptions) {
     super(`Couldn’t read the server response for ${path}. Please retry; your draft is kept.`, options);
   }
@@ -210,6 +210,12 @@ async function sendRequest<T>(path: string, init?: RequestInit, text = false): P
     body = await res.text();
   } catch (cause) {
     if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
+    if (isAbortError(cause)) {
+      const reason = abortReason(init?.signal);
+      noteAbort(`${init?.method?.toUpperCase() ?? "GET"} ${redactDiagnosticPath(path)}`, reason, performance.now() - started);
+      if (reason !== "caller-abort") throw new RequestTimeoutError();
+      throw cause;
+    }
     throw new InvalidApiResponseError(`${init?.method ?? "GET"} ${redactDiagnosticPath(path)}`, { cause });
   }
   if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
@@ -1197,6 +1203,7 @@ export async function sendMissionMessage(
   text: string,
   attachments?: MissionAttachment[],
   clientMessageId: string = crypto.randomUUID(),
+  knownMission?: Mission | null,
 ): Promise<MessageReceipt> {
   const version = connectionVersion();
   const replacementKey = `${version}:${id}:${clientMessageId}`;
@@ -1209,7 +1216,11 @@ export async function sendMissionMessage(
   };
   const retry = remoteReplacements.get(replacementKey);
   if (retry) return createReplacement(retry);
-  let mission = await getMission(id);
+  // Only skip the pre-send GET when the mission is actively working in memory:
+  // idle/stopped missions fetch fresh `track`, `github_pr`, and `status` before
+  // building `continue_identity` or deciding replacement/reopen semantics.
+  const usedKnownMission = Boolean(knownMission && knownMission.id === id && isWorking(knownMission.status));
+  let mission = usedKnownMission ? knownMission! : await getMission(id);
   if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
   if (mission.status === "acknowledged" || mission.status === "paused") {
     await api(`/api/control/missions/${encodeURIComponent(id)}/status`, {
@@ -1236,7 +1247,19 @@ export async function sendMissionMessage(
   try {
     receipt = await postWhileTurnRuns(post, () => connectionVersion() !== version);
   } catch (error) {
+    // If Core already accepted and queued the message before the HTTP response
+    // body dropped (`Couldn't read the server response` / timeout), recover its
+    // receipt from Core's durable queue without re-posting behind the user's back.
+    if ((error instanceof InvalidApiResponseError || error instanceof RequestTimeoutError) && connectionVersion() === version) {
+      const queued = await listQueuedMessages(id).catch(() => null);
+      const found = queued?.find(row => row.id === clientMessageId);
+      if (found) return { id: clientMessageId, queued: !found.inflight, message_accepted: true };
+    }
     if (!(error instanceof ApiError) || error.status !== 409 || !error.detail.startsWith("REMOTE_RESUME_REQUIRES_REPLACEMENT:")) throw error;
+    if (usedKnownMission && !mission.history?.length) {
+      mission = await getMission(id, { fresh: true });
+      if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
+    }
     // Side conversations must keep their archive, parent and sidebar identity.
     // Their caller handles this explicit refusal through the dedicated /btw route.
     if (isBtwMission(mission)) throw error;

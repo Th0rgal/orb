@@ -3311,8 +3311,10 @@ pub struct MissionRunner {
     session_store: Option<Arc<dyn crate::api::mission_store::MissionStore>>,
 
     /// Once cancellation is requested, this runner must drain its current
-    /// handle and be removed without starting queued or automated follow-ups.
+    /// handle and be removed without starting queued or automated follow-ups,
+    /// unless an interruption preserves queued work (`preserve_queue_on_cancel`).
     cancellation_requested: bool,
+    preserve_queue_on_cancel: bool,
     interruption_reason: Option<TerminalReason>,
 
     /// Absolute deadline after which a cancelled runner is force-aborted if
@@ -3373,6 +3375,7 @@ impl MissionRunner {
             durable_run: None,
             session_store: None,
             cancellation_requested: false,
+            preserve_queue_on_cancel: false,
             interruption_reason: None,
             cancellation_force_clear_deadline: None,
             force_abort_requested: false,
@@ -3521,6 +3524,7 @@ impl MissionRunner {
     /// Cancel the current execution.
     pub fn cancel(&mut self) {
         self.interruption_reason = None;
+        self.preserve_queue_on_cancel = false;
         self.cancellation_requested = true;
         self.cancellation_force_clear_deadline
             .get_or_insert_with(|| Instant::now() + RUNNER_FORCE_CLEAR_GRACE);
@@ -3533,16 +3537,40 @@ impl MissionRunner {
     /// Interrupt this execution for inactivity without revoking queued work.
     /// A later explicit Stop still clears the queue and overrides this cause.
     pub fn interrupt_stalled(&mut self) {
-        if self.cancellation_requested && self.interruption_reason.is_none() {
+        if self.cancellation_requested && !self.preserve_queue_on_cancel {
             return; // An explicit Stop already owns termination.
         }
         self.interruption_reason = Some(TerminalReason::Stalled);
+        self.preserve_queue_on_cancel = true;
         self.cancellation_requested = true;
         self.cancellation_force_clear_deadline
             .get_or_insert_with(|| Instant::now() + RUNNER_FORCE_CLEAR_GRACE);
         if let Some(token) = &self.cancel_token {
             token.cancel();
         }
+    }
+
+    /// Interrupt the current execution so a promoted queued follow-up runs
+    /// immediately next, preserving the runner's queue and `TerminalReason::Cancelled`.
+    pub fn interrupt_for_promoted_followup(&mut self) {
+        if !self.is_running() {
+            return;
+        }
+        if self.cancellation_requested && !self.preserve_queue_on_cancel {
+            return; // An explicit Stop already owns termination.
+        }
+        self.interruption_reason = None;
+        self.preserve_queue_on_cancel = true;
+        self.cancellation_requested = true;
+        self.cancellation_force_clear_deadline
+            .get_or_insert_with(|| Instant::now() + RUNNER_FORCE_CLEAR_GRACE);
+        if let Some(token) = &self.cancel_token {
+            token.cancel();
+        }
+    }
+
+    pub fn take_preserve_queue_on_cancel(&mut self) -> bool {
+        std::mem::replace(&mut self.preserve_queue_on_cancel, false)
     }
 
     pub fn take_interruption_reason(&mut self) -> Option<TerminalReason> {
@@ -3687,7 +3715,7 @@ impl MissionRunner {
         self.reset_turn_tool_calls();
         self.state = MissionRunState::Running;
 
-        let cancel = CancellationToken::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
         self.cancel_token = Some(cancel.clone());
 
         let hist_snapshot = self.history.clone();
@@ -3804,8 +3832,9 @@ impl MissionRunner {
             match handle.await {
                 Ok(mut result) => {
                     let interruption = self.interruption_reason.take();
+                    let preserve_queue = self.take_preserve_queue_on_cancel();
                     apply_interruption_reason(&mut result.2, interruption);
-                    if interruption.is_some() {
+                    if interruption.is_some() || preserve_queue {
                         self.cancellation_requested = false;
                     }
                     self.touch(); // Update last activity
@@ -14881,6 +14910,57 @@ mod tests {
             shutdown.terminal_reason,
             Some(TerminalReason::ServerShutdown)
         );
+    }
+
+    #[tokio::test]
+    async fn interrupt_for_promoted_followup_preserves_queue_and_clears_cancel_after_turn() {
+        let mut runner = MissionRunner::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            Some("opencode".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
+        let promoted = Uuid::new_v4();
+        let remaining = Uuid::new_v4();
+        runner.queue_message(promoted, "promoted follow-up".into(), None, None);
+        runner.queue_message(remaining, "later follow-up".into(), None, None);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        runner.cancel_token = Some(cancel.clone());
+        runner.state = MissionRunState::Running;
+        runner.running_handle = Some(tokio::spawn(async move {
+            cancel.cancelled().await;
+            (
+                Uuid::new_v4(),
+                "original prompt".into(),
+                AgentResult::failure("Mission cancelled", 0)
+                    .with_terminal_reason(TerminalReason::Cancelled),
+            )
+        }));
+
+        runner.interrupt_for_promoted_followup();
+        assert_eq!(runner.queue.len(), 2);
+        assert_eq!(runner.queue[0].id, promoted);
+        assert_eq!(runner.queue[1].id, remaining);
+
+        let result = loop {
+            if let Some(result) = runner.poll_completion().await {
+                break result.2;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(result.terminal_reason, Some(TerminalReason::Cancelled));
+        assert!(!runner.cancellation_requested());
+        let next = runner
+            .take_next_message_for_start()
+            .expect("promoted follow-up should be startable after interrupted turn exits");
+        assert_eq!(next.id, promoted);
+        assert_eq!(runner.queue.front().unwrap().id, remaining);
     }
 
     #[test]

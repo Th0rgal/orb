@@ -54,11 +54,17 @@ export interface StoredEvent {
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const REMOTE_JOB_RUNNING = new RegExp(`^Remote job ${UUID} on node '[^']+' is now (queued|running|finished)$`);
 const DISPATCHED_JOB = new RegExp(`^Dispatched job ${UUID} to remote node '[^']+'(?: \\([^\\n]*\\))?$`);
+const PARALLEL_CANCEL_REQUESTED = new RegExp(`^Parallel mission ${UUID} cancellation requested$`, "i");
 
 export function isGeneratedRemoteJobStatus(ev: Pick<StoredEvent, "content" | "metadata">): boolean {
   const meta = ev.metadata ?? {};
   if (meta.kind === "remote_job_status" || meta.remote_job_status === true) return true;
   return REMOTE_JOB_RUNNING.test(ev.content) || DISPATCHED_JOB.test(ev.content);
+}
+
+/** Legacy parallel-runner cancellation acknowledgement — not a mission failure. */
+export function isCancellationRequestedNotice(text: string): boolean {
+  return PARALLEL_CANCEL_REQUESTED.test(text.trim());
 }
 
 /** Core marks the persisted text of a turn that was cut (Send now, Stop). */
@@ -203,6 +209,7 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
       return d({ tool_call_id: ev.tool_call_id ?? "", name: ev.tool_name ?? "tool", result, ...(ev.metadata?.truncated === true ? { truncated: true } : {}) });
     }
     case "error":
+      if (isCancellationRequestedNotice(ev.content)) return null;
       return d({ message: ev.content, resumable: false });
     case "mission_status_changed":
       return d({ status: ev.metadata?.status, summary: ev.content || undefined });

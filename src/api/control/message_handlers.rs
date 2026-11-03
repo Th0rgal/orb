@@ -738,6 +738,7 @@ pub async fn send_queued_now(
         .cmd_tx
         .send(ControlCommand::SendQueuedNow {
             message_id,
+            interrupt,
             respond: tx,
         })
         .await
@@ -748,9 +749,18 @@ pub async fn send_queued_now(
             "failed to send queued message now".to_string(),
         )
     })? {
-        Ok(delivered) => Ok(Json(serde_json::json!({
+        Ok(SendQueuedNowOutcome::DeliveredLive) => Ok(Json(serde_json::json!({
             "ok": true,
-            "delivered": delivered,
+            "delivered": true,
+        }))),
+        Ok(SendQueuedNowOutcome::Promoted) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "delivered": false,
+            "promoted": true,
+        }))),
+        Ok(SendQueuedNowOutcome::NotDelivered) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "delivered": false,
         }))),
         Err(err) if err == "message not in queue" => Err((StatusCode::NOT_FOUND, err)),
         Err(err) => Err((StatusCode::CONFLICT, err)),

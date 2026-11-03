@@ -588,10 +588,12 @@ pub enum ControlCommand {
         respond: oneshot::Sender<bool>, // true if removed, false if not found
     },
     /// Deliver a queued message immediately to a running turn when the harness
-    /// supports mid-turn user message injection (without stopping the turn).
+    /// supports mid-turn user message injection, or promote it to run next and
+    /// interrupt the active turn when `interrupt` is set.
     SendQueuedNow {
         message_id: Uuid,
-        respond: oneshot::Sender<Result<bool, String>>,
+        interrupt: bool,
+        respond: oneshot::Sender<Result<SendQueuedNowOutcome, String>>,
     },
     /// Clear queued messages. When `mission_id` is set, only messages
     /// targeting that mission are cleared (main queue entries targeting it +
@@ -610,6 +612,13 @@ pub enum CancelMissionOutcome {
     Cancelled,
     SkippedRecentlyActive,
     NoRunner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendQueuedNowOutcome {
+    DeliveredLive,
+    Promoted,
+    NotDelivered,
 }
 
 // ==================== Mission Types ====================

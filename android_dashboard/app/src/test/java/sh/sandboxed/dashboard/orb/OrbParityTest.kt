@@ -53,4 +53,12 @@ class OrbParityTest {
         assertEquals(100, OrbRemoteImageLoader.readBounded(data.inputStream(), 100)?.size)
         assertNull(OrbRemoteImageLoader.readBounded(data.inputStream(), 99))
     }
+
+    @Test
+    fun inboxHumanizeStatusTextSuppressesParallelCancellationRequestedNotice() {
+        assertEquals(
+            "",
+            OrbInboxModel.humanizeStatusText("Parallel mission 0f48caee-6c61-4fa7-979f-64277e2889e1 cancellation requested")
+        )
+    }
 }
