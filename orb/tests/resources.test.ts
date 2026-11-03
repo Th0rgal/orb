@@ -6,6 +6,7 @@ import {
   buildOverviewSankeyInput,
   computeMonotoneCurve,
   computeSankeyLayout,
+  formatLargeNumber,
   formatResourceRate,
   layoutDagRows,
   stabilizeTrailingOpenBucket,
@@ -35,6 +36,15 @@ describe("resourcesModel shared spec", () => {
         ),
       ).toBe(row.expected);
     }
+    expect(formatLargeNumber(999.4)).toBe("999");
+    expect(formatLargeNumber(999.6)).toBe("1,000");
+    expect(formatLargeNumber(6939)).toBe("6,939");
+    expect(formatLargeNumber(9999.6)).toBe("10k");
+    expect(formatLargeNumber(30000)).toBe("30k");
+    expect(formatLargeNumber(30100)).toBe("30.1k");
+    expect(formatLargeNumber(142600)).toBe("143k");
+    expect(formatLargeNumber(999600)).toBe("1M");
+    expect(formatLargeNumber(1250000)).toBe("1.25M");
   });
 
   it("conserves raw and USD mass across 2-column Sankey layout", () => {

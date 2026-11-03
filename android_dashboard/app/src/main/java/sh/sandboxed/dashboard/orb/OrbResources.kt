@@ -50,6 +50,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -156,6 +157,59 @@ object OrbResourcesModel {
         val etaEndFrac: Double?,
     )
 
+    fun formatIntThousands(value: Double): String {
+        val n = max(0L, if (value.isFinite()) value.roundToLong() else 0L)
+        val s = n.toString()
+        if (s.length <= 3) return s
+        val sb = StringBuilder(s.length + (s.length - 1) / 3)
+        for (i in s.indices) {
+            if (i > 0 && (s.length - i) % 3 == 0) {
+                sb.append(',')
+            }
+            sb.append(s[i])
+        }
+        return sb.toString()
+    }
+
+    fun formatLargeNumber(value: Double): String {
+        val safe = if (value.isFinite()) max(0.0, value) else 0.0
+        val rounded = safe.roundToLong()
+        if (rounded >= 1_000_000L) {
+            val m100 = ((safe / 1_000_000.0) * 100.0).roundToLong()
+            if (m100 >= 10_000L) {
+                return "${formatIntThousands(safe / 1_000_000.0)}M"
+            }
+            if (m100 >= 1_000L) {
+                val m10 = ((safe / 1_000_000.0) * 10.0).roundToLong()
+                return if (m10 % 10L == 0L) {
+                    "${m10 / 10L}M"
+                } else {
+                    String.format(Locale.US, "%.1fM", m10.toDouble() / 10.0)
+                }
+            }
+            if (m100 % 100L == 0L) return "${m100 / 100L}M"
+            if (m100 % 10L == 0L) return String.format(Locale.US, "%.1fM", m100.toDouble() / 100.0)
+            return String.format(Locale.US, "%.2fM", m100.toDouble() / 100.0)
+        }
+        if (rounded >= 10_000L) {
+            val k10 = ((safe / 1_000.0) * 10.0).roundToLong()
+            if (k10 >= 10_000L) return "1M"
+            if (k10 >= 1_000L) {
+                val kInt = (safe / 1_000.0).roundToLong()
+                return if (kInt >= 1_000L) "1M" else "${kInt}k"
+            }
+            return if (k10 % 10L == 0L) {
+                "${k10 / 10L}k"
+            } else {
+                String.format(Locale.US, "%.1fk", k10.toDouble() / 10.0)
+            }
+        }
+        if (rounded >= 1_000L) {
+            return formatIntThousands(rounded.toDouble())
+        }
+        return "$rounded"
+    }
+
     fun formatResourceRate(
         value: Double,
         lens: Lens,
@@ -166,13 +220,13 @@ object OrbResourcesModel {
         if (metric == Metric.Usd) {
             if (!withUnit) {
                 return when {
-                    safe >= 100.0 -> "$${safe.roundToInt()}"
+                    safe >= 100.0 -> "$${formatLargeNumber(safe)}"
                     safe >= 10.0 -> String.format(Locale.US, "$%.1f", safe)
                     else -> String.format(Locale.US, "$%.2f", safe)
                 }
             }
             return when {
-                safe >= 100.0 -> "$${safe.roundToInt()}/h"
+                safe >= 100.0 -> "$${formatLargeNumber(safe)}/h"
                 safe >= 10.0 -> String.format(Locale.US, "$%.1f/h", safe)
                 safe >= 0.01 -> String.format(Locale.US, "$%.2f/h", safe)
                 safe > 0.0 -> "<$0.01/h"
@@ -181,9 +235,9 @@ object OrbResourcesModel {
         }
 
         if (lens == Lens.Compute) {
-            val rounded1 = (safe * 10.0).roundToInt() / 10.0
-            val num = if (safe >= 10.0 || abs(rounded1 - safe.roundToInt()) < 0.05) {
-                "${safe.roundToInt()}"
+            val rounded1 = (safe * 10.0).roundToLong() / 10.0
+            val num = if (safe >= 10.0 || abs(rounded1 - safe.roundToLong()) < 0.05) {
+                formatLargeNumber(safe)
             } else {
                 String.format(Locale.US, "%.1f", safe)
             }
@@ -955,7 +1009,7 @@ private fun FleetSankeyCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        "${OrbJSON.int(m, "subagent_total") ?: 1} spans · tap for Fast-DAG",
+                        "${OrbResourcesModel.formatLargeNumber((OrbJSON.int(m, "subagent_total") ?: 1).toDouble())} spans · tap for Fast-DAG",
                         color = OrbStyle.textSecondary,
                         fontSize = 11.sp,
                     )
@@ -1018,9 +1072,9 @@ private fun MissionFastDagCard(
 
         Text(
             text = if (vmCount > 0) {
-                "Execution Fast-DAG · $vmCount VMs · $spanCount spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
+                "Execution Fast-DAG · ${OrbResourcesModel.formatLargeNumber(vmCount.toDouble())} VMs · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
             } else {
-                "Subagent Execution Fast-DAG · ${bars.size} spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
+                "Subagent Execution Fast-DAG · ${OrbResourcesModel.formatLargeNumber(bars.size.toDouble())} spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
             },
             color = OrbStyle.textSecondary,
             fontSize = 11.sp,

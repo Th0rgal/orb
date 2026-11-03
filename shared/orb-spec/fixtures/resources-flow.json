@@ -2,10 +2,18 @@
   "description": "Shared cross-client specification for Resources Sankey flow conservation, unit formatting (raw vCPU / B tok/h vs estimated $/h), and subagent DAG row layout across Orb desktop (orb/src/resourcesModel.ts), iOS (OrbResources.swift), and Android (OrbResources.kt).",
   "formatting": [
     { "value": 64, "lens": "compute", "metric": "raw", "withUnit": true, "expected": "64 vCPU" },
+    { "value": 1280, "lens": "compute", "metric": "raw", "withUnit": true, "expected": "1,280 vCPU" },
+    { "value": 12800, "lens": "compute", "metric": "raw", "withUnit": true, "expected": "12.8k vCPU" },
     { "value": 1.456, "lens": "inference", "metric": "raw", "withUnit": true, "expected": "1.46 B tok/h" },
     { "value": 4.78, "lens": "compute", "metric": "usd", "withUnit": true, "expected": "$4.78/h" },
     { "value": 29.24, "lens": "inference", "metric": "usd", "withUnit": true, "expected": "$29.2/h" },
-    { "value": 142.6, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$143" }
+    { "value": 142.6, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$143" },
+    { "value": 6939, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$6,939" },
+    { "value": 1534, "lens": "inference", "metric": "usd", "withUnit": true, "expected": "$1,534/h" },
+    { "value": 30000, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$30k" },
+    { "value": 30100, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$30.1k" },
+    { "value": 142600, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$143k" },
+    { "value": 1250000, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$1.25M" }
   ],
   "sankey_2col": {
     "nodes": [

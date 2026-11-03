@@ -978,7 +978,6 @@ async fn get_overview(
 
         let sublabel = match quota_rem {
             Some(pct) => format!("{}% left", pct.round() as i64),
-            None if p429 > 0 => format!("{p429}× 429"),
             None => "metered".to_string(),
         };
         let health = if quota_rem.is_some_and(|q| q <= 10.0) || p429 >= 5 {

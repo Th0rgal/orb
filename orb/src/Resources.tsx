@@ -24,6 +24,7 @@ import {
   computeMonotoneCurve,
   computeSankeyLayout,
   formatDurationCompact,
+  formatLargeNumber,
   formatResourceRate,
   formatTokenTotalCompact,
   layoutDagRows,
@@ -368,7 +369,7 @@ export default function Resources(props: {
     const m = metric();
     if (isMissionMode()) {
       const det = detail();
-      if (!det) return { primary: "—", secondary: null, warn: null };
+      if (!det) return { primary: "—", secondary: null };
       const activeVmBars = det.dag.bars.filter(
         (b) => b.role === "vm" && b.state === "active",
       );
@@ -390,11 +391,11 @@ export default function Resources(props: {
         det.mission.eta_remaining_secs != null && det.mission.eta_remaining_secs > 0
           ? `ETA ~${formatDurationCompact(det.mission.eta_remaining_secs)}`
           : `${formatDurationCompact(det.mission.elapsed_secs)} elapsed`;
-      return { primary, secondary: eta, warn: null };
+      return { primary, secondary: eta };
     }
 
     const ov = overview();
-    if (!ov) return { primary: "—", secondary: null, warn: null };
+    if (!ov) return { primary: "—", secondary: null };
     if (l === "compute") {
       const primary =
         m === "usd"
@@ -402,9 +403,9 @@ export default function Resources(props: {
           : `${formatResourceRate(ov.compute.active_vcpu, "compute", "raw", false)}/${formatResourceRate(ov.compute.total_vcpu, "compute", "raw", true)}`;
       const secondary =
         ov.compute.idle_leased_vcpu > 0.4
-          ? `${Math.round(ov.compute.idle_leased_vcpu)} idle vCPU`
-          : `${ov.missions.length} mission${ov.missions.length === 1 ? "" : "s"}`;
-      return { primary, secondary, warn: null };
+          ? `${formatLargeNumber(ov.compute.idle_leased_vcpu)} idle vCPU`
+          : `${formatLargeNumber(ov.missions.length)} mission${ov.missions.length === 1 ? "" : "s"}`;
+      return { primary, secondary };
     }
     const primary = formatResourceRate(
       m === "usd" ? ov.inference.est_usd_per_h : ov.inference.current_b_tok_per_h,
@@ -416,11 +417,7 @@ export default function Resources(props: {
       m === "usd"
         ? `${formatResourceRate(ov.inference.window_est_usd, "inference", "usd", false)} (${ov.range})`
         : `${formatTokenTotalCompact(ov.inference.window_total_tokens)} (${ov.range})`;
-    const warn =
-      ov.inference.throttled_429_count > 0
-        ? `${ov.inference.throttled_429_count} × 429`
-        : null;
-    return { primary, secondary, warn };
+    return { primary, secondary };
   });
 
   // Hover readout text in card header
@@ -845,9 +842,6 @@ export default function Resources(props: {
               <span class="res-stamp-sep">·</span>
               <span>{headerStamp().secondary}</span>
             </Show>
-            <Show when={headerStamp().warn}>
-              <span class="res-badge-warn">{headerStamp().warn}</span>
-            </Show>
           </div>
 
           {/* Elegant Raw Unit vs Estimated $ Toggle */}
@@ -1166,8 +1160,8 @@ export default function Resources(props: {
                     const vmCount = bars.filter((b) => b.role === "vm").length;
                     const spanCount = bars.length - vmCount;
                     return vmCount > 0
-                      ? `Execution DAG · ${vmCount} VMs · ${spanCount} spans`
-                      : `Subagent Execution DAG · ${bars.length} spans`;
+                      ? `Execution DAG · ${formatLargeNumber(vmCount)} VMs · ${formatLargeNumber(spanCount)} spans`
+                      : `Subagent Execution DAG · ${formatLargeNumber(bars.length)} spans`;
                   })()}
                 </span>
               </div>

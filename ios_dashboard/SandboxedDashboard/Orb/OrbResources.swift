@@ -101,6 +101,56 @@ enum OrbResourcesModel {
         var etaEndFrac: Double?
     }
 
+    static func formatIntThousands(_ value: Double) -> String {
+        let n = max(0, Int64(value.isFinite ? value.rounded() : 0))
+        let digits = Array(String(n))
+        guard digits.count > 3 else { return String(n) }
+        var out: [Character] = []
+        out.reserveCapacity(digits.count + (digits.count - 1) / 3)
+        for (idx, ch) in digits.enumerated() {
+            if idx > 0 && (digits.count - idx) % 3 == 0 {
+                out.append(",")
+            }
+            out.append(ch)
+        }
+        return String(out)
+    }
+
+    static func formatLargeNumber(_ value: Double) -> String {
+        let safe = value.isFinite ? max(0, value) : 0
+        let rounded = Int64(safe.rounded())
+        if rounded >= 1_000_000 {
+            let m100 = Int64(((safe / 1_000_000.0) * 100.0).rounded())
+            if m100 >= 10_000 {
+                return "\(formatIntThousands(safe / 1_000_000.0))M"
+            }
+            if m100 >= 1_000 {
+                let m10 = Int64(((safe / 1_000_000.0) * 10.0).rounded())
+                return m10 % 10 == 0
+                    ? "\(m10 / 10)M"
+                    : String(format: "%.1fM", Double(m10) / 10.0)
+            }
+            if m100 % 100 == 0 { return "\(m100 / 100)M" }
+            if m100 % 10 == 0 { return String(format: "%.1fM", Double(m100) / 100.0) }
+            return String(format: "%.2fM", Double(m100) / 100.0)
+        }
+        if rounded >= 10_000 {
+            let k10 = Int64(((safe / 1_000.0) * 10.0).rounded())
+            if k10 >= 10_000 { return "1M" }
+            if k10 >= 1_000 {
+                let kInt = Int64((safe / 1_000.0).rounded())
+                return kInt >= 1_000 ? "1M" : "\(kInt)k"
+            }
+            return k10 % 10 == 0
+                ? "\(k10 / 10)k"
+                : String(format: "%.1fk", Double(k10) / 10.0)
+        }
+        if rounded >= 1_000 {
+            return formatIntThousands(Double(rounded))
+        }
+        return "\(rounded)"
+    }
+
     static func formatResourceRate(
         _ value: Double,
         lens: Lens,
@@ -110,11 +160,11 @@ enum OrbResourcesModel {
         let safe = value.isFinite ? max(0, value) : 0
         if metric == .usd {
             if !withUnit {
-                if safe >= 100 { return "$\(Int(safe.rounded()))" }
+                if safe >= 100 { return "$\(formatLargeNumber(safe))" }
                 if safe >= 10 { return String(format: "$%.1f", safe) }
                 return String(format: "$%.2f", safe)
             }
-            if safe >= 100 { return "$\(Int(safe.rounded()))/h" }
+            if safe >= 100 { return "$\(formatLargeNumber(safe))/h" }
             if safe >= 10 { return String(format: "$%.1f/h", safe) }
             if safe >= 0.01 { return String(format: "$%.2f/h", safe) }
             if safe > 0 { return "<$0.01/h" }
@@ -125,7 +175,7 @@ enum OrbResourcesModel {
             let rounded1 = (safe * 10).rounded() / 10
             let num: String
             if safe >= 10 || abs(rounded1 - safe.rounded()) < 0.05 {
-                num = "\(Int(safe.rounded()))"
+                num = formatLargeNumber(safe)
             } else {
                 num = String(format: "%.1f", safe)
             }
@@ -561,7 +611,7 @@ struct OrbResourcesView: View {
                                 Text(m["title"].text.isEmpty ? String(mid.prefix(8)) : m["title"].text)
                                     .font(.subheadline.weight(.medium))
                                     .foregroundStyle(.primary)
-                                Text("\((Int(m["subagent_total"].doubleValue ?? 1))) spans · tap for Fast-DAG")
+                                Text("\(OrbResourcesModel.formatLargeNumber(m["subagent_total"].doubleValue ?? 1)) spans · tap for Fast-DAG")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -597,7 +647,7 @@ struct OrbResourcesView: View {
                 let spanCount = bars.count - vmCount
 
                 HStack {
-                    Text(vmCount > 0 ? "\(vmCount) VMs · \(spanCount) spans" : "\(bars.count) spans")
+                    Text(vmCount > 0 ? "\(OrbResourcesModel.formatLargeNumber(Double(vmCount))) VMs · \(OrbResourcesModel.formatLargeNumber(Double(spanCount))) spans" : "\(OrbResourcesModel.formatLargeNumber(Double(bars.count))) spans")
                         .font(.caption.weight(.semibold))
                     if let eta = det["mission"]["eta_remaining_secs"].doubleValue, eta > 0 {
                         Text("· ETA ~\(OrbResourcesModel.formatDurationCompact(eta))")

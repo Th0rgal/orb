@@ -157,6 +157,42 @@ export function colorForMission(id: string, index = 0): string {
   return MISSION_PALETTE[slot];
 }
 
+export function formatIntThousands(value: number): string {
+  const s = String(Math.max(0, Math.round(value)));
+  return s.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+export function formatLargeNumber(value: number): string {
+  const safe = Number.isFinite(value) ? Math.max(0, value) : 0;
+  const rounded = Math.round(safe);
+  if (rounded >= 1_000_000) {
+    const m100 = Math.round((safe / 1_000_000) * 100);
+    if (m100 >= 10_000) {
+      return `${formatIntThousands(Math.round(safe / 1_000_000))}M`;
+    }
+    if (m100 >= 1_000) {
+      const m10 = Math.round((safe / 1_000_000) * 10);
+      return m10 % 10 === 0 ? `${m10 / 10}M` : `${(m10 / 10).toFixed(1)}M`;
+    }
+    if (m100 % 100 === 0) return `${m100 / 100}M`;
+    if (m100 % 10 === 0) return `${(m100 / 100).toFixed(1)}M`;
+    return `${(m100 / 100).toFixed(2)}M`;
+  }
+  if (rounded >= 10_000) {
+    const k10 = Math.round((safe / 1_000) * 10);
+    if (k10 >= 10_000) return "1M";
+    if (k10 >= 1_000) {
+      const kInt = Math.round(safe / 1_000);
+      return kInt >= 1_000 ? "1M" : `${kInt}k`;
+    }
+    return k10 % 10 === 0 ? `${k10 / 10}k` : `${(k10 / 10).toFixed(1)}k`;
+  }
+  if (rounded >= 1_000) {
+    return formatIntThousands(rounded);
+  }
+  return String(rounded);
+}
+
 export function formatResourceRate(
   value: number,
   lens: ResourceLens,
@@ -166,11 +202,11 @@ export function formatResourceRate(
   const safe = Number.isFinite(value) ? Math.max(0, value) : 0;
   if (metric === "usd") {
     if (!withUnit) {
-      if (safe >= 100) return `$${Math.round(safe)}`;
+      if (safe >= 100) return `$${formatLargeNumber(safe)}`;
       if (safe >= 10) return `$${safe.toFixed(1)}`;
       return `$${safe.toFixed(2)}`;
     }
-    if (safe >= 100) return `$${Math.round(safe)}/h`;
+    if (safe >= 100) return `$${formatLargeNumber(safe)}/h`;
     if (safe >= 10) return `$${safe.toFixed(1)}/h`;
     if (safe >= 0.01) return `$${safe.toFixed(2)}/h`;
     if (safe > 0) return "<$0.01/h";
@@ -181,7 +217,7 @@ export function formatResourceRate(
     const rounded1 = Math.round(safe * 10) / 10;
     const num =
       safe >= 10 || Math.abs(rounded1 - Math.round(safe)) < 0.05
-        ? String(Math.round(safe))
+        ? formatLargeNumber(safe)
         : safe.toFixed(1);
     return withUnit ? `${num} vCPU` : num;
   }
@@ -215,6 +251,9 @@ export function formatDurationCompact(secs: number | null | undefined): string {
 
 export function formatTokenTotalCompact(tokens: number): string {
   if (!Number.isFinite(tokens) || tokens <= 0) return "0 tok";
+  if (tokens >= 1e12) return `${(tokens / 1e12).toFixed(2)}T tok`;
+  if (tokens >= 1e11) return `${Math.round(tokens / 1e9)}B tok`;
+  if (tokens >= 1e10) return `${(tokens / 1e9).toFixed(1)}B tok`;
   if (tokens >= 1e9) return `${(tokens / 1e9).toFixed(2)}B tok`;
   if (tokens >= 1e6) return `${(tokens / 1e6).toFixed(1)}M tok`;
   if (tokens >= 1e3) return `${(tokens / 1e3).toFixed(1)}K tok`;
@@ -816,8 +855,8 @@ export function buildOverviewSankeyInput(
     if (m.subagent_total > 1) {
       subParts.push(
         m.subagent_running > 0
-          ? `${m.subagent_running}/${m.subagent_total} agents`
-          : `${m.subagent_total} agents`,
+          ? `${formatLargeNumber(m.subagent_running)}/${formatLargeNumber(m.subagent_total)} agents`
+          : `${formatLargeNumber(m.subagent_total)} agents`,
       );
     } else {
       subParts.push(m.status);
@@ -850,7 +889,7 @@ export function buildOverviewSankeyInput(
     nodes.push({
       id: tailBucketId,
       column: 1,
-      label: `+${overflowMissions.length} smaller missions`,
+      label: `+${formatLargeNumber(overflowMissions.length)} smaller missions`,
       sub: "long tail",
       color: "#6b7280",
       health: "ok",

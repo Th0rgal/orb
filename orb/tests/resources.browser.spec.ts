@@ -332,6 +332,9 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
   await expect(lensTabs.nth(0)).toHaveText("Inference");
   await expect(lensTabs.nth(1)).toHaveText("Compute");
   await expect(page.getByTestId("res-summary-stamp")).toContainText("1.46 B tok/h");
+  // Rate-limit 429 pill is intentionally omitted from the header summary stamp
+  await expect(page.getByTestId("res-summary-stamp")).not.toContainText("429");
+  await expect(page.locator(".res-badge-warn")).toHaveCount(0);
 
   // Regression check: zero layout shift (0px height/y change) on hover, scrub, lens & $ toggles,
   // and fine-grained DOM node preservation across background refreshes.
@@ -666,6 +669,7 @@ test("Resources page handles dense 30+ mission fleet and 500-span mission Flow c
   await page.getByTestId("sb-resources").click();
   await page.getByTestId("res-metric-usd").click();
   await expect(page.getByTestId("res-sankey-svg")).toBeVisible();
+  await expect(page.getByTestId("res-summary-stamp")).toContainText("$1,534 (6h)");
 
   // Verify the Sankey diagram dynamically fills 100% of `.res-card-main`'s available body height
   const cardMainBox = (await page.locator(".res-card-main").boundingBox())!;
