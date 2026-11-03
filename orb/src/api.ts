@@ -152,31 +152,35 @@ export function withIdempotencyKey(init: RequestInit | undefined, key: string = 
   };
 }
 
-function isIdempotentFetchInit(init?: RequestInit): boolean {
-  const method = (init?.method ?? "GET").toUpperCase();
-  if (method === "GET" || method === "HEAD") return true;
-  return Boolean(headerValue(init?.headers, "Idempotency-Key")?.trim());
-}
-
 async function transportFetchDirect(target: string, path: string, init?: RequestInit): Promise<Response> {
   const candidates = orderedApiCandidates(target);
-  const idempotent = isIdempotentFetchInit(init);
+  const method = (init?.method ?? "GET").toUpperCase();
+  // Browser fetch() cannot distinguish pre-connect DNS/TCP errors from mid-flight
+  // response drops (both surface as TypeError). Only safe reads walk multiple
+  // origins inside a single call; writes cool down the failing origin so the
+  // caller's own retry / outbox replays the same Idempotency-Key onto the next
+  // healthy standby origin without multiplying attempts behind UI state machines.
+  const safeMethod = method === "GET" || method === "HEAD";
+  const attempts = safeMethod ? candidates.length : Math.min(candidates.length, 1);
   let lastError: unknown;
-  for (let i = 0; i < candidates.length; i++) {
+  for (let i = 0; i < attempts; i++) {
     const base = candidates[i];
-    const isLast = i + 1 === candidates.length;
+    const isLast = i + 1 === attempts;
     try {
       const res = await fetch(`${base}${path}`, init);
-      if (idempotent && !isLast && [502, 503, 504, 522, 524].includes(res.status)) {
+      if ([502, 503, 504, 522, 524].includes(res.status)) {
         endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
-        continue;
+        if (safeMethod && !isLast) continue;
+      } else if (res.status < 500) {
+        endpointCooldownUntil.delete(base);
       }
-      if (res.status < 500) endpointCooldownUntil.delete(base);
       return res;
     } catch (err) {
       lastError = err;
-      if (isAbortError(err) || !idempotent || isLast) throw err;
-      endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
+      if (!isAbortError(err)) {
+        endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
+      }
+      if (isAbortError(err) || !safeMethod || isLast) throw err;
     }
   }
   throw lastError ?? new TypeError("Load failed");
@@ -341,7 +345,8 @@ function stickMissionRows<T>(path: string, result: T): T {
   return (isMissionRow(result) ? stickHierarchy(result) : result) as T;
 }
 function isFastRetryableError(error: unknown, init?: RequestInit): boolean {
-  if (!isIdempotentFetchInit(init)) return false;
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD") return false;
   if (init?.signal?.aborted) return false;
   if (error instanceof RequestTimeoutError || isAbortError(error) || error instanceof InvalidApiResponseError) return false;
   return error instanceof TypeError && /load failed|failed to fetch|networkerror|network connection|internet connection|could not connect/i.test(error.message);

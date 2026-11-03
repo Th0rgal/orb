@@ -44,7 +44,7 @@ afterEach(() => {
 });
 
 describe("connection reliability transport & prefetch bounds", () => {
-  it("retries idempotent GET and Idempotency-Key POST on transient TypeError(Load failed), never raw POST", async () => {
+  it("fast-retries idempotent GET on single-origin Load failed while leaving caller-owned POST retry state machines intact", async () => {
     let getCalls = 0;
     let rawPostCalls = 0;
     let idemPostCalls = 0;
@@ -80,12 +80,13 @@ describe("connection reliability transport & prefetch bounds", () => {
     await expect(api("/api/control/missions", { method: "POST", body: "{}" })).rejects.toThrow("Load failed");
     expect(rawPostCalls).toBe(1);
 
-    await expect(
-      api<{ created: boolean; attempt: number }>(
-        "/api/control/missions",
-        withIdempotencyKey({ method: "POST", body: "{}" }, "idem-fixed-1"),
-      ),
-    ).resolves.toEqual({ created: true, attempt: 2 });
+    // Single-origin POST surfaces lost-reply uncertainty to caller retry UX, then replays the same Idempotency-Key.
+    const idemInit = withIdempotencyKey({ method: "POST", body: "{}" }, "idem-fixed-1");
+    await expect(api("/api/control/missions", idemInit)).rejects.toThrow("Load failed");
+    await expect(api<{ created: boolean; attempt: number }>("/api/control/missions", idemInit)).resolves.toEqual({
+      created: true,
+      attempt: 2,
+    });
     expect(seenIdemKeys).toEqual(["idem-fixed-1", "idem-fixed-1"]);
   });
 
@@ -203,14 +204,13 @@ describe("connection reliability transport & prefetch bounds", () => {
     );
 
     await expect(markMissionOpened("m-offline")).resolves.toBeUndefined();
-    expect(seenKeys.length).toBeGreaterThanOrEqual(2);
+    expect(seenKeys).toHaveLength(1);
     const originalKey = seenKeys[0];
-    expect(seenKeys.every((k) => k === originalKey)).toBe(true);
 
     offline = false;
     const flushed = await flushDurableWriteOutbox();
     expect(flushed).toBe(1);
-    expect(seenKeys[seenKeys.length - 1]).toBe(originalKey);
+    expect(seenKeys).toEqual([originalKey, originalKey]);
     expect(await flushDurableWriteOutbox()).toBe(0);
   });
 
