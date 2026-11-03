@@ -213,6 +213,67 @@ pub mod lean_sys_cabi {
             active_workers: u64,
             max_workers: u64,
         ) -> u8;
+        pub fn leansys_verify_unix_path_bounds(path_len: u64, no_interior_null: u8) -> u8;
+        pub fn leansys_verify_cas_digest256(
+            e0: u64,
+            e1: u64,
+            e2: u64,
+            e3: u64,
+            c0: u64,
+            c1: u64,
+            c2: u64,
+            c3: u64,
+            has_path_sep: u8,
+        ) -> u8;
+        pub fn leansys_verify_sigv4_envelope(
+            signed_at_epoch: u64,
+            now_epoch: u64,
+            expires_secs: u64,
+            signed_header_count: u32,
+            no_header_ctl: u8,
+            host_signed: u8,
+        ) -> u8;
+        pub fn leansys_verify_cgroup_v2_budget(
+            mem_current_bytes: u64,
+            mem_max_bytes: u64,
+            oom_kill_count: u64,
+            cgroup_attached: u8,
+        ) -> u8;
+        pub fn leansys_verify_io_uring_ring(
+            sq_head: u32,
+            sq_tail: u32,
+            ring_entries: u32,
+            ring_mask: u32,
+            to_submit: u32,
+        ) -> u8;
+        pub fn leansys_verify_borrowed_view(
+            ptr_addr: u64,
+            view_len: u64,
+            rel_off: u64,
+            sub_len: u64,
+        ) -> u8;
+        pub fn leansys_verify_step_reactor(
+            cmd_epoch: u64,
+            min_epoch: u64,
+            used_after: u64,
+            quota_cap: u64,
+            active_conns: u32,
+            max_conns: u32,
+            already_seen: u8,
+        ) -> u8;
+        pub fn leansys_verify_stream_relay(
+            client_gone: u8,
+            upstream_dead: u8,
+            first_chunk_seen: u8,
+            at_frame_boundary: u8,
+            prefill_elapsed_ms: u64,
+            prefill_max_ms: u64,
+            idle_ms: u64,
+            idle_max_ms: u64,
+            keepalive_due_ms: u64,
+            pending_tx_bytes: u64,
+            max_buffer_bytes: u64,
+        ) -> u8;
     }
 
     pub const WAL_MAGIC: u32 = 0x4C53_5953;
@@ -711,6 +772,37 @@ pub mod lean_sys_cabi {
             ) == 1
         }
     }
+
+    #[inline]
+    pub fn verify_stream_relay(
+        client_gone: bool,
+        upstream_dead: bool,
+        first_chunk_seen: bool,
+        at_frame_boundary: bool,
+        prefill_elapsed_ms: u64,
+        prefill_max_ms: u64,
+        idle_ms: u64,
+        idle_max_ms: u64,
+        keepalive_due_ms: u64,
+        pending_tx_bytes: u64,
+        max_buffer_bytes: u64,
+    ) -> u8 {
+        unsafe {
+            leansys_verify_stream_relay(
+                u8::from(client_gone),
+                u8::from(upstream_dead),
+                u8::from(first_chunk_seen),
+                u8::from(at_frame_boundary),
+                prefill_elapsed_ms,
+                prefill_max_ms,
+                idle_ms,
+                idle_max_ms,
+                keepalive_due_ms,
+                pending_tx_bytes,
+                max_buffer_bytes,
+            )
+        }
+    }
 }
 
 unsafe extern "C" {
@@ -1085,6 +1177,18 @@ unsafe extern "C" {
         arena_len: u32,
         max_budget_bytes: u32,
     ) -> u8;
+    fn orb_fleet_endpoint_gate(
+        mesh_reachable: u8,
+        router_ready: u8,
+        model_loaded: u8,
+        breaker_open: u8,
+    ) -> u8;
+    fn orb_prefill_deadline_ms(
+        prompt_tokens: u64,
+        base_ms: u64,
+        per_k_tokens_ms: u64,
+        max_prefill_ms: u64,
+    ) -> u64;
     fn orb_effect_admissible(
         effect_kind: u8,
         has_valid_lease: u8,
@@ -3248,6 +3352,33 @@ pub fn wire_decode_slice_step(input: WireDecodeSliceInput) -> OrbWireStatus {
         )
     };
     OrbWireStatus::from_raw(raw)
+}
+
+#[inline]
+pub fn fleet_endpoint_admitted(
+    mesh_reachable: bool,
+    router_ready: bool,
+    model_loaded: bool,
+    breaker_open: bool,
+) -> bool {
+    unsafe {
+        orb_fleet_endpoint_gate(
+            u8::from(mesh_reachable),
+            u8::from(router_ready),
+            u8::from(model_loaded),
+            u8::from(breaker_open),
+        ) == 1
+    }
+}
+
+#[inline]
+pub fn prefill_deadline_ms(
+    prompt_tokens: u64,
+    base_ms: u64,
+    per_k_tokens_ms: u64,
+    max_prefill_ms: u64,
+) -> u64 {
+    unsafe { orb_prefill_deadline_ms(prompt_tokens, base_ms, per_k_tokens_ms, max_prefill_ms) }
 }
 
 /// Canonical 64-bit `OrbWire` record word (`tag: u8`, `flags: u8`, `len16: u16`, `payload32: u32`).
@@ -6599,6 +6730,82 @@ pub mod raw_cabi {
     pub fn leansys_verify_fd_bounds(a0: u64, a1: u32) -> u8 {
         unsafe { super::lean_sys_cabi::leansys_verify_fd_bounds(a0, a1) }
     }
+    #[inline]
+    pub fn leansys_verify_unix_path_bounds(a0: u64, a1: u8) -> u8 {
+        unsafe { super::lean_sys_cabi::leansys_verify_unix_path_bounds(a0, a1) }
+    }
+    #[inline]
+    pub fn leansys_verify_cas_digest256(
+        a0: u64,
+        a1: u64,
+        a2: u64,
+        a3: u64,
+        a4: u64,
+        a5: u64,
+        a6: u64,
+        a7: u64,
+        a8: u8,
+    ) -> u8 {
+        unsafe {
+            super::lean_sys_cabi::leansys_verify_cas_digest256(a0, a1, a2, a3, a4, a5, a6, a7, a8)
+        }
+    }
+    #[inline]
+    pub fn leansys_verify_sigv4_envelope(a0: u64, a1: u64, a2: u64, a3: u32, a4: u8, a5: u8) -> u8 {
+        unsafe { super::lean_sys_cabi::leansys_verify_sigv4_envelope(a0, a1, a2, a3, a4, a5) }
+    }
+    #[inline]
+    pub fn leansys_verify_cgroup_v2_budget(a0: u64, a1: u64, a2: u64, a3: u8) -> u8 {
+        unsafe { super::lean_sys_cabi::leansys_verify_cgroup_v2_budget(a0, a1, a2, a3) }
+    }
+    #[inline]
+    pub fn leansys_verify_io_uring_ring(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32) -> u8 {
+        unsafe { super::lean_sys_cabi::leansys_verify_io_uring_ring(a0, a1, a2, a3, a4) }
+    }
+    #[inline]
+    pub fn leansys_verify_borrowed_view(a0: u64, a1: u64, a2: u64, a3: u64) -> u8 {
+        unsafe { super::lean_sys_cabi::leansys_verify_borrowed_view(a0, a1, a2, a3) }
+    }
+    #[inline]
+    pub fn leansys_verify_step_reactor(
+        a0: u64,
+        a1: u64,
+        a2: u64,
+        a3: u64,
+        a4: u32,
+        a5: u32,
+        a6: u8,
+    ) -> u8 {
+        unsafe { super::lean_sys_cabi::leansys_verify_step_reactor(a0, a1, a2, a3, a4, a5, a6) }
+    }
+    #[inline]
+    pub fn leansys_verify_stream_relay(
+        a0: u8,
+        a1: u8,
+        a2: u8,
+        a3: u8,
+        a4: u64,
+        a5: u64,
+        a6: u64,
+        a7: u64,
+        a8: u64,
+        a9: u64,
+        a10: u64,
+    ) -> u8 {
+        unsafe {
+            super::lean_sys_cabi::leansys_verify_stream_relay(
+                a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10,
+            )
+        }
+    }
+    #[inline]
+    pub fn orb_fleet_endpoint_gate(a0: u8, a1: u8, a2: u8, a3: u8) -> u8 {
+        unsafe { super::orb_fleet_endpoint_gate(a0, a1, a2, a3) }
+    }
+    #[inline]
+    pub fn orb_prefill_deadline_ms(a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+        unsafe { super::orb_prefill_deadline_ms(a0, a1, a2, a3) }
+    }
     pub fn call_u64(symbol: &str, args: &[u64]) -> Option<u64> {
         Some(match symbol {
             "orb_verify_writer_reuse" if args.len() == 6 => orb_verify_writer_reuse(
@@ -7568,6 +7775,70 @@ pub mod raw_cabi {
             ) as u64,
             "leansys_verify_fd_bounds" if args.len() == 2 => {
                 leansys_verify_fd_bounds(args[0] as u64, args[1] as u32) as u64
+            }
+            "leansys_verify_unix_path_bounds" if args.len() == 2 => {
+                leansys_verify_unix_path_bounds(args[0] as u64, args[1] as u8) as u64
+            }
+            "leansys_verify_cas_digest256" if args.len() == 9 => leansys_verify_cas_digest256(
+                args[0],
+                args[1],
+                args[2],
+                args[3],
+                args[4],
+                args[5],
+                args[6],
+                args[7],
+                args[8] as u8,
+            ) as u64,
+            "leansys_verify_sigv4_envelope" if args.len() == 6 => leansys_verify_sigv4_envelope(
+                args[0],
+                args[1],
+                args[2],
+                args[3] as u32,
+                args[4] as u8,
+                args[5] as u8,
+            ) as u64,
+            "leansys_verify_cgroup_v2_budget" if args.len() == 4 => {
+                leansys_verify_cgroup_v2_budget(args[0], args[1], args[2], args[3] as u8) as u64
+            }
+            "leansys_verify_io_uring_ring" if args.len() == 5 => leansys_verify_io_uring_ring(
+                args[0] as u32,
+                args[1] as u32,
+                args[2] as u32,
+                args[3] as u32,
+                args[4] as u32,
+            ) as u64,
+            "leansys_verify_borrowed_view" if args.len() == 4 => {
+                leansys_verify_borrowed_view(args[0], args[1], args[2], args[3]) as u64
+            }
+            "leansys_verify_step_reactor" if args.len() == 7 => leansys_verify_step_reactor(
+                args[0],
+                args[1],
+                args[2],
+                args[3],
+                args[4] as u32,
+                args[5] as u32,
+                args[6] as u8,
+            ) as u64,
+            "leansys_verify_stream_relay" if args.len() == 11 => leansys_verify_stream_relay(
+                args[0] as u8,
+                args[1] as u8,
+                args[2] as u8,
+                args[3] as u8,
+                args[4],
+                args[5],
+                args[6],
+                args[7],
+                args[8],
+                args[9],
+                args[10],
+            ) as u64,
+            "orb_fleet_endpoint_gate" if args.len() == 4 => {
+                orb_fleet_endpoint_gate(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8)
+                    as u64
+            }
+            "orb_prefill_deadline_ms" if args.len() == 4 => {
+                orb_prefill_deadline_ms(args[0], args[1], args[2], args[3])
             }
             _ => return None,
         })
@@ -8866,6 +9137,28 @@ mod tests {
             true, true, false, 1
         ));
         assert!(lean_sys_cabi::verify_dag_wave_step(0, 4, 8, 16, 4, 4));
+        assert_eq!(
+            lean_sys_cabi::verify_stream_relay(
+                false, false, true, true, 10_000, 120_000, 5_000, 60_000, 15_000, 0, 1_048_576,
+            ),
+            2
+        );
+        assert_eq!(
+            lean_sys_cabi::verify_stream_relay(
+                false, false, true, true, 10_000, 120_000, 20_000, 60_000, 15_000, 0, 1_048_576,
+            ),
+            1
+        );
+        assert_eq!(
+            lean_sys_cabi::verify_stream_relay(
+                true, false, true, true, 10_000, 120_000, 5_000, 60_000, 15_000, 0, 1_048_576,
+            ),
+            0
+        );
+        assert!(fleet_endpoint_admitted(true, true, true, false));
+        assert!(!fleet_endpoint_admitted(true, true, true, true));
+        assert_eq!(prefill_deadline_ms(40_960, 45_000, 1_500, 240_000), 105_000);
+        assert_eq!(prefill_deadline_ms(40_960, 45_000, 1_500, 90_000), 90_000);
 
         let manifest: serde_json::Value =
             serde_json::from_str(include_str!("../../../shared/orb-spec/kernel_abi.json")).unwrap();
@@ -8879,7 +9172,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 134);
+        assert_eq!(count, 144);
     }
 }
 

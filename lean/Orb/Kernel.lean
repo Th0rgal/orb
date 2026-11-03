@@ -2584,4 +2584,35 @@ def wireDecodeSliceStep
               24 + payloadLen == totalLen) then 3
     else 0
 
+/--
+  Unboxed C-ABI Local/Private Fleet Endpoint Admission Gate (`orb_fleet_endpoint_gate`):
+  Admits routing to a private/local GPU fleet endpoint (e.g. `dgx-spark` / `builtin/private`)
+  if and only if the mesh peer is reachable (`meshReachable == 1`), the local router/daemon
+  is ready (`routerReady == 1`), the target model is warm or swap-admissible (`modelLoaded == 1`),
+  and the endpoint circuit breaker is closed (`breakerOpen == 0`).
+  Returns `1` when admitted, `0` otherwise (`RcMode.freestanding` scalar `LNIR -> LLVM` clean).
+-/
+@[inline, export orb_fleet_endpoint_gate]
+def fleetEndpointGate
+    (meshReachable routerReady modelLoaded breakerOpen : UInt8) : UInt8 :=
+  if meshReachable == 1 && routerReady == 1 && modelLoaded == 1 && breakerOpen == 0 then 1
+  else 0
+
+/--
+  Unboxed C-ABI Overflow-Free Prompt-Proportional Prefill First-Byte Deadline
+  (`orb_prefill_deadline_ms`):
+  Computes `min(maxPrefillMs, baseMs + (promptTokens >>> 10) * perKTokensMs)` when
+  `baseMs ≤ maxPrefillMs` (clamping to `baseMs` if `maxPrefillMs < baseMs`) using division-before-
+  multiply overflow protection (`(promptTokens >>> 10) > (maxPrefillMs - baseMs) / perKTokensMs`),
+  preventing premature `first_byte_timeout` kills during multi-10k-token GPU prompt prefill while
+  strictly respecting transport ceilings (e.g. Cloudflare's 90s cliff vs 240s direct).
+-/
+@[inline, export orb_prefill_deadline_ms]
+def prefillDeadlineMs
+    (promptTokens baseMs perKTokensMs maxPrefillMs : UInt64) : UInt64 :=
+  if maxPrefillMs ≤ baseMs then baseMs
+  else if perKTokensMs == 0 || (promptTokens >>> 10) == 0 then baseMs
+  else if (promptTokens >>> 10) > (maxPrefillMs - baseMs) / perKTokensMs then maxPrefillMs
+  else baseMs + (promptTokens >>> 10) * perKTokensMs
+
 end Orb.Kernel

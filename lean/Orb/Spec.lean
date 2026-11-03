@@ -6587,4 +6587,121 @@ theorem wire_slice_io_wasm32_lp64_and_alias_rejection :
     wireDecodeSliceStep 0x2000 49 1 0x4F524257 1 7 7 49 25 14 11 4096 = 3 := by
   decide
 
+/-! ## Private Fleet Endpoint Gate & Prompt-Proportional Prefill Deadline (`dgx-spark`) -/
+
+structure FleetEndpointCheck where
+  meshReachable : UInt8
+  routerReady   : UInt8
+  modelLoaded   : UInt8
+  breakerOpen   : UInt8
+  deriving Repr, DecidableEq
+
+def FleetEndpointCheck.Admissible (c : FleetEndpointCheck) : Bool :=
+  c.meshReachable == 1 &&
+  c.routerReady == 1 &&
+  c.modelLoaded == 1 &&
+  c.breakerOpen == 0
+
+def fleetEndpointMetaGate : MetaGateSpec FleetEndpointCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    fleetEndpointGate c.meshReachable c.routerReady c.modelLoaded c.breakerOpen == 1
+  sound c h := by
+    unfold FleetEndpointCheck.Admissible
+    unfold fleetEndpointGate at h
+    cases hm : (c.meshReachable == 1 && c.routerReady == 1 &&
+                c.modelLoaded == 1 && c.breakerOpen == 0)
+    · simp [hm] at h
+    · rfl
+  complete c h := by
+    unfold FleetEndpointCheck.Admissible at h
+    unfold fleetEndpointGate
+    simp [h]
+  posWitness := ⟨1, 1, 1, 0⟩
+  negWitness := ⟨1, 1, 1, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def fleetEndpointScopedAuthority : ScopedAuthority FleetEndpointCheck where
+  admit c :=
+    fleetEndpointGate c.meshReachable c.routerReady c.modelLoaded c.breakerOpen == 1
+  scopeValid c := c.Admissible
+  sound c h := fleetEndpointMetaGate.sound c h
+
+/-- Exhaustive rejection witnesses for `orb_fleet_endpoint_gate`: admits iff mesh is reachable,
+    router is ready, model is warm/swap-admissible, and circuit breaker is closed. -/
+theorem fleet_endpoint_rejects_unready_or_tripped :
+    fleetEndpointGate 1 1 1 0 = 1 ∧
+    fleetEndpointGate 0 1 1 0 = 0 ∧
+    fleetEndpointGate 1 0 1 0 = 0 ∧
+    fleetEndpointGate 1 1 0 0 = 0 ∧
+    fleetEndpointGate 1 1 1 1 = 0 := by
+  decide
+
+/-- Key safety & clamping theorem for `orb_prefill_deadline_ms`:
+    whenever `baseMs ≤ maxPrefillMs`, the computed prefill deadline never wraps 64-bit arithmetic
+    and always stays bounded inside `[baseMs, maxPrefillMs]`. -/
+theorem prefill_deadline_clamped_and_safe
+    (promptTokens baseMs perKTokensMs maxPrefillMs : UInt64)
+    (hbase : baseMs ≤ maxPrefillMs) :
+    baseMs ≤ prefillDeadlineMs promptTokens baseMs perKTokensMs maxPrefillMs ∧
+    prefillDeadlineMs promptTokens baseMs perKTokensMs maxPrefillMs ≤ maxPrefillMs := by
+  unfold prefillDeadlineMs
+  by_cases h1 : maxPrefillMs ≤ baseMs
+  · simp [h1, UInt64.le_refl, hbase]
+  · simp only [h1, ↓reduceIte]
+    by_cases h2 : (perKTokensMs == 0 || (promptTokens >>> 10) == 0) = true
+    · simp [h2, UInt64.le_refl, hbase]
+    · simp only [h2, Bool.false_eq_true, ↓reduceIte]
+      by_cases h3 : (promptTokens >>> 10) > (maxPrefillMs - baseMs) / perKTokensMs
+      · simp [h3, hbase, UInt64.le_refl]
+      · simp only [h3, ↓reduceIte]
+        have h2f : (perKTokensMs == 0 || (promptTokens >>> 10) == 0) = false :=
+          Bool.not_eq_true _ ▸ h2
+        rcases Bool.or_eq_false_iff.mp h2f with ⟨hpk0, _⟩
+        have hpk_ne : perKTokensMs ≠ 0 := beq_eq_false_iff_ne.mp hpk0
+        have hpk_pos : 0 < perKTokensMs.toNat := by
+          rcases perKTokensMs with ⟨⟨n, hn⟩⟩
+          cases n with
+          | zero => exact absurd rfl hpk_ne
+          | succ m => exact Nat.succ_pos m
+        have hbase_nat : baseMs.toNat ≤ maxPrefillMs.toNat :=
+          UInt64.le_iff_toNat_le.mp hbase
+        have hk_le : (promptTokens >>> 10).toNat ≤
+            ((maxPrefillMs - baseMs) / perKTokensMs).toNat :=
+          Nat.not_lt.mp (fun hlt => h3 (UInt64.lt_iff_toNat_lt.mpr hlt))
+        have hdiv : ((maxPrefillMs - baseMs) / perKTokensMs).toNat =
+            (maxPrefillMs.toNat - baseMs.toNat) / perKTokensMs.toNat := by
+          rw [UInt64.toNat_div, UInt64.toNat_sub_of_le _ _ hbase]
+        rw [hdiv] at hk_le
+        have hmul_le : (promptTokens >>> 10).toNat * perKTokensMs.toNat ≤
+            maxPrefillMs.toNat - baseMs.toNat :=
+          (Nat.le_div_iff_mul_le hpk_pos).mp hk_le
+        have hmax_lt : maxPrefillMs.toNat < UInt64.size := maxPrefillMs.toNat_lt_size
+        have hmul_lt : (promptTokens >>> 10).toNat * perKTokensMs.toNat < UInt64.size := by
+          omega
+        have hsum_lt : baseMs.toNat + (promptTokens >>> 10).toNat * perKTokensMs.toNat <
+            UInt64.size := by
+          omega
+        have hmul_nat : ((promptTokens >>> 10) * perKTokensMs).toNat =
+            (promptTokens >>> 10).toNat * perKTokensMs.toNat := by
+          rw [UInt64.toNat_mul, Nat.mod_eq_of_lt hmul_lt]
+        have hadd_nat : (baseMs + (promptTokens >>> 10) * perKTokensMs).toNat =
+            baseMs.toNat + (promptTokens >>> 10).toNat * perKTokensMs.toNat := by
+          rw [UInt64.toNat_add, hmul_nat, Nat.mod_eq_of_lt hsum_lt]
+        exact ⟨
+          UInt64.le_iff_toNat_le.mpr (by rw [hadd_nat]; omega),
+          UInt64.le_iff_toNat_le.mpr (by rw [hadd_nat]; omega)
+        ⟩
+
+/-- Boundary & Cloudflare-cliff witnesses for `orb_prefill_deadline_ms`:
+    verifies sub-1K prompt floor (`45000`), linear scaling (`40960` tokens -> `105000` ms direct),
+    Cloudflare 90s ceiling clamp (`90000` ms), and `UInt64.max` overflow-free clamping (`240000`). -/
+theorem prefill_deadline_cloudflare_and_overflow_witnesses :
+    prefillDeadlineMs 512 45000 1500 240000 = 45000 ∧
+    prefillDeadlineMs 40960 45000 1500 240000 = 105000 ∧
+    prefillDeadlineMs 40960 45000 1500 90000 = 90000 ∧
+    prefillDeadlineMs 0xFFFFFFFFFFFFFFFF 45000 1500 240000 = 240000 := by
+  decide
+
 end Orb.Spec

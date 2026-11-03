@@ -4185,6 +4185,308 @@
         "method": "orbWireDecodeSliceStep",
         "ret": "jint"
       }
+    },
+    {
+      "name": "leansys_verify_unix_path_bounds",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "pathLen",
+          "type": "uint64_t"
+        },
+        {
+          "name": "noInteriorNull",
+          "type": "uint8_t"
+        }
+      ],
+      "internal": true,
+      "model": "LeanSys.Spec.verifyUnixPathBounds"
+    },
+    {
+      "name": "leansys_verify_cas_digest256",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "e0",
+          "type": "uint64_t"
+        },
+        {
+          "name": "e1",
+          "type": "uint64_t"
+        },
+        {
+          "name": "e2",
+          "type": "uint64_t"
+        },
+        {
+          "name": "e3",
+          "type": "uint64_t"
+        },
+        {
+          "name": "c0",
+          "type": "uint64_t"
+        },
+        {
+          "name": "c1",
+          "type": "uint64_t"
+        },
+        {
+          "name": "c2",
+          "type": "uint64_t"
+        },
+        {
+          "name": "c3",
+          "type": "uint64_t"
+        },
+        {
+          "name": "hasPathSep",
+          "type": "uint8_t"
+        }
+      ],
+      "internal": true,
+      "model": "LeanSys.Spec.verifyCasDigest256"
+    },
+    {
+      "name": "leansys_verify_sigv4_envelope",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "signedAtEpoch",
+          "type": "uint64_t"
+        },
+        {
+          "name": "nowEpoch",
+          "type": "uint64_t"
+        },
+        {
+          "name": "expiresSecs",
+          "type": "uint64_t"
+        },
+        {
+          "name": "signedHeaderCount",
+          "type": "uint32_t"
+        },
+        {
+          "name": "noHeaderCtl",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hostSigned",
+          "type": "uint8_t"
+        }
+      ],
+      "internal": true,
+      "model": "LeanSys.Spec.verifySigV4Envelope"
+    },
+    {
+      "name": "leansys_verify_cgroup_v2_budget",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "memCurrentBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "memMaxBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "oomKillCount",
+          "type": "uint64_t"
+        },
+        {
+          "name": "cgroupAttached",
+          "type": "uint8_t"
+        }
+      ],
+      "internal": true,
+      "model": "LeanSys.Spec.verifyCgroupV2Budget"
+    },
+    {
+      "name": "leansys_verify_io_uring_ring",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "sqHead",
+          "type": "uint32_t"
+        },
+        {
+          "name": "sqTail",
+          "type": "uint32_t"
+        },
+        {
+          "name": "ringEntries",
+          "type": "uint32_t"
+        },
+        {
+          "name": "ringMask",
+          "type": "uint32_t"
+        },
+        {
+          "name": "toSubmit",
+          "type": "uint32_t"
+        }
+      ],
+      "internal": true,
+      "model": "LeanSys.Spec.verifyIoUringRing"
+    },
+    {
+      "name": "leansys_verify_borrowed_view",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "ptrAddr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "viewLen",
+          "type": "uint64_t"
+        },
+        {
+          "name": "relOff",
+          "type": "uint64_t"
+        },
+        {
+          "name": "subLen",
+          "type": "uint64_t"
+        }
+      ],
+      "internal": true,
+      "model": "LeanSys.Spec.verifyBorrowedView"
+    },
+    {
+      "name": "leansys_verify_step_reactor",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "cmdEpoch",
+          "type": "uint64_t"
+        },
+        {
+          "name": "minEpoch",
+          "type": "uint64_t"
+        },
+        {
+          "name": "usedAfter",
+          "type": "uint64_t"
+        },
+        {
+          "name": "quotaCap",
+          "type": "uint64_t"
+        },
+        {
+          "name": "activeConns",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxConns",
+          "type": "uint32_t"
+        },
+        {
+          "name": "alreadySeen",
+          "type": "uint8_t"
+        }
+      ],
+      "internal": true,
+      "model": "LeanSys.Spec.verifyStepReactor"
+    },
+    {
+      "name": "leansys_verify_stream_relay",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "clientGone",
+          "type": "uint8_t"
+        },
+        {
+          "name": "upstreamDead",
+          "type": "uint8_t"
+        },
+        {
+          "name": "firstChunkSeen",
+          "type": "uint8_t"
+        },
+        {
+          "name": "atFrameBoundary",
+          "type": "uint8_t"
+        },
+        {
+          "name": "prefillElapsedMs",
+          "type": "uint64_t"
+        },
+        {
+          "name": "prefillMaxMs",
+          "type": "uint64_t"
+        },
+        {
+          "name": "idleMs",
+          "type": "uint64_t"
+        },
+        {
+          "name": "idleMaxMs",
+          "type": "uint64_t"
+        },
+        {
+          "name": "keepaliveDueMs",
+          "type": "uint64_t"
+        },
+        {
+          "name": "pendingTxBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "maxBufferBytes",
+          "type": "uint64_t"
+        }
+      ],
+      "internal": true,
+      "model": "LeanSys.Spec.verifyStreamRelay"
+    },
+    {
+      "name": "orb_fleet_endpoint_gate",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "meshReachable",
+          "type": "uint8_t"
+        },
+        {
+          "name": "routerReady",
+          "type": "uint8_t"
+        },
+        {
+          "name": "modelLoaded",
+          "type": "uint8_t"
+        },
+        {
+          "name": "breakerOpen",
+          "type": "uint8_t"
+        }
+      ],
+      "internal": true
+    },
+    {
+      "name": "orb_prefill_deadline_ms",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "promptTokens",
+          "type": "uint64_t"
+        },
+        {
+          "name": "baseMs",
+          "type": "uint64_t"
+        },
+        {
+          "name": "perKTokensMs",
+          "type": "uint64_t"
+        },
+        {
+          "name": "maxPrefillMs",
+          "type": "uint64_t"
+        }
+      ],
+      "internal": true
     }
   ]
 }
