@@ -52,7 +52,7 @@ object OrbMath {
             return false
         }
         var inFence = false
-        for (rawLine in source.split("\n")) {
+        for (rawLine in OrbCodeFences.normalize(source).split("\n")) {
             val trimmed = rawLine.trim()
             if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
                 inFence = !inFence

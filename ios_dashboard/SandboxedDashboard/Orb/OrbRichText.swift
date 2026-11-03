@@ -55,7 +55,7 @@ enum OrbMath {
             return false
         }
         var inFence = false
-        for rawLine in source.components(separatedBy: "\n") {
+        for rawLine in OrbCodeFences.normalize(source).components(separatedBy: "\n") {
             let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
                 inFence.toggle()
@@ -740,7 +740,7 @@ struct OrbNativeMarkdownView: View {
 
     static func parseBlocks(_ source: String) -> [Block] {
         var blocks: [Block] = []
-        let lines = OrbPipeTables.normalize(source).components(separatedBy: "\n")
+        let lines = OrbPipeTables.normalize(OrbCodeFences.normalize(source)).components(separatedBy: "\n")
         var idx = 0
         while idx < lines.count {
             let line = lines[idx]
@@ -1615,9 +1615,12 @@ extension OrbNativeMarkdownView {
         var previousBlank = true
         while index < prefix.endIndex {
             let lineEnd = prefix[index...].firstIndex(of: "\n") ?? prefix.endIndex
-            let line = prefix[index..<lineEnd].trimmingCharacters(in: .whitespaces)
+            let rawLine = prefix[index..<lineEnd]
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
             if line.hasPrefix("```") || line.hasPrefix("~~~") {
                 if fenceStart == nil { fenceStart = index } else { fenceStart = nil; lastBoundary = lineEnd }
+            } else if fenceStart == nil, let glued = OrbCodeFences.splitGlued(rawLine) {
+                fenceStart = prefix.utf8.index(index, offsetBy: glued.utf8Offset)
             } else if fenceStart == nil && line.isEmpty && !previousBlank {
                 lastBoundary = index
             }

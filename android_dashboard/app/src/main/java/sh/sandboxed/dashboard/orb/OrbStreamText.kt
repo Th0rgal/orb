@@ -484,12 +484,15 @@ data class OrbStreamCommit(val tick: Boolean = false, val fence: Marker? = null,
     }
 
     companion object {
-        fun classify(raw: String): Line {
+        fun classify(raw: String, inFence: Boolean = false): Line {
             val rest = raw.trimStart(' ', '\t')
             val c = rest.firstOrNull()
             val marker = if (c == '`' || c == '~') rest.takeWhile { it == c }.length.takeIf { it >= 3 }?.let { Marker(c == '`', it) } else null
             // The parser's own trimming decides blank and fence lines.
             val trimmed = raw.trim()
+            if (!inFence && !trimmed.startsWith("```") && OrbCodeFences.splitGlued(raw) != null) {
+                return Line(blank = false, tick = true, marker = Marker(backtick = true, count = 3))
+            }
             return Line(trimmed.isEmpty(), trimmed.startsWith("```"), marker)
         }
 
@@ -513,7 +516,7 @@ data class OrbStreamCommit(val tick: Boolean = false, val fence: Marker? = null,
             while (true) {
                 val end = text.indexOf('\n', start).takeIf { it >= 0 } ?: return committed
                 val before = state.commit
-                state = state.scan(classify(text.substring(start, end)))
+                state = state.scan(classify(text.substring(start, end), inFence = state.tick))
                 if (state.commit != before) committed = end + 1
                 start = end + 1
             }
@@ -577,16 +580,26 @@ internal class OrbStreamBlocks {
             scannedBytes += utf8Length(line) + 1
 
             val wasTick = scanState.tick
+            val glued = if (wasTick) null else OrbCodeFences.splitGlued(line)
             val beforeCommit = scanState.commit
-            scanState = scanState.scan(OrbStreamCommit.classify(line))
+            scanState = if (glued != null) {
+                scanState.scan(OrbStreamCommit.Line(blank = false, tick = true, marker = OrbStreamCommit.Marker(backtick = true, count = 3)))
+            } else {
+                scanState.scan(OrbStreamCommit.classify(line, inFence = true))
+            }
             if (scanState.commit != beforeCommit) {
                 newCommitOffset = scanCursor
                 resetOpenFence()
             } else if (!wasTick && scanState.tick) {
-                openFenceStart = lineStart
+                if (glued != null) {
+                    openFenceStart = lineStart + glued.offset
+                    openFenceLang = glued.lang
+                } else {
+                    openFenceStart = lineStart
+                    openFenceLang = line.trim().drop(3).trim()
+                }
                 openFenceBodyStart = scanCursor
                 openFenceBodyCursor = scanCursor
-                openFenceLang = line.trim().drop(3).trim()
                 openFencePrefixBlocks = null
                 openFenceAcc.setLength(0)
                 openFenceHasLines = false

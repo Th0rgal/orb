@@ -678,7 +678,7 @@ private fun isDisplayMathStart(trimmed: String): Boolean =
 
 internal fun parseMdBlocks(source: String): List<OrbMdBlock> {
     val blocks = mutableListOf<OrbMdBlock>()
-    val lines = source.split("\n")
+    val lines = OrbCodeFences.normalize(source).split("\n")
     var idx = 0
     while (idx < lines.size) {
         val line = lines[idx]
@@ -849,14 +849,20 @@ internal fun inlinePreview(source: String, limit: Int): String {
     while (index < prefix.length) {
         val nl = prefix.indexOf('\n', index)
         val lineEnd = if (nl < 0) prefix.length else nl
-        val line = prefix.substring(index, lineEnd).trim()
+        val rawLine = prefix.substring(index, lineEnd)
+        val line = rawLine.trim()
         if (line.startsWith("```") || line.startsWith("~~~")) {
             if (fenceStart < 0) fenceStart = index else {
                 fenceStart = -1
                 lastBoundary = lineEnd
             }
-        } else if (fenceStart < 0 && line.isEmpty() && !previousBlank) {
-            lastBoundary = index
+        } else if (fenceStart < 0) {
+            val glued = OrbCodeFences.splitGlued(rawLine)
+            if (glued != null) {
+                fenceStart = index + glued.offset
+            } else if (line.isEmpty() && !previousBlank) {
+                lastBoundary = index
+            }
         }
         previousBlank = line.isEmpty()
         index = if (lineEnd < prefix.length) lineEnd + 1 else prefix.length

@@ -9,6 +9,7 @@ import { swallow } from "./log";
 import { RICH_TAG, expandMediaLines, parseRichTag, richTagSpan } from "./richTags";
 import { WorkspaceImage } from "./WorkspaceImage";
 import * as Ic from "./icons";
+import { normalizeGluedFences, splitGluedFence } from "./codeFences";
 import { normalizeLoosePipeTables } from "./pipeTables";
 
 /**
@@ -224,7 +225,7 @@ function readTable(lines: string[], start: number): { block: Extract<Block, { t:
 }
 
 export function parseMarkdown(src: string): Block[] {
-  return timed("markdown", () => parseBlocks(expandMediaLines(src)));
+  return timed("markdown", () => parseBlocks(expandMediaLines(normalizeGluedFences(src.replace(/\r\n/g, "\n")))));
 }
 function isHrLine(line: string): boolean {
   const t = line.trim();
@@ -316,7 +317,7 @@ function readList(lines: string[], startIdx: number, baseIndent: number, kind: "
   };
 }
 function parseBlocks(src: string): Block[] {
-  const lines = normalizeLoosePipeTables(src.replace(/\r\n/g, "\n")).split("\n");
+  const lines = normalizeLoosePipeTables(normalizeGluedFences(src.replace(/\r\n/g, "\n"))).split("\n");
   const out: Block[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -590,6 +591,25 @@ export function incrementalMarkdown(): IncrementalMarkdownParser {
           resetFenceState();
         }
         continue;
+      }
+      if (!fenced && !math) {
+        const glued = splitGluedFence(line);
+        if (glued) {
+          inList = false;
+          listAfterBlank = false;
+          fenced = true;
+          fenceStart = lineStart + glued.offset;
+          fenceBodyStart = scanCursor;
+          fenceBodyCursor = scanCursor;
+          fenceIndent = 0;
+          fenceIndentPad = "";
+          fenceLang = glued.lang;
+          fencePrefixBlocks = null;
+          fenceAccText = "";
+          fenceHasLines = false;
+          fenceCleanRaw = true;
+          continue;
+        }
       }
       if (!fenced && ["$$", "\\[", "\\]"].includes(line.trim())) math = !math;
       if (!fenced && !math) {

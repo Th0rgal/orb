@@ -16,3 +16,19 @@ for both clients:
 Both `OrbMath` implementations enforce identical resource bounds (`maxDepth = 16`,
 `maxSpanChars = 8192`) and degrade incomplete or malformed TeX to readable
 monospace spans without throwing.
+
+## Glued opening code fences
+
+Agents occasionally emit an opening triple-backtick code fence directly at the
+end of a prose sentence without a preceding newline (for example
+`Let's present the updated diagram cleanly!```mermaid`), which would otherwise
+miss line-initial fence detection and turn the closing ```` ``` ```` into an
+opening code block that swallows trailing prose.
+
+Desktop (`orb/src/codeFences.ts`), iOS (`OrbCodeFences.swift`), and Android
+(`OrbCodeFences.kt`) normalize admitted glued opening fences onto their own line
+outside existing code fences before block parsing and loose pipe-table
+normalization, and recognize them in the checkpointed incremental streaming
+scanners (`incrementalMarkdown`, `OrbStreamCommit`, `OrbStreamBlocks`) so
+streamed prefixes remain equivalent to full parses in linear time. Shared cases
+live in `shared/orb-spec/fixtures/glued-code-fences.json`.

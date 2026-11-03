@@ -98,12 +98,18 @@ enum OrbPipeTables {
                 }
             }
             if scanFenceLen == 0 && c != UInt8(ascii: "|") && p < lineEnd {
+                var checkEnd = lineEnd
+                if let glued = OrbCodeFences.splitGlued(Substring(utf8[lineStart..<lineEnd])) {
+                    checkEnd = utf8.index(lineStart, offsetBy: glued.utf8Offset)
+                    scanFenceChar = UInt8(ascii: "`")
+                    scanFenceLen = 3
+                }
                 var cur = p
-                while let bar = utf8[cur..<lineEnd].firstIndex(of: UInt8(ascii: "|")) {
+                while cur < checkEnd, let bar = utf8[cur..<checkEnd].firstIndex(of: UInt8(ascii: "|")) {
                     if bar > p {
                         let prev = utf8[utf8.index(before: bar)]
                         let nextIdx = utf8.index(after: bar)
-                        if prev == UInt8(ascii: " ") && nextIdx < lineEnd && utf8[nextIdx] == UInt8(ascii: " ") {
+                        if prev == UInt8(ascii: " ") && nextIdx < checkEnd && utf8[nextIdx] == UInt8(ascii: " ") {
                             return true
                         }
                     }
@@ -138,6 +144,7 @@ enum OrbPipeTables {
                 out.append(line); i += 1; continue
             }
             if marker != nil { fence = marker; out.append(line); i += 1; continue }
+            if OrbCodeFences.splitGlued(line) != nil { fence = "```"; out.append(line); i += 1; continue }
             guard let first = cells(line), admitted(i, first, sepCols: first.count) else { out.append(line); i += 1; continue }
             var rows = [first]
             var j = i + 1
