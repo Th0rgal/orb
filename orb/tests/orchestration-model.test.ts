@@ -66,4 +66,75 @@ describe("real transcript of mission 3a510e9b (subagent on a boat machine)", () 
     const destroy = machineRef(tools.find(t => orchestrationKind(t.name) === "machine-destroy")!, follow)!;
     expect(destroy).toMatchObject({ action: "destroy", state: "destroyed", machineId: "mm4b8tgs9y" });
   });
+  it("resolves async auto-managed start_mission via get_action to running and concrete machine label", () => {
+    const autoEvents = buildTranscript([
+      {
+        type: "tool_call",
+        data: {
+          tool_call_id: "c-start",
+          name: "mcp__sandboxed__start_mission",
+          args: {
+            title: "R15-EvmEkFk: 7 ek_*/fk_frame_open",
+            backend: "opencode",
+            model_override: "google/gemini-4-carbon-eap",
+            remote_node_id: "auto-managed:boat:xlarge",
+            prompt: "prove contracts",
+          },
+        },
+      },
+      {
+        type: "tool_result",
+        data: {
+          tool_call_id: "c-start",
+          name: "mcp__sandboxed__start_mission",
+          result: { content: [{ type: "text", text: JSON.stringify({ accepted: "yes", action_id: "act-1", state: "queued" }) }] },
+        },
+      },
+      {
+        type: "tool_call",
+        data: { tool_call_id: "c-poll", name: "mcp__sandboxed__get_action", args: { action_id: "act-1" } },
+      },
+      {
+        type: "tool_result",
+        data: {
+          tool_call_id: "c-poll",
+          name: "mcp__sandboxed__get_action",
+          result: {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                action_id: "act-1",
+                state: "succeeded",
+                result: {
+                  mission: {
+                    id: "005ca1ac-1111-2222-3333-444455556666",
+                    status: "active",
+                    title: "R15-EvmEkFk: 7 ek_*/fk_frame_open",
+                    backend: "opencode",
+                    model_override: "google/gemini-4-carbon-eap",
+                    execution: { scope_unit: "remote-node:managed-mmf4ywkaxw" },
+                  },
+                  managed_machine: {
+                    id: "mmf4ywkaxw",
+                    node_id: "managed-mmf4ywkaxw",
+                    size: "xlarge",
+                    state: "online",
+                  },
+                },
+              }),
+            }],
+          },
+        },
+      },
+    ] as StreamEvent[]);
+    const autoFollow = collectFollowUps(autoEvents);
+    const startTool = autoEvents.find((i): i is Tool => i.kind === "tool" && orchestrationKind(i.name) === "subagent")!;
+    const ref = subagentRef(startTool, autoFollow)!;
+    expect(ref).toMatchObject({
+      missionId: "005ca1ac-1111-2222-3333-444455556666",
+      status: "running",
+      nodeId: "managed-mmf4ywkaxw",
+    });
+    expect(machineLabel(ref.nodeId, autoFollow)).toBe("xlarge · mmf4ywkaxw");
+  });
 });

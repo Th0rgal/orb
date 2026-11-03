@@ -4575,3 +4575,71 @@ fn generic_provision_failure_preserves_502_provision_failed() {
     assert_eq!(auth.error, "provider_auth_failed");
     assert_eq!(auth.status, 422);
 }
+
+#[test]
+fn secrets_wipe_deletes_secrets_and_prunes_heavy_build_and_cache_trees() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let orb = root.join("var/lib/orb-node");
+    let home = root.join("home/user");
+    let run = root.join("run/user/1001/paloma-secrets/m1");
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(run.join("GITHUB_TOKEN"), "tok").unwrap();
+
+    for secret_dir in [
+        orb.join(".paloma-secrets/m1"),
+        orb.join("work/caches/home/.paloma-secrets/m1"),
+        orb.join("work/mission-a/.paloma-secrets/m1"),
+        home.join(".paloma-secrets/s1"),
+        home.join("repo/.paloma-secrets/s1"),
+    ] {
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("GITHUB_TOKEN"), "secret").unwrap();
+    }
+    // Heavy toolchain/build/VCS trees that must be pruned without traversal.
+    for pruned in [
+        orb.join("work/caches/rustup/toolchains/stable/marker"),
+        orb.join("work/caches/cargo/registry/marker"),
+        orb.join("work/caches/elan/toolchains/lean4/marker"),
+        orb.join("work/caches/lake/pkg/marker"),
+        orb.join("work/mission-a/.lake/build/lib/Verity.olean"),
+        orb.join("work/mission-a/.git/objects/aa/bb"),
+        orb.join("work/mission-a/target/debug/libfoo.rlib"),
+        home.join("repo/node_modules/pkg/index.js"),
+    ] {
+        std::fs::create_dir_all(pruned.parent().unwrap()).unwrap();
+        std::fs::write(&pruned, "keep").unwrap();
+    }
+
+    assert!(!snapshots::SECRETS_WIPE_NO_SYNC.contains("&& sync"));
+    assert!(snapshots::SECRETS_WIPE.ends_with("&& sync"));
+
+    let cmd = snapshots::SECRETS_WIPE_NO_SYNC
+        .replace("sudo ", "")
+        .replace("/run/user", &root.join("run/user").display().to_string())
+        .replace(
+            "/var/lib/orb-node",
+            &root.join("var/lib/orb-node").display().to_string(),
+        )
+        .replace("/home", &root.join("home").display().to_string());
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cmd)
+        .status()
+        .unwrap();
+    assert!(status.success(), "cmd failed: {cmd}");
+
+    assert!(!root.join("run/user/1001/paloma-secrets").exists());
+    assert!(!orb.join(".paloma-secrets").exists());
+    assert!(!orb.join("work/caches/home/.paloma-secrets").exists());
+    assert!(!orb.join("work/mission-a/.paloma-secrets").exists());
+    assert!(!home.join(".paloma-secrets").exists());
+    assert!(!home.join("repo/.paloma-secrets").exists());
+    assert!(orb
+        .join("work/mission-a/.lake/build/lib/Verity.olean")
+        .exists());
+    assert!(orb
+        .join("work/caches/rustup/toolchains/stable/marker")
+        .exists());
+    assert!(home.join("repo/node_modules/pkg/index.js").exists());
+}

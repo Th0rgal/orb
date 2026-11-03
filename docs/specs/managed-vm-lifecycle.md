@@ -244,7 +244,18 @@ starting `orb-node` (best effort, logged): `/tmp/opencode` writable by
 `orbnode`, a git credential helper answering only `https://github.com` with
 the mission's GitHub token (the `paloma-secrets` file Core delivered, else
 `GITHUB_TOKEN`/`GH_TOKEN`; never written by the script), ssh GitHub URLs
-rewritten to https, and the orbnode rustup env when the image has it. For cloud-init/onstart providers (`hetzner`, `vastai`, `scaleway`), Core generates a
+rewritten to https, and the orbnode rustup env when the image has it (skipping
+recursive `chown -R` when `$CACHES/{rustup,cargo}` is already owned by
+`orbnode`). Boot-time state preparation wipes `node.cred`, `managed-auth`,
+`/run/user/*/paloma-secrets`, and `.paloma-secrets` while pruning heavy
+toolchain/build/VCS trees (`caches/{elan,rustup,cargo,lake,xdg}`, `.git`,
+`.lake`, `target`, `node_modules`) and skipping global `sync` so lazy CoW
+snapshot hydration never times out (`SECRETS_WIPE` before snapshot/fork save
+retains `&& sync`). Post-create provisioning enforces an overall wall-clock
+deadline (`360s` for Boat, `480s` for cloud-init providers) strictly below
+`AssistantMcp`'s `540s` HTTP timeout (and Hermes's `600s` MCP stdio timeout) so
+Core always destroys any partial VM and returns structured JSON before the
+caller's HTTP socket times out. For cloud-init/onstart providers (`hetzner`, `vastai`, `scaleway`), Core generates a
 one-time `<4 KiB` enrollment script (fitting Vast.ai's `onstart` limit) that
 fetches `sandboxed-node`, `sandboxed-mcp`, and verified native harnesses
 (`opencode`, `claude`, `codex`) over streaming `GET /api/managed-machines/bootstrap-binary/:id`

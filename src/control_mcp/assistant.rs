@@ -1679,14 +1679,22 @@ impl AssistantMcp {
         ))
     }
 
+    fn format_http_error(error: reqwest::Error) -> String {
+        if error.is_timeout() {
+            format!("HTTP request failed: timed out: {error}")
+        } else if error.is_connect() {
+            format!("HTTP request failed: connection error: {error}")
+        } else {
+            format!("HTTP request failed: {error}")
+        }
+    }
+
     async fn api_get(&self, path: &str) -> Result<reqwest::Response, String> {
         let mut req = self.client.get(format!("{}{}", self.api_url, path));
         if let Some((name, value)) = self.auth_header() {
             req = req.header(name, value);
         }
-        req.send()
-            .await
-            .map_err(|error| format!("HTTP request failed: {error}"))
+        req.send().await.map_err(Self::format_http_error)
     }
 
     async fn api_get_bytes(&self, path: &str) -> Result<Vec<u8>, String> {
@@ -1729,9 +1737,7 @@ impl AssistantMcp {
         if let Some((name, value)) = self.auth_header() {
             req = req.header(name, value);
         }
-        req.send()
-            .await
-            .map_err(|error| format!("HTTP request failed: {error}"))
+        req.send().await.map_err(Self::format_http_error)
     }
 
     async fn api_patch(&self, path: &str, body: Value) -> Result<reqwest::Response, String> {
@@ -1742,9 +1748,7 @@ impl AssistantMcp {
         if let Some((name, value)) = self.auth_header() {
             req = req.header(name, value);
         }
-        req.send()
-            .await
-            .map_err(|error| format!("HTTP request failed: {error}"))
+        req.send().await.map_err(Self::format_http_error)
     }
 
     async fn api_put(&self, path: &str, body: Value) -> Result<reqwest::Response, String> {
@@ -1755,9 +1759,7 @@ impl AssistantMcp {
         if let Some((name, value)) = self.auth_header() {
             req = req.header(name, value);
         }
-        req.send()
-            .await
-            .map_err(|error| format!("HTTP request failed: {error}"))
+        req.send().await.map_err(Self::format_http_error)
     }
 
     async fn api_delete(&self, path: &str) -> Result<reqwest::Response, String> {
@@ -1765,9 +1767,7 @@ impl AssistantMcp {
         if let Some((name, value)) = self.auth_header() {
             req = req.header(name, value);
         }
-        req.send()
-            .await
-            .map_err(|error| format!("HTTP request failed: {error}"))
+        req.send().await.map_err(Self::format_http_error)
     }
 
     async fn response_value(response: reqwest::Response, operation: &str) -> Result<Value, String> {
@@ -2960,14 +2960,15 @@ impl AssistantMcp {
         if let Some(cloud) = params.cloud {
             body["cloud"] = cloud;
         }
-        // Server-side `auto-managed` provisioning waits for the VM to boot and
-        // enroll (typically 20-90s; cloud-init up to ~420s), so give it the same
-        // 420s ceiling `managed_request` used previously.
+        // Server-side `auto-managed` provisioning enforces a 360s (fast/Boat) or
+        // 480s (cloud-init) wall-clock budget; give the HTTP call 540s (>=60s
+        // headroom above Core's deadline and strictly below Hermes's 600s MCP
+        // stdio timeout) so Core always returns a structured error first.
         let create_timeout = body["remote_node_id"]
             .as_str()
             .and_then(crate::api::control::parse_auto_managed_spec)
-            .map(|_| std::time::Duration::from_secs(420))
-            .or_else(|| started_by_mission.then(|| std::time::Duration::from_secs(420)));
+            .map(|_| std::time::Duration::from_secs(540))
+            .or_else(|| started_by_mission.then(|| std::time::Duration::from_secs(540)));
         let created = self
             .api_post_with_timeout("/api/control/missions", body, create_timeout)
             .await;
@@ -3628,18 +3629,16 @@ impl AssistantMcp {
         let mut req = self
             .client
             .request(method, format!("{}{}", self.api_url, path))
-            // Spawning waits for the VM to enroll (typically 20-90 s).
-            .timeout(std::time::Duration::from_secs(420));
+            // Server-side provisioning enforces a 360s/480s wall-clock ceiling;
+            // keep 540s here (>=60s margin, <600s MCP stdio timeout).
+            .timeout(std::time::Duration::from_secs(540));
         if let Some(body) = body {
             req = req.json(&body);
         }
         if let Some((name, value)) = self.auth_header() {
             req = req.header(name, value);
         }
-        let response = req
-            .send()
-            .await
-            .map_err(|error| format!("HTTP request failed: {error}"))?;
+        let response = req.send().await.map_err(Self::format_http_error)?;
         let status = response.status();
         let value: Value = response.json().await.unwrap_or(Value::Null);
         if !status.is_success() {

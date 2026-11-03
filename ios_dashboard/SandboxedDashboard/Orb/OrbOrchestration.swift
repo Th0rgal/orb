@@ -13,6 +13,7 @@ enum OrbOrchestration {
         var backend: String
         var model: String
         var nodeID: String
+        var nodeSize: String = ""
         var missionID: String?
         var status: String // starting, queued, running, done, failed, cancelled
         var error: String
@@ -49,7 +50,7 @@ enum OrbOrchestration {
 
     /// Tools whose results `build` parses as JSON, so they must be kept whole.
     nonisolated static func needsFullResult(_ name: String) -> Bool {
-        kind(name) != nil || ["get_action", "get_mission", "get_mission_health", "get_mission_status"].contains(operation(name))
+        kind(name) != nil || ["get_action", "get_mission", "get_mission_health", "get_mission_status", "list_managed_machines"].contains(operation(name))
     }
 
     static func kind(_ name: String) -> Kind? {
@@ -136,10 +137,16 @@ enum OrbOrchestration {
                 let mission = value["result"]["mission"]
                 if !mission["id"].text.isEmpty { missions[mission["id"].text] = mission }
                 if value["result"]["machine"] != .null { note(machine: value["result"]["machine"]) }
+                else if value["result"]["managed_machine"] != .null { note(machine: value["result"]["managed_machine"]) }
                 else if !value["result"]["node_id"].text.isEmpty && !value["result"]["state"].text.isEmpty { note(machine: value["result"]) }
+            } else if ["start_mission", "create_mission", "spawn_worker"].contains(op) {
+                if value["managed_machine"] != .null { note(machine: value["managed_machine"]) }
+                else if value["machine"] != .null { note(machine: value["machine"]) }
             } else if ["get_mission", "get_mission_health", "get_mission_status"].contains(op) {
                 let id = [value["mission_id"].text, value["id"].text, args["mission_id"].text].first { !$0.isEmpty } ?? ""
                 if !id.isEmpty { missions[id] = value }
+            } else if op == "list_managed_machines" {
+                for m in value["machines"].items { note(machine: m) }
             }
         }
 
@@ -161,9 +168,12 @@ enum OrbOrchestration {
                         s.status = "failed"; s.error = error ?? errorText(value)
                     } else {
                         var mission: OrbJSON = value["mission"] != .null ? value["mission"] : (value["mission_id"].text.isEmpty ? .null : value)
+                        var managedMachine: OrbJSON = value["managed_machine"] != .null ? value["managed_machine"] : value["machine"]
                         if let act = actions[value["action_id"].text] {
                             if let e = act.error { s.status = "failed"; s.error = e.replacingOccurrences(of: "Outcome unconfirmed; inspect before retrying. ", with: "") }
                             if act.value["mission"] != .null { mission = act.value["mission"] }
+                            if act.value["managed_machine"] != .null { managedMachine = act.value["managed_machine"] }
+                            else if act.value["machine"] != .null { managedMachine = act.value["machine"] }
                         }
                         let id = mission["mission_id"].text.isEmpty ? mission["id"].text : mission["mission_id"].text
                         if !id.isEmpty {
@@ -176,7 +186,16 @@ enum OrbOrchestration {
                             if !facts["backend"].text.isEmpty { s.backend = facts["backend"].text }
                             if !facts["model_override"].text.isEmpty { s.model = facts["model_override"].text }
                             let scope = facts["execution"]["scope_unit"].text
-                            if s.nodeID.isEmpty && scope.hasPrefix("remote-node:") { s.nodeID = String(scope.dropFirst("remote-node:".count)) }
+                            let scopeNode = scope.hasPrefix("remote-node:") ? String(scope.dropFirst("remote-node:".count)) : ""
+                            let factNode = facts["remote_node_id"].text
+                            let resolvedNode = [
+                                managedMachine["node_id"].text,
+                                factNode.hasPrefix("auto-managed") ? "" : factNode,
+                                scopeNode
+                            ].first { !$0.isEmpty } ?? ""
+                            if !resolvedNode.isEmpty && (s.nodeID.isEmpty || s.nodeID.hasPrefix("auto-managed")) { s.nodeID = resolvedNode }
+                            let knownMachine = machines[s.nodeID] ?? managedMachine
+                            if !knownMachine["size"].text.isEmpty { s.nodeSize = knownMachine["size"].text }
                             if s.status != "failed" { s.status = status(facts) ?? "running" }
                             if let live = liveStatus(id), let mapped = status(.object(["status": .string(live)])) { s.status = mapped }
                             if s.status == "done" || s.status == "running" { s.summary = oneLine(facts["last_assistant_message"].text) }
@@ -218,10 +237,11 @@ enum OrbOrchestration {
         return refs
     }
 
-    static func nodeLabel(_ nodeID: String, refs: [Ref]) -> String {
+    static func nodeLabel(_ nodeID: String, refs: [Ref], fallbackSize: String = "") -> String {
         guard !nodeID.isEmpty else { return "" }
         let short = nodeID.hasPrefix("managed-") ? String(nodeID.dropFirst("managed-".count)) : nodeID
         for case .machine(let m) in refs where m.nodeID == nodeID && !m.size.isEmpty { return "\(m.size) · \(short)" }
+        if !fallbackSize.isEmpty { return "\(fallbackSize) · \(short)" }
         return short
     }
 
@@ -268,7 +288,7 @@ struct OrbOrchestrationCards: View {
                 Text(OrbOrchestration.statusLabel(s.status)).font(.caption2.weight(.medium)).foregroundStyle(color(s.status))
                 if s.missionID != nil { Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(OrbStyle.textMuted) }
             }
-            let meta = [[s.backend, s.model].filter { !$0.isEmpty }.joined(separator: " · "), OrbOrchestration.nodeLabel(s.nodeID, refs: refs)].filter { !$0.isEmpty }
+            let meta = [[s.backend, s.model].filter { !$0.isEmpty }.joined(separator: " · "), OrbOrchestration.nodeLabel(s.nodeID, refs: refs, fallbackSize: s.nodeSize)].filter { !$0.isEmpty }
             if !meta.isEmpty { Text(meta.joined(separator: "  ·  ")).font(.caption2).foregroundStyle(OrbStyle.textMuted).lineLimit(1) }
             if !s.error.isEmpty { Text(s.error).font(.caption2).foregroundStyle(OrbStyle.error).lineLimit(3) }
             else if !s.summary.isEmpty { Text(s.summary).font(.caption2).foregroundStyle(OrbStyle.textSecondary).lineLimit(3) }
