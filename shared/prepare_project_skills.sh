@@ -1,6 +1,6 @@
 # Invoked with source, harness, embedded Python program, optional cwd.
 # Keep projects without skills working even when Python is not installed.
-if [ -n "${4:-}" ]; then
+if [ $# -ge 4 ] && [ -n "$4" ]; then
     cd -- "$4" || exit 78
 fi
 need_skills=0
@@ -16,7 +16,7 @@ while :; do
         break
     fi
     [ "$skill_parent" = / ] && break
-    skill_parent="${skill_parent%/*}"
+    skill_parent=$(dirname "$skill_parent")
     [ -n "$skill_parent" ] || skill_parent=/
 done
 [ "$need_skills" = 0 ] && exit 0
