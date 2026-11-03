@@ -1324,15 +1324,4 @@ export function buildMissionFlowSankeyInput(
   return { nodes, links };
 }
 
-export function pickFastDagCandidate(
-  missions: ResourcesOverviewResponse["missions"],
-): string | null {
-  if (missions.length === 0) return null;
-  const multi = missions.find((m) => m.subagent_total > 1 && m.status === "active");
-  if (multi) return multi.id;
-  const anyMulti = missions.find((m) => m.subagent_total > 1);
-  if (anyMulti) return anyMulti.id;
-  return missions[0].id;
-}
-
 export type { MissionDagBar };

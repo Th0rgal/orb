@@ -28,7 +28,6 @@ import {
   formatResourceRate,
   formatTokenTotalCompact,
   layoutDagRows,
-  pickFastDagCandidate,
   stabilizeTrailingOpenBucket,
   type MissionDetailSubmode,
   type ResourceLens,
@@ -106,7 +105,7 @@ export default function Resources(props: {
   const [metric, setMetric] = createSignal<ResourceMetric>("raw");
   const [range, setRange] = createSignal<ResourcesWindowRange>("6h");
   const [horizon, setHorizon] = createSignal<string>("6h");
-  const [submode, setSubmode] = createSignal<MissionDetailSubmode>("dag");
+  const [submode, setSubmode] = createSignal<MissionDetailSubmode>("flow");
 
   const [overview, setOverview] = createSignal<ResourcesOverviewResponse | null>(null);
   const [detail, setDetail] = createSignal<MissionResourcesResponse | null>(null);
@@ -226,7 +225,7 @@ export default function Resources(props: {
         setHoveredBarId(null);
         setHoverFrac(null);
         if (mid) {
-          setSubmode("dag");
+          setSubmode("flow");
         }
       },
     ),
@@ -275,10 +274,60 @@ export default function Resources(props: {
 
   const isMissionMode = createMemo(() => Boolean(props.missionId));
 
-  const fastDagCandidateId = createMemo(() => {
-    const ov = overview();
-    return ov ? pickFastDagCandidate(ov.missions) : null;
-  });
+  const renderLensToggle = (compact = false) => (
+    <div
+      class={`res-seg ${compact ? "res-seg-compact" : ""}`}
+      role="tablist"
+      aria-label="Resource lens"
+    >
+      <button
+        type="button"
+        role="tab"
+        aria-selected={lens() === "inference"}
+        class={`res-seg-btn ${lens() === "inference" ? "is-active" : ""}`}
+        data-testid="res-lens-inference"
+        onClick={() => setLens("inference")}
+      >
+        Inference
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={lens() === "compute"}
+        class={`res-seg-btn ${lens() === "compute" ? "is-active" : ""}`}
+        data-testid="res-lens-compute"
+        onClick={() => setLens("compute")}
+      >
+        Compute
+      </button>
+    </div>
+  );
+
+  const renderMetricToggle = (compact = false) => (
+    <div
+      class={`res-seg ${compact ? "res-seg-compact" : ""}`}
+      role="group"
+      aria-label="Display unit"
+    >
+      <button
+        type="button"
+        class={`res-seg-btn ${metric() === "raw" ? "is-active" : ""}`}
+        data-testid="res-metric-raw"
+        onClick={() => setMetric("raw")}
+      >
+        {rawUnitLabel()}
+      </button>
+      <button
+        type="button"
+        class={`res-seg-btn ${metric() === "usd" ? "is-active" : ""}`}
+        data-testid="res-metric-usd"
+        onClick={() => setMetric("usd")}
+        title="Switch to estimated USD burn rate"
+      >
+        $
+      </button>
+    </div>
+  );
 
   // Sankey layout memo (used in Fleet mode & Mission "flow" submode)
   const sankeyGraph = createMemo(() => {
@@ -783,57 +832,10 @@ export default function Resources(props: {
             </Show>
           </Show>
 
-          <div class="res-seg" role="tablist" aria-label="Resource lens">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={lens() === "inference"}
-              class={`res-seg-btn ${lens() === "inference" ? "is-active" : ""}`}
-              data-testid="res-lens-inference"
-              onClick={() => setLens("inference")}
-            >
-              Inference
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={lens() === "compute"}
-              class={`res-seg-btn ${lens() === "compute" ? "is-active" : ""}`}
-              data-testid="res-lens-compute"
-              onClick={() => setLens("compute")}
-            >
-              Compute
-            </button>
-          </div>
+          <Show when={!isMissionMode()}>{renderLensToggle(false)}</Show>
 
-          <Show
-            when={isMissionMode()}
-            fallback={
-              <Show when={fastDagCandidateId()}>
-                {(candId) => (
-                  <button
-                    type="button"
-                    class="res-btn res-btn-dag-jump"
-                    data-testid="res-fast-dag-jump"
-                    onClick={() => props.onOpen(`rm:${candId()}`)}
-                  >
-                    Fast-DAG ›
-                  </button>
-                )}
-              </Show>
-            }
-          >
+          <Show when={isMissionMode()}>
             <div class="res-seg" role="tablist" aria-label="Mission view mode">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={submode() === "dag"}
-                class={`res-seg-btn ${submode() === "dag" ? "is-active" : ""}`}
-                data-testid="res-submode-dag"
-                onClick={() => setSubmode("dag")}
-              >
-                Fast-DAG
-              </button>
               <button
                 type="button"
                 role="tab"
@@ -843,6 +845,16 @@ export default function Resources(props: {
                 onClick={() => setSubmode("flow")}
               >
                 Flow
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={submode() === "dag"}
+                class={`res-seg-btn ${submode() === "dag" ? "is-active" : ""}`}
+                data-testid="res-submode-dag"
+                onClick={() => setSubmode("dag")}
+              >
+                Fast-DAG
               </button>
             </div>
           </Show>
@@ -857,26 +869,7 @@ export default function Resources(props: {
             </Show>
           </div>
 
-          {/* Elegant Raw Unit vs Estimated $ Toggle */}
-          <div class="res-seg" role="group" aria-label="Display unit">
-            <button
-              type="button"
-              class={`res-seg-btn ${metric() === "raw" ? "is-active" : ""}`}
-              data-testid="res-metric-raw"
-              onClick={() => setMetric("raw")}
-            >
-              {rawUnitLabel()}
-            </button>
-            <button
-              type="button"
-              class={`res-seg-btn ${metric() === "usd" ? "is-active" : ""}`}
-              data-testid="res-metric-usd"
-              onClick={() => setMetric("usd")}
-              title="Switch to estimated USD burn rate"
-            >
-              $
-            </button>
-          </div>
+          <Show when={!isMissionMode()}>{renderMetricToggle(false)}</Show>
         </div>
       </div>
 
@@ -944,7 +937,7 @@ export default function Resources(props: {
                         <span class="res-head-hint">
                           {isMissionMode()
                             ? "Click subagent to open transcript"
-                            : "Click a mission to inspect subagent DAG"}
+                            : "Click a mission to inspect resource flow"}
                         </span>
                       }
                     >
@@ -1530,9 +1523,17 @@ export default function Resources(props: {
       {/* Synchronized Consumption Curve Underneath */}
       <div class="res-curve-card" data-testid="res-consumption-card">
         <div class="res-curve-head">
-          <span class="res-col-title">
-            Consumption · {metric() === "usd" ? "Est. USD / hour" : rawUnitLabel()}
-          </span>
+          <div class="res-curve-head-left">
+            <span class="res-col-title">
+              Consumption · {metric() === "usd" ? "Est. USD / hour" : rawUnitLabel()}
+            </span>
+            <Show when={isMissionMode()}>
+              <div class="res-curve-controls">
+                {renderLensToggle(true)}
+                {renderMetricToggle(true)}
+              </div>
+            </Show>
+          </div>
           <div class="res-curve-legend">
             <Show
               when={hoverFrac() != null && curveGeometry()}

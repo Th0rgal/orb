@@ -106,17 +106,6 @@
   color: var(--fg-strong);
 }
 
-.res-btn-dag-jump {
-  color: var(--blue);
-  background: color-mix(in srgb, var(--blue) 9%, var(--bg-btn));
-  border-color: color-mix(in srgb, var(--blue) 26%, var(--stroke));
-}
-
-.res-btn-dag-jump:hover {
-  background: color-mix(in srgb, var(--blue) 15%, var(--bg-btn));
-  color: var(--blue);
-}
-
 .res-mission-crumb {
   display: inline-flex;
   align-items: center;
@@ -479,18 +468,40 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  height: 20px;
-  min-height: 20px;
+  height: 24px;
+  min-height: 24px;
   font-size: 11.5px;
   line-height: 1;
   color: var(--fg-3);
+}
+
+.res-curve-head-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.res-curve-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.res-seg-compact {
+  padding: 2px;
+}
+
+.res-seg-compact .res-seg-btn {
+  font-size: 11px;
+  padding: 3px 8px;
 }
 
 .res-curve-legend {
   display: inline-flex;
   align-items: center;
   gap: 12px;
-  height: 20px;
+  height: 24px;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   font-size: 11px;
