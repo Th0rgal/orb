@@ -73,19 +73,47 @@ fn excerpt(text: &str, max: usize) -> String {
     )
 }
 
-/// Shorten every string longer than `max` inside a JSON value.
+/// Shorten every string longer than `max` inside a JSON value, recursively
+/// unwrapping JSON-encoded strings (such as OpenCode `output` and MCP
+/// `content[].text` envelopes) so structured payloads stay valid JSON.
 fn shorten_strings(value: &mut serde_json::Value, max: usize) {
+    shorten_strings_depth(value, max, 0);
+}
+
+fn shorten_strings_depth(value: &mut serde_json::Value, max: usize, depth: usize) {
     match value {
-        serde_json::Value::String(text) if text.len() > max => *text = excerpt(text, max),
-        serde_json::Value::Array(items) => items.iter_mut().for_each(|v| shorten_strings(v, max)),
-        serde_json::Value::Object(map) => map.values_mut().for_each(|v| shorten_strings(v, max)),
+        serde_json::Value::String(text) if text.len() > max => {
+            if depth < 3 {
+                let trimmed = text.trim_start();
+                if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                    if let Ok(mut inner) = serde_json::from_str::<serde_json::Value>(text) {
+                        if inner.is_object() || inner.is_array() {
+                            shorten_strings_depth(&mut inner, max, depth + 1);
+                            if let Ok(encoded) = serde_json::to_string(&inner) {
+                                *text = encoded;
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            *text = excerpt(text, max);
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .for_each(|v| shorten_strings_depth(v, max, depth)),
+        serde_json::Value::Object(map) => map
+            .values_mut()
+            .for_each(|v| shorten_strings_depth(v, max, depth)),
         _ => {}
     }
 }
 
 /// Shorten tool payloads larger than `max` bytes. JSON keeps its shape (each
 /// long string keeps its head and tail), so args still name their target;
-/// other text keeps its head and tail. Interactive UI tools stay whole.
+/// other text keeps its head and tail. Interactive UI tools stay whole, and
+/// orchestration card / follow-up tools (`start_mission`, `get_action`, …)
+/// always stay valid JSON so subagent and machine cards resolve their status.
 pub(super) fn truncate_tool_payloads(events: &mut [mission_store::StoredEvent], max: usize) {
     let max = max.max(MIN_MAX_PAYLOAD);
     for event in events {
@@ -98,15 +126,27 @@ pub(super) fn truncate_tool_payloads(events: &mut [mission_store::StoredEvent], 
         {
             continue;
         }
+        let is_orchestration = event
+            .tool_name
+            .as_deref()
+            .is_some_and(is_orchestration_ui_tool);
+        let string_budget = if is_orchestration {
+            (max / 4).max(512)
+        } else {
+            max / 2
+        };
         let full = event.content.len();
         let shaped = serde_json::from_str::<serde_json::Value>(&event.content)
             .ok()
             .filter(|v| v.is_object() || v.is_array())
             .and_then(|mut v| {
-                shorten_strings(&mut v, max / 2);
+                shorten_strings(&mut v, string_budget);
                 serde_json::to_string(&v).ok()
             })
-            .filter(|text| text.len() <= max * 2);
+            .filter(|text| is_orchestration || text.len() <= max * 2);
+        if is_orchestration && shaped.is_none() {
+            continue;
+        }
         event.content = shaped.unwrap_or_else(|| excerpt(&event.content, max));
         let mut metadata = event.metadata.as_object().cloned().unwrap_or_default();
         metadata.insert("truncated".to_string(), serde_json::json!(true));
@@ -285,6 +325,68 @@ pub(super) fn is_interactive_ui_tool(name: &str) -> bool {
     name == "question" || name == "AskUserQuestion" || name.starts_with("ui_")
 }
 
+/// Normalize harness/MCP tool names to their bare operation name, matching
+/// `orchestrationOp` in `orb/src/orchestrationModel.ts` and `OrbOrchestration.operation`.
+pub(super) fn orchestration_op(name: &str) -> String {
+    let mut s = name.trim().to_ascii_lowercase();
+    if let Some(rest) = s.strip_prefix("functions.") {
+        s = rest.to_string();
+    }
+    if s.starts_with("mcp__") {
+        if let Some(idx) = s.rfind("__") {
+            if idx > 3 {
+                s = s[idx + 2..].to_string();
+            }
+        }
+    }
+    if let Some(idx) = s.rfind('.') {
+        s = s[idx + 1..].to_string();
+    }
+    if let Some(idx) = s.rfind(':') {
+        s = s[idx + 1..].to_string();
+    }
+    let rest = s.strip_prefix("mcp_").unwrap_or(&s);
+    if let Some(mut tail) = rest
+        .strip_prefix("sandboxed")
+        .or_else(|| rest.strip_prefix("orchestrator"))
+        .or_else(|| rest.strip_prefix("paloma"))
+    {
+        while let Some(next) = tail
+            .strip_prefix("_sh")
+            .or_else(|| tail.strip_prefix("-sh"))
+            .or_else(|| tail.strip_prefix("_assistant"))
+            .or_else(|| tail.strip_prefix("-assistant"))
+            .or_else(|| tail.strip_prefix("_orchestrator"))
+            .or_else(|| tail.strip_prefix("-orchestrator"))
+        {
+            tail = next;
+        }
+        if let Some(stripped) = tail.strip_prefix('_').or_else(|| tail.strip_prefix('-')) {
+            return stripped.to_string();
+        }
+    }
+    s
+}
+
+/// Orchestration card and follow-up tools (`start_mission`, `get_action`, …)
+/// whose JSON structure clients parse across the whole transcript to link
+/// `action_id` -> `mission_id` / `managed_machine` and render live status.
+pub(super) fn is_orchestration_ui_tool(name: &str) -> bool {
+    matches!(
+        orchestration_op(name).as_str(),
+        "start_mission"
+            | "create_mission"
+            | "spawn_worker"
+            | "spawn_managed_machine"
+            | "destroy_managed_machine"
+            | "get_action"
+            | "get_mission"
+            | "get_mission_health"
+            | "get_mission_status"
+            | "list_managed_machines"
+    )
+}
+
 pub(super) fn project_conversation_events(
     events: Vec<mission_store::StoredEvent>,
     keep_full_tool_call_ids: &HashSet<String>,
@@ -346,7 +448,7 @@ pub(super) fn project_conversation_events(
         if event
             .tool_name
             .as_deref()
-            .is_some_and(is_interactive_ui_tool)
+            .is_some_and(|name| is_interactive_ui_tool(name) || is_orchestration_ui_tool(name))
         {
             projected.push(event);
             continue;
@@ -1368,5 +1470,117 @@ mod payload_tests {
         assert_eq!(events[0].content.len(), 1000);
         assert!(events[1].content.len() < 1100);
         assert!(events[1].content.len() >= MIN_MAX_PAYLOAD);
+    }
+
+    #[test]
+    fn orchestration_get_action_envelopes_stay_valid_json_under_max_payload() {
+        let action_json = serde_json::json!({
+            "action_id": "act-r15-evmekfk",
+            "state": "succeeded",
+            "result": {
+                "mission": {
+                    "id": "005ca1ac-1111-2222-3333-444455556666",
+                    "status": "active",
+                    "title": "R15-EvmEkFk: 7 ek_*/fk_frame_open + finish_child_spec (0-sorry)",
+                    "backend": "opencode",
+                    "model_override": "google/gemini-4-carbon-eap",
+                    "execution": { "scope_unit": "remote-node:managed-mmf4ywkaxw" },
+                    "prompt": "Prove all 7 ek_* specs.\n".repeat(450)
+                },
+                "managed_machine": {
+                    "id": "mmf4ywkaxw",
+                    "node_id": "managed-mmf4ywkaxw",
+                    "size": "xlarge",
+                    "state": "online"
+                }
+            }
+        })
+        .to_string();
+        assert!(action_json.len() > 10_000);
+
+        let opencode_env = serde_json::json!({
+            "name": "sandboxed_get_action",
+            "error": serde_json::Value::Null,
+            "output": action_json,
+        })
+        .to_string();
+        let mcp_env = serde_json::json!({
+            "content": [{ "type": "text", "text": action_json }]
+        })
+        .to_string();
+
+        let mut events = vec![
+            event("tool_result", "sandboxed_get_action", &opencode_env),
+            event("tool_result", "mcp__sandboxed__get_action", &mcp_env),
+        ];
+        truncate_tool_payloads(&mut events, 4096);
+
+        let oc_outer: serde_json::Value = serde_json::from_str(&events[0].content).unwrap();
+        let oc_inner: serde_json::Value =
+            serde_json::from_str(oc_outer["output"].as_str().unwrap()).unwrap();
+        assert_eq!(oc_inner["action_id"], "act-r15-evmekfk");
+        assert_eq!(oc_inner["state"], "succeeded");
+        assert_eq!(
+            oc_inner["result"]["mission"]["id"],
+            "005ca1ac-1111-2222-3333-444455556666"
+        );
+        assert_eq!(oc_inner["result"]["mission"]["status"], "active");
+        assert_eq!(
+            oc_inner["result"]["managed_machine"]["node_id"],
+            "managed-mmf4ywkaxw"
+        );
+        assert!(oc_inner["result"]["mission"]["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("bytes omitted"));
+
+        let mcp_outer: serde_json::Value = serde_json::from_str(&events[1].content).unwrap();
+        let mcp_inner: serde_json::Value =
+            serde_json::from_str(mcp_outer["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            mcp_inner["result"]["mission"]["id"],
+            "005ca1ac-1111-2222-3333-444455556666"
+        );
+        assert_eq!(mcp_inner["result"]["managed_machine"]["size"], "xlarge");
+    }
+
+    #[test]
+    fn conversation_projection_keeps_orchestration_and_followup_tools_full() {
+        let mut start_call = event(
+            "tool_call",
+            "mcp__sandboxed__start_mission",
+            "{\"title\":\"R15\",\"remote_node_id\":\"auto-managed:boat:xlarge\"}",
+        );
+        start_call.tool_call_id = Some("s1".into());
+        start_call.sequence = 1;
+        let mut start_res = event(
+            "tool_result",
+            "mcp__sandboxed__start_mission",
+            "{\"accepted\":\"yes\",\"action_id\":\"a1\",\"state\":\"queued\"}",
+        );
+        start_res.tool_call_id = Some("s1".into());
+        start_res.sequence = 2;
+        let mut get_call = event(
+            "tool_call",
+            "sandboxed_get_action",
+            "{\"action_id\":\"a1\"}",
+        );
+        get_call.tool_call_id = Some("g1".into());
+        get_call.sequence = 3;
+        let mut get_res = event(
+            "tool_result",
+            "sandboxed_get_action",
+            "{\"action_id\":\"a1\",\"state\":\"succeeded\"}",
+        );
+        get_res.tool_call_id = Some("g1".into());
+        get_res.sequence = 4;
+
+        let projected = project_conversation_events(
+            vec![start_call, start_res, get_call, get_res],
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(projected.len(), 4);
+        assert!(projected.iter().all(|e| e.event_type != "tool_stub"));
     }
 }

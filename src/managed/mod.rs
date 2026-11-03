@@ -3907,13 +3907,24 @@ impl ManagedManager {
         let m = self.get(id).await.ok_or("machine vanished")?;
         self.ledger("provider_created", &m);
 
+        // Overall post-create wall-clock ceiling so Core always destroys any
+        // partial sandbox and returns structured JSON before AssistantMcp's 540s
+        // HTTP timeout (and Hermes's 600s MCP stdio timeout) can fire.
+        let wall_timeout = if provider.uses_cloud_init_bootstrap() {
+            480
+        } else {
+            360
+        };
+        let wall_deadline = started + Duration::from_secs(wall_timeout);
+
         // Wait for ready.
         let ready_timeout = if provider.uses_cloud_init_bootstrap() {
             420
         } else {
             240
         };
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(ready_timeout);
+        let deadline =
+            (tokio::time::Instant::now() + Duration::from_secs(ready_timeout)).min(wall_deadline);
         loop {
             if !self.get(id).await.is_some_and(|m| m.state.is_live()) {
                 return Err("machine destroyed while provisioning".into());
@@ -3931,6 +3942,11 @@ impl ManagedManager {
                 }
             }
             if tokio::time::Instant::now() > deadline {
+                if tokio::time::Instant::now() >= wall_deadline {
+                    return Err(format!(
+                        "provisioning exceeded {wall_timeout}s budget waiting for provider ready"
+                    ));
+                }
                 return Err(format!(
                     "provider machine not ready within {ready_timeout}s"
                 ));
@@ -3975,6 +3991,9 @@ impl ManagedManager {
             );
             let mut wrote = Err(String::new());
             for _ in 0..5 {
+                if tokio::time::Instant::now() >= wall_deadline {
+                    return Err(format!("provisioning exceeded {wall_timeout}s budget"));
+                }
                 wrote = provider
                     .write_file(&provider_id, ENROLL_ENV_PATH, &env)
                     .await;
@@ -3990,12 +4009,22 @@ impl ManagedManager {
             // (`sandbox_direct_failed`) right after ready; retry transient errors.
             let mut provisioned = Err(String::new());
             for attempt in 0..4 {
+                let Some(rem) = wall_deadline.checked_duration_since(tokio::time::Instant::now())
+                else {
+                    break;
+                };
+                let exec_timeout = rem.as_secs().clamp(5, 60);
+                let call_started = tokio::time::Instant::now();
                 provisioned = match provider
                     .write_file(&provider_id, PROVISION_PATH, PROVISION_SCRIPT)
                     .await
                 {
                     Ok(()) => provider
-                        .exec(&provider_id, &format!("sudo bash {PROVISION_PATH}"), 60)
+                        .exec(
+                            &provider_id,
+                            &format!("sudo bash {PROVISION_PATH}"),
+                            exec_timeout,
+                        )
                         .await
                         .and_then(|v| match exec_exit_code(&v) {
                             Some(code) if code != 0 => Err(format!("exit code {code}")),
@@ -4003,11 +4032,15 @@ impl ManagedManager {
                         }),
                     Err(e) => Err(e),
                 };
+                let full_timeout = exec_timeout >= 15
+                    && call_started.elapsed()
+                        >= Duration::from_secs(exec_timeout.saturating_sub(5));
                 if provisioned.is_ok()
                     || provisioned
                         .as_ref()
                         .err()
                         .is_none_or(|e| !is_retryable_exec_error(e))
+                    || (full_timeout && attempt >= 1)
                 {
                     break;
                 }
@@ -4024,14 +4057,23 @@ impl ManagedManager {
             // stopped, BEFORE starting the daemon. Keeping credential deletion
             // separate from `systemctl restart` ensures a retry after a lost
             // exec response cannot erase a newly enrolled `node.cred`.
+            // Boot uses SECRETS_WIPE_NO_SYNC (no global `sync`) so lazy CoW
+            // snapshot hydration never stalls state cleanup.
             let wipe_cmd = format!(
                 "(sudo systemctl stop orb-node.service 2>/dev/null || true) && sudo rm -rf /var/lib/orb-node/node.cred /var/lib/orb-node/work/managed-auth && {} && chmod 600 /home/user/.orb/enroll.env",
-                snapshots::SECRETS_WIPE
+                snapshots::SECRETS_WIPE_NO_SYNC
             );
             let mut wipe_res = Err(String::new());
             for attempt in 0..5 {
+                let Some(rem) = wall_deadline.checked_duration_since(tokio::time::Instant::now())
+                else {
+                    wipe_res = Err(format!("exceeded {wall_timeout}s provisioning budget"));
+                    break;
+                };
+                let exec_timeout = rem.as_secs().clamp(5, 90);
+                let call_started = tokio::time::Instant::now();
                 wipe_res = provider
-                    .exec(&provider_id, &wipe_cmd, 60)
+                    .exec(&provider_id, &wipe_cmd, exec_timeout)
                     .await
                     .and_then(|res| {
                         if let Some(code) = exec_exit_code(&res).filter(|c| *c != 0) {
@@ -4040,11 +4082,15 @@ impl ManagedManager {
                             Ok(())
                         }
                     });
+                let full_timeout = exec_timeout >= 15
+                    && call_started.elapsed()
+                        >= Duration::from_secs(exec_timeout.saturating_sub(5));
                 if wipe_res.is_ok()
                     || wipe_res
                         .as_ref()
                         .err()
                         .is_none_or(|e| !is_retryable_exec_error(e))
+                    || (full_timeout && attempt >= 1)
                 {
                     break;
                 }
@@ -4056,11 +4102,18 @@ impl ManagedManager {
 
             let mut start_res = Err(String::new());
             for attempt in 0..5 {
+                let Some(rem) = wall_deadline.checked_duration_since(tokio::time::Instant::now())
+                else {
+                    start_res = Err(format!("exceeded {wall_timeout}s provisioning budget"));
+                    break;
+                };
+                let exec_timeout = rem.as_secs().clamp(5, 120);
+                let call_started = tokio::time::Instant::now();
                 start_res = provider
                     .exec(
                         &provider_id,
                         "(sudo systemctl reset-failed orb-node.service 2>/dev/null || true) && sudo systemctl restart orb-node.service",
-                        120,
+                        exec_timeout,
                     )
                     .await
                     .and_then(|node_started| {
@@ -4070,11 +4123,15 @@ impl ManagedManager {
                             Ok(())
                         }
                     });
+                let full_timeout = exec_timeout >= 15
+                    && call_started.elapsed()
+                        >= Duration::from_secs(exec_timeout.saturating_sub(5));
                 if start_res.is_ok()
                     || start_res
                         .as_ref()
                         .err()
                         .is_none_or(|e| !is_retryable_exec_error(e))
+                    || (full_timeout && attempt >= 1)
                 {
                     break;
                 }
@@ -4099,7 +4156,8 @@ impl ManagedManager {
         } else {
             240
         };
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(enroll_timeout);
+        let deadline =
+            (tokio::time::Instant::now() + Duration::from_secs(enroll_timeout)).min(wall_deadline);
         let client = crate::remote_node::RemoteNodeClient::default();
         loop {
             if !self.get(id).await.is_some_and(|m| m.state.is_live()) {
@@ -4148,6 +4206,11 @@ impl ManagedManager {
                 }
             }
             if tokio::time::Instant::now() > deadline {
+                if tokio::time::Instant::now() >= wall_deadline {
+                    return Err(format!(
+                        "provisioning exceeded {wall_timeout}s budget waiting for node enrollment"
+                    ));
+                }
                 return Err(format!(
                     "node did not enroll and answer a heartbeat within {enroll_timeout}s"
                 ));

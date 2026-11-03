@@ -35,9 +35,34 @@ use super::{
 pub const INCLUDED_SNAPSHOTS: usize = 10;
 pub const SNAPSHOT_USD_PER_MONTH: f64 = 1.70;
 const SNAPSHOT_PREFIX: &str = "orb-snap-";
-/// Deletes every delivered secret file on a VM; non-zero exit on failure.
-pub const SECRETS_WIPE: &str =
-    "sudo find /var/lib/orb-node /home -maxdepth 6 -name .paloma-secrets -prune -exec rm -rf {} + && sync";
+/// Deletes every delivered secret directory on a VM (`XDG_RUNTIME_DIR/paloma-secrets`
+/// and `.paloma-secrets` under `/var/lib/orb-node` or `/home`), pruning heavy
+/// toolchain/build/VCS trees so warm snapshot hydration never times out; non-zero
+/// exit on failure.
+pub const SECRETS_WIPE_NO_SYNC: &str = concat!(
+    "sudo rm -rf /run/user/*/paloma-secrets /var/lib/orb-node/.paloma-secrets /var/lib/orb-node/work/caches/home/.paloma-secrets && ",
+    "sudo find /var/lib/orb-node /home -maxdepth 6 ",
+    "\\( -path '/var/lib/orb-node/work/caches/elan' ",
+    "-o -path '/var/lib/orb-node/work/caches/rustup' ",
+    "-o -path '/var/lib/orb-node/work/caches/cargo' ",
+    "-o -path '/var/lib/orb-node/work/caches/lake' ",
+    "-o -path '/var/lib/orb-node/work/caches/xdg' ",
+    "-o -name .git -o -name .lake -o -name target -o -name node_modules \\) -prune ",
+    "-o -name .paloma-secrets -prune -exec rm -rf {} +"
+);
+/// Deletes every delivered secret file on a VM and flushes disk buffers before
+/// snapshot/fork capture; non-zero exit on failure.
+pub const SECRETS_WIPE: &str = concat!(
+    "sudo rm -rf /run/user/*/paloma-secrets /var/lib/orb-node/.paloma-secrets /var/lib/orb-node/work/caches/home/.paloma-secrets && ",
+    "sudo find /var/lib/orb-node /home -maxdepth 6 ",
+    "\\( -path '/var/lib/orb-node/work/caches/elan' ",
+    "-o -path '/var/lib/orb-node/work/caches/rustup' ",
+    "-o -path '/var/lib/orb-node/work/caches/cargo' ",
+    "-o -path '/var/lib/orb-node/work/caches/lake' ",
+    "-o -path '/var/lib/orb-node/work/caches/xdg' ",
+    "-o -name .git -o -name .lake -o -name target -o -name node_modules \\) -prune ",
+    "-o -name .paloma-secrets -prune -exec rm -rf {} + && sync"
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedSnapshot {
