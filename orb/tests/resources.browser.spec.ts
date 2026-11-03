@@ -326,8 +326,37 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
     if (path === "/api/projects") {
       return route.fulfill({ json: { projects: [{ slug: "orb", title: "Orb" }] } });
     }
+    if (path === `/api/control/missions/${missionId}`) {
+      return route.fulfill({
+        json: {
+          id: missionId,
+          title: "Maxwell Kernel Campaign",
+          status: "active",
+          project: "orb",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          history: [],
+        },
+      });
+    }
+    if (path === `/api/control/missions/${missionId}/events`) {
+      return route.fulfill({ json: [] });
+    }
+    if (path === "/api/control/missions") {
+      return route.fulfill({
+        json: [
+          {
+            id: missionId,
+            title: "Maxwell Kernel Campaign",
+            status: "active",
+            project: "orb",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+        ],
+      });
+    }
     if (
-      path === "/api/control/missions" ||
       path === "/api/control/queue" ||
       path === "/api/backends" ||
       path === "/api/cloud/accounts"
@@ -442,9 +471,23 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
     ),
   ).toBe(true);
 
-  // Click mission node in Sankey to drill down into Fast-DAG
+  // Click mission node in Sankey to drill down into per-mission Flow (default submode)
   await page.getByTestId(`res-node-${missionId}`).click();
+  await expect(page.getByTestId("res-sankey-svg")).toBeVisible();
+  // In both Flow and Fast-DAG per-mission modes, Inference/Compute and unit toggles live inside the bottom Consumption card, not the top bar
+  await expect(page.locator(".res-topbar").getByTestId("res-lens-inference")).toHaveCount(0);
+  await expect(page.locator(".res-topbar").getByTestId("res-metric-usd")).toHaveCount(0);
+  await expect(consumptionCard.getByTestId("res-lens-inference")).toBeVisible();
+  await expect(consumptionCard.getByTestId("res-lens-compute")).toBeVisible();
+  await expect(consumptionCard.getByTestId("res-metric-usd")).toBeVisible();
+
+  // Switch submode from Flow to Fast-DAG -> 0px vertical jump on Consumption card and controls stay in Consumption card
+  const flowCurveBox = (await consumptionCard.boundingBox())!;
+  await page.getByTestId("res-submode-dag").click();
   await expect(page.getByTestId("res-dag-view")).toBeVisible();
+  await expect(page.locator(".res-topbar").getByTestId("res-lens-inference")).toHaveCount(0);
+  await expect(consumptionCard.getByTestId("res-lens-inference")).toBeVisible();
+  expect((await consumptionCard.boundingBox())!.y).toBe(flowCurveBox.y);
   await expect(page.getByTestId("res-dag-row-b-shard-1")).toContainText("Proof Shard 01");
   await expect(page.getByTestId("res-dag-row-b-shard-1")).toContainText("2×");
 
@@ -471,17 +514,19 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
   expect((await cardHead.boundingBox())!.height).toBe(dagHeadBoxBefore.height);
   expect((await page.getByTestId("res-dag-view").boundingBox())!.y).toBe(dagBoxBefore.y);
 
-  // Switch submode to 3-column Subagent Flow and back -> 0px vertical jump on Consumption card
-  const dagCurveBox = (await consumptionCard.boundingBox())!;
+  // Switch back to Flow -> 0px vertical jump on Consumption card
   await page.getByTestId("res-submode-flow").click();
   await expect(page.getByTestId("res-sankey-svg")).toBeVisible();
-  expect((await consumptionCard.boundingBox())!.y).toBe(dagCurveBox.y);
-  await page.getByTestId("res-submode-dag").click();
-  await expect(page.getByTestId("res-dag-view")).toBeVisible();
-  expect((await consumptionCard.boundingBox())!.y).toBe(dagCurveBox.y);
+  await expect(page.locator(".res-topbar").getByTestId("res-lens-inference")).toHaveCount(0);
+  await expect(consumptionCard.getByTestId("res-lens-inference")).toBeVisible();
+  expect((await consumptionCard.boundingBox())!.y).toBe(flowCurveBox.y);
 
-  // Navigate back to Fleet
-  await page.getByTestId("res-back-fleet").click();
+  // Open Transcript from Fast-DAG -> mission page header must NOT contain a Resources icon button
+  await page.getByTestId("res-open-transcript").click();
+  await expect(page.getByTestId("tb-mission-resources")).toHaveCount(0);
+
+  // Resources remains accessible from the sidebar Resources tab
+  await page.getByTestId("sb-resources").click();
   await expect(page.getByTestId("res-sankey-svg")).toBeVisible();
 });
 
@@ -739,13 +784,11 @@ test("Resources page handles dense 30+ mission fleet and 500-span mission Flow c
   const boatLink = page.getByTestId(`res-link-boat:xlarge-${bigMissionId}`);
   await expect(boatLink).toHaveAttribute("stroke-width", "1.1");
 
-  // Drill into Fast-DAG -> switch to 3-col Flow and assert clean capped layout with zero overlapping labels
+  // Fleet mode must NOT show a top-bar Fast-DAG jump button when no mission is selected;
+  // clicking the specific mission node in the Sankey diagram opens per-mission Flow by default.
   await page.getByTestId("res-lens-inference").click();
-  await page.getByTestId("res-fast-dag-jump").click();
-  await expect(page.getByTestId("res-dag-view")).toBeVisible();
-  const dagScrollBox = (await page.getByTestId("res-dag-view").boundingBox())!;
-  expect(Math.abs(dagScrollBox.height - (cardMainBox.height - 38))).toBeLessThanOrEqual(3);
-  await page.getByTestId("res-submode-flow").click();
+  await expect(page.getByTestId("res-fast-dag-jump")).toHaveCount(0);
+  await page.getByTestId(`res-node-${bigMissionId}`).click();
   await expect(page.getByTestId("res-sankey-svg")).toBeVisible();
 
   const flowNodeCount = await page.locator(".res-sankey-node-group").count();
@@ -761,4 +804,10 @@ test("Resources page handles dense 30+ mission fleet and 500-span mission Flow c
     expect(b.x).toBeGreaterThanOrEqual(flowSvgBox.x - 2);
     expect(b.x + b.width).toBeLessThanOrEqual(flowSvgBox.x + flowSvgBox.width + 2);
   }
+
+  // Switching to Fast-DAG fills `.res-card-main`'s available body height cleanly
+  await page.getByTestId("res-submode-dag").click();
+  await expect(page.getByTestId("res-dag-view")).toBeVisible();
+  const dagScrollBox = (await page.getByTestId("res-dag-view").boundingBox())!;
+  expect(Math.abs(dagScrollBox.height - (cardMainBox.height - 38))).toBeLessThanOrEqual(3);
 });

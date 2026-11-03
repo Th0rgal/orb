@@ -647,6 +647,7 @@ fun OrbResourcesSettingsPage(
     var range by remember { mutableStateOf("6h") }
     var horizon by remember { mutableStateOf("6h") }
     var selectedMissionId by remember { mutableStateOf<String?>(null) }
+    var submode by remember { mutableStateOf("flow") }
 
     var overview by remember { mutableStateOf<OrbDict?>(null) }
     var detail by remember { mutableStateOf<OrbDict?>(null) }
@@ -707,7 +708,7 @@ fun OrbResourcesSettingsPage(
                 text = if (selectedMissionId == null) {
                     "Resources"
                 } else {
-                    OrbJSON.str(OrbJSON.dict(detail?.get("mission")), "title")?.ifEmpty { null } ?: "Mission Fast-DAG"
+                    OrbJSON.str(OrbJSON.dict(detail?.get("mission")), "title")?.ifEmpty { null } ?: "Mission Resources"
                 },
                 color = Color.White,
                 fontSize = 17.sp,
@@ -747,41 +748,61 @@ fun OrbResourcesSettingsPage(
             ) {
                 error?.let { Text(it, color = OrbStyle.warning, fontSize = 12.sp) }
 
-                // Top Lens + Unit [vCPU / B tok/h | $] Toggle Row
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    SegmentedPillRow(
-                        options = listOf(
-                            OrbResourcesModel.Lens.Inference to "Inference",
-                            OrbResourcesModel.Lens.Compute to "Compute",
-                        ),
-                        selected = lens,
-                        onSelect = { lens = it },
-                        modifier = Modifier.weight(1f),
-                    )
-                    SegmentedPillRow(
-                        options = listOf(
-                            OrbResourcesModel.Metric.Raw to if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h",
-                            OrbResourcesModel.Metric.Usd to "$",
-                        ),
-                        selected = metric,
-                        onSelect = { metric = it },
-                        modifier = Modifier.width(116.dp),
-                    )
-                }
-
                 if (selectedMissionId != null) {
-                    MissionFastDagCard(detail = detail, lens = lens, metric = metric)
+                    SegmentedPillRow(
+                        options = listOf(
+                            "flow" to "Flow",
+                            "dag" to "Fast-DAG",
+                        ),
+                        selected = submode,
+                        onSelect = { submode = it },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (submode == "flow") {
+                        MissionFlowCard(
+                            detail = detail,
+                            lens = lens,
+                            metric = metric,
+                        )
+                    } else {
+                        MissionFastDagCard(detail = detail)
+                    }
                 } else {
+                    // Top Lens + Unit [vCPU / B tok/h | $] Toggle Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        SegmentedPillRow(
+                            options = listOf(
+                                OrbResourcesModel.Lens.Inference to "Inference",
+                                OrbResourcesModel.Lens.Compute to "Compute",
+                            ),
+                            selected = lens,
+                            onSelect = { lens = it },
+                            modifier = Modifier.weight(1f),
+                        )
+                        SegmentedPillRow(
+                            options = listOf(
+                                OrbResourcesModel.Metric.Raw to if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h",
+                                OrbResourcesModel.Metric.Usd to "$",
+                            ),
+                            selected = metric,
+                            onSelect = { metric = it },
+                            modifier = Modifier.width(116.dp),
+                        )
+                    }
+
                     FleetSankeyCard(
                         overview = overview,
                         lens = lens,
                         metric = metric,
                         range = range,
-                        onSelectMission = { selectedMissionId = it },
+                        onSelectMission = {
+                            submode = "flow"
+                            selectedMissionId = it
+                        },
                     )
                 }
 
@@ -791,6 +812,8 @@ fun OrbResourcesSettingsPage(
                     isMission = selectedMissionId != null,
                     lens = lens,
                     metric = metric,
+                    onSelectLens = { lens = it },
+                    onSelectMetric = { metric = it },
                 )
             }
         }
@@ -1155,7 +1178,7 @@ private fun FleetSankeyCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        "${OrbResourcesModel.formatLargeNumber((OrbJSON.int(m, "subagent_total") ?: 1).toDouble())} spans · tap for Fast-DAG",
+                        "${OrbResourcesModel.formatLargeNumber((OrbJSON.int(m, "subagent_total") ?: 1).toDouble())} spans · tap for Flow",
                         color = OrbStyle.textSecondary,
                         fontSize = 11.sp,
                     )
@@ -1172,10 +1195,242 @@ private fun FleetSankeyCard(
 }
 
 @Composable
-private fun MissionFastDagCard(
+private fun MissionFlowCard(
     detail: OrbDict?,
     lens: OrbResourcesModel.Lens,
     metric: OrbResourcesModel.Metric,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(OrbStyle.surface)
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (detail == null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(190.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.White.copy(alpha = 0.04f)),
+            )
+            return@Column
+        }
+
+        val mission = OrbJSON.dict(detail["mission"]) ?: emptyMap()
+        val flow = OrbJSON.dict(detail["flow"]) ?: emptyMap()
+        val etaSecs = OrbJSON.double(mission, "eta_remaining_secs")
+        val elapsedSecs = OrbJSON.double(mission, "elapsed_secs")
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = if (lens == OrbResourcesModel.Lens.Compute) {
+                    "Machines → Tracks → Subagents"
+                } else {
+                    "Pools → Tracks → Subagents"
+                },
+                color = OrbStyle.textSecondary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            val stamp = if (etaSecs != null && etaSecs > 0.0) {
+                "ETA ~${OrbResourcesModel.formatDurationCompact(etaSecs)}"
+            } else if (elapsedSecs != null) {
+                "${OrbResourcesModel.formatDurationCompact(elapsedSecs)} elapsed"
+            } else {
+                ""
+            }
+            if (stamp.isNotEmpty()) {
+                Text(
+                    text = stamp,
+                    color = OrbStyle.textSecondary,
+                    fontSize = 11.5.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        }
+
+        val inputNodes = mutableListOf<OrbResourcesModel.SankeyInputNode>()
+        val inputLinks = mutableListOf<OrbResourcesModel.SankeyInputLink>()
+
+        val inputs = OrbJSON.dictList(flow["inputs"]).filter { OrbJSON.str(it, "kind") == lens.id }
+        inputs.forEachIndexed { idx, inp ->
+            inputNodes.add(
+                OrbResourcesModel.SankeyInputNode(
+                    id = OrbJSON.str(inp, "id") ?: "inp-$idx",
+                    column = 0,
+                    label = OrbJSON.str(inp, "label") ?: "Source",
+                    sub = OrbJSON.str(inp, "sub") ?: "",
+                    colorHex = RESOURCES_PALETTE[idx % RESOURCES_PALETTE.size],
+                    fallbackValue = OrbJSON.double(inp, "weight") ?: 0.0,
+                    fallbackUsd = OrbJSON.double(inp, "est_usd_per_h") ?: 0.0,
+                ),
+            )
+        }
+
+        val allTracks = OrbJSON.dictList(flow["tracks"])
+        val tracks = allTracks.take(8)
+        val visibleTrackIds = tracks.mapNotNull { OrbJSON.str(it, "id") }.toSet()
+        tracks.forEachIndexed { idx, trk ->
+            inputNodes.add(
+                OrbResourcesModel.SankeyInputNode(
+                    id = OrbJSON.str(trk, "id") ?: "trk-$idx",
+                    column = 1,
+                    label = OrbJSON.str(trk, "label") ?: "Track",
+                    sub = OrbJSON.str(trk, "sub") ?: "",
+                    colorHex = RESOURCES_PALETTE[(idx + 1) % RESOURCES_PALETTE.size],
+                ),
+            )
+        }
+        val overflowTrackCount = (allTracks.size - tracks.size).coerceAtLeast(0)
+        val tailTrackId = "track:__other__"
+        if (overflowTrackCount > 0) {
+            inputNodes.add(
+                OrbResourcesModel.SankeyInputNode(
+                    id = tailTrackId,
+                    column = 1,
+                    label = "+$overflowTrackCount tracks",
+                    sub = "grouped",
+                    colorHex = "#6b7280",
+                ),
+            )
+        }
+
+        val allSubs = OrbJSON.dictList(flow["subagents"])
+        val subs = allSubs.take(9)
+        val visibleSubIds = subs.mapNotNull { OrbJSON.str(it, "id") }.toSet()
+        subs.forEachIndexed { idx, sub ->
+            inputNodes.add(
+                OrbResourcesModel.SankeyInputNode(
+                    id = OrbJSON.str(sub, "id") ?: "sub-$idx",
+                    column = 2,
+                    label = OrbJSON.str(sub, "label") ?: "Subagent",
+                    sub = OrbJSON.str(sub, "role") ?: "",
+                    colorHex = RESOURCES_PALETTE[(idx + 2) % RESOURCES_PALETTE.size],
+                    missionId = OrbJSON.str(sub, "mission_id")?.ifEmpty { null },
+                    fallbackValue = if (lens == OrbResourcesModel.Lens.Compute) {
+                        OrbJSON.double(sub, "vcpu") ?: 0.0
+                    } else {
+                        OrbJSON.double(sub, "b_tok_per_h") ?: 0.0
+                    },
+                    fallbackUsd = if (lens == OrbResourcesModel.Lens.Compute) {
+                        OrbJSON.double(sub, "compute_usd_per_h") ?: 0.0
+                    } else {
+                        OrbJSON.double(sub, "inference_usd_per_h") ?: 0.0
+                    },
+                ),
+            )
+        }
+        val overflowSubCount = (allSubs.size - subs.size).coerceAtLeast(0)
+        val tailSubId = "sub:__other__"
+        if (overflowSubCount > 0) {
+            inputNodes.add(
+                OrbResourcesModel.SankeyInputNode(
+                    id = tailSubId,
+                    column = 2,
+                    label = "+$overflowSubCount spans",
+                    sub = "grouped",
+                    colorHex = "#6b7280",
+                ),
+            )
+        }
+
+        OrbJSON.dictList(flow["input_to_track"])
+            .filter { OrbJSON.str(it, "kind") == lens.id }
+            .forEachIndexed { idx, e ->
+                val rawTgt = OrbJSON.str(e, "target_id") ?: ""
+                val tgt = if (visibleTrackIds.contains(rawTgt)) rawTgt else tailTrackId
+                inputLinks.add(
+                    OrbResourcesModel.SankeyInputLink(
+                        id = "i2t-$idx",
+                        source = OrbJSON.str(e, "source_id") ?: "",
+                        target = tgt,
+                        value = OrbJSON.double(e, "weight") ?: 0.0,
+                        estUsdPerH = OrbJSON.double(e, "est_usd_per_h") ?: 0.0,
+                        degraded = e["degraded"] == true,
+                    ),
+                )
+            }
+        OrbJSON.dictList(flow["track_to_subagent"])
+            .filter { OrbJSON.str(it, "kind") == lens.id }
+            .forEachIndexed { idx, e ->
+                val rawSrc = OrbJSON.str(e, "source_id") ?: ""
+                val rawTgt = OrbJSON.str(e, "target_id") ?: ""
+                val src = if (visibleTrackIds.contains(rawSrc)) rawSrc else tailTrackId
+                val tgt = if (visibleSubIds.contains(rawTgt)) rawTgt else tailSubId
+                inputLinks.add(
+                    OrbResourcesModel.SankeyInputLink(
+                        id = "t2s-$idx",
+                        source = src,
+                        target = tgt,
+                        value = OrbJSON.double(e, "weight") ?: 0.0,
+                        estUsdPerH = OrbJSON.double(e, "est_usd_per_h") ?: 0.0,
+                        degraded = e["degraded"] == true,
+                    ),
+                )
+            }
+
+        if (inputNodes.isEmpty()) {
+            Text(
+                text = "No ${lens.id} flow recorded in this window.",
+                color = OrbStyle.textSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(vertical = 12.dp),
+            )
+        } else {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(210.dp),
+            ) {
+                val layout = OrbResourcesModel.computeSankeyLayout(
+                    inputNodes = inputNodes,
+                    inputLinks = inputLinks,
+                    width = size.width.toDouble(),
+                    height = size.height.toDouble(),
+                    metric = metric,
+                    marginX = 24.0,
+                    marginY = 8.0,
+                )
+                for (link in layout.links) {
+                    val mx = ((link.sourceX + link.targetX) / 2.0).toFloat()
+                    val syTop = (link.y0 - link.sourceWidth / 2.0).toFloat()
+                    val syBot = (link.y0 + link.sourceWidth / 2.0).toFloat()
+                    val tyTop = (link.y1 - link.width / 2.0).toFloat()
+                    val tyBot = (link.y1 + link.width / 2.0).toFloat()
+                    val path = Path().apply {
+                        moveTo(link.sourceX.toFloat(), syTop)
+                        cubicTo(mx, syTop, mx, tyTop, link.targetX.toFloat(), tyTop)
+                        lineTo(link.targetX.toFloat(), tyBot)
+                        cubicTo(mx, tyBot, mx, syBot, link.sourceX.toFloat(), syBot)
+                        close()
+                    }
+                    val col = OrbResourcesModel.parseColor(link.colorHex)
+                    drawPath(path = path, color = col.copy(alpha = 0.36f))
+                }
+                for (node in layout.nodes) {
+                    drawRoundRect(
+                        color = OrbResourcesModel.parseColor(node.colorHex),
+                        topLeft = Offset(node.x0.toFloat(), node.y0.toFloat()),
+                        size = Size((node.x1 - node.x0).toFloat(), max(4.0, node.y1 - node.y0).toFloat()),
+                        cornerRadius = CornerRadius(4f, 4f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MissionFastDagCard(
+    detail: OrbDict?,
 ) {
     Column(
         modifier = Modifier
@@ -1219,9 +1474,9 @@ private fun MissionFastDagCard(
 
         Text(
             text = if (laneCount > 0 && spanCount > laneCount) {
-                "Execution Fast-DAG · ${OrbResourcesModel.formatLargeNumber(laneCount.toDouble())} lanes · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
+                "Execution Fast-DAG · ${OrbResourcesModel.formatLargeNumber(laneCount.toDouble())} lanes · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} spans"
             } else {
-                "Subagent Execution Fast-DAG · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} spans (${if (metric == OrbResourcesModel.Metric.Usd) "$/h" else if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h"})"
+                "Subagent Execution Fast-DAG · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} spans"
             },
             color = OrbStyle.textSecondary,
             fontSize = 11.sp,
@@ -1323,6 +1578,8 @@ private fun ConsumptionCurveCard(
     isMission: Boolean,
     lens: OrbResourcesModel.Lens,
     metric: OrbResourcesModel.Metric,
+    onSelectLens: (OrbResourcesModel.Lens) -> Unit = {},
+    onSelectMetric: (OrbResourcesModel.Metric) -> Unit = {},
 ) {
     val values: List<Double> = remember(overview, detail, isMission, lens, metric) {
         if (isMission) {
@@ -1397,6 +1654,32 @@ private fun ConsumptionCurveCard(
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        if (isMission) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SegmentedPillRow(
+                    options = listOf(
+                        OrbResourcesModel.Lens.Inference to "Inference",
+                        OrbResourcesModel.Lens.Compute to "Compute",
+                    ),
+                    selected = lens,
+                    onSelect = onSelectLens,
+                    modifier = Modifier.weight(1f),
+                )
+                SegmentedPillRow(
+                    options = listOf(
+                        OrbResourcesModel.Metric.Raw to if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h",
+                        OrbResourcesModel.Metric.Usd to "$",
+                    ),
+                    selected = metric,
+                    onSelect = onSelectMetric,
+                    modifier = Modifier.width(116.dp),
+                )
+            }
+        }
         val peak = values.maxOrNull() ?: 0.0
         Row(
             modifier = Modifier.fillMaxWidth(),

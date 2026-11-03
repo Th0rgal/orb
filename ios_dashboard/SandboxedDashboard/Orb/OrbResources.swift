@@ -573,11 +573,17 @@ enum OrbResourcesModel {
 
 struct OrbResourcesView: View {
     @Environment(\.scenePhase) private var scenePhase
+    enum MissionSubmode: String {
+        case flow
+        case dag
+    }
+
     @State private var client = OrbSettingsClient()
     @State private var lens: OrbResourcesModel.Lens = .inference
     @State private var metric: OrbResourcesModel.Metric = .raw
     @State private var range: String = "6h"
     @State private var horizon: String = "6h"
+    @State private var submode: MissionSubmode = .flow
     @State private var selectedMissionId: String?
     @State private var openedTranscriptMissionId: String?
     @State private var overview: OrbJSON?
@@ -602,26 +608,36 @@ struct OrbResourcesView: View {
                                     .font(.caption.weight(.semibold))
                             }
                             .buttonStyle(.bordered)
-                        }
 
-                        Picker("Lens", selection: $lens) {
-                            Text("Inference").tag(OrbResourcesModel.Lens.inference)
-                            Text("Compute").tag(OrbResourcesModel.Lens.compute)
-                        }
-                        .pickerStyle(.segmented)
+                            Picker("View", selection: $submode) {
+                                Text("Flow").tag(MissionSubmode.flow)
+                                Text("Fast-DAG").tag(MissionSubmode.dag)
+                            }
+                            .pickerStyle(.segmented)
+                        } else {
+                            Picker("Lens", selection: $lens) {
+                                Text("Inference").tag(OrbResourcesModel.Lens.inference)
+                                Text("Compute").tag(OrbResourcesModel.Lens.compute)
+                            }
+                            .pickerStyle(.segmented)
 
-                        Picker("Unit", selection: $metric) {
-                            Text(lens == .compute ? "vCPU" : "B tok/h").tag(OrbResourcesModel.Metric.raw)
-                            Text("$").tag(OrbResourcesModel.Metric.usd)
+                            Picker("Unit", selection: $metric) {
+                                Text(lens == .compute ? "vCPU" : "B tok/h").tag(OrbResourcesModel.Metric.raw)
+                                Text("$").tag(OrbResourcesModel.Metric.usd)
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(maxWidth: 118)
                         }
-                        .pickerStyle(.segmented)
-                        .frame(maxWidth: 118)
                     }
                     .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
                 }
 
                 if let mid = selectedMissionId {
-                    missionDagSection(missionId: mid)
+                    if submode == .flow {
+                        missionFlowSection(missionId: mid)
+                    } else {
+                        missionDagSection(missionId: mid)
+                    }
                 } else {
                     fleetFlowSection
                 }
@@ -753,6 +769,7 @@ struct OrbResourcesView: View {
                         ? (metric == .usd ? (m["compute_usd_per_h"].doubleValue ?? 0) : (m["vcpu"].doubleValue ?? 0))
                         : (metric == .usd ? (m["inference_usd_per_h"].doubleValue ?? 0) : (m["b_tok_per_h"].doubleValue ?? 0))
                     Button {
+                        submode = .flow
                         selectedMissionId = mid
                     } label: {
                         HStack {
@@ -760,7 +777,7 @@ struct OrbResourcesView: View {
                                 Text(m["title"].text.isEmpty ? String(mid.prefix(8)) : m["title"].text)
                                     .font(.subheadline.weight(.medium))
                                     .foregroundStyle(.primary)
-                                Text("\(OrbResourcesModel.formatLargeNumber(m["subagent_total"].doubleValue ?? 1)) spans · tap for Fast-DAG")
+                                Text("\(OrbResourcesModel.formatLargeNumber(m["subagent_total"].doubleValue ?? 1)) spans · tap for Flow")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -880,8 +897,103 @@ struct OrbResourcesView: View {
         }
     }
 
+    @ViewBuilder private func missionFlowSection(missionId: String) -> some View {
+        Section {
+            if let det = detail {
+                HStack {
+                    if let eta = det["mission"]["eta_remaining_secs"].doubleValue, eta > 0 {
+                        Text("ETA ~\(OrbResourcesModel.formatDurationCompact(eta))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if let el = det["mission"]["elapsed_secs"].doubleValue {
+                        Text("\(OrbResourcesModel.formatDurationCompact(el)) elapsed")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Transcript ↗") {
+                        openedTranscriptMissionId = missionId
+                    }
+                    .font(.caption.weight(.medium))
+                }
+
+                let sankeyInput = buildMissionFlowSankey(det)
+                if sankeyInput.nodes.isEmpty {
+                    Text("No \(lens.rawValue) flow recorded in this window.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 16)
+                } else {
+                    GeometryReader { geo in
+                        let layout = OrbResourcesModel.computeSankeyLayout(
+                            nodes: sankeyInput.nodes,
+                            links: sankeyInput.links,
+                            width: max(260, geo.size.width),
+                            height: 240,
+                            metric: metric,
+                            marginX: 74
+                        )
+                        Canvas { ctx, _ in
+                            for link in layout.links {
+                                var p = Path()
+                                let mx = (link.sourceX + link.targetX) / 2
+                                let syTop = link.y0 - link.sourceWidth / 2
+                                let syBot = link.y0 + link.sourceWidth / 2
+                                let tyTop = link.y1 - link.width / 2
+                                let tyBot = link.y1 + link.width / 2
+                                p.move(to: CGPoint(x: link.sourceX, y: syTop))
+                                p.addCurve(to: CGPoint(x: link.targetX, y: tyTop), control1: CGPoint(x: mx, y: syTop), control2: CGPoint(x: mx, y: tyTop))
+                                p.addLine(to: CGPoint(x: link.targetX, y: tyBot))
+                                p.addCurve(to: CGPoint(x: link.sourceX, y: syBot), control1: CGPoint(x: mx, y: tyBot), control2: CGPoint(x: mx, y: syBot))
+                                p.closeSubpath()
+                                let col = OrbResourcesModel.hexColor(link.colorHex)
+                                ctx.fill(p, with: .color(col.opacity(0.34)))
+                            }
+                            for node in layout.nodes {
+                                let rect = CGRect(x: node.x0, y: node.y0, width: node.x1 - node.x0, height: max(4, node.y1 - node.y0))
+                                ctx.fill(Path(roundedRect: rect, cornerRadius: 3), with: .color(OrbResourcesModel.hexColor(node.colorHex)))
+                                if node.showLabel {
+                                    let isLeft = node.column == 0
+                                    let isRight = node.column == 2
+                                    let tx = isLeft ? node.x0 - 5 : (isRight ? node.x1 + 5 : rect.midX)
+                                    let anchor: UnitPoint = isLeft ? .trailing : (isRight ? .leading : .center)
+                                    let label = Text(node.label.prefix(12)).font(.caption2.weight(.medium))
+                                    ctx.draw(label, at: CGPoint(x: tx, y: rect.midY), anchor: anchor)
+                                }
+                            }
+                        }
+                    }
+                    .frame(height: 240)
+                }
+            } else {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(.quaternary)
+                    .frame(height: 200)
+                    .orbShimmer(active: true)
+            }
+        } header: {
+            Text(lens == .compute ? "Machines → Tracks → Subagents" : "Pools → Tracks → Subagents")
+        }
+    }
+
     @ViewBuilder private var consumptionSection: some View {
         Section {
+            if selectedMissionId != nil {
+                HStack(spacing: 8) {
+                    Picker("Lens", selection: $lens) {
+                        Text("Inference").tag(OrbResourcesModel.Lens.inference)
+                        Text("Compute").tag(OrbResourcesModel.Lens.compute)
+                    }
+                    .pickerStyle(.segmented)
+
+                    Picker("Unit", selection: $metric) {
+                        Text(lens == .compute ? "vCPU" : "B tok/h").tag(OrbResourcesModel.Metric.raw)
+                        Text("$").tag(OrbResourcesModel.Metric.usd)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 118)
+                }
+            }
             let values = currentSeriesValues()
             if values.isEmpty {
                 RoundedRectangle(cornerRadius: 8)
@@ -1089,6 +1201,86 @@ struct OrbResourcesView: View {
                 value: agg.val,
                 estUsdPerH: agg.usd,
                 degraded: agg.deg
+            ))
+        }
+        return (nodes, links)
+    }
+
+    private func buildMissionFlowSankey(_ det: OrbJSON) -> (nodes: [OrbResourcesModel.SankeyInputNode], links: [OrbResourcesModel.SankeyInputLink]) {
+        let flow = det["flow"]
+        var nodes: [OrbResourcesModel.SankeyInputNode] = []
+        var links: [OrbResourcesModel.SankeyInputLink] = []
+
+        for (idx, inp) in flow["inputs"].items.filter({ $0["kind"].text == lens.rawValue }).enumerated() {
+            nodes.append(.init(
+                id: inp["id"].text,
+                column: 0,
+                label: inp["label"].text,
+                sub: inp["sub"].text,
+                colorHex: Self.palette[idx % Self.palette.count],
+                fallbackValue: inp["weight"].doubleValue ?? 0,
+                fallbackUsd: inp["est_usd_per_h"].doubleValue ?? 0
+            ))
+        }
+
+        let tracks = Array(flow["tracks"].items.prefix(8))
+        let visibleTrackIds = Set(tracks.map { $0["id"].text })
+        for (idx, trk) in tracks.enumerated() {
+            nodes.append(.init(
+                id: trk["id"].text,
+                column: 1,
+                label: trk["label"].text,
+                sub: trk["sub"].text,
+                colorHex: Self.palette[(idx + 1) % Self.palette.count]
+            ))
+        }
+        let overflowTrackCount = max(0, flow["tracks"].items.count - tracks.count)
+        let tailTrackId = "track:__other__"
+        if overflowTrackCount > 0 {
+            nodes.append(.init(id: tailTrackId, column: 1, label: "+\(overflowTrackCount) tracks", sub: "grouped", colorHex: "#6b7280"))
+        }
+
+        let subs = Array(flow["subagents"].items.prefix(9))
+        let visibleSubIds = Set(subs.map { $0["id"].text })
+        for (idx, sub) in subs.enumerated() {
+            nodes.append(.init(
+                id: sub["id"].text,
+                column: 2,
+                label: sub["label"].text,
+                sub: sub["role"].text,
+                colorHex: Self.palette[(idx + 2) % Self.palette.count],
+                missionId: sub["mission_id"].text.isEmpty ? nil : sub["mission_id"].text,
+                fallbackValue: lens == .compute ? (sub["vcpu"].doubleValue ?? 0) : (sub["b_tok_per_h"].doubleValue ?? 0),
+                fallbackUsd: lens == .compute ? (sub["compute_usd_per_h"].doubleValue ?? 0) : (sub["inference_usd_per_h"].doubleValue ?? 0)
+            ))
+        }
+        let overflowSubCount = max(0, flow["subagents"].items.count - subs.count)
+        let tailSubId = "sub:__other__"
+        if overflowSubCount > 0 {
+            nodes.append(.init(id: tailSubId, column: 2, label: "+\(overflowSubCount) spans", sub: "grouped", colorHex: "#6b7280"))
+        }
+
+        for (idx, e) in flow["input_to_track"].items.filter({ $0["kind"].text == lens.rawValue }).enumerated() {
+            let tgt = visibleTrackIds.contains(e["target_id"].text) ? e["target_id"].text : tailTrackId
+            links.append(.init(
+                id: "i2t-\(idx)",
+                source: e["source_id"].text,
+                target: tgt,
+                value: e["weight"].doubleValue ?? 0,
+                estUsdPerH: e["est_usd_per_h"].doubleValue ?? 0,
+                degraded: e["degraded"].flag
+            ))
+        }
+        for (idx, e) in flow["track_to_subagent"].items.filter({ $0["kind"].text == lens.rawValue }).enumerated() {
+            let src = visibleTrackIds.contains(e["source_id"].text) ? e["source_id"].text : tailTrackId
+            let tgt = visibleSubIds.contains(e["target_id"].text) ? e["target_id"].text : tailSubId
+            links.append(.init(
+                id: "t2s-\(idx)",
+                source: src,
+                target: tgt,
+                value: e["weight"].doubleValue ?? 0,
+                estUsdPerH: e["est_usd_per_h"].doubleValue ?? 0,
+                degraded: e["degraded"].flag
             ))
         }
         return (nodes, links)
