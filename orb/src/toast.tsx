@@ -195,10 +195,18 @@ export function Toaster() {
       .sort((a, b) => b.bottom - a.bottom)[0];
     // The conversation's own composer wins over side-panel ones (/btw, files).
     const rect = visible(".dock .composer") ?? visible(".composer");
-    if (!rect) return setPos({ bottom: 20, left: "50%" });
-    // Centre on the composer's column, as wide as it; lift above it only when it sits at the bottom.
-    const docked = window.innerHeight - rect.bottom < 120;
-    setPos({ bottom: docked ? window.innerHeight - rect.top + 12 : 20, left: `${rect.left + rect.width / 2}px`, width: rect.width });
+    if (rect) {
+      // Centre on the composer's column, as wide as it; lift above it only when it sits at the bottom.
+      const docked = window.innerHeight - rect.bottom < 120;
+      return setPos({ bottom: docked ? window.innerHeight - rect.top + 12 : 20, left: `${rect.left + rect.width / 2}px`, width: rect.width });
+    }
+    const col = visible(".main .s-inner");
+    const main = col ?? visible(".main");
+    if (!main) return setPos({ bottom: 20, left: "50%" });
+    // Settings .s-inner carries 20px horizontal padding; full-width .main views inset 24px each side.
+    const pad = col ? 40 : 48;
+    const width = Math.min(748, Math.max(0, main.width - pad));
+    setPos({ bottom: 20, left: `${main.left + main.width / 2}px`, width: width || undefined });
   };
   // Views swap and composers grow while a toast is up; re-measure cheaply
   // only while one is visible.

@@ -100,6 +100,7 @@ function BunkerModeCard() {
       } catch (e) {
         if (e instanceof ApprovalCancelled) return;
         notify({
+          key: "approval-error:unbunker",
           kind: "error",
           title: "Could not exit Bunker Mode",
           message: e instanceof Error ? e.message : String(e),
@@ -145,6 +146,7 @@ function act(items: ApprovalItem[], approve: boolean) {
       void getApprovalQueue().then(({ items: fresh }) => syncApprovalQueue(fresh, openReview)).catch(() => {});
       if (e instanceof ApprovalCancelled) return;
       notify({
+        key: `approval-error:${approve ? "approve" : "deny"}`,
         kind: "error",
         title: approve ? "Could not approve" : "Could not deny",
         message: e instanceof Error ? e.message : String(e),
