@@ -55,7 +55,7 @@ setting() { sed -nE "s/^[[:space:]]*$1:[[:space:]]*\"?([0-9.]+)\"?.*/\\1/p" "${I
 BASE="$(setting CURRENT_PROJECT_VERSION)"
 VERSION="$(setting MARKETING_VERSION)"
 [[ -n "${BASE}" && -n "${VERSION}" ]] || { echo "version settings missing from project.yml" >&2; exit 1; }
-BUILD="${BASE%%.*}.$(date -u +%j%H%M)"
+BUILD="${ASC_BUILD_NUMBER:-${BASE%%.*}.$(date -u +%j%H%M)}"
 echo "=== Orb ${VERSION} (${BUILD}) ==="
 
 xcodebuild archive \
