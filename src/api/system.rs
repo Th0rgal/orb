@@ -7044,6 +7044,30 @@ mod tests {
         assert!(is_production_orb_service("assistant-mcp.service"));
         assert!(!is_production_orb_service("orb-core-dev.service"));
         assert!(!is_production_orb_service("assistant-mcp-dev.service"));
+        assert!(!crate::orb_spec::deploy_gate_step(
+            crate::orb_spec::DeployGateInput {
+                is_prod_service: is_production_orb_service("orb-core.service"),
+                service_matches: true,
+                calling_on_self: false,
+                debounce_ok: true,
+                force_flag: false,
+                biometric_approved: false,
+                bunker_state: crate::orb_spec::BunkerState::Normal,
+                live_writers: 0,
+            }
+        ));
+        assert!(crate::orb_spec::deploy_gate_step(
+            crate::orb_spec::DeployGateInput {
+                is_prod_service: is_production_orb_service("orb-core-dev.service"),
+                service_matches: true,
+                calling_on_self: false,
+                debounce_ok: true,
+                force_flag: false,
+                biometric_approved: false,
+                bunker_state: crate::orb_spec::BunkerState::Normal,
+                live_writers: 0,
+            }
+        ));
     }
 
     use super::{
