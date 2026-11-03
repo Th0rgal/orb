@@ -978,7 +978,6 @@ async fn get_overview(
 
         let sublabel = match quota_rem {
             Some(pct) => format!("{}% left", pct.round() as i64),
-            None if p429 > 0 => format!("{p429}× 429"),
             None => "metered".to_string(),
         };
         let health = if quota_rem.is_some_and(|q| q <= 10.0) || p429 >= 5 {
@@ -1575,6 +1574,7 @@ async fn get_mission_resources(
     // Track `(class_id, start_s, end_s, vcpu, usd_per_h, owner_mid, degraded)` for Flow + Timeline
     let mut vm_intervals: Vec<(String, i64, i64, f64, f64, String, bool)> = Vec::new();
     let mut matched_vm_node_ids: HashSet<String> = HashSet::new();
+    let mut managed_class_by_node: HashMap<String, String> = HashMap::new();
     if let Some(manager) = state.managed() {
         let all_machines = manager.machines_snapshot().await;
         for m in all_machines {
@@ -1582,6 +1582,8 @@ async fn get_mission_resources(
             if !tenant_ok {
                 continue;
             }
+            let (class_id, class_lbl) = machine_class_for_managed(&m.provider, &m.size);
+            managed_class_by_node.insert(m.node_id.clone(), class_lbl.clone());
             let rj_match = remote_job_nodes.get(&m.node_id);
             let in_lineage = m.root_mission_id.as_deref() == Some(snap.root.id.as_str())
                 || m.owner_mission_id
@@ -1637,7 +1639,6 @@ async fn get_mission_resources(
                 "done"
             };
 
-            let (class_id, class_lbl) = machine_class_for_managed(&m.provider, &m.size);
             let owner_mid = m
                 .owner_mission_id
                 .as_deref()
@@ -1686,7 +1687,7 @@ async fn get_mission_resources(
                     id: format!("vm:{}", m.id),
                     mission_id: Some(owner_mid),
                     label: format!("{class_lbl} · {short_name} ({} vCPU)", m.cpu.max(1)),
-                    section: format!("{class_lbl} VMs"),
+                    section: class_lbl,
                     role: "vm".to_string(),
                     model: Some(format!("{} vCPU · {} GB", m.cpu.max(1), m.ram_gb)),
                     node_id: Some(m.node_id.clone()),
@@ -1764,7 +1765,7 @@ async fn get_mission_resources(
                     "worker".to_string()
                 }
             });
-        let section = normalize_dag_section(child.track.as_deref(), &role);
+        let flow_section = normalize_dag_section(child.track.as_deref(), &role);
 
         let raw_deps = if !child.depends_on.is_empty() {
             &child.depends_on
@@ -1815,6 +1816,27 @@ async fn get_mission_resources(
             .placement_node_id
             .clone()
             .or_else(|| child.remote_node_id.clone());
+        let role_lc = role.to_ascii_lowercase();
+        let dag_section =
+            if role_lc == "coordinator" || role_lc == "boss" || role_lc == "orchestrator" {
+                "Orchestrator".to_string()
+            } else if let Some(nid) = node_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != "core" && *s != "local")
+            {
+                if let Some(hw_lbl) = managed_class_by_node.get(nid) {
+                    hw_lbl.clone()
+                } else if nid.starts_with("managed-") {
+                    "Cloud VMs".to_string()
+                } else if nid.starts_with("spark") {
+                    "DGX Spark".to_string()
+                } else {
+                    "Static fleet".to_string()
+                }
+            } else {
+                flow_section.clone()
+            };
         let vcpu = if sum_vcpu > 0.0 {
             sum_vcpu / norm_comp_mins
         } else if state_norm == "active" {
@@ -1846,7 +1868,7 @@ async fn get_mission_resources(
             id: child.id.clone(),
             mission_id: Some(child.id.clone()),
             label: child.title.clone(),
-            section: section.clone(),
+            section: dag_section,
             role: role.clone(),
             model: model.clone(),
             node_id: node_id.clone(),
@@ -1866,7 +1888,7 @@ async fn get_mission_resources(
             id: child.id.clone(),
             mission_id: Some(child.id.clone()),
             native: false,
-            track_id: format!("track:{section}"),
+            track_id: format!("track:{flow_section}"),
             role,
             label: child.title.clone(),
             model,

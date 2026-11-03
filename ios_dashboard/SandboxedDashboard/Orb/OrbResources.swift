@@ -81,6 +81,7 @@ enum OrbResourcesModel {
         var label: String
         var section: String
         var role: String = "worker"
+        var nodeId: String?
         var startOffsetSecs: Double
         var durationSecs: Double
         var etaRemainingSecs: Double?
@@ -92,13 +93,72 @@ enum OrbResourcesModel {
         var inferenceUsdPerH: Double = 0
     }
 
-    struct DagRowLayout: Identifiable, Equatable {
-        var id: String { bar.id }
+    struct DagSpanLayout: Equatable {
         var bar: DagBarInput
+        var startFrac: Double
+        var endFrac: Double
+        var etaEndFrac: Double?
+    }
+
+    struct DagRowLayout: Identifiable, Equatable {
+        var id: String
+        var bar: DagBarInput
+        var spans: [DagSpanLayout]
+        var totalDurationSecs: Double
         var sectionHeader: String?
         var startFrac: Double
         var endFrac: Double
         var etaEndFrac: Double?
+    }
+
+    static func formatIntThousands(_ value: Double) -> String {
+        let n = max(0, Int64(value.isFinite ? value.rounded() : 0))
+        let digits = Array(String(n))
+        guard digits.count > 3 else { return String(n) }
+        var out: [Character] = []
+        out.reserveCapacity(digits.count + (digits.count - 1) / 3)
+        for (idx, ch) in digits.enumerated() {
+            if idx > 0 && (digits.count - idx) % 3 == 0 {
+                out.append(",")
+            }
+            out.append(ch)
+        }
+        return String(out)
+    }
+
+    static func formatLargeNumber(_ value: Double) -> String {
+        let safe = value.isFinite ? max(0, value) : 0
+        let rounded = Int64(safe.rounded())
+        if rounded >= 1_000_000 {
+            let m100 = Int64(((safe / 1_000_000.0) * 100.0).rounded())
+            if m100 >= 10_000 {
+                return "\(formatIntThousands(safe / 1_000_000.0))M"
+            }
+            if m100 >= 1_000 {
+                let m10 = Int64(((safe / 1_000_000.0) * 10.0).rounded())
+                return m10 % 10 == 0
+                    ? "\(m10 / 10)M"
+                    : String(format: "%.1fM", Double(m10) / 10.0)
+            }
+            if m100 % 100 == 0 { return "\(m100 / 100)M" }
+            if m100 % 10 == 0 { return String(format: "%.1fM", Double(m100) / 100.0) }
+            return String(format: "%.2fM", Double(m100) / 100.0)
+        }
+        if rounded >= 10_000 {
+            let k10 = Int64(((safe / 1_000.0) * 10.0).rounded())
+            if k10 >= 10_000 { return "1M" }
+            if k10 >= 1_000 {
+                let kInt = Int64((safe / 1_000.0).rounded())
+                return kInt >= 1_000 ? "1M" : "\(kInt)k"
+            }
+            return k10 % 10 == 0
+                ? "\(k10 / 10)k"
+                : String(format: "%.1fk", Double(k10) / 10.0)
+        }
+        if rounded >= 1_000 {
+            return formatIntThousands(Double(rounded))
+        }
+        return "\(rounded)"
     }
 
     static func formatResourceRate(
@@ -110,11 +170,11 @@ enum OrbResourcesModel {
         let safe = value.isFinite ? max(0, value) : 0
         if metric == .usd {
             if !withUnit {
-                if safe >= 100 { return "$\(Int(safe.rounded()))" }
+                if safe >= 100 { return "$\(formatLargeNumber(safe))" }
                 if safe >= 10 { return String(format: "$%.1f", safe) }
                 return String(format: "$%.2f", safe)
             }
-            if safe >= 100 { return "$\(Int(safe.rounded()))/h" }
+            if safe >= 100 { return "$\(formatLargeNumber(safe))/h" }
             if safe >= 10 { return String(format: "$%.1f/h", safe) }
             if safe >= 0.01 { return String(format: "$%.2f/h", safe) }
             if safe > 0 { return "<$0.01/h" }
@@ -125,7 +185,7 @@ enum OrbResourcesModel {
             let rounded1 = (safe * 10).rounded() / 10
             let num: String
             if safe >= 10 || abs(rounded1 - safe.rounded()) < 0.05 {
-                num = "\(Int(safe.rounded()))"
+                num = formatLargeNumber(safe)
             } else {
                 num = String(format: "%.1f", safe)
             }
@@ -344,22 +404,161 @@ enum OrbResourcesModel {
         )
     }
 
+    private static func stripVmSectionAffix(_ section: String) -> String {
+        let trimmed = section.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasSuffix(" VMs") {
+            let cut = String(trimmed.dropLast(4)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return cut.isEmpty ? section : cut
+        }
+        return trimmed.isEmpty ? section : trimmed
+    }
+
+    private static func normalizeDagBarsForLanes(_ bars: [DagBarInput]) -> [DagBarInput] {
+        var vmClassByNode: [String: String] = [:]
+        var nodesWithWorkers: Set<String> = []
+
+        for b in bars {
+            let nid = (b.nodeId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if nid.isEmpty { continue }
+            if b.role == "vm" {
+                vmClassByNode[nid] = stripVmSectionAffix(b.section)
+            } else {
+                nodesWithWorkers.insert(nid)
+            }
+        }
+
+        var out: [DagBarInput] = []
+        for b in bars {
+            let nid = (b.nodeId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if b.role == "vm" {
+                if !nid.isEmpty && nodesWithWorkers.contains(nid) {
+                    continue
+                }
+                var copy = b
+                if !nid.isEmpty { copy.section = stripVmSectionAffix(b.section) }
+                out.append(copy)
+                continue
+            }
+
+            var copy = b
+            let roleLc = b.role.lowercased()
+            if roleLc == "coordinator" || roleLc == "boss" || roleLc == "orchestrator" {
+                copy.section = b.section.isEmpty ? "Orchestrator" : b.section
+            } else if !nid.isEmpty, let hw = vmClassByNode[nid] {
+                copy.section = hw
+            } else if !nid.isEmpty, nid != "core", nid != "local" {
+                if nid.hasPrefix("managed-") {
+                    copy.section = b.section.contains("·") ? stripVmSectionAffix(b.section) : "Cloud VMs"
+                } else if nid.hasPrefix("spark") {
+                    copy.section = "DGX Spark"
+                } else {
+                    copy.section = "Static fleet"
+                }
+            }
+            out.append(copy)
+        }
+        return out
+    }
+
     static func layoutDagRows(_ bars: [DagBarInput], horizonSecs: Double) -> [DagRowLayout] {
         let safeH = max(60.0, horizonSecs)
-        var prevSection: String?
-        return bars.map { b in
-            let hdr: String? = (b.section != prevSection) ? b.section : nil
-            prevSection = b.section
-            let sFrac = min(1.0, max(0.0, b.startOffsetSecs / safeH))
-            let eFrac = min(1.0, max(sFrac + 0.01, (b.startOffsetSecs + max(30, b.durationSecs)) / safeH))
-            let etaFrac: Double?
-            if let eta = b.etaRemainingSecs, eta > 0, b.state == "active" {
-                etaFrac = min(1.0, max(eFrac, (b.startOffsetSecs + b.durationSecs + eta) / safeH))
-            } else {
-                etaFrac = nil
+        let normalized = normalizeDagBarsForLanes(bars)
+        var sectionOrder: [String] = []
+        var bySection: [String: [DagBarInput]] = [:]
+        for b in normalized {
+            if bySection[b.section] == nil {
+                sectionOrder.append(b.section)
+                bySection[b.section] = []
             }
-            return DagRowLayout(bar: b, sectionHeader: hdr, startFrac: sFrac, endFrac: eFrac, etaEndFrac: etaFrac)
+            bySection[b.section]?.append(b)
         }
+        if let orchIdx = sectionOrder.firstIndex(of: "Orchestrator"), orchIdx > 0 {
+            sectionOrder.remove(at: orchIdx)
+            sectionOrder.insert("Orchestrator", at: 0)
+        }
+
+        struct Lane {
+            var lastEndSecs: Double
+            var lastOccFrac: Double
+            var lastNodeId: String?
+            var spans: [DagSpanLayout]
+        }
+
+        var rows: [DagRowLayout] = []
+        for sec in sectionOrder {
+            let secBars = (bySection[sec] ?? []).sorted { a, b in
+                if a.startOffsetSecs != b.startOffsetSecs { return a.startOffsetSecs < b.startOffsetSecs }
+                if a.durationSecs != b.durationSecs { return a.durationSecs > b.durationSecs }
+                return a.id < b.id
+            }
+            var lanes: [Lane] = []
+            for b in secBars {
+                let dur = max(30.0, b.durationSecs)
+                let sFrac = min(1.0, max(0.0, b.startOffsetSecs / safeH))
+                let eFrac = min(1.0, max(sFrac + 0.008, (b.startOffsetSecs + dur) / safeH))
+                let etaFrac: Double?
+                if let eta = b.etaRemainingSecs, eta > 0, b.state == "active" {
+                    etaFrac = min(1.0, max(eFrac, (b.startOffsetSecs + b.durationSecs + eta) / safeH))
+                } else {
+                    etaFrac = nil
+                }
+                let occEndSecs = b.startOffsetSecs + dur + ((b.state == "active" && (b.etaRemainingSecs ?? 0) > 0) ? (b.etaRemainingSecs ?? 0) : 0)
+                let occEndFrac = etaFrac ?? eFrac
+                let nidRaw = (b.nodeId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let nid: String? = nidRaw.isEmpty ? nil : nidRaw
+
+                var chosen: Int?
+                if let nid {
+                    for i in lanes.indices {
+                        if lanes[i].lastNodeId == nid
+                            && lanes[i].lastEndSecs <= b.startOffsetSecs + 5.0
+                            && lanes[i].lastOccFrac <= sFrac + 0.002 {
+                            chosen = i
+                            break
+                        }
+                    }
+                }
+                if chosen == nil {
+                    for i in lanes.indices {
+                        if lanes[i].lastEndSecs <= b.startOffsetSecs + 5.0
+                            && lanes[i].lastOccFrac <= sFrac + 0.002 {
+                            chosen = i
+                            break
+                        }
+                    }
+                }
+
+                let span = DagSpanLayout(bar: b, startFrac: sFrac, endFrac: eFrac, etaEndFrac: etaFrac)
+                if let c = chosen {
+                    lanes[c].lastEndSecs = max(lanes[c].lastEndSecs, occEndSecs)
+                    lanes[c].lastOccFrac = max(lanes[c].lastOccFrac, occEndFrac)
+                    if let nid { lanes[c].lastNodeId = nid }
+                    lanes[c].spans.append(span)
+                } else {
+                    lanes.append(Lane(lastEndSecs: occEndSecs, lastOccFrac: occEndFrac, lastNodeId: nid, spans: [span]))
+                }
+            }
+
+            for (li, ln) in lanes.enumerated() {
+                let hdr: String? = (li == 0) ? sec : nil
+                let primarySpan = ln.spans.last(where: { $0.bar.state == "active" }) ?? ln.spans[ln.spans.count - 1]
+                let totalDur = ln.spans.reduce(0.0) { $0 + max(0.0, $1.bar.durationSecs) }
+                let rowId = ln.spans.count == 1 ? primarySpan.bar.id : "lane:\(sec):\(li):\(ln.spans[0].bar.id)"
+                rows.append(
+                    DagRowLayout(
+                        id: rowId,
+                        bar: primarySpan.bar,
+                        spans: ln.spans,
+                        totalDurationSecs: totalDur,
+                        sectionHeader: hdr,
+                        startFrac: primarySpan.startFrac,
+                        endFrac: primarySpan.endFrac,
+                        etaEndFrac: primarySpan.etaEndFrac
+                    )
+                )
+            }
+        }
+        return rows
     }
 
     static func hexColor(_ hex: String) -> Color {
@@ -561,7 +760,7 @@ struct OrbResourcesView: View {
                                 Text(m["title"].text.isEmpty ? String(mid.prefix(8)) : m["title"].text)
                                     .font(.subheadline.weight(.medium))
                                     .foregroundStyle(.primary)
-                                Text("\((Int(m["subagent_total"].doubleValue ?? 1))) spans · tap for Fast-DAG")
+                                Text("\(OrbResourcesModel.formatLargeNumber(m["subagent_total"].doubleValue ?? 1)) spans · tap for Fast-DAG")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -593,11 +792,11 @@ struct OrbResourcesView: View {
                 let horizonSecs = det["dag"]["horizon_secs"].doubleValue ?? 21600
                 let rows = OrbResourcesModel.layoutDagRows(bars, horizonSecs: horizonSecs)
 
-                let vmCount = bars.filter { $0.role == "vm" }.count
-                let spanCount = bars.count - vmCount
+                let laneCount = rows.count
+                let spanCount = rows.reduce(0) { $0 + $1.spans.count }
 
                 HStack {
-                    Text(vmCount > 0 ? "\(vmCount) VMs · \(spanCount) spans" : "\(bars.count) spans")
+                    Text(laneCount > 0 && spanCount > laneCount ? "\(OrbResourcesModel.formatLargeNumber(Double(laneCount))) lanes · \(OrbResourcesModel.formatLargeNumber(Double(spanCount))) spans" : "\(OrbResourcesModel.formatLargeNumber(Double(spanCount))) spans")
                         .font(.caption.weight(.semibold))
                     if let eta = det["mission"]["eta_remaining_secs"].doubleValue, eta > 0 {
                         Text("· ETA ~\(OrbResourcesModel.formatDurationCompact(eta))")
@@ -631,26 +830,36 @@ struct OrbResourcesView: View {
                                         .foregroundStyle(.primary)
                                         .lineLimit(1)
                                     Spacer()
-                                    Text(OrbResourcesModel.formatDurationCompact(row.bar.durationSecs))
+                                    if row.spans.count > 1 {
+                                        Text("\(row.spans.count)×")
+                                            .font(.caption2.monospacedDigit().weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Text(OrbResourcesModel.formatDurationCompact(row.spans.count > 1 ? row.totalDurationSecs : row.bar.durationSecs))
                                         .font(.caption2.monospacedDigit())
                                         .foregroundStyle(.secondary)
                                 }
                                 GeometryReader { geo in
                                     let w = max(40, geo.size.width)
-                                    let x0 = row.startFrac * w
-                                    let bw = max(6, (row.endFrac - row.startFrac) * w)
                                     ZStack(alignment: .leading) {
                                         Capsule().fill(Color.secondary.opacity(0.12)).frame(height: 8)
-                                        Capsule()
-                                            .fill(barColor(row.bar.state, role: row.bar.role))
-                                            .frame(width: bw, height: 8)
-                                            .offset(x: x0)
-                                        if let etaEnd = row.etaEndFrac {
-                                            let ew = max(0, (etaEnd - row.endFrac) * w)
+                                        ForEach(Array(row.spans.enumerated()), id: \.offset) { idx, sp in
+                                            let x0 = sp.startFrac * w
+                                            let rawBw = max(5, (sp.endFrac - sp.startFrac) * w)
+                                            let bw: Double = idx + 1 < row.spans.count
+                                                ? max(4, min(rawBw, row.spans[idx + 1].startFrac * w - x0 - 2))
+                                                : rawBw
                                             Capsule()
-                                                .fill(barColor(row.bar.state, role: row.bar.role).opacity(0.25))
-                                                .frame(width: ew, height: 8)
-                                                .offset(x: x0 + bw)
+                                                .fill(barColor(sp.bar.state, role: sp.bar.role))
+                                                .frame(width: bw, height: 8)
+                                                .offset(x: x0)
+                                            if let etaEnd = sp.etaEndFrac {
+                                                let ew = max(0, (etaEnd - sp.endFrac) * w)
+                                                Capsule()
+                                                    .fill(barColor(sp.bar.state, role: sp.bar.role).opacity(0.25))
+                                                    .frame(width: ew, height: 8)
+                                                    .offset(x: x0 + bw)
+                                            }
                                         }
                                     }
                                 }
@@ -893,6 +1102,7 @@ struct OrbResourcesView: View {
                 label: b["label"].text,
                 section: b["section"].text,
                 role: b["role"].text.isEmpty ? "worker" : b["role"].text,
+                nodeId: b["node_id"].text.isEmpty ? nil : b["node_id"].text,
                 startOffsetSecs: b["start_offset_secs"].doubleValue ?? 0,
                 durationSecs: b["duration_secs"].doubleValue ?? 60,
                 etaRemainingSecs: b["eta_remaining_secs"].doubleValue,

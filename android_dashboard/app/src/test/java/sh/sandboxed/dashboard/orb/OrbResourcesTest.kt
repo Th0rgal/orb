@@ -74,7 +74,9 @@ class OrbResourcesTest {
         }
         val rows = OrbResourcesModel.layoutDagRows(bars, horizon)
         val expectedHeaders = (dag["expected_section_headers"] as List<*>).map { it as? String }
+        val expectedSpanCounts = (dag["expected_span_counts"] as List<*>).map { (it as Number).toInt() }
         assertEquals(expectedHeaders, rows.map { it.sectionHeader })
+        assertEquals(expectedSpanCounts, rows.map { it.spans.size })
     }
 
     @Test
@@ -95,7 +97,9 @@ class OrbResourcesTest {
         }
         val rows = OrbResourcesModel.layoutDagRows(bars, horizon)
         val expectedHeaders = (dag["expected_section_headers"] as List<*>).map { it as? String }
+        val expectedSpanCounts = (dag["expected_span_counts"] as List<*>).map { (it as Number).toInt() }
         assertEquals(expectedHeaders, rows.map { it.sectionHeader })
+        assertEquals(expectedSpanCounts, rows.map { it.spans.size })
         val expX0 = (dag["expected_x0"] as List<*>).map { (it as Number).toDouble() }
         val expX1 = (dag["expected_x1"] as List<*>).map { (it as Number).toDouble() }
         val expProj = (dag["expected_proj_x1"] as List<*>).map { (it as? Number)?.toDouble() }

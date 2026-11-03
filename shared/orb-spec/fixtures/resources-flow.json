@@ -2,10 +2,18 @@
   "description": "Shared cross-client specification for Resources Sankey flow conservation, unit formatting (raw vCPU / B tok/h vs estimated $/h), and subagent DAG row layout across Orb desktop (orb/src/resourcesModel.ts), iOS (OrbResources.swift), and Android (OrbResources.kt).",
   "formatting": [
     { "value": 64, "lens": "compute", "metric": "raw", "withUnit": true, "expected": "64 vCPU" },
+    { "value": 1280, "lens": "compute", "metric": "raw", "withUnit": true, "expected": "1,280 vCPU" },
+    { "value": 12800, "lens": "compute", "metric": "raw", "withUnit": true, "expected": "12.8k vCPU" },
     { "value": 1.456, "lens": "inference", "metric": "raw", "withUnit": true, "expected": "1.46 B tok/h" },
     { "value": 4.78, "lens": "compute", "metric": "usd", "withUnit": true, "expected": "$4.78/h" },
     { "value": 29.24, "lens": "inference", "metric": "usd", "withUnit": true, "expected": "$29.2/h" },
-    { "value": 142.6, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$143" }
+    { "value": 142.6, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$143" },
+    { "value": 6939, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$6,939" },
+    { "value": 1534, "lens": "inference", "metric": "usd", "withUnit": true, "expected": "$1,534/h" },
+    { "value": 30000, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$30k" },
+    { "value": 30100, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$30.1k" },
+    { "value": 142600, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$143k" },
+    { "value": 1250000, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$1.25M" }
   ],
   "sankey_2col": {
     "nodes": [
@@ -33,7 +41,8 @@
       { "id": "b2", "label": "Warm cache", "section": "Bootstrap", "start_offset_secs": 1800, "duration_secs": 1800, "state": "active", "after_ids": ["b1"] },
       { "id": "b3", "label": "Prove theorems", "section": "Provers", "start_offset_secs": 3600, "duration_secs": 5400, "state": "pending", "after_ids": ["b2"] }
     ],
-    "expected_section_headers": ["Bootstrap", null, "Provers"]
+    "expected_section_headers": ["Bootstrap", "Provers"],
+    "expected_span_counts": [2, 1]
   },
   "dag_parallel_vms": {
     "horizon_secs": 21600,
@@ -43,9 +52,10 @@
       { "id": "w-1", "label": "wave8 Step0 race", "role": "worker", "section": "evm-fast-wave8", "start_offset_secs": 10800, "duration_secs": 1200, "state": "cancelled" },
       { "id": "w-2", "label": "wave8 R16F prover", "role": "worker", "section": "evm-fast-wave8", "start_offset_secs": 14400, "duration_secs": 3600, "eta_remaining_secs": 900, "state": "active" }
     ],
-    "expected_section_headers": ["Cloud VMs · Boat · xlarge", null, "evm-fast-wave8", null],
-    "expected_x0": [0.1666666667, 0.3333333333, 0.5, 0.6666666667],
-    "expected_x1": [0.5, 0.8333333333, 0.5555555556, 0.8333333333],
-    "expected_proj_x1": [null, 0.9166666667, null, 0.875]
+    "expected_section_headers": ["Cloud VMs · Boat · xlarge", null, "evm-fast-wave8"],
+    "expected_span_counts": [1, 1, 2],
+    "expected_x0": [0.1666666667, 0.3333333333, 0.6666666667],
+    "expected_x1": [0.5, 0.8333333333, 0.8333333333],
+    "expected_proj_x1": [null, 0.9166666667, 0.875]
   }
 }

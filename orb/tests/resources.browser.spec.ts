@@ -270,13 +270,32 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
                 after_ids: [],
               },
               {
+                id: "b-shard-0",
+                mission_id: "22222222-2222-4222-8222-222222222220",
+                label: "Warmup Shard 00",
+                section: "Boat · large",
+                role: "worker",
+                model: "claude-sonnet-4-5",
+                node_id: "managed-boat-lg-1",
+                vcpu: 32,
+                compute_usd_per_h: 3.2,
+                b_tok_per_h: 0.9,
+                inference_usd_per_h: 18.0,
+                start_offset_secs: 600,
+                duration_secs: 1100,
+                eta_remaining_secs: null,
+                eta_basis: null,
+                state: "done",
+                after_ids: [],
+              },
+              {
                 id: "b-shard-1",
                 mission_id: childId,
                 label: "Proof Shard 01",
-                section: "Provers",
+                section: "Boat · large",
                 role: "worker",
                 model: "claude-sonnet-4-5",
-                node_id: "boat-lg-1",
+                node_id: "managed-boat-lg-1",
                 vcpu: 32,
                 compute_usd_per_h: 3.2,
                 b_tok_per_h: 1.1,
@@ -286,7 +305,7 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
                 eta_remaining_secs: 2400,
                 eta_basis: "cohort_p50",
                 state: "active",
-                after_ids: ["b-root"],
+                after_ids: ["b-root", "b-shard-0"],
               },
             ],
           },
@@ -332,6 +351,9 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
   await expect(lensTabs.nth(0)).toHaveText("Inference");
   await expect(lensTabs.nth(1)).toHaveText("Compute");
   await expect(page.getByTestId("res-summary-stamp")).toContainText("1.46 B tok/h");
+  // Rate-limit 429 pill is intentionally omitted from the header summary stamp
+  await expect(page.getByTestId("res-summary-stamp")).not.toContainText("429");
+  await expect(page.locator(".res-badge-warn")).toHaveCount(0);
 
   // Regression check: zero layout shift (0px height/y change) on hover, scrub, lens & $ toggles,
   // and fine-grained DOM node preservation across background refreshes.
@@ -424,10 +446,26 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
   await page.getByTestId(`res-node-${missionId}`).click();
   await expect(page.getByTestId("res-dag-view")).toBeVisible();
   await expect(page.getByTestId("res-dag-row-b-shard-1")).toContainText("Proof Shard 01");
+  await expect(page.getByTestId("res-dag-row-b-shard-1")).toContainText("2×");
 
-  // Hover Fast-DAG bar -> 0px header jump
+  // Verify sequential missions on the same Boat hardware share a single horizontal lane (identical Y)
+  const shard0Bar = page.getByTestId("res-dag-bar-b-shard-0");
+  const shard1Bar = page.getByTestId("res-dag-bar-b-shard-1");
+  const shard0Box = (await shard0Bar.boundingBox())!;
+  const shard1Box = (await shard1Bar.boundingBox())!;
+  expect(Math.abs(shard0Box.y - shard1Box.y)).toBeLessThanOrEqual(1);
+  expect(shard1Box.x).toBeGreaterThan(shard0Box.x + shard0Box.width);
+
+  // Hovering an earlier bar on the shared lane dynamically previews its title on the row label with 0px shift
   const dagHeadBoxBefore = (await cardHead.boundingBox())!;
   const dagBoxBefore = (await page.getByTestId("res-dag-view").boundingBox())!;
+  await shard0Bar.hover();
+  await expect(page.locator(".res-hover-pill")).toContainText("Warmup Shard 00");
+  await expect(page.getByTestId("res-dag-row-b-shard-1")).toContainText("Warmup Shard 00");
+  expect((await cardHead.boundingBox())!.height).toBe(dagHeadBoxBefore.height);
+  expect((await page.getByTestId("res-dag-view").boundingBox())!.y).toBe(dagBoxBefore.y);
+
+  // Hover Fast-DAG row label -> 0px header jump
   await page.getByTestId("res-dag-row-b-shard-1").hover();
   await expect(page.locator(".res-hover-pill")).toContainText("Proof Shard 01");
   expect((await cardHead.boundingBox())!.height).toBe(dagHeadBoxBefore.height);
@@ -666,6 +704,7 @@ test("Resources page handles dense 30+ mission fleet and 500-span mission Flow c
   await page.getByTestId("sb-resources").click();
   await page.getByTestId("res-metric-usd").click();
   await expect(page.getByTestId("res-sankey-svg")).toBeVisible();
+  await expect(page.getByTestId("res-summary-stamp")).toContainText("$1,534 (6h)");
 
   // Verify the Sankey diagram dynamically fills 100% of `.res-card-main`'s available body height
   const cardMainBox = (await page.locator(".res-card-main").boundingBox())!;

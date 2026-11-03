@@ -72,7 +72,9 @@ final class OrbResourcesTests: XCTestCase {
         }
         let dagRows = OrbResourcesModel.layoutDagRows(bars, horizonSecs: horizon)
         let expectedHeaders = try XCTUnwrap(dagSpec["expected_section_headers"] as? [Any]).map { $0 as? String }
+        let expectedSpanCounts = try XCTUnwrap(dagSpec["expected_span_counts"] as? [NSNumber]).map(\.intValue)
         XCTAssertEqual(dagRows.map(\.sectionHeader), expectedHeaders)
+        XCTAssertEqual(dagRows.map { $0.spans.count }, expectedSpanCounts)
 
         // 4. Parallel Boat VMs + staggered wave spans at non-zero historical offsets
         let vmDag = try XCTUnwrap(spec["dag_parallel_vms"] as? [String: Any])
@@ -92,7 +94,9 @@ final class OrbResourcesTests: XCTestCase {
         }
         let vmRows = OrbResourcesModel.layoutDagRows(vmBars, horizonSecs: vmHorizon)
         let expVmHeaders = try XCTUnwrap(vmDag["expected_section_headers"] as? [Any]).map { $0 as? String }
+        let expVmSpanCounts = try XCTUnwrap(vmDag["expected_span_counts"] as? [NSNumber]).map(\.intValue)
         XCTAssertEqual(vmRows.map(\.sectionHeader), expVmHeaders)
+        XCTAssertEqual(vmRows.map { $0.spans.count }, expVmSpanCounts)
         let expX0 = try XCTUnwrap(vmDag["expected_x0"] as? [NSNumber]).map(\.doubleValue)
         let expX1 = try XCTUnwrap(vmDag["expected_x1"] as? [NSNumber]).map(\.doubleValue)
         let expProj = try XCTUnwrap(vmDag["expected_proj_x1"] as? [Any]).map { ($0 as? NSNumber)?.doubleValue }
