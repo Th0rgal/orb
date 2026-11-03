@@ -64,8 +64,8 @@ relabeled.
 
 Physical device and native Apple execution remain blocked. Production rollout,
 full end-to-end host callers and independently accepted phase exits remain
-separate gates. On current `master` (135 manifest entries including
-`orb_slot_bypass_step`, `orb_node_resize_step`, `orb_node_lane_step`, the Phase R2b `orb_wire_*_slice_*` exports, and Phase R3 Cluster 1–4 partial evidence), the coverage registry is **78 partial / 57 unconnected**
+separate gates. On current `master` (145 manifest entries / 144 public exports including
+`orb_slot_bypass_step`, `orb_node_resize_step`, `orb_node_lane_step`, the Phase R2b `orb_wire_*_slice_*` exports, Phase R3 Cluster 1–4 partial evidence, and the `dgx-spark` / `lean-sys` `c8449e0` gates), the coverage registry is **78 partial / 67 unconnected**
 (23 partial / 106 unconnected across the 129 entries at execution head
 `3c70e5ada`); passing scalar conformance does not close those connections.
 
@@ -73,7 +73,7 @@ separate gates. On current `master` (135 manifest entries including
 checkout. It signs an Ed25519 consistency receipt (`assurance: Tested`,
 `kernel_proof: false`) binding both compared archive hashes and distinguishing
 `compared_backend` from the selected `backend` under rollback, compares the
-270-case scalar C ABI (`135 * 2`) with a LeanNative `probe_*` archive (supplied
+290-case scalar C ABI (`145 * 2`) with a LeanNative `probe_*` archive (supplied
 via `--leannative-archive` or compiled fresh via `--turbo-root`), and rolls
 back with `--rollback-stock` or `ORB_KERNEL_BACKEND=stock-c`. A local match is
 not phase acceptance, the historical 1044-case multi-target qualification,

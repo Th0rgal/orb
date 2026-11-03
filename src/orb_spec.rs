@@ -6,6 +6,24 @@ pub fn verify_host_fd_bounds(raw_word: u64, fd_out: u32) -> bool {
     lean_sys_cabi::verify_fd_bounds(raw_word, fd_out)
 }
 
+pub fn verify_host_fleet_endpoint(
+    mesh_reachable: bool,
+    router_ready: bool,
+    model_loaded: bool,
+    breaker_open: bool,
+) -> bool {
+    fleet_endpoint_admitted(mesh_reachable, router_ready, model_loaded, breaker_open)
+}
+
+pub fn compute_host_prefill_deadline_ms(
+    prompt_tokens: u64,
+    base_ms: u64,
+    per_k_tokens_ms: u64,
+    max_prefill_ms: u64,
+) -> u64 {
+    prefill_deadline_ms(prompt_tokens, base_ms, per_k_tokens_ms, max_prefill_ms)
+}
+
 pub fn select_host_stream_isa_with_caps(caps: u64, max_requested: u8) -> u8 {
     stream_simd::select_verified_stream_isa_with_caps(caps, max_requested)
 }

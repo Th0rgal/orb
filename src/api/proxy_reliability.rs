@@ -67,6 +67,58 @@ pub fn first_token_timeout_for_request(
     first_token_timeout()
 }
 
+/// Prompt-proportional first-token deadline for custom/private GPU fleet
+/// endpoints (e.g. `dgx-spark` / `builtin/private`), computed via the formally
+/// verified `orb_prefill_deadline_ms` C-ABI gate (`Orb.Kernel.prefillDeadlineMs`).
+/// Standard cloud providers preserve [`first_token_timeout_for_request`] verbatim.
+pub fn first_token_timeout_for_prompt(
+    provider: &str,
+    model: &str,
+    via_cloudflare: bool,
+    estimated_prompt_tokens: u64,
+) -> Duration {
+    let base = first_token_timeout_for_request(provider, model, via_cloudflare);
+    if matches!(
+        crate::ai_providers::ProviderType::from_id(provider),
+        Some(p) if p != crate::ai_providers::ProviderType::Custom
+    ) {
+        return base;
+    }
+    let base_ms = base.as_millis() as u64;
+    let per_k_ms = std::env::var("PROXY_FLEET_PREFILL_MS_PER_1K_TOKENS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1_500);
+    let max_secs = if via_cloudflare {
+        env_secs("PROXY_CLOUDFLARE_MAX_PREFILL_SECS", 90)
+    } else {
+        env_secs("PROXY_FLEET_MAX_PREFILL_SECS", 240)
+    };
+    let max_ms = Duration::from_secs(max_secs).as_millis() as u64;
+    Duration::from_millis(crate::orb_spec::compute_host_prefill_deadline_ms(
+        estimated_prompt_tokens,
+        base_ms,
+        per_k_ms,
+        max_ms.max(base_ms),
+    ))
+}
+
+/// Formally verified admission check (`orb_fleet_endpoint_gate`) for routing to
+/// a local/private GPU fleet endpoint (`mesh_reachable && router_ready && model_loaded && !breaker_open`).
+pub fn fleet_endpoint_admitted(
+    mesh_reachable: bool,
+    router_ready: bool,
+    model_loaded: bool,
+    breaker_open: bool,
+) -> bool {
+    crate::orb_spec::verify_host_fleet_endpoint(
+        mesh_reachable,
+        router_ready,
+        model_loaded,
+        breaker_open,
+    )
+}
+
 /// Longest a stream may stay idle once content is flowing.
 pub fn stream_idle_timeout() -> Duration {
     Duration::from_secs(env_secs("PROXY_STREAM_IDLE_TIMEOUT_SECS", 60))
@@ -748,6 +800,42 @@ mod tests {
             first_token_timeout_for("google", "gemini-1.5-flash").as_secs(),
             45
         );
+    }
+
+    #[test]
+    fn fleet_prefill_deadline_scales_with_prompt_and_clamps_to_cloudflare_cliff() {
+        assert_eq!(
+            first_token_timeout_for_prompt("dgx-spark", "qwen3.6-35b-a3b", false, 512).as_millis(),
+            45_000
+        );
+        assert_eq!(
+            first_token_timeout_for_prompt("dgx-spark", "qwen3.6-35b-a3b", false, 40_960)
+                .as_millis(),
+            105_000
+        );
+        assert_eq!(
+            first_token_timeout_for_prompt("custom", "qwen3.6-35b-a3b", false, 40_960).as_millis(),
+            105_000
+        );
+        assert_eq!(
+            first_token_timeout_for_prompt("dgx-spark", "qwen3.6-35b-a3b", true, 40_960)
+                .as_millis(),
+            90_000
+        );
+        assert_eq!(
+            first_token_timeout_for_prompt("dgx-spark", "qwen3.6-35b-a3b", false, u64::MAX)
+                .as_millis(),
+            240_000
+        );
+        assert_eq!(
+            first_token_timeout_for_prompt("openai", "gpt-5", false, 40_960).as_secs(),
+            45
+        );
+        assert!(fleet_endpoint_admitted(true, true, true, false));
+        assert!(!fleet_endpoint_admitted(false, true, true, false));
+        assert!(!fleet_endpoint_admitted(true, false, true, false));
+        assert!(!fleet_endpoint_admitted(true, true, false, false));
+        assert!(!fleet_endpoint_admitted(true, true, true, true));
     }
 
     #[test]

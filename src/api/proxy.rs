@@ -4007,10 +4007,11 @@ async fn chat_completions_routed(
         // their first chunk; direct endpoints (e.g. orbrouter.thomas.md) get a
         // 240s budget while Cloudflare orange-cloud requests keep
         // `queue_waited + first_token_timeout` inside the 90s budget (< 100s cliff).
-        let raw_first_token_timeout = reliability::first_token_timeout_for_request(
+        let raw_first_token_timeout = reliability::first_token_timeout_for_prompt(
             &entry.provider_id,
             &entry.model_id,
             via_cloudflare,
+            (body.len() as u64) >> 2,
         );
         let first_token_timeout = if via_cloudflare && !queue_waited.is_zero() {
             raw_first_token_timeout
@@ -4409,6 +4410,20 @@ async fn chat_completions_routed(
                 );
                 continue;
             };
+            if provider_type == ProviderType::Custom {
+                let breaker_open = state
+                    .health_tracker
+                    .any_account_has_active_cooldown(&[entry.account_id])
+                    .await;
+                if !reliability::fleet_endpoint_admitted(
+                    !url.is_empty(),
+                    !entry.provider_id.trim().is_empty(),
+                    !entry.model_id.trim().is_empty(),
+                    breaker_open,
+                ) {
+                    continue;
+                }
+            }
             // Build the upstream request body: replace model with the real model ID.
             // Kimi additionally rejects any temperature other than 1, so normalize
             // sampling params for it (see `rewrite_model_for_kimi`).

@@ -139,6 +139,16 @@ uint32_t orb_node_lane_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_
 uint8_t orb_wire_verify_slice_io(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
 uint8_t orb_wire_encode_slice_step(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint8_t);
 uint8_t orb_wire_decode_slice_step(uint64_t, uint64_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint8_t leansys_verify_unix_path_bounds(uint64_t, uint8_t);
+uint8_t leansys_verify_cas_digest256(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
+uint8_t leansys_verify_sigv4_envelope(uint64_t, uint64_t, uint64_t, uint32_t, uint8_t, uint8_t);
+uint8_t leansys_verify_cgroup_v2_budget(uint64_t, uint64_t, uint64_t, uint8_t);
+uint8_t leansys_verify_io_uring_ring(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint8_t leansys_verify_borrowed_view(uint64_t, uint64_t, uint64_t, uint64_t);
+uint8_t leansys_verify_step_reactor(uint64_t, uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint8_t);
+uint8_t leansys_verify_stream_relay(uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint8_t orb_fleet_endpoint_gate(uint8_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_prefill_deadline_ms(uint64_t, uint64_t, uint64_t, uint64_t);
 #ifdef __cplusplus
 }
 #endif

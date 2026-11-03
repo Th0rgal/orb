@@ -35,7 +35,7 @@ def load_manifest():
     manifest = json.loads((ROOT / "shared/orb-spec/kernel_abi.json").read_text())
     functions = manifest["functions"]
     public = [item for item in functions if item["name"].startswith(("orb_", "leansys_"))]
-    if len(public) != 134 or len(functions) != 135:
+    if len(public) != 144 or len(functions) != 145:
         raise ValueError("kernel ABI export inventory changed")
     return functions
 
