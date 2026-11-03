@@ -185,7 +185,7 @@ extension OrbConversation {
                 if stream == nil && phase == .active {
                     let token = UUID()
                     streamToken = token
-                    let inner = OrbCore.shared.streamControl(missionId: id, sinceSeq: events.last?.sequence, preferWebSocket: false) { type, data in
+                    let inner = OrbCore.shared.streamControl(missionId: id, sinceSeq: events.last?.sequence) { type, data in
                         if type == "fido_sign_request" { FidoApprovalState.shared.handleSignRequest(data); return }
                         if type == "text_delta" {
                             live.applyTextDelta(data)

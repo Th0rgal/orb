@@ -18,6 +18,7 @@ struct OrbConnectionIssue: Equatable {
 
 enum OrbConnection {
     static let defaultBaseURL = "https://agent-backend.thomas.md"
+    static let orbcoreBaseURL = "https://orbcore.thomas.md"
     static let knownDirectBaseURL = "https://agent-backend.nico-best-pc-ever.ovh"
 
     static func normalize(_ url: String) -> String {
@@ -26,18 +27,34 @@ enum OrbConnection {
         return s
     }
 
-    /// Ordered candidate origins for multi-path failover (mirrors Desktop/Tauri/Android).
+    /// Ordered candidate origins for 3-way multi-path failover (mirrors Desktop/Tauri/Android).
     static func candidateEndpoints(for primary: String) -> [String] {
         let clean = normalize(primary)
         guard !clean.isEmpty else { return [] }
         let lower = clean.lowercased()
-        if lower == knownDirectBaseURL || (lower.hasSuffix(".thomas.md") && lower != defaultBaseURL) {
-            return [clean, defaultBaseURL]
+        if lower == orbcoreBaseURL {
+            return [clean, knownDirectBaseURL, defaultBaseURL]
+        }
+        if lower == knownDirectBaseURL {
+            return [clean, orbcoreBaseURL, defaultBaseURL]
         }
         if lower == defaultBaseURL {
-            return [clean, knownDirectBaseURL]
+            return [clean, orbcoreBaseURL, knownDirectBaseURL]
+        }
+        if lower.hasSuffix(".thomas.md") {
+            return [clean, orbcoreBaseURL, defaultBaseURL]
         }
         return [clean]
+    }
+
+    /// Whether a mutating `/api/...` JSON request should automatically carry an `Idempotency-Key`
+    /// so retries and multi-path failovers cannot duplicate side effects.
+    static func shouldAttachIdempotencyKey(method: String, path: String) -> Bool {
+        let upper = method.uppercased()
+        guard ["POST", "PUT", "PATCH", "DELETE"].contains(upper) else { return false }
+        guard path.hasPrefix("/api/") else { return false }
+        let excludedPrefixes = ["/api/auth/login", "/api/voice/", "/api/uploads", "/api/fs/upload"]
+        return !excludedPrefixes.contains { path.hasPrefix($0) }
     }
 
     static func isFastRetryableGetError(_ error: Error) -> Bool {

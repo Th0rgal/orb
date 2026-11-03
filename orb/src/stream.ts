@@ -1,5 +1,6 @@
 import {batch} from "solid-js";
-import { api, clearConnection, getJwt, connectionVersion, isAbortError, isTransientNetworkError, noteAbort, REQUEST_TIMEOUT_MS, RequestTimeoutError, transportFetch } from "./api";
+import { api, clearConnection, getJwt, connectionVersion, isAbortError, isTransientNetworkError, noteAbort, orderedApiCandidates, REQUEST_TIMEOUT_MS, RequestTimeoutError, transportFetch } from "./api";
+import { nativeInvoke } from "./native";
 import { requestDone, streamLoad, timed } from "./diagnostics";
 import { orbStreamBoundedCommitStep } from "./orbKernel";
 
@@ -247,12 +248,289 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
   }
 }
 
+let forceMultiplexSyncForTest = false;
+export function setMultiplexSyncEnabledForTest(enabled: boolean): void {
+  forceMultiplexSyncForTest = enabled;
+  if (!enabled && activeSyncHub) {
+    activeSyncHub.destroy();
+    activeSyncHub = null;
+  }
+}
+
+type SyncListener = {
+  missionId: string | null;
+  getSinceSeq: () => number | undefined;
+  deliver: (ev: StreamEvent) => void;
+  onLagged: () => void;
+  onReady?: () => void;
+  onDisconnected?: () => void;
+  startFallback: () => void;
+};
+
+type MultiplexSyncHub = {
+  connVer: number;
+  listeners: Set<SyncListener>;
+  destroy: () => void;
+  refreshSubscriptions: () => void;
+};
+
+let activeSyncHub: MultiplexSyncHub | null = null;
+
+function toWsUrl(httpBase: string, path: string): string {
+  const clean = httpBase.trim().replace(/\/+$/, "");
+  if (clean.startsWith("https://")) return `wss://${clean.slice(8)}${path}`;
+  if (clean.startsWith("http://")) return `ws://${clean.slice(7)}${path}`;
+  return `${clean}${path}`;
+}
+
+function getOrCreateSyncHub(): MultiplexSyncHub | null {
+  if (!forceMultiplexSyncForTest && !nativeInvoke()) return null;
+  if (typeof WebSocket === "undefined") return null;
+  const jwt = getJwt();
+  const ver = connectionVersion();
+  if (activeSyncHub && activeSyncHub.connVer === ver) return activeSyncHub;
+  activeSyncHub?.destroy();
+
+  const listeners = new Set<SyncListener>();
+  let socket: WebSocket | null = null;
+  let ready = false;
+  let closed = false;
+  let consecutiveFailures = 0;
+  let candidateIdx = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let pingTimer: ReturnType<typeof setInterval> | undefined;
+  let pongTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleCloseTimer: ReturnType<typeof setTimeout> | undefined;
+  const subscribedOnSocket = new Set<string>();
+  let presentationSent: boolean | null = null;
+
+  const clearTimers = () => {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    if (pingTimer) clearInterval(pingTimer);
+    if (pongTimer) clearTimeout(pongTimer);
+    reconnectTimer = pingTimer = pongTimer = undefined;
+  };
+
+  const sendJson = (msg: Record<string, unknown>) => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      try { socket.send(JSON.stringify(msg)); } catch { /* closing */ }
+    }
+  };
+
+  const syncSubscriptions = () => {
+    if (!socket || socket.readyState !== WebSocket.OPEN || !ready) return;
+    const wantPresentation = [...listeners].some((l) => l.missionId === null);
+    if (presentationSent !== wantPresentation) {
+      presentationSent = wantPresentation;
+      sendJson({ op: "set_presentation", enabled: wantPresentation });
+    }
+    const wantedByMission = new Map<string, number | undefined>();
+    for (const l of listeners) {
+      if (!l.missionId) continue;
+      const seq = l.getSinceSeq();
+      if (!wantedByMission.has(l.missionId)) {
+        wantedByMission.set(l.missionId, seq);
+      } else {
+        const prev = wantedByMission.get(l.missionId);
+        wantedByMission.set(l.missionId, prev !== undefined && seq !== undefined ? Math.min(prev, seq) : undefined);
+      }
+    }
+    for (const mid of [...subscribedOnSocket]) {
+      if (!wantedByMission.has(mid)) {
+        subscribedOnSocket.delete(mid);
+        sendJson({ op: "unsubscribe", mission_id: mid });
+      }
+    }
+    for (const [mid, sinceSeq] of wantedByMission) {
+      if (!subscribedOnSocket.has(mid)) {
+        subscribedOnSocket.add(mid);
+        sendJson({ op: "subscribe", mission_id: mid, ...(sinceSeq !== undefined ? { since_seq: sinceSeq } : {}) });
+      }
+    }
+  };
+
+  const triggerFallbackAll = () => {
+    closed = true;
+    clearTimers();
+    if (socket) { try { socket.close(); } catch { /* ignore */ } socket = null; }
+    if (activeSyncHub === hub) activeSyncHub = null;
+    for (const l of [...listeners]) {
+      listeners.delete(l);
+      l.startFallback();
+    }
+  };
+
+  const openSocket = () => {
+    if (closed || !listeners.size) return;
+    if (connectionVersion() !== ver) {
+      hub.destroy();
+      return;
+    }
+    const candidates = orderedApiCandidates();
+    if (!candidates.length) {
+      triggerFallbackAll();
+      return;
+    }
+    const base = candidates[candidateIdx % candidates.length];
+    const token = getJwt();
+    const protocols = token ? ["orb-sync.v1", `jwt.${token}`] : ["orb-sync.v1"];
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(toWsUrl(base, "/api/control/sync"), protocols);
+    } catch {
+      triggerFallbackAll();
+      return;
+    }
+    socket = ws;
+    ready = false;
+    subscribedOnSocket.clear();
+    presentationSent = null;
+
+    const connectDeadline = setTimeout(() => {
+      if (socket === ws && !ready) {
+        try { ws.close(); } catch { /* ignore */ }
+      }
+    }, 5_000);
+
+    ws.onopen = () => {
+      if (socket !== ws || closed) return;
+      clearTimeout(connectDeadline);
+      ready = true;
+      const hadFailures = consecutiveFailures > 0;
+      consecutiveFailures = 0;
+      syncSubscriptions();
+      for (const l of listeners) {
+        if (l.onReady) l.onReady();
+        else if (hadFailures) l.onLagged();
+      }
+      pingTimer = setInterval(() => {
+        if (socket !== ws || ws.readyState !== WebSocket.OPEN) return;
+        sendJson({ op: "ping", ts: Date.now() });
+        if (!pongTimer) {
+          pongTimer = setTimeout(() => {
+            pongTimer = undefined;
+            if (socket === ws) {
+              try { ws.close(); } catch { /* ignore */ }
+            }
+          }, 5_000);
+        }
+      }, 10_000);
+    };
+
+    ws.onmessage = (msg) => {
+      if (socket !== ws || typeof msg.data !== "string") return;
+      if (pongTimer) {
+        clearTimeout(pongTimer);
+        pongTimer = undefined;
+      }
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(msg.data) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      const eventType = typeof parsed.type === "string" ? parsed.type : "";
+      if (!eventType || eventType === "sync_ready" || eventType === "heartbeat" || eventType === "pong" || eventType === "subscribed" || eventType === "unsubscribed") {
+        return;
+      }
+      streamLoad("sync-ws", 1, msg.data.length);
+      if (eventType === "stream_lagged") {
+        const targetMid = typeof parsed.mission_id === "string" ? parsed.mission_id : null;
+        for (const l of listeners) {
+          if (!targetMid || l.missionId === targetMid) l.onLagged();
+        }
+        return;
+      }
+      if (eventType === "mission_presentation") {
+        const ev: StreamEvent = { type: "mission_presentation", data: parsed };
+        for (const l of listeners) {
+          if (l.missionId === null) l.deliver(ev);
+        }
+        return;
+      }
+      if (eventType === "assistant_message" && isPartialTurn(parsed)) parsed.partial = true;
+      if (eventType === "assistant_message" && typeof parsed.at !== "string") parsed.at = new Date().toISOString();
+      const targetMid = typeof parsed.mission_id === "string" ? parsed.mission_id : null;
+      const ev: StreamEvent = {
+        type: eventType,
+        data: parsed,
+        eventId: (parsed.event_id ?? parsed.id) as string | undefined,
+        sequence: typeof parsed.sequence === "number" ? parsed.sequence : undefined,
+      };
+      for (const l of listeners) {
+        if (!l.missionId) continue;
+        if (!targetMid || l.missionId === targetMid) l.deliver(ev);
+      }
+    };
+
+    const handleDisconnect = () => {
+      if (socket !== ws) return;
+      clearTimeout(connectDeadline);
+      clearTimers();
+      socket = null;
+      const wasReady = ready;
+      ready = false;
+      for (const l of listeners) l.onDisconnected?.();
+      if (closed || !listeners.size) return;
+      consecutiveFailures++;
+      candidateIdx++;
+      // If we never managed to complete handshake across all candidates, fall back cleanly to SSE.
+      if (!wasReady && consecutiveFailures >= Math.max(2, candidates.length)) {
+        triggerFallbackAll();
+        return;
+      }
+      if (wasReady) {
+        for (const l of listeners) if (l.getSinceSeq() === undefined) l.onLagged();
+      }
+      const delay = Math.min(400 * 2 ** Math.min(consecutiveFailures - 1, 5), 10_000);
+      reconnectTimer = setTimeout(openSocket, delay);
+    };
+
+    ws.onerror = () => { /* onclose handles state transition */ };
+    ws.onclose = handleDisconnect;
+  };
+
+  const hub: MultiplexSyncHub = {
+    connVer: ver,
+    listeners,
+    refreshSubscriptions() {
+      if (idleCloseTimer) {
+        clearTimeout(idleCloseTimer);
+        idleCloseTimer = undefined;
+      }
+      if (!listeners.size) {
+        idleCloseTimer = setTimeout(() => {
+          if (!listeners.size) hub.destroy();
+        }, 5_000);
+        return;
+      }
+      if (!socket && !reconnectTimer && !closed) openSocket();
+      else syncSubscriptions();
+    },
+    destroy() {
+      closed = true;
+      clearTimers();
+      if (idleCloseTimer) clearTimeout(idleCloseTimer);
+      if (socket) { try { socket.close(); } catch { /* ignore */ } socket = null; }
+      listeners.clear();
+      if (activeSyncHub === hub) activeSyncHub = null;
+    },
+  };
+
+  if (jwt || forceMultiplexSyncForTest) {
+    activeSyncHub = hub;
+    return hub;
+  }
+  return null;
+}
+
 /**
- * Subscribe to the mission's live SSE stream (`/api/control/stream?mission=`).
- * EventSource can't carry the Authorization header, so this parses SSE frames
- * off a fetch ReadableStream. Reconnects with backoff until the returned
- * cleanup is called; `onLagged` fires when the server reports dropped events
- * (the caller should refetch and resync).
+ * Subscribe to the mission's live event stream:
+ * - On Orb desktop (`__TAURI__`), multiplexes both presentation hints and all
+ *   per-mission subscriptions onto a single heartbeat-monitored WebSocket
+ *   (`/api/control/sync`), automatically falling back to `/api/control/stream`
+ *   SSE if WebSocket upgrade is unavailable.
+ * - Reconnects with `since_seq` replay and backoff until cleanup is called.
  */
 export function streamMission(
   missionId: string | null,
@@ -274,6 +552,7 @@ export function streamMission(
   let retry = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let controller: AbortController | undefined;
+  let detachSyncListener: (() => void) | undefined;
 
   const connect = async () => {
     if (stopped) return;
@@ -361,9 +640,34 @@ export function streamMission(
     }
   };
 
-  void connect();
+  const syncHub = getOrCreateSyncHub();
+  if (syncHub) {
+    const listener: SyncListener = {
+      missionId,
+      getSinceSeq: () => highestSeq,
+      deliver,
+      onLagged,
+      onReady,
+      onDisconnected,
+      startFallback: () => {
+        detachSyncListener = undefined;
+        if (!stopped) void connect();
+      },
+    };
+    syncHub.listeners.add(listener);
+    syncHub.refreshSubscriptions();
+    detachSyncListener = () => {
+      syncHub.listeners.delete(listener);
+      syncHub.refreshSubscriptions();
+    };
+  } else {
+    void connect();
+  }
+
   return () => {
     stopped = true;
+    detachSyncListener?.();
+    detachSyncListener = undefined;
     clearTimeout(paint);fragments=[];
     if (timer) clearTimeout(timer);
     controller?.abort();

@@ -985,7 +985,7 @@ enum OrbReadCache {
         while !Task.isCancelled {
             ensureScope()
             let account = scope
-            let stream = OrbCore.shared.streamControl(missionId: nil, kinds: ["presentation"], preferWebSocket: false) { type, data in
+            let stream = OrbCore.shared.streamControl(missionId: nil, kinds: ["presentation"]) { type, data in
                 if type == "status" || type == "stream_lagged" { pending.formUnion(recent) }
                 guard type == "mission_presentation", let id = data["mission_id"] as? String else { return }
                 if (data["kind"] as? String) == "mission_activity" {

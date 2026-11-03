@@ -92,6 +92,8 @@ mod mission_lifecycle;
 pub use mission_lifecycle::*;
 mod streaming;
 pub use streaming::*;
+mod sync_stream;
+pub use sync_stream::*;
 mod webhook_forwarder;
 use webhook_forwarder::*;
 mod automation_scheduler;

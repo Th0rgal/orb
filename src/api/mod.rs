@@ -51,6 +51,7 @@ pub mod github_integration;
 pub(crate) mod grok_goal;
 pub(crate) mod grok_tool_bridge;
 pub mod hermes_control_route;
+pub mod idempotency;
 pub(crate) mod kimi_usage;
 pub mod library;
 pub mod managed_machines;

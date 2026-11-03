@@ -305,7 +305,7 @@ final class OrbFidoMonitor {
                     for payload in pending { FidoApprovalState.shared.handleSignRequest(payload) }
                 }
                 if Task.isCancelled { break }
-                let stream = OrbCore.shared.streamControl(missionId: nil, kinds: ["fido"], preferWebSocket: false, generation: generation) { type, data in
+                let stream = OrbCore.shared.streamControl(missionId: nil, kinds: ["fido"], generation: generation) { type, data in
                     if type == "fido_sign_request" { FidoApprovalState.shared.handleSignRequest(data) }
                 }
                 await withTaskCancellationHandler { await stream.value } onCancel: { stream.cancel() }

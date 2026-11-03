@@ -25,24 +25,40 @@ data class OrbConnectionIssue(
 
 object OrbConnection {
     const val DEFAULT_BASE_URL = "https://agent-backend.thomas.md"
+    const val ORBCORE_BASE_URL = "https://orbcore.thomas.md"
     const val KNOWN_DIRECT_BASE_URL = "https://agent-backend.nico-best-pc-ever.ovh"
 
     fun normalize(url: String): String = url.trim().trimEnd('/')
 
     fun isDefault(url: String): Boolean = normalize(url).equals(DEFAULT_BASE_URL, ignoreCase = true)
 
-    /** Ordered candidate origins for multi-path failover (mirrors Desktop/Tauri/iOS). */
+    /** Ordered candidate origins for 3-way multi-path failover (mirrors Desktop/Tauri/iOS). */
     fun candidateEndpoints(primary: String): List<String> {
         val clean = normalize(primary)
         if (clean.isEmpty()) return emptyList()
         val lower = clean.lowercase()
-        if (lower == KNOWN_DIRECT_BASE_URL || (lower.endsWith(".thomas.md") && lower != DEFAULT_BASE_URL)) {
-            return listOf(clean, DEFAULT_BASE_URL)
+        if (lower == ORBCORE_BASE_URL) {
+            return listOf(clean, KNOWN_DIRECT_BASE_URL, DEFAULT_BASE_URL)
+        }
+        if (lower == KNOWN_DIRECT_BASE_URL) {
+            return listOf(clean, ORBCORE_BASE_URL, DEFAULT_BASE_URL)
         }
         if (lower == DEFAULT_BASE_URL) {
-            return listOf(clean, KNOWN_DIRECT_BASE_URL)
+            return listOf(clean, ORBCORE_BASE_URL, KNOWN_DIRECT_BASE_URL)
+        }
+        if (lower.endsWith(".thomas.md")) {
+            return listOf(clean, ORBCORE_BASE_URL, DEFAULT_BASE_URL)
         }
         return listOf(clean)
+    }
+
+    /** Whether a mutating `/api/...` JSON request should automatically carry an `Idempotency-Key`. */
+    fun shouldAttachIdempotencyKey(method: String, path: String): Boolean {
+        val upper = method.uppercase()
+        if (upper !in setOf("POST", "PUT", "PATCH", "DELETE")) return false
+        if (!path.startsWith("/api/")) return false
+        val excluded = listOf("/api/auth/login", "/api/voice/", "/api/uploads", "/api/fs/upload")
+        return excluded.none { path.startsWith(it) }
     }
 
     fun isFastRetryableStatus(status: Int): Boolean = status in setOf(502, 503, 504, 522, 524)

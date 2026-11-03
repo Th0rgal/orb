@@ -71,17 +71,30 @@ final class OrbConnectionIssueTests: XCTestCase {
 
     func testCandidateEndpointsPairDirectAndFallback() {
         XCTAssertEqual(
+            OrbConnection.candidateEndpoints(for: "https://orbcore.thomas.md/"),
+            ["https://orbcore.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh", "https://agent-backend.thomas.md"]
+        )
+        XCTAssertEqual(
             OrbConnection.candidateEndpoints(for: "https://agent-backend.nico-best-pc-ever.ovh/"),
-            ["https://agent-backend.nico-best-pc-ever.ovh", "https://agent-backend.thomas.md"]
+            ["https://agent-backend.nico-best-pc-ever.ovh", "https://orbcore.thomas.md", "https://agent-backend.thomas.md"]
         )
         XCTAssertEqual(
             OrbConnection.candidateEndpoints(for: "https://agent-backend.thomas.md"),
-            ["https://agent-backend.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"]
+            ["https://agent-backend.thomas.md", "https://orbcore.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"]
         )
         XCTAssertEqual(
             OrbConnection.candidateEndpoints(for: "https://orb.example.com"),
             ["https://orb.example.com"]
         )
+    }
+
+    func testIdempotencyKeyAttachmentEligibility() {
+        XCTAssertTrue(OrbConnection.shouldAttachIdempotencyKey(method: "POST", path: "/api/control/missions"))
+        XCTAssertTrue(OrbConnection.shouldAttachIdempotencyKey(method: "PATCH", path: "/api/control/missions/m1/settings"))
+        XCTAssertTrue(OrbConnection.shouldAttachIdempotencyKey(method: "DELETE", path: "/api/control/missions/m1"))
+        XCTAssertFalse(OrbConnection.shouldAttachIdempotencyKey(method: "GET", path: "/api/control/missions"))
+        XCTAssertFalse(OrbConnection.shouldAttachIdempotencyKey(method: "POST", path: "/api/auth/login"))
+        XCTAssertFalse(OrbConnection.shouldAttachIdempotencyKey(method: "POST", path: "/api/voice/transcribe?language=en"))
     }
 
     func testFastRetryableGetErrorClassification() {

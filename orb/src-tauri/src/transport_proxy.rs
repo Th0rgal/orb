@@ -6,12 +6,15 @@
 //! traffic through a per-process `127.0.0.1` bridge moves network transport onto
 //! Rust's `reqwest` + `rustls` pool with:
 //! 1. Instant (`0 ms`) local `OPTIONS` preflight handling.
-//! 2. Last-known-good DNS resolution persisted in `~/.orb/dns-cache.json` so
-//!    transient upstream DNS timeouts never drop connections while full TLS SNI
-//!    and certificate verification remain enforced for the target hostname.
-//! 3. Ordered multi-path failover: primary direct Core URL first, with automatic
-//!    cooldown failover to `https://agent-backend.thomas.md` when the direct
-//!    endpoint is unreachable or returns `502`/`503`/`504`/`520`–`529`.
+//! 2. Encrypted DNS-over-HTTPS (DoH) fallback (`1.1.1.1` / `8.8.8.8` over direct IP
+//!    TLS, zero OS DNS dependency) + last-known-good DNS resolution persisted in
+//!    `~/.orb/dns-cache.json` while full TLS SNI and certificate verification
+//!    remain enforced for the target hostname.
+//! 3. HTTP/2 keepalive PING frames + adaptive flow-control windows so dead NAT /
+//!    Wi-Fi sockets are recycled within seconds.
+//! 4. Ordered 3-way multi-path failover (`orbcore.thomas.md` <->
+//!    `agent-backend.nico-best-pc-ever.ovh` <-> `agent-backend.thomas.md`),
+//!    including safe retry & failover for mutating writes carrying `Idempotency-Key`.
 
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use serde::{Deserialize, Serialize};
@@ -24,9 +27,11 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+const ORBCORE_DIRECT_URL: &str = "https://orbcore.thomas.md";
 const DEFAULT_FALLBACK_URL: &str = "https://agent-backend.thomas.md";
 const KNOWN_DIRECT_URL: &str = "https://agent-backend.nico-best-pc-ever.ovh";
 const DNS_TIMEOUT: Duration = Duration::from_millis(2_500);
+const DOH_TIMEOUT: Duration = Duration::from_millis(2_200);
 const ENDPOINT_COOLDOWN: Duration = Duration::from_secs(20);
 const MAX_REQUEST_HEADER_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -43,6 +48,103 @@ pub struct TransportBridgeInfo {
 #[derive(Default, Serialize, Deserialize)]
 struct PersistedDnsCache {
     hosts: HashMap<String, Vec<IpAddr>>,
+}
+
+#[derive(Deserialize)]
+struct DohAnswerRecord {
+    #[serde(rename = "type")]
+    record_type: u16,
+    data: String,
+}
+
+#[derive(Deserialize)]
+struct DohResponse {
+    #[serde(rename = "Status", default)]
+    status: u16,
+    #[serde(rename = "Answer", default)]
+    answer: Vec<DohAnswerRecord>,
+}
+
+fn parse_doh_json_ips(raw: &[u8]) -> Vec<IpAddr> {
+    let Ok(parsed) = serde_json::from_slice::<DohResponse>(raw) else {
+        return Vec::new();
+    };
+    if parsed.status != 0 {
+        return Vec::new();
+    }
+    let mut ips = Vec::new();
+    for ans in parsed.answer {
+        // 1 = A (IPv4), 28 = AAAA (IPv6)
+        if matches!(ans.record_type, 1 | 28) {
+            if let Ok(ip) = ans.data.trim().parse::<IpAddr>() {
+                if !ips.contains(&ip) {
+                    ips.push(ip);
+                }
+            }
+        }
+    }
+    ips
+}
+
+fn doh_http_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_millis(1_500))
+                .timeout(DOH_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
+fn should_skip_doh(host: &str) -> bool {
+    cfg!(test)
+        || host.eq_ignore_ascii_case("localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".invalid")
+        || host.ends_with(".localhost")
+        || host.ends_with(".ts.net")
+}
+
+async fn resolve_via_doh(host: &str) -> Vec<IpAddr> {
+    if should_skip_doh(host) {
+        return Vec::new();
+    }
+    let Some(client) = doh_http_client() else {
+        return Vec::new();
+    };
+    let clean = host.trim_end_matches('.');
+    // Query Cloudflare (1.1.1.1) and Google (8.8.8.8) directly by IP literal so
+    // resolution succeeds even when local mDNSResponder / MagicDNS is wedged.
+    for base in ["https://1.1.1.1/dns-query", "https://8.8.8.8/resolve"] {
+        let mut combined = Vec::new();
+        for qtype in ["A", "AAAA"] {
+            let res = client
+                .get(base)
+                .query(&[("name", clean), ("type", qtype)])
+                .header("Accept", "application/dns-json")
+                .send()
+                .await;
+            if let Ok(resp) = res {
+                if resp.status().is_success() {
+                    if let Ok(bytes) = resp.bytes().await {
+                        for ip in parse_doh_json_ips(&bytes) {
+                            if !combined.contains(&ip) {
+                                combined.push(ip);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !combined.is_empty() {
+            return combined;
+        }
+    }
+    Vec::new()
 }
 
 pub struct ResilientDnsResolver {
@@ -157,6 +259,16 @@ impl Resolve for ResilientDnsResolver {
                     return Ok(addrs);
                 }
             }
+            // Encrypted DNS-over-HTTPS fallback over direct IP (1.1.1.1 / 8.8.8.8)
+            // when system DNS stalls or returns NXDOMAIN/SERVFAIL.
+            let doh_ips = resolve_via_doh(&host).await;
+            if !doh_ips.is_empty() {
+                if persist_global {
+                    Self::global().record(&host, &doh_ips);
+                }
+                let addrs: Addrs = Box::new(doh_ips.into_iter().map(|ip| SocketAddr::new(ip, 0)));
+                return Ok(addrs);
+            }
             if let Some(cached_ips) = memory_fallback {
                 let addrs: Addrs =
                     Box::new(cached_ips.into_iter().map(|ip| SocketAddr::new(ip, 0)));
@@ -171,13 +283,17 @@ impl Resolve for ResilientDnsResolver {
     }
 }
 
-/// Shared `reqwest::Client` builder wired with `ResilientDnsResolver`, TCP keepalive,
-/// and rustls connection pooling so Tauri workers (`project_context`, `local_origin`)
-/// inherit the same DNS immunity.
+/// Shared `reqwest::Client` builder wired with `ResilientDnsResolver`, HTTP/2
+/// keepalive PING frames, TCP keepalive, and rustls connection pooling so Tauri
+/// workers (`project_context`, `local_origin`) inherit the same DNS & socket immunity.
 pub fn resilient_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .dns_resolver(ResilientDnsResolver::global())
         .tcp_keepalive(Duration::from_secs(20))
+        .http2_adaptive_window(true)
+        .http2_keep_alive_interval(Duration::from_secs(10))
+        .http2_keep_alive_timeout(Duration::from_secs(4))
+        .http2_keep_alive_while_idle(true)
         .pool_idle_timeout(Duration::from_secs(90))
 }
 
@@ -186,21 +302,40 @@ pub fn normalize_base_url(raw: &str) -> String {
 }
 
 /// Ordered candidate origins for a configured primary URL.
-/// Direct endpoints stay primary; the Cloudflare edge (`agent-backend.thomas.md`)
-/// is appended as a last-resort circuit-breaker fallback for known production
-/// direct hosts (and vice versa if Cloudflare itself drops).
+/// Pairs the two direct origin hosts (`orbcore.thomas.md` on Cloudflare Anycast DNS
+/// and `agent-backend.nico-best-pc-ever.ovh` on OVH DNS) with the Cloudflare edge
+/// (`agent-backend.thomas.md`) as a 3-way circuit-breaker ring.
 pub fn candidate_endpoints(primary: &str) -> Vec<String> {
     let clean = normalize_base_url(primary);
     if clean.is_empty() {
         return Vec::new();
     }
-    let mut out = vec![clean.clone()];
     let lower = clean.to_ascii_lowercase();
-    if lower == KNOWN_DIRECT_URL || (lower.ends_with(".thomas.md") && lower != DEFAULT_FALLBACK_URL)
-    {
+    if lower == ORBCORE_DIRECT_URL {
+        return vec![
+            clean,
+            KNOWN_DIRECT_URL.to_string(),
+            DEFAULT_FALLBACK_URL.to_string(),
+        ];
+    }
+    if lower == KNOWN_DIRECT_URL {
+        return vec![
+            clean,
+            ORBCORE_DIRECT_URL.to_string(),
+            DEFAULT_FALLBACK_URL.to_string(),
+        ];
+    }
+    if lower == DEFAULT_FALLBACK_URL {
+        return vec![
+            clean,
+            ORBCORE_DIRECT_URL.to_string(),
+            KNOWN_DIRECT_URL.to_string(),
+        ];
+    }
+    let mut out = vec![clean.clone()];
+    if lower.ends_with(".thomas.md") {
+        out.push(ORBCORE_DIRECT_URL.to_string());
         out.push(DEFAULT_FALLBACK_URL.to_string());
-    } else if lower == DEFAULT_FALLBACK_URL {
-        out.push(KNOWN_DIRECT_URL.to_string());
     }
     out
 }
@@ -209,8 +344,13 @@ fn is_failover_status(status: u16) -> bool {
     matches!(status, 502..=504 | 520..=529)
 }
 
-fn is_idempotent_method(method: &str) -> bool {
-    matches!(method, "GET" | "HEAD" | "OPTIONS")
+fn is_idempotent_request(method: &str, headers: &[(String, String)]) -> bool {
+    if matches!(method, "GET" | "HEAD" | "OPTIONS") {
+        return true;
+    }
+    headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("idempotency-key") && !v.trim().is_empty())
 }
 
 struct BridgeConfig {
@@ -305,6 +445,10 @@ fn start_bridge_with_resolver(
         .connect_timeout(Duration::from_secs(6))
         .timeout(Duration::from_secs(35))
         .tcp_keepalive(Duration::from_secs(20))
+        .http2_adaptive_window(true)
+        .http2_keep_alive_interval(Duration::from_secs(10))
+        .http2_keep_alive_timeout(Duration::from_secs(4))
+        .http2_keep_alive_while_idle(true)
         .pool_idle_timeout(Duration::from_secs(90))
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -314,12 +458,16 @@ fn start_bridge_with_resolver(
         .dns_resolver(resolver)
         .connect_timeout(Duration::from_secs(8))
         .tcp_keepalive(Duration::from_secs(15))
+        .http2_adaptive_window(true)
+        .http2_keep_alive_interval(Duration::from_secs(10))
+        .http2_keep_alive_timeout(Duration::from_secs(4))
+        .http2_keep_alive_while_idle(true)
         .pool_idle_timeout(Duration::from_secs(90))
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| e.to_string())?;
 
-    let initial_url = DEFAULT_FALLBACK_URL.to_string();
+    let initial_url = ORBCORE_DIRECT_URL.to_string();
     let runtime = Arc::new(BridgeRuntime {
         port,
         secret_prefix,
@@ -453,13 +601,13 @@ fn cors_headers(req_headers: &[(String, String)]) -> String {
         .find(|(k, _)| k.eq_ignore_ascii_case("access-control-request-headers"))
         .map(|(_, v)| v.as_str())
         .unwrap_or(
-            "Authorization, Content-Type, Accept, Cache-Control, Last-Event-ID, X-Orb-Target",
+            "Authorization, Content-Type, Accept, Cache-Control, Last-Event-ID, Idempotency-Key, X-Orb-Target, X-Paloma-Approval",
         );
     format!(
         "Access-Control-Allow-Origin: {origin}\r\n\
          Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS\r\n\
          Access-Control-Allow-Headers: {req_allow_headers}\r\n\
-         Access-Control-Expose-Headers: X-Orb-Events-Protocol, X-Has-More, X-Next-Cursor, X-Page-Max-Sequence, X-Max-Sequence, X-Orb-Upstream, Content-Type\r\n\
+         Access-Control-Expose-Headers: X-Orb-Events-Protocol, X-Has-More, X-Next-Cursor, X-Page-Max-Sequence, X-Max-Sequence, X-Orb-Upstream, X-Orb-Idempotent-Replay, Content-Type\r\n\
          Access-Control-Max-Age: 86400\r\n\
          Vary: Origin\r\n"
     )
@@ -596,7 +744,7 @@ async fn handle_connection(
         &runtime.api_client
     };
     let method = reqwest::Method::from_bytes(req.method.as_bytes()).map_err(|e| e.to_string())?;
-    let idempotent = is_idempotent_method(&req.method);
+    let idempotent = is_idempotent_request(&req.method, &req.headers);
 
     let mut last_transport_err: Option<String> = None;
     let mut fallback_response: Option<(String, reqwest::Response)> = None;
@@ -604,34 +752,34 @@ async fn handle_connection(
     for (idx, base) in candidates.iter().enumerate() {
         let is_last = idx + 1 == candidates.len();
         let url = format!("{base}{forward_path}");
-        let mut builder = client.request(method.clone(), &url);
-        for (k, v) in &req.headers {
-            if !should_strip_request_header(k) {
-                builder = builder.header(k.as_str(), v.as_str());
-            }
-        }
-        if !req.body.is_empty() {
-            builder = builder.body(req.body.clone());
-        }
-
-        // For idempotent requests, perform 1 fast retry on immediate connect/DNS reset
-        // before cooling down the primary endpoint.
-        let mut send_res = builder.send().await;
-        if send_res.is_err() && idempotent && !streaming {
-            tokio::time::sleep(Duration::from_millis(180)).await;
-            let mut retry_builder = client.request(method.clone(), &url);
+        let build_req = || {
+            let mut b = client.request(method.clone(), &url);
             for (k, v) in &req.headers {
                 if !should_strip_request_header(k) {
-                    retry_builder = retry_builder.header(k.as_str(), v.as_str());
+                    b = b.header(k.as_str(), v.as_str());
                 }
             }
-            send_res = retry_builder.send().await;
+            if !req.body.is_empty() {
+                b = b.body(req.body.clone());
+            }
+            b
+        };
+
+        // For idempotent requests (GET/HEAD or writes carrying Idempotency-Key),
+        // perform 1 fast retry on immediate connect/socket reset before cooling down.
+        let mut send_res = build_req().send().await;
+        if send_res.is_err() && idempotent && !streaming {
+            tokio::time::sleep(Duration::from_millis(180)).await;
+            send_res = build_req().send().await;
         }
 
         match send_res {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                if is_failover_status(status) && !is_last {
+                if is_failover_status(status)
+                    && !is_last
+                    && (idempotent || status == 502 || status == 503)
+                {
                     runtime.mark_unhealthy(base);
                     fallback_response = Some((base.clone(), resp));
                     continue;
@@ -644,8 +792,8 @@ async fn handle_connection(
             Err(err) => {
                 runtime.mark_unhealthy(base);
                 last_transport_err = Some(err.to_string());
-                // Non-idempotent requests may fail over ONLY when connect() failed
-                // before bytes were committed, or when `is_connect()` is true.
+                // Non-idempotent requests without Idempotency-Key fail over ONLY
+                // when connect() failed before bytes were committed.
                 if !idempotent && !err.is_connect() {
                     break;
                 }
@@ -817,21 +965,49 @@ mod tests {
     }
 
     #[test]
-    fn candidate_endpoints_pair_direct_and_cloudflare_fallback() {
-        let direct = candidate_endpoints("https://agent-backend.nico-best-pc-ever.ovh/");
+    fn candidate_endpoints_form_three_way_failover_ring() {
         assert_eq!(
-            direct,
+            candidate_endpoints("https://orbcore.thomas.md/"),
             vec![
+                "https://orbcore.thomas.md",
                 "https://agent-backend.nico-best-pc-ever.ovh",
-                "https://agent-backend.thomas.md"
+                "https://agent-backend.thomas.md",
             ]
         );
-        let cf = candidate_endpoints("https://agent-backend.thomas.md");
         assert_eq!(
-            cf,
+            candidate_endpoints("https://agent-backend.nico-best-pc-ever.ovh/"),
+            vec![
+                "https://agent-backend.nico-best-pc-ever.ovh",
+                "https://orbcore.thomas.md",
+                "https://agent-backend.thomas.md",
+            ]
+        );
+        assert_eq!(
+            candidate_endpoints("https://agent-backend.thomas.md"),
             vec![
                 "https://agent-backend.thomas.md",
-                "https://agent-backend.nico-best-pc-ever.ovh"
+                "https://orbcore.thomas.md",
+                "https://agent-backend.nico-best-pc-ever.ovh",
+            ]
+        );
+    }
+
+    #[test]
+    fn doh_json_parser_extracts_ipv4_and_ipv6_records() {
+        let sample = br#"{
+            "Status": 0,
+            "Answer": [
+                {"name": "orbcore.thomas.md.", "type": 5, "TTL": 120, "data": "alias.example."},
+                {"name": "orbcore.thomas.md.", "type": 1, "TTL": 120, "data": "65.109.98.246"},
+                {"name": "orbcore.thomas.md.", "type": 28, "TTL": 120, "data": "2a01:4f9:3080:19d7::2"}
+            ]
+        }"#;
+        let ips = parse_doh_json_ips(sample);
+        assert_eq!(
+            ips,
+            vec![
+                "65.109.98.246".parse::<IpAddr>().unwrap(),
+                "2a01:4f9:3080:19d7::2".parse::<IpAddr>().unwrap(),
             ]
         );
     }
@@ -849,7 +1025,6 @@ mod tests {
         let info = bridge.configure(&upstream);
         let client = reqwest::Client::new();
 
-        // Preflight answers 204 immediately with CORS headers even without secret token check.
         let preflight = client
             .request(
                 reqwest::Method::OPTIONS,
@@ -868,7 +1043,6 @@ mod tests {
             "tauri://localhost"
         );
 
-        // Authenticated GET forwards Authorization and preserves custom response headers.
         let res = client
             .get(format!("{}/api/health", info.proxy_base_url))
             .header("Authorization", "Bearer secret-jwt")
@@ -882,23 +1056,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_fails_over_when_primary_endpoint_is_unreachable() {
-        let healthy = spawn_mock_upstream(|_| (200, "OK", r#"{"ok":true}"#.into())).await;
+    async fn bridge_fails_over_idempotent_post_across_504_upstream() {
+        let broken =
+            spawn_mock_upstream(|_| (504, "Gateway Timeout", r#"{"err":504}"#.into())).await;
+        let healthy = spawn_mock_upstream(|req| {
+            let has_idem = req
+                .to_ascii_lowercase()
+                .contains("idempotency-key: idem-77");
+            (200, "OK", format!(r#"{{"idem":{has_idem}}}"#))
+        })
+        .await;
         let bridge = spawn_test_bridge(Arc::new(ResilientDnsResolver::new(None)));
         {
             let mut guard = bridge.config.write().unwrap();
-            // Closed port 1 on loopback triggers immediate ECONNREFUSED -> failover to `healthy`.
-            guard.primary = "http://127.0.0.1:1".into();
-            guard.candidates = vec!["http://127.0.0.1:1".into(), healthy.clone()];
+            guard.primary = broken.clone();
+            guard.candidates = vec![broken, healthy.clone()];
         }
         let base = format!("http://127.0.0.1:{}{}", bridge.port, bridge.secret_prefix);
         let res = reqwest::Client::new()
-            .get(format!("{base}/api/health"))
+            .post(format!("{base}/api/control/message"))
+            .header("Idempotency-Key", "idem-77")
+            .header("Content-Type", "application/json")
+            .body(r#"{"content":"ping"}"#)
             .send()
             .await
             .unwrap();
         assert_eq!(res.status(), 200);
         assert_eq!(res.headers().get("x-orb-upstream").unwrap(), &healthy);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["idem"], true);
     }
 
     #[tokio::test]
