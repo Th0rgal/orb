@@ -85,8 +85,8 @@ class OrbResourcesTest {
             OrbResourcesModel.DagBarInput(
                 id = OrbJSON.str(b, "id")!!,
                 label = OrbJSON.str(b, "label")!!,
-                role = OrbJSON.str(b, "role"),
                 section = OrbJSON.str(b, "section")!!,
+                role = OrbJSON.str(b, "role") ?: "worker",
                 startOffsetSecs = OrbJSON.double(b, "start_offset_secs")!!,
                 durationSecs = OrbJSON.double(b, "duration_secs")!!,
                 etaRemainingSecs = OrbJSON.double(b, "eta_remaining_secs"),
@@ -100,12 +100,12 @@ class OrbResourcesTest {
         val expX1 = (dag["expected_x1"] as List<*>).map { (it as Number).toDouble() }
         val expProj = (dag["expected_proj_x1"] as List<*>).map { (it as? Number)?.toDouble() }
         rows.forEachIndexed { idx, r ->
-            assertEquals(expX0[idx], r.x0Frac, 1e-5)
-            assertEquals(expX1[idx], r.x1Frac, 1e-5)
+            assertEquals(expX0[idx], r.startFrac, 1e-5)
+            assertEquals(expX1[idx], r.endFrac, 1e-5)
             if (expProj[idx] == null) {
-                assertEquals(null, r.projX1Frac)
+                assertEquals(null, r.etaEndFrac)
             } else {
-                assertEquals(expProj[idx]!!, r.projX1Frac!!, 1e-5)
+                assertEquals(expProj[idx]!!, r.etaEndFrac!!, 1e-5)
             }
         }
     }

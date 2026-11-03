@@ -81,12 +81,13 @@ final class OrbResourcesTests: XCTestCase {
             OrbResourcesModel.DagBarInput(
                 id: b["id"] as? String ?? "",
                 label: b["label"] as? String ?? "",
-                role: b["role"] as? String,
                 section: b["section"] as? String ?? "",
+                role: b["role"] as? String ?? "worker",
                 startOffsetSecs: (b["start_offset_secs"] as? NSNumber)?.doubleValue ?? 0,
                 durationSecs: (b["duration_secs"] as? NSNumber)?.doubleValue ?? 0,
                 etaRemainingSecs: (b["eta_remaining_secs"] as? NSNumber)?.doubleValue,
-                state: b["state"] as? String ?? "pending"
+                state: b["state"] as? String ?? "pending",
+                afterIds: b["after_ids"] as? [String] ?? []
             )
         }
         let vmRows = OrbResourcesModel.layoutDagRows(vmBars, horizonSecs: vmHorizon)
@@ -96,12 +97,12 @@ final class OrbResourcesTests: XCTestCase {
         let expX1 = try XCTUnwrap(vmDag["expected_x1"] as? [NSNumber]).map(\.doubleValue)
         let expProj = try XCTUnwrap(vmDag["expected_proj_x1"] as? [Any]).map { ($0 as? NSNumber)?.doubleValue }
         for (idx, r) in vmRows.enumerated() {
-            XCTAssertEqual(r.x0Frac, expX0[idx], accuracy: 1e-5)
-            XCTAssertEqual(r.x1Frac, expX1[idx], accuracy: 1e-5)
+            XCTAssertEqual(r.startFrac, expX0[idx], accuracy: 1e-5)
+            XCTAssertEqual(r.endFrac, expX1[idx], accuracy: 1e-5)
             if let expP = expProj[idx] {
-                XCTAssertEqual(try XCTUnwrap(r.projX1Frac), expP, accuracy: 1e-5)
+                XCTAssertEqual(try XCTUnwrap(r.etaEndFrac), expP, accuracy: 1e-5)
             } else {
-                XCTAssertNil(r.projX1Frac)
+                XCTAssertNil(r.etaEndFrac)
             }
         }
     }
