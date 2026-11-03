@@ -412,7 +412,7 @@ struct OrbStreamCommit: Equatable {
     var pos = 0
     var commit = 0
 
-    static func classify<S: StringProtocol>(_ raw: S) -> Line {
+    static func classify<S: StringProtocol>(_ raw: S, inFence: Bool = false) -> Line {
         let rest = raw.drop(while: { $0 == " " || $0 == "\t" })
         var marker: Marker?
         if let c = rest.first, c == "`" || c == "~" {
@@ -421,6 +421,9 @@ struct OrbStreamCommit: Equatable {
         }
         // The parser's own trimming decides blank and fence lines.
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        if !inFence && !trimmed.hasPrefix("```") && OrbCodeFences.splitGlued(raw) != nil {
+            return Line(blank: false, tick: true, marker: Marker(backtick: true, count: 3))
+        }
         return Line(blank: trimmed.isEmpty, tick: trimmed.hasPrefix("```"), marker: marker)
     }
 
@@ -468,7 +471,7 @@ struct OrbStreamCommit: Equatable {
         while let end = utf8[lineStart...].firstIndex(of: UInt8(ascii: "\n")) {
             let line = Substring(utf8[lineStart..<end])
             let before = state.commit
-            state.scan(classify(line))
+            state.scan(classify(line, inFence: state.tick))
             offset += line.utf8.count + 1
             if state.commit != before { committed = offset }
             lineStart = utf8.index(after: end)
@@ -532,17 +535,27 @@ final class OrbStreamBlocks {
             cursorIdx = utf8.index(after: nlIdx)
 
             let wasTick = scanState.tick
+            let glued = wasTick ? nil : OrbCodeFences.splitGlued(lineSub)
             let beforeCommit = scanState.commit
-            scanState.scan(OrbStreamCommit.classify(lineSub))
+            if glued != nil {
+                scanState.scan(OrbStreamCommit.Line(blank: false, tick: true, marker: OrbStreamCommit.Marker(backtick: true, count: 3)))
+            } else {
+                scanState.scan(OrbStreamCommit.classify(lineSub, inFence: true))
+            }
             if scanState.commit != beforeCommit {
                 newCommitUTF8 = scanUTF8
                 resetOpenFence()
             } else if !wasTick && scanState.tick {
-                openFenceStartUTF8 = lineStartUTF8
+                if let glued {
+                    openFenceStartUTF8 = lineStartUTF8 + glued.utf8Offset
+                    openFenceLang = glued.lang
+                } else {
+                    openFenceStartUTF8 = lineStartUTF8
+                    let trimmed = lineSub.trimmingCharacters(in: .whitespaces)
+                    openFenceLang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                }
                 openFenceBodyStartUTF8 = scanUTF8
                 openFenceBodyCursorUTF8 = scanUTF8
-                let trimmed = lineSub.trimmingCharacters(in: .whitespaces)
-                openFenceLang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 openFencePrefixBlocks = nil
                 openFenceAcc.removeAll(keepingCapacity: true)
                 openFenceHasLines = false

@@ -1,0 +1,65 @@
+{
+  "_doc": "Opening Markdown code fences glued to the end of a prose line without a newline (e.g. `cleanly!```mermaid`) are split onto their own line before block parsing, while inline code spans, prose mentioning backticks, and lines inside open code fences stay untouched. Implementations: orb/src/codeFences.ts (normalizeGluedFences / splitGluedFence), iOS OrbCodeFences, Android OrbCodeFences.",
+  "cases": [
+    {
+      "name": "prod c7a89ff3 seq 219 mermaid diagram glued to prose",
+      "input": "5. **`G[\"Big routines · 32\"]`**:\n   - `GE[\"EVM frames · 9\"]`: **`9 / 9`** (`:::ok`).\n6. **`R[\"Memory rules · 167\"]`**:\n   - `R3[\"Fresh + exit · 52\"]`: was `22 / 52 · 30 left`; now **`27 / 52 · 25 left`**.\n\nLet's double-check that we didn't touch any files (`git status --short` should be clean or unchanged) and output the updated Mermaid diagram concisely with a brief summary of what moved. No extra tool calls needed — we only ran read-only commands. Let's present the updated diagram cleanly!```mermaid\n%%{init: {\"flowchart\": {\"nodeSpacing\": 18, \"rankSpacing\": 32}}}%%\nflowchart TD\n  classDef ok fill:#1b4332,stroke:#95d5b2,color:#fff\n  classDef no fill:#641220,stroke:#ff8fa3,color:#fff\n\n  Z[\"Final certificate\"]:::no --> A[\"Target clock bound<br/>K_target\"]:::no\n\n  A --> B[\"Compiler pipeline\"]:::no\n  A --> C[\"Guest runtime<br/>K_pan\"]:::no\n\n  C2 --> F[\"Small leaves · 241\"]:::ok\n  F --> FA[\"241 / 241\"]:::ok\n\n  B1A ~~~ F\n```\n\nChanges at `HEAD` (`fc02f3ccc`):\n- **Small leaves (`fb_*`)**: `226/241` → **`241/241` (green)**.\n- **Stages 1–5**: `Open` → **`4/5` Argon stage modules integrated (`0 sorry`)**.\n- **Core specs (`C00`) & Memory rules**: Table+init `6/8 → 7/8`.",
+      "output": "5. **`G[\"Big routines · 32\"]`**:\n   - `GE[\"EVM frames · 9\"]`: **`9 / 9`** (`:::ok`).\n6. **`R[\"Memory rules · 167\"]`**:\n   - `R3[\"Fresh + exit · 52\"]`: was `22 / 52 · 30 left`; now **`27 / 52 · 25 left`**.\n\nLet's double-check that we didn't touch any files (`git status --short` should be clean or unchanged) and output the updated Mermaid diagram concisely with a brief summary of what moved. No extra tool calls needed — we only ran read-only commands. Let's present the updated diagram cleanly!\n```mermaid\n%%{init: {\"flowchart\": {\"nodeSpacing\": 18, \"rankSpacing\": 32}}}%%\nflowchart TD\n  classDef ok fill:#1b4332,stroke:#95d5b2,color:#fff\n  classDef no fill:#641220,stroke:#ff8fa3,color:#fff\n\n  Z[\"Final certificate\"]:::no --> A[\"Target clock bound<br/>K_target\"]:::no\n\n  A --> B[\"Compiler pipeline\"]:::no\n  A --> C[\"Guest runtime<br/>K_pan\"]:::no\n\n  C2 --> F[\"Small leaves · 241\"]:::ok\n  F --> FA[\"241 / 241\"]:::ok\n\n  B1A ~~~ F\n```\n\nChanges at `HEAD` (`fc02f3ccc`):\n- **Small leaves (`fb_*`)**: `226/241` → **`241/241` (green)**.\n- **Stages 1–5**: `Open` → **`4/5` Argon stage modules integrated (`0 sorry`)**.\n- **Core specs (`C00`) & Memory rules**: Table+init `6/8 → 7/8`."
+    },
+    {
+      "name": "glued code fence with colon and language tag",
+      "input": "Here is the snippet:```python\ndef add(a, b):\n    return a + b\n```\n\nDone.",
+      "output": "Here is the snippet:\n```python\ndef add(a, b):\n    return a + b\n```\n\nDone."
+    },
+    {
+      "name": "glued code fence with space before backticks and symbols in lang",
+      "input": "Compile with: ```c++  \nint main() { return 0; }\n```",
+      "output": "Compile with: \n```c++  \nint main() { return 0; }\n```"
+    },
+    {
+      "name": "normal code fence is unchanged",
+      "input": "Before:\n\n```rust\nfn main() {}\n```\n\nAfter.",
+      "output": "Before:\n\n```rust\nfn main() {}\n```\n\nAfter."
+    },
+    {
+      "name": "matched inline triple-backtick code span stays prose",
+      "input": "Use ```mermaid``` fences for diagrams and `git status` for checks.",
+      "output": "Use ```mermaid``` fences for diagrams and `git status` for checks."
+    },
+    {
+      "name": "matched four-backtick inline span wrapping triple-backtick fence stays prose",
+      "input": "Write ```` ```mermaid ```` on its own line.",
+      "output": "Write ```` ```mermaid ```` on its own line."
+    },
+    {
+      "name": "prose mentioning triple backticks with space after backticks stays prose",
+      "input": "In Markdown, typing ``` starts a code fence.\n\nUse ``` instead.",
+      "output": "In Markdown, typing ``` starts a code fence.\n\nUse ``` instead."
+    },
+    {
+      "name": "prose ending with bare triple backticks without language tag stays prose",
+      "input": "The fence delimiter is ```\n\nNext paragraph.",
+      "output": "The fence delimiter is ```\n\nNext paragraph."
+    },
+    {
+      "name": "escaped backtick before two backticks stays prose",
+      "input": "Escaped \\```mermaid is not a fence.",
+      "output": "Escaped \\```mermaid is not a fence."
+    },
+    {
+      "name": "glued fence text inside an already-open code block is untouched",
+      "input": "```rust\nlet msg = \"cleanly!```mermaid\";\n```\n\nOutside.",
+      "output": "```rust\nlet msg = \"cleanly!```mermaid\";\n```\n\nOutside."
+    },
+    {
+      "name": "blockquote and pipe table rows are untouched",
+      "input": "> Quote!```mermaid\n| col | val```mermaid |",
+      "output": "> Quote!```mermaid\n| col | val```mermaid |"
+    },
+    {
+      "name": "pipes inside a glued code fence stay inside the fence",
+      "input": "Raw log:```text\na | b | c\nd | e | f\n```\n\nSummary.",
+      "output": "Raw log:\n```text\na | b | c\nd | e | f\n```\n\nSummary."
+    }
+  ]
+}

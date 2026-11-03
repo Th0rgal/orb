@@ -4,6 +4,7 @@
  * `<image path="./chart.png" alt="Chart" />`, `<file path="./r.pdf" name="Report" />`
  * and the paired `<file path="r.pdf">Report</file>` form.
  */
+import { splitGluedFence } from "./codeFences";
 import { leansysRichTagAdmitted } from "./orbKernel";
 
 export const RICH_TAG = /<(image|file)\s+([^>]*?)(?:\/\s*>|>([^<]*?)<\/\1\s*>)/gi;
@@ -60,6 +61,7 @@ export function expandMediaLines(text: string): string {
     const t = line.trimStart();
     if (fence) { if (t.startsWith(fence)) fence = null; return line; }
     if (t.startsWith("```") || t.startsWith("~~~")) { fence = t.slice(0, 3); return line; }
+    if (splitGluedFence(line)) { fence = "```"; return line; }
     return mediaLineTag(line) ?? line;
   }).join("\n");
 }

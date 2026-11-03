@@ -89,9 +89,18 @@ object OrbPipeTables {
                     scanFence = marker
                 }
             } else if (scanFence == null && c != '|') {
+                var checkEnd = lineEnd
+                val tickPos = src.indexOf("```", p)
+                if (tickPos != -1 && tickPos < lineEnd) {
+                    val glued = OrbCodeFences.splitGlued(src.substring(lineStart, lineEnd))
+                    if (glued != null) {
+                        checkEnd = lineStart + glued.offset
+                        scanFence = "```"
+                    }
+                }
                 while (nextPipe != -1 && nextPipe < p) nextPipe = src.indexOf(" | ", p)
                 if (nextPipe == -1) break
-                if (nextPipe < lineEnd) return true
+                if (nextPipe < checkEnd) return true
             }
             if (nl == -1) break
             lineStart = nl + 1
@@ -120,6 +129,7 @@ object OrbPipeTables {
                 out.add(line); i++; continue
             }
             if (marker != null) { fence = marker; out.add(line); i++; continue }
+            if (OrbCodeFences.splitGlued(line) != null) { fence = "```"; out.add(line); i++; continue }
             val first = cells(line)
             if (first == null || !admitted(i, first, first.size)) { out.add(line); i++; continue }
             val rows = mutableListOf(first)

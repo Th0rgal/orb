@@ -24,6 +24,7 @@
  * - The table is separated from surrounding text by blank lines.
  */
 
+import { splitGluedFence } from "./codeFences";
 import { leansysGfmPipeRowAdmitted } from "./orbKernel";
 
 const NUMERIC = /^[+\-−]?[$€£]?\d[\d   ,.']*%?$/;
@@ -92,9 +93,18 @@ export function normalizeLoosePipeTables(src: string): string {
         scanFence = marker;
       }
     } else if (!scanFence && c !== 124) {
+      let checkEnd = lineEnd;
+      const tickPos = src.indexOf("```", p);
+      if (tickPos !== -1 && tickPos < lineEnd) {
+        const glued = splitGluedFence(src.slice(lineStart, lineEnd));
+        if (glued) {
+          checkEnd = lineStart + glued.offset;
+          scanFence = "```";
+        }
+      }
       while (nextPipe !== -1 && nextPipe < p) nextPipe = src.indexOf(" | ", p);
       if (nextPipe === -1) break;
-      if (nextPipe < lineEnd) {
+      if (nextPipe < checkEnd) {
         hasLooseCandidate = true;
         break;
       }
@@ -124,6 +134,12 @@ export function normalizeLoosePipeTables(src: string): string {
     }
     if (marker) {
       fence = marker;
+      out.push(line);
+      i++;
+      continue;
+    }
+    if (splitGluedFence(line)) {
+      fence = "```";
       out.push(line);
       i++;
       continue;
