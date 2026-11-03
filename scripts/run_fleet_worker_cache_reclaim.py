@@ -14,19 +14,25 @@ from pathlib import Path
 DEFAULT_TARGETS = [
     ("ashur", "/var/lib/sandboxed-node", [
         "/var/lib/sandboxed-node/campaigns/worktrees/*",
+        "/var/lib/sandboxed-node/campaigns/*",
+        "/var/lib/sandboxed-node/worktrees/*",
         "/var/lib/sandboxed-node/worktrees/*/*",
     ]),
     ("nippur", "/var/lib/sandboxed-node", [
         "/var/lib/sandboxed-node/campaigns/worktrees/*",
         "/var/lib/sandboxed-node/campaigns/*",
+        "/var/lib/sandboxed-node/worktrees/*",
     ]),
     ("babylon", "/var/lib/sandboxed-node", [
+        "/var/lib/sandboxed-node/campaigns/worktrees/*",
+        "/var/lib/sandboxed-node/campaigns/*",
         "/var/lib/sandboxed-node/worktrees/*",
         "/var/lib/sandboxed-node/worktrees/*/*",
     ]),
     ("uruk", "/var/lib/sandboxed-node/work", [
         "/var/lib/sandboxed-node/campaigns/worktrees/*",
         "/var/lib/sandboxed-node/campaigns/*",
+        "/var/lib/sandboxed-node/worktrees/*",
     ]),
     ("nimrud", "/var/lib/sandboxed-node", []),
     ("dgx-spark", "/var/lib/sandboxed-node", []),
@@ -161,6 +167,17 @@ def main() -> int:
                 extra_flags = " ".join(
                     [*(f"'{tok}'" for tok in idle_cli), *(f"--extra-step-glob '{g}'" for g in extra_globs)]
                 )
+                turbo_gc_sh = ""
+                if args.apply:
+                    turbo_gc_sh = (
+                        f"TL_CACHE='{work_dir}/caches/turbo-lean'; "
+                        "TL_BIN=$(command -v turbo-lean || echo /opt/orb/bin/turbo-lean); "
+                        "if [ -d \"$TL_CACHE\" ] && [ -x \"$TL_BIN\" ]; then "
+                        "TL_OWNER=$(stat -c '%U' \"$TL_CACHE\" 2>/dev/null || echo root); "
+                        "sudo -n -u \"$TL_OWNER\" \"$TL_BIN\" --cache-dir \"$TL_CACHE\" gc "
+                        "--max-reclaimable-bytes 5368709120 --prune-worktrees-older-than-secs 86400 --json >/dev/null 2>&1 || true; "
+                        "fi; "
+                    )
                 remote_sh = (
                     "if [ $(id -u) -ne 0 ]; then S='sudo -n'; else S=''; fi; "
                     "if [ ! -d " + repr(work_dir) + " ]; then rm -f /tmp/missions-snapshot-*.jsonl /tmp/storage_inventory.py /tmp/reclaim_worker_build_caches.py; exit 0; fi; "
@@ -171,7 +188,7 @@ def main() -> int:
                     f"$S python3 /usr/local/lib/sandboxed-sh/reclaim_worker_build_caches.py "
                     f"{mode_flag} --node-work-dir '{work_dir}' --missions-snapshot \"$SNAP\" "
                     f"--audit-log '{args.audit_log}' {extra_flags}; "
-                    "RC=$?; rm -f \"$SNAP\"; exit $RC"
+                    f"RC=$?; rm -f \"$SNAP\"; {turbo_gc_sh}exit $RC"
                 )
                 res = subprocess.run(
                     [

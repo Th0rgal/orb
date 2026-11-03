@@ -1,0 +1,74 @@
+# Ubuntu 26.04 LTS Subiquity autoinstall storage profiles for Orb RAID0 workers.
+#
+# Hybrid resiliency + capacity design (matches agent-core and uruk):
+#   - /boot on 1 GiB RAID1 (md0, ext4) + bootloader mirrored across both drives
+#   - 16 GiB RAID0 swap (md1) — avoids root /swapfile fragmentation
+#   - Remaining capacity on RAID0 (md2, XFS with reflink=1 CoW support) for /
+#
+# Profile A: 2x NVMe UEFI hosts (e.g. babylon, media-exit)
+#   - Dual 512 MiB ESP partitions (/dev/nvme0n1p1 + /dev/nvme1n1p1)
+# Profile B: 2x SATA SSD Legacy BIOS hosts (e.g. nippur, ashur)
+#   - Dual 2 MiB bios_grub partitions (/dev/sda1 + /dev/sdb1) with grub_device: true on both disks
+
+---
+# Profile A: 2x NVMe UEFI -> RAID1 /boot + RAID0 XFS /
+autoinstall:
+  version: 1
+  storage:
+    config:
+      - { id: disk0, type: disk, path: /dev/nvme0n1, ptable: gpt, wipe: superblock-recursive, preserve: false }
+      - { id: disk1, type: disk, path: /dev/nvme1n1, ptable: gpt, wipe: superblock-recursive, preserve: false }
+
+      - { id: esp0, type: partition, device: disk0, size: 512M, flag: boot, grub_device: true }
+      - { id: esp1, type: partition, device: disk1, size: 512M, flag: boot, grub_device: true }
+      - { id: boot0, type: partition, device: disk0, size: 1G }
+      - { id: boot1, type: partition, device: disk1, size: 1G }
+      - { id: swap0, type: partition, device: disk0, size: 8G }
+      - { id: swap1, type: partition, device: disk1, size: 8G }
+      - { id: root0, type: partition, device: disk0, size: -1 }
+      - { id: root1, type: partition, device: disk1, size: -1 }
+
+      - { id: md_boot, type: raid, name: md0, raidlevel: 1, devices: [boot0, boot1] }
+      - { id: md_swap, type: raid, name: md1, raidlevel: 0, devices: [swap0, swap1] }
+      - { id: md_root, type: raid, name: md2, raidlevel: 0, devices: [root0, root1] }
+
+      - { id: fs_esp0, type: format, fstype: fat32, volume: esp0 }
+      - { id: fs_esp1, type: format, fstype: fat32, volume: esp1 }
+      - { id: fs_boot, type: format, fstype: ext4, volume: md_boot }
+      - { id: fs_swap, type: format, fstype: swap, volume: md_swap }
+      - { id: fs_root, type: format, fstype: xfs, volume: md_root }
+
+      - { id: mnt_root, type: mount, path: /, device: fs_root }
+      - { id: mnt_boot, type: mount, path: /boot, device: fs_boot }
+      - { id: mnt_esp,  type: mount, path: /boot/efi, device: fs_esp0 }
+      - { id: mnt_swap, type: mount, path: "", device: fs_swap }
+
+---
+# Profile B: 2x SATA SSD Legacy BIOS -> RAID1 /boot + RAID0 XFS /
+autoinstall:
+  version: 1
+  storage:
+    config:
+      - { id: disk0, type: disk, path: /dev/sda, ptable: gpt, wipe: superblock-recursive, preserve: false, grub_device: true }
+      - { id: disk1, type: disk, path: /dev/sdb, ptable: gpt, wipe: superblock-recursive, preserve: false, grub_device: true }
+
+      - { id: bios0, type: partition, device: disk0, size: 2M, flag: bios_grub }
+      - { id: bios1, type: partition, device: disk1, size: 2M, flag: bios_grub }
+      - { id: boot0, type: partition, device: disk0, size: 1G }
+      - { id: boot1, type: partition, device: disk1, size: 1G }
+      - { id: swap0, type: partition, device: disk0, size: 8G }
+      - { id: swap1, type: partition, device: disk1, size: 8G }
+      - { id: root0, type: partition, device: disk0, size: -1 }
+      - { id: root1, type: partition, device: disk1, size: -1 }
+
+      - { id: md_boot, type: raid, name: md0, raidlevel: 1, devices: [boot0, boot1] }
+      - { id: md_swap, type: raid, name: md1, raidlevel: 0, devices: [swap0, swap1] }
+      - { id: md_root, type: raid, name: md2, raidlevel: 0, devices: [root0, root1] }
+
+      - { id: fs_boot, type: format, fstype: ext4, volume: md_boot }
+      - { id: fs_swap, type: format, fstype: swap, volume: md_swap }
+      - { id: fs_root, type: format, fstype: xfs, volume: md_root }
+
+      - { id: mnt_root, type: mount, path: /, device: fs_root }
+      - { id: mnt_boot, type: mount, path: /boot, device: fs_boot }
+      - { id: mnt_swap, type: mount, path: "", device: fs_swap }

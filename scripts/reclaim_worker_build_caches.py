@@ -29,6 +29,8 @@ ELIGIBLE_CORE_STATUSES = inv.TERMINAL | {"acknowledged"}
 IDLE_ELIGIBLE_CORE_STATUSES = {"awaiting_user", "paused"}
 NESTED_DOT_CACHE_NAMES = {"turbo-lean", "mathlib", "opencode", "uv", "pip", "go-build"}
 NESTED_DOT_CARGO_NAMES = {"registry", "git"}
+NESTED_DOT_NPM_NAMES = {"_cacache"}
+NESTED_DOT_CODEX_NAMES = {".tmp"}
 
 
 def _unescape_mountinfo_path(raw):
@@ -305,11 +307,22 @@ def build_proc_open_file_probe(proc_root="/proc", ttl_secs=1.0, fallback_probe=d
     return _probe
 
 
+def _is_verified_custom_build_cache(candidate, lower_name):
+    """Match custom-named Cargo target or turbo-lean overlay directories by marker."""
+    if lower_name.startswith("target-"):
+        return (candidate / ".rustc_info.json").is_file() or (candidate / "CACHEDIR.TAG").is_file()
+    if lower_name.endswith("-overlay"):
+        return (candidate / "pkg_cas").is_dir()
+    return False
+
+
 def find_reclaimable_subdirs(
     mission_dir,
     allowed_names=inv.RECLAIMABLE_WORKER_CACHES,
     nested_dot_cache_names=NESTED_DOT_CACHE_NAMES,
     nested_dot_cargo_names=NESTED_DOT_CARGO_NAMES,
+    nested_dot_npm_names=NESTED_DOT_NPM_NAMES,
+    nested_dot_codex_names=NESTED_DOT_CODEX_NAMES,
     mountpoints=frozenset(),
 ):
     """Yield non-overlapping reconstructible cache subdirectories on the same device."""
@@ -318,10 +331,17 @@ def find_reclaimable_subdirs(
     allowed = {name.lower() for name in allowed_names}
     nested_cache = {name.lower() for name in nested_dot_cache_names}
     nested_cargo = {name.lower() for name in nested_dot_cargo_names}
+    nested_npm = {name.lower() for name in nested_dot_npm_names}
+    nested_codex = {name.lower() for name in nested_dot_codex_names}
     for current, dirs, _ in os.walk(root_path, followlinks=False):
-        parent_name = Path(current).name.lower()
+        cur_path = Path(current)
+        parent_name = cur_path.name.lower()
+        grandparent_name = cur_path.parent.name.lower() if cur_path.parent != cur_path else ""
         parent_is_dot_cache = parent_name == ".cache"
         parent_is_dot_cargo = parent_name == ".cargo"
+        parent_is_dot_npm = parent_name == ".npm"
+        parent_is_dot_codex = parent_name == ".codex"
+        parent_is_bun_install = grandparent_name == ".bun" and parent_name == "install"
         kept = []
         for name in sorted(dirs):
             candidate = Path(current, name)
@@ -336,6 +356,10 @@ def find_reclaimable_subdirs(
                 lower_name in allowed
                 or (parent_is_dot_cache and lower_name in nested_cache)
                 or (parent_is_dot_cargo and lower_name in nested_cargo)
+                or (parent_is_dot_npm and lower_name in nested_npm)
+                or (parent_is_dot_codex and lower_name in nested_codex)
+                or (parent_is_bun_install and lower_name == "cache")
+                or _is_verified_custom_build_cache(candidate, lower_name)
             )
             # Never treat a Git checkout or bare repository as a build cache,
             # even if a directory happens to share a cache basename.
