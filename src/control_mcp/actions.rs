@@ -479,13 +479,28 @@ pub(crate) fn is_uncertain_dispatch_error(tool: &str, error: &str) -> bool {
     if has_http_status_in(stripped, 500..=599) {
         // Pre-commit / cleaned-up 5xx exceptions:
         // - `disabled (503)`: managed-machines manager not initialised.
-        // - `provision_failed (502)` / `provision_failed (500)`: ManagedManager::spawn
-        //   destroys the failed sandbox before returning and never hands out a VM.
+        // - `provision_failed (502)` / `provision_failed (500)` and 4xx upstream
+        //   provider rejections (`provider_billing_required`, `provider_quota_exceeded`,
+        //   `provider_auth_failed`, `provider_misconfigured`, `provider_quote_failed`):
+        //   ManagedManager::spawn destroys any partial sandbox before returning and
+        //   never hands out a VM or creates an `auto-managed` mission.
         // - `No assistant LLM configured` (503): rejected before Ask thread creation.
         // - Pre-fix `ask_mission` workspace resolution 500s: rejected before Ask LLM run.
         if stripped.starts_with("disabled (503")
             || stripped.starts_with("provision_failed (502")
             || stripped.starts_with("provision_failed (500")
+            || stripped.starts_with("provider_quote_failed (502")
+            || stripped.starts_with("provider_billing_required (")
+            || stripped.starts_with("provider_quota_exceeded (")
+            || stripped.starts_with("provider_auth_failed (")
+            || stripped.starts_with("provider_misconfigured (")
+            || (tool == "start_mission"
+                && (stripped.contains(": provision_failed:")
+                    || stripped.contains(": provider_quote_failed:")
+                    || stripped.contains(": provider_billing_required:")
+                    || stripped.contains(": provider_quota_exceeded:")
+                    || stripped.contains(": provider_auth_failed:")
+                    || stripped.contains(": provider_misconfigured:")))
             || (tool == "ask_mission"
                 && (stripped.contains("No assistant LLM configured")
                     || stripped.contains("mission workspace is unavailable or not prepared:")
@@ -1191,6 +1206,36 @@ mod tests {
                 }
             })),
         );
+        // 7. Upstream provider quota / billing rejections (even when carrying an embedded
+        //    upstream `HTTP 501` / `HTTP 403` / `HTTP 402` snippet) MUST settle as `rejected`.
+        insert(
+            "spawn-quota-reject",
+            "spawn_managed_machine",
+            Some(json!({
+                "action_id": "spawn-quota-reject",
+                "state": "reconciliation_required",
+                "error": {
+                    "code": "execution_failed",
+                    "accepted": "unknown",
+                    "retryable": false,
+                    "message": "Outcome unconfirmed; inspect before retrying. provider_quota_exceeded (429 Too Many Requests): hetzner POST /servers -> HTTP 403 resource_limit_exceeded: shared core limit exceeded — upstream cloud provider vCPU/instance quota reached; pick a smaller size, switch server family/provider, or destroy idle VMs instead of retrying the same size"
+                }
+            })),
+        );
+        insert(
+            "start-scw-misconfig",
+            "start_mission",
+            Some(json!({
+                "action_id": "start-scw-misconfig",
+                "state": "reconciliation_required",
+                "error": {
+                    "code": "execution_failed",
+                    "accepted": "unknown",
+                    "retryable": false,
+                    "message": "Outcome unconfirmed; inspect before retrying. Failed to create mission (422 Unprocessable Entity): provider_misconfigured: scaleway: unable to resolve project_id via IAM or Account v3 (scaleway GET /account/v3/projects -> HTTP 501)"
+                }
+            })),
+        );
 
         recover(&conn).unwrap();
 
@@ -1209,7 +1254,13 @@ mod tests {
         assert_eq!(state_of("net-timeout").0, "reconciliation_required");
         assert_eq!(state_of("destroy-502").0, "reconciliation_required");
 
-        for id in ["resume-409", "spawn-prov-fail", "ask-ws-missing"] {
+        for id in [
+            "resume-409",
+            "spawn-prov-fail",
+            "ask-ws-missing",
+            "spawn-quota-reject",
+            "start-scw-misconfig",
+        ] {
             let (st, receipt) = state_of(id);
             let receipt = receipt.unwrap();
             assert_eq!(st, "rejected", "{id}: {receipt}");

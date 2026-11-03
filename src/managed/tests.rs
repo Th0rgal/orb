@@ -4452,3 +4452,126 @@ async fn bitwarden_discovery_requires_explicit_managed_opt_in() {
         .unwrap();
     assert!(with_stored.allows_bitwarden_provider_discovery());
 }
+
+#[tokio::test]
+async fn spawn_classifies_upstream_billing_and_quota_rejections_as_deterministic_4xx() {
+    use axum::{http::StatusCode, routing::post, Json, Router};
+
+    // 1. Hetzner shared/dedicated core quota (`HTTP 403 resource_limit_exceeded`) -> 429 `provider_quota_exceeded`.
+    let hz_app = Router::new().route(
+        "/servers",
+        post(|| async {
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": {
+                        "code": "resource_limit_exceeded",
+                        "message": "shared core limit exceeded"
+                    }
+                })),
+            )
+        }),
+    );
+    let hz_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hz_addr = hz_listener.local_addr().unwrap();
+    let hz_srv = tokio::spawn(async move {
+        let _ = axum::serve(hz_listener, hz_app).await;
+    });
+
+    // 2. Boat wallet exhausted (`HTTP 402 billing_required`) -> 402 `provider_billing_required`.
+    let boat_app = Router::new().route(
+        "/sandboxes",
+        post(|| async {
+            (
+                StatusCode::PAYMENT_REQUIRED,
+                Json(serde_json::json!({
+                    "code": "billing_required",
+                    "message": "Insufficient credits to create sandbox"
+                })),
+            )
+        }),
+    );
+    let boat_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let boat_addr = boat_listener.local_addr().unwrap();
+    let boat_srv = tokio::spawn(async move {
+        let _ = axum::serve(boat_listener, boat_app).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.daily_cap_usd = Some(50.0);
+    s.max_concurrent = Some(8);
+    let m = Arc::new(ManagedManager::new(s, None, dir.path(), 3000));
+    m.register_provider(Arc::new(hetzner::HetznerProvider::with_location(
+        format!("http://{hz_addr}"),
+        "hz-test-token",
+        Some("fsn1".into()),
+    )));
+    m.register_provider(Arc::new(boat::BoatProvider::new(
+        format!("http://{boat_addr}"),
+        "boat-test-token",
+    )));
+
+    let hz_err = m
+        .spawn(SpawnRequest {
+            provider: Some("hetzner".into()),
+            size: Some("cpx62".into()),
+            owner_user_id: Some("t1".into()),
+            wait: Some(true),
+            ttl_minutes: Some(30),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(hz_err.error, "provider_quota_exceeded", "{hz_err}");
+    assert_eq!(hz_err.status, 429);
+    assert!(
+        hz_err
+            .message
+            .contains("resource_limit_exceeded: shared core limit exceeded"),
+        "{hz_err}"
+    );
+    assert!(
+        hz_err
+            .message
+            .contains("upstream cloud provider vCPU/instance quota reached"),
+        "{hz_err}"
+    );
+
+    let boat_err = m
+        .spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("xlarge".into()),
+            owner_user_id: Some("t1".into()),
+            wait: Some(true),
+            ttl_minutes: Some(30),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(boat_err.error, "provider_billing_required", "{boat_err}");
+    assert_eq!(boat_err.status, 402);
+    assert!(boat_err.message.contains("billing_required"), "{boat_err}");
+
+    // Failed provisioning rows must be cleaned up (Destroyed, 0 live machines).
+    let rows = m.list(24).await.machines;
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| !r.state.is_live()));
+
+    hz_srv.abort();
+    boat_srv.abort();
+}
+
+#[test]
+fn generic_provision_failure_preserves_502_provision_failed() {
+    let e = ManagedError::from_provision_failure("sandbox did not enroll within 180s".into());
+    assert_eq!(e.error, "provision_failed");
+    assert_eq!(e.status, 502);
+
+    let auth = ManagedError::from_provision_failure(
+        "scaleway GET /iam/v1alpha1/api-keys/SCW1 -> HTTP 401 {\"type\":\"denied_authentication\"}"
+            .into(),
+    );
+    assert_eq!(auth.error, "provider_auth_failed");
+    assert_eq!(auth.status, 422);
+}

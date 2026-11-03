@@ -930,6 +930,71 @@ impl ManagedError {
             message: message.into(),
         }
     }
+
+    /// Classify upstream cloud provider rejections into deterministic non-5xx
+    /// errors so callers and MCP action recovery immediately settle them as
+    /// `rejected` (`accepted = "no"`) instead of opaque `502 Bad Gateway` errors.
+    pub(crate) fn from_provision_failure(err: String) -> Self {
+        Self::classify_upstream_error(err, "provision_failed")
+    }
+
+    pub(crate) fn from_quote_failure(err: String) -> Self {
+        Self::classify_upstream_error(err, "provider_quote_failed")
+    }
+
+    fn classify_upstream_error(err: String, fallback_code: &'static str) -> Self {
+        let lower = err.to_ascii_lowercase();
+        if lower.contains("http 402")
+            || lower.contains("billing_required")
+            || lower.contains("insufficient_credit")
+            || lower.contains("insufficient credit")
+            || lower.contains("insufficient balance")
+            || lower.contains("payment required")
+            || lower.contains("payment_required")
+        {
+            return Self::new(
+                "provider_billing_required",
+                402,
+                format!(
+                    "{err} — upstream cloud provider wallet/billing limit reached; switch provider or static node instead of retrying this provider"
+                ),
+            );
+        }
+        if lower.contains("resource_limit_exceeded")
+            || lower.contains("core limit exceeded")
+            || lower.contains("server_limit_exceeded")
+            || lower.contains("quota_exceeded")
+            || lower.contains("quotas_exceeded")
+            || ((lower.contains("http 403") || lower.contains("http 429"))
+                && lower.contains("quota")
+                && lower.contains("exceed"))
+        {
+            return Self::new(
+                "provider_quota_exceeded",
+                429,
+                format!(
+                    "{err} — upstream cloud provider vCPU/instance quota reached; pick a smaller size, switch server family/provider, or destroy idle VMs instead of retrying the same size"
+                ),
+            );
+        }
+        if lower.contains("http 401")
+            || lower.contains("denied_authentication")
+            || lower.contains("invalid_api_key")
+            || (lower.contains("unauthorized") && lower.contains("-> http "))
+        {
+            return Self::new(
+                "provider_auth_failed",
+                422,
+                format!(
+                    "{err} — upstream cloud provider rejected credentials; switch provider until operator updates the API key"
+                ),
+            );
+        }
+        if lower.contains("unable to resolve project_id") {
+            return Self::new("provider_misconfigured", 422, err);
+        }
+        Self::new(fallback_code, 502, err)
+    }
 }
 
 impl std::fmt::Display for ManagedError {
@@ -1195,16 +1260,20 @@ pub struct ProviderMeta {
 struct BaseProviderCredential {
     source: String,
     api_key: String,
+    access_key: Option<String>,
     region: Option<String>,
     project_id: Option<String>,
+    organization_id: Option<String>,
 }
 
 impl std::fmt::Debug for BaseProviderCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BaseProviderCredential")
             .field("source", &self.source)
+            .field("has_access_key", &self.access_key.is_some())
             .field("region", &self.region)
             .field("project_id", &self.project_id)
+            .field("organization_id", &self.organization_id)
             .finish()
     }
 }
@@ -1918,23 +1987,39 @@ impl ManagedManager {
         region: Option<String>,
         project_id: Option<String>,
     ) {
+        self.register_base_credential_with_extras(
+            provider, source, api_key, None, region, project_id, None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_base_credential_with_extras(
+        self: &Arc<Self>,
+        provider: &str,
+        source: &str,
+        api_key: impl Into<String>,
+        access_key: Option<String>,
+        region: Option<String>,
+        project_id: Option<String>,
+        organization_id: Option<String>,
+    ) {
         let id = provider.trim().to_ascii_lowercase();
         let api_key = api_key.into().trim().to_string();
         if api_key.is_empty() {
             return;
         }
+        let clean =
+            |opt: Option<String>| opt.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         if let Ok(mut base) = self.base_credentials.write() {
             base.insert(
                 id.clone(),
                 BaseProviderCredential {
                     source: source.to_string(),
                     api_key,
-                    region: region
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty()),
-                    project_id: project_id
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty()),
+                    access_key: clean(access_key),
+                    region: clean(region),
+                    project_id: clean(project_id),
+                    organization_id: clean(organization_id),
                 },
             );
         }
@@ -1969,8 +2054,10 @@ impl ManagedManager {
     fn build_cloud_provider(
         id: &str,
         api_key: &str,
+        access_key: Option<&str>,
         region: Option<&str>,
         project_id: Option<&str>,
+        organization_id: Option<&str>,
     ) -> Option<BuiltCloudProvider> {
         match id {
             "boat" => {
@@ -2006,7 +2093,9 @@ impl ManagedManager {
                     api_key,
                     project_id.map(str::to_string),
                     region.map(str::to_string),
-                );
+                )
+                .with_access_key(access_key.map(str::to_string))
+                .with_organization_id(organization_id.map(str::to_string));
                 let zone = Some(p.default_zone().to_string());
                 let proj = p.configured_project_id().map(str::to_string);
                 Some((Arc::new(p), zone, proj))
@@ -2038,6 +2127,7 @@ impl ManagedManager {
                     .filter(|v| !v.is_empty())
             });
 
+        let using_settings_key = settings_key.is_some();
         let (effective_key, cred_source, key_hint) = if let Some(k) = settings_key {
             let hint = stored
                 .as_ref()
@@ -2054,6 +2144,11 @@ impl ManagedManager {
             (None, None, None)
         };
 
+        let access_key = if using_settings_key {
+            None
+        } else {
+            base.as_ref().and_then(|b| b.access_key.clone())
+        };
         let region = stored
             .as_ref()
             .and_then(|s| s.region.clone())
@@ -2062,11 +2157,17 @@ impl ManagedManager {
             .as_ref()
             .and_then(|s| s.project_id.clone())
             .or_else(|| base.as_ref().and_then(|b| b.project_id.clone()));
+        let organization_id = base.as_ref().and_then(|b| b.organization_id.clone());
 
         if let Some(api_key) = effective_key {
-            if let Some((provider, resolved_region, resolved_project)) =
-                Self::build_cloud_provider(id, &api_key, region.as_deref(), project_id.as_deref())
-            {
+            if let Some((provider, resolved_region, resolved_project)) = Self::build_cloud_provider(
+                id,
+                &api_key,
+                access_key.as_deref(),
+                region.as_deref(),
+                project_id.as_deref(),
+                organization_id.as_deref(),
+            ) {
                 self.insert_provider_and_meta(
                     provider,
                     Some(ProviderMeta {
@@ -3373,7 +3474,7 @@ impl ManagedManager {
             provider
                 .quote_spawn(&quote_spec)
                 .await
-                .map_err(|e| ManagedError::new("provider_quote_failed", 502, e))?
+                .map_err(ManagedError::from_quote_failure)?
         } else {
             None
         };
@@ -3609,7 +3710,7 @@ impl ManagedManager {
         if req.wait.unwrap_or(true) {
             match task.await {
                 Ok(Ok(m)) => Ok(m),
-                Ok(Err(e)) => Err(ManagedError::new("provision_failed", 502, e)),
+                Ok(Err(e)) => Err(ManagedError::from_provision_failure(e)),
                 Err(e) => Err(ManagedError::new("provision_failed", 500, e.to_string())),
             }
         } else {
@@ -5996,8 +6097,7 @@ pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<Managed
     let hetzner_key = take_env(&["HETZNER_CLOUD_APIKEY", "HCLOUD_TOKEN"]);
     let vastai_key = take_env(&["VASTAI_API_KEY", "VAST_API_KEY"]);
     let scaleway_key = take_env(&["SCALEWAY_SECRET_KEY", "SCW_SECRET_KEY"]);
-    std::env::remove_var("SCALEWAY_KEY_ID");
-    std::env::remove_var("SCW_ACCESS_KEY");
+    let scaleway_access_key = take_env(&["SCALEWAY_KEY_ID", "SCW_ACCESS_KEY"]);
 
     let hetzner_loc = std::env::var("HETZNER_DEFAULT_LOCATION")
         .ok()
@@ -6007,6 +6107,10 @@ pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<Managed
         .filter(|s| !s.trim().is_empty());
     let scaleway_proj = std::env::var("SCALEWAY_PROJECT_ID")
         .or_else(|_| std::env::var("SCW_DEFAULT_PROJECT_ID"))
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let scaleway_org = std::env::var("SCALEWAY_ORGANIZATION_ID")
+        .or_else(|_| std::env::var("SCW_DEFAULT_ORGANIZATION_ID"))
         .ok()
         .filter(|s| !s.trim().is_empty());
 
@@ -6026,12 +6130,14 @@ pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<Managed
         manager.register_base_credential("vastai", "environment", key, None, None);
     }
     if let Some(key) = scaleway_key {
-        manager.register_base_credential(
+        manager.register_base_credential_with_extras(
             "scaleway",
             "environment",
             key,
+            scaleway_access_key,
             scaleway_zone,
             scaleway_proj,
+            scaleway_org,
         );
     }
     manager.load().await;
