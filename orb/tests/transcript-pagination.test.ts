@@ -80,6 +80,20 @@ it('hydrates the conversational spine when a tool-heavy tail page has no user or
  expect(older.items.filter(i=>i.kind==='text').map(i=>i.kind==='text'?i.text:'')).toEqual(['First reply','Latest canonical update before 3400 tool calls']);
  expect(older.items.filter(i=>i.kind==='tool').map(i=>i.kind==='tool'?i.callId:'')).toEqual(['c-6000','c-9114']);
 });
+it('still hydrates the conversational spine when a tool-heavy tail only has canonical narration or queued user messages',async()=>{
+ mocks.page
+  .mockResolvedValueOnce({events:[
+   {id:9200,event_id:'ac-9200',sequence:9200,event_type:'assistant_message_canonical',content:'Mid-turn status note',timestamp:'2026-11-03T01:10:00Z',metadata:{bubble_id:'b-1',revision:1}},
+   {id:9250,event_id:'uq-1',sequence:9250,event_type:'user_message',content:'Queued follow-up',timestamp:'2026-11-03T01:11:00Z',metadata:{queued:true}},
+  ],nextCursor:9200,pageMax:9300,hasMore:true})
+  .mockResolvedValueOnce({events:[
+   {id:8000,event_id:'u-active',sequence:8000,event_type:'user_message',content:'Start long turn',timestamp:'2026-11-03T01:00:00Z'},
+  ],nextCursor:8000,pageMax:8000,hasMore:false});
+ const initial=await loadTranscript('canonical-tail');
+ expect(mocks.page.mock.calls).toEqual([['canonical-tail',{}],['canonical-tail',{before:9200,view:'transcript'}]]);
+ const delivered=initial.items.find(i=>i.kind==='user'&&!i.queued);
+ expect(delivered).toMatchObject({kind:'user',text:'Start long turn',at:'2026-11-03T01:00:00Z'});
+});
 it('joins an in-flight initial load when refreshTranscript is called before initial completes',async()=>{
  let finish!:(page:unknown)=>void;
  mocks.page.mockImplementation(()=>new Promise(resolve=>finish=resolve));

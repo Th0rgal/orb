@@ -176,7 +176,7 @@ export class TranscriptReducer {
     if (ev.type === "user_message") {
       const parts = deferredMessages(str(d.content), d.source, d.messages);
       if (parts) {
-        for (const part of parts) this.apply({ type: "user_message", data: { ...part, queued: d.queued === true } });
+        for (const part of parts) this.apply({ type: "user_message", data: { ...part, queued: d.queued === true, ...(d.queued !== true && typeof d.at === "string" ? { at: d.at } : {}) } });
         return;
       }
       const messageId = typeof d.id === "string" ? d.id : ev.eventId;
@@ -192,7 +192,10 @@ export class TranscriptReducer {
       if (previous?.kind === "user" && index != null) {
         if (source && source !== previous.source) this.put(index, { ...previous, source });
         if (!previous.queued || queued) {
-          if (previous.receipt && d.receipt !== true) this.put(index, { ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, receipt: false });
+          const nextAt = !queued && typeof d.at === "string" ? d.at : previous.at;
+          if ((previous.receipt && d.receipt !== true) || nextAt !== previous.at) {
+            this.put(index, { ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, ...(previous.receipt && d.receipt !== true ? { receipt: false } : {}), ...(nextAt ? { at: nextAt } : {}) });
+          }
           return;
         }
         this.close(); this.lastFinal = undefined;
@@ -205,13 +208,13 @@ export class TranscriptReducer {
         if (this.lastFinal != null && this.lastFinal > index) this.lastFinal--;
         this.lastUser = this.items.length;
         this.users.set(messageId!, this.items.length);
-        this.items.push({ ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, queued: false, receipt: d.receipt === true, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), at: typeof d.at === "string" ? d.at : previous.at });
+        this.items.push({ ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, queued: false, receipt: d.receipt === true, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), at: typeof d.at === "string" ? d.at : undefined });
         return;
       }
       if (!queued) { this.close(); this.lastFinal = undefined; }
       if (messageId) this.users.set(messageId, this.items.length);
       if (!queued) this.lastUser = this.items.length;
-      this.items.push({ kind: "user", key: messageId ? `user:${messageId}` : this.key("user"), text: str(d.content), messageId, eventId: messageId, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), source, queued, attached: d.attached === true, receipt: d.receipt === true, ...(typeof d.at === "string" ? { at: d.at } : {}) });
+      this.items.push({ kind: "user", key: messageId ? `user:${messageId}` : this.key("user"), text: str(d.content), messageId, eventId: messageId, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), source, queued, attached: d.attached === true, receipt: d.receipt === true, ...(!queued && typeof d.at === "string" ? { at: d.at } : {}) });
       return;
     }
     const id = ev.eventId ?? (typeof d.id === "string" ? d.id : undefined);

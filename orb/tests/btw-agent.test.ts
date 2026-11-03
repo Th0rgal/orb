@@ -909,7 +909,7 @@ it('transitions watchBtw from Turn 1 to dequeued Turn 2, merges concurrent queue
   await vi.advanceTimersByTimeAsync(11000);
   await watching;
   expect(sinceArgs).toEqual([undefined,1,3]);
-  expect(received).toContainEqual({type:'turn',question:'Second question',messageId:'msg-2',completed:{question:'First question',answer:'First answer.'}});
+  expect(received).toContainEqual({type:'turn',question:'Second question',messageId:'msg-2',startedAt:'2026-11-01T00:00:03Z',completed:{question:'First question',answer:'First answer.'}});
   expect(received.at(-1)).toEqual({type:'done',answer:'Second answer.'});
   expect(btwSession('handoff-parent')?.conversationCursor).toEqual({sequence:9,visibleHash:'h9'});
   expect(btwSession('handoff-parent')?.queuedCursors).toBeUndefined();
@@ -1030,4 +1030,52 @@ it('arms startFreshBtwSession across server reconciles and polls live /btw threa
  expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[4]).toEqual(settled.history);
  expect(btwSession('fresh-parent')).toMatchObject({id:'brand-new-side',turnCount:1});
  expect(btwSession('fresh-parent')?.freshSession).toBeUndefined();
+});
+
+it('propagates server user_message timestamps into activeSession.startedAt and watchBtw events',async()=>{
+ const {getMissionEvents}=await import('../src/stream');
+ const {reconcileBtwServerHistory,watchBtw}=await import('../src/btwAgent');
+ vi.mocked(api).mockImplementation(async(path:string)=>{
+  if(path.startsWith('/api/control/missions?tag=')){
+   return [{id:'ts-side',status:'active',created_at:'2026-11-03T01:00:00Z',updated_at:'2026-11-03T01:05:00Z',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:ts-parent'],history:[],title:null}] as any;
+  }
+  return [] as any;
+ });
+ vi.mocked(getMissionEvents).mockResolvedValue([
+  {id:1,sequence:1,event_type:'user_message',content:'Header\n\nCurrent request:\nFirst turn',timestamp:'2026-11-03T01:00:01Z'},
+  {id:2,sequence:2,event_type:'assistant_message',content:'First answer.',timestamp:'2026-11-03T01:01:00Z'},
+  {id:3,sequence:3,event_type:'user_message',content:'Header\n\nCurrent request:\nActive second turn',timestamp:'2026-11-03T01:04:30Z'},
+ ]);
+ const reconciled=await reconcileBtwServerHistory('ts-parent',[]);
+ expect(reconciled.activeSession).toMatchObject({
+  id:'ts-side',
+  question:'Active second turn',
+  active:true,
+  startedAt:'2026-11-03T01:04:30Z',
+ });
+
+ vi.useFakeTimers();
+ try{
+  let step=0;
+  vi.mocked(getMission).mockImplementation(async()=>({id:'ts-side',status:step<1?'active':'completed',history:[],tags:['btw-parent:ts-parent'],title:null,created_at:'2026-11-03T01:00:00Z',updated_at:'2026-11-03T01:06:00Z'} as any));
+  vi.mocked(getMissionEvents).mockImplementation(async()=>{
+   const cur=step++;
+   if(cur===0)return [{id:3,sequence:3,event_type:'user_message',content:'Header\n\nCurrent request:\nActive second turn',timestamp:'2026-11-03T01:04:30Z'}];
+   return [
+    {id:4,sequence:4,event_type:'assistant_message',content:'Second answer.',timestamp:'2026-11-03T01:05:10Z'},
+    {id:5,sequence:5,event_type:'user_message',content:'Header\n\nCurrent request:\nThird turn',timestamp:'2026-11-03T01:05:45Z'},
+    {id:6,sequence:6,event_type:'assistant_message',content:'Third answer.',timestamp:'2026-11-03T01:06:00Z'},
+   ];
+  });
+  const events:any[]=[];
+  const watching=watchBtw('ts-parent',new AbortController().signal,e=>events.push(e));
+  await vi.advanceTimersByTimeAsync(5000);
+  await watching;
+  expect(events[0]).toEqual({type:'start',model:'opencode · builtin/smart',startedAt:'2026-11-03T01:04:30Z'});
+  expect(events.find(e=>e.type==='turn')).toMatchObject({
+   type:'turn',
+   question:'Third turn',
+   startedAt:'2026-11-03T01:05:45Z',
+  });
+ }finally{vi.useRealTimers();}
 });

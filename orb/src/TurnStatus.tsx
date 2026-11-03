@@ -29,6 +29,9 @@ export function turnStartedAt(items: StreamItem[]): number | undefined {
     if (item.kind === "user" && !item.queued) {
       const t = item.at ? Date.parse(item.at) : NaN;
       if (Number.isFinite(t)) return t;
+      // Seeded history/continuation placeholders precede the canonical event stream on reload;
+      // wait for the server event instead of pinning page-open time in localStorage.
+      if (item.key.startsWith("history:") || item.key.startsWith("continuation:")) return undefined;
       return rememberTurnStart(item.messageId ?? item.key);
     }
   }

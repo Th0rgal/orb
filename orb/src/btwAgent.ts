@@ -39,7 +39,7 @@ export function shouldRotateBtwSession(turnCount:number,maxSequence:number):bool
  return turnCount>=BTW_MAX_SESSION_TURNS||maxSequence>=BTW_MAX_SESSION_EVENTS;
 }
 export type QueuedBtwCursor={id:string;before?:ConversationCursor;after:ConversationCursor};
-export type BtwSession={id:string;question:string;harness:string;model:string;local:boolean;active:boolean;baseline:number;afterSequence?:number;placement?:string;conversationCursor?:ConversationCursor;pendingCursor?:ConversationCursor;queuedCursor?:ConversationCursor;queuedCursors?:QueuedBtwCursor[];contextBytes?:number;contextVersion?:number;launchPending?:boolean;brokenSession?:boolean;freshSession?:boolean;turnCount?:number;lastSequence?:number};
+export type BtwSession={id:string;question:string;harness:string;model:string;local:boolean;active:boolean;baseline:number;startedAt?:string;afterSequence?:number;placement?:string;conversationCursor?:ConversationCursor;pendingCursor?:ConversationCursor;queuedCursor?:ConversationCursor;queuedCursors?:QueuedBtwCursor[];contextBytes?:number;contextVersion?:number;launchPending?:boolean;brokenSession?:boolean;freshSession?:boolean;turnCount?:number;lastSequence?:number};
 const storageKey=(parent:string)=>'agent:'+sideQuestionKey(parent);
 export function btwSession(parent:string):BtwSession|undefined{sessionRevision();const s=readJson<BtwSession|undefined>(storageKey(parent),undefined,isRecord);return s?{...s}:undefined;}
 function save(parent:string,s:BtwSession){writeJson(storageKey(parent),s);setSessionRevision(v=>v+1);}
@@ -190,7 +190,8 @@ function follow(id:string,receipt?:import('./clientRuns').ClientRunReceipt){
 }
 export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideEvent)=>void){
  const s=btwSession(parent);if(!s)throw new Error('Side session not found.');const version=connectionVersion();
- receive({type:'start',model:s.harness+' · '+s.model});
+ let reportedStart=s.startedAt;
+ receive({type:'start',model:s.harness+' · '+s.model,...(reportedStart?{startedAt:reportedStart}:{})});
  if(s.local){
   receive({type:'status',text:''});
   await restoreLocalBindings();
@@ -200,7 +201,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   // The native receipt owns completion; Core synchronization must not keep the UI busy.
   const state=await followLocal(s.id,text=>{if(!signal.aborted&&connectionVersion()===version)receive({type:'snapshot',text});});
   if(signal.aborted||connectionVersion()!==version)return;
-  s.active=false;
+  s.active=false;delete s.startedAt;
   syncSessionCursors(parent,s);
   if(state.error||state.exit_code||!state.text.trim()){s.brokenSession=true;delete s.pendingCursor;delete s.queuedCursor;delete s.queuedCursors;save(parent,s);throw new Error(state.error||'The side agent stopped without a response.');}
   if(s.pendingCursor){s.conversationCursor=s.pendingCursor;delete s.pendingCursor;}
@@ -280,9 +281,16 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
    if(activeUserSeq===undefined){
     activeUserSeq=latestUser.sequence;
     syncSessionCursors(parent,s);
+    let dirty=false;
+    if(latestUser.timestamp&&s.startedAt!==latestUser.timestamp){s.startedAt=latestUser.timestamp;dirty=true;}
     if(latestUser.event_id&&s.queuedCursors?.some(entry=>entry.id===latestUser.event_id)){
      commitBtwDeliveredCursor(s,latestUser.event_id);
-     save(parent,s);
+     dirty=true;
+    }
+    if(dirty)save(parent,s);
+    if(latestUser.timestamp&&latestUser.timestamp!==reportedStart){
+     reportedStart=latestUser.timestamp;
+     receive({type:'start',model:s.harness+' · '+s.model,startedAt:reportedStart});
     }
    }else if(latestUser.sequence>activeUserSeq){
     const parsed=parseBtwThread({...mission,status:'completed'},events.filter(e=>e.sequence<latestUser.sequence));
@@ -291,12 +299,16 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
     const nextQuestion=extractBtwUserQuestion(latestUser.content)||s.question;
     syncSessionCursors(parent,s);
     s.question=nextQuestion;
+    if(latestUser.timestamp){s.startedAt=latestUser.timestamp;reportedStart=latestUser.timestamp;}else delete s.startedAt;
     commitBtwDeliveredCursor(s,latestUser.event_id??undefined);
     save(parent,s);
     live=new TranscriptReducer();streamed={answer:'',narration:[]};previous=undefined;
     setLiveThoughts(all=>({...all,[s.id]:[]}));
-    receive({type:'turn',question:nextQuestion,messageId:latestUser.event_id??undefined,completed:finished?{question:finished.question,answer:finished.answer,...(finished.narration?.length?{narration:finished.narration}:{})}:undefined});
+    receive({type:'turn',question:nextQuestion,messageId:latestUser.event_id??undefined,...(latestUser.timestamp?{startedAt:latestUser.timestamp}:{}),completed:finished?{question:finished.question,answer:finished.answer,...(finished.narration?.length?{narration:finished.narration}:{})}:undefined});
    }
+  }else if(!reportedStart&&(s.turnCount??1)<=1&&!s.afterSequence&&mission.created_at){
+   reportedStart=mission.created_at;s.startedAt=reportedStart;save(parent,s);
+   receive({type:'start',model:s.harness+' · '+s.model,startedAt:reportedStart});
   }
   receive({type:'status',text:btwQueueStatus(mission)});
   const reducer=new TranscriptReducer();let final:string|undefined;let delta:string|undefined;
@@ -316,7 +328,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   publish(result);
   if(!active){
    syncSessionCursors(parent,s);
-   s.active=false;
+   s.active=false;delete s.startedAt;
    if(['failed','interrupted','cancelled'].includes(mission.status)){
     s.brokenSession=true;delete s.pendingCursor;delete s.queuedCursor;delete s.queuedCursors;save(parent,s);
     throw new Error(mission.remote_job?.error||mission.status_message||`Side agent ${mission.status}.`);
@@ -452,11 +464,11 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    // Core owns placement. A stale local view must not launch a native run for
    // a side session Core already started elsewhere.
    if(local&&!m.tags?.includes('placement:client'))local=false;
-   s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0,turnCount:1};save(parent,s);localStorage.removeItem(attemptKey);accepted=true;
+   s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0,turnCount:1,startedAt:m.created_at||new Date().toISOString()};save(parent,s);localStorage.removeItem(attemptKey);accepted=true;
   };
   if(!reuse)await createSide();
   else{
-   const next:BtwSession={...s!,question,active:!local,baseline:0,afterSequence:headSeq,turnCount:(s!.turnCount??1)+1,lastSequence:headSeq};
+   const next:BtwSession={...s!,question,active:!local,baseline:0,afterSequence:headSeq,turnCount:(s!.turnCount??1)+1,lastSequence:headSeq,startedAt:new Date().toISOString()};
    delete next.brokenSession;delete next.freshSession;
    try{
     if(!local)await sendMissionMessage(next.id,prompt,undefined,clientMessageId);
@@ -586,7 +598,7 @@ export async function queueBtwFollowUp(
    if(receipt.queued){
     save(parent,recordQueuedCursor({...nextSession,id:current.id},id));
    }else{
-    const cleaned:BtwSession={...nextSession,id:current.id,question,active:true,pendingCursor:snapshot.cursor};
+    const cleaned:BtwSession={...nextSession,id:current.id,question,active:true,pendingCursor:snapshot.cursor,startedAt:new Date().toISOString()};
     delete cleaned.queuedCursor;
     if(cleaned.queuedCursors){
      const rest=cleaned.queuedCursors.filter(entry=>entry.id!==id);
@@ -659,7 +671,8 @@ function parseBtwThread(m:Mission,events:StoredEvent[]):Omit<ParsedBtwThread,'st
  let active:BtwSession|undefined;
  if(ACTIVE.includes(m.status)&&curQuestion){
   const local=m.tags?.includes('placement:client')??false;
-  active={id:m.id,question:curQuestion,harness:m.backend||'opencode',model:m.model_override||'builtin/smart',local,active:true,baseline:0,turnCount:turns.length+1,lastSequence};
+  const startedAt=curAt||(!turns.length?m.created_at||undefined:undefined);
+  active={id:m.id,question:curQuestion,harness:m.backend||'opencode',model:m.model_override||'builtin/smart',local,active:true,baseline:0,turnCount:turns.length+1,lastSequence,...(startedAt?{startedAt}:{})};
  }else if(curQuestion){
   flush();
  }
@@ -672,9 +685,18 @@ export async function reconnectBtwSession(parent:string,sideId:string):Promise<B
  const events=await getMissionEvents(mission.id,{view:'history'}).catch(()=>[] as StoredEvent[]);
  const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
  let question=existing?.id===mission.id?existing.question:'';
+ let startedAt=existing?.id===mission.id?existing.startedAt:undefined;
+ let sawPriorReply=false;
  for(const ev of ordered){
-  if(ev.event_type==='user_message'&&!isQueuedUserEvent(ev))question=extractBtwUserQuestion(ev.content)||question;
+  if(ev.event_type==='user_message'&&!isQueuedUserEvent(ev)){
+   question=extractBtwUserQuestion(ev.content)||question;
+   if(ev.timestamp)startedAt=ev.timestamp;
+  }else if(ev.event_type==='assistant_message'&&!isSyntheticRemoteAssistantNote(ev.content)&&ev.content.trim()){
+   sawPriorReply=true;
+  }
  }
+ const isActive=ACTIVE.includes(mission.status);
+ if(!startedAt&&isActive&&!sawPriorReply&&mission.created_at)startedAt=mission.created_at;
  const local=mission.tags?.includes('placement:client')??false;
  const session:BtwSession={
   id:mission.id,
@@ -682,8 +704,9 @@ export async function reconnectBtwSession(parent:string,sideId:string):Promise<B
   harness:mission.backend||existing?.harness||'opencode',
   model:mission.model_override||existing?.model||'builtin/smart',
   local,
-  active:ACTIVE.includes(mission.status),
+  active:isActive,
   baseline:0,
+  ...(isActive&&startedAt?{startedAt}:{}),
   placement:existing?.placement,
   contextVersion:existing?.contextVersion,
   conversationCursor:existing?.conversationCursor,
@@ -782,8 +805,8 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
  // A session saved as running whose thread Core reports finished (or that is
  // no longer listed) is stale: it must not pin the tab to an old thread.
  if(existing?.active&&!valid.some(m=>m.id===existing!.id&&ACTIVE.includes(m.status)))existing={...existing,active:false};
- if(latestActive&&(!existing||!existing.active||existing.id!==latestActive.id)){
-  save(parent,latestActive);
+ if(latestActive&&(!existing||!existing.active||existing.id!==latestActive.id||(latestActive.startedAt&&existing.startedAt!==latestActive.startedAt))){
+  save(parent,existing?.id===latestActive.id?syncSessionCursors(parent,{...existing,...latestActive}):latestActive);
  }else if(latest&&RESUMABLE.includes(latest.status)&&!existing?.active){
   const local=latest.tags?.includes('placement:client')??false;
   const latestParsed=byId.get(latest.id);

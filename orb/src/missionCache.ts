@@ -115,7 +115,7 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
     // the recent conversation turns. Fetch the lightweight conversational
     // spine (view=transcript) before nextCursor so the latest messages always
     // appear immediately above the active work fold on first paint.
-    if(hasOlder && before !== undefined && !stream.some(e => e.type === "user_message" || e.type === "assistant_message")){
+    if(hasOlder && before !== undefined && !stream.some(e => (e.type === "user_message" && e.data.queued !== true) || (e.type === "assistant_message" && e.data.canonical !== true))){
      const spinePage = await getMissionEventPage(id, { before, view: "transcript" }).catch(() => null);
      check();
      if(spinePage?.events?.length){

@@ -161,6 +161,16 @@ object OrbSideAgent {
         return if (sec < 60) "${sec}s" else "%d:%02d".format(sec / 60, sec % 60)
     }
 
+    fun turnStartMs(
+        openAt: String?,
+        localAskedAtMs: Long?,
+        missionStartedAt: String?,
+        hasPriorTurns: Boolean
+    ): Long? =
+        OrbJSON.dateEpochMs(openAt)
+            ?: localAskedAtMs
+            ?: if (!hasPriorTurns) OrbJSON.dateEpochMs(missionStartedAt) else null
+
     fun prompt(context: String, question: String, priorTurns: List<Turn> = emptyList()): String {
         val sideSection = if (priorTurns.isEmpty()) "" else {
             val formatted = priorTurns.joinToString("\n\n") { "Q: ${it.question}\nA: ${it.answer}" }
@@ -640,12 +650,19 @@ fun OrbSideAgentSheet(
     val cachedThreads = remember(session.parentId) { mutableStateMapOf<String, Pair<String, OrbSideAgent.ParsedThread>>() }
     val cachedEventsByThread = remember(session.parentId) { mutableStateMapOf<String, List<OrbRow>>() }
 
-    var startedAtMs by remember(session.parentId) { mutableLongStateOf(System.currentTimeMillis()) }
-    var nowMs by remember(session.parentId) { mutableLongStateOf(startedAtMs) }
+    var localAskedAtMs by remember(session.parentId) { mutableStateOf<Long?>(null) }
+    var nowMs by remember(session.parentId) { mutableLongStateOf(System.currentTimeMillis()) }
 
     val status = (boundMission?.str("status") ?: "").lowercase()
     val running = boundId != null && status in OrbSideAgent.liveStatuses
     val working = running || pendingQuestion != null
+    val turnStartMs = OrbSideAgent.turnStartMs(
+        openAt = openTurn?.at,
+        localAskedAtMs = localAskedAtMs,
+        missionStartedAt = boundMission?.str("started_at", "created_at"),
+        hasPriorTurns = turns.isNotEmpty()
+    )
+    val elapsedSuffix = turnStartMs?.let { " · ${OrbSideAgent.elapsedLabel(nowMs - it)}" }.orEmpty()
 
     suspend fun refreshQueue(targetId: String?) {
         val id = targetId ?: return
@@ -770,6 +787,9 @@ fun OrbSideAgentSheet(
         val pending = pendingQuestion?.trim()
         if (!pending.isNullOrEmpty() && (latestOpen?.question?.trim() == pending || merged.any { it.question.trim() == pending })) {
             pendingQuestion = null
+            if (!latestOpen?.at.isNullOrEmpty() || merged.any { it.question.trim() == pending }) {
+                localAskedAtMs = null
+            }
         }
         loading = false
         refreshQueue(target.id)
@@ -800,7 +820,7 @@ fun OrbSideAgentSheet(
                     UsageTelemetry.trackAction(UsageTelemetry.Action.Queue, "btw")
                 } else {
                     pendingQuestion = text
-                    startedAtMs = System.currentTimeMillis()
+                    localAskedAtMs = System.currentTimeMillis()
                 }
                 val receipt = OrbJSON.dict(
                     OrbSideAgent.retrying {
@@ -830,12 +850,12 @@ fun OrbSideAgentSheet(
                     }
                     if (!queuedNow) {
                         pendingQuestion = text
-                        startedAtMs = System.currentTimeMillis()
+                        localAskedAtMs = System.currentTimeMillis()
                     }
                 }
             } else {
                 pendingQuestion = text
-                startedAtMs = System.currentTimeMillis()
+                localAskedAtMs = System.currentTimeMillis()
                 val created = OrbSideAgent.launch(
                     core,
                     session.parentId,
@@ -852,6 +872,7 @@ fun OrbSideAgentSheet(
         } catch (e: Throwable) {
             followUps = followUps.postFailed(clientId)
             pendingQuestion = null
+            localAskedAtMs = null
             if (inputText.isEmpty()) inputText = text
             error = e.message ?: "Couldn't send side question."
         } finally {
@@ -951,7 +972,7 @@ fun OrbSideAgentSheet(
         val wireContent = rawQueuedById[queueId] ?: row.content
         followUps = followUps.hide(queueId)
         pendingQuestion = row.content.trim()
-        startedAtMs = System.currentTimeMillis()
+        localAskedAtMs = System.currentTimeMillis()
         scope.launch {
             try {
                 val resp = OrbJSON.dict(
@@ -970,6 +991,7 @@ fun OrbSideAgentSheet(
             } catch (e: Throwable) {
                 followUps = followUps.unhide(queueId)
                 pendingQuestion = null
+                localAskedAtMs = null
                 error = e.message ?: "Couldn't send now."
             }
         }
@@ -981,6 +1003,7 @@ fun OrbSideAgentSheet(
             try {
                 core.request("/api/control/missions/${core.encodeComponent(targetId)}/cancel", method = "POST")
                 pendingQuestion = null
+                localAskedAtMs = null
                 refreshThreads()
                 refreshQueue(targetId)
             } catch (e: Throwable) {
@@ -1016,11 +1039,12 @@ fun OrbSideAgentSheet(
 
     LaunchedEffect(working) {
         if (working) {
-            startedAtMs = System.currentTimeMillis()
             while (working && isActive) {
                 nowMs = System.currentTimeMillis()
                 delay(1_000L)
             }
+        } else {
+            localAskedAtMs = null
         }
     }
 
@@ -1057,8 +1081,8 @@ fun OrbSideAgentSheet(
                         text = when {
                             status == "pending" || status == "queued" -> "Waiting to start…"
                             status == "paused" -> "Paused"
-                            openTurn?.answer?.isNotEmpty() == true -> "Writing · ${OrbSideAgent.elapsedLabel(nowMs - startedAtMs)}"
-                            else -> "Working · ${OrbSideAgent.elapsedLabel(nowMs - startedAtMs)}"
+                            openTurn?.answer?.isNotEmpty() == true -> "Writing$elapsedSuffix"
+                            else -> "Working$elapsedSuffix"
                         },
                         color = OrbStyle.textMuted,
                         fontSize = 12.sp
@@ -1143,9 +1167,9 @@ fun OrbSideAgentSheet(
                             CircularProgressIndicator(color = OrbStyle.textSecondary, strokeWidth = 1.8.dp, modifier = Modifier.size(12.dp))
                             Text(
                                 text = if (openTurn?.answer?.isNotEmpty() == true) {
-                                    "Writing… · ${OrbSideAgent.elapsedLabel(nowMs - startedAtMs)}"
+                                    "Writing…$elapsedSuffix"
                                 } else {
-                                    "Working… · ${OrbSideAgent.elapsedLabel(nowMs - startedAtMs)}"
+                                    "Working…$elapsedSuffix"
                                 },
                                 color = OrbStyle.textMuted,
                                 fontSize = 12.sp
