@@ -432,6 +432,24 @@ impl SqliteMissionStore {
             if updated == 0 {
                 return Err(format!("Board task {} not found", t.id));
             }
+            if let Some(worker_id) = t.worker_mission_id {
+                let deps = serde_json::to_string(&t.depends_on).unwrap_or_else(|_| "[]".into());
+                let _ = conn.execute(
+                    "INSERT INTO mission_orchestration_meta
+                        (mission_id, root_mission_id, role, depends_on_json, queued_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(mission_id) DO UPDATE SET
+                        role = excluded.role,
+                        depends_on_json = excluded.depends_on_json",
+                    params![
+                        worker_id.to_string(),
+                        t.boss_mission_id.to_string(),
+                        t.role.to_string(),
+                        deps,
+                        t.created_at,
+                    ],
+                );
+            }
             Ok(())
         })
         .await

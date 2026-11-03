@@ -50,7 +50,7 @@ enum OrbSettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .account: [("settings", "Account"), ("usage-telemetry", "Usage telemetry"), ("dictation", "Dictation"), ("debug", "Advanced")]
         case .models: [("routing", "Fallback Chains"), ("providers", "Providers"), ("usage-settings", "Usage"), ("routing-keys", "API Keys")]
-        case .agents: [("skills-settings", "Skills"), ("hermes-settings", "Assistant"), ("btw-settings", "Quick questions (/btw)"), ("inbox-summaries", "Inbox & summaries"), ("machines", "Machines")]
+        case .agents: [("skills-settings", "Skills"), ("hermes-settings", "Assistant"), ("btw-settings", "Quick questions (/btw)"), ("inbox-summaries", "Inbox & summaries"), ("machines", "Machines"), ("resources", "Resources")]
         case .security: [("security-settings", "Access"), ("bitwarden-settings", "Secrets vault")]
         case .notifications: [("inbox-settings", "Notifications")]
         }
@@ -137,6 +137,7 @@ struct OrbSettingsHome: View {
         case "btw-settings": OrbBtwSettingsView()
         case "inbox-summaries": OrbInboxSummariesSettingsView()
         case "machines": OrbMachinesSettings()
+        case "resources": OrbResourcesView()
         case "security-settings": OrbPrivilegeAccessList().navigationTitle("Access").navigationBarTitleDisplayMode(.inline)
         case "mission-access": OrbMissionAccessList().navigationTitle("Mission access").navigationBarTitleDisplayMode(.inline)
         case "bitwarden-settings": OrbBitwardenSettings()

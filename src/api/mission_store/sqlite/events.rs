@@ -575,6 +575,7 @@ pub(in crate::api::mission_store) fn log_event_sync(
             &content,
             &metadata,
         )?;
+        super::resources::on_event_logged_sync(conn, mission_id, &now, event);
 
         Ok(())
     })()

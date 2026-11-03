@@ -641,6 +641,7 @@ impl SqliteMissionStore {
             ],
         )
         .map_err(|e| e.to_string())?;
+        super::resources::on_proxy_outcome_sync(&conn, record);
         // Cheap bounded retention: prune roughly once per 512 inserts.
         if conn.last_insert_rowid() % 512 == 0 {
             let cutoff = (chrono::Utc::now()

@@ -1673,4 +1673,235 @@ export function getMissionPassageContext(
   );
 }
 
+// ─── Resources Flow & Subagent DAG ───────────────────────────────────────────
+
+export type ResourcesWindowRange = "30m" | "1h" | "6h" | "24h" | "7d";
+
+export interface ComputeSourceSummary {
+  id: string;
+  label: string;
+  sublabel: string;
+  total_vcpu: number;
+  active_vcpu: number;
+  idle_leased_vcpu: number;
+  est_usd_per_h: number;
+  health: string;
+  series_vcpu: number[];
+  series_usd_per_h: number[];
+}
+
+export interface ComputeOverview {
+  total_vcpu: number;
+  active_vcpu: number;
+  idle_leased_vcpu: number;
+  hourly_burn_usd: number;
+  sources: ComputeSourceSummary[];
+}
+
+export interface InferencePoolSummary {
+  id: string;
+  label: string;
+  sublabel: string;
+  provider: string;
+  quota_pct_remaining?: number | null;
+  reset_at?: string | null;
+  current_b_tok_per_h: number;
+  est_usd_per_h: number;
+  health: string;
+  series_b_tok_per_h: number[];
+  series_usd_per_h: number[];
+}
+
+export interface InferenceOverview {
+  current_b_tok_per_h: number;
+  est_usd_per_h: number;
+  window_total_tokens: number;
+  window_est_usd: number;
+  throttled_429_count: number;
+  pools: InferencePoolSummary[];
+}
+
+export interface MissionResourceSummary {
+  id: string;
+  title: string;
+  project?: string | null;
+  status: string;
+  stall_kind?: string | null;
+  subagent_running: number;
+  subagent_total: number;
+  vcpu: number;
+  idle_vcpu: number;
+  compute_usd_per_h: number;
+  b_tok_per_h: number;
+  inference_usd_per_h: number;
+  eta_remaining_secs?: number | null;
+  series_vcpu: number[];
+  series_compute_usd_per_h: number[];
+  series_b_tok_per_h: number[];
+  series_inference_usd_per_h: number[];
+}
+
+export interface ResourceFlowLink {
+  kind: "compute" | "inference" | string;
+  source_id: string;
+  mission_id: string;
+  value: number;
+  est_usd_per_h: number;
+  degraded: boolean;
+}
+
+export interface ResourcesOverviewResponse {
+  as_of: string;
+  range: ResourcesWindowRange | string;
+  bucket_seconds: number;
+  timestamps_ms: number[];
+  compute: ComputeOverview;
+  inference: InferenceOverview;
+  missions: MissionResourceSummary[];
+  links: ResourceFlowLink[];
+}
+
+export interface HorizonOption {
+  id: string;
+  label: string;
+  span_secs: number;
+}
+
+export interface MissionDetailHeader {
+  id: string;
+  title: string;
+  project?: string | null;
+  status: string;
+  started_at: string;
+  completed_at?: string | null;
+  elapsed_secs: number;
+  eta_remaining_secs?: number | null;
+  subagent_count: number;
+  track_count: number;
+}
+
+export interface MissionFlowInputNode {
+  id: string;
+  kind: string;
+  label: string;
+  sub: string;
+  weight: number;
+  est_usd_per_h: number;
+}
+
+export interface MissionFlowTrackNode {
+  id: string;
+  label: string;
+  sub: string;
+  state: string;
+}
+
+export interface MissionFlowSubagentNode {
+  id: string;
+  mission_id?: string | null;
+  native: boolean;
+  track_id: string;
+  role: string;
+  label: string;
+  model?: string | null;
+  node_id?: string | null;
+  vcpu: number;
+  compute_usd_per_h: number;
+  b_tok_per_h: number;
+  inference_usd_per_h: number;
+  state: string;
+}
+
+export interface MissionFlowEdge {
+  kind: string;
+  source_id: string;
+  target_id: string;
+  weight: number;
+  est_usd_per_h: number;
+  degraded: boolean;
+}
+
+export interface MissionFlowPayload {
+  inputs: MissionFlowInputNode[];
+  tracks: MissionFlowTrackNode[];
+  subagents: MissionFlowSubagentNode[];
+  input_to_track: MissionFlowEdge[];
+  track_to_subagent: MissionFlowEdge[];
+}
+
+export interface MissionDagBar {
+  id: string;
+  mission_id?: string | null;
+  label: string;
+  section: string;
+  role: string;
+  model?: string | null;
+  node_id?: string | null;
+  vcpu: number;
+  compute_usd_per_h: number;
+  b_tok_per_h: number;
+  inference_usd_per_h: number;
+  start_offset_secs: number;
+  duration_secs: number;
+  eta_remaining_secs?: number | null;
+  eta_basis?: string | null;
+  state: "done" | "active" | "capped" | "pending" | string;
+  after_ids: string[];
+}
+
+export interface MissionDagPayload {
+  origin_unix_secs: number;
+  horizon_secs: number;
+  now_offset_secs: number;
+  bars: MissionDagBar[];
+}
+
+export interface MissionTimelineSeries {
+  offsets_secs: number[];
+  observed_vcpu: Array<number | null>;
+  projected_vcpu: Array<number | null>;
+  observed_compute_usd_per_h: Array<number | null>;
+  projected_compute_usd_per_h: Array<number | null>;
+  observed_b_tok_per_h: Array<number | null>;
+  projected_b_tok_per_h: Array<number | null>;
+  observed_inference_usd_per_h: Array<number | null>;
+  projected_inference_usd_per_h: Array<number | null>;
+}
+
+export interface MissionResourcesResponse {
+  as_of: string;
+  mission: MissionDetailHeader;
+  available_horizons: HorizonOption[];
+  active_horizon: string;
+  flow: MissionFlowPayload;
+  dag: MissionDagPayload;
+  timeline: MissionTimelineSeries;
+}
+
+export function getResourcesOverview(
+  range: ResourcesWindowRange = "6h",
+  signal?: AbortSignal,
+): Promise<ResourcesOverviewResponse> {
+  const qs = new URLSearchParams({ range });
+  return api<ResourcesOverviewResponse>(
+    `/api/resources/overview?${qs.toString()}`,
+    signal ? { signal } : undefined,
+  );
+}
+
+export function getMissionResources(
+  missionId: string,
+  horizon?: string,
+  signal?: AbortSignal,
+): Promise<MissionResourcesResponse> {
+  const qs = new URLSearchParams();
+  if (horizon) qs.set("horizon", horizon);
+  const suffix = qs.size > 0 ? `?${qs.toString()}` : "";
+  return api<MissionResourcesResponse>(
+    `/api/resources/missions/${encodeURIComponent(missionId)}${suffix}`,
+    signal ? { signal } : undefined,
+  );
+}
+
+
 

@@ -65,6 +65,7 @@ import { RoutingSettings, confirmLeaveRouting } from "./RoutingSettings";
 const Machines = lazy(() => import("./Machines").then(module => ({ default: module.Machines })));
 import { MACHINES, isManagedNode, managedFleetLabel, nodeSize } from "./machines/nodes";
 const Providers=lazy(()=>import("./Providers").then(module=>({default:module.Providers})));
+const Resources = lazy(() => import("./Resources"));
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { mdSource, toggleMdSource } from "./Markdown";
 import { applyPendingMoves } from "./missionMove";
@@ -133,7 +134,7 @@ import { MissionView, NativeMissionView } from "./mission/MissionView";
 const SETTINGS_ICONS: Record<string, () => JSX.Element> = {
   account: () => <Ic.GearIcon />, models: () => <Ic.CubeIcon />, agents: () => <Ic.SkillsIcon />, security: () => <Ic.KeyIcon />, notifications: () => <Ic.BellIcon />,
 };
-const PAGES = new Set(["inbox", "cloud-agent", "machines", "providers", ...SETTINGS_PAGE_IDS]);
+const PAGES = new Set(["inbox", "cloud-agent", "machines", "providers", "resources", ...SETTINGS_PAGE_IDS]);
 
 export default function App() {
   const [secretRequests, setSecretRequests] = createSignal(0);
@@ -163,7 +164,7 @@ export default function App() {
   onMount(() => onCleanup(trackScrollbarHover()));
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
-  const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps|sk):/.test(saved)) ? settingsPageId(saved) : null; })());
+  const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps|sk|rm):/.test(saved)) ? settingsPageId(saved) : null; })());
   createEffect(() => { writeString("orb.selectedConversation", selected() ?? ""); });
   onMount(() => onCleanup(startUsageTelemetry()));
   // One page view per selected page; the previous page is the entry point.
@@ -474,6 +475,11 @@ export default function App() {
     const id = selected();
     return id?.startsWith("ps:") ? id.slice(3) : null;
   });
+  // Per-mission Resources / Fast-DAG view: `rm:<missionId>`.
+  const currentResourcesMissionId = createMemo(() => {
+    const id = selected();
+    return id?.startsWith("rm:") ? id.slice(3) : null;
+  });
   // Hosted project file: `pf:<slug>:<path>` (path may itself contain slashes).
   const currentProjectFile = createMemo(() => {
     const id = selected();
@@ -534,7 +540,7 @@ export default function App() {
       // Backend views (missions, hosted files) can't render offline — e.g.
       // after a 401 cleared the token mid-session.
       const sel = selected();
-      if (sel && (sel.startsWith("m:") || sel.startsWith("pf:") || sel.startsWith("c:") || sel.startsWith("pc:") || sel.startsWith("ps:") || sel === "execution")) open(null);
+      if (sel && (sel.startsWith("m:") || sel.startsWith("pf:") || sel.startsWith("c:") || sel.startsWith("pc:") || sel.startsWith("ps:") || sel.startsWith("rm:") || sel === "execution")) open(null);
       // Keep an explicit machine selection across reconnects.
     }
   }));
@@ -1037,6 +1043,10 @@ export default function App() {
                   <span class="row-ico"><Ic.CubeIcon /></span>
                   <span class="row-label">Inference</span><kbd aria-hidden="true">{shortcutLabel("providers")}</kbd>
                 </button>
+                <button class={`row ${selected() === "resources" || Boolean(currentResourcesMissionId()) ? "active" : ""}`} data-testid="sb-resources" onClick={() => open("resources")}>
+                  <span class="row-ico"><Ic.ResourcesIcon /></span>
+                  <span class="row-label">Resources</span><kbd aria-hidden="true">{shortcutLabel("resources")}</kbd>
+                </button>
 
                 <Show
                   when={isConnected()}
@@ -1170,6 +1180,16 @@ export default function App() {
             <Match when={selected() === "providers"}>
               <span>Inference</span>
             </Match>
+            <Match when={selected() === "resources"}>
+              <span>Resources</span>
+            </Match>
+            <Match when={currentResourcesMissionId()}>
+              {(mid) => (
+                <span>
+                  Resources · {missions().find((m) => m.id === mid())?.title || mid().slice(0, 8)}
+                </span>
+              )}
+            </Match>
             <Match when={selected() === "inbox"}><span>Inbox</span></Match>
             <Match when={selected() === "cloud-agent" && cloudLaunchTitle()}>{(title) => <span>{title().replace(/\s+/g, " ").slice(0, 80)}</span>}</Match>
             <Match when={selected() === "cloud-agent"}><span>Cloud agent</span></Match>
@@ -1205,6 +1225,20 @@ export default function App() {
         {/* A mission view portals its Chapters navigation here, beside the title-bar icons. */}
         <div class="tb-tools" id="tb-tools" />
         <FilePanelButton />
+        <Show when={currentMissionId()}>
+          {(mid) => (
+            <button
+              class="files-toggle"
+              style={{ "margin-left": "0" }}
+              title="Resources & Fast-DAG"
+              aria-label="Resources & Fast-DAG"
+              data-testid="tb-mission-resources"
+              onClick={() => open(`rm:${mid()}`)}
+            >
+              <Ic.ResourcesIcon size={16} />
+            </button>
+          )}
+        </Show>
       </header>
 
       <main class="main">
@@ -1483,6 +1517,11 @@ export default function App() {
           <Match when={selected() === "providers"}>
             <Providers />
           </Match>
+          <Match when={selected() === "resources" || Boolean(currentResourcesMissionId())}>
+            <Suspense>
+              <Resources missionId={currentResourcesMissionId()} onOpen={open} />
+            </Suspense>
+          </Match>
           <Match when={currentMissionId() || (selected()===null && launchPreview())}>
             <Show when={currentMissionId() ? launchedViewKeys.get(currentMissionId()!) || currentMissionId() : launchViewKey()} keyed>{viewKey =>
               <Show when={viewKey===launchViewKey()} fallback={<MissionLookupContext.Provider value={id=>missions().find(m=>m.id===id) ?? lookupMissionById(id)}><MissionView id={currentMissionId()!} initial={missions().find(m=>m.id===currentMissionId())} onMission={setOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id,pct)=>setPreviewContext({id,pct})} onFork={commitFork}/></MissionLookupContext.Provider>}>
@@ -1614,4 +1653,3 @@ export default function App() {
     </div>
   );
 }
-

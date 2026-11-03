@@ -100,6 +100,7 @@ enum class OrbSettingsRoute {
     Skills,
     Assistant,
     Machines,
+    Resources,
     Inbox,
     InboxSummaries,
     Secrets,
@@ -323,6 +324,12 @@ fun OrbSettingsSheet(
                         onBack = back
                     )
                 }
+                OrbSettingsRoute.Resources -> {
+                    OrbResourcesSettingsPage(
+                        core = core,
+                        onBack = back
+                    )
+                }
                 OrbSettingsRoute.Inbox -> {
                     OrbInboxSettingsPage(
                         onBack = back,
@@ -394,6 +401,7 @@ private fun pageSubtitle(route: OrbSettingsRoute, baseURL: String, providers: In
     OrbSettingsRoute.Skills -> "Shared Library skills"
     OrbSettingsRoute.Assistant -> "Hermes coordinator model, memory & persona"
     OrbSettingsRoute.Machines -> "$nodes nodes"
+    OrbSettingsRoute.Resources -> "Compute & inference flow, subagent Fast-DAG"
     OrbSettingsRoute.Inbox -> if (OrbNotifications.notificationsEnabled) "Alerts on" else "Alerts off"
     OrbSettingsRoute.InboxSummaries -> when {
         !OrbInboxSettings.inboxEnabled -> "Inbox off"

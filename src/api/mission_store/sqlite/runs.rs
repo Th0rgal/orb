@@ -95,6 +95,7 @@ impl SqliteMissionStore {
                 ],
             )
             .map_err(|error| error.to_string())?;
+            super::resources::on_run_started_sync(&tx, &run);
             tx.commit().map_err(|error| error.to_string())?;
             Ok(run)
         })
@@ -200,14 +201,24 @@ impl SqliteMissionStore {
         let terminal_reason = terminal_reason.map(str::to_string);
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
-            conn.execute(
-                "UPDATE mission_runs SET execution_state = 'terminal', heartbeat_at = ?1,
-                    ended_at = ?1, terminal_reason = ?2
-                 WHERE run_id = ?3 AND generation = ?4 AND execution_state <> 'terminal'",
-                params![now, terminal_reason, run_id.to_string(), generation as i64],
-            )
-            .map(|changed| changed == 1)
-            .map_err(|error| error.to_string())
+            let changed = conn
+                .execute(
+                    "UPDATE mission_runs SET execution_state = 'terminal', heartbeat_at = ?1,
+                        ended_at = ?1, terminal_reason = ?2
+                     WHERE run_id = ?3 AND generation = ?4 AND execution_state <> 'terminal'",
+                    params![now, terminal_reason, run_id.to_string(), generation as i64],
+                )
+                .map(|changed| changed == 1)
+                .map_err(|error| error.to_string())?;
+            if changed {
+                super::resources::on_run_finished_sync(
+                    &conn,
+                    run_id,
+                    &now,
+                    terminal_reason.as_deref(),
+                );
+            }
+            Ok(changed)
         })
         .await
         .map_err(|error| error.to_string())?

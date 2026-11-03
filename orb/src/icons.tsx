@@ -65,6 +65,13 @@ export const ProvidersIcon = (p: P) => (
     <path d="M8 12.5v2.1" />
   </I>
 );
+export const ResourcesIcon = (p: P) => (
+  <I {...p}>
+    <path d="M2.4 4.2h2.4c2.4 0 2.8 3.8 5.2 3.8h3.6" />
+    <path d="M2.4 11.8h2.4c2.4 0 2.8-3.8 5.2-3.8" />
+    <path d="M11.6 5.8 13.8 8l-2.2 2.2" />
+  </I>
+);
 export const GearIcon = (p: P) => (
   <I {...p}>
     <circle cx="8" cy="8" r="2" />

@@ -711,6 +711,12 @@ fn get_monitoring_state() -> Arc<MonitoringState> {
     MONITORING_STATE.get_or_init(MonitoringState::new).clone()
 }
 
+/// Latest host metrics snapshot if the monitoring collector has started.
+pub async fn latest_system_metrics() -> Option<SystemMetrics> {
+    let state = MONITORING_STATE.get()?;
+    state.history.read().await.back().cloned()
+}
+
 /// `GET /api/monitoring/memory-health` — current host memory pressure level
 /// (ok / warn / critical) plus the top container memory consumers, for the
 /// in-app memory-pressure banner. Auth is enforced by the protected-routes

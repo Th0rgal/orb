@@ -1,0 +1,38 @@
+{
+  "description": "Shared cross-client specification for Resources Sankey flow conservation, unit formatting (raw vCPU / B tok/h vs estimated $/h), and subagent DAG row layout across Orb desktop (orb/src/resourcesModel.ts), iOS (OrbResources.swift), and Android (OrbResources.kt).",
+  "formatting": [
+    { "value": 64, "lens": "compute", "metric": "raw", "withUnit": true, "expected": "64 vCPU" },
+    { "value": 1.456, "lens": "inference", "metric": "raw", "withUnit": true, "expected": "1.46 B tok/h" },
+    { "value": 4.78, "lens": "compute", "metric": "usd", "withUnit": true, "expected": "$4.78/h" },
+    { "value": 29.24, "lens": "inference", "metric": "usd", "withUnit": true, "expected": "$29.2/h" },
+    { "value": 142.6, "lens": "inference", "metric": "usd", "withUnit": false, "expected": "$143" }
+  ],
+  "sankey_2col": {
+    "nodes": [
+      { "id": "boat:large", "column": 0, "label": "Boat · large", "sub": "4 VMs", "color": "#2f83bf" },
+      { "id": "static:fleet", "column": 0, "label": "Static fleet", "sub": "2 hosts", "color": "#1d9a78" },
+      { "id": "m1", "column": 1, "label": "evm.fast", "sub": "12 agents", "color": "#2f83bf" },
+      { "id": "m2", "column": 1, "label": "orb-kernel", "sub": "4 agents", "color": "#7b63cf" }
+    ],
+    "links": [
+      { "id": "l1", "source": "boat:large", "target": "m1", "value": 32.0, "est_usd_per_h": 0.80, "degraded": false },
+      { "id": "l2", "source": "static:fleet", "target": "m1", "value": 8.0, "est_usd_per_h": 0.04, "degraded": false },
+      { "id": "l3", "source": "static:fleet", "target": "m2", "value": 8.0, "est_usd_per_h": 0.04, "degraded": false }
+    ],
+    "expected": {
+      "total_raw": 48.0,
+      "total_usd": 0.88,
+      "m1_raw": 40.0,
+      "m2_raw": 8.0
+    }
+  },
+  "dag": {
+    "horizon_secs": 21600,
+    "bars": [
+      { "id": "b1", "label": "Bootstrap VM", "section": "Bootstrap", "start_offset_secs": 0, "duration_secs": 1800, "state": "done", "after_ids": [] },
+      { "id": "b2", "label": "Warm cache", "section": "Bootstrap", "start_offset_secs": 1800, "duration_secs": 1800, "state": "active", "after_ids": ["b1"] },
+      { "id": "b3", "label": "Prove theorems", "section": "Provers", "start_offset_secs": 3600, "duration_secs": 5400, "state": "pending", "after_ids": ["b2"] }
+    ],
+    "expected_section_headers": ["Bootstrap", null, "Provers"]
+  }
+}

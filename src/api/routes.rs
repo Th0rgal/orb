@@ -681,6 +681,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     super::ai_providers::spawn_kimi_oauth_refresh_loop(Arc::clone(&state));
     super::cli_proxy_accounts::spawn_projection_loop(state.ai_providers.clone());
     super::antigravity_accounts::spawn_refresh_loop(Arc::clone(&state));
+    super::resources::spawn_compute_sampler(Arc::clone(&state));
 
     // Initialize the metadata LLM client for AI-powered mission titles/descriptions
     {
@@ -903,6 +904,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         )
         .route("/api/remote-nodes", get(list_remote_nodes))
         .merge(super::managed_machines::protected_routes())
+        .merge(super::resources::protected_routes())
         .merge(super::mission_budget::routes())
         .merge(super::mission_stats::routes())
         .route("/api/nodes/:name/cordon", post(cordon_remote_node))

@@ -105,6 +105,7 @@ pub(super) async fn record(
         ],
     )
     .map_err(err)?;
+    crate::api::mission_store::sqlite::resources::on_router_usage_sync(&conn, record);
     Ok(())
 }
 
