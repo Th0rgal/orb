@@ -3,7 +3,7 @@ import {createStore, reconcile} from "solid-js/store";
 import {NativeInteraction} from "./NativeInteraction";
 import * as btwMod from "./btwAgent";
 import {askBtwAgent,watchBtw,stopBtw,btwSession,btwActivities,btwItems,btwThoughts,isSyntheticRemoteAssistantNote,dropBtwQueuedCursor} from "./btwAgent";
-import {streamMission} from "./stream";
+import {isMultiplexSyncActive, streamMission} from "./stream";
 import {btwConfig} from "./btwSettings";
 import {AgentActivity} from "./AgentActivity";
 import { Composer, floatingDock } from "./composer/Composer";
@@ -127,6 +127,9 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setPendingQueued([]);setConfirmedQueued([]);setDeliveredQueuedIds([]);setRemoteQueuedIds([]);setHandoffId(undefined);
   let stale=false;onCleanup(()=>{stale=true;});
   const missionId=p.mission;
+  const warmInitial='peekWarmBtwState' in btwMod && typeof btwMod.peekWarmBtwState==='function'?btwMod.peekWarmBtwState(missionId):undefined;
+  if(warmInitial?.history.length)setHistory(warmInitial.history);
+  if(warmInitial?.latest)setSideSessionId(warmInitial.latest);
   let resync:(()=>void)|undefined;
   let migratingLegacyQueue=false;
   let unmigratedLegacyQueue:QueuedSideQuestion[]=[];
@@ -260,22 +263,23 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    let following='',stopFollow:(()=>void)|undefined,again:ReturnType<typeof setTimeout>|undefined;
    let inFlight=0;
    // The live stream can sit on a dead cursor (sleep, proxy, reconnect):
-   // re-read Core periodically so the newest turns always arrive without overlapping slow reads.
-   const poll=setInterval(()=>{if(!stale&&inFlight===0&&document.visibilityState!=='hidden')sync(history());},15000);
+   // re-read Core periodically when SSE is used or a turn is busy; skip idle HTTP
+   // polling when the heartbeat-monitored multiplex WebSocket is active.
+   const poll=setInterval(()=>{if(!stale&&inFlight===0&&document.visibilityState!=='hidden'&&(!isMultiplexSyncActive()||busy()))sync(history(),true);},15000);
    onCleanup(()=>{stopFollow?.();clearTimeout(again);clearInterval(poll);});
    const follow=(id:string|undefined)=>{
     if(!id||id===following||stale)return;
     stopFollow?.();following=id;
     stopFollow=streamMission(id,event=>{
      if(!['user_message','assistant_message','assistant_message_canonical','mission_status_changed'].includes(event.type))return;
-     clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history());},300);
-    },()=>{if(!stale)sync(history());});
+     clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history(),true);},300);
+    },()=>{if(!stale)sync(history(),true);});
    };
    let generation=0;
    // Only the newest read applies: an older, slower one never rolls back history.
-   const sync=(local:Parameters<typeof reconcile>[1])=>{
+   const sync=(local:Parameters<typeof reconcile>[1],force=false)=>{
     const mine=++generation;inFlight++;
-    void reconcile(missionId,local).then(reconciled=>{
+    void reconcile(missionId,local,undefined,force?{force:true}:undefined).then(reconciled=>{
      if(stale||key()!==current||mine!==generation)return;
      if(reconciled.latest)setSideSessionId(prev=>prev||reconciled.latest!);
      refreshSideSession(missionId,reconciled.activeSession);
@@ -345,7 +349,12 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   const snapshot={history:history(),draft:draft(),model:model(),open:side?side.visible():open(),docked:true,
     pending:(busy()||error())?{question:question(),answer:answer(),error:error(),attachments:pendingAttachments(),turnId:turnId(),...(startedAt()?{startedAt:startedAt()}:{}),...(notSent()?{notSent:true}:{})}:undefined,
     queue:queue()};
-  if(loadedKey()===current)void writeSideQuestion(current,snapshot).then(saved=>{if(key()===current)setStorageError(!saved);});
+  if(loadedKey()===current){
+   if('updateWarmBtwHistory' in btwMod && typeof btwMod.updateWarmBtwHistory==='function'){
+    btwMod.updateWarmBtwHistory(p.mission,history(),undefined,sideSessionId()||undefined);
+   }
+   void writeSideQuestion(current,snapshot).then(saved=>{if(key()===current)setStorageError(!saved);});
+  }
  });
  side?.register(()=>setOpen(true));
  onCleanup(()=>{abort?.abort();side?.register(undefined);});

@@ -3,6 +3,12 @@ import { api, clearConnection, getJwt, connectionVersion, isAbortError, isTransi
 import { nativeInvoke } from "./native";
 import { requestDone, streamLoad, timed } from "./diagnostics";
 import {
+  SYNC_MAX_PAYLOAD_BYTES,
+  reportSyncPongRtt,
+  reportSyncStreamLagged,
+  reportSyncUnexpectedDisconnect,
+} from "./backgroundSync";
+import {
   orbKernelScratchSliceStep,
   orbWireStreamSliceStep,
 } from "./orbKernel";
@@ -287,6 +293,12 @@ export function setMultiplexSyncEnabledForTest(enabled: boolean): void {
   }
 }
 
+export function isMultiplexSyncActive(): boolean {
+  if (!forceMultiplexSyncForTest && !nativeInvoke()) return false;
+  if (typeof WebSocket === "undefined") return false;
+  return Boolean(getJwt() || forceMultiplexSyncForTest);
+}
+
 type SyncListener = {
   missionId: string | null;
   getSinceSeq: () => number | undefined;
@@ -294,6 +306,7 @@ type SyncListener = {
   onLagged: () => void;
   onReady?: () => void;
   onDisconnected?: () => void;
+  onCaughtUp?: (cursor: number | null, replayed: number) => void;
   startFallback: () => void;
 };
 
@@ -375,7 +388,12 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
     for (const [mid, sinceSeq] of wantedByMission) {
       if (!subscribedOnSocket.has(mid)) {
         subscribedOnSocket.add(mid);
-        sendJson({ op: "subscribe", mission_id: mid, ...(sinceSeq !== undefined ? { since_seq: sinceSeq } : {}) });
+        sendJson({
+          op: "subscribe",
+          mission_id: mid,
+          max_payload: SYNC_MAX_PAYLOAD_BYTES,
+          ...(sinceSeq !== undefined ? { since_seq: sinceSeq } : {}),
+        });
       }
     }
   };
@@ -468,11 +486,29 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
         return;
       }
       const eventType = typeof parsed.type === "string" ? parsed.type : "";
-      if (!eventType || eventType === "sync_ready" || eventType === "heartbeat" || eventType === "pong" || eventType === "subscribed" || eventType === "unsubscribed") {
+      if (eventType === "pong") {
+        if (typeof parsed.ts === "number") {
+          reportSyncPongRtt(Math.max(0, Date.now() - parsed.ts));
+        }
+        return;
+      }
+      if (eventType === "sync_caught_up") {
+        const targetMid = typeof parsed.mission_id === "string" ? parsed.mission_id : null;
+        const cursor = typeof parsed.cursor === "number" ? parsed.cursor : null;
+        const replayed = typeof parsed.replayed === "number" ? parsed.replayed : 0;
+        for (const l of listeners) {
+          if (l.missionId && l.missionId === targetMid) {
+            l.onCaughtUp?.(cursor, replayed);
+          }
+        }
+        return;
+      }
+      if (!eventType || eventType === "sync_ready" || eventType === "heartbeat" || eventType === "subscribed" || eventType === "unsubscribed") {
         return;
       }
       streamLoad("sync-ws", 1, msg.data.length);
       if (eventType === "stream_lagged") {
+        reportSyncStreamLagged();
         const targetMid = typeof parsed.mission_id === "string" ? parsed.mission_id : null;
         for (const l of listeners) {
           if (!targetMid || l.missionId === targetMid) l.onLagged();
@@ -510,6 +546,7 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       ready = false;
       for (const l of listeners) l.onDisconnected?.();
       if (closed || !listeners.size) return;
+      if (wasReady) reportSyncUnexpectedDisconnect();
       consecutiveFailures++;
       candidateIdx++;
       // Only fall back to individual SSE streams if `/api/control/sync` has NEVER
@@ -563,6 +600,7 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
         idleCloseTimer = undefined;
       }
       if (!listeners.size) {
+        syncSubscriptions();
         idleCloseTimer = setTimeout(() => {
           if (!listeners.size) hub.destroy();
         }, 5_000);
@@ -606,6 +644,7 @@ export function streamMission(
   onBatch?: (evs: StreamEvent[]) => void,
   onDisconnected?: () => void,
   initialSinceSeq?: number,
+  onCaughtUp?: (cursor: number | null, replayed: number) => void,
 ): () => void {
   let stopped = false;
   let highestSeq: number | undefined = initialSinceSeq;
@@ -615,6 +654,13 @@ export function streamMission(
   // re-renders a growing block (up to 70 ms each on a long thought). They are
   // painted together with text, once per frame.
   const deliver=(event:StreamEvent)=>{if(typeof event.sequence==="number"&&Number.isSafeInteger(event.sequence))highestSeq=highestSeq===undefined?event.sequence:Math.max(highestSeq,event.sequence);if(event.type==='text_delta'||event.type==='text_op'||(event.type==='thinking'&&event.data.done!==true)){fragments.push(event);paint??=setTimeout(flush,16);}else{flush();timed(`stream ${event.type}`,()=>onEvent(event));}};
+  const handleCaughtUp = (cursor: number | null, replayed: number) => {
+    flush();
+    if (typeof cursor === "number" && Number.isSafeInteger(cursor)) {
+      highestSeq = highestSeq === undefined ? cursor : Math.max(highestSeq, cursor);
+    }
+    onCaughtUp?.(cursor, replayed);
+  };
   let retry = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let controller: AbortController | undefined;
@@ -719,6 +765,7 @@ export function streamMission(
       onLagged,
       onReady,
       onDisconnected,
+      onCaughtUp: handleCaughtUp,
       startFallback: () => {
         detachSyncListener = undefined;
         if (!stopped) void connect();

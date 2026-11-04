@@ -308,7 +308,8 @@ final class OrbCore {
         types: [String]? = nil,
         limit: Int? = nil,
         sinceSeq: Int64? = nil,
-        beforeSeq: Int64? = nil
+        beforeSeq: Int64? = nil,
+        maxPayload: Int? = StoredEvent.resultKeepUTF8
     ) async throws -> MissionEventsResult {
         var queryItems: [URLQueryItem] = []
         if let types = types {
@@ -322,6 +323,9 @@ final class OrbCore {
         }
         if let beforeSeq = beforeSeq {
             queryItems.append(URLQueryItem(name: "before_seq", value: String(beforeSeq)))
+        }
+        if let maxPayload = maxPayload {
+            queryItems.append(URLQueryItem(name: "max_payload", value: String(maxPayload)))
         }
 
         var urlString = "/api/control/missions/\(id)/events"
@@ -364,6 +368,20 @@ final class OrbCore {
     /// noise before the inevitable SSE fallback.
     nonisolated static let webSocketMaxOpenFailures = 3
     private var webSocketOpenFailureStreak = 0
+
+    var canUseMultiplexSync: Bool {
+        #if DEBUG
+        let isUITestMock = ProcessInfo.processInfo.arguments.contains("-api_base_url")
+        #else
+        let isUITestMock = false
+        #endif
+        return !isUITestMock && jwtToken != nil && webSocketOpenFailureStreak < Self.webSocketMaxOpenFailures
+    }
+
+    var isMultiplexSyncHealthy: Bool {
+        guard let hub = syncHub, !hub.closed, hub.opened else { return false }
+        return hub.scope == "\(endpoint)|\(jwtToken ?? "")"
+    }
 
     func streamControl(
         missionId: String?,
@@ -664,7 +682,11 @@ final class OrbCore {
             }
             for (mid, seq) in wantedMissions where !subscribedMissions.contains(mid) {
                 subscribedMissions.insert(mid)
-                var msg: [String: Any] = ["op": "subscribe", "mission_id": mid]
+                var msg: [String: Any] = [
+                    "op": "subscribe",
+                    "mission_id": mid,
+                    "max_payload": StoredEvent.resultKeepUTF8
+                ]
                 if let seq { msg["since_seq"] = seq }
                 sendJSON(msg)
             }
@@ -725,16 +747,26 @@ final class OrbCore {
                                 sub.onEvent("connected", ["type": "connected", "transport": ControlStreamTransport.webSocket.rawValue])
                             }
                             syncSubscriptions()
+                            sendJSON(["op": "ping", "ts": Int64(Date().timeIntervalSince1970 * 1000)])
                         }
                         let eventType = obj["type"] as? String ?? ""
                         if eventType.isEmpty || eventType == "sync_ready" || eventType == "subscribed" || eventType == "unsubscribed" {
                             continue
                         }
                         if eventType == "heartbeat" || eventType == "pong" {
+                            if eventType == "pong", let ts = (obj["ts"] as? NSNumber)?.int64Value {
+                                let rtt = Int(Int64(Date().timeIntervalSince1970 * 1000) - ts)
+                                if rtt >= 0 && rtt < 120_000 {
+                                    OrbBackgroundSyncMonitor.shared.notePingRtt(ms: rtt)
+                                }
+                            }
                             for sub in subscribers.values {
                                 sub.onEvent("heartbeat", ["type": "heartbeat", "transport": ControlStreamTransport.webSocket.rawValue])
                             }
                             continue
+                        }
+                        if eventType == "stream_lagged" {
+                            OrbBackgroundSyncMonitor.shared.noteStreamLagged()
                         }
                         if eventType == "mission_presentation" {
                             for sub in subscribers.values where sub.kinds == ["presentation"] {
@@ -763,6 +795,9 @@ final class OrbCore {
                     pingLoop.cancel()
                     task.cancel(with: .normalClosure, reason: nil)
                     if opened {
+                        if !closed {
+                            OrbBackgroundSyncMonitor.shared.noteUnexpectedDisconnect()
+                        }
                         // Socket was established and later dropped; finish active tasks so callers reconnect cleanly.
                         break
                     }

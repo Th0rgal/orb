@@ -11,9 +11,16 @@ Desktop, iOS and Android share these invariants:
   working label in place; historical work counts do not add a second status row.
 - Latest durable answers load before detailed tool history. Partial previews
   never become pagination cursors or complete inputs to Inbox summaries.
-- Offscreen foreground updates carry compact state/references, not tool payloads
-  or token deltas. Reconnect/gaps trigger reconciliation. Mobile suspension uses
-  resume reconciliation rather than relying on background sockets.
+- Recently opened foreground conversations (up to 12 MRU parent missions plus
+  each warm mission's active `/btw` child mission) stay live over the single
+  multiplexed `/api/control/sync` WebSocket (`max_payload = 4096`) when
+  **Background sync** resolves to active (`On` or `Auto` on a healthy link),
+  rendering on reopen with zero HTTP round-trips. When **Background sync** is
+  `Off` or `Auto` pauses on a slow/Data-Saver link, unfocused subscriptions
+  detach immediately while preserving cached transcripts, `/btw` turns, and
+  `since_seq` cursors; clean missions without intervening `mission_presentation`
+  hints reopen without redundant metadata or `/btw` crawls. Mobile suspension
+  uses resume reconciliation rather than relying on background sockets.
 - Images already read reuse a bounded, account/mission-scoped cache. Concurrent
   consumers share reads; failures are retryable; scope changes reject late loads.
   Mutable workspace images must expire or be invalidated when the mission changes.
@@ -89,3 +96,50 @@ replaces stale bubble revisions and suppresses the ordinary terminal receipt whe
 it repeats the native bubbles, matching desktop. Storage retains that receipt so
 the incremental cursor still advances. Legacy overlap must reach the final stored
 row; matching an earlier repeated prompt is not sufficient.
+
+## Warm background sync and low-bandwidth policy
+
+Desktop (`orb/src/backgroundSync.ts`), iOS (`OrbBackgroundSync.swift`), and
+Android (`OrbBackgroundSync.kt`) share one per-device **Background sync** policy
+(`Auto` | `On` | `Off`, default `Auto`) in `Settings → Account`, verified against
+`shared/orb-spec/fixtures/background-sync-policy.json`:
+
+1. **`Auto` link-quality state machine (zero synthetic probes):**
+   - Evaluates passive OS flags (`navigator.connection.saveData` / `2g` /
+     `downlink < 1 Mbps`, iOS `NWPathMonitor.isConstrained`, Android Data Saver /
+     `linkDownstreamBandwidthKbps < 1000`) plus `/api/control/sync` WebSocket
+     `ping` → `pong` RTT, `stream_lagged`, and unexpected reconnects.
+   - **Trips immediately (`active = false`)** on OS Data Saver / constrained link,
+     `stream_lagged`, ping timeout, `>= 2` unexpected disconnects within `60 s`,
+     or `2` consecutive `ping` RTTs `> 750 ms`.
+   - **Recovers (`active = true`)** with hysteresis only when OS Data Saver is
+     `false`, at least `30 s` have elapsed since the last lag/disconnect, and `3`
+     consecutive `ping` RTTs measure `< 350 ms`.
+
+2. **Warm subscription set (`K = 12`) and `/btw` companion streams:**
+   - On `/api/control/sync`, `subscribe` passes `max_payload = 4096` (Core
+     shortens oversized `tool_call` / `tool_result` strings identically to HTTP
+     `GET /events?max_payload=4096`, preserving interactive and orchestration
+     JSON cards) and acknowledges `since_seq` replay completion with
+     `sync_caught_up`.
+   - `mission_presentation` frames include `btw_parent_id` when emitted by a
+     `btw-parent:<uuid>` side mission so warm parents discover new `/btw` runs
+     without polling `GET /missions?tag=btw-parent:...`.
+   - When **Background sync** resolves to active, the client keeps all focused
+     missions plus up to `12` MRU recently opened missions (and each warm
+     mission's active `/btw` child mission) subscribed in memory (`WarmLive`),
+     reducing live events directly into the transcript and `/btw` caches so
+     switching back requires zero HTTP requests.
+
+3. **Zero-cost quickness and bandwidth wins in `Off` / paused mode:**
+   - Both `/api/control/sync` subscriptions and mobile `/events` HTTP reads bound
+     tool payloads with `max_payload = 4096`.
+   - Live WebSocket frames update cached transcripts directly on Desktop, iOS,
+     and Android — never discarded on unmount and never triggering redundant full
+     HTTP history reloads while streaming.
+   - `/btw` uses `/api/control/sync` subscriptions instead of HTTP polling on
+     all clients across `Auto`, `On`, and `Off`.
+   - While unfocused in `Off` / paused mode on an unbroken `/api/control/sync`
+     connection, clients track per-mission and `/btw` dirty flags from
+     `mission_presentation` hints so returning to an untouched conversation skips
+     redundant metadata, queue, and `/btw` history fetches.

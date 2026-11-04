@@ -160,6 +160,59 @@ pub(super) fn truncate_tool_payloads(events: &mut [mission_store::StoredEvent], 
     }
 }
 
+/// Shorten an outbound stream `ToolCall.args` or `ToolResult.result` JSON value
+/// larger than `max` bytes using the same interactive/orchestration invariants
+/// as [`truncate_tool_payloads`]. Returns `Some((shortened_value, full_bytes))`
+/// when shortened, or `None` when the payload fits or must remain intact.
+pub(super) fn truncate_stream_tool_payload(
+    tool_name: &str,
+    value: &serde_json::Value,
+    max: usize,
+) -> Option<(serde_json::Value, usize)> {
+    let max = max.max(MIN_MAX_PAYLOAD);
+    if is_interactive_ui_tool(tool_name) {
+        return None;
+    }
+    let serialized = serde_json::to_string(value).ok()?;
+    let full = serialized.len();
+    if full <= max {
+        return None;
+    }
+    let is_orchestration = is_orchestration_ui_tool(tool_name);
+    let string_budget = if is_orchestration {
+        (max / 4).max(512)
+    } else {
+        max / 2
+    };
+    if value.is_object() || value.is_array() {
+        let mut shaped = value.clone();
+        shorten_strings(&mut shaped, string_budget);
+        if let Ok(encoded) = serde_json::to_string(&shaped) {
+            if is_orchestration || encoded.len() <= max * 2 {
+                return Some((shaped, full));
+            }
+        }
+        if is_orchestration {
+            return None;
+        }
+        return Some((serde_json::Value::String(excerpt(&serialized, max)), full));
+    }
+    if is_orchestration {
+        return None;
+    }
+    if let serde_json::Value::String(raw_str) = value {
+        let mut shaped = value.clone();
+        shorten_strings(&mut shaped, string_budget);
+        if let serde_json::Value::String(ref s) = shaped {
+            if s.len() <= max * 2 {
+                return Some((shaped, full));
+            }
+        }
+        return Some((serde_json::Value::String(excerpt(raw_str, max)), full));
+    }
+    Some((serde_json::Value::String(excerpt(&serialized, max)), full))
+}
+
 pub(super) fn default_include_event_counts() -> bool {
     true
 }

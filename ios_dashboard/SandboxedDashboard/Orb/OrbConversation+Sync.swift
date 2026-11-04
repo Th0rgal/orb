@@ -11,7 +11,79 @@ extension OrbConversation {
         }
     }
 
-    /// Tool and thinking events only add events: fetch those since the last sequence
+    func detachLiveStream() {
+        if let token = warmListenerToken, let targetId = id ?? missionID {
+            OrbWarmSyncCoordinator.shared.detach(missionId: targetId, token: token)
+        }
+        warmListenerToken = nil
+    }
+
+    func attachLiveStreamIfNeeded() {
+        guard warmListenerToken == nil, phase == .active, let id, !isCloud, !unavailable else { return }
+        warmListenerToken = OrbWarmSyncCoordinator.shared.attach(
+            missionId: id,
+            sinceSeq: events.last?.sequence
+        ) { type, data, stored in
+            if type == "fido_sign_request" {
+                FidoApprovalState.shared.handleSignRequest(data)
+                return
+            }
+            if type == "text_delta" {
+                live.applyTextDelta(data)
+                return
+            }
+            if type == "text_op" {
+                live.applyTextOp(data)
+                return
+            }
+            if type == "user_message", (data["queued"] as? Bool) != true {
+                live.resetTurn()
+            }
+            if let stored {
+                let epoch = live.streamEpoch
+                events = Self.mergeStoredEvents(existing: events, incoming: [stored])
+                if OrbConversationHistory.eventTypes.contains(stored.eventType),
+                   case var .object(fields) = mission {
+                    fields["history"] = .array(OrbConversationHistory.merge(fields["history"]?.items ?? [], events: [stored]))
+                    mission = .object(fields)
+                }
+                if stored.eventType == "user_message",
+                   let opt = optimisticPrompt,
+                   Self.sameMessage(stored.content, opt) {
+                    optimisticPrompt = nil
+                }
+                let nextFollowUps = followUps.reconciled(with: deliveredUserMessages)
+                if nextFollowUps != followUps {
+                    withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) {
+                        followUps = nextFollowUps
+                    }
+                }
+                rebuildWorkModel()
+                rebuildHistory()
+                live.reconcileStored(events, working: working, streamAdvanced: live.streamEpoch != epoch)
+                return
+            }
+            if type == "mission_status_changed" {
+                if let newStatus = data["status"] as? String, !newStatus.isEmpty,
+                   case var .object(fields) = mission {
+                    fields["status"] = .string(newStatus)
+                    mission = .object(fields)
+                    rebuildWorkModel()
+                }
+                Task { await refresh(force: true) }
+                return
+            }
+            if type == "stream_lagged" || type == "disconnected" {
+                if phase == .active {
+                    Task { await refresh(force: true) }
+                }
+                return
+            }
+            if ["assistant_message", "assistant_message_canonical", "user_message", "tool_call", "tool_result", "thinking"].contains(type) {
+                scheduleCoalescedRefresh()
+            }
+        }
+    }
     /// instead of the full refresh (mission with 200 history messages, queue, events).
     /// Throttled, not debounced, so a busy turn still updates about once a second.
     func scheduleCoalescedRefresh() {
@@ -181,37 +253,10 @@ extension OrbConversation {
                     OrbReadCache.saveEvents(id, events: events)
                     rebuildWorkModel()
                 }
+                OrbWarmSyncCoordinator.shared.markMissionSynced(id, lastSeq: events.last?.sequence)
+                OrbWarmSyncCoordinator.shared.reconcile()
                 live.reconcileStored(events, working: working, streamAdvanced: live.streamEpoch != streamEpochBefore)
-                if stream == nil && phase == .active {
-                    let token = UUID()
-                    streamToken = token
-                    let inner = OrbCore.shared.streamControl(missionId: id, sinceSeq: events.last?.sequence) { type, data in
-                        if type == "fido_sign_request" { FidoApprovalState.shared.handleSignRequest(data); return }
-                        if type == "text_delta" {
-                            live.applyTextDelta(data)
-                        } else if type == "text_op" {
-                            live.applyTextOp(data)
-                        }
-                        if type == "user_message", (data["queued"] as? Bool) != true {
-                            live.resetTurn()
-                        }
-                        if ["assistant_message", "assistant_message_canonical", "mission_status_changed", "user_message"].contains(type) {
-                            Task { await refresh(force: true) }
-                        } else if ["tool_call", "tool_result", "thinking"].contains(type) {
-                            scheduleCoalescedRefresh()
-                        }
-                    }
-                    // The SSE task ends when Core closes or idles the stream. Forget it so the
-                    // next refresh reconnects; a stale non-nil handle stopped all live updates.
-                    stream = Task {
-                        await withTaskCancellationHandler { await inner.value } onCancel: { inner.cancel() }
-                        guard !Task.isCancelled else { return }
-                        try? await Task.sleep(for: .seconds(2))
-                        guard !Task.isCancelled, streamToken == token else { return }
-                        stream = nil
-                        if phase == .active { await refresh(force: true) }
-                    }
-                }
+                attachLiveStreamIfNeeded()
                 let queueResp = await queueTask
                 if queueResp != .null {
                     queued = queueResp.items.filter { $0["mission_id"].text == id }

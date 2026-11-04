@@ -1,0 +1,154 @@
+{
+  "description": "Cross-client Background Sync policy shared by Desktop (orb/src/backgroundSync.ts), iOS (OrbBackgroundSync.swift), and Android (OrbBackgroundSync.kt).",
+  "constants": {
+    "maxWarmMissions": 12,
+    "maxPayloadBytes": 4096,
+    "highRttThresholdMs": 750,
+    "highRttConsecutiveTrips": 2,
+    "lowRttThresholdMs": 350,
+    "lowRttConsecutiveRecover": 3,
+    "disconnectWindowMs": 60000,
+    "disconnectBurstTrips": 2,
+    "recoveryCooldownMs": 30000
+  },
+  "normalization": [
+    { "input": null, "expected": "auto" },
+    { "input": "", "expected": "auto" },
+    { "input": "AUTO", "expected": "auto" },
+    { "input": "on", "expected": "on" },
+    { "input": "off", "expected": "off" },
+    { "input": "invalid_mode", "expected": "auto" }
+  ],
+  "stateTransitions": [
+    {
+      "name": "auto starts active on healthy link and stays active on normal RTT",
+      "mode": "auto",
+      "events": [
+        { "type": "pong", "rttMs": 85, "nowMs": 10000 }
+      ],
+      "expected": { "active": true, "reason": "healthy" }
+    },
+    {
+      "name": "single high RTT spike does not flap auto into paused",
+      "mode": "auto",
+      "events": [
+        { "type": "pong", "rttMs": 920, "nowMs": 10000 }
+      ],
+      "expected": { "active": true, "reason": "healthy" }
+    },
+    {
+      "name": "two consecutive high RTTs trip auto into slow_rtt pause and require 3 fast pings plus cooldown to recover",
+      "mode": "auto",
+      "events": [
+        { "type": "pong", "rttMs": 810, "nowMs": 10000 },
+        { "type": "pong", "rttMs": 890, "nowMs": 20000 },
+        { "type": "pong", "rttMs": 120, "nowMs": 30000 },
+        { "type": "pong", "rttMs": 110, "nowMs": 40000 },
+        { "type": "pong", "rttMs": 95, "nowMs": 55000 }
+      ],
+      "expected": { "active": true, "reason": "healthy" }
+    },
+    {
+      "name": "two fast pings after slow_rtt are not enough before third fast ping",
+      "mode": "auto",
+      "events": [
+        { "type": "pong", "rttMs": 810, "nowMs": 10000 },
+        { "type": "pong", "rttMs": 890, "nowMs": 20000 },
+        { "type": "pong", "rttMs": 120, "nowMs": 35000 },
+        { "type": "pong", "rttMs": 110, "nowMs": 55000 }
+      ],
+      "expected": { "active": false, "reason": "slow_rtt" }
+    },
+    {
+      "name": "stream_lagged pauses immediately and respects 30s cooldown even if 3 fast pings arrive early",
+      "mode": "auto",
+      "events": [
+        { "type": "lagged", "nowMs": 10000 },
+        { "type": "pong", "rttMs": 90, "nowMs": 15000 },
+        { "type": "pong", "rttMs": 80, "nowMs": 25000 },
+        { "type": "pong", "rttMs": 70, "nowMs": 35000 }
+      ],
+      "expected": { "active": false, "reason": "lagged" }
+    },
+    {
+      "name": "stream_lagged recovers once 30s cooldown and 3 fast pings hold",
+      "mode": "auto",
+      "events": [
+        { "type": "lagged", "nowMs": 10000 },
+        { "type": "pong", "rttMs": 90, "nowMs": 20000 },
+        { "type": "pong", "rttMs": 80, "nowMs": 30000 },
+        { "type": "pong", "rttMs": 70, "nowMs": 41000 }
+      ],
+      "expected": { "active": true, "reason": "healthy" }
+    },
+    {
+      "name": "os data saver pauses immediately and blocks recovery until cleared",
+      "mode": "auto",
+      "events": [
+        { "type": "network", "dataSaver": true, "slowLink": false, "nowMs": 10000 },
+        { "type": "pong", "rttMs": 40, "nowMs": 20000 },
+        { "type": "pong", "rttMs": 40, "nowMs": 30000 },
+        { "type": "pong", "rttMs": 40, "nowMs": 45000 }
+      ],
+      "expected": { "active": false, "reason": "data_saver" }
+    },
+    {
+      "name": "two unexpected disconnects within 60s pause auto",
+      "mode": "auto",
+      "events": [
+        { "type": "disconnect", "nowMs": 10000 },
+        { "type": "disconnect", "nowMs": 40000 }
+      ],
+      "expected": { "active": false, "reason": "unstable" }
+    },
+    {
+      "name": "mode on forces active even when data saver and slow rtt are present",
+      "mode": "on",
+      "events": [
+        { "type": "network", "dataSaver": true, "slowLink": true, "nowMs": 10000 },
+        { "type": "pong", "rttMs": 1500, "nowMs": 20000 },
+        { "type": "pong", "rttMs": 1600, "nowMs": 30000 }
+      ],
+      "expected": { "active": true, "reason": "forced_on" }
+    },
+    {
+      "name": "mode off forces inactive even on 10ms fiber link",
+      "mode": "off",
+      "events": [
+        { "type": "pong", "rttMs": 10, "nowMs": 10000 }
+      ],
+      "expected": { "active": false, "reason": "forced_off" }
+    }
+  ],
+  "warmSelection": [
+    {
+      "name": "active background sync keeps focused missions plus MRU up to 12 and companion btw sessions",
+      "backgroundActive": true,
+      "maxWarm": 3,
+      "focusedIds": ["m-focus"],
+      "recentIds": ["m-1", "m-2", "m-focus", "m-3", "m-4"],
+      "btwByParent": { "m-focus": "btw-focus", "m-2": "btw-2", "m-4": "btw-4" },
+      "expectedMissionIds": ["m-focus", "m-4", "m-3", "btw-focus", "btw-4"]
+    },
+    {
+      "name": "inactive background sync keeps only focused missions and focused btw",
+      "backgroundActive": false,
+      "maxWarm": 12,
+      "focusedIds": ["m-focus"],
+      "recentIds": ["m-1", "m-2", "m-focus", "m-3"],
+      "btwByParent": { "m-focus": "btw-focus", "m-3": "btw-3" },
+      "openBtwParentIds": ["m-focus"],
+      "expectedMissionIds": ["m-focus", "btw-focus"]
+    },
+    {
+      "name": "inactive background sync excludes closed btw sheet on focused mission",
+      "backgroundActive": false,
+      "maxWarm": 12,
+      "focusedIds": ["m-focus"],
+      "recentIds": ["m-focus", "m-1"],
+      "btwByParent": { "m-focus": "btw-focus" },
+      "openBtwParentIds": [],
+      "expectedMissionIds": ["m-focus"]
+    }
+  ]
+}

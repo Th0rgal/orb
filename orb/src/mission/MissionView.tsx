@@ -31,14 +31,32 @@ import { Portal } from "solid-js/web";
 import * as Ic from "../icons";
 import { ForkMission, observeTransferDestination, stopSource, transferForDestination } from "../ForkMission";
 import { forkSource } from "../missionTree";
-import { fullToolCall, streamMission, heldAfterHistory, type StreamEvent } from "../stream";
+import { fullToolCall, heldAfterHistory, isMultiplexSyncActive, type StreamEvent } from "../stream";
 import { localActivitiesToStreamItems } from "../workModel";
 import { Chapters } from "../Chapters";
 import { TurnRecap } from "../TurnRecap";
 import { Transcript, UserTurn, applyStreamEvent, applyStreamEvents, type StreamItem } from "../Transcript";
 import { cacheRemember } from "../pageCache";
 import { antigravityBaseModel, defaultEffortLabel, effortLabel, normalizeEffort, supportedEfforts } from "../effort";
-import { retainTranscript, loadOlderTranscript, prepareTranscriptSearch, refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscript, peekTranscriptHeight, putTranscript, putTranscriptHeight, putTranscriptItems, transcriptVersion } from "../missionCache";
+import {
+  applyLiveEventsToTranscriptCache,
+  attachMissionStream,
+  isMissionDirtyWhileUnfocused,
+  isMissionWarmLive,
+  loadOlderTranscript,
+  loadTranscript,
+  peekReadyTranscript,
+  peekTranscript,
+  peekTranscriptHeight,
+  peekWarmMissionStatus,
+  prepareTranscriptSearch,
+  putTranscript,
+  putTranscriptHeight,
+  putTranscriptItems,
+  refreshTranscript,
+  retainTranscript,
+  transcriptVersion,
+} from "../missionCache";
 import { ConversationSkeleton, DelayedTranscriptSkeleton, ActivitySkeleton } from "../Skeleton";
 import { visibleTranscript, removeUsers, mapUsers, reuseUnchanged } from "../transcriptModel";
 import { pollWhileVisible } from "../poll";
@@ -430,8 +448,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     liveEvents.push(...evs);
     setItems((cur) => {
       const next = timed("reduce event", () => applyStreamEvents(cur, evs));
+      applyLiveEventsToTranscriptCache(p.id, evs, next);
       if (next !== cur) {
-        putTranscriptItems(p.id, next);
         queueMicrotask(()=>{if(!disposed){scrollIfPinned();scroller?.dispatchEvent(new Event("orb:transcript-change",{bubbles:true}));}});
       }
       return next;
@@ -535,14 +553,34 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     };
     window.addEventListener("orb:refresh", reload);
     onCleanup(() => window.removeEventListener("orb:refresh", reload));
-    void refresh();
-    // History must load even when the live connection has not opened yet.
+    const warmStatus = peekWarmMissionStatus(id);
+    if (warmStatus) {
+      setMission(old => old ? { ...old, status: warmStatus.status, ...(warmStatus.summary ? { status_message: warmStatus.summary } : {}) } : old);
+    }
+    const warmLiveOnMount = isMissionWarmLive(id);
+    const readyOnMount = peekReadyTranscript(id);
+    const cleanStaleOnMount =
+      !warmLiveOnMount &&
+      Boolean(readyOnMount) &&
+      isMultiplexSyncActive() &&
+      !isMissionDirtyWhileUnfocused(id) &&
+      !missionPhase(mission(), false).moving;
+    if (!mission() || (!warmLiveOnMount && !cleanStaleOnMount)) {
+      void refresh();
+    }
+    // History must load even when the live connection has not opened yet,
+    // unless the mission is already WarmLive or clean on an unbroken sync WS.
     let initialReady = true;
-    let streamHealthy = false;
-    void resync(true).then(() => { if (!hasPendingSearchTarget(p.id)) scrollIfPinned(); });
-    const stopStream = streamMission(
-      p.id,
-      (ev) => {
+    let streamHealthy = warmLiveOnMount;
+    if (warmLiveOnMount || cleanStaleOnMount) {
+      queueMicrotask(() => {
+        if (!disposed && !hasPendingSearchTarget(p.id)) scrollIfPinned();
+      });
+    } else {
+      void resync(true).then(() => { if (!hasPendingSearchTarget(p.id)) scrollIfPinned(); });
+    }
+    const stopStream = attachMissionStream(p.id, {
+      onEvent: (ev) => {
         if (ev.type === "mission_status_changed" || ev.type === "status") {
           if (ev.type === "mission_status_changed" && typeof ev.data.status === "string") {
             const status = ev.data.status;
@@ -560,26 +598,26 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         if (replaying) held.push(ev);
         else applyLive(ev);
       },
-      () => void resync(true),
-      () => {
+      onLagged: () => void resync(true),
+      onReady: () => {
         streamHealthy = true;
         if (initialReady) {
           initialReady = false;
           if (!hasPendingSearchTarget(p.id)) scrollIfPinned();
           return;
         }
-        void resync(true).then(() => { if (!hasPendingSearchTarget(p.id)) scrollIfPinned(); });
+        if (!isMissionWarmLive(p.id)) {
+          void resync(true).then(() => { if (!hasPendingSearchTarget(p.id)) scrollIfPinned(); });
+        }
       },
-      undefined,
-      (evs) => {
+      onBatch: (evs) => {
         if (replaying) held.push(...evs);
         else applyLiveBatch(evs);
       },
-      () => {
+      onDisconnected: () => {
         streamHealthy = false;
       },
-      peekReadyTranscript(p.id)?.cursor,
-    );
+    });
     // Slow status poll — the stream is authoritative for content, but the
     // composer busy state shouldn't depend on it alone.
     const stopPoll = pollWhileVisible(async () => {

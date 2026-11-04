@@ -15,9 +15,18 @@ import { SettingsCard as Card, SettingsRow as Row } from "./SettingsCard";
 import { Toggle } from "./Toggle";
 export { Toggle };
 import { getThemePref, setThemePref, type ThemePref } from "./theme";
+import {
+  describeBackgroundSyncStatus,
+  getBackgroundSyncMode,
+  getBackgroundSyncVerdict,
+  setBackgroundSyncMode,
+  type BackgroundSyncMode,
+} from "./backgroundSync";
 
 const THEME_LABELS: Record<ThemePref, string> = { auto: "Auto", light: "Light", dark: "Dark" };
 const THEME_PREFS: Record<string, ThemePref> = { Auto: "auto", Light: "light", Dark: "dark" };
+const BG_SYNC_LABELS: Record<BackgroundSyncMode, string> = { auto: "Auto", on: "On", off: "Off" };
+const BG_SYNC_MODES: Record<string, BackgroundSyncMode> = { Auto: "auto", On: "on", Off: "off" };
 
 function CloudAccountsCard(p: { onOpenPage?: (id: string) => void }) {
   const [accounts, setAccounts] = createSignal<CloudAccount[]>([]);
@@ -254,6 +263,13 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
               aria-label="Theme"
               onChange={(e) => setThemePref(THEME_PREFS[e.currentTarget.value])}
             ><option>Auto</option><option>Light</option><option>Dark</option></Select>
+          </Row>
+          <Row title="Background sync" desc={describeBackgroundSyncStatus(getBackgroundSyncVerdict())}>
+            <Select
+              value={BG_SYNC_LABELS[getBackgroundSyncMode()]}
+              aria-label="Background sync"
+              onChange={(e) => setBackgroundSyncMode(BG_SYNC_MODES[e.currentTarget.value] ?? "auto")}
+            ><option>Auto</option><option>On</option><option>Off</option></Select>
           </Row>
         </Card>
         <details class="settings-advanced" onToggle={e => { if (e.currentTarget.open) setAdvancedMounted(true); }}>

@@ -30,6 +30,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -358,7 +359,7 @@ object OrbSideAgent {
         var cursor = sinceSeq
         for (pageIndex in 0 until maxPages) {
             val page = core.fetchRows(
-                "/api/control/missions/$encoded/events?since_seq=$cursor&limit=$pageSize&include_counts=false",
+                "/api/control/missions/$encoded/events?since_seq=$cursor&limit=$pageSize&include_counts=false&max_payload=${OrbReadCache.RESULT_KEEP_CHARS}",
                 "events"
             )
             if (page.isEmpty()) break
@@ -380,7 +381,7 @@ object OrbSideAgent {
         val encoded = core.encodeComponent(missionId)
         return loadThreadEvents(pageSize = pageSize, maxPages = maxPages) { beforeSeq ->
             val beforeQuery = if (beforeSeq != null) "&before_seq=$beforeSeq" else ""
-            core.fetchRows("/api/control/missions/$encoded/events?limit=$pageSize&include_counts=false$beforeQuery", "events")
+            core.fetchRows("/api/control/missions/$encoded/events?limit=$pageSize&include_counts=false&max_payload=${OrbReadCache.RESULT_KEEP_CHARS}$beforeQuery", "events")
         }
     }
 
@@ -632,12 +633,13 @@ fun OrbSideAgentSheet(
     val scrollState = rememberScrollState()
     val reducedMotion = orbReducedMotion()
 
-    var boundMission by remember(session.parentId, session.missionId) { mutableStateOf<OrbRow?>(null) }
-    var boundId by remember(session.parentId, session.missionId) { mutableStateOf(session.missionId) }
-    var turns by remember(session.parentId) { mutableStateOf<List<OrbSideAgent.Turn>>(emptyList()) }
-    var openTurn by remember(session.parentId) { mutableStateOf<OrbSideAgent.OpenTurn?>(null) }
+    val initialWarm = remember(session.parentId) { OrbWarmSyncCoordinator.peekBtwSnapshot(core, session.parentId) }
+    var boundMission by remember(session.parentId, session.missionId) { mutableStateOf(initialWarm?.boundMission) }
+    var boundId by remember(session.parentId, session.missionId) { mutableStateOf(session.missionId ?: initialWarm?.boundMission?.id) }
+    var turns by remember(session.parentId) { mutableStateOf(initialWarm?.turns ?: emptyList()) }
+    var openTurn by remember(session.parentId) { mutableStateOf(initialWarm?.openTurn) }
     var pendingQuestion by remember(session.parentId) { mutableStateOf<String?>(null) }
-    var loading by remember(session.parentId) { mutableStateOf(true) }
+    var loading by remember(session.parentId) { mutableStateOf(initialWarm == null) }
     var sending by remember(session.parentId) { mutableStateOf(false) }
     var error by remember(session.parentId) { mutableStateOf<String?>(null) }
 
@@ -647,11 +649,41 @@ fun OrbSideAgentSheet(
     var queueExpanded by remember(session.parentId) { mutableStateOf(true) }
     var editingQueuedId by remember(session.parentId) { mutableStateOf<String?>(null) }
     val rawQueuedById = remember(session.parentId) { mutableStateMapOf<String, String>() }
-    val cachedThreads = remember(session.parentId) { mutableStateMapOf<String, Pair<String, OrbSideAgent.ParsedThread>>() }
-    val cachedEventsByThread = remember(session.parentId) { mutableStateMapOf<String, List<OrbRow>>() }
+    val cachedThreads = remember(session.parentId) {
+        mutableStateMapOf<String, Pair<String, OrbSideAgent.ParsedThread>>().apply {
+            initialWarm?.cachedThreads?.let { putAll(it) }
+        }
+    }
+    val cachedEventsByThread = remember(session.parentId) {
+        mutableStateMapOf<String, List<OrbRow>>().apply {
+            initialWarm?.cachedEventsByThread?.let { putAll(it) }
+        }
+    }
 
     var localAskedAtMs by remember(session.parentId) { mutableStateOf<Long?>(null) }
     var nowMs by remember(session.parentId) { mutableLongStateOf(System.currentTimeMillis()) }
+
+    DisposableEffect(session.parentId) {
+        val token = OrbWarmSyncCoordinator.attachBtwSheet(core, session.parentId) { snap ->
+            if (snap.boundMission != null) {
+                boundMission = snap.boundMission
+                boundId = snap.boundMission.id
+            }
+            turns = snap.turns
+            openTurn = snap.openTurn
+            cachedThreads.putAll(snap.cachedThreads)
+            cachedEventsByThread.putAll(snap.cachedEventsByThread)
+            val pending = pendingQuestion?.trim()
+            if (!pending.isNullOrEmpty() && (snap.openTurn?.question?.trim() == pending || snap.turns.any { it.question.trim() == pending })) {
+                pendingQuestion = null
+                localAskedAtMs = null
+            }
+            loading = false
+        }
+        onDispose {
+            OrbWarmSyncCoordinator.detachBtwSheet(core, session.parentId, token)
+        }
+    }
 
     val status = (boundMission?.str("status") ?: "").lowercase()
     val running = boundId != null && status in OrbSideAgent.liveStatuses
@@ -677,7 +709,10 @@ fun OrbSideAgentSheet(
         followUps = followUps.withServer(displayRows)
     }
 
-    suspend fun refreshThreads(): OrbRow? {
+    suspend fun refreshThreads(force: Boolean = false): OrbRow? {
+        if (!force && !loading && !running && OrbWarmSyncCoordinator.canSkipBtwServerCrawl(core, session.parentId)) {
+            return boundMission
+        }
         val allRows = try {
             val tag = core.encodeComponent("btw-parent:${session.parentId}")
             core.fetchRows("/api/control/missions?tag=$tag&all=true&limit=50", "missions")
@@ -700,6 +735,17 @@ fun OrbSideAgentSheet(
         }
         if (matching.isEmpty()) {
             loading = false
+            OrbWarmSyncCoordinator.saveBtwSnapshot(
+                core,
+                session.parentId,
+                OrbWarmBtwSnapshot(
+                    boundMission = boundMission,
+                    turns = turns,
+                    openTurn = openTurn,
+                    cachedThreads = cachedThreads.toMap(),
+                    cachedEventsByThread = cachedEventsByThread.toMap(),
+                )
+            )
             return boundMission
         }
         val latest = OrbSideAgent.latestThread(matching) ?: matching.last()
@@ -792,6 +838,17 @@ fun OrbSideAgentSheet(
             }
         }
         loading = false
+        OrbWarmSyncCoordinator.saveBtwSnapshot(
+            core,
+            session.parentId,
+            OrbWarmBtwSnapshot(
+                boundMission = target,
+                turns = merged,
+                openTurn = latestOpen,
+                cachedThreads = cachedThreads.toMap(),
+                cachedEventsByThread = cachedEventsByThread.toMap(),
+            )
+        )
         refreshQueue(target.id)
         return target
     }
@@ -868,7 +925,7 @@ fun OrbSideAgentSheet(
                 boundMission = created
                 boundId = created.id
             }
-            refreshThreads()
+            refreshThreads(force = true)
         } catch (e: Throwable) {
             followUps = followUps.postFailed(clientId)
             pendingQuestion = null
@@ -987,7 +1044,7 @@ fun OrbSideAgentSheet(
                         body = mapOf("mission_id" to targetId, "content" to wireContent, "client_message_id" to UUID.randomUUID().toString())
                     )
                 }
-                refreshThreads()
+                refreshThreads(force = true)
             } catch (e: Throwable) {
                 followUps = followUps.unhide(queueId)
                 pendingQuestion = null
@@ -1004,7 +1061,7 @@ fun OrbSideAgentSheet(
                 core.request("/api/control/missions/${core.encodeComponent(targetId)}/cancel", method = "POST")
                 pendingQuestion = null
                 localAskedAtMs = null
-                refreshThreads()
+                refreshThreads(force = true)
                 refreshQueue(targetId)
             } catch (e: Throwable) {
                 error = e.message
@@ -1032,8 +1089,17 @@ fun OrbSideAgentSheet(
         val pollOrigin = System.currentTimeMillis()
         while (isActive) {
             val fast = working || sending || followUps.count > 0
-            delay(if (fast) OrbSideAgent.pollDelayMs(System.currentTimeMillis() - pollOrigin) else 10_000L)
-            runCatching { refreshThreads() }.onFailure { if (turns.isEmpty()) error = it.message }
+            val wsHealthy = core.isMultiplexSyncHealthy && OrbWarmSyncCoordinator.isBtwStreamCaughtUp(session.parentId)
+            val delayMs = when {
+                fast && wsHealthy -> 12_000L
+                fast -> OrbSideAgent.pollDelayMs(System.currentTimeMillis() - pollOrigin)
+                wsHealthy -> 60_000L
+                else -> 10_000L
+            }
+            delay(delayMs)
+            if (fast || !wsHealthy) {
+                runCatching { refreshThreads(force = fast) }.onFailure { if (turns.isEmpty()) error = it.message }
+            }
         }
     }
 

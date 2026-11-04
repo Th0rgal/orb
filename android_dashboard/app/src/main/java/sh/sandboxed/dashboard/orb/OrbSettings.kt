@@ -497,6 +497,7 @@ fun OrbSetupView(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val signedInToken by core.tokenFlow.collectAsState()
+    val bgSyncState by OrbBackgroundSyncMonitor.stateFlow.collectAsState()
     val gitHubButton = remember {
         OrbGitHubSignInButton(OrbGitHubSignIn(OrbGitHubSignIn.prefsStore(context))) { base ->
             // The callback is only accepted for the endpoint the app is configured with.
@@ -558,6 +559,7 @@ fun OrbSetupView(
         modifier = modifier
             .fillMaxSize()
             .background(OrbStyle.background)
+            .verticalScroll(androidx.compose.foundation.rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
@@ -717,6 +719,68 @@ fun OrbSetupView(
             )
             is OrbGitHubSignInButton.State.Failed -> OrbNotice(title = state.message, log = null)
             OrbGitHubSignInButton.State.Idle -> Unit
+        }
+
+        if (onBack != null) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "BACKGROUND SYNC",
+                    color = OrbStyle.textMuted,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.6.sp
+                )
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(OrbStyle.background)
+                            .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                            .padding(3.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        OrbBackgroundSyncMode.entries.forEach { option ->
+                            val selected = bgSyncState.mode == option
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) OrbStyle.surface else Color.Transparent)
+                                    .then(
+                                        if (selected) Modifier.border(1.dp, OrbStyle.border, RoundedCornerShape(8.dp))
+                                        else Modifier
+                                    )
+                                    .orbPressClickable { OrbBackgroundSyncMonitor.setMode(option) }
+                                    .padding(vertical = 8.dp)
+                                    .semantics { contentDescription = "Background sync ${option.label}" },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = option.label,
+                                    color = if (selected) Color.White else OrbStyle.textMuted,
+                                    fontSize = 13.sp,
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        text = OrbBackgroundSyncPolicy.statusText(bgSyncState),
+                        color = OrbStyle.textMuted,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp
+                    )
+                }
+            }
         }
 
         if (core.isConfigured) {

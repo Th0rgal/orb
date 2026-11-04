@@ -280,6 +280,38 @@ final class OrbBtwStore {
         return store
     }
 
+    static func peek(_ parent: String) -> OrbBtwStore? {
+        stores[OrbBtwConfig.sessionKey(parent)]
+    }
+
+    static func knownBoundIdsByParent(candidates: Set<String>) -> [String: String] {
+        var out: [String: String] = [:]
+        for parent in candidates where !parent.isEmpty {
+            let key = OrbBtwConfig.sessionKey(parent)
+            if let bid = stores[key]?.boundID, !bid.isEmpty {
+                out[parent] = bid
+            } else if let saved = UserDefaults.standard.string(forKey: key), !saved.isEmpty {
+                out[parent] = saved
+            }
+        }
+        return out
+    }
+
+    static func reconcileWarmFollows(wantedParents: Set<String>) {
+        for parent in wantedParents {
+            shared(parent).setWarmFollow(true)
+        }
+        for (_, store) in stores where !wantedParents.contains(store.parent) {
+            store.setWarmFollow(false)
+        }
+    }
+
+    static func stopAllWarmFollows() {
+        for store in stores.values {
+            store.setWarmFollow(false)
+        }
+    }
+
     let parent: String
     private(set) var turns: [OrbBtwThreads.Turn]
     private(set) var open: OrbBtwThreads.OpenTurn?
@@ -289,8 +321,12 @@ final class OrbBtwStore {
     private(set) var boundTurnCount = 0
     private(set) var boundMaxSequence: Int64 = 0
     private(set) var loaded = false
+    private(set) var isWarmCaughtUp = false
     private var eventCache: [String: (stamp: String, events: [StoredEvent])] = [:]
     private var refreshing: Task<Void, Error>?
+    private var warmFollowWanted = false
+    private var streamTask: Task<Void, Never>?
+    private var streamMissionId: String?
 
     var boundID: String? { bound["id"].text.isEmpty ? nil : bound["id"].text }
     var boundStatus: String { bound["status"].text }
@@ -303,13 +339,34 @@ final class OrbBtwStore {
         loaded = !turns.isEmpty
     }
 
+    func setWarmFollow(_ wanted: Bool) {
+        guard warmFollowWanted != wanted else {
+            if wanted { syncStreamSubscription() }
+            return
+        }
+        warmFollowWanted = wanted
+        syncStreamSubscription()
+    }
+
     /// Concurrent callers share one refresh.
-    func refresh() async throws {
+    func refresh(force: Bool = false) async throws {
+        if !force && loaded && !running && OrbWarmSyncCoordinator.shared.canSkipBtwServerCrawl(parentId: parent) {
+            syncStreamSubscription()
+            return
+        }
         if let refreshing { return try await refreshing.value }
         let task = Task { try await load() }
         refreshing = task
         defer { refreshing = nil }
         try await task.value
+    }
+
+    func refreshStatusOnly() async throws {
+        guard let id = boundID else { return }
+        let m = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(id))?include_history=false")
+        guard !m["id"].text.isEmpty else { return }
+        bound = m
+        recomputeFromCache()
     }
 
     /// A question was just posted to `id`: follow it as live until Core reports it.
@@ -323,6 +380,7 @@ final class OrbBtwStore {
             bound = .object(fields)
         }
         if let existing = eventCache[id] { eventCache[id] = ("", existing.events) }
+        syncStreamSubscription()
     }
 
     private func load() async throws {
@@ -393,6 +451,135 @@ final class OrbBtwStore {
         }
         if let id = boundID { UserDefaults.standard.set(id, forKey: OrbBtwConfig.sessionKey(parent)) }
         loaded = true
+        OrbWarmSyncCoordinator.shared.markBtwClean(parentId: parent)
+        syncStreamSubscription()
+        OrbWarmSyncCoordinator.shared.reconcile()
+    }
+
+    private func syncStreamSubscription() {
+        let targetId = warmFollowWanted ? (boundID ?? UserDefaults.standard.string(forKey: OrbBtwConfig.sessionKey(parent))) : nil
+        guard let targetId, !targetId.isEmpty else {
+            streamTask?.cancel()
+            streamTask = nil
+            streamMissionId = nil
+            isWarmCaughtUp = false
+            return
+        }
+        if streamMissionId == targetId, streamTask != nil {
+            return
+        }
+        streamTask?.cancel()
+        streamMissionId = targetId
+        isWarmCaughtUp = false
+        streamTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.warmFollowWanted, self.streamMissionId == targetId else { return }
+                let since = self.eventCache[targetId]?.events.map(\.sequence).max()
+                let inner = OrbCore.shared.streamControl(
+                    missionId: targetId,
+                    sinceSeq: since
+                ) { [weak self] type, data in
+                    guard let self, self.streamMissionId == targetId else { return }
+                    self.handleLiveStreamEvent(missionId: targetId, type: type, data: data)
+                }
+                await withTaskCancellationHandler {
+                    await inner.value
+                } onCancel: {
+                    inner.cancel()
+                }
+                guard !Task.isCancelled, self.warmFollowWanted, self.streamMissionId == targetId else { return }
+                self.isWarmCaughtUp = false
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    private func handleLiveStreamEvent(missionId: String, type: String, data: [String: Any]) {
+        if type == "sync_caught_up" {
+            isWarmCaughtUp = true
+            OrbWarmSyncCoordinator.shared.markBtwClean(parentId: parent)
+            return
+        }
+        if type == "stream_lagged" || type == "error" {
+            isWarmCaughtUp = false
+            Task { try? await refresh(force: true) }
+            return
+        }
+        if type == "mission_status_changed", let newStatus = data["status"] as? String, !newStatus.isEmpty {
+            if boundID == missionId, case var .object(fields) = bound {
+                fields["status"] = .string(newStatus)
+                bound = .object(fields)
+            } else if boundID == nil {
+                bound = .object(["id": .string(missionId), "status": .string(newStatus)])
+            }
+            recomputeFromCache()
+            return
+        }
+        if type == "text_delta", let delta = data["content"] as? String {
+            let seq = (data["sequence"] as? NSNumber)?.int64Value ?? ((eventCache[missionId]?.events.last?.sequence ?? 0) + 1)
+            let existing = eventCache[missionId]?.events ?? []
+            let prevDelta = existing.last(where: { $0.eventType == "text_delta" })?.content ?? ""
+            let synthetic = StoredEvent(
+                id: seq,
+                missionId: missionId,
+                sequence: seq,
+                eventType: "text_delta",
+                timestamp: ISO8601DateFormatter().string(from: Date()),
+                eventId: "text_delta_latest",
+                toolCallId: nil,
+                toolName: nil,
+                content: prevDelta + delta,
+                metadata: [:]
+            )
+            let merged = OrbConversation.mergeStoredEvents(existing: existing, incoming: [synthetic])
+            eventCache[missionId] = ("", merged)
+            if boundID == nil || (!running && boundID == missionId) {
+                bound = .object(["id": .string(missionId), "status": .string("running")])
+            }
+            recomputeFromCache()
+            return
+        }
+        guard let stored = StoredEvent.fromStreamFrame(missionId: missionId, type: type, data: data) else {
+            return
+        }
+        let existing = eventCache[missionId]?.events ?? []
+        var merged = OrbConversation.mergeStoredEvents(existing: existing, incoming: [stored])
+        if stored.eventType == "user_message" || stored.eventType == "assistant_message" {
+            merged.removeAll { $0.eventType == "text_delta" }
+        }
+        eventCache[missionId] = ("", merged)
+        boundMaxSequence = max(boundMaxSequence, stored.sequence)
+        if stored.eventType == "user_message", (stored.metadata["queued"]?.value as? Bool) != true {
+            if boundID == missionId, case var .object(fields) = bound {
+                fields["status"] = .string("running")
+                bound = .object(fields)
+            } else if boundID == nil {
+                bound = .object(["id": .string(missionId), "status": .string("running")])
+            }
+        }
+        recomputeFromCache()
+    }
+
+    private func recomputeFromCache() {
+        guard let id = boundID ?? streamMissionId, let cached = eventCache[id]?.events else { return }
+        let active = OrbBtwThreads.liveStatuses.contains(boundStatus)
+        let parsed = OrbBtwThreads.parse(missionID: id, events: cached, active: active)
+        let otherTurns = turns.filter { !$0.id.hasPrefix("btw:\(id):") }
+        let merged = OrbBtwThreads.merge([otherTurns, parsed.turns])
+        if merged != turns {
+            turns = merged
+            OrbDisk.saveAsync(merged, key: cacheKey)
+        }
+        if parsed.open != open {
+            open = parsed.open
+        }
+        boundTurnCount = parsed.turns.count
+        boundMaxSequence = cached.map(\.sequence).max() ?? boundMaxSequence
+        boundDeliveredMessages = cached.compactMap { e in
+            guard e.eventType == "user_message", (e.metadata["queued"]?.value as? Bool) != true else { return nil }
+            return OrbDeliveredMessage(id: e.eventId, content: OrbBtwThreads.question(e.content), sequence: e.sequence)
+        }
+        loaded = true
     }
 }
 
@@ -460,6 +647,7 @@ struct OrbSideQuestionSheet: View {
             .toolbar { toolbar }
             .task(id: phase) { await follow() }
             .onAppear {
+                OrbWarmSyncCoordinator.shared.noteBtwSheetOpened(parentId: parentID)
                 // `/btw <question>` from the composer was already a send: don't ask for a second tap.
                 let typed = question.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !typed.isEmpty && !autoAsked {
@@ -468,6 +656,9 @@ struct OrbSideQuestionSheet: View {
                 } else if store.loaded && store.turns.isEmpty && store.open == nil {
                     focused = true
                 }
+            }
+            .onDisappear {
+                OrbWarmSyncCoordinator.shared.noteBtwSheetClosed(parentId: parentID)
             }
             .onChange(of: store.loaded) { _, loaded in
                 if loaded && store.turns.isEmpty && store.open == nil && pending == nil { focused = true }
@@ -727,7 +918,25 @@ struct OrbSideQuestionSheet: View {
 
     private func follow() async {
         guard phase == .active else { return }
-        await Poller.run(every: { .seconds(waiting || busy || followUps.count > 0 ? 1.5 : 15) }) {
+        do {
+            try await store.refresh()
+            await refreshQueue()
+            settlePending()
+        } catch is CancellationError {
+            return
+        } catch {
+            if store.turns.isEmpty { self.error = error.localizedDescription }
+        }
+        await Poller.run(
+            every: {
+                if OrbCore.shared.isMultiplexSyncHealthy && store.isWarmCaughtUp {
+                    return .seconds(waiting || busy || followUps.count > 0 ? 12 : 60)
+                }
+                return .seconds(waiting || busy || followUps.count > 0 ? 1.5 : 15)
+            },
+            immediately: false,
+            while: { phase == .active && (!OrbCore.shared.isMultiplexSyncHealthy || !store.isWarmCaughtUp || waiting || busy || followUps.count > 0) }
+        ) {
             do {
                 try await store.refresh()
                 await refreshQueue()
@@ -821,7 +1030,7 @@ struct OrbSideQuestionSheet: View {
                 store.sent(to: created["id"].text)
             }
             error = ""
-            try? await store.refresh()
+            try? await store.refresh(force: true)
             await refreshQueue()
         } catch let e as OrbHTTPError where [404, 405].contains(e.status) && store.boundID == nil {
             if queueing { followUps = followUps.postFailed(messageID) }
@@ -912,7 +1121,7 @@ struct OrbSideQuestionSheet: View {
                 _ = try await OrbCore.shared.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(wireContent), "client_message_id": .string(UUID().uuidString)]))
                 store.sent(to: id)
             }
-            try? await store.refresh()
+            try? await store.refresh(force: true)
             await refreshQueue()
         } catch {
             withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) {
@@ -932,7 +1141,7 @@ struct OrbSideQuestionSheet: View {
 
     private func stop() async {
         guard let id = store.boundID else { return }
-        do { _ = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(id))/cancel", method: "POST"); try await store.refresh(); await refreshQueue() }
+        do { _ = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(id))/cancel", method: "POST"); try await store.refresh(force: true); await refreshQueue() }
         catch { self.error = error.localizedDescription }
     }
 }
