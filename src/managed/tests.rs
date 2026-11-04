@@ -4661,6 +4661,9 @@ fn secrets_wipe_deletes_secrets_and_prunes_heavy_build_and_cache_trees() {
         std::fs::write(secret_dir.join("GITHUB_TOKEN"), "secret").unwrap();
     }
     std::fs::write(orb.join(".boost-env"), "BOOST_CACHE_TOKEN=scoped\n").unwrap();
+    let etc_orb = root.join("etc/orb");
+    std::fs::create_dir_all(&etc_orb).unwrap();
+    std::fs::write(etc_orb.join("boost-env"), "BOOST_CACHE_TOKEN=scoped\n").unwrap();
     // Heavy toolchain/build/VCS trees that must be pruned without traversal.
     for pruned in [
         orb.join("work/caches/rustup/toolchains/stable/marker"),
@@ -4682,6 +4685,7 @@ fn secrets_wipe_deletes_secrets_and_prunes_heavy_build_and_cache_trees() {
     let cmd = snapshots::SECRETS_WIPE_NO_SYNC
         .replace("sudo ", "")
         .replace("/run/user", &root.join("run/user").display().to_string())
+        .replace("/etc/orb", &root.join("etc/orb").display().to_string())
         .replace(
             "/var/lib/orb-node",
             &root.join("var/lib/orb-node").display().to_string(),
@@ -4695,6 +4699,7 @@ fn secrets_wipe_deletes_secrets_and_prunes_heavy_build_and_cache_trees() {
     assert!(status.success(), "cmd failed: {cmd}");
 
     assert!(!root.join("run/user/1001/paloma-secrets").exists());
+    assert!(!etc_orb.join("boost-env").exists());
     assert!(!orb.join(".paloma-secrets").exists());
     assert!(!orb.join(".boost-env").exists());
     assert!(!orb.join("work/caches/home/.paloma-secrets").exists());
@@ -4874,7 +4879,13 @@ fn boost_warm_overlay_bootstrap_avoids_copyup_and_supports_non_systemd_init() {
     assert!(script.contains("P=/opt/boost/bin:/opt/elan/bin:/opt/orb/bin:$B:"));
     assert!(script.contains("grep -F '\"machine_id\":\"mmboostwarm1\"' \"$H/node.cred\""));
     assert!(script.contains("\"$S/orb-node-bg\" \"$P\" \"$E\""));
-    assert!(PROVISION_SCRIPT.contains(r#"[ ! -r \"$H/.boost-env\" ] || . \"$H/.boost-env\""#));
+    assert!(PROVISION_SCRIPT.contains("[ ! -r /etc/orb/boost-env ] || . /etc/orb/boost-env"));
+    assert!(!PROVISION_SCRIPT.contains("$NODE_HOME/.boost-env.tmp"));
+    assert!(PROVISION_SCRIPT.contains("install -d -m 0750 -o root -g \"$NODE_USER\" /etc/orb"));
+    assert!(PROVISION_SCRIPT.contains("chown \"root:$NODE_USER\" /etc/orb/boost-env.tmp"));
+    assert!(PROVISION_SCRIPT.contains("chmod 0640 /etc/orb/boost-env.tmp"));
+    assert!(PROVISION_SCRIPT
+        .contains("[ \"$(id -un 2>/dev/null)\" = \"orbnode\" ] && [ -r /etc/orb/boost-env ]"));
     assert!(PROVISION_SCRIPT.contains("pgrep -u orbnode -x sandboxed-node"));
     assert!(PROVISION_SCRIPT.contains("/etc/profile.d/zz-orb-boost.sh"));
     assert!(PROVISION_SCRIPT.contains("unset BOOST_REPO_DIR"));

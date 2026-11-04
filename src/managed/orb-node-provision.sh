@@ -37,7 +37,7 @@ L="${LD_LIBRARY_PATH:-/usr/local/nvidia/lib:/usr/local/nvidia/lib64}:/usr/local/
 if pgrep -u orbnode -x sandboxed-node >/dev/null 2>&1; then
   exit 0
 fi
-nohup bash -c "set -a; . \"$O/enroll.env\"; [ ! -r \"$H/.boost-env\" ] || . \"$H/.boost-env\"; set +a; cd \"$H\"; while :; do runuser -u orbnode -- env HOME=\"$H\" PATH=\"$P\" LD_LIBRARY_PATH=\"$L\" $E \"$B/sandboxed-node\" || :; sleep 2; done" </dev/null >"$H/orb-node.log" 2>&1 &
+nohup bash -c "set -a; . \"$O/enroll.env\"; [ ! -r /etc/orb/boost-env ] || . /etc/orb/boost-env; set +a; cd \"$H\"; while :; do runuser -u orbnode -- env HOME=\"$H\" PATH=\"$P\" LD_LIBRARY_PATH=\"$L\" $E \"$B/sandboxed-node\" || :; sleep 2; done" </dev/null >"$H/orb-node.log" 2>&1 &
 ORBBG
 chmod 0755 /usr/local/sbin/orb-node-bg
 
@@ -78,7 +78,7 @@ git config --system --add url.https://github.com/.insteadOf ssh://git@github.com
 mkdir -p /etc/systemd/system/orb-node.service.d
 {
   echo "[Service]"
-  echo "EnvironmentFile=-$NODE_HOME/.boost-env"
+  echo "EnvironmentFile=-/etc/orb/boost-env"
   echo "Environment=GIT_TERMINAL_PROMPT=0"
   echo "Environment=OPENCODE_TMPDIR=/tmp/opencode"
   if [ -x "$CACHES/cargo/bin/rustup" ]; then
@@ -209,8 +209,9 @@ chmod 0755 /usr/local/bin/orb-cow-worktree
 #    forcing `--project-dir /workspace/boost-cvm/lean-overlay/merged`. Never run
 #    `chmod -R` across overlayfs (77 GiB metadata copy-up); instead VFS-idmap
 #    `/opt/boost/warm-lower` to `orbnode` at `/opt/boost/warm-orb` in O(1) time.
-rm -f "$NODE_HOME/.boost-env" /etc/profile.d/zz-orb-boost.sh
+rm -f "$NODE_HOME/.boost-env" /etc/orb/boost-env /etc/profile.d/zz-orb-boost.sh
 if [ -f /etc/profile.d/boost-vm.sh ] || [ -n "${BOOST_VM_ID:-}" ]; then
+  install -d -m 0750 -o root -g "$NODE_USER" /etc/orb
   (
     set +u
     [ -r /etc/profile.d/boost-vm.sh ] && . /etc/profile.d/boost-vm.sh
@@ -226,19 +227,19 @@ if [ -f /etc/profile.d/boost-vm.sh ] || [ -n "${BOOST_VM_ID:-}" ]; then
       clean=$(printf '%s' "$BOOST_REPO_DIR" | tr -d '\r\n' | sed 's/\\/\\\\/g; s/"/\\"/g')
       printf 'BOOST_WARM_REPO_DIR="%s"\n' "$clean"
     fi
-  ) > "$NODE_HOME/.boost-env.tmp"
-  chmod 0600 "$NODE_HOME/.boost-env.tmp"
-  chown "$NODE_USER:$NODE_USER" "$NODE_HOME/.boost-env.tmp"
-  mv "$NODE_HOME/.boost-env.tmp" "$NODE_HOME/.boost-env"
+  ) > /etc/orb/boost-env.tmp
+  chown "root:$NODE_USER" /etc/orb/boost-env.tmp
+  chmod 0640 /etc/orb/boost-env.tmp
+  mv /etc/orb/boost-env.tmp /etc/orb/boost-env
   # sandboxed-node launches remote jobs with env_clear() + HOME=<job-cwd> via
   # `bash -lc`, which sources /etc/profile.d/boost-vm.sh (setting BOOST_REPO_DIR
   # and checking $HOME/.boost-env under the wrong HOME). Run after boost-vm.sh
-  # to export /var/lib/orb-node/.boost-env and clear BOOST_REPO_DIR so `lake`
-  # builds $PWD inside sub-agent CoW worktrees.
+  # for orbnode shells only, reading root-owned /etc/orb/boost-env so mission
+  # processes can never tamper with sourced profile content.
   cat > /etc/profile.d/zz-orb-boost.sh <<'ORBBOOSTPROFILE'
-if [ -r /var/lib/orb-node/.boost-env ]; then
+if [ "$(id -un 2>/dev/null)" = "orbnode" ] && [ -r /etc/orb/boost-env ]; then
   set -a
-  . /var/lib/orb-node/.boost-env
+  . /etc/orb/boost-env
   set +a
   unset BOOST_REPO_DIR
 fi

@@ -559,7 +559,10 @@ impl BoostProvider {
     }
 
     fn file_mode_for_path(path: &str) -> u32 {
-        if path.ends_with("enroll.env") || path.contains("/.boost-env") {
+        if path.ends_with("enroll.env")
+            || path.contains("/.boost-env")
+            || path == "/etc/orb/boost-env"
+        {
             0o600
         } else if path.ends_with(".sh") {
             0o755

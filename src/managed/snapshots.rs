@@ -40,7 +40,7 @@ const SNAPSHOT_PREFIX: &str = "orb-snap-";
 /// toolchain/build/VCS trees so warm snapshot hydration never times out; non-zero
 /// exit on failure.
 pub const SECRETS_WIPE_NO_SYNC: &str = concat!(
-    "sudo rm -rf /run/user/*/paloma-secrets /var/lib/orb-node/.paloma-secrets /var/lib/orb-node/.boost-env /var/lib/orb-node/work/caches/home/.paloma-secrets && ",
+    "sudo rm -rf /run/user/*/paloma-secrets /etc/orb/boost-env /var/lib/orb-node/.paloma-secrets /var/lib/orb-node/.boost-env /var/lib/orb-node/work/caches/home/.paloma-secrets && ",
     "sudo find /var/lib/orb-node /home -maxdepth 6 ",
     "\\( -path '/var/lib/orb-node/work/caches/elan' ",
     "-o -path '/var/lib/orb-node/work/caches/rustup' ",
@@ -53,7 +53,7 @@ pub const SECRETS_WIPE_NO_SYNC: &str = concat!(
 /// Deletes every delivered secret file on a VM and flushes disk buffers before
 /// snapshot/fork capture; non-zero exit on failure.
 pub const SECRETS_WIPE: &str = concat!(
-    "sudo rm -rf /run/user/*/paloma-secrets /var/lib/orb-node/.paloma-secrets /var/lib/orb-node/.boost-env /var/lib/orb-node/work/caches/home/.paloma-secrets && ",
+    "sudo rm -rf /run/user/*/paloma-secrets /etc/orb/boost-env /var/lib/orb-node/.paloma-secrets /var/lib/orb-node/.boost-env /var/lib/orb-node/work/caches/home/.paloma-secrets && ",
     "sudo find /var/lib/orb-node /home -maxdepth 6 ",
     "\\( -path '/var/lib/orb-node/work/caches/elan' ",
     "-o -path '/var/lib/orb-node/work/caches/rustup' ",
