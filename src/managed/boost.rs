@@ -202,7 +202,8 @@ struct VmListResponse {
 #[derive(Debug, Clone, Deserialize)]
 struct VmRecord {
     id: String,
-    name: String,
+    #[serde(default)]
+    name: Option<String>,
     runner_label: String,
     #[serde(default)]
     vcpus: Option<u32>,
@@ -221,11 +222,14 @@ struct VmRecord {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ExecResponse {
-    exit_code: i64,
     #[serde(default)]
-    stdout_b64: String,
+    ok: Option<bool>,
     #[serde(default)]
-    stderr_b64: String,
+    exit_code: Option<i64>,
+    #[serde(default)]
+    stdout_b64: Option<String>,
+    #[serde(default)]
+    stderr_b64: Option<String>,
     #[serde(default)]
     timed_out: bool,
     #[serde(default)]
@@ -233,7 +237,11 @@ struct ExecResponse {
     #[serde(default)]
     stderr_truncated: bool,
     #[serde(default)]
-    duration_ms: u64,
+    elapsed_ms: Option<u64>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -250,7 +258,8 @@ struct SnapshotListResponse {
 #[derive(Debug, Clone, Deserialize)]
 struct SnapshotRecord {
     id: String,
-    label: String,
+    #[serde(default)]
+    label: Option<String>,
     status: String,
     #[serde(default)]
     size_bytes: Option<u64>,
@@ -485,7 +494,7 @@ impl BoostProvider {
         let found = list
             .snapshots
             .into_iter()
-            .find(|s| s.label == trimmed || s.id == trimmed)
+            .find(|s| s.label.as_deref() == Some(trimmed) || s.id == trimmed)
             .ok_or_else(|| format!("snapshot '{trimmed}' not found on boost.ci"))?;
         if let Ok(mut cache) = self.snapshot_ids.write() {
             cache.insert(trimmed.to_string(), found.id.clone());
@@ -501,33 +510,61 @@ impl BoostProvider {
     }
 
     fn decode_exec_value(resp: ExecResponse) -> Value {
-        let stdout = base64::engine::general_purpose::STANDARD
-            .decode(resp.stdout_b64.trim())
-            .ok()
+        let stdout = resp
+            .stdout_b64
+            .as_deref()
+            .and_then(|b64| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64.trim())
+                    .ok()
+            })
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default();
-        let stderr = base64::engine::general_purpose::STANDARD
-            .decode(resp.stderr_b64.trim())
-            .ok()
+        let mut stderr = resp
+            .stderr_b64
+            .as_deref()
+            .and_then(|b64| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64.trim())
+                    .ok()
+            })
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default();
+        let timed_out = resp.timed_out
+            || resp
+                .error
+                .as_deref()
+                .is_some_and(|e| e.to_ascii_lowercase().contains("timed out"));
+        let exit_code = match resp.exit_code {
+            Some(0) if timed_out => 124,
+            Some(0) if resp.ok == Some(false) => 1,
+            Some(code) => code,
+            None if timed_out => 124,
+            None if resp.ok == Some(false) => 1,
+            None => 0,
+        };
+        if stderr.is_empty() {
+            if let Some(err) = resp.error.filter(|s| !s.trim().is_empty()) {
+                stderr = err;
+            }
+        }
         json!({
-            "exit_code": if resp.timed_out && resp.exit_code == 0 { 124 } else { resp.exit_code },
+            "exit_code": exit_code,
             "stdout": stdout,
             "stderr": stderr,
-            "timed_out": resp.timed_out,
+            "timed_out": timed_out,
             "truncated": resp.stdout_truncated || resp.stderr_truncated,
-            "duration_ms": resp.duration_ms,
+            "duration_ms": resp.elapsed_ms.or(resp.duration_ms).unwrap_or(0),
         })
     }
 
-    fn file_mode_for_path(path: &str) -> &'static str {
+    fn file_mode_for_path(path: &str) -> u32 {
         if path.ends_with("enroll.env") || path.contains("/.boost-env") {
-            "0600"
+            0o600
         } else if path.ends_with(".sh") {
-            "0755"
+            0o755
         } else {
-            "0644"
+            0o644
         }
     }
 }
@@ -548,11 +585,21 @@ fn format_error(label: &str, status: reqwest::StatusCode, body: &str) -> String 
     let detail = serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|v| {
+            if let Some(err_obj) = v.get("error").and_then(Value::as_object) {
+                let code = err_obj.get("code").and_then(Value::as_str);
+                let msg = err_obj.get("message").and_then(Value::as_str);
+                match (code, msg) {
+                    (Some(c), Some(m)) => return Some(format!("{c}: {m}")),
+                    (None, Some(m)) => return Some(m.to_string()),
+                    (Some(c), None) => return Some(c.to_string()),
+                    (None, None) => {}
+                }
+            }
             let code = v.get("code").and_then(Value::as_str);
             let msg = v
                 .get("error")
-                .or_else(|| v.get("message"))
-                .and_then(Value::as_str);
+                .and_then(Value::as_str)
+                .or_else(|| v.get("message").and_then(Value::as_str));
             match (code, msg) {
                 (Some(c), Some(m)) => Some(format!("{c}: {m}")),
                 (None, Some(m)) => Some(m.to_string()),
@@ -755,7 +802,7 @@ impl ManagedProvider for BoostProvider {
         Ok(ProviderMachine {
             provider_id: vm.id,
             state: map_vm_state(&vm.status),
-            name: vm.name,
+            name: vm.name.unwrap_or_default(),
             deletable_at: None,
         })
     }
@@ -780,7 +827,7 @@ impl ManagedProvider for BoostProvider {
         Ok(ProviderMachine {
             provider_id: env.vm.id,
             state,
-            name: env.vm.name,
+            name: env.vm.name.unwrap_or_default(),
             deletable_at: None,
         })
     }
@@ -795,7 +842,7 @@ impl ManagedProvider for BoostProvider {
             .map(|vm| ProviderMachine {
                 provider_id: vm.id,
                 state: map_vm_state(&vm.status),
-                name: vm.name,
+                name: vm.name.unwrap_or_default(),
                 deletable_at: None,
             })
             .collect())
@@ -825,15 +872,21 @@ impl ManagedProvider for BoostProvider {
             "path": path,
             "content_b64": base64::engine::general_purpose::STANDARD.encode(content.as_bytes()),
             "mode": Self::file_mode_for_path(path),
-            "as_root": true,
         });
-        let _: Value = self
+        let resp: ExecResponse = self
             .send_json(
                 "PUT /vms/{id}/files",
                 self.req(reqwest::Method::PUT, &format!("/vms/{provider_id}/files"))
+                    .timeout(Duration::from_secs(125))
                     .json(&payload),
             )
             .await?;
+        if resp.ok == Some(false) {
+            return Err(format!(
+                "PUT /vms/{{id}}/files: {}",
+                resp.error.as_deref().unwrap_or("guest file write failed")
+            ));
+        }
         Ok(())
     }
 
@@ -844,8 +897,9 @@ impl ManagedProvider for BoostProvider {
         timeout_secs: u64,
     ) -> Result<Value, String> {
         let clamped_timeout = timeout_secs.clamp(1, 600);
+        let http_timeout_secs = (clamped_timeout + 35).max(125);
         let payload = json!({
-            "argv": ["bash", "-lc", command],
+            "command": ["bash", "-lc", command],
             "timeout_secs": clamped_timeout,
             "as_root": true,
         });
@@ -853,7 +907,7 @@ impl ManagedProvider for BoostProvider {
             .send_json(
                 "POST /vms/{id}/exec",
                 self.req(reqwest::Method::POST, &format!("/vms/{provider_id}/exec"))
-                    .timeout(Duration::from_secs(clamped_timeout + 15))
+                    .timeout(Duration::from_secs(http_timeout_secs))
                     .json(&payload),
             )
             .await?;
@@ -867,16 +921,17 @@ impl ManagedProvider for BoostProvider {
         timeout_secs: u64,
     ) -> Result<Value, String> {
         let clamped_timeout = timeout_secs.clamp(1, 120);
+        let http_timeout_secs = (clamped_timeout + 35).max(125);
         let payload = json!({
-            "argv": ["bash", "-lc", command],
+            "command": ["bash", "-lc", command],
             "timeout_secs": clamped_timeout,
-            "as_root": false,
+            "as_root": true,
         });
         let raw = self
             .send_bounded_json(
                 "POST /vms/{id}/exec",
                 self.req(reqwest::Method::POST, &format!("/vms/{provider_id}/exec"))
-                    .timeout(Duration::from_secs(clamped_timeout + 10))
+                    .timeout(Duration::from_secs(http_timeout_secs))
                     .json(&payload),
             )
             .await?;
@@ -894,17 +949,23 @@ impl ManagedProvider for BoostProvider {
         let payload = json!({
             "path": path,
             "content_b64": base64::engine::general_purpose::STANDARD.encode(content.as_bytes()),
-            "mode": "0644",
-            "as_root": false,
+            "mode": Self::file_mode_for_path(path),
         });
-        let _ = self
+        let raw = self
             .send_bounded_json(
                 "PUT /vms/{id}/files",
                 self.req(reqwest::Method::PUT, &format!("/vms/{provider_id}/files"))
-                    .timeout(Duration::from_secs(30))
+                    .timeout(Duration::from_secs(125))
                     .json(&payload),
             )
             .await?;
+        if raw.get("ok").and_then(Value::as_bool) == Some(false) {
+            let err = raw
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("guest file write failed");
+            return Err(format!("PUT /vms/{{id}}/files: {err}"));
+        }
         Ok(())
     }
 
@@ -989,7 +1050,7 @@ impl ManagedProvider for BoostProvider {
         let found = list
             .snapshots
             .into_iter()
-            .find(|s| s.label == name || s.id == name)
+            .find(|s| s.label.as_deref() == Some(name) || s.id == name)
             .ok_or_else(|| format!("snapshot '{name}' not found on boost.ci"))?;
         if let Ok(mut cache) = self.snapshot_ids.write() {
             cache.insert(name.to_string(), found.id);
@@ -1219,6 +1280,22 @@ mod tests {
         assert_eq!(sat.reason.as_deref(), Some("quota_vcpus"));
     }
 
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct MockExecReq {
+        command: Vec<String>,
+        timeout_secs: Option<u32>,
+        as_root: bool,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct MockWriteFileReq {
+        path: String,
+        content_b64: String,
+        mode: Option<u32>,
+    }
+
     #[tokio::test]
     async fn spawn_exec_files_and_snapshots_roundtrip() {
         let vm_id = "2f85a649-5040-49d0-9499-0b8d7e81b111";
@@ -1268,24 +1345,35 @@ mod tests {
             )
             .route(
                 "/v1/vms/:id/exec",
-                post(|Path(id): Path<String>| async move {
+                post(|Path(id): Path<String>, Json(req): Json<MockExecReq>| async move {
                     assert_eq!(id, "2f85a649-5040-49d0-9499-0b8d7e81b111");
+                    assert_eq!(req.command, vec!["bash", "-lc", "echo ready"]);
+                    assert_eq!(req.timeout_secs, Some(30));
+                    assert!(req.as_root);
                     Json(json!({
+                        "op_id": "11111111-2222-3333-4444-555555555555",
+                        "ok": true,
                         "exit_code": 0,
                         "stdout_b64": base64::engine::general_purpose::STANDARD.encode("ready\n"),
-                        "stderr_b64": "",
-                        "timed_out": false,
-                        "stdout_truncated": false,
-                        "stderr_truncated": false,
-                        "duration_ms": 42
+                        "elapsed_ms": 42
                     }))
                 }),
             )
             .route(
                 "/v1/vms/:id/files",
-                put(|Path(id): Path<String>| async move {
+                put(|Path(id): Path<String>, Json(req): Json<MockWriteFileReq>| async move {
                     assert_eq!(id, "2f85a649-5040-49d0-9499-0b8d7e81b111");
-                    Json(json!({"bytes": 5}))
+                    assert!(!req.path.is_empty());
+                    assert!(!req.content_b64.is_empty());
+                    let mode = req.mode.expect("numeric octal mode expected");
+                    assert!(mode <= 0o777, "mode {mode:#o} exceeds 0o777");
+                    Json(json!({
+                        "op_id": "11111111-2222-3333-4444-666666666666",
+                        "ok": true,
+                        "size_bytes": 5,
+                        "mode": mode,
+                        "elapsed_ms": 7
+                    }))
                 }),
             )
             .route(
@@ -1354,12 +1442,20 @@ mod tests {
         assert_eq!(created.state, "provisioning");
 
         provider
-            .write_file(vm_id, "/home/user/.orb/enroll.env", "KEY=1\n")
+            .write_file(vm_id, "/tmp/orb-bootstrap.sh", "#!/bin/sh\nexit 0\n")
+            .await
+            .unwrap();
+        provider
+            .raw_write_file(vm_id, "/tmp/hello.txt", "hello\n")
             .await
             .unwrap();
         let exec_out = provider.exec(vm_id, "echo ready", 30).await.unwrap();
         assert_eq!(exec_out["exit_code"], 0);
         assert_eq!(exec_out["stdout"], "ready\n");
+        assert_eq!(exec_out["duration_ms"], 42);
+        let raw_out = provider.raw_exec(vm_id, "echo ready", 30).await.unwrap();
+        assert_eq!(raw_out["exit_code"], 0);
+        assert_eq!(raw_out["stdout"], "ready\n");
 
         provider
             .save_snapshot(vm_id, "orb-snap-proj-warm-abcd")
@@ -1373,5 +1469,35 @@ mod tests {
             .await
             .unwrap();
         provider.destroy(vm_id).await.unwrap();
+    }
+
+    #[test]
+    fn formats_nested_boost_api_error_and_decodes_failed_operation_result() {
+        let formatted = format_error(
+            "POST /vms",
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"error":{"code":"forbidden","message":"repository `org/repo` is not connected to workspace"}}"#,
+        );
+        assert_eq!(
+            formatted,
+            "POST /vms -> HTTP 403: forbidden: repository `org/repo` is not connected to workspace"
+        );
+
+        let failed = BoostProvider::decode_exec_value(ExecResponse {
+            ok: Some(false),
+            exit_code: None,
+            stdout_b64: None,
+            stderr_b64: None,
+            timed_out: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            elapsed_ms: Some(120_005),
+            duration_ms: None,
+            error: Some("guest command timed out after 120s".into()),
+        });
+        assert_eq!(failed["exit_code"], 124);
+        assert_eq!(failed["timed_out"], true);
+        assert_eq!(failed["stderr"], "guest command timed out after 120s");
+        assert_eq!(failed["duration_ms"], 120_005);
     }
 }
