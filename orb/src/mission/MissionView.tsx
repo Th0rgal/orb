@@ -274,7 +274,7 @@ export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
   });
   onMount(() => {
     if (p.id) void loadTranscript(p.id).catch(swallow("mission.loadTranscript", { mission: p.id }));
-    if (!resolved()) void getMission(p.id).then(setResolved).catch(e => setError(String(e)));
+    if (!resolved()) void getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e)));
   });
   return <Show when={Boolean(resolved())} fallback={<Show when={error()} fallback={<ConversationSkeleton />}><div class="scroll"><div class="col"><p role="alert">{error()}</p></div></div></Show>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} />}><CloudConversation id={p.id} onMission={p.onMission} onOpenMission={p.onFork} /></Show></Show>;
 }
@@ -369,11 +369,14 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const [followAttach, setFollowAttach] = createSignal<AttachChip[]>([]);
   // Near the top, or too short to scroll at all (a page of folded tool rows),
   // keep fetching older pages: a scroll event alone never fires otherwise.
+  // Once at least one user/assistant message is visible above a collapsed tool
+  // fold, stop auto-paging raw tool pages on `short` alone until the user scrolls up.
   const older=()=>{
     const el=scroller;
     if(!el||hasPendingSearchTarget(p.id))return;
-    const short=el.scrollHeight<=el.clientHeight+800;
-    if((el.scrollTop<800||short)&&peekReadyTranscript(p.id)?.hasOlder)void loadOlder().then(()=>requestAnimationFrame(older)).catch(e=>setError(String(e)));
+    const hasConversationItem=items().some(i=>i.kind==="user"||i.kind==="text");
+    const short=!hasConversationItem&&el.scrollHeight<=el.clientHeight+800;
+    if((el.scrollTop<800&&el.scrollHeight>el.clientHeight||short)&&peekReadyTranscript(p.id)?.hasOlder)void loadOlder().then(()=>requestAnimationFrame(older)).catch(e=>setError(String(e)));
   };
   const pin = createPinnedScroll({ key: () => p.id, onResize: () => older() });
   const { landAtBottom, scrollIfPinned } = pin;
@@ -393,9 +396,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     if(!p.id)return;
     const since = statusSeen;
     try {
-      const next=await getMission(p.id, { fresh });
+      const next=await getMission(p.id, { fresh, includeHistory: false });
       if(disposed||since!==statusSeen)return;
-      setMission(next);
+      setMission(prev => prev && prev.id === next.id ? { ...next, history: next.history?.length ? next.history : prev.history } : next);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -535,6 +538,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     void refresh();
     // History must load even when the live connection has not opened yet.
     let initialReady = true;
+    let streamHealthy = false;
     void resync(true).then(() => { if (!hasPendingSearchTarget(p.id)) scrollIfPinned(); });
     const stopStream = streamMission(
       p.id,
@@ -558,6 +562,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       },
       () => void resync(true),
       () => {
+        streamHealthy = true;
         if (initialReady) {
           initialReady = false;
           if (!hasPendingSearchTarget(p.id)) scrollIfPinned();
@@ -570,12 +575,17 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         if (replaying) held.push(...evs);
         else applyLiveBatch(evs);
       },
+      () => {
+        streamHealthy = false;
+      },
+      peekReadyTranscript(p.id)?.cursor,
     );
     // Slow status poll — the stream is authoritative for content, but the
     // composer busy state shouldn't depend on it alone.
     const stopPoll = pollWhileVisible(async () => {
       const wasMoving = missionPhase(mission(), activity()).moving;
       await refresh();
+      const nowMoving = missionPhase(mission(), activity()).moving;
       // Reconcile through completion even if the live stream misses output.
       const transcript = items();
       const lastUser = transcript.reduce((last, item, index) => item.kind === "user" && !item.queued ? index : last, -1);
@@ -584,7 +594,11 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         (item.kind === "text" && !item.live && !!item.text.trim()) || item.kind === "error");
       const waitingForReply = ["awaiting_user", "waiting_user", "completed", "done"].includes(mission()?.status ?? "")
         && !hasFinalReply && viewItems().some(item => item.kind === "user" && !item.queued);
-      if (wasMoving || missionPhase(mission(), activity()).moving || waitingForReply) await resync(true);
+      // When `streamHealthy` is true and the mission is still actively moving,
+      // live events are already streaming over `/api/control/sync` — re-paging
+      // 400 KB raw event batches every 10 s would saturate slow links.
+      const stoppedMoving = wasMoving && !nowMoving;
+      if (((wasMoving || nowMoving) && !streamHealthy) || stoppedMoving || waitingForReply) await resync(true);
       // Queue failures are recoverable independently of the mission stream.
       // A healthy stream must not leave a transient startup warning forever.
       if (queueError()) await resync(true);

@@ -894,7 +894,7 @@ enum OrbReadCache {
     }
     static func conversation(_ id: String, force: Bool = false) async throws -> OrbJSON {
         try await load("mission:\(id)", force: force) {
-            try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(id))")
+            try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(id))?include_history=false")
         }
     }
     static func cloud(_ id: String, force: Bool = false) async throws -> OrbJSON {

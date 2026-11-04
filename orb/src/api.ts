@@ -99,7 +99,8 @@ export async function resolveTransportBase(apiUrl = getApiUrl()): Promise<string
       if (bridgeTarget === clean) bridgeBaseUrl = proxy;
       return proxy;
     })
-    .catch(() => {
+    .catch((error) => {
+      note(`transport.bridge.error: ${error instanceof Error ? error.message : String(error)}`);
       if (bridgeTarget === clean) bridgeBaseUrl = null;
       return null;
     })
@@ -1133,12 +1134,12 @@ export const ANCESTOR_TTL_MS = 60_000;
 async function fetchAncestor(id: string): Promise<Mission | null> {
   const cached = ancestorCache.get(id);
   if (cached && Date.now() - cached.at < ANCESTOR_TTL_MS) return stickHierarchy(cached.row);
-  try { const row = await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}`); ancestorCache.set(id, {row, at: Date.now()}); return row; }
+  try { const row = await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}?include_history=false`); ancestorCache.set(id, {row, at: Date.now()}); return row; }
   catch (error) { if (error instanceof ApiError && error.status === 404) { ancestorCache.delete(id); return null; } return cached ? stickHierarchy(cached.row) : null; }
 }
 // The sidebar's parent resolver: null only when Core says the parent is gone.
 configureParentResolver(async id => {
-  try { return await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}`);  }
+  try { return await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}?include_history=false`);  }
   catch (error) { if (error instanceof ApiError && error.status === 404) return null; throw error; }
 });
 /** Pages are ordered by recent activity: add parents that fell off the page. */
@@ -1381,11 +1382,13 @@ export async function listCompletedMissions(limit = 100): Promise<Mission[] | nu
 
 /** `coreOnly` skips the local-origin fallback: callers that need Core's
  * placement must not see a journal row that predates a machine transfer. */
-export async function getMission(id: string, options: { coreOnly?: boolean; fresh?: boolean } = {}): Promise<Mission> {
+export async function getMission(id: string, options: { coreOnly?: boolean; fresh?: boolean; includeHistory?: boolean } = {}): Promise<Mission> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const local = options.coreOnly ? undefined : (await origins.localOrigins(id)).find(row=>row.id===id);
   try{
-    const path = `/api/control/missions/${id}`;
+    const path = options.includeHistory === false
+      ? `/api/control/missions/${id}?include_history=false`
+      : `/api/control/missions/${id}`;
     const read = async () => {
       // `fresh`: never join a read that started before the caller's newer event.
       const value = await api<Mission>(path, options.fresh ? {} : undefined);
@@ -1594,7 +1597,7 @@ export async function sendMissionMessage(
     }
     if (!(error instanceof ApiError) || error.status !== 409 || !error.detail.startsWith("REMOTE_RESUME_REQUIRES_REPLACEMENT:")) throw error;
     if (usedKnownMission && !mission.history?.length) {
-      mission = await getMission(id, { fresh: true });
+      mission = await getMission(id, { fresh: true, includeHistory: true });
       if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
     }
     // Side conversations must keep their archive, parent and sidebar identity.

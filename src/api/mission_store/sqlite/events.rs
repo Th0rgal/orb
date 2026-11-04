@@ -695,7 +695,48 @@ impl SqliteMissionStore {
         .await
         .map_err(|e| e.to_string())?
     }
+}
 
+fn dedup_event_types(event_types: Option<&[&str]>) -> Option<Vec<String>> {
+    event_types.map(|types| {
+        let mut seen = std::collections::HashSet::with_capacity(types.len());
+        types
+            .iter()
+            .filter(|t| seen.insert(**t))
+            .map(|t| (*t).to_string())
+            .collect()
+    })
+}
+
+fn parse_stored_event_row(row: &rusqlite::Row<'_>) -> Result<StoredEvent, rusqlite::Error> {
+    let content: Option<String> = row.get(8)?;
+    let content_file: Option<String> = row.get(9)?;
+    let full_content =
+        SqliteMissionStore::load_content(content.as_deref(), content_file.as_deref());
+    let metadata_str: String = row
+        .get::<_, Option<String>>(10)?
+        .unwrap_or_else(|| "{}".to_string());
+    let mid_str: String = row.get(1)?;
+
+    Ok(StoredEvent {
+        id: row.get(0)?,
+        mission_id: parse_uuid_or_nil(&mid_str),
+        sequence: row.get(2)?,
+        event_type: row.get(3)?,
+        timestamp: row.get(4)?,
+        event_id: row.get(5)?,
+        tool_call_id: row.get(6)?,
+        tool_name: row.get(7)?,
+        content: full_content,
+        metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
+    })
+}
+
+const EVENT_SELECT_COLS: &str =
+    "id, mission_id, sequence, event_type, timestamp, event_id, tool_call_id, tool_name, content, content_file, metadata";
+const MAX_UNION_EVENT_TYPES: usize = 12;
+
+impl SqliteMissionStore {
     pub(super) async fn get_events(
         &self,
         mission_id: Uuid,
@@ -705,69 +746,106 @@ impl SqliteMissionStore {
     ) -> Result<Vec<StoredEvent>, String> {
         let conn = self.reader();
         let mid = mission_id.to_string();
-        let types: Option<Vec<String>> =
-            event_types.map(|t| t.iter().map(|s| s.to_string()).collect());
+        let types = dedup_event_types(event_types);
         let limit = limit.unwrap_or(50000) as i64;
         let offset = offset.unwrap_or(0) as i64;
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
 
-            let query = if types.is_some() {
-                "SELECT id, mission_id, sequence, event_type, timestamp, event_id, tool_call_id, tool_name, content, content_file, metadata
-                 FROM mission_events
-                 WHERE mission_id = ?1 AND event_type IN (SELECT value FROM json_each(?2))
-                 ORDER BY sequence ASC
-                 LIMIT ?3 OFFSET ?4"
-            } else {
-                "SELECT id, mission_id, sequence, event_type, timestamp, event_id, tool_call_id, tool_name, content, content_file, metadata
-                 FROM mission_events
-                 WHERE mission_id = ?1
-                 ORDER BY sequence ASC
-                 LIMIT ?2 OFFSET ?3"
-            };
-
-            // Helper closure to parse a row into StoredEvent
-            fn parse_row(row: &rusqlite::Row<'_>) -> Result<StoredEvent, rusqlite::Error> {
-                let content: Option<String> = row.get(8)?;
-                let content_file: Option<String> = row.get(9)?;
-                let full_content = SqliteMissionStore::load_content(content.as_deref(), content_file.as_deref());
-                let metadata_str: String = row.get::<_, Option<String>>(10)?.unwrap_or_else(|| "{}".to_string());
-                let mid_str: String = row.get(1)?;
-
-                Ok(StoredEvent {
-                    id: row.get(0)?,
-                    mission_id: parse_uuid_or_nil(&mid_str),
-                    sequence: row.get(2)?,
-                    event_type: row.get(3)?,
-                    timestamp: row.get(4)?,
-                    event_id: row.get(5)?,
-                    tool_call_id: row.get(6)?,
-                    tool_name: row.get(7)?,
-                    content: full_content,
-                    metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
-                })
-            }
-
-            let events: Vec<StoredEvent> = if let Some(types) = types {
-                let types_json = serde_json::to_string(&types).unwrap_or_else(|_| "[]".to_string());
-                let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
-                let rows = stmt.query_map(params![&mid, &types_json, limit, offset], parse_row)
-                    .map_err(|e| e.to_string())?;
-                let mut result = Vec::new();
-                for row in rows {
-                    result.push(row.map_err(|e| e.to_string())?);
+            let events: Vec<StoredEvent> = match types.as_deref() {
+                Some([]) => Vec::new(),
+                Some([single_type]) => {
+                    let sql = format!(
+                        "SELECT {EVENT_SELECT_COLS}
+                         FROM mission_events
+                         WHERE mission_id = ?1 AND event_type = ?2
+                         ORDER BY sequence ASC
+                         LIMIT ?3 OFFSET ?4"
+                    );
+                    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(
+                            params![&mid, single_type, limit, offset],
+                            parse_stored_event_row,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
                 }
-                result
-            } else {
-                let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
-                let rows = stmt.query_map(params![&mid, limit, offset], parse_row)
-                    .map_err(|e| e.to_string())?;
-                let mut result = Vec::new();
-                for row in rows {
-                    result.push(row.map_err(|e| e.to_string())?);
+                Some(type_list) if type_list.len() <= MAX_UNION_EVENT_TYPES => {
+                    let branch_cap = limit.saturating_add(offset);
+                    let branches: Vec<String> = (0..type_list.len())
+                        .map(|i| {
+                            let param_idx = i + 3;
+                            format!(
+                                "SELECT * FROM (
+                                     SELECT {EVENT_SELECT_COLS}
+                                     FROM mission_events
+                                     WHERE mission_id = ?1 AND event_type = ?{param_idx}
+                                     ORDER BY sequence ASC
+                                     LIMIT ?2
+                                 )"
+                            )
+                        })
+                        .collect();
+                    let last_idx = type_list.len() + 3;
+                    let off_idx = type_list.len() + 4;
+                    let sql = format!(
+                        "{} ORDER BY sequence ASC LIMIT ?{last_idx} OFFSET ?{off_idx}",
+                        branches.join(" UNION ALL ")
+                    );
+                    let mut bound: Vec<rusqlite::types::Value> =
+                        Vec::with_capacity(type_list.len() + 4);
+                    bound.push(mid.clone().into());
+                    bound.push(branch_cap.into());
+                    for t in type_list {
+                        bound.push(t.clone().into());
+                    }
+                    bound.push(limit.into());
+                    bound.push(offset.into());
+                    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(rusqlite::params_from_iter(bound), parse_stored_event_row)
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
                 }
-                result
+                Some(type_list) => {
+                    let types_json =
+                        serde_json::to_string(type_list).unwrap_or_else(|_| "[]".to_string());
+                    let sql = format!(
+                        "SELECT {EVENT_SELECT_COLS}
+                         FROM mission_events
+                         WHERE mission_id = ?1 AND event_type IN (SELECT value FROM json_each(?2))
+                         ORDER BY sequence ASC
+                         LIMIT ?3 OFFSET ?4"
+                    );
+                    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(
+                            params![&mid, &types_json, limit, offset],
+                            parse_stored_event_row,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                }
+                None => {
+                    let sql = format!(
+                        "SELECT {EVENT_SELECT_COLS}
+                         FROM mission_events
+                         WHERE mission_id = ?1
+                         ORDER BY sequence ASC
+                         LIMIT ?2 OFFSET ?3"
+                    );
+                    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(params![&mid, limit, offset], parse_stored_event_row)
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                }
             };
 
             Ok(events)
@@ -785,65 +863,101 @@ impl SqliteMissionStore {
     ) -> Result<Vec<StoredEvent>, String> {
         let conn = self.reader();
         let mid = mission_id.to_string();
-        let types: Option<Vec<String>> =
-            event_types.map(|t| t.iter().map(|s| s.to_string()).collect());
+        let types = dedup_event_types(event_types);
         let limit = limit.unwrap_or(50000) as i64;
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
 
-            let query = if types.is_some() {
-                "SELECT id, mission_id, sequence, event_type, timestamp, event_id, tool_call_id, tool_name, content, content_file, metadata
-                 FROM mission_events
-                 WHERE mission_id = ?1 AND sequence > ?2 AND event_type IN (SELECT value FROM json_each(?3))
-                 ORDER BY sequence ASC
-                 LIMIT ?4"
-            } else {
-                "SELECT id, mission_id, sequence, event_type, timestamp, event_id, tool_call_id, tool_name, content, content_file, metadata
-                 FROM mission_events
-                 WHERE mission_id = ?1 AND sequence > ?2
-                 ORDER BY sequence ASC
-                 LIMIT ?3"
-            };
-
-            fn parse_row(row: &rusqlite::Row<'_>) -> Result<StoredEvent, rusqlite::Error> {
-                let content: Option<String> = row.get(8)?;
-                let content_file: Option<String> = row.get(9)?;
-                let full_content = SqliteMissionStore::load_content(content.as_deref(), content_file.as_deref());
-                let metadata_str: String = row.get::<_, Option<String>>(10)?.unwrap_or_else(|| "{}".to_string());
-                let mid_str: String = row.get(1)?;
-
-                Ok(StoredEvent {
-                    id: row.get(0)?,
-                    mission_id: parse_uuid_or_nil(&mid_str),
-                    sequence: row.get(2)?,
-                    event_type: row.get(3)?,
-                    timestamp: row.get(4)?,
-                    event_id: row.get(5)?,
-                    tool_call_id: row.get(6)?,
-                    tool_name: row.get(7)?,
-                    content: full_content,
-                    metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
-                })
-            }
-
-            let raw_rows: Vec<StoredEvent> = if let Some(types) = types {
-                let types_json = serde_json::to_string(&types).unwrap_or_else(|_| "[]".to_string());
-                let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map(params![&mid, since_seq, &types_json, limit], parse_row)
-                    .map_err(|e| e.to_string())?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| e.to_string())?;
-                rows
-            } else {
-                let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map(params![&mid, since_seq, limit], parse_row)
-                    .map_err(|e| e.to_string())?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| e.to_string())?;
-                rows
+            let raw_rows: Vec<StoredEvent> = match types.as_deref() {
+                Some([]) => Vec::new(),
+                Some([single_type]) => {
+                    let sql = format!(
+                        "SELECT {EVENT_SELECT_COLS}
+                         FROM mission_events
+                         WHERE mission_id = ?1 AND event_type = ?2 AND sequence > ?3
+                         ORDER BY sequence ASC
+                         LIMIT ?4"
+                    );
+                    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(
+                            params![&mid, single_type, since_seq, limit],
+                            parse_stored_event_row,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                }
+                Some(type_list) if type_list.len() <= MAX_UNION_EVENT_TYPES => {
+                    let branches: Vec<String> = (0..type_list.len())
+                        .map(|i| {
+                            let param_idx = i + 4;
+                            format!(
+                                "SELECT * FROM (
+                                     SELECT {EVENT_SELECT_COLS}
+                                     FROM mission_events
+                                     WHERE mission_id = ?1 AND event_type = ?{param_idx} AND sequence > ?2
+                                     ORDER BY sequence ASC
+                                     LIMIT ?3
+                                 )"
+                            )
+                        })
+                        .collect();
+                    let sql = format!(
+                        "{} ORDER BY sequence ASC LIMIT ?3",
+                        branches.join(" UNION ALL ")
+                    );
+                    let mut bound: Vec<rusqlite::types::Value> =
+                        Vec::with_capacity(type_list.len() + 3);
+                    bound.push(mid.clone().into());
+                    bound.push(since_seq.into());
+                    bound.push(limit.into());
+                    for t in type_list {
+                        bound.push(t.clone().into());
+                    }
+                    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(rusqlite::params_from_iter(bound), parse_stored_event_row)
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                }
+                Some(type_list) => {
+                    let types_json =
+                        serde_json::to_string(type_list).unwrap_or_else(|_| "[]".to_string());
+                    let sql = format!(
+                        "SELECT {EVENT_SELECT_COLS}
+                         FROM mission_events
+                         WHERE mission_id = ?1 AND sequence > ?2 AND event_type IN (SELECT value FROM json_each(?3))
+                         ORDER BY sequence ASC
+                         LIMIT ?4"
+                    );
+                    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(
+                            params![&mid, since_seq, &types_json, limit],
+                            parse_stored_event_row,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                }
+                None => {
+                    let sql = format!(
+                        "SELECT {EVENT_SELECT_COLS}
+                         FROM mission_events
+                         WHERE mission_id = ?1 AND sequence > ?2
+                         ORDER BY sequence ASC
+                         LIMIT ?3"
+                    );
+                    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(params![&mid, since_seq, limit], parse_stored_event_row)
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                }
             };
 
             let is_partial_response = (raw_rows.len() as i64) >= limit;
@@ -885,78 +999,118 @@ impl SqliteMissionStore {
     ) -> Result<Vec<StoredEvent>, String> {
         let conn = self.reader();
         let mid = mission_id.to_string();
-        let types: Option<Vec<String>> =
-            event_types.map(|t| t.iter().map(|s| s.to_string()).collect());
+        let types = dedup_event_types(event_types);
         let limit = limit.unwrap_or(50000) as i64;
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
 
-            // We want the N events immediately preceding `before_seq`,
-            // but in chronological (ASC) order so the client can prepend
-            // them without re-sorting. SQLite has no `ORDER BY DESC LIMIT
-            // ... ORDER BY ASC` form, so do the DESC selection in a
-            // subquery and reverse it in the outer query.
-            let query = if types.is_some() {
-                "SELECT id, mission_id, sequence, event_type, timestamp, event_id, tool_call_id, tool_name, content, content_file, metadata
-                 FROM (
-                   SELECT id, mission_id, sequence, event_type, timestamp, event_id, tool_call_id, tool_name, content, content_file, metadata
-                   FROM mission_events
-                   WHERE mission_id = ?1 AND sequence < ?2 AND event_type IN (SELECT value FROM json_each(?3))
-                   ORDER BY sequence DESC
-                   LIMIT ?4
-                 )
-                 ORDER BY sequence ASC"
-            } else {
-                "SELECT id, mission_id, sequence, event_type, timestamp, event_id, tool_call_id, tool_name, content, content_file, metadata
-                 FROM (
-                   SELECT id, mission_id, sequence, event_type, timestamp, event_id, tool_call_id, tool_name, content, content_file, metadata
-                   FROM mission_events
-                   WHERE mission_id = ?1 AND sequence < ?2
-                   ORDER BY sequence DESC
-                   LIMIT ?3
-                 )
-                 ORDER BY sequence ASC"
-            };
-
-            fn parse_row(row: &rusqlite::Row<'_>) -> Result<StoredEvent, rusqlite::Error> {
-                let content: Option<String> = row.get(8)?;
-                let content_file: Option<String> = row.get(9)?;
-                let full_content = SqliteMissionStore::load_content(content.as_deref(), content_file.as_deref());
-                let metadata_str: String = row.get::<_, Option<String>>(10)?.unwrap_or_else(|| "{}".to_string());
-                let mid_str: String = row.get(1)?;
-
-                Ok(StoredEvent {
-                    id: row.get(0)?,
-                    mission_id: parse_uuid_or_nil(&mid_str),
-                    sequence: row.get(2)?,
-                    event_type: row.get(3)?,
-                    timestamp: row.get(4)?,
-                    event_id: row.get(5)?,
-                    tool_call_id: row.get(6)?,
-                    tool_name: row.get(7)?,
-                    content: full_content,
-                    metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
-                })
-            }
-
-            let raw_rows: Vec<StoredEvent> = if let Some(types) = types {
-                let types_json = serde_json::to_string(&types).unwrap_or_else(|_| "[]".to_string());
-                let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map(params![&mid, before_seq, &types_json, limit], parse_row)
-                    .map_err(|e| e.to_string())?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| e.to_string())?;
-                rows
-            } else {
-                let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map(params![&mid, before_seq, limit], parse_row)
-                    .map_err(|e| e.to_string())?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| e.to_string())?;
-                rows
+            // Seek `idx_events_mission_type_sequence (mission_id, event_type, sequence)`
+            // per event type in DESC order and reverse in the outer query so large
+            // tool-heavy missions never scan 100k+ unrelated rows via `json_each`.
+            let raw_rows: Vec<StoredEvent> = match types.as_deref() {
+                Some([]) => Vec::new(),
+                Some([single_type]) => {
+                    let sql = format!(
+                        "SELECT {EVENT_SELECT_COLS}
+                         FROM (
+                             SELECT {EVENT_SELECT_COLS}
+                             FROM mission_events
+                             WHERE mission_id = ?1 AND event_type = ?2 AND sequence < ?3
+                             ORDER BY sequence DESC
+                             LIMIT ?4
+                         )
+                         ORDER BY sequence ASC"
+                    );
+                    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(
+                            params![&mid, single_type, before_seq, limit],
+                            parse_stored_event_row,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                }
+                Some(type_list) if type_list.len() <= MAX_UNION_EVENT_TYPES => {
+                    let branches: Vec<String> = (0..type_list.len())
+                        .map(|i| {
+                            let param_idx = i + 4;
+                            format!(
+                                "SELECT * FROM (
+                                     SELECT {EVENT_SELECT_COLS}
+                                     FROM mission_events
+                                     WHERE mission_id = ?1 AND event_type = ?{param_idx} AND sequence < ?2
+                                     ORDER BY sequence DESC
+                                     LIMIT ?3
+                                 )"
+                            )
+                        })
+                        .collect();
+                    let sql = format!(
+                        "SELECT {EVENT_SELECT_COLS} FROM (
+                             {} ORDER BY sequence DESC LIMIT ?3
+                         ) ORDER BY sequence ASC",
+                        branches.join(" UNION ALL ")
+                    );
+                    let mut bound: Vec<rusqlite::types::Value> =
+                        Vec::with_capacity(type_list.len() + 3);
+                    bound.push(mid.clone().into());
+                    bound.push(before_seq.into());
+                    bound.push(limit.into());
+                    for t in type_list {
+                        bound.push(t.clone().into());
+                    }
+                    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(rusqlite::params_from_iter(bound), parse_stored_event_row)
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                }
+                Some(type_list) => {
+                    let types_json =
+                        serde_json::to_string(type_list).unwrap_or_else(|_| "[]".to_string());
+                    let sql = format!(
+                        "SELECT {EVENT_SELECT_COLS}
+                         FROM (
+                           SELECT {EVENT_SELECT_COLS}
+                           FROM mission_events
+                           WHERE mission_id = ?1 AND sequence < ?2 AND event_type IN (SELECT value FROM json_each(?3))
+                           ORDER BY sequence DESC
+                           LIMIT ?4
+                         )
+                         ORDER BY sequence ASC"
+                    );
+                    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(
+                            params![&mid, before_seq, &types_json, limit],
+                            parse_stored_event_row,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                }
+                None => {
+                    let sql = format!(
+                        "SELECT {EVENT_SELECT_COLS}
+                         FROM (
+                           SELECT {EVENT_SELECT_COLS}
+                           FROM mission_events
+                           WHERE mission_id = ?1 AND sequence < ?2
+                           ORDER BY sequence DESC
+                           LIMIT ?3
+                         )
+                         ORDER BY sequence ASC"
+                    );
+                    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(params![&mid, before_seq, limit], parse_stored_event_row)
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                }
             };
 
             let is_partial_response = (raw_rows.len() as i64) >= limit;
@@ -1277,28 +1431,45 @@ impl SqliteMissionStore {
     ) -> Result<usize, String> {
         let conn = self.reader();
         let mid = mission_id.to_string();
-        let types: Option<Vec<String>> =
-            event_types.map(|t| t.iter().map(|s| s.to_string()).collect());
+        let types = dedup_event_types(event_types);
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
 
-            let count: i64 = if let Some(types) = types {
-                let types_json =
-                    serde_json::to_string(&types).unwrap_or_else(|_| "[]".to_string());
-                conn.query_row(
-                    "SELECT COUNT(*) FROM mission_events WHERE mission_id = ?1 AND event_type IN (SELECT value FROM json_each(?2))",
-                    params![&mid, &types_json],
-                    |row| row.get(0),
-                )
-                .map_err(|e| e.to_string())?
-            } else {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM mission_events WHERE mission_id = ?1",
-                    params![&mid],
-                    |row| row.get(0),
-                )
-                .map_err(|e| e.to_string())?
+            let count: i64 = match types.as_deref() {
+                Some([]) => 0,
+                Some(type_list) if type_list.len() <= MAX_UNION_EVENT_TYPES => {
+                    let mut sum = 0i64;
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT COUNT(*) FROM mission_events WHERE mission_id = ?1 AND event_type = ?2",
+                        )
+                        .map_err(|e| e.to_string())?;
+                    for t in type_list {
+                        let c: i64 = stmt
+                            .query_row(params![&mid, t], |row| row.get(0))
+                            .map_err(|e| e.to_string())?;
+                        sum = sum.saturating_add(c);
+                    }
+                    sum
+                }
+                Some(type_list) => {
+                    let types_json =
+                        serde_json::to_string(type_list).unwrap_or_else(|_| "[]".to_string());
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM mission_events WHERE mission_id = ?1 AND event_type IN (SELECT value FROM json_each(?2))",
+                        params![&mid, &types_json],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?
+                }
+                None => conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM mission_events WHERE mission_id = ?1",
+                        params![&mid],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?,
             };
 
             Ok(count as usize)

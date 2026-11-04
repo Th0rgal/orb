@@ -21,8 +21,11 @@ import {
   forgetPrefetchPauses,
   peekReadyTranscript,
   prefetchTranscript,
+  putTranscript,
+  refreshTranscript,
   selectLivePrefetchIds,
 } from "../src/missionCache";
+import { createFileClient } from "../src/fileResources";
 import { SOFTWARE_CONCURRENCY, refreshSoftware } from "../src/softwareInventory";
 import { setMultiplexSyncEnabledForTest, streamMission, type StreamEvent } from "../src/stream";
 
@@ -411,5 +414,110 @@ describe("connection reliability transport & prefetch bounds", () => {
     await refreshSoftware(true);
     expect(maxObservedConcurrency).toBeGreaterThan(1);
     expect(maxObservedConcurrency).toBeLessThanOrEqual(SOFTWARE_CONCURRENCY);
+  });
+
+  it("jumps directly to tail + conversational spine instead of paging unboundedly when >2 pages behind", async () => {
+    setConnection("http://tail-jump.test", "tok");
+    putTranscript("tool-storm", {
+      items: [],
+      stream: [
+        { type: "user_message", sequence: 10, eventId: "u10", data: { id: "u10", content: "Original prompt" } },
+      ],
+      fromLog: true,
+      cursor: 100,
+      before: 10,
+      hasOlder: false,
+    });
+
+    const eventQueries: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/api/control/queue") {
+          return Response.json([]);
+        }
+        if (url.pathname === "/api/control/missions/tool-storm/events") {
+          eventQueries.push(url.search);
+          const since = url.searchParams.get("since_seq");
+          const before = url.searchParams.get("before_seq");
+          const view = url.searchParams.get("view");
+          if (since === "100") {
+            return new Response(
+              JSON.stringify([{ id: 101, mission_id: "tool-storm", sequence: 300, event_type: "tool_call", timestamp: "2026-11-03T00:00:00Z", tool_call_id: "t1", tool_name: "bash", content: "{}", metadata: {} }]),
+              { status: 200, headers: { "Content-Type": "application/json", "X-Orb-Events-Protocol": "1", "X-Has-More": "true", "X-Next-Cursor": "300", "X-Page-Max-Sequence": "300", "X-Max-Sequence": "95000" } },
+            );
+          }
+          if (since === "300") {
+            return new Response(
+              JSON.stringify([{ id: 301, mission_id: "tool-storm", sequence: 500, event_type: "tool_result", timestamp: "2026-11-03T00:00:01Z", tool_call_id: "t1", tool_name: "bash", content: "ok", metadata: {} }]),
+              { status: 200, headers: { "Content-Type": "application/json", "X-Orb-Events-Protocol": "1", "X-Has-More": "true", "X-Next-Cursor": "500", "X-Page-Max-Sequence": "500", "X-Max-Sequence": "95000" } },
+            );
+          }
+          if (!since && !before && !view) {
+            return new Response(
+              JSON.stringify([{ id: 94999, mission_id: "tool-storm", sequence: 95000, event_type: "tool_call", timestamp: "2026-11-03T01:00:00Z", tool_call_id: "t999", tool_name: "bash", content: "{}", metadata: {} }]),
+              { status: 200, headers: { "Content-Type": "application/json", "X-Orb-Events-Protocol": "1", "X-Has-More": "true", "X-Next-Cursor": "94800", "X-Page-Max-Sequence": "95000", "X-Max-Sequence": "95000" } },
+            );
+          }
+          if (before === "94800" && view === "transcript") {
+            return new Response(
+              JSON.stringify([
+                { id: 10, mission_id: "tool-storm", sequence: 10, event_type: "user_message", timestamp: "2026-11-03T00:00:00Z", event_id: "u10", content: "Original prompt", metadata: {} },
+                { id: 50000, mission_id: "tool-storm", sequence: 50000, event_type: "assistant_message", timestamp: "2026-11-03T00:30:00Z", event_id: "a50000", content: "Midway report", metadata: {} },
+              ]),
+              { status: 200, headers: { "Content-Type": "application/json", "X-Orb-Events-Protocol": "1", "X-Has-More": "false", "X-Next-Cursor": "10", "X-Page-Max-Sequence": "50000", "X-Max-Sequence": "95000" } },
+            );
+          }
+          throw new Error(`Unexpected events query: ${url.search}`);
+        }
+        return Response.json({});
+      }),
+    );
+
+    const snap = await refreshTranscript("tool-storm");
+    expect(eventQueries).toHaveLength(4);
+    expect(snap.cursor).toBe(95000);
+    expect(snap.before).toBe(94800);
+    expect(snap.hasOlder).toBe(true);
+    expect(snap.items.some((i) => i.kind === "text" && i.text.includes("Midway report"))).toBe(true);
+  });
+
+  it("requests exclude_content=true when discovering published artifacts on mission open", async () => {
+    setConnection("http://artifacts-light.test", "tok");
+    let seenUrl = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/events?")) {
+          seenUrl = url;
+          return Response.json([
+            {
+              metadata: {
+                shared_files: [
+                  { name: "report.pdf", url: "http://artifacts-light.test/api/fs/download?path=%2Ftmp%2Freport.pdf" },
+                ],
+              },
+            },
+          ]);
+        }
+        return Response.json({ sources: [] });
+      }),
+    );
+
+    const resolver = createFileClient({
+      mission: {
+        id: "m-art",
+        status: "active",
+        title: "Art",
+        history: [],
+        created_at: "2026-11-03T00:00:00Z",
+        updated_at: "2026-11-03T00:00:00Z",
+      },
+    });
+    const roots = await resolver.roots();
+    expect(seenUrl).toContain("exclude_content=true");
+    expect(roots.some((r) => r.id === "artifacts" && r.available)).toBe(true);
   });
 });

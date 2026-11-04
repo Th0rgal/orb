@@ -212,7 +212,7 @@ fun OrbManagedMachinesBlock(
         for (id in missionIds) {
             if (ManagedMissionTitles.cache.containsKey(id)) continue
             ManagedMissionTitles.cache[id] = try {
-                OrbManagedMachines.missionTitle(core.fetchDict("/api/control/missions/${core.encodeComponent(id)}"))
+                OrbManagedMachines.missionTitle(core.fetchDict("/api/control/missions/${core.encodeComponent(id)}?include_history=false"))
             } catch (e: Throwable) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 null

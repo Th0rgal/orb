@@ -514,7 +514,7 @@ struct OrbManagedBadge: View {
         if let cached = cache[id] { return cached }
         guard !inFlight.contains(id) else { return nil }
         inFlight.insert(id); defer { inFlight.remove(id) }
-        guard let mission = try? await OrbSettingsClient().call("/api/control/missions/\(OrbCore.escape(id))") else { return nil }
+        guard let mission = try? await OrbSettingsClient().call("/api/control/missions/\(OrbCore.escape(id))?include_history=false") else { return nil }
         let title = mission["title"].text
         cache[id] = title
         return title

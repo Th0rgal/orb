@@ -16,7 +16,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 sha2 = "0.10"
 fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "gzip"] }
 base64 = "0.22"
 tauri = { version = "2", features = ["macos-private-api", "devtools"] }
 window-vibrancy = "0.6"
@@ -38,6 +38,7 @@ codegen-units = 1
 strip = true
 
 [dev-dependencies]
+flate2 = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
