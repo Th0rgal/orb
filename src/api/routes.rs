@@ -35,6 +35,8 @@ use axum::{
 };
 use futures::stream::Stream;
 use serde::Deserialize;
+use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
@@ -1069,7 +1071,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             "/api/control/missions/resolve",
             get(control::resolve_mission_id),
         )
-        .route("/api/control/missions/:id", get(control::get_mission))
+        .route(
+            "/api/control/missions/:id",
+            get(control::get_mission_with_query),
+        )
         .route(
             "/api/control/missions/:id/messages/context",
             get(control::get_mission_passage_context),
@@ -1661,9 +1666,17 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             auth::require_auth,
         ));
 
+    let compression = CompressionLayer::new().compress_when(
+        SizeAbove::new(1024)
+            .and(NotForContentType::new("text/event-stream"))
+            .and(NotForContentType::IMAGES)
+            .and(NotForContentType::GRPC),
+    );
+
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
+        .layer(compression)
         .layer(CorsLayer::permissive().max_age(std::time::Duration::from_secs(86400)))
         .layer(TraceLayer::new_for_http())
         .with_state(Arc::clone(&state));

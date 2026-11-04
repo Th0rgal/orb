@@ -5189,3 +5189,128 @@ async fn get_mission_activity_returns_latest_event_and_latest_output_via_indexes
     );
     assert!(!activity.contains_key(&m3.id));
 }
+
+#[tokio::test]
+async fn typed_event_queries_seek_composite_index_and_preserve_sequence_order() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "typed-event-seek")
+        .await
+        .expect("sqlite store");
+    let m = store
+        .create_mission(
+            Some("heavy-tools"),
+            None,
+            None,
+            None,
+            None,
+            Some("claudecode"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    {
+        let conn = store.conn.lock().await;
+        conn.execute(
+            "INSERT INTO mission_events (mission_id, sequence, event_type, timestamp, content) VALUES (?1, 1, 'user_message', '2026-11-03T10:00:00Z', 'first question')",
+            params![m.id.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mission_events (mission_id, sequence, event_type, timestamp, content) VALUES (?1, 2, 'assistant_message', '2026-11-03T10:01:00Z', 'first answer')",
+            params![m.id.to_string()],
+        )
+        .unwrap();
+        for seq in 3..=250 {
+            conn.execute(
+                "INSERT INTO mission_events (mission_id, sequence, event_type, timestamp, content) VALUES (?1, ?2, 'tool_call', '2026-11-03T10:02:00Z', '{}')",
+                params![m.id.to_string(), seq],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO mission_events (mission_id, sequence, event_type, timestamp, content) VALUES (?1, 251, 'user_message', '2026-11-03T10:03:00Z', 'second question')",
+            params![m.id.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mission_events (mission_id, sequence, event_type, timestamp, content) VALUES (?1, 252, 'assistant_message', '2026-11-03T10:04:00Z', 'second answer')",
+            params![m.id.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mission_terminal_evidence (mission_id, evidence, recorded_at) VALUES (?1, '{\"ok\":true}', '2026-11-03T10:04:01Z')",
+            params![m.id.to_string()],
+        )
+        .unwrap();
+    }
+
+    let only_assistants = store
+        .get_events_before(m.id, i64::MAX, Some(&["assistant_message"]), Some(10))
+        .await
+        .unwrap();
+    assert_eq!(
+        only_assistants
+            .iter()
+            .map(|e| e.sequence)
+            .collect::<Vec<_>>(),
+        vec![2, 252]
+    );
+
+    let spine_before = store
+        .get_events_before(
+            m.id,
+            252,
+            Some(&["user_message", "assistant_message"]),
+            Some(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        spine_before.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+        vec![1, 2, 251]
+    );
+
+    let spine_since = store
+        .get_events_since(
+            m.id,
+            1,
+            Some(&["user_message", "assistant_message"]),
+            Some(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        spine_since.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+        vec![2, 251]
+    );
+
+    let paged = store
+        .get_events(
+            m.id,
+            Some(&["user_message", "assistant_message"]),
+            Some(2),
+            Some(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        paged.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+        vec![2, 251]
+    );
+
+    assert_eq!(
+        store
+            .count_events(m.id, Some(&["user_message", "assistant_message"]))
+            .await
+            .unwrap(),
+        4
+    );
+
+    // Metadata-only projection omits embedded history while preserving terminal_evidence.
+    let meta = store.get_mission_metadata(m.id).await.unwrap().unwrap();
+    assert!(meta.history.is_empty());
+    assert_eq!(meta.terminal_evidence.as_deref(), Some("{\"ok\":true}"));
+    let full = store.get_mission(m.id).await.unwrap().unwrap();
+    assert_eq!(full.history.len(), 4);
+}

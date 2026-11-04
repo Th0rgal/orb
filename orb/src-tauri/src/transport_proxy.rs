@@ -32,6 +32,7 @@ const DEFAULT_FALLBACK_URL: &str = "https://agent-backend.thomas.md";
 const KNOWN_DIRECT_URL: &str = "https://agent-backend.nico-best-pc-ever.ovh";
 const DNS_TIMEOUT: Duration = Duration::from_millis(2_500);
 const DOH_TIMEOUT: Duration = Duration::from_millis(2_200);
+const ORB_DESKTOP_USER_AGENT: &str = concat!("Orb/", env!("CARGO_PKG_VERSION"));
 const ENDPOINT_COOLDOWN: Duration = Duration::from_secs(20);
 const MAX_REQUEST_HEADER_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -288,6 +289,7 @@ impl Resolve for ResilientDnsResolver {
 /// workers (`project_context`, `local_origin`) inherit the same DNS & socket immunity.
 pub fn resilient_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
+        .user_agent(ORB_DESKTOP_USER_AGENT)
         .dns_resolver(ResilientDnsResolver::global())
         .tcp_keepalive(Duration::from_secs(20))
         .http2_adaptive_window(true)
@@ -441,6 +443,7 @@ fn start_bridge_with_resolver(
     let secret_prefix = format!("/__orb_tx/{}", uuid::Uuid::new_v4());
 
     let api_client = reqwest::Client::builder()
+        .user_agent(ORB_DESKTOP_USER_AGENT)
         .dns_resolver(resolver.clone())
         .connect_timeout(Duration::from_secs(6))
         .timeout(Duration::from_secs(35))
@@ -455,7 +458,9 @@ fn start_bridge_with_resolver(
         .map_err(|e| e.to_string())?;
 
     let stream_client = reqwest::Client::builder()
+        .user_agent(ORB_DESKTOP_USER_AGENT)
         .dns_resolver(resolver)
+        .no_gzip()
         .connect_timeout(Duration::from_secs(8))
         .tcp_keepalive(Duration::from_secs(15))
         .http2_adaptive_window(true)
@@ -653,6 +658,7 @@ fn should_strip_request_header(name: &str) -> bool {
             | "transfer-encoding"
             | "upgrade"
             | "content-length"
+            | "accept-encoding"
             | "origin"
             | "referer"
             | "x-orb-target"
@@ -935,13 +941,16 @@ mod tests {
         let port = std_listener.local_addr().unwrap().port();
         let secret_prefix = format!("/__orb_tx/{}", uuid::Uuid::new_v4());
         let api_client = reqwest::Client::builder()
+            .user_agent(ORB_DESKTOP_USER_AGENT)
             .dns_resolver(resolver.clone())
             .connect_timeout(Duration::from_millis(500))
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
         let stream_client = reqwest::Client::builder()
+            .user_agent(ORB_DESKTOP_USER_AGENT)
             .dns_resolver(resolver)
+            .no_gzip()
             .connect_timeout(Duration::from_millis(500))
             .build()
             .unwrap();
@@ -1107,5 +1116,61 @@ mod tests {
         assert_eq!(res.status(), 200);
         let json: serde_json::Value = res.json().await.unwrap();
         assert_eq!(json["dns"], "cached");
+    }
+
+    #[test]
+    fn tauri_permission_manifest_allows_transport_bridge_configure() {
+        let manifest = include_str!("../permissions/local-agents.toml");
+        assert!(
+            manifest.contains("\"transport_bridge_configure\""),
+            "orb/src-tauri/permissions/local-agents.toml must list transport_bridge_configure in commands.allow"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_decompresses_gzip_upstream_and_sends_orb_user_agent() {
+        use std::io::Write as _;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+            let lower = raw.to_ascii_lowercase();
+            let accepted_gzip = lower.contains("accept-encoding:") && lower.contains("gzip");
+            let has_ua = lower.contains("user-agent: orb/");
+            let json = format!(r#"{{"gzip":{accepted_gzip},"ua":{has_ua}}}"#);
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(json.as_bytes()).unwrap();
+            let compressed = encoder.finish().unwrap();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                compressed.len()
+            );
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(&compressed).await;
+            let _ = sock.shutdown().await;
+        });
+
+        let bridge = spawn_test_bridge(Arc::new(ResilientDnsResolver::new(None)));
+        let info = bridge.configure(&format!("http://127.0.0.1:{}", addr.port()));
+        let res = reqwest::Client::builder()
+            .no_gzip()
+            .build()
+            .unwrap()
+            .get(format!("{}/api/health", info.proxy_base_url))
+            .header("Accept-Encoding", "identity")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert!(res.headers().get("content-encoding").is_none());
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["gzip"], true);
+        assert_eq!(body["ua"], true);
     }
 }

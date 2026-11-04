@@ -50,6 +50,11 @@ pub struct GetEventsQuery {
     /// `/api/control/missions/:id/tool-calls/:tool_call_id`.
     #[serde(default)]
     pub max_payload: Option<usize>,
+    /// When `true`, strip `content` bodies from returned event rows while
+    /// preserving `metadata` (e.g. `metadata.shared_files` for lightweight
+    /// artifact discovery).
+    #[serde(default)]
+    pub exclude_content: bool,
 }
 
 /// Smallest accepted `max_payload`, so a row always keeps a useful excerpt.
@@ -617,6 +622,11 @@ pub async fn get_mission_events(
 
     if let Some(max) = query.max_payload {
         truncate_tool_payloads(&mut summary.events, max);
+    }
+    if query.exclude_content {
+        for event in &mut summary.events {
+            event.content.clear();
+        }
     }
 
     // Metadata headers let the client decide whether it's caught up

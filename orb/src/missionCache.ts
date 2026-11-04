@@ -101,11 +101,11 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
   }
   let stream:StreamEvent[]=[...(previous?.stream??[])];
   let cursor=previous?.cursor, before=previous?.before, hasOlder=previous?.hasOlder;
-  let resets=0;
+  let resets=0, forwardPages=0;
   for(;;){
    const page=await getMissionEventPage(id,cursor===undefined?{}:{since:cursor});
    check();
-   if(page.reset){if(resets++)throw Error('Event history changed repeatedly during recovery.');stream.length=0;cursor=undefined;before=undefined;hasOlder=undefined;continue;}
+   if(page.reset){if(resets++)throw Error('Event history changed repeatedly during recovery.');stream.length=0;cursor=undefined;before=undefined;hasOlder=undefined;forwardPages=0;continue;}
    for(const row of page.events){const event=storedToStream(row);if(event)stream.push(event);}
    if(cursor===undefined){
     before=page.nextCursor;hasOlder=page.hasMore;cursor=page.pageMax??0;
@@ -127,6 +127,16 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
    }
    if(page.nextCursor!==undefined){if(page.nextCursor<=cursor)throw Error('Event cursor did not advance.');cursor=page.nextCursor;}
    if(!page.hasMore)break;
+   if(++forwardPages>=2){
+    // More than 400 raw events streamed since our cached cursor (e.g. a long
+    // offscreen tool storm). Jump straight to the newest 200-event tail and
+    // hydrate the latest conversational spine below instead of walking dozens
+    // of sequential pages.
+    stream=[];
+    cursor=undefined;
+    before=undefined;
+    hasOlder=undefined;
+   }
   }
   stream=mergeStreamBySequence(preview,stream);
   const queued = await queuedPromise;

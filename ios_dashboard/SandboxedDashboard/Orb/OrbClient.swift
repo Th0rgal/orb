@@ -924,7 +924,7 @@ final class OrbCore {
     private func fetchAncestor(_ id: String) async -> OrbRow? {
         if let cached = OrbHierarchy.cachedAncestor(id) { return cached }
         do {
-            let raw = try await call("/api/control/missions/\(Self.escape(id))")
+            let raw = try await call("/api/control/missions/\(Self.escape(id))?include_history=false")
             let mid = raw["id"].text
             if !mid.isEmpty {
                 OrbReadCache.seedMemory("mission:\(mid)", value: raw)

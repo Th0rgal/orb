@@ -2,19 +2,74 @@
 
 use super::*;
 
-/// Get a specific mission.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct GetMissionQuery {
+    /// When `false`, omit the embedded 200-entry `history` transcript array
+    /// (`mission.history = []`) while keeping all status, run, placement,
+    /// continuation, and terminal-evidence metadata. Defaults to `true` for
+    /// backward compatibility with MCP, CLI, and continuation builders.
+    #[serde(default = "default_include_mission_history")]
+    pub include_history: bool,
+}
+
+impl Default for GetMissionQuery {
+    fn default() -> Self {
+        Self {
+            include_history: true,
+        }
+    }
+}
+
+fn default_include_mission_history() -> bool {
+    true
+}
+
+impl GetMissionQuery {
+    pub const fn metadata_only() -> Self {
+        Self {
+            include_history: false,
+        }
+    }
+}
+
+/// Get a specific mission (default full history projection for internal Rust callers).
 pub async fn get_mission(
+    state: State<Arc<AppState>>,
+    user: Extension<AuthUser>,
+    path: Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    get_mission_with_query(
+        state,
+        user,
+        path,
+        axum::extract::Query(GetMissionQuery::default()),
+    )
+    .await
+}
+
+/// Get a specific mission with optional query projection (`?include_history=false`).
+pub async fn get_mission_with_query(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
+    axum::extract::Query(query): axum::extract::Query<GetMissionQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
-    match control
-        .mission_store
-        .get_mission(id)
-        .await
-        .map_err(internal_error)?
-    {
+    let loaded = if query.include_history {
+        control.mission_store.get_mission(id).await
+    } else {
+        control
+            .mission_store
+            .get_mission_metadata(id)
+            .await
+            .map(|opt| {
+                opt.map(|mut m| {
+                    m.history.clear();
+                    m
+                })
+            })
+    };
+    match loaded.map_err(internal_error)? {
         Some(mut mission) => {
             if mission.backend.starts_with("cloud_") {
                 let execution = control

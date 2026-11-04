@@ -784,7 +784,7 @@ fun OrbConversationPage(
                         val existingForCid = OrbConversationHistory.forMission(if (cid == targetId) events else OrbReadCache.loadRowsAsync("mission_events_$cid"), cid)
                         val lastSeq = existingForCid.lastOrNull()?.int("sequence", "seq")
                         val detailDef = async {
-                            orbTry(OrbLog.Category.Network, "/api/control/missions") { core.fetchDict("/api/control/missions/${core.encodeComponent(cid)}") }.getOrNull()
+                            orbTry(OrbLog.Category.Network, "/api/control/missions") { core.fetchDict("/api/control/missions/${core.encodeComponent(cid)}?include_history=false") }.getOrNull()
                         }
                         val evPath = if (lastSeq != null && lastSeq > 0) {
                             "/api/control/missions/${core.encodeComponent(cid)}/events?limit=150&since_seq=$lastSeq"

@@ -771,13 +771,24 @@ impl SqliteMissionStore {
         let id_str = id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
-            conn.query_row(
-                &format!("SELECT {MISSION_LIST_COLUMNS} FROM missions WHERE id = ?1"),
-                params![id_str],
-                row_to_mission,
-            )
-            .optional()
-            .map_err(|e| e.to_string())
+            let mut mission = conn
+                .query_row(
+                    &format!("SELECT {MISSION_LIST_COLUMNS} FROM missions WHERE id = ?1"),
+                    params![&id_str],
+                    row_to_mission,
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            if let Some(ref mut m) = mission {
+                m.terminal_evidence = conn
+                    .query_row(
+                        "SELECT evidence FROM mission_terminal_evidence WHERE mission_id = ?1",
+                        params![&id_str],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok();
+            }
+            Ok(mission)
         })
         .await
         .map_err(|e| e.to_string())?

@@ -4,6 +4,7 @@ description = "Detect local agent CLIs, copy project files into the local worksp
 commands.allow = [
   "desktop_connection_load",
   "desktop_connection_save",
+  "transport_bridge_configure",
   "pick_working_directory",
   "software_inventory",
   "software_update",

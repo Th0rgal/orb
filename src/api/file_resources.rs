@@ -20,10 +20,11 @@ pub async fn operate(
 ) -> Result<Json<Value>, Error> {
     let mission = if let Some(id) = req.mission_id {
         Some(
-            super::control::get_mission(
+            super::control::get_mission_with_query(
                 State(state.clone()),
                 Extension(user.clone()),
                 axum::extract::Path(id),
+                axum::extract::Query(super::control::GetMissionQuery::metadata_only()),
             )
             .await?
             .0,
@@ -119,10 +120,11 @@ pub async fn operate(
             .chain(later.into_iter().map(|m| ("later", m)))
         {
             // The same per-user lookup as the current mission: authorization stays here.
-            let Ok(Json(m)) = super::control::get_mission(
+            let Ok(Json(m)) = super::control::get_mission_with_query(
                 State(state.clone()),
                 Extension(user.clone()),
                 axum::extract::Path(other),
+                axum::extract::Query(super::control::GetMissionQuery::metadata_only()),
             )
             .await
             else {

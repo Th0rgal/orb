@@ -570,9 +570,10 @@ export function streamMission(
   profile?: "presentation",
   onBatch?: (evs: StreamEvent[]) => void,
   onDisconnected?: () => void,
+  initialSinceSeq?: number,
 ): () => void {
   let stopped = false;
-  let highestSeq: number | undefined;
+  let highestSeq: number | undefined = initialSinceSeq;
   let fragments:StreamEvent[]=[],paint:ReturnType<typeof setTimeout>|undefined;
   const flush=()=>{clearTimeout(paint);paint=undefined;const pending=fragments;fragments=[];if(pending.length)timed('stream text',()=>batch(()=>{if(onBatch)onBatch(pending);else for(const event of pending)onEvent(event);}));};
   // Thinking deltas carry the whole thought so far; applied one by one each

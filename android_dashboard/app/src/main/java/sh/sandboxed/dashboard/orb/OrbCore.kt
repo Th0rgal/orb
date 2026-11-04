@@ -1909,7 +1909,7 @@ class OrbCore private constructor(context: Context) {
     private suspend fun fetchAncestor(id: String): OrbRow? {
         OrbMissionTree.cachedAncestor(id)?.let { return it }
         return try {
-            val raw = fetchDict("/api/control/missions/${encodeComponent(id)}")
+            val raw = fetchDict("/api/control/missions/${encodeComponent(id)}?include_history=false")
             if (raw.isEmpty()) return null
             val row = OrbRow(raw, id)
             val hist = row.rows("history")
