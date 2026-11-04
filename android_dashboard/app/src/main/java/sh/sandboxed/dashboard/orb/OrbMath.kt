@@ -104,15 +104,18 @@ object OrbMath {
         return -1
     }
 
-    fun admitsInlineDollarBody(inner: String): Boolean {
-        if (inner.isEmpty() || inner.length > MAX_SPAN_CHARS) return false
-        if (inner.first().isWhitespace() || inner.last().isWhitespace()) return false
-        if (inner.first().isDigit() && inner.any { it.isWhitespace() }) {
-            val hasMathOp = inner.any { it in "\\^_{}=+-*/<>|" }
-            if (!hasMathOp) return false
-        }
-        return true
-    }
+    fun admitsInlineDollarBody(inner: String, prevBlocked: Boolean = false, nextDigit: Boolean = false): Boolean =
+        OrbTranscriptGates.latexSpanAdmitted(
+            len = inner.length,
+            prevBlocked = prevBlocked,
+            nextDigit = nextDigit,
+            leadSpace = inner.firstOrNull()?.isWhitespace() ?: false,
+            trailSpace = inner.lastOrNull()?.isWhitespace() ?: false,
+            hasNewline = inner.contains('\n'),
+            firstDigit = inner.firstOrNull()?.isDigit() ?: false,
+            internalSpace = inner.any { it.isWhitespace() },
+            hasMathOp = inner.any { it in "\\^_{}=+-*/<>|" }
+        )
 
     fun tokenizeInline(raw: String, depth: Int = 0): List<OrbInlineToken> {
         if (raw.isEmpty() || depth > 6) return if (raw.isEmpty()) emptyList() else listOf(OrbInlineToken.Text(raw))

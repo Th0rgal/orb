@@ -278,4 +278,144 @@ final class OrbRichTextTests: XCTestCase {
         let done = OrbNativeMarkdownView.parseBlocks("```mermaid\nflowchart LR\n  A --> B\n```")
         XCTAssertEqual(done, [.mermaid(code: "flowchart LR\n  A --> B", complete: true)])
     }
+
+    func testLoosePipeTablesCRLFPreservesRightAlignment() {
+        let crlf = "a | b | c\r\nx | 1 | 2\r\nThat is all."
+        let expected = "| a | b | c |\n| --- | ---: | ---: |\n| x | 1 | 2 |\n\nThat is all."
+        XCTAssertEqual(OrbPipeTables.normalize(crlf), expected)
+    }
+
+    func testTranscriptGatesAndRandomizedFuzzInvariants() throws {
+        let gatesURL = OrbSpec.url("fixtures/transcript-gates.json")
+        let gatesDoc = try JSONDecoder().decode(OrbJSON.self, from: Data(contentsOf: gatesURL))
+        let cases = gatesDoc["cases"].items
+        XCTAssertGreaterThanOrEqual(cases.count, 60)
+
+        for (idx, item) in cases.enumerated() {
+            switch item["op"].text {
+            case "allocTurnKeys":
+                let cands = item["candidates"].items.map {
+                    OrbTranscriptGates.CandidateKey(
+                        tag: Int($0["tag"].doubleValue ?? 0),
+                        item: Int($0["item"].doubleValue ?? 0)
+                    )
+                }
+                let expected = item["expected"].items.map {
+                    OrbTranscriptGates.TurnKey(
+                        tag: Int($0["tag"].doubleValue ?? 0),
+                        item: Int($0["item"].doubleValue ?? 0),
+                        gen: Int($0["gen"].doubleValue ?? 0)
+                    )
+                }
+                let got = OrbTranscriptGates.allocTurnKeys(cands)
+                XCTAssertEqual(got, expected, "allocTurnKeys case \(idx)")
+            case "latexSpanAdmitted":
+                let got = OrbTranscriptGates.latexSpanAdmitted(
+                    len: Int(item["len"].doubleValue ?? 0),
+                    prevBlocked: item["prevBlocked"].flag,
+                    nextDigit: item["nextDigit"].flag,
+                    leadSpace: item["leadSpace"].flag,
+                    trailSpace: item["trailSpace"].flag,
+                    hasNewline: item["hasNewline"].flag,
+                    firstDigit: item["firstDigit"].flag,
+                    internalSpace: item["internalSpace"].flag,
+                    hasMathOp: item["hasMathOp"].flag
+                )
+                XCTAssertEqual(got, item["expected"].flag, item["name"].text)
+            case "windowBudget":
+                let total = Int(item["total"].doubleValue ?? 0)
+                let base = Int(item["baseLimit"].doubleValue ?? 24)
+                let steps = Int(item["expandedSteps"].doubleValue ?? 0)
+                let step = Int(item["stepSize"].doubleValue ?? 24)
+                XCTAssertEqual(OrbTranscriptGates.visibleTurnCount(total: total, baseLimit: base, expandedSteps: steps, stepSize: step), Int(item["expectedVisible"].doubleValue ?? 0))
+                XCTAssertEqual(OrbTranscriptGates.hiddenTurnCount(total: total, baseLimit: base, expandedSteps: steps, stepSize: step), Int(item["expectedHidden"].doubleValue ?? 0))
+            case "admitMount":
+                let res = OrbTranscriptGates.admitMount(active: Int(item["active"].doubleValue ?? 0), cap: Int(item["cap"].doubleValue ?? 0))
+                XCTAssertEqual(res.admitted, item["expectedAdmitted"].flag)
+                XCTAssertEqual(res.nextActive, Int(item["expectedNextActive"].doubleValue ?? 0))
+            default:
+                XCTFail("Unknown op at \(idx): \(item["op"].text)")
+            }
+        }
+
+        // Cloud turns with empty / duplicate keys must still yield strictly unique non-empty row IDs.
+        let cloudDupes: [OrbJSON] = [
+            .object(["key": .string(""), "prompt": .string("p1"), "result": .string("r1")]),
+            .object(["key": .string(""), "prompt": .string("p2"), "result": .string("r2")]),
+            .object(["key": .string("k1"), "prompt": .string("p3"), "result": .string("r3")]),
+            .object(["key": .string("k1"), "prompt": .string("p4"), "result": .string("r4")])
+        ]
+        let cloudRows = OrbTranscriptModel.computeHistory(
+            isCloud: true,
+            turns: cloudDupes,
+            mission: .object([:]),
+            events: [],
+            optimisticPrompt: "pending follow-up"
+        )
+        let cloudIds = cloudRows.map(\.0)
+        XCTAssertEqual(Set(cloudIds).count, cloudIds.count)
+        XCTAssertTrue(cloudIds.allSatisfy { !$0.isEmpty })
+
+        // 500-seed deterministic fuzzing across transcript history + native Markdown + math.
+        var rng: UInt64 = 0x9E37_79B9_7F4A_7C15
+        func nextInt(_ bound: Int) -> Int {
+            rng ^= rng >> 12
+            rng ^= rng << 25
+            rng ^= rng >> 27
+            let mixed = rng &* 0x2545_F491_4F6C_DD1D
+            return Int((mixed >> 1) % UInt64(bound))
+        }
+        let payloads = [
+            "Plain update with 🔹 surrogate pair",
+            "Currency $15 and $20 stays prose while $x^2 + y_1$ renders math",
+            "$$\n\\frac{\\alpha + 1}{\\sqrt{2}\n",
+            "colA | colB | colC\r\n🔹 | 12 | 3.5%\r\nDone.",
+            "<fork_context>\n<turn role=\"user\">Prior prompt</turn>\n<turn role=\"assistant\">Prior answer</turn>\n</fork_context>\nFollow-up question",
+            "![chart](https://example.com/chart.png) and [artifact](file:///workspace/out.txt)"
+        ]
+
+        for seed in 0..<500 {
+            let count = 1 + nextInt(14)
+            var events: [StoredEvent] = []
+            for i in 0..<count {
+                let seq = nextInt(4) == 0 ? 5 : Int64(i + 1)
+                let evType = nextInt(3) == 0 ? "user_message" : (nextInt(2) == 0 ? "assistant_message_canonical" : "assistant_message")
+                events.append(
+                    StoredEvent(
+                        id: seq,
+                        missionId: "m-fuzz",
+                        sequence: seq,
+                        eventType: evType,
+                        timestamp: "2026-10-31T00:00:00Z",
+                        eventId: nil,
+                        toolCallId: nil,
+                        toolName: nil,
+                        content: payloads[nextInt(payloads.count)],
+                        metadata: [
+                            "bubble_id": AnyCodable(nextInt(2) == 0 ? "antigravity:b1" : "text_delta_latest"),
+                            "revision": AnyCodable(nextInt(4))
+                        ]
+                    )
+                )
+            }
+            let opt = nextInt(2) == 0 ? "optimistic \(seed)" : nil
+            let rows = OrbTranscriptModel.computeHistory(
+                isCloud: false,
+                turns: [],
+                mission: .object(["history": .array([])]),
+                events: events,
+                optimisticPrompt: opt
+            )
+            let rowIds = rows.map(\.0)
+            XCTAssertEqual(Set(rowIds).count, rowIds.count, "Duplicate row ID at seed \(seed)")
+            for (_, _, text) in rows {
+                let blocks = OrbNativeMarkdownView.parseBlocks(text)
+                for block in blocks {
+                    if case .paragraph(let p) = block {
+                        _ = OrbNativeMarkdownView.inlineAttributed(p)
+                    }
+                }
+            }
+        }
+    }
 }

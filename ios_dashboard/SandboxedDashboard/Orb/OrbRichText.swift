@@ -72,27 +72,30 @@ enum OrbMath {
         return false
     }
 
-    nonisolated static func admitsInlineDollarBody(_ inner: String) -> Bool {
-        guard !inner.isEmpty, inner.count <= maxSpanChars else { return false }
-        guard let first = inner.first, let last = inner.last, !first.isWhitespace, !last.isWhitespace else {
-            return false
-        }
-        if first.isNumber && inner.contains(where: \.isWhitespace) {
-            let mathOps: Set<Character> = ["\\", "^", "_", "{", "}", "=", "+", "-", "*", "/", "<", ">", "|"]
-            if !inner.contains(where: { mathOps.contains($0) }) {
-                return false
-            }
-        }
-        return true
+    nonisolated static func admitsInlineDollarBody(_ inner: String, prevBlocked: Bool = false, nextDigit: Bool = false) -> Bool {
+        let mathOps: Set<Character> = ["\\", "^", "_", "{", "}", "=", "+", "-", "*", "/", "<", ">", "|"]
+        return OrbTranscriptGates.latexSpanAdmitted(
+            len: inner.count,
+            prevBlocked: prevBlocked,
+            nextDigit: nextDigit,
+            leadSpace: inner.first?.isWhitespace ?? false,
+            trailSpace: inner.last?.isWhitespace ?? false,
+            hasNewline: inner.contains("\n"),
+            firstDigit: inner.first?.isNumber ?? false,
+            internalSpace: inner.contains(where: \.isWhitespace),
+            hasMathOp: inner.contains(where: { mathOps.contains($0) })
+        )
     }
 
     nonisolated static func findClosingInlineDollar(_ chars: [Character], openIdx: Int) -> Int? {
         let n = chars.count
         guard openIdx >= 0, openIdx + 2 <= n, chars[openIdx] == "$" else { return nil }
-        if openIdx > 0 {
+        let prevBlocked: Bool = {
+            guard openIdx > 0 else { return false }
             let prev = chars[openIdx - 1]
-            if prev == "\\" || prev == "$" || prev.isLetter || prev.isNumber { return nil }
-        }
+            return prev == "\\" || prev == "$" || prev.isLetter || prev.isNumber
+        }()
+        if prevBlocked { return nil }
         let firstInner = chars[openIdx + 1]
         if firstInner == "$" || firstInner.isWhitespace { return nil }
 
@@ -109,7 +112,7 @@ enum OrbMath {
                 let next: Character = i + 1 < n ? chars[i + 1] : "\0"
                 if !prev.isWhitespace && next != "$" && !next.isNumber {
                     let inner = String(chars[(openIdx + 1)..<i])
-                    return admitsInlineDollarBody(inner) ? i : nil
+                    return admitsInlineDollarBody(inner, prevBlocked: prevBlocked, nextDigit: next.isNumber) ? i : nil
                 }
             }
             i += 1

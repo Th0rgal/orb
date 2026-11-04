@@ -140,7 +140,7 @@ enum OrbCodeFences {
 
     static func normalize(_ src: String) -> String {
         guard src.contains("```"), hasGluedFence(src) else { return src }
-        let lines = src.components(separatedBy: "\n")
+        let lines = src.unicodeScalars.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var out: [String] = []
         out.reserveCapacity(lines.count + 2)
         var inFence = false
