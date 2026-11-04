@@ -4876,4 +4876,12 @@ fn boost_warm_overlay_bootstrap_avoids_copyup_and_supports_non_systemd_init() {
     assert!(script.contains("\"$S/orb-node-bg\" \"$P\" \"$E\""));
     assert!(PROVISION_SCRIPT.contains(r#"[ ! -r \"$H/.boost-env\" ] || . \"$H/.boost-env\""#));
     assert!(PROVISION_SCRIPT.contains("pgrep -u orbnode -x sandboxed-node"));
+    assert!(PROVISION_SCRIPT.contains("/etc/profile.d/zz-orb-boost.sh"));
+    assert!(PROVISION_SCRIPT.contains("unset BOOST_REPO_DIR"));
+    assert!(PROVISION_SCRIPT.contains("readlink -f /opt/boost/warm-lower"));
+    assert!(PROVISION_SCRIPT.contains("stat -Lc '%u' \"$probe_path\""));
+    assert!(PROVISION_SCRIPT.contains(
+        "! mountpoint -q /opt/boost/warm-orb 2>/dev/null && [ -d /workspace/repo/.git ]"
+    ));
+    assert!(PROVISION_SCRIPT.contains("symbolic-ref HEAD \"refs/heads/$branch\""));
 }

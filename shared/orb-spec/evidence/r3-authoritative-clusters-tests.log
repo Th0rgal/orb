@@ -1,50 +1,5 @@
-    Finished `test` profile [unoptimized] target(s) in 0.15s
+    Finished `test` profile [unoptimized] target(s) in 0.13s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
-
-running 40 tests
-test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
-test privilege_bunker_deploy_tests::deploy_gate_allows_dev_zero_touch_and_requires_session_grant_on_prod ... ok
-test privilege_bunker_deploy_tests::privilege_step_enforces_biometric_session_clock_and_bunker_fence ... ok
-test shadow::tests::orb_wire_enumerative_boundary_perturbations_rejected ... ok
-test shadow::tests::orb_wire_fuzz_10000_malformed_frames_never_panics ... ok
-test shadow::tests::orb_wire_roundtrip_and_failure_no_partial_mutation ... ok
-test shadow::tests::orb_wire_zero_copy_slice_abi_alias_null_wasm32_and_no_partial_mutation ... ok
-test shadow::tests::phase1_mission_control_and_fork_home_incident_replays ... ok
-test shadow::tests::phase2_proxy_provider_pool_and_argmin_route_fold_replay ... ok
-test shadow::tests::phase3_agent_event_normalizer_and_transcript_reducer_replays ... ok
-test shadow::tests::phase4_cursor_pagination_and_sidebar_merge_replays ... ok
-test shadow::tests::phase5_privd_command_and_ssh_identity_confinement_replays ... ok
-test shadow::tests::phase6_scroll_epoch_and_client_parity_replays ... ok
-test shadow::tests::shadow_runner_classifies_exact_matches_and_known_legacy_bugs ... ok
-test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
-test stateful_tests::kmp_suffix_prefix_overlap_matches_naive_across_1024_multibyte_utf8_cases ... ok
-test stateful_tests::node_resize_and_lane_steps_enforce_debt_conservation_and_coordinator_anti_starvation ... ok
-test stateful_tests::r4_scroll_policy_and_zero_copy_slice_steppers_verified ... ok
-test stateful_tests::slot_bypass_step_enforces_operator_force_bounds_and_regular_independence ... ok
-test stateful_tests::stream_simd_isa_gated_scanner_matches_scalar_across_1024_differential_inputs ... ok
-test stateful_tests::vm_cap_admit_pool_override_and_zero_provider_caps_verified ... ok
-test stats_settle_tests::settle_adds_once_ignores_replays_and_saturates ... ok
-test tests::approval_gate_needs_every_condition_and_confirms_critical ... ok
-test tests::attribution_step_rejects_forged_hints_and_never_returns_empty ... ok
-test tests::board_retry_and_slots_respect_parameterized_caps ... ok
-test tests::bundle_budget_and_log_window_respect_custom_limits ... ok
-test tests::canary_actor_trust_ignores_argv_and_unknown_uid ... ok
-test tests::lease_mode_classifier_respects_precedence ... ok
-test tests::mobile_and_leansys_extensions_roundtrip_via_cabi ... ok
-test tests::phase2_proxy_stream_and_breaker_steppers_preserve_invariants ... ok
-test tests::phase3_mission_reconcile_queue_vm_and_access_steppers_preserve_invariants ... ok
-test tests::phase4_cross_client_projection_steppers_preserve_invariants ... ok
-test tests::phase6_scroll_epoch_and_client_parity_zero_divergences ... ok
-test tests::schedule_step_dedupes_fences_and_fires_once_per_slot ... ok
-test tests::tier1_admission_cooldown_cost_and_stream_loop_match_kernel ... ok
-test tests::tier1_ledger_liveness_and_pr_gate_match_kernel ... ok
-test tests::turn_summary_usage_limit_relative_time_and_transcript_patch_match_fixtures ... ok
-test tests::wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gates ... ok
-test tests::wave12_node_disk_pressure_and_placement_kernels_match_specs ... ok
-test tests::writer_reuse_gate_enforces_continuation_and_retag_rules ... ok
-
-test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
-
    Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
@@ -217,15 +172,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 32.39s
+    Finished `test` profile [unoptimized] target(s) in 30.98s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test provider_health::tests::subscription_cooldown_classifies_empty_chain_as_retryable ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.01s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -397,15 +345,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 31.84s
+    Finished `test` profile [unoptimized] target(s) in 0.40s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test provider_health::tests::account_error_cooldown_doubles_from_ten_minutes_to_six_hours ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -577,15 +518,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 31.23s
+    Finished `test` profile [unoptimized] target(s) in 0.15s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test provider_health::tests::provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -757,15 +691,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 37.11s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test cost::tests::test_cost_calculation_basic ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -937,15 +864,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 35.42s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::control::host_goal::tests::armed_wakeup_gives_paused ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -1117,15 +1037,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 34.90s
+    Finished `test` profile [unoptimized] target(s) in 0.15s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::reconcile::tests::active_mission_with_any_liveness_signal_is_kept ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -1297,15 +1210,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 33.73s
+    Finished `test` profile [unoptimized] target(s) in 0.16s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::control::tests::queue_snapshot_replays_prepared_parallel_message_until_run_exists ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.01s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -1477,15 +1383,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 35.97s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::control::dispatch_admission_tests::rejected_actor_dispatch_with_failed_rollback_is_durably_recoverable ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.13s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -1657,15 +1556,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 33.16s
+    Finished `test` profile [unoptimized] target(s) in 0.15s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::usage_attribution::tests::forged_hints_are_rejected_and_keep_the_principal ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -1837,15 +1729,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 33.11s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::control::automation_scheduler::native_schedule_bounds_tests::native_schedule_stops_after_ttl_or_a_finished_mission ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.01s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -2017,15 +1902,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 32.74s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::mission_stats::tests::mission_and_subtree_totals_are_conserved_and_replays_count_once ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -2197,15 +2075,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 32.05s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::privilege_broker::tests::grant_lifecycle_audit_log_session_reap_and_bunker_lockdown ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.02s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -2377,15 +2248,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 32.27s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::system::tests::orb_and_sandboxed_service_aliases_map_to_same_deploy_tiers ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.01s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -2557,15 +2421,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 34.69s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test managed::tests::budget_and_concurrency_are_hard_refusals ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.02s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -2737,15 +2594,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 34.83s
+    Finished `test` profile [unoptimized] target(s) in 0.15s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test managed::lifecycle::tests::busy_lease_protects_everything_but_ttl ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -2917,15 +2767,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 37.19s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test managed::tests::claim_moves_ownership_to_the_served_mission_only ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.04s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -3097,15 +2940,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 35.63s
+    Finished `test` profile [unoptimized] target(s) in 0.15s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::secret_broker::tests::compute_secret_confinement_blocks_reserved_keys_and_untrusted_nodes ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -3277,15 +3113,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 39.16s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test node::capacity::tests::shrink_with_jobs_in_flight_never_revokes_and_blocks_until_under_cap ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.03s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -3457,15 +3286,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 38.30s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::runners::stream_guard::tests::matches_exhaustive_oracle_on_unicode_and_partial_repeats ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.03s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -3637,15 +3459,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 37.21s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::control::remote_grok::tests::phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.01s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -3817,15 +3632,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 31.90s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::mission_store::harness_session_tests::phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.07s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -3997,15 +3805,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 33.17s
+    Finished `test` profile [unoptimized] target(s) in 0.15s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test api::approval_queue::tests::admit_is_the_shared_gate ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.01s
-
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -4177,14 +3978,8 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 33.46s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.02s
-
    Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
@@ -4411,8 +4206,191 @@ warning: function `check_schema` is never used
   |        ^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib) generated 21 warnings (run `cargo fix --lib -p sandboxed_sh` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 3m 42s
+    Finished `test` profile [unoptimized] target(s) in 26.95s
      Running unittests src/bin/palomactl.rs (target/debug/deps/palomactl-53e44ebd4013ceaa)
+
+running 40 tests
+test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
+test privilege_bunker_deploy_tests::deploy_gate_allows_dev_zero_touch_and_requires_session_grant_on_prod ... ok
+test privilege_bunker_deploy_tests::privilege_step_enforces_biometric_session_clock_and_bunker_fence ... ok
+test shadow::tests::orb_wire_enumerative_boundary_perturbations_rejected ... ok
+test shadow::tests::orb_wire_fuzz_10000_malformed_frames_never_panics ... ok
+test shadow::tests::orb_wire_roundtrip_and_failure_no_partial_mutation ... ok
+test shadow::tests::orb_wire_zero_copy_slice_abi_alias_null_wasm32_and_no_partial_mutation ... ok
+test shadow::tests::phase1_mission_control_and_fork_home_incident_replays ... ok
+test shadow::tests::phase2_proxy_provider_pool_and_argmin_route_fold_replay ... ok
+test shadow::tests::phase3_agent_event_normalizer_and_transcript_reducer_replays ... ok
+test shadow::tests::phase4_cursor_pagination_and_sidebar_merge_replays ... ok
+test shadow::tests::phase5_privd_command_and_ssh_identity_confinement_replays ... ok
+test shadow::tests::phase6_scroll_epoch_and_client_parity_replays ... ok
+test shadow::tests::shadow_runner_classifies_exact_matches_and_known_legacy_bugs ... ok
+test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
+test stateful_tests::kmp_suffix_prefix_overlap_matches_naive_across_1024_multibyte_utf8_cases ... ok
+test stateful_tests::node_resize_and_lane_steps_enforce_debt_conservation_and_coordinator_anti_starvation ... ok
+test stateful_tests::r4_scroll_policy_and_zero_copy_slice_steppers_verified ... ok
+test stateful_tests::slot_bypass_step_enforces_operator_force_bounds_and_regular_independence ... ok
+test stateful_tests::stream_simd_isa_gated_scanner_matches_scalar_across_1024_differential_inputs ... ok
+test stateful_tests::vm_cap_admit_pool_override_and_zero_provider_caps_verified ... ok
+test stats_settle_tests::settle_adds_once_ignores_replays_and_saturates ... ok
+test tests::approval_gate_needs_every_condition_and_confirms_critical ... ok
+test tests::attribution_step_rejects_forged_hints_and_never_returns_empty ... ok
+test tests::board_retry_and_slots_respect_parameterized_caps ... ok
+test tests::bundle_budget_and_log_window_respect_custom_limits ... ok
+test tests::canary_actor_trust_ignores_argv_and_unknown_uid ... ok
+test tests::lease_mode_classifier_respects_precedence ... ok
+test tests::mobile_and_leansys_extensions_roundtrip_via_cabi ... ok
+test tests::phase2_proxy_stream_and_breaker_steppers_preserve_invariants ... ok
+test tests::phase3_mission_reconcile_queue_vm_and_access_steppers_preserve_invariants ... ok
+test tests::phase4_cross_client_projection_steppers_preserve_invariants ... ok
+test tests::phase6_scroll_epoch_and_client_parity_zero_divergences ... ok
+test tests::schedule_step_dedupes_fences_and_fires_once_per_slot ... ok
+test tests::tier1_admission_cooldown_cost_and_stream_loop_match_kernel ... ok
+test tests::tier1_ledger_liveness_and_pr_gate_match_kernel ... ok
+test tests::turn_summary_usage_limit_relative_time_and_transcript_patch_match_fixtures ... ok
+test tests::wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gates ... ok
+test tests::wave12_node_disk_pressure_and_placement_kernels_match_specs ... ok
+test tests::writer_reuse_gate_enforces_continuation_and_retag_rules ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+
+running 1 test
+test provider_health::tests::subscription_cooldown_classifies_empty_chain_as_retryable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.01s
+
+
+running 1 test
+test provider_health::tests::account_error_cooldown_doubles_from_ten_minutes_to_six_hours ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test provider_health::tests::provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test cost::tests::test_cost_calculation_basic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test api::control::host_goal::tests::armed_wakeup_gives_paused ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test api::reconcile::tests::active_mission_with_any_liveness_signal_is_kept ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test api::control::tests::queue_snapshot_replays_prepared_parallel_message_until_run_exists ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test api::control::dispatch_admission_tests::rejected_actor_dispatch_with_failed_rollback_is_durably_recoverable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.12s
+
+
+running 1 test
+test api::usage_attribution::tests::forged_hints_are_rejected_and_keep_the_principal ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test api::control::automation_scheduler::native_schedule_bounds_tests::native_schedule_stops_after_ttl_or_a_finished_mission ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test api::mission_stats::tests::mission_and_subtree_totals_are_conserved_and_replays_count_once ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test api::privilege_broker::tests::grant_lifecycle_audit_log_session_reap_and_bunker_lockdown ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.01s
+
+
+running 1 test
+test api::system::tests::orb_and_sandboxed_service_aliases_map_to_same_deploy_tiers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test managed::tests::budget_and_concurrency_are_hard_refusals ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test managed::lifecycle::tests::busy_lease_protects_everything_but_ttl ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test managed::tests::claim_moves_ownership_to_the_served_mission_only ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.02s
+
+
+running 1 test
+test api::secret_broker::tests::compute_secret_confinement_blocks_reserved_keys_and_untrusted_nodes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test node::capacity::tests::shrink_with_jobs_in_flight_never_revokes_and_blocks_until_under_cap ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.03s
+
+
+running 1 test
+test api::runners::stream_guard::tests::matches_exhaustive_oracle_on_unicode_and_partial_repeats ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.02s
+
+
+running 1 test
+test api::control::remote_grok::tests::phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test api::mission_store::harness_session_tests::phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.04s
+
+
+running 1 test
+test api::approval_queue::tests::admit_is_the_shared_gate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
+
+
+running 1 test
+test node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.01s
+
 
 running 1 test
 test tests::pr_103_green_but_conflicting_recommends_conflict_resolution ... ok
