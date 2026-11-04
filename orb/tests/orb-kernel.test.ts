@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { kernelAbi } from "../src/orbKernelAbi";
+import { ensureKernelLinearScratch, kernelScratchBaseOffset } from "../src/orbKernelRuntime";
 import {
+  ORB_WIRE_SCHEMA_SCROLL_SLICE, ORB_WIRE_SCHEMA_STREAM_SLICE, ORB_WIRE_SCHEMA_TRANSCRIPT_SLICE,
   leansysGfmPipeRowAdmitted, leansysRichTagAdmitted, leansysVerifyFdBounds,
   orbAuthToctouExecuteStep, orbHierarchyMergeStep, orbOutboxCrashReconcileStep,
   orbProviderAttemptStep, orbRelativeTimeString, orbResourceLedgerStep,
+  orbScrollPolicyClampTop, orbScrollPolicyCorrect, orbScrollPolicyGap,
+  orbScrollPolicyMaxTop, orbScrollPolicyStep,
   orbStreamBoundedCommitStep, orbTranscriptFoldStep, orbTranscriptPatchStep,
   orbUsageLimitBadge, orbWireApplyPatchStep, orbWireDecodeSlice,
-  orbWireEncodeSliceInto, orbWireMachineStep, orbWireVerifySliceIo,
+  orbWireEncodeSliceInto, orbWireMachineStep, orbWireScrollSliceStep,
+  orbWireStreamSliceStep, orbWireTranscriptSliceStep, orbWireVerifySliceIo,
 } from "../src/orbKernel";
 import { mergeMission, reparentMission, resetMissionHierarchy } from "../src/missionHierarchy";
 import { normalizeLoosePipeTables } from "../src/pipeTables";
@@ -390,5 +395,235 @@ describe("orb kernel gates mirror lean-sys", () => {
     rab.resize(24);
     expect(rabDec.view!.recordAt(0)).toBeNull();
     expect(rabDec.view!.arenaSlice(0, 4)).toBeNull();
+  });
+
+  it("verifies Phase R4 Scroll policy and zero-copy Stream/Scroll/Transcript slice steppers over WASM", () => {
+    expect(orbScrollPolicyGap(1000, 400, 580)).toBe(20);
+    expect(orbScrollPolicyGap(300, 400, 0)).toBe(-100);
+    expect(orbScrollPolicyMaxTop(1000, 400)).toBe(600);
+    expect(orbScrollPolicyClampTop(1000, 400, 999)).toBe(600);
+    expect(orbScrollPolicyClampTop(1000, 400, -50)).toBe(0);
+    expect(orbScrollPolicyMaxTop(0x4000_0000, 400)).toBeNull();
+    expect(orbScrollPolicyClampTop(1000, 400, -0x4000_0001)).toBeNull();
+    expect(orbScrollPolicyGap(0x4000_0000, 400, 0)).toBeNull();
+    expect(orbScrollPolicyCorrect(0x4000_0000, 400, 0, 100, 20)).toBeNull();
+    const c1 = orbScrollPolicyCorrect(2000, 500, 300, 820, 40)!;
+    expect(c1).toBe(780);
+    expect(orbScrollPolicyCorrect(2000, 500, c1, 820, 40)).toBe(c1);
+
+    // Passive resize never flips pinned
+    expect(orbScrollPolicyStep({
+      opKind: 2, pinned: false, intent: false, resized: true,
+      curTop: 400, height: 1200, client: 500, arg: 695,
+    })).toEqual({ status: 1, admitted: true, pinned: false, top: 695 });
+
+    // 1. Scroll slice step writes 32-byte OrbWire verdict frame and preserves sentinels on rejection
+    const scrollOut = new Uint8Array(40).fill(0xa5);
+    const scrollRes = orbWireScrollSliceStep({
+      inSlice: new Uint8Array(8),
+      outBuf: scrollOut,
+      opKind: 1,
+      pinned: true,
+      intent: true,
+      resized: false,
+      curTop: 600,
+      height: 1200,
+      client: 500,
+      arg: 350,
+    });
+    expect(scrollRes).toEqual({
+      status: 0,
+      written: 32,
+      verdict: { status: 1, admitted: true, pinned: false, top: 350 },
+    });
+    expect(Array.from(scrollOut.subarray(32))).toEqual(new Array(8).fill(0xa5));
+    const scrollDec = orbWireDecodeSlice(scrollOut.subarray(0, 32), ORB_WIRE_SCHEMA_SCROLL_SLICE);
+    expect(scrollDec.status).toBe(0);
+    expect(scrollDec.view!.recordAt(0)).toEqual({ tag: 1, flags: 0, len16: 0, payload32: 350 });
+
+    const scrollSmall = new Uint8Array(24).fill(0x5a);
+    expect(orbWireScrollSliceStep({
+      inSlice: new Uint8Array(4),
+      outBuf: scrollSmall,
+      opKind: 0,
+      pinned: true,
+      intent: false,
+      resized: false,
+      curTop: 0,
+      height: 1000,
+      client: 400,
+      arg: 0,
+    })).toEqual({ status: 5, written: 0, verdict: null });
+    expect(Array.from(scrollSmall)).toEqual(new Array(24).fill(0x5a));
+
+    // 2. Stream bounded-tail slice step forces checkpoint and preserves sentinels on alias/bad state
+    const streamOut = new Uint8Array(32).fill(0x3c);
+    const streamRes = orbWireStreamSliceStep({
+      inTail: new TextEncoder().encode("```rust\nlet x = 1;\n"),
+      outBuf: streamOut,
+      prevLen: 1000,
+      prevCommit: 200,
+      prevCheckpoint: 200,
+      newLen: 20_000,
+      rawCommit: 200,
+      maxOpenTailBytes: 4096,
+    });
+    expect(streamRes).toEqual({
+      status: 0,
+      written: 32,
+      verdict: { admitted: true, checkpointForced: true, nextCheckpoint: 15_904 },
+    });
+    const streamDec = orbWireDecodeSlice(streamOut, ORB_WIRE_SCHEMA_STREAM_SLICE);
+    expect(streamDec.status).toBe(0);
+    expect(streamDec.view!.recordAt(0)).toEqual({ tag: 1, flags: 1, len16: 19, payload32: 15_904 });
+
+    const streamBad = new Uint8Array(32).fill(0xc3);
+    expect(orbWireStreamSliceStep({
+      inTail: new Uint8Array(8),
+      outBuf: streamBad,
+      prevLen: 500,
+      prevCommit: 200,
+      prevCheckpoint: 200,
+      newLen: 400,
+      rawCommit: 200,
+      maxOpenTailBytes: 4096,
+    })).toEqual({ status: 3, written: 0, verdict: null });
+    expect(Array.from(streamBad)).toEqual(new Array(32).fill(0xc3));
+
+    // 3. Transcript fold slice step preserves live == replay determinism and rejects sequence gaps without mutating outBuf
+    const liveBuf = new Uint8Array(32).fill(0x11);
+    const replayBuf = new Uint8Array(32).fill(0x22);
+    const liveFold = orbWireTranscriptSliceStep({
+      inEvent: new TextEncoder().encode("delta"),
+      outBuf: liveBuf,
+      lastAppliedSeq: 10n,
+      incomingSeq: 11n,
+      entryCount: 3,
+      thinkingOpen: true,
+      normalizedAction: 5,
+      isReplayFromLog: false,
+    });
+    const replayFold = orbWireTranscriptSliceStep({
+      inEvent: new TextEncoder().encode("delta"),
+      outBuf: replayBuf,
+      lastAppliedSeq: 10n,
+      incomingSeq: 11n,
+      entryCount: 3,
+      thinkingOpen: true,
+      normalizedAction: 5,
+      isReplayFromLog: true,
+    });
+    expect(liveFold.verdict).toEqual(replayFold.verdict);
+    expect(Array.from(liveBuf)).toEqual(Array.from(replayBuf));
+    const txDec = orbWireDecodeSlice(liveBuf, ORB_WIRE_SCHEMA_TRANSCRIPT_SLICE);
+    expect(txDec.status).toBe(0);
+    expect(txDec.view!.recordAt(0)).toEqual({ tag: 1, flags: 2, len16: 5, payload32: 4 });
+
+    const gapBuf = new Uint8Array(32).fill(0x77);
+    const gapRes = orbWireTranscriptSliceStep({
+      inEvent: new Uint8Array(4),
+      outBuf: gapBuf,
+      lastAppliedSeq: 10n,
+      incomingSeq: 13n,
+      entryCount: 3,
+      thinkingOpen: false,
+      normalizedAction: 5,
+      isReplayFromLog: false,
+    });
+    expect(gapRes.written).toBe(0);
+    expect(gapRes.verdict).toMatchObject({ admitted: false, gapBuffered: true, nextEntryCount: 3 });
+    expect(Array.from(gapBuf)).toEqual(new Array(32).fill(0x77));
+
+    // Invalid normalizedAction (actionCode = 4) is distinguished from OutputTooSmall (status = 5)
+    const badActBuf = new Uint8Array(32).fill(0x88);
+    const badActRes = orbWireTranscriptSliceStep({
+      inEvent: new Uint8Array(4),
+      outBuf: badActBuf,
+      lastAppliedSeq: 10n,
+      incomingSeq: 11n,
+      entryCount: 3,
+      thinkingOpen: true,
+      normalizedAction: 99,
+      isReplayFromLog: false,
+    });
+    expect(badActRes.status).toBe(3);
+    expect(badActRes.written).toBe(0);
+    expect(badActRes.verdict).toMatchObject({
+      actionCode: 4,
+      admitted: false,
+      thinkingOpenNext: true,
+      nextEntryCount: 3,
+    });
+    expect(Array.from(badActBuf)).toEqual(new Array(32).fill(0x88));
+
+    const smallTxBuf = new Uint8Array(16).fill(0x99);
+    const smallTxRes = orbWireTranscriptSliceStep({
+      inEvent: new Uint8Array(4),
+      outBuf: smallTxBuf,
+      lastAppliedSeq: 10n,
+      incomingSeq: 11n,
+      entryCount: 3,
+      thinkingOpen: true,
+      normalizedAction: 99,
+      isReplayFromLog: false,
+    });
+    expect(smallTxRes).toEqual({ status: 5, written: 0, verdict: null });
+    expect(Array.from(smallTxBuf)).toEqual(new Array(16).fill(0x99));
+
+    // advanceStreamBoundedCommit rejects invalid/negative inputs fail-closed via kernel gate
+    const baseTail = { totalBytes: 1000, committedBytes: 200, checkpointBytes: 200 };
+    expect(advanceStreamBoundedCommit(baseTail, -5, 200, 4096)).toEqual({
+      ...baseTail,
+      admitted: false,
+      checkpointForced: false,
+    });
+    expect(advanceStreamBoundedCommit(baseTail, 100, 200, 0)).toEqual({
+      ...baseTail,
+      admitted: false,
+      checkpointForced: false,
+    });
+
+    // Zero-copy length-only stream slice step handles >1 MiB open tails without copying or growing WASM linear memory past 1 MiB scratch
+    const scratchBefore = ensureKernelLinearScratch(0).memory.buffer.byteLength;
+    const cappedScratch = ensureKernelLinearScratch(8 * 1024 * 1024);
+    const maxExpectedBytes = Math.ceil((kernelScratchBaseOffset() + 32 + 1_048_576) / 65_536) * 65_536;
+    expect(cappedScratch.memory.buffer.byteLength).toBeLessThanOrEqual(maxExpectedBytes);
+    expect(cappedScratch.memory.buffer.byteLength).toBeGreaterThanOrEqual(scratchBefore);
+
+    const largeTailStep = advanceStreamBoundedCommit(
+      { totalBytes: 2_000_000, committedBytes: 0, checkpointBytes: 1_983_616 },
+      4096,
+      0,
+      16_384,
+      20_480,
+    );
+    expect(largeTailStep).toEqual({
+      totalBytes: 2_004_096,
+      committedBytes: 0,
+      checkpointBytes: 2_004_096 - 16_384,
+      admitted: true,
+      checkpointForced: true,
+    });
+
+    const lengthOnlyOut = new Uint8Array(32).fill(0x55);
+    const lengthOnlyRes = orbWireStreamSliceStep({
+      inTail: new Uint8Array(0),
+      inTailBytesLen: 2_097_152,
+      outBuf: lengthOnlyOut,
+      prevLen: 2_097_152,
+      prevCommit: 0,
+      prevCheckpoint: 2_080_768,
+      newLen: 2_101_248,
+      rawCommit: 0,
+      maxOpenTailBytes: 16_384,
+    });
+    expect(lengthOnlyRes.status).toBe(0);
+    expect(lengthOnlyRes.written).toBe(32);
+    expect(lengthOnlyRes.verdict).toEqual({
+      admitted: true,
+      checkpointForced: true,
+      nextCheckpoint: 2_101_248 - 16_384,
+    });
+    expect(cappedScratch.memory.buffer.byteLength).toBeLessThanOrEqual(maxExpectedBytes);
   });
 });

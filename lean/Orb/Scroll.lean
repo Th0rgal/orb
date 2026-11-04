@@ -67,7 +67,7 @@ def scrollEvent (s : State) (intent resized : Bool) (height client top' : Int) :
     else { s with top := t }
 
 /-- A send or "Jump to latest". -/
-def jump (_ : State) (height client : Int) : State := { pinned := true, top := maxTop height client }
+def jump (s : State) (height client : Int) : State := { s with pinned := true, top := maxTop height client }
 
 /-- The idempotent correction: move so the anchor (now at `anchorDoc`) is back at screen `y0`. -/
 def correct (height client top anchorDoc y0 : Int) : Int := clampTop height client (top + (anchorDoc - top - y0))

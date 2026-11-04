@@ -1,7 +1,8 @@
-    Finished `test` profile [unoptimized] target(s) in 0.07s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-d791927b4d2534f0)
+   Compiling orb-spec v1.3.0 (/var/lib/sandboxed-node/work/8c1be306-e36e-4bf0-a1c0-4014c6cb8dcd/worktrees/orb-slice2/crates/orb-spec)
+    Finished `test` profile [unoptimized] target(s) in 2.20s
+     Running unittests src/lib.rs (/tmp/orb-r4-target/debug/deps/orb_spec-8374b4127ccc7fbc)
 
-running 39 tests
+running 40 tests
 test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
 test privilege_bunker_deploy_tests::deploy_gate_allows_dev_zero_touch_and_requires_session_grant_on_prod ... ok
 test privilege_bunker_deploy_tests::privilege_step_enforces_biometric_session_clock_and_bunker_fence ... ok
@@ -19,6 +20,7 @@ test shadow::tests::shadow_runner_classifies_exact_matches_and_known_legacy_bugs
 test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 test stateful_tests::kmp_suffix_prefix_overlap_matches_naive_across_1024_multibyte_utf8_cases ... ok
 test stateful_tests::node_resize_and_lane_steps_enforce_debt_conservation_and_coordinator_anti_starvation ... ok
+test stateful_tests::r4_scroll_policy_and_zero_copy_slice_steppers_verified ... ok
 test stateful_tests::slot_bypass_step_enforces_operator_force_bounds_and_regular_independence ... ok
 test stateful_tests::stream_simd_isa_gated_scanner_matches_scalar_across_1024_differential_inputs ... ok
 test stateful_tests::vm_cap_admit_pool_override_and_zero_provider_caps_verified ... ok
@@ -42,5 +44,5 @@ test tests::wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gate
 test tests::wave12_node_disk_pressure_and_placement_kernels_match_specs ... ok
 test tests::writer_reuse_gate_enforces_continuation_and_retag_rules ... ok
 
-test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
 

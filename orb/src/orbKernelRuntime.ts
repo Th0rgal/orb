@@ -1,6 +1,7 @@
 // This module owns initialization. No caller can execute a behavioral fallback.
 let instance: WebAssembly.Instance | undefined;
 let scratchBaseOffset = 65_536;
+const WASM_MAX_SCRATCH_EXTRA_BYTES = 1_048_576;
 
 export async function loadKernel(bytes: Uint8Array, sha256: string, arities: Record<string, number>): Promise<void> {
   const buffer = new Uint8Array(bytes).buffer;
@@ -52,9 +53,45 @@ export function result64(raw: number | bigint): bigint {
   return BigInt.asUintN(64, raw);
 }
 
+export function bindKernelFn<T extends (number | bigint)[]>(
+  name: string,
+  widths: readonly (8 | 32 | 64)[],
+  ret64: boolean,
+): (...args: T) => number | bigint {
+  return (...args: T) => {
+    for (let i = 0; i < widths.length; i++) word(args[i], widths[i]);
+    const raw = callKernel(name, args);
+    return ret64 ? result64(raw) : result32(raw);
+  };
+}
+
 const WASM_PAGE_BYTES = 65_536;
 
 export function kernelScratchBaseOffset(): number {
   if (!instance) throw new Error("Shared kernel is not initialized");
   return scratchBaseOffset;
 }
+
+const SLICE_STEP_OUT_BYTES = 32;
+
+export function ensureKernelLinearScratch(minExtraBytes: number): {
+  memory: WebAssembly.Memory;
+  inOffset: number;
+  outOffset: number;
+} {
+  if (!instance) throw new Error("Shared kernel is not initialized");
+  const mem = instance.exports.memory;
+  if (!(mem instanceof WebAssembly.Memory)) {
+    throw new Error("Shared kernel does not export linear memory");
+  }
+  const outOffset = scratchBaseOffset;
+  const inOffset = scratchBaseOffset + SLICE_STEP_OUT_BYTES;
+  const boundedExtra = Math.min(WASM_MAX_SCRATCH_EXTRA_BYTES, Math.max(0, Math.ceil(minExtraBytes)));
+  const needed = inOffset + boundedExtra;
+  if (needed > mem.buffer.byteLength) {
+    const extraPages = Math.ceil((needed - mem.buffer.byteLength) / WASM_PAGE_BYTES);
+    mem.grow(extraPages);
+  }
+  return { memory: mem, inOffset, outOffset };
+}
+

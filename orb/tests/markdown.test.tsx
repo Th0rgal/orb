@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { render } from "@solidjs/testing-library";
-import { parseMarkdown, MdView, loadKatex } from "../src/Markdown";
+import { parseMarkdown, MdView, loadKatex, markdownText } from "../src/Markdown";
+import { RICH_TAG } from "../src/richTags";
 beforeAll(() => loadKatex());
 import { MATH_REPLY } from "./markdown-math.fixture";
 
@@ -285,6 +286,46 @@ it("checkpointed streaming over a giant unclosed fence scans O(N) bytes and matc
   expect(parse(full)).toEqual(parseMarkdown(full));
   full += "```\n\nSummary a | b | c\n1 | 2 | 3\n4 | 5 | 6\n";
   expect(parse(full)).toEqual(parseMarkdown(full));
+});
+
+it("checkpointed streaming over a giant unclosed paragraph (>16 KiB without blank lines) bounds re-parse work and matches parseMarkdown", () => {
+  const parse = incrementalMarkdown();
+  let full = "# Preamble\n\n";
+  parse(full);
+  for (let i = 0; i < 64; i++) {
+    full += `Line ${i}: ` + "plain prose token ".repeat(30) + "\n";
+    parse(full);
+  }
+  const totalUtf8 = new TextEncoder().encode(full).length;
+  expect(totalUtf8).toBeGreaterThan(32_768);
+  expect(parse.scannedBytes).toBe(totalUtf8);
+  expect(parse.parsedBytes).toBeLessThan(totalUtf8 * 25);
+  expect(parse(full)).toEqual(parseMarkdown(full));
+  full += "\nClosing paragraph.\n";
+  expect(parse(full)).toEqual(parseMarkdown(full));
+});
+
+it("checkpointed streaming folds headings, MEDIA: directives, rich tags, fences, quotes, tables, and lists in O(N) without blank lines and ignores RICH_TAG.lastIndex", () => {
+  const parse = incrementalMarkdown();
+  let full = "# Unblanked Section\nMEDIA:/tmp/chart.png\nLead with <file path=\"./spec.pdf\" name=\"Spec\" />\n> quoted note\n```ts\nconst ok = 1;\n```\n| Col A | Col B |\n| --- | --- |\n| 1 | 2 |\n- item one\n- item two\n### Subsection\n";
+  parse(full);
+  for (let i = 0; i < 64; i++) {
+    RICH_TAG.lastIndex = 9999;
+    full += `Continuation ${i}: ` + "alpha beta gamma ".repeat(32) + "\n";
+    parse(full);
+  }
+  const totalUtf8 = new TextEncoder().encode(full).length;
+  expect(totalUtf8).toBeGreaterThan(32_768);
+  expect(parse.scannedBytes).toBe(totalUtf8);
+  expect(parse.parsedBytes).toBeLessThan(totalUtf8 * 25);
+  expect(parse(full)).toEqual(parseMarkdown(full));
+
+  RICH_TAG.lastIndex = 9999;
+  const tagMsg = 'First <image path="./one.png" alt="One" /> and <file path="./two.pdf">Two</file>.';
+  expect(markdownText(tagMsg)).toBe("First One and Two.");
+  RICH_TAG.lastIndex = 9999;
+  const { container } = render(() => <MdView text={tagMsg} />);
+  expect(container.textContent).toContain("Two");
 });
 
 it("detects mid-document interior edits >4096 chars, preserves list-nested open fences after blank lines, and scans long GFM preambles linearly", () => {

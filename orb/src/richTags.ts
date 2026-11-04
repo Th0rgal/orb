@@ -9,6 +9,10 @@ import { leansysRichTagAdmitted } from "./orbKernel";
 
 export const RICH_TAG = /<(image|file)\s+([^>]*?)(?:\/\s*>|>([^<]*?)<\/\1\s*>)/gi;
 
+export function hasRichTagSyntax(text: string): boolean {
+  return /<(?:image|file)\s/i.test(text);
+}
+
 export type RichTag = { type: "image" | "file"; path: string; label: string; unavailable?: true };
 
 const present = (value: string | undefined) => value?.trim().replace(/\s+/g, " ") || undefined;

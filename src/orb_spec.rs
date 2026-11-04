@@ -86,6 +86,48 @@ pub fn decode_host_wire_slice(
     shadow::OrbWireSliceView::decode_slice(bytes, expected_schema_id, max_budget)
 }
 
+pub fn observe_host_scroll_policy_gap(height: i64, client: i64, top: i64) -> Option<i64> {
+    scroll_policy_gap(height, client, top)
+}
+
+pub fn observe_host_scroll_policy_correct(
+    height: i64,
+    client: i64,
+    top: i64,
+    anchor_doc: i64,
+    y0: i64,
+) -> Option<i64> {
+    scroll_policy_correct(height, client, top, anchor_doc, y0)
+}
+
+pub fn step_host_scroll_policy(input: ScrollPolicyInput) -> ScrollPolicyVerdict {
+    scroll_policy_step(input)
+}
+
+pub fn step_host_wire_scroll_slice(
+    in_slice: &[u8],
+    out_buf: &mut [u8],
+    input: ScrollPolicyInput,
+) -> Result<(ScrollPolicyVerdict, usize), OrbWireStatus> {
+    wire_scroll_slice_step(in_slice, out_buf, input)
+}
+
+pub fn step_host_wire_stream_slice(
+    in_tail: &[u8],
+    out_buf: &mut [u8],
+    input: StreamBoundedCommitInput,
+) -> Result<(WireStreamSliceVerdict, usize), OrbWireStatus> {
+    wire_stream_slice_step(in_tail, out_buf, input)
+}
+
+pub fn step_host_wire_transcript_slice(
+    in_event: &[u8],
+    out_buf: &mut [u8],
+    input: TranscriptFoldStepInput,
+) -> Result<(TranscriptFoldStepVerdict, usize), WireTranscriptSliceError> {
+    wire_transcript_slice_step(in_event, out_buf, input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +352,98 @@ mod tests {
         .unwrap();
         assert_eq!(view.record_count(), 1);
         assert_eq!(view.arena_slice(0, 4), Some(&b"host"[..]));
+
+        assert_eq!(observe_host_scroll_policy_gap(1_000, 400, 700), Some(-100));
+        assert_eq!(observe_host_scroll_policy_gap(1 << 30, 400, 700), None);
+        assert_eq!(
+            observe_host_scroll_policy_correct(2_000, 600, 500, 1_200, 100),
+            Some(1_100)
+        );
+        assert_eq!(
+            observe_host_scroll_policy_correct(2_000, 600, 500, -(1 << 30) - 1, 100),
+            None
+        );
+        let sp = step_host_scroll_policy(ScrollPolicyInput {
+            op_kind: ScrollPolicyOp::Layout as u8,
+            pinned: false,
+            intent: false,
+            resized: false,
+            cur_top: 800,
+            height: 2_000,
+            client: 600,
+            arg: -700,
+        });
+        assert!(sp.admitted);
+        assert_eq!(sp.top, 100);
+
+        let mut r4_out = [0xAAu8; 64];
+        let (ws, ws_len) = step_host_wire_scroll_slice(
+            b"scroll",
+            &mut r4_out,
+            ScrollPolicyInput {
+                op_kind: ScrollPolicyOp::UserScroll as u8,
+                pinned: false,
+                intent: true,
+                resized: false,
+                cur_top: 100,
+                height: 2_000,
+                client: 600,
+                arg: 1_400,
+            },
+        )
+        .unwrap();
+        assert_eq!(ws_len, ORB_WIRE_FIXED_SLICE_FRAME_BYTES);
+        assert!(ws.pinned);
+
+        let (stm, stm_len) = step_host_wire_stream_slice(
+            b"```lean\nopen tail",
+            &mut r4_out,
+            StreamBoundedCommitInput {
+                prev_len: 20,
+                prev_commit: 5,
+                prev_checkpoint: 12,
+                new_len: 40,
+                raw_commit: 5,
+                max_open_tail_bytes: 8,
+            },
+        )
+        .unwrap();
+        assert_eq!(stm_len, ORB_WIRE_FIXED_SLICE_FRAME_BYTES);
+        assert_eq!(stm.next_checkpoint, 32);
+
+        let (tr, tr_len) = step_host_wire_transcript_slice(
+            b"delta",
+            &mut r4_out,
+            TranscriptFoldStepInput {
+                last_applied_seq: 10,
+                incoming_seq: 11,
+                entry_count: 3,
+                thinking_open: true,
+                normalized_action: 5,
+                is_replay_from_log: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(tr_len, ORB_WIRE_FIXED_SLICE_FRAME_BYTES);
+        assert_eq!(tr.next_entry_count, 4);
+
+        let gap_err = step_host_wire_transcript_slice(
+            b"delta",
+            &mut r4_out,
+            TranscriptFoldStepInput {
+                last_applied_seq: 10,
+                incoming_seq: 13,
+                entry_count: 3,
+                thinking_open: true,
+                normalized_action: 5,
+                is_replay_from_log: false,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            gap_err,
+            WireTranscriptSliceError::FoldRejected(v)
+                if !v.admitted && v.action_code == 3 && v.gap_buffered
+        ));
     }
 }

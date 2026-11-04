@@ -592,9 +592,81 @@ object OrbKernel {
         maxBudgetBytes: Int
     ): Int
 
+    @JvmStatic
+    external fun orbScrollPolicyGap(height: Long, client: Long, top: Long): Long
+
+    @JvmStatic
+    external fun orbScrollPolicyCorrect(
+        height: Long,
+        client: Long,
+        top: Long,
+        anchorDoc: Long,
+        y0: Long
+    ): Long
+
+    @JvmStatic
+    external fun orbScrollPolicyStep(
+        opKind: Int,
+        pinned: Int,
+        intent: Int,
+        resized: Int,
+        curTop: Long,
+        height: Long,
+        client: Long,
+        arg: Long
+    ): Long
+
+    @JvmStatic
+    external fun orbWireScrollSliceStep(
+        inPtr: Long,
+        inLen: Long,
+        outPtr: Long,
+        outCap: Long,
+        is32Bit: Int,
+        opKind: Int,
+        pinned: Int,
+        intent: Int,
+        resized: Int,
+        curTop: Long,
+        height: Long,
+        client: Long,
+        arg: Long
+    ): Long
+
+    @JvmStatic
+    external fun orbWireStreamSliceStep(
+        inPtr: Long,
+        inLen: Long,
+        outPtr: Long,
+        outCap: Long,
+        is32Bit: Int,
+        prevLen: Int,
+        prevCommit: Int,
+        prevCheckpoint: Int,
+        newLen: Int,
+        rawCommit: Int,
+        maxOpenTailBytes: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbWireTranscriptSliceStep(
+        inPtr: Long,
+        inLen: Long,
+        outPtr: Long,
+        outCap: Long,
+        is32Bit: Int,
+        lastAppliedSeq: Long,
+        incomingSeq: Long,
+        entryCount: Int,
+        thinkingOpen: Int,
+        normalizedAction: Int,
+        isReplayFromLog: Int
+    ): Long
+
     data class WorkfoldVerdict(val foldItem: Boolean, val foldHasToolNext: Boolean)
 
     private fun bInt(v: Boolean): Int = if (v) 1 else 0
+    private fun enum8(v: Int): Int = if (v in 0..255) v else 255
 
     fun workfoldStep(
         itemKind: Int,
@@ -606,7 +678,7 @@ object OrbKernel {
     ): WorkfoldVerdict {
         requireNative()
         val raw = orbWorkfoldStep(
-            itemKind,
+            enum8(itemKind),
             bInt(isCumulative),
             bInt(isNonEmpty),
             bInt(toolAhead),
@@ -731,28 +803,28 @@ object OrbKernel {
             attrOff.toLong(),
             attrLen.toLong(),
             bufLen.toLong(),
-            tagKind
+            enum8(tagKind)
         ).toInt() != 0
     }
 
     fun missionStateClassify(stateId: Int): Int {
         requireNative()
-        return orbMissionStateClassify(stateId)
+        return orbMissionStateClassify(enum8(stateId))
     }
 
     fun missionSortRank(stateId: Int): Int {
         requireNative()
-        return orbMissionSortRank(stateId)
+        return orbMissionSortRank(enum8(stateId))
     }
 
     fun missionFlags(stateId: Int): Int {
         requireNative()
-        return orbMissionFlags(stateId)
+        return orbMissionFlags(enum8(stateId))
     }
 
     fun missionInboxSection(stateId: Int): Int {
         requireNative()
-        return orbMissionInboxSection(stateId)
+        return orbMissionInboxSection(enum8(stateId))
     }
 
     data class ConnectionIssueVerdict(
@@ -819,7 +891,7 @@ object OrbKernel {
 
     fun machineActionAdmitted(stateKind: Int, isBusy: Boolean = false, isMuted: Boolean = false): MachineActionVerdict {
         requireNative()
-        val raw = orbMachineActionAdmitted(stateKind.coerceIn(0, 255), bInt(isBusy), bInt(isMuted))
+        val raw = orbMachineActionAdmitted(enum8(stateKind), bInt(isBusy), bInt(isMuted))
         return MachineActionVerdict(
             isLive = (raw and 1) != 0,
             canAct = ((raw ushr 8) and 1) != 0,
@@ -841,14 +913,16 @@ object OrbKernel {
         httpStatus: Int = 0
     ): SendFlowVerdict {
         requireNative()
+        val clampedPending = if (pendingCount <= 0) 0 else minOf(255, pendingCount)
+        val clampedStatus = if (httpStatus < 0) 0 else httpStatus
         val raw = orbSendFlowStep(
             bInt(isBusy),
             bInt(hasNonEmptyText),
             bInt(canQueue),
             bInt(awaitingAck),
             bInt(isDraining),
-            pendingCount.coerceIn(0, 255),
-            maxOf(0, httpStatus)
+            clampedPending,
+            clampedStatus
         )
         return SendFlowVerdict(
             tapAction = raw and 0xFF,
@@ -867,8 +941,9 @@ object OrbKernel {
     )
 
     fun streamFenceStep(openKind: Int, openCount: Int, markerKind: Int, markerCount: Int): Pair<Int, Int> {
+        if (openCount < 0 || markerCount < 0) return openKind to maxOf(0, openCount)
         requireNative()
-        val raw = orbStreamFenceStep(openKind, openCount, markerKind, markerCount)
+        val raw = orbStreamFenceStep(enum8(openKind), openCount, enum8(markerKind), markerCount)
         return (raw and 0xFFL).toInt() to ((raw ushr 32) and 0xFFFF_FFFFL).toInt()
     }
 
@@ -883,15 +958,25 @@ object OrbKernel {
         pos: Int,
         commit: Int
     ): StreamCommitVerdict {
+        if (openCount < 0 || markerCount < 0 || pos < 0 || commit < 0) {
+            return StreamCommitVerdict(
+                tick = tick,
+                openKind = openKind,
+                openCount = maxOf(0, openCount),
+                commits = false,
+                pos = maxOf(0, pos),
+                commit = maxOf(0, commit)
+            )
+        }
         requireNative()
         val fence = streamFenceStep(openKind, openCount, markerKind, markerCount)
         val raw = orbStreamCommitStep(
             bInt(tick),
-            openKind,
+            enum8(openKind),
             openCount,
             bInt(lineBlank),
             bInt(lineTick),
-            markerKind,
+            enum8(markerKind),
             markerCount,
             pos,
             commit
@@ -918,6 +1003,7 @@ object OrbKernel {
         pageAlignMask: Long = 16383L,
         isAppExtension: Boolean = false
     ): Boolean {
+        if (dirtyRssBytes < 0L || allocBytes < 0L || maxJetsamBytes < 0L || pageAlignMask < 0L) return false
         requireNative()
         return leansysVerifyIosJetsamBudget(dirtyRssBytes, allocBytes, maxJetsamBytes, pageAlignMask, bInt(isAppExtension)) != 0
     }
@@ -929,8 +1015,9 @@ object OrbKernel {
         totalLen: Long,
         topologyKind: Int = 1
     ): Boolean {
+        if (activeWorkers < 0L || maxWorkers < 0L || microChunks < 0L || totalLen < 0L) return false
         requireNative()
-        return leansysVerifyWorkerBudget(activeWorkers, maxWorkers, microChunks, totalLen, topologyKind.coerceIn(0, 255)) != 0
+        return leansysVerifyWorkerBudget(activeWorkers, maxWorkers, microChunks, totalLen, enum8(topologyKind)) != 0
     }
 
     fun verifyPageAlignedBuffer(
@@ -941,6 +1028,7 @@ object OrbKernel {
         maxBudgetBytes: Long,
         pageAlignMask: Long = 16383L
     ): Boolean {
+        if (addr < 0L || allocBytes < 0L || capacityBytes < 0L || dirtyRssBytes < 0L || maxBudgetBytes < 0L || pageAlignMask < 0L) return false
         requireNative()
         return leansysVerifyPageAlignedBuffer(addr, allocBytes, capacityBytes, dirtyRssBytes, maxBudgetBytes, pageAlignMask) != 0
     }
@@ -951,8 +1039,9 @@ object OrbKernel {
         requestedVariantId: Int,
         maxVariantId: Int = 4
     ): Int {
+        if (detectedHwCaps < 0L || requiredMask < 0L) return 0
         requireNative()
-        return leansysSelectIsa(detectedHwCaps, requiredMask, requestedVariantId.coerceIn(0, 255), maxVariantId.coerceIn(0, 255))
+        return leansysSelectIsa(detectedHwCaps, requiredMask, enum8(requestedVariantId), enum8(maxVariantId))
     }
 
     fun verifyIsaSelection(
@@ -961,11 +1050,13 @@ object OrbKernel {
         selectedVariantId: Int,
         maxVariantId: Int = 4
     ): Boolean {
+        if (detectedHwCaps < 0L || requiredMask < 0L) return false
         requireNative()
-        return leansysVerifyIsaSelection(detectedHwCaps, requiredMask, selectedVariantId.coerceIn(0, 255), maxVariantId.coerceIn(0, 255)) != 0
+        return leansysVerifyIsaSelection(detectedHwCaps, requiredMask, enum8(selectedVariantId), enum8(maxVariantId)) != 0
     }
 
     fun verifyFdBounds(rawWord: Long, fdOut: Int): Boolean {
+        if (fdOut < 0) return false
         requireNative()
         return leansysVerifyFdBounds(rawWord, fdOut) != 0
     }
@@ -986,15 +1077,23 @@ object OrbKernel {
         targetScrollTopPx: Int,
         currentScrollTopPx: Int
     ): ScrollEpochVerdict {
+        if (layoutEpoch < 0 || lastCorrectedEpoch < 0 || correctionsInEpoch < 0 || targetScrollTopPx < 0 || currentScrollTopPx < 0) {
+            return ScrollEpochVerdict(
+                action = 0,
+                applyCorrection = false,
+                nextCorrectionsInEpoch = if (correctionsInEpoch > 0) 1 else 0,
+                resolvedScrollTopPx = maxOf(0, currentScrollTopPx)
+            )
+        }
         requireNative()
         val raw = orbScrollEpochStep(
-            maxOf(0, layoutEpoch),
-            maxOf(0, lastCorrectedEpoch),
-            correctionsInEpoch.coerceIn(0, 255),
+            layoutEpoch,
+            lastCorrectedEpoch,
+            enum8(correctionsInEpoch),
             bInt(isPinnedToBottom),
             bInt(userIsDragging),
-            maxOf(0, targetScrollTopPx),
-            maxOf(0, currentScrollTopPx)
+            targetScrollTopPx,
+            currentScrollTopPx
         )
         val lo32 = (raw and 0xFFFF_FFFFL).toInt()
         val hi32 = ((raw ushr 32) and 0xFFFF_FFFFL).toInt()
@@ -1021,14 +1120,17 @@ object OrbKernel {
         sendQueueDepth: Int,
         scrollCorrectedInEpoch: Int
     ): ClientParityVerdict {
+        if (wireSchemaId < 0 || transcriptSeq < 0 || markdownBlocksCount < 0 || sendQueueDepth < 0 || scrollCorrectedInEpoch < 0) {
+            return ClientParityVerdict(action = 0, parityAdmitted = false, singleScrollCorrectionOk = false, digest32 = 0L)
+        }
         requireNative()
         val raw = orbClientParityStep(
-            clientTarget.coerceIn(0, 255),
-            maxOf(0, wireSchemaId),
-            maxOf(0, transcriptSeq),
-            maxOf(0, markdownBlocksCount),
-            maxOf(0, sendQueueDepth),
-            scrollCorrectedInEpoch.coerceIn(0, 255)
+            enum8(clientTarget),
+            wireSchemaId,
+            transcriptSeq,
+            markdownBlocksCount,
+            sendQueueDepth,
+            enum8(scrollCorrectedInEpoch)
         )
         val lo32 = (raw and 0xFFFF_FFFFL).toInt()
         val hi32 = (raw ushr 32) and 0xFFFF_FFFFL
@@ -1048,6 +1150,7 @@ object OrbKernel {
         writtenLen: Long,
         is32Bit: Boolean = false
     ): Int {
+        if (inPtr < 0L || inLen < 0L || outPtr < 0L || outCap < 0L || writtenLen < 0L) return 8
         requireNative()
         return orbWireVerifySliceIo(inPtr, inLen, outPtr, outCap, writtenLen, bInt(is32Bit)) and 0xFF
     }
@@ -1062,15 +1165,18 @@ object OrbKernel {
         maxBudgetBytes: Int,
         is32Bit: Boolean = false
     ): Int {
+        if (inArenaPtr < 0L || outPtr < 0L || outCap < 0L) return 8
+        if (schemaId < 0) return 2
+        if (recordsCount < 0 || arenaLen < 0 || maxBudgetBytes < 0) return 3
         requireNative()
         return orbWireEncodeSliceStep(
             inArenaPtr,
             outPtr,
             outCap,
-            maxOf(0, schemaId),
-            maxOf(0, recordsCount),
-            maxOf(0, arenaLen),
-            maxOf(0, maxBudgetBytes),
+            schemaId,
+            recordsCount,
+            arenaLen,
+            maxBudgetBytes,
             bInt(is32Bit)
         ) and 0xFF
     }
@@ -1089,20 +1195,189 @@ object OrbKernel {
         arenaLen: Int,
         maxBudgetBytes: Int
     ): Int {
+        if (inPtr < 0L || inLen < 0L) return 8
+        if (abiVersion < 0) return 1
+        if (schemaId < 0 || expectedSchemaId < 0) return 2
+        if (totalLen < 0 || payloadLen < 0 || arenaOff < 0 || arenaLen < 0 || maxBudgetBytes < 0) return 3
         requireNative()
         return orbWireDecodeSliceStep(
             inPtr,
             inLen,
             bInt(is32Bit),
             magic,
-            maxOf(0, abiVersion),
-            maxOf(0, schemaId),
-            maxOf(0, expectedSchemaId),
-            maxOf(0, totalLen),
-            maxOf(0, payloadLen),
-            maxOf(0, arenaOff),
-            maxOf(0, arenaLen),
-            maxOf(0, maxBudgetBytes)
+            abiVersion,
+            schemaId,
+            expectedSchemaId,
+            totalLen,
+            payloadLen,
+            arenaOff,
+            arenaLen,
+            maxBudgetBytes
         ) and 0xFF
+    }
+
+    private const val SCROLL_DOMAIN_MIN: Long = -0x4000_0000L
+    private const val SCROLL_DOMAIN_MAX: Long = 0x3FFF_FFFFL
+    private fun inScrollDomain(v: Long): Boolean = v in SCROLL_DOMAIN_MIN..SCROLL_DOMAIN_MAX
+
+    fun scrollPolicyGap(height: Long, client: Long, top: Long): Long? {
+        if (!inScrollDomain(height) || !inScrollDomain(client) || !inScrollDomain(top)) return null
+        requireNative()
+        return orbScrollPolicyGap(height, client, top)
+    }
+
+    fun scrollPolicyCorrect(
+        height: Long,
+        client: Long,
+        top: Long,
+        anchorDoc: Long,
+        y0: Long
+    ): Long? {
+        if (!inScrollDomain(height) || !inScrollDomain(client) || !inScrollDomain(top) || !inScrollDomain(anchorDoc) || !inScrollDomain(y0)) return null
+        requireNative()
+        return orbScrollPolicyCorrect(height, client, top, anchorDoc, y0)
+    }
+
+    data class ScrollPolicyVerdict(
+        val status: Int,
+        val admitted: Boolean,
+        val pinned: Boolean,
+        val top: Long
+    )
+
+    fun scrollPolicyStep(
+        opKind: Int,
+        pinned: Boolean,
+        intent: Boolean,
+        resized: Boolean,
+        curTop: Long,
+        height: Long,
+        client: Long,
+        arg: Long
+    ): ScrollPolicyVerdict {
+        requireNative()
+        val raw = orbScrollPolicyStep(
+            enum8(opKind),
+            bInt(pinned),
+            bInt(intent),
+            bInt(resized),
+            curTop,
+            height,
+            client,
+            arg
+        )
+        val lo32 = (raw and 0xFFFF_FFFFL).toInt()
+        val hi32 = (raw ushr 32) and 0xFFFF_FFFFL
+        return ScrollPolicyVerdict(
+            status = lo32 and 0xFF,
+            admitted = ((lo32 ushr 8) and 1) != 0,
+            pinned = ((lo32 ushr 9) and 1) != 0,
+            top = hi32
+        )
+    }
+
+    fun wireScrollSliceStep(
+        inPtr: Long,
+        inLen: Long,
+        outPtr: Long,
+        outCap: Long,
+        is32Bit: Boolean = false,
+        opKind: Int,
+        pinned: Boolean,
+        intent: Boolean,
+        resized: Boolean,
+        curTop: Long,
+        height: Long,
+        client: Long,
+        arg: Long
+    ): Long {
+        if (inPtr < 0L || inLen < 0L || outPtr < 0L || outCap < 0L) {
+            val keepPin = if (pinned) 512L else 0L
+            val keepTop = minOf(0xFFFF_FFFFL, maxOf(0L, curTop))
+            return (8L or keepPin) or (keepTop shl 32)
+        }
+        requireNative()
+        return orbWireScrollSliceStep(
+            inPtr,
+            inLen,
+            outPtr,
+            outCap,
+            bInt(is32Bit),
+            enum8(opKind),
+            bInt(pinned),
+            bInt(intent),
+            bInt(resized),
+            curTop,
+            height,
+            client,
+            arg
+        )
+    }
+
+    fun wireStreamSliceStep(
+        inPtr: Long,
+        inLen: Long,
+        outPtr: Long,
+        outCap: Long,
+        is32Bit: Boolean = false,
+        prevLen: Int,
+        prevCommit: Int,
+        prevCheckpoint: Int,
+        newLen: Int,
+        rawCommit: Int,
+        maxOpenTailBytes: Int
+    ): Long {
+        val fallbackCheckpoint = (maxOf(0, prevCheckpoint).toLong() and 0xFFFF_FFFFL) shl 32
+        if (inPtr < 0L || inLen < 0L || outPtr < 0L || outCap < 0L) return 8L or fallbackCheckpoint
+        if (prevLen < 0 || prevCommit < 0 || prevCheckpoint < 0 || newLen < 0 || rawCommit < 0 || maxOpenTailBytes < 0) {
+            return 3L or fallbackCheckpoint
+        }
+        requireNative()
+        return orbWireStreamSliceStep(
+            inPtr,
+            inLen,
+            outPtr,
+            outCap,
+            bInt(is32Bit),
+            prevLen,
+            prevCommit,
+            prevCheckpoint,
+            newLen,
+            rawCommit,
+            maxOpenTailBytes
+        )
+    }
+
+    fun wireTranscriptSliceStep(
+        inPtr: Long,
+        inLen: Long,
+        outPtr: Long,
+        outCap: Long,
+        is32Bit: Boolean = false,
+        lastAppliedSeq: Long,
+        incomingSeq: Long,
+        entryCount: Int,
+        thinkingOpen: Boolean,
+        normalizedAction: Int,
+        isReplayFromLog: Boolean
+    ): Long {
+        val keepThink = if (thinkingOpen) 512L else 0L
+        val fallbackCount = (maxOf(0, entryCount).toLong() and 0xFFFF_FFFFL) shl 32
+        if (inPtr < 0L || inLen < 0L || outPtr < 0L || outCap < 0L) return (8L or keepThink) or fallbackCount
+        if (lastAppliedSeq < 0L || incomingSeq < 0L || entryCount < 0) return (3L or keepThink) or fallbackCount
+        requireNative()
+        return orbWireTranscriptSliceStep(
+            inPtr,
+            inLen,
+            outPtr,
+            outCap,
+            bInt(is32Bit),
+            lastAppliedSeq,
+            incomingSeq,
+            entryCount,
+            bInt(thinkingOpen),
+            enum8(normalizedAction),
+            bInt(isReplayFromLog)
+        )
     }
 }

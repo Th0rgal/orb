@@ -46,6 +46,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .lake/build/lib/lean/Orb .lake/build/ir/Orb
+          lean -DwarningAsError=true -DautoImplicit=false Orb/Scroll.lean \
+            -o .lake/build/lib/lean/Orb/Scroll.olean \
+            -i .lake/build/lib/lean/Orb/Scroll.ilean
+          lean -DwarningAsError=true -DautoImplicit=false Orb/Stream.lean \
+            -o .lake/build/lib/lean/Orb/Stream.olean \
+            -i .lake/build/lib/lean/Orb/Stream.ilean
           lean -DwarningAsError=true -DautoImplicit=false Orb/Kernel.lean \
             -o .lake/build/lib/lean/Orb/Kernel.olean \
             -i .lake/build/lib/lean/Orb/Kernel.ilean \
@@ -60,12 +66,6 @@ jobs:
             -o .lake/build/lib/lean/Orb/StatefulMutantSuite.olean \
             -i .lake/build/lib/lean/Orb/StatefulMutantSuite.ilean
           LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true audit/AuditSpec.lean
-          lean -DwarningAsError=true -DautoImplicit=false Orb/Scroll.lean \
-            -o .lake/build/lib/lean/Orb/Scroll.olean \
-            -i .lake/build/lib/lean/Orb/Scroll.ilean
-          lean -DwarningAsError=true -DautoImplicit=false Orb/Stream.lean \
-            -o .lake/build/lib/lean/Orb/Stream.olean \
-            -i .lake/build/lib/lean/Orb/Stream.ilean
           lean -DwarningAsError=true -DautoImplicit=false Orb/Transcript.lean \
             -o .lake/build/lib/lean/Orb/Transcript.olean \
             -i .lake/build/lib/lean/Orb/Transcript.ilean
