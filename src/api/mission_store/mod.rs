@@ -487,7 +487,9 @@ pub struct MissionProject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     /// Normalized folder path inside `project` (`""` for project root).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// Always serialized so snapshots moving a mission back to root (`""`) at a
+    /// higher `placement_revision` unambiguously clear cached client folders.
+    #[serde(default)]
     pub folder: String,
     /// Monotone placement version incremented on every authoritative project or
     /// folder move (`orb_placement_merge_step`).

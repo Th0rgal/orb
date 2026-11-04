@@ -64,6 +64,7 @@ it("moves nested agents and crons with moveFolderWork fallback and reports failu
   const { moveFolderWork } = await import('../src/fileActions');
   const missions = [
     {id:'inside',project:'test',folder:'notes/deep',tags:['pinned']},
+    {id:'sibling',project:'test',folder:'notes',tags:[]},
     {id:'stuck',project:'test',folder:'notes',tags:[]},
   ];
   const sent: Array<{url:string;body:any}> = [];
@@ -90,6 +91,21 @@ it("moves nested agents and crons with moveFolderWork fallback and reports failu
     project:'test',
     folder:'archive/renamed/deep',
   });
+  expect(sent.find(call => call.url.endsWith('/api/control/missions/move') && call.body.mission_ids.length === 1 && call.body.mission_ids[0] === 'sibling')?.body).toMatchObject({
+    mission_ids:['sibling'],
+    project:'test',
+    folder:'archive/renamed',
+  });
   expect(sent.find(call => call.url.includes('/crons/job'))?.body).toMatchObject({folder:'archive/renamed'});
   expect(sent.some(call => call.url.includes('/crons/far'))).toBe(false);
+});
+
+it("marks local-context transfers with { local: true } so desktop callers relocate folder work", async () => {
+  const projectContext = await import("../src/projectContext");
+  const spy = vi.spyOn(projectContext, "localContextFile").mockResolvedValueOnce({} as never);
+  const fetch = vi.spyOn(globalThis, "fetch");
+  const res = await transferProjectFile("test", "notes", "archive", false);
+  expect(res).toEqual({ local: true });
+  expect(spy).toHaveBeenCalledWith("test", "move", "notes", "archive", undefined, undefined);
+  expect(fetch).not.toHaveBeenCalled();
 });

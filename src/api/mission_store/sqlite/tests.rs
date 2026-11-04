@@ -5303,4 +5303,9 @@ async fn typed_event_queries_seek_composite_index_and_preserve_sequence_order() 
     assert_eq!(meta.terminal_evidence.as_deref(), Some("{\"ok\":true}"));
     let full = store.get_mission(m.id).await.unwrap().unwrap();
     assert_eq!(full.history.len(), 4);
+
+    // Authoritative snapshots always serialize `folder: ""` at project root so clients
+    // polling after a folder -> root move (without SSE) clear cached folder state.
+    let json_val = serde_json::to_value(&meta).expect("serialize mission snapshot");
+    assert_eq!(json_val.get("folder").and_then(|v| v.as_str()), Some(""));
 }

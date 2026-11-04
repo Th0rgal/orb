@@ -219,3 +219,20 @@ test("excludes /btw side sessions and descendant workers even when resolved asyn
   expect(isBtwMission(grandchild)).toBe(true);
   expect(openBeyondPage([main], [btw, worker, grandchild]).map(m => m.id)).toEqual([]);
 });
+
+test("snapshot with explicit folder: '' at higher placement_revision clears cached folder when SSE was missed", () => {
+  resetMissionHierarchy();
+  const inFolder = stickHierarchy(row("root-move", { project: "assistant", folder: "Research", placement_revision: 1 }));
+  expect(inFolder.folder).toBe("Research");
+
+  // Another client moved `root-move` back to project root (`folder: ""`, `placement_revision: 2`),
+  // and this client missed the SSE event and observes the authoritative snapshot on poll.
+  const movedToRoot = stickHierarchy(row("root-move", { project: "assistant", folder: "", placement_revision: 2 }));
+  expect(movedToRoot.folder).toBe("");
+  expect(movedToRoot.placement_revision).toBe(2);
+
+  // Subsequent stale poll from before the move (`placement_revision: 1`) cannot revert it.
+  const stale = stickHierarchy(row("root-move", { project: "assistant", folder: "Research", placement_revision: 1 }));
+  expect(stale.folder).toBe("");
+  expect(stale.placement_revision).toBe(2);
+});

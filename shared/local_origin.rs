@@ -8,7 +8,7 @@ pub struct Origin {
     pub client_id: uuid::Uuid,
     pub title: String,
     pub project: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default)]
     pub folder: String,
     pub backend: String,
     pub model: Option<String>,

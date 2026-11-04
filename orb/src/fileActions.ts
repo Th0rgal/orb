@@ -12,7 +12,7 @@ import {
 } from "./api";
 import { writeClipboardReference } from "./clipboard";
 import { localContextFile } from "./projectContext";
-import { applyServerPlacementEvent, moveMissions } from "./missionMove";
+import { applyServerPlacementEvent, moveMission, moveMissions } from "./missionMove";
 
 export interface FileClipboard { slug: string; path: string; copy: boolean; directory?: boolean; backend: string; account: string; nonce: string }
 export interface CronClipboard { slug: string; id: string; name: string; folder?: string; backend: string; account: string; nonce: string }
@@ -47,6 +47,7 @@ export interface TransferFileResponse {
   path?: string;
   moved_missions?: MissionPlacementItem[];
   moved_crons?: number;
+  local?: boolean;
 }
 
 /** Files and folders share one transfer; another project receives a copy before the source is removed. */
@@ -59,7 +60,7 @@ export async function transferProjectFile(slug: string, path: string, destinatio
     if (!known.projects?.some(row => row.slug === project && row.status !== "archived" && row.status !== "deleted")) throw new Error("The destination project no longer exists. Refresh the project list.");
   }
   const local = await localContextFile(slug, copy ? "copy" : "move", path, destination, undefined, project === slug ? undefined : project);
-  if (local) return;
+  if (local) return { local: true };
   if (version !== connectionVersion()) throw new Error("Connection changed. Try again.");
   try {
     // A separate route: an older backend must refuse, not move within the source project.
@@ -168,7 +169,13 @@ export async function moveFolderWork(slug: string, path: string, destination: st
     folder: target(folder),
   }));
   if (missionPlan.length) {
-    const missionFailures = await moveMissions(missionPlan, slug);
+    let missionFailures = await moveMissions(missionPlan, slug);
+    if (missionFailures.length && missionPlan.length > 1) {
+      missionFailures = [];
+      for (const step of missionPlan) {
+        await moveMission(step.id, slug, step.folder, slug).catch(error => missionFailures.push({ id: step.id, error }));
+      }
+    }
     for (const f of missionFailures) failed.push(f.id.slice(0, 8));
   }
   for (const job of work.crons) await updateProjectCron(slug, job.id, { folder: target(job.folder ?? "") }).catch(() => failed.push(job.name));

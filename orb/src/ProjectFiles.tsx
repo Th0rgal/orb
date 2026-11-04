@@ -8,7 +8,7 @@ import {nativeComposerDrop} from "./composerDrop";
 import {importProjectFiles} from "./projectFileImport";
 import {backgroundUploads,cancelBackgroundUpload,formatFileSize,pauseBackgroundUpload,resumeBackgroundUpload,type UploadSource} from "./uploads";
 import {subscribeProjectContext} from "./projectContext";
-import { assertFolderHasNoWork, makeFileReference, readFileReference, makeCronReference, readCronReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
+import { assertFolderHasNoWork, makeFileReference, readFileReference, makeCronReference, readCronReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, moveFolderWork, transferProjectFile } from "./fileActions";
 import { FolderActivityIcon, folderActivity } from "./FolderActivity";
 import { createSidebarRequests } from "./sidebarRequests";
 import { folderLabel, setFolderLabel } from "./folderLabels";
@@ -613,7 +613,7 @@ export function LiveProjectsSection(p: {
     await loadDir(slug, fileParent(path), true);
     if (destination && fileParent(destination) !== fileParent(path)) await loadDir(slug, fileParent(destination), true);
   };
-  const folderMoved = async (slug: string, path: string, destination: string, project = slug) => {
+  const folderMoved = async (slug: string, path: string, destination: string, project = slug, localTransfer = false) => {
     setFolderLabel(slug, path, fileBaseName(path));
     batch(() => {
       const oldPrefix = `${slug}:${path}`, newPrefix = `${project}:${destination}`;
@@ -630,7 +630,13 @@ export function LiveProjectsSection(p: {
     });
     const selected = p.selected(), prefix = `pf:${slug}:${path}`;
     if (selected === prefix || selected?.startsWith(`${prefix}/`)) p.open(`pf:${project}:${destination}${selected.slice(prefix.length)}`);
+    let moveError: unknown;
+    if (localTransfer && project === slug) {
+      try { await moveFolderWork(slug, path, destination); }
+      catch (err) { moveError = err; }
+    }
     await Promise.all([loadMissions(slug), loadCrons(slug, true)]);
+    if (moveError) throw moveError;
   };
   const saveFileAction = async () => {
     const target = fileAction(), version = connectionVersion();
@@ -639,10 +645,10 @@ export function LiveProjectsSection(p: {
     try {
       const destination = target.kind === "delete" ? undefined : fileDestination(target.path, fileActionValue(), target.kind === "rename");
       if (destination) {
-        await transferProjectFile(target.slug, target.path, destination);
+        const res = await transferProjectFile(target.slug, target.path, destination);
         if (target.directory) {
           setFileAction(null);
-          try { await folderMoved(target.slug, target.path, destination); }
+          try { await folderMoved(target.slug, target.path, destination, target.slug, res?.local === true); }
           finally { await refreshFileParents(target.slug, target.path, destination); }
           return;
         }
@@ -671,9 +677,11 @@ export function LiveProjectsSection(p: {
       const other = item.slug !== slug;
       const destination = other ? [path, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, path, false);
       // Agents and crons belong to their project: only documents cross over.
+      let localTransfer = false;
       const transfer = async () => {
         if (other && item.directory && !item.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
-        await transferProjectFile(item.slug, item.path, destination, item.copy, slug);
+        const res = await transferProjectFile(item.slug, item.path, destination, item.copy, slug);
+        localTransfer = res?.local === true;
       };
       const moveKey = fileMoveKey(item.slug, item.path);
       // A move shows at its destination at once; a copy waits for the server.
@@ -685,7 +693,7 @@ export function LiveProjectsSection(p: {
       if (!item.copy) settleMove(moveKey);
       setExpanded(path ? `${slug}:${path}` : slug, true);
       if (item.copy) return;
-      if (item.directory) await folderMoved(item.slug, item.path, destination, slug);
+      if (item.directory) await folderMoved(item.slug, item.path, destination, slug, localTransfer);
       else if (p.selected() === `pf:${item.slug}:${item.path}`) p.open(`pf:${slug}:${destination}`);
     } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
     finally { setFileBusy(false); }
@@ -1374,13 +1382,15 @@ export function LiveProjectsSection(p: {
         try {
           const other = item.slug !== targetSlug;
           const destination = other ? [targetPath, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, targetPath, false);
+          let localTransfer = false;
           await moveFile(item, destination, async () => {
             if (other && !bundle.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
-            await transferProjectFile(item.slug, item.path, destination, bundle.copy, targetSlug);
+            const res = await transferProjectFile(item.slug, item.path, destination, bundle.copy, targetSlug);
+            localTransfer = res?.local === true;
           });
           if (!bundle.copy) {
             movedFolders.set(`${item.slug}:${item.path}`, { destSlug: targetSlug, destPath: destination });
-            await folderMoved(item.slug, item.path, destination, targetSlug);
+            await folderMoved(item.slug, item.path, destination, targetSlug, localTransfer);
           }
           await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(targetSlug, targetPath, true)]);
         } catch (err) { failures.push(`${fileBaseName(item.path)}: ${err instanceof Error ? err.message : String(err)}`); }

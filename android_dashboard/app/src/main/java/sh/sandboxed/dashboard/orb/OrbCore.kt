@@ -2448,7 +2448,7 @@ class OrbCore private constructor(context: Context) {
         val items = rawMoves.mapNotNull { m ->
             val mid = OrbJSON.str(m, "mission_id", "id") ?: return@mapNotNull null
             val proj = OrbJSON.str(m, "project")?.takeIf { it.isNotEmpty() } ?: project?.trim()?.takeIf { it.isNotEmpty() }
-            val fld = OrbMissionTree.normalizeFolder(OrbJSON.str(m, "folder") ?: cleanFolder)
+            val fld = OrbMissionTree.normalizeFolder((m["folder"] as? String) ?: cleanFolder)
             val rev = maxOf(0L, (m["placement_revision"] as? Number)?.toLong() ?: 1L)
             OrbPlacementCommitItem(missionId = mid, project = proj, folder = fld, placementRevision = rev)
         }
@@ -2465,7 +2465,7 @@ class OrbCore private constructor(context: Context) {
         val items = rawMoved.mapNotNull { m ->
             val mid = OrbJSON.str(m, "mission_id", "id") ?: return@mapNotNull null
             val proj = OrbJSON.str(m, "project")?.takeIf { it.isNotEmpty() } ?: fallbackProject
-            val fld = OrbMissionTree.normalizeFolder(OrbJSON.str(m, "folder"))
+            val fld = OrbMissionTree.normalizeFolder(m["folder"] as? String)
             val rev = maxOf(0L, (m["placement_revision"] as? Number)?.toLong() ?: 1L)
             OrbPlacementCommitItem(missionId = mid, project = proj, folder = fld, placementRevision = rev)
         }
