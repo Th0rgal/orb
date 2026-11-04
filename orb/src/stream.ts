@@ -324,6 +324,7 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
   const listeners = new Set<SyncListener>();
   let socket: WebSocket | null = null;
   let ready = false;
+  let everReady = false;
   let closed = false;
   let consecutiveFailures = 0;
   let candidateIdx = 0;
@@ -379,9 +380,15 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
     }
   };
 
+  const detachWakeListeners = () => {
+    if (typeof window !== "undefined") window.removeEventListener("online", handleWakeOrOnline);
+    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", handleWakeOrOnline);
+  };
+
   const triggerFallbackAll = () => {
     closed = true;
     clearTimers();
+    detachWakeListeners();
     if (socket) { try { socket.close(); } catch { /* ignore */ } socket = null; }
     if (activeSyncHub === hub) activeSyncHub = null;
     for (const l of [...listeners]) {
@@ -426,6 +433,7 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       if (socket !== ws || closed) return;
       clearTimeout(connectDeadline);
       ready = true;
+      everReady = true;
       const hadFailures = consecutiveFailures > 0;
       consecutiveFailures = 0;
       syncSubscriptions();
@@ -504,21 +512,47 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       if (closed || !listeners.size) return;
       consecutiveFailures++;
       candidateIdx++;
-      // If we never managed to complete handshake across all candidates, fall back cleanly to SSE.
-      if (!wasReady && consecutiveFailures >= Math.max(2, candidates.length)) {
+      // Only fall back to individual SSE streams if `/api/control/sync` has NEVER
+      // completed a handshake on this session (e.g. legacy backend without WS upgrade).
+      // Once `everReady` is true, backend deploys or sleep/wake reconnect on `sync-ws`
+      // instead of permanently splitting into N HTTP/1.1 SSE streams.
+      if (!everReady && consecutiveFailures >= Math.max(2, candidates.length)) {
         triggerFallbackAll();
         return;
       }
       if (wasReady) {
         for (const l of listeners) if (l.getSinceSeq() === undefined) l.onLagged();
       }
-      const delay = Math.min(400 * 2 ** Math.min(consecutiveFailures - 1, 5), 10_000);
+      const delay = Math.min(400 * 2 ** Math.min(consecutiveFailures - 1, 5), 5_000);
       reconnectTimer = setTimeout(openSocket, delay);
     };
 
     ws.onerror = () => { /* onclose handles state transition */ };
     ws.onclose = handleDisconnect;
   };
+
+  function handleWakeOrOnline() {
+    if (closed || !listeners.size) return;
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    if (!socket && reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+      consecutiveFailures = 0;
+      openSocket();
+    } else if (socket && socket.readyState === WebSocket.OPEN && ready && !pongTimer) {
+      sendJson({ op: "ping", ts: Date.now() });
+      const activeWs = socket;
+      pongTimer = setTimeout(() => {
+        pongTimer = undefined;
+        if (socket === activeWs) {
+          try { activeWs.close(); } catch { /* ignore */ }
+        }
+      }, 2_500);
+    }
+  }
+
+  if (typeof window !== "undefined") window.addEventListener("online", handleWakeOrOnline);
+  if (typeof document !== "undefined") document.addEventListener("visibilitychange", handleWakeOrOnline);
 
   const hub: MultiplexSyncHub = {
     connVer: ver,
@@ -540,6 +574,7 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
     destroy() {
       closed = true;
       clearTimers();
+      detachWakeListeners();
       if (idleCloseTimer) clearTimeout(idleCloseTimer);
       if (socket) { try { socket.close(); } catch { /* ignore */ } socket = null; }
       listeners.clear();

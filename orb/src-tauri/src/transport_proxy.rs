@@ -34,14 +34,19 @@ const DNS_TIMEOUT: Duration = Duration::from_millis(2_500);
 const DOH_TIMEOUT: Duration = Duration::from_millis(2_200);
 const ORB_DESKTOP_USER_AGENT: &str = concat!("Orb/", env!("CARGO_PKG_VERSION"));
 const ENDPOINT_COOLDOWN: Duration = Duration::from_secs(20);
+const STREAM_PORT_SHARDS: usize = 6;
+const PER_CANDIDATE_API_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_REQUEST_HEADER_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TransportBridgeInfo {
-    /// Base URL including the per-launch secret prefix, e.g.
+    /// Base URL including the per-launch secret prefix for short-lived REST requests, e.g.
     /// `http://127.0.0.1:54321/__orb_tx/<token>` (no trailing slash).
     pub proxy_base_url: String,
+    /// Sharded loopback base URLs dedicated exclusively to long-lived SSE streams so
+    /// `WKWebView`'s 6-connection-per-origin HTTP/1.1 pool can never starve REST calls.
+    pub stream_proxy_base_urls: Vec<String>,
     pub configured_target: String,
     pub candidates: Vec<String>,
 }
@@ -363,6 +368,7 @@ struct BridgeConfig {
 
 struct BridgeRuntime {
     port: u16,
+    stream_ports: Vec<u16>,
     secret_prefix: String,
     api_client: reqwest::Client,
     stream_client: reqwest::Client,
@@ -416,8 +422,14 @@ impl BridgeRuntime {
                 guard.cooldowns.clear();
             }
         }
+        let stream_proxy_base_urls = self
+            .stream_ports
+            .iter()
+            .map(|p| format!("http://127.0.0.1:{p}{}", self.secret_prefix))
+            .collect();
         TransportBridgeInfo {
             proxy_base_url: format!("http://127.0.0.1:{}{}", self.port, self.secret_prefix),
+            stream_proxy_base_urls,
             configured_target: clean,
             candidates,
         }
@@ -432,21 +444,31 @@ fn ensure_bridge() -> Result<Arc<BridgeRuntime>, String> {
         .clone()
 }
 
+fn bind_loopback_listener() -> Result<(std::net::TcpListener, u16), String> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    Ok((listener, port))
+}
+
 fn start_bridge_with_resolver(
     resolver: Arc<ResilientDnsResolver>,
 ) -> Result<Arc<BridgeRuntime>, String> {
-    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    std_listener
-        .set_nonblocking(true)
-        .map_err(|e| e.to_string())?;
-    let port = std_listener.local_addr().map_err(|e| e.to_string())?.port();
+    let (std_listener, port) = bind_loopback_listener()?;
+    let mut stream_std_listeners = Vec::with_capacity(STREAM_PORT_SHARDS);
+    let mut stream_ports = Vec::with_capacity(STREAM_PORT_SHARDS);
+    for _ in 0..STREAM_PORT_SHARDS {
+        let (sl, sp) = bind_loopback_listener()?;
+        stream_std_listeners.push(sl);
+        stream_ports.push(sp);
+    }
     let secret_prefix = format!("/__orb_tx/{}", uuid::Uuid::new_v4());
 
     let api_client = reqwest::Client::builder()
         .user_agent(ORB_DESKTOP_USER_AGENT)
         .dns_resolver(resolver.clone())
         .connect_timeout(Duration::from_secs(6))
-        .timeout(Duration::from_secs(35))
+        .timeout(Duration::from_secs(26))
         .tcp_keepalive(Duration::from_secs(20))
         .http2_adaptive_window(true)
         .http2_keep_alive_interval(Duration::from_secs(10))
@@ -475,6 +497,7 @@ fn start_bridge_with_resolver(
     let initial_url = ORBCORE_DIRECT_URL.to_string();
     let runtime = Arc::new(BridgeRuntime {
         port,
+        stream_ports,
         secret_prefix,
         api_client,
         stream_client,
@@ -485,13 +508,15 @@ fn start_bridge_with_resolver(
         }),
     });
 
-    let listener_runtime = runtime.clone();
-    tauri::async_runtime::spawn(async move {
-        let Ok(listener) = TcpListener::from_std(std_listener) else {
-            return;
-        };
-        accept_loop(listener, listener_runtime).await;
-    });
+    for sl in std::iter::once(std_listener).chain(stream_std_listeners) {
+        let listener_runtime = runtime.clone();
+        tauri::async_runtime::spawn(async move {
+            let Ok(listener) = TcpListener::from_std(sl) else {
+                return;
+            };
+            accept_loop(listener, listener_runtime).await;
+        });
+    }
 
     Ok(runtime)
 }
@@ -771,12 +796,28 @@ async fn handle_connection(
             b
         };
 
+        // Bound non-final idempotent API attempts so a post-sleep half-open primary
+        // connection fails over to standby candidates well within WKWebView's 30s budget.
+        let send_once = || async {
+            if idempotent && !streaming && !is_last {
+                match tokio::time::timeout(PER_CANDIDATE_API_TIMEOUT, build_req().send()).await {
+                    Ok(res) => res.map_err(|e| (e.is_connect(), e.to_string())),
+                    Err(_) => Err((false, "candidate response header timeout".to_string())),
+                }
+            } else {
+                build_req()
+                    .send()
+                    .await
+                    .map_err(|e| (e.is_connect(), e.to_string()))
+            }
+        };
+
         // For idempotent requests (GET/HEAD or writes carrying Idempotency-Key),
         // perform 1 fast retry on immediate connect/socket reset before cooling down.
-        let mut send_res = build_req().send().await;
+        let mut send_res = send_once().await;
         if send_res.is_err() && idempotent && !streaming {
             tokio::time::sleep(Duration::from_millis(180)).await;
-            send_res = build_req().send().await;
+            send_res = send_once().await;
         }
 
         match send_res {
@@ -795,12 +836,12 @@ async fn handle_connection(
                 }
                 return relay_upstream_response(&mut stream, resp, base, &cors, streaming).await;
             }
-            Err(err) => {
+            Err((is_connect, err_msg)) => {
                 runtime.mark_unhealthy(base);
-                last_transport_err = Some(err.to_string());
+                last_transport_err = Some(err_msg);
                 // Non-idempotent requests without Idempotency-Key fail over ONLY
                 // when connect() failed before bytes were committed.
-                if !idempotent && !err.is_connect() {
+                if !idempotent && !is_connect {
                     break;
                 }
             }
@@ -867,12 +908,27 @@ async fn relay_upstream_response(
             .await
             .map_err(|e| e.to_string())?;
         stream.flush().await.map_err(|e| e.to_string())?;
-        while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        let (mut rd, mut wr) = stream.split();
+        let mut disconnect_probe = [0u8; 1];
+        loop {
+            let next_chunk = tokio::select! {
+                biased;
+                read_res = rd.read(&mut disconnect_probe) => {
+                    match read_res {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => continue,
+                    }
+                }
+                chunk_res = resp.chunk() => chunk_res.map_err(|e| e.to_string())?,
+            };
+            let Some(chunk) = next_chunk else {
+                break;
+            };
             if chunk.is_empty() {
                 continue;
             }
-            stream.write_all(&chunk).await.map_err(|e| e.to_string())?;
-            stream.flush().await.map_err(|e| e.to_string())?;
+            wr.write_all(&chunk).await.map_err(|e| e.to_string())?;
+            wr.flush().await.map_err(|e| e.to_string())?;
         }
         let _ = stream.shutdown().await;
         return Ok(());
@@ -936,9 +992,14 @@ mod tests {
     }
 
     fn spawn_test_bridge(resolver: Arc<ResilientDnsResolver>) -> Arc<BridgeRuntime> {
-        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        std_listener.set_nonblocking(true).unwrap();
-        let port = std_listener.local_addr().unwrap().port();
+        let (std_listener, port) = bind_loopback_listener().unwrap();
+        let mut stream_std_listeners = Vec::with_capacity(STREAM_PORT_SHARDS);
+        let mut stream_ports = Vec::with_capacity(STREAM_PORT_SHARDS);
+        for _ in 0..STREAM_PORT_SHARDS {
+            let (sl, sp) = bind_loopback_listener().unwrap();
+            stream_std_listeners.push(sl);
+            stream_ports.push(sp);
+        }
         let secret_prefix = format!("/__orb_tx/{}", uuid::Uuid::new_v4());
         let api_client = reqwest::Client::builder()
             .user_agent(ORB_DESKTOP_USER_AGENT)
@@ -956,6 +1017,7 @@ mod tests {
             .unwrap();
         let rt = Arc::new(BridgeRuntime {
             port,
+            stream_ports,
             secret_prefix,
             api_client,
             stream_client,
@@ -965,11 +1027,13 @@ mod tests {
                 cooldowns: HashMap::new(),
             }),
         });
-        let listener_rt = rt.clone();
-        tokio::spawn(async move {
-            let listener = TcpListener::from_std(std_listener).unwrap();
-            accept_loop(listener, listener_rt).await;
-        });
+        for sl in std::iter::once(std_listener).chain(stream_std_listeners) {
+            let listener_rt = rt.clone();
+            tokio::spawn(async move {
+                let listener = TcpListener::from_std(sl).unwrap();
+                accept_loop(listener, listener_rt).await;
+            });
+        }
         rt
     }
 
@@ -1172,5 +1236,81 @@ mod tests {
         let body: serde_json::Value = res.json().await.unwrap();
         assert_eq!(body["gzip"], true);
         assert_eq!(body["ua"], true);
+    }
+
+    #[tokio::test]
+    async fn bridge_isolates_stream_shards_and_cancels_upstream_on_client_disconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (upstream_closed_tx, upstream_closed_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let mut closed_tx = Some(upstream_closed_tx);
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                if req.contains("/api/control/stream") {
+                    let tx = closed_tx.take();
+                    tokio::spawn(async move {
+                        let _ = sock
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\nevent: ready\ndata: {}\n\n",
+                            )
+                            .await;
+                        let _ = sock.flush().await;
+                        let mut probe = [0u8; 1];
+                        let _ = sock.read(&mut probe).await;
+                        if let Some(tx) = tx {
+                            let _ = tx.send(());
+                        }
+                    });
+                } else {
+                    let body = r#"{"ok":true}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                }
+            }
+        });
+
+        let bridge = spawn_test_bridge(Arc::new(ResilientDnsResolver::new(None)));
+        let info = bridge.configure(&format!("http://127.0.0.1:{}", addr.port()));
+        assert_eq!(info.stream_proxy_base_urls.len(), STREAM_PORT_SHARDS);
+        let unique: std::collections::HashSet<&String> =
+            info.stream_proxy_base_urls.iter().collect();
+        assert_eq!(unique.len(), STREAM_PORT_SHARDS);
+        assert!(!unique.contains(&info.proxy_base_url));
+
+        let mut sse_resp = reqwest::Client::new()
+            .get(format!(
+                "{}/api/control/stream?mission=m1",
+                info.stream_proxy_base_urls[0]
+            ))
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sse_resp.status(), 200);
+        let first_chunk = sse_resp.chunk().await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&first_chunk).contains("event: ready"));
+
+        // JSON API calls on `proxy_base_url` succeed independently while SSE stays open.
+        let api_resp = reqwest::Client::new()
+            .get(format!("{}/api/health", info.proxy_base_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(api_resp.status(), 200);
+
+        // Dropping the client SSE response closes the loopback socket and must promptly
+        // drop the upstream SSE socket rather than leaking until the next keepalive.
+        drop(sse_resp);
+        tokio::time::timeout(Duration::from_secs(2), upstream_closed_rx)
+            .await
+            .expect("upstream SSE connection should close promptly on client disconnect")
+            .unwrap();
     }
 }

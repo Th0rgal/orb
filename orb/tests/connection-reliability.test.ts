@@ -520,4 +520,120 @@ describe("connection reliability transport & prefetch bounds", () => {
     expect(seenUrl).toContain("exclude_content=true");
     expect(roots.some((r) => r.id === "artifacts" && r.available)).toBe(true);
   });
+
+  it("keeps reconnecting /api/control/sync across backend restarts once everReady without exploding into SSE streams", async () => {
+    setConnection("https://orbcore.thomas.md", "secret-jwt");
+    setMultiplexSyncEnabledForTest(true);
+
+    class RestartingSocket {
+      static instances: RestartingSocket[] = [];
+      static OPEN = 1;
+      static failConnect = false;
+      readyState = 0;
+      sent: Record<string, unknown>[] = [];
+      onopen: (() => void) | null = null;
+      onmessage: ((ev: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor(public url: string, public protocols?: string | string[]) {
+        RestartingSocket.instances.push(this);
+        queueMicrotask(() => {
+          if (RestartingSocket.failConnect) {
+            this.readyState = 3;
+            this.onerror?.();
+            this.onclose?.();
+            return;
+          }
+          this.readyState = RestartingSocket.OPEN;
+          this.onopen?.();
+        });
+      }
+      send(payload: string) {
+        this.sent.push(JSON.parse(payload) as Record<string, unknown>);
+      }
+      close() {
+        this.readyState = 3;
+        this.onclose?.();
+      }
+    }
+    vi.stubGlobal("WebSocket", RestartingSocket as unknown as typeof WebSocket);
+    let sseRequested = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).includes("/api/control/stream")) sseRequested = true;
+        return Response.json({});
+      }),
+    );
+
+    const events: StreamEvent[] = [];
+    const stop = streamMission("m-restart", (ev) => events.push(ev), () => {}, undefined, undefined, undefined, undefined, 41);
+    await vi.waitFor(() => expect(RestartingSocket.instances).toHaveLength(1));
+    const initial = RestartingSocket.instances[0];
+    initial.onmessage?.({
+      data: JSON.stringify({ type: "mission_status_changed", mission_id: "m-restart", sequence: 42, status: "active" }),
+    });
+    expect(events).toHaveLength(1);
+
+    // Simulate a backend deploy where 3 consecutive WS handshakes fail before coming back.
+    RestartingSocket.failConnect = true;
+    initial.close();
+    for (let i = 0; i < 3; i++) {
+      const prevCount = RestartingSocket.instances.length;
+      window.dispatchEvent(new Event("online"));
+      await vi.waitFor(() => expect(RestartingSocket.instances.length).toBeGreaterThan(prevCount));
+    }
+    expect(sseRequested).toBe(false);
+
+    // Backend finishes restarting; next online wake-up reconnects WS and replays from highestSeq=42.
+    RestartingSocket.failConnect = false;
+    window.dispatchEvent(new Event("online"));
+    await vi.waitFor(() => {
+      const latest = RestartingSocket.instances[RestartingSocket.instances.length - 1];
+      expect(latest.sent).toContainEqual({ op: "subscribe", mission_id: "m-restart", since_seq: 42 });
+    });
+    expect(sseRequested).toBe(false);
+    stop();
+  });
+
+  it("routes SSE streams across sharded loopback stream ports so WKWebView REST pool never starves", async () => {
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {
+      invoke: vi.fn(async (cmd: string) => {
+        if (cmd === "transport_bridge_configure") {
+          return {
+            proxy_base_url: "http://127.0.0.1:50000/__orb_tx/tok",
+            stream_proxy_base_urls: [
+              "http://127.0.0.1:50001/__orb_tx/tok",
+              "http://127.0.0.1:50002/__orb_tx/tok",
+            ],
+            configured_target: "https://orbcore.thomas.md",
+          };
+        }
+        return null;
+      }),
+    };
+    setApiUrl("https://orbcore.thomas.md");
+    setTransportBridgeEnabled(true);
+    const seenUrls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        seenUrls.push(String(input));
+        return Response.json({ ok: true });
+      }),
+    );
+
+    await transportFetch("/api/control/missions?limit=20");
+    await transportFetch("/api/control/stream?mission=m1", { headers: { Accept: "text/event-stream" } });
+    await transportFetch("/api/projects/demo/context/stream");
+    await transportFetch("/api/control/stream?mission=m2", { headers: { Accept: "text/event-stream" } });
+
+    expect(seenUrls).toEqual([
+      "http://127.0.0.1:50000/__orb_tx/tok/api/control/missions?limit=20",
+      "http://127.0.0.1:50001/__orb_tx/tok/api/control/stream?mission=m1",
+      "http://127.0.0.1:50002/__orb_tx/tok/api/projects/demo/context/stream",
+      "http://127.0.0.1:50001/__orb_tx/tok/api/control/stream?mission=m2",
+    ]);
+    delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  });
 });
