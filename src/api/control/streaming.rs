@@ -322,7 +322,9 @@ pub(super) fn stored_event_to_agent_event(
                     .and_then(|v| v.as_str())
                     .map(ToString::to_string),
                 mission_id,
-                shared_files: None,
+                shared_files: meta
+                    .and_then(|m| m.get("shared_files"))
+                    .and_then(|v| serde_json::from_value(v.clone()).ok()),
                 resumable: meta
                     .and_then(|m| m.get("resumable"))
                     .and_then(|v| v.as_bool())

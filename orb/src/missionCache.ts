@@ -1,10 +1,37 @@
 import { createSignal } from "solid-js";
 import { connectionVersion, listQueuedMessages } from "./api";
+import {
+  MAX_WARM_MISSIONS,
+  isBackgroundSyncActive,
+  onBackgroundSyncActiveChange,
+  selectWarmMissionIds,
+} from "./backgroundSync";
 import { applyStreamEvent, applyStreamEvents, buildTranscript, type StreamItem } from "./transcriptModel";
-import { getMissionEventPage, getMissionEventPreview, storedToStream, type StoredEvent, type StreamEvent } from "./stream";
+import * as streamModule from "./stream";
+import {
+  getMissionEventPage,
+  getMissionEventPreview,
+  heldAfterHistory,
+  storedToStream,
+  streamMission,
+  type StoredEvent,
+  type StreamEvent,
+} from "./stream";
 import { cacheDelete, cachePeek, cachePut, onCacheEvict } from "./pageCache";
 
-export type TranscriptSnap = { activity?: string; items: StreamItem[]; stream: StreamEvent[]; fromLog?: boolean; detailsPending?: boolean; spineComplete?: boolean; queueError?: string; cursor?: number; before?: number; hasOlder?: boolean };
+export type TranscriptSnap = {
+  activity?: string;
+  items: StreamItem[];
+  stream: StreamEvent[];
+  liveTail?: StreamEvent[];
+  fromLog?: boolean;
+  detailsPending?: boolean;
+  spineComplete?: boolean;
+  queueError?: string;
+  cursor?: number;
+  before?: number;
+  hasOlder?: boolean;
+};
 
 const key = (id: string) => `c:${connectionVersion()}:m:${id}:tx`;
 const heightKey = (id: string) => `c:${connectionVersion()}:m:${id}:h`;
@@ -21,22 +48,69 @@ function bumpTranscriptVersion() {
   }, 16);
 }
 
+export type MissionStreamViewHandlers = {
+  onEvent: (ev: StreamEvent) => void;
+  onBatch: (evs: StreamEvent[]) => void;
+  onLagged: () => void;
+  onReady: () => void;
+  onDisconnected: () => void;
+  onCaughtUp?: (cursor: number | null, replayed: number) => void;
+};
+
+type WarmMissionSub = {
+  scope: string;
+  connVer: number;
+  id: string;
+  stop: () => void;
+  healthy: boolean;
+  caughtUp: boolean;
+  lastStatus?: string;
+  lastStatusSummary?: string;
+  views: Set<MissionStreamViewHandlers>;
+};
+
 const recentlyOpened = new Map<string, string>();
-const active=new Map<string,{refs:number;snapshot?:TranscriptSnap}>();
-function saveSnapshot(scope:string,snapshot:TranscriptSnap){const entry=active.get(scope);if(entry)entry.snapshot=snapshot;else cachePut(scope,snapshot);bumpTranscriptVersion();}
-export function retainTranscript(id:string):()=>void{
- const scope=key(id);
- recentlyOpened.delete(scope); recentlyOpened.set(scope,id);
- while(recentlyOpened.size>12) recentlyOpened.delete(recentlyOpened.keys().next().value!);
- let entry=active.get(scope);
- if(entry)entry.refs++;else{entry={refs:1,snapshot:cachePeek<TranscriptSnap>(scope)};cacheDelete(scope);active.set(scope,entry);}
- return()=>{if(--entry.refs===0){active.delete(scope);if(entry.snapshot)cachePut(scope,entry.snapshot);}};
-}
-export function peekTranscript(id: string): TranscriptSnap | undefined {
-  return active.get(key(id))?.snapshot??cachePeek<TranscriptSnap>(key(id));
+const active = new Map<string, { refs: number; snapshot?: TranscriptSnap }>();
+const warmSubs = new Map<string, WarmMissionSub>();
+const dirtyMissions = new Set<string>();
+
+function saveSnapshot(scope: string, snapshot: TranscriptSnap) {
+  const entry = active.get(scope);
+  if (entry) entry.snapshot = snapshot;
+  else cachePut(scope, snapshot);
+  bumpTranscriptVersion();
 }
 
-/** Full event-log snapshot, safe to paint on first open. Live SSE patches are not. */
+export function retainTranscript(id: string): () => void {
+  const scope = key(id);
+  recentlyOpened.delete(scope);
+  recentlyOpened.set(scope, id);
+  while (recentlyOpened.size > MAX_WARM_MISSIONS) {
+    recentlyOpened.delete(recentlyOpened.keys().next().value!);
+  }
+  let entry = active.get(scope);
+  if (entry) entry.refs++;
+  else {
+    entry = { refs: 1, snapshot: cachePeek<TranscriptSnap>(scope) };
+    cacheDelete(scope);
+    active.set(scope, entry);
+  }
+  reconcileWarmSubscriptions();
+  return () => {
+    const cur = active.get(scope);
+    if (cur && --cur.refs === 0) {
+      active.delete(scope);
+      if (cur.snapshot) cachePut(scope, cur.snapshot);
+      reconcileWarmSubscriptions();
+    }
+  };
+}
+
+export function peekTranscript(id: string): TranscriptSnap | undefined {
+  return active.get(key(id))?.snapshot ?? cachePeek<TranscriptSnap>(key(id));
+}
+
+/** Full event-log snapshot, safe to paint on first open. */
 export function peekReadyTranscript(id: string): TranscriptSnap | undefined {
   const snap = peekTranscript(id);
   return snap?.fromLog && !snap.detailsPending ? snap : undefined;
@@ -48,14 +122,263 @@ export function peekTranscriptHeight(id: string): number | undefined {
 
 export function putTranscript(id: string, snap: TranscriptSnap) {
   saveSnapshot(key(id), { ...snap, fromLog: snap.fromLog !== false });
+  reconcileWarmSubscriptions();
 }
 
 export function putTranscriptItems(id: string, items: StreamItem[]) {
   const prev = peekTranscript(id);
-  // A log snapshot stays the reopen first-paint. Live deltas update the
-  // mounted view only; overwriting here is what flashed mashed SSE text.
   if (prev?.fromLog) return;
-  saveSnapshot(key(id), { items, stream: prev?.stream ?? [], fromLog: false });
+  saveSnapshot(key(id), { items, stream: [], fromLog: false });
+}
+
+export function applyLiveEventsToTranscriptCache(
+  id: string,
+  evs: StreamEvent[],
+  precomputedItems?: StreamItem[],
+): void {
+  if (!evs.length) return;
+  const scope = key(id);
+  const prev = peekTranscript(id);
+  const items = precomputedItems ?? applyStreamEvents(prev?.items ?? [], evs);
+  let cursor = prev?.cursor;
+  const sequenced: StreamEvent[] = [];
+  const unsequenced: StreamEvent[] = [];
+  for (const ev of evs) {
+    if (typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence)) {
+      cursor = cursor === undefined ? ev.sequence : Math.max(cursor, ev.sequence);
+      sequenced.push(ev);
+    } else {
+      unsequenced.push(ev);
+    }
+  }
+  const stream = sequenced.length
+    ? mergeStreamBySequence(prev?.stream ?? [], sequenced)
+    : (prev?.stream ?? []);
+  const priorTail = prev?.liveTail ?? [];
+  const combinedTail = unsequenced.length ? [...priorTail, ...unsequenced] : priorTail;
+  const liveTail = combinedTail.length > 256 ? combinedTail.slice(-256) : combinedTail;
+  saveSnapshot(scope, {
+    ...(prev ?? {}),
+    items,
+    stream,
+    ...(liveTail.length ? { liveTail } : {}),
+    ...(cursor !== undefined ? { cursor } : {}),
+    fromLog: prev?.fromLog === true,
+  });
+}
+
+export function isMissionWarmLive(id: string): boolean {
+  const scope = key(id);
+  const sub = warmSubs.get(scope);
+  return Boolean(
+    peekReadyTranscript(id) &&
+      sub &&
+      sub.connVer === connectionVersion() &&
+      sub.healthy &&
+      sub.caughtUp &&
+      !dirtyMissions.has(scope),
+  );
+}
+
+export function isMissionDirtyWhileUnfocused(id: string): boolean {
+  return dirtyMissions.has(key(id));
+}
+
+export function peekWarmMissionStatus(
+  id: string,
+): { status: string; summary?: string } | undefined {
+  const sub = warmSubs.get(key(id));
+  if (!sub?.lastStatus) return undefined;
+  return { status: sub.lastStatus, summary: sub.lastStatusSummary };
+}
+
+export function noteMissionPresentationHint(id: string, kind: unknown): void {
+  const scope = key(id);
+  const sub = warmSubs.get(scope);
+  if (sub && sub.healthy && sub.caughtUp) return;
+  if (kind !== "mission_activity") {
+    dirtyMissions.add(scope);
+  }
+}
+
+export function markUnfocusedMissionsDirty(): void {
+  for (const [scope] of recentlyOpened) {
+    const sub = warmSubs.get(scope);
+    if (!sub || !sub.healthy || !sub.caughtUp) {
+      dirtyMissions.add(scope);
+    }
+  }
+}
+
+function ensureWarmSub(id: string): WarmMissionSub {
+  const scope = key(id);
+  const ver = connectionVersion();
+  const existing = warmSubs.get(scope);
+  if (existing && existing.connVer === ver) return existing;
+  existing?.stop();
+
+  const sub: WarmMissionSub = {
+    scope,
+    connVer: ver,
+    id,
+    stop: () => {},
+    healthy: false,
+    caughtUp: false,
+    views: new Set(),
+  };
+  warmSubs.set(scope, sub);
+
+  const handleBatch = (evs: StreamEvent[]) => {
+    if (!evs.length) return;
+    if (sub.views.size > 0) {
+      for (const v of sub.views) v.onBatch(evs);
+    } else {
+      applyLiveEventsToTranscriptCache(id, evs);
+    }
+  };
+
+  const handleEvent = (ev: StreamEvent) => {
+    if (ev.type === "mission_status_changed" || ev.type === "status") {
+      if (ev.type === "mission_status_changed" && typeof ev.data.status === "string") {
+        sub.lastStatus = ev.data.status;
+        sub.lastStatusSummary =
+          typeof ev.data.summary === "string" ? ev.data.summary : undefined;
+      }
+      if (sub.views.size > 0) {
+        for (const v of sub.views) v.onEvent(ev);
+      }
+      return;
+    }
+    handleBatch([ev]);
+  };
+
+  sub.stop = streamMission(
+    id,
+    handleEvent,
+    () => {
+      sub.caughtUp = false;
+      dirtyMissions.add(scope);
+      if (sub.views.size > 0) {
+        for (const v of sub.views) v.onLagged();
+      } else if (peekReadyTranscript(id)) {
+        void refreshTranscript(id)
+          .then(() => {
+            if (warmSubs.get(scope) === sub && sub.healthy) {
+              sub.caughtUp = true;
+              dirtyMissions.delete(scope);
+            }
+          })
+          .catch(() => {});
+      }
+    },
+    () => {
+      sub.healthy = true;
+      for (const v of sub.views) v.onReady();
+    },
+    undefined,
+    handleBatch,
+    () => {
+      sub.healthy = false;
+      sub.caughtUp = false;
+      dirtyMissions.add(scope);
+      for (const v of sub.views) v.onDisconnected();
+    },
+    peekReadyTranscript(id)?.cursor,
+    (cursor, replayed) => {
+      sub.healthy = true;
+      sub.caughtUp = true;
+      dirtyMissions.delete(scope);
+      if (typeof cursor === "number" && Number.isSafeInteger(cursor)) {
+        const snap = peekReadyTranscript(id);
+        if (snap && (snap.cursor === undefined || cursor > snap.cursor)) {
+          saveSnapshot(scope, { ...snap, cursor });
+        }
+      }
+      for (const v of sub.views) v.onCaughtUp?.(cursor, replayed);
+    },
+  );
+  return sub;
+}
+
+export function attachMissionStream(
+  id: string,
+  handlers: MissionStreamViewHandlers,
+): () => void {
+  const sub = ensureWarmSub(id);
+  sub.views.add(handlers);
+  if (sub.healthy) {
+    queueMicrotask(() => {
+      if (sub.views.has(handlers) && sub.healthy) {
+        handlers.onReady();
+        if (sub.caughtUp) {
+          handlers.onCaughtUp?.(peekReadyTranscript(id)?.cursor ?? null, 0);
+        }
+      }
+    });
+  }
+  return () => {
+    sub.views.delete(handlers);
+    reconcileWarmSubscriptions();
+  };
+}
+
+export function warmRecentMissionIds(): string[] {
+  const ver = connectionVersion();
+  const prefix = `c:${ver}:`;
+  const focusedIds: string[] = [];
+  for (const [scope, entry] of active) {
+    if (entry.refs > 0 && scope.startsWith(prefix)) {
+      const mid = recentlyOpened.get(scope) ?? scope.slice(prefix.length + 2, -3);
+      if (mid) focusedIds.push(mid);
+    }
+  }
+  const recentIds: string[] = [];
+  for (const [scope, mid] of recentlyOpened) {
+    if (scope.startsWith(prefix) && peekReadyTranscript(mid)) {
+      recentIds.push(mid);
+    }
+  }
+  const bgActive =
+    Boolean(streamModule.isMultiplexSyncActive?.()) &&
+    isBackgroundSyncActive() &&
+    (typeof document === "undefined" || document.visibilityState !== "hidden");
+  return selectWarmMissionIds({
+    backgroundActive: bgActive,
+    maxWarm: MAX_WARM_MISSIONS,
+    focusedIds,
+    recentIds,
+  });
+}
+
+export function reconcileWarmSubscriptions(): void {
+  const ver = connectionVersion();
+  for (const [scope, sub] of [...warmSubs]) {
+    if (sub.connVer !== ver) {
+      sub.stop();
+      warmSubs.delete(scope);
+    }
+  }
+  const wanted = new Set(warmRecentMissionIds());
+  for (const [scope, sub] of [...warmSubs]) {
+    if (sub.views.size === 0 && !wanted.has(sub.id)) {
+      if (!sub.caughtUp) dirtyMissions.add(scope);
+      sub.stop();
+      warmSubs.delete(scope);
+    }
+  }
+  if (Boolean(streamModule.isMultiplexSyncActive?.()) && isBackgroundSyncActive()) {
+    for (const mid of wanted) {
+      const scope = key(mid);
+      if (!warmSubs.has(scope) && peekReadyTranscript(mid)) {
+        ensureWarmSub(mid);
+      }
+    }
+  }
+}
+
+onBackgroundSyncActiveChange(() => reconcileWarmSubscriptions());
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => reconcileWarmSubscriptions());
 }
 
 export function putTranscriptHeight(id: string, height: number) {
@@ -142,8 +465,9 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
   const queued = await queuedPromise;
   check();
   const queueEvents: StreamEvent[] = queued.map(row => ({ type: "user_message", eventId: row.id, data: { id: row.id, content: row.content, queued: row.inflight !== true } }));
+  const retainedLive = previous?.liveTail?.length ? heldAfterHistory(stream, previous.liveTail) : [];
   // History first puts accepted user turns at their actual transcript positions.
-  return { items: buildTranscript([...stream, ...queueEvents]), stream, fromLog: true, spineComplete: previous?.spineComplete, queueError, cursor, before, hasOlder };
+  return { items: buildTranscript([...stream, ...retainedLive, ...queueEvents]), stream, ...(retainedLive.length ? { liveTail: retainedLive } : {}), fromLog: true, spineComplete: previous?.spineComplete, queueError, cursor, before, hasOlder };
 }
 
 type JobKind='initial'|'refresh'|'older';
@@ -154,7 +478,7 @@ function transcriptJob(id:string,kind:JobKind,load:()=>Promise<TranscriptSnap>):
  const pending=job.pending.get(kind);if(pending)return pending;
  const owner=job;
  const result=owner.tail.catch(()=>{}).then(()=>{if(version!==connectionVersion())throw Error('Connection changed during transcript load.');return load();}).then(snapshot=>{
-  if(version!==connectionVersion())throw Error('Connection changed during transcript load.');saveSnapshot(scope,snapshot);return snapshot;
+  if(version!==connectionVersion())throw Error('Connection changed during transcript load.');saveSnapshot(scope,snapshot);dirtyMissions.delete(scope);reconcileWarmSubscriptions();return snapshot;
  }).finally(()=>{owner.pending.delete(kind);if(!owner.pending.size)jobs.delete(scope);});
  owner.tail=result;owner.pending.set(kind,result);return result;
 }
@@ -208,7 +532,14 @@ export function prefetchTranscript(id:string){
  prefetchQueue.set(scope,id);
  pumpPrefetch();
 }
-export function forgetPrefetchPauses(){prefetchPaused.clear();prefetchQueue.clear();}
+export function forgetPrefetchPauses(){
+  prefetchPaused.clear();
+  prefetchQueue.clear();
+  for (const [, sub] of warmSubs) sub.stop();
+  warmSubs.clear();
+  dirtyMissions.clear();
+  recentlyOpened.clear();
+}
 export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
  return transcriptJob(id,'older',async()=>{
   const previous=peekReadyTranscript(id);if(!previous)return fetchTranscript(id);
@@ -308,7 +639,7 @@ export function prepareTranscriptSearch(id: string, signal?: AbortSignal): Promi
 const presentationLoads = new Set<string>();
 export async function refreshPresentationPreview(id: string) {
  const scope=key(id);
- if(!recentlyOpened.has(scope) || active.has(scope) || jobs.has(scope) || presentationLoads.has(scope)) return;
+ if(!recentlyOpened.has(scope) || active.has(scope) || isMissionWarmLive(id) || jobs.has(scope) || presentationLoads.has(scope)) return;
  presentationLoads.add(scope);
  try {
  const page=await getMissionEventPreview(id);

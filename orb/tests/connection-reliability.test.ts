@@ -267,7 +267,7 @@ describe("connection reliability transport & prefetch bounds", () => {
       expect(sock.sent).toEqual(
         expect.arrayContaining([
           { op: "set_presentation", enabled: true },
-          { op: "subscribe", mission_id: "m-1" },
+          { op: "subscribe", mission_id: "m-1", max_payload: 4096 },
         ]),
       ),
     );
@@ -590,7 +590,7 @@ describe("connection reliability transport & prefetch bounds", () => {
     window.dispatchEvent(new Event("online"));
     await vi.waitFor(() => {
       const latest = RestartingSocket.instances[RestartingSocket.instances.length - 1];
-      expect(latest.sent).toContainEqual({ op: "subscribe", mission_id: "m-restart", since_seq: 42 });
+      expect(latest.sent).toContainEqual({ op: "subscribe", mission_id: "m-restart", since_seq: 42, max_payload: 4096 });
     });
     expect(sseRequested).toBe(false);
     stop();

@@ -1,5 +1,11 @@
 import { streamMission } from "./stream";
-import { refreshPresentationPreview, recordPresentationActivity } from "./missionCache";
+import {
+  markUnfocusedMissionsDirty,
+  noteMissionPresentationHint,
+  recordPresentationActivity,
+  refreshPresentationPreview,
+} from "./missionCache";
+import { markUnfocusedBtwDirty, noteBtwPresentationHint } from "./btwAgent";
 import { lookupMissionById } from "./missionLookup";
 import { movedMission, withMovedMissions } from "./moves";
 import { MissionLookupContext } from "./orchestrationModel";
@@ -921,6 +927,13 @@ export default function App() {
         event => {
           if (event.type !== "mission_presentation") return;
           const id = event.data.mission_id;
+          const btwParent = event.data.btw_parent_id;
+          if (typeof btwParent === "string") {
+            noteBtwPresentationHint(btwParent, typeof id === "string" ? id : undefined);
+          }
+          if (typeof id === "string") {
+            noteMissionPresentationHint(id, event.data.kind);
+          }
           if (event.data.kind === "mission_activity") {
             if (typeof id === "string") recordPresentationActivity(id, event.data.label);
             return;
@@ -929,11 +942,11 @@ export default function App() {
           if (event.data.kind !== "mission_activity") needsList = true;
           presentationTimer ??= setTimeout(flushPresentation, 1000);
         },
-        () => { void refreshMissions(); },
+        () => { markUnfocusedMissionsDirty(); markUnfocusedBtwDirty(); void refreshMissions(); },
         () => { presentationConnected = true; },
         "presentation",
         undefined,
-        () => { presentationConnected = false; },
+        () => { presentationConnected = false; markUnfocusedMissionsDirty(); markUnfocusedBtwDirty(); },
       );
     };
     createEffect(() => { connectionVersion(); connectPresentation(); });

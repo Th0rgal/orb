@@ -34,6 +34,8 @@ enum SyncClientMessage {
         mission_id: Uuid,
         #[serde(default)]
         since_seq: Option<i64>,
+        #[serde(default)]
+        max_payload: Option<usize>,
     },
     Unsubscribe {
         mission_id: Uuid,
@@ -47,7 +49,16 @@ enum SyncClientMessage {
     },
 }
 
-fn sync_presentation_hint(event: &AgentEvent) -> Option<serde_json::Value> {
+fn extract_btw_parent_id(tags: &[String]) -> Option<Uuid> {
+    tags.iter()
+        .find_map(|tag| tag.strip_prefix("btw-parent:"))
+        .and_then(|raw| Uuid::parse_str(raw.trim()).ok())
+}
+
+fn sync_presentation_hint(
+    event: &AgentEvent,
+    btw_parent_id: Option<Uuid>,
+) -> Option<serde_json::Value> {
     let mission_id = event.mission_id()?;
     let label = match event {
         AgentEvent::MissionActivity { label, .. } => {
@@ -61,12 +72,16 @@ fn sync_presentation_hint(event: &AgentEvent) -> Option<serde_json::Value> {
         | AgentEvent::MissionMetadataUpdated { .. } => None,
         _ => return None,
     };
-    Some(serde_json::json!({
+    let mut hint = serde_json::json!({
         "type": "mission_presentation",
         "mission_id": mission_id,
         "kind": event.event_name(),
         "label": label,
-    }))
+    });
+    if let (Some(parent_id), Some(obj)) = (btw_parent_id, hint.as_object_mut()) {
+        obj.insert("btw_parent_id".to_string(), serde_json::json!(parent_id));
+    }
+    Some(hint)
 }
 
 fn authenticate_sync_upgrade(
@@ -135,27 +150,65 @@ async fn send_raw_text(
     sender.send(WsMessage::Text(payload)).await.is_ok()
 }
 
+fn format_agent_event_frame(
+    ev: &AgentEvent,
+    seq_override: Option<i64>,
+    max_payload: Option<usize>,
+) -> Option<String> {
+    let raw = deferred_messages::stream_payload(ev).ok()?;
+    let needs_truncation = max_payload
+        .is_some_and(|max| raw.len() > max.max(mission_events::MIN_MAX_PAYLOAD))
+        && matches!(
+            ev,
+            AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
+        );
+    if seq_override.is_none() && !needs_truncation {
+        return Some(raw);
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Some(raw);
+    };
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(seq) = seq_override {
+            obj.entry("sequence".to_string())
+                .or_insert_with(|| serde_json::json!(seq));
+        }
+        if let Some(max) = max_payload.filter(|_| needs_truncation) {
+            match ev {
+                AgentEvent::ToolCall { name, args, .. } => {
+                    if let Some((shortened, full_bytes)) =
+                        mission_events::truncate_stream_tool_payload(name, args, max)
+                    {
+                        obj.insert("args".to_string(), shortened);
+                        obj.insert("truncated".to_string(), serde_json::json!(true));
+                        obj.insert("full_bytes".to_string(), serde_json::json!(full_bytes));
+                    }
+                }
+                AgentEvent::ToolResult { name, result, .. } => {
+                    if let Some((shortened, full_bytes)) =
+                        mission_events::truncate_stream_tool_payload(name, result, max)
+                    {
+                        obj.insert("result".to_string(), shortened);
+                        obj.insert("truncated".to_string(), serde_json::json!(true));
+                        obj.insert("full_bytes".to_string(), serde_json::json!(full_bytes));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Some(serde_json::to_string(&value).unwrap_or(raw))
+}
+
 async fn send_agent_event_frame(
     sender: &mut futures::stream::SplitSink<WebSocket, WsMessage>,
     metrics: &crate::api::control_metrics::ControlMetrics,
     ev: &AgentEvent,
     seq_override: Option<i64>,
+    max_payload: Option<usize>,
 ) -> bool {
-    let Ok(raw) = deferred_messages::stream_payload(ev) else {
+    let Some(payload) = format_agent_event_frame(ev, seq_override, max_payload) else {
         return true;
-    };
-    let payload = if let Some(seq) = seq_override {
-        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if let Some(obj) = value.as_object_mut() {
-                obj.entry("sequence".to_string())
-                    .or_insert_with(|| serde_json::json!(seq));
-            }
-            serde_json::to_string(&value).unwrap_or(raw)
-        } else {
-            raw
-        }
-    } else {
-        raw
     };
     metrics.record_broadcast(ev.mission_id());
     send_raw_text(sender, metrics, payload).await
@@ -197,13 +250,14 @@ async fn control_sync_loop(
         queue_len: initial.queue_len,
         mission_id: initial.mission_id,
     };
-    if !send_agent_event_frame(&mut sender, &metrics, &initial_status, None).await {
+    if !send_agent_event_frame(&mut sender, &metrics, &initial_status, None, None).await {
         return;
     }
 
-    let mut subscribed_missions: HashSet<Uuid> = HashSet::new();
+    let mut subscribed_missions: HashMap<Uuid, Option<usize>> = HashMap::new();
     let mut text_op_buffers: HashMap<Uuid, String> = HashMap::new();
     let mut activity_sent: HashMap<Uuid, std::time::Instant> = HashMap::new();
+    let mut btw_parent_cache: HashMap<Uuid, Option<Uuid>> = HashMap::new();
 
     let mut heartbeat_interval =
         tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
@@ -255,8 +309,12 @@ async fn control_sync_loop(
                                     break;
                                 }
                             }
-                            Ok(SyncClientMessage::Subscribe { mission_id, since_seq }) => {
-                                if !subscribed_missions.contains(&mission_id)
+                            Ok(SyncClientMessage::Subscribe {
+                                mission_id,
+                                since_seq,
+                                max_payload,
+                            }) => {
+                                if !subscribed_missions.contains_key(&mission_id)
                                     && subscribed_missions.len() >= MAX_SUBSCRIPTIONS_PER_SOCKET
                                 {
                                     let err_frame = serde_json::json!({
@@ -269,7 +327,7 @@ async fn control_sync_loop(
                                     }
                                     continue;
                                 }
-                                subscribed_missions.insert(mission_id);
+                                subscribed_missions.insert(mission_id, max_payload);
                                 text_op_buffers.remove(&mission_id);
 
                                 let ack = serde_json::json!({
@@ -302,8 +360,11 @@ async fn control_sync_loop(
                                             }
                                         }
                                         Ok(replayed) => {
+                                            let mut highest_seq = seq;
+                                            let mut replayed_count = 0usize;
                                             for stored in replayed {
                                                 let row_seq = stored.sequence;
+                                                highest_seq = highest_seq.max(row_seq);
                                                 let Some(agent_ev) =
                                                     streaming::stored_event_to_agent_event(&stored)
                                                 else {
@@ -314,17 +375,28 @@ async fn control_sync_loop(
                                                     &mut text_op_buffers,
                                                 );
                                                 for ev in outbound {
+                                                    replayed_count += 1;
                                                     if !send_agent_event_frame(
                                                         &mut sender,
                                                         &metrics,
                                                         &ev,
                                                         Some(row_seq),
+                                                        max_payload,
                                                     )
                                                     .await
                                                     {
                                                         return;
                                                     }
                                                 }
+                                            }
+                                            let caught_up = serde_json::json!({
+                                                "type": "sync_caught_up",
+                                                "mission_id": mission_id,
+                                                "replayed": replayed_count,
+                                                "cursor": highest_seq,
+                                            });
+                                            if !send_raw_text(&mut sender, &metrics, caught_up.to_string()).await {
+                                                break;
                                             }
                                         }
                                         Err(err) => {
@@ -344,6 +416,16 @@ async fn control_sync_loop(
                                                 break;
                                             }
                                         }
+                                    }
+                                } else {
+                                    let caught_up = serde_json::json!({
+                                        "type": "sync_caught_up",
+                                        "mission_id": mission_id,
+                                        "replayed": 0,
+                                        "cursor": serde_json::Value::Null,
+                                    });
+                                    if !send_raw_text(&mut sender, &metrics, caught_up.to_string()).await {
+                                        break;
                                     }
                                 }
                             }
@@ -374,7 +456,7 @@ async fn control_sync_loop(
                     Ok(ev) => {
                         // Connection-scoped status & FIDO requests are always forwarded.
                         if matches!(&ev, AgentEvent::Status { .. } | AgentEvent::FidoSignRequest { .. }) {
-                            if !send_agent_event_frame(&mut sender, &metrics, &ev, None).await {
+                            if !send_agent_event_frame(&mut sender, &metrics, &ev, None, None).await {
                                 break;
                             }
                             continue;
@@ -402,8 +484,24 @@ async fn control_sync_loop(
                             } else {
                                 false
                             };
-                            if !throttle {
-                                if let Some(hint) = sync_presentation_hint(&ev) {
+                            if !throttle && sync_presentation_hint(&ev, None).is_some() {
+                                let btw_parent = if let Some(&cached) = btw_parent_cache.get(&mid) {
+                                    cached
+                                } else {
+                                    let resolved = control
+                                        .mission_store
+                                        .get_mission_metadata(mid)
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|m| extract_btw_parent_id(&m.project.tags));
+                                    if btw_parent_cache.len() >= 512 {
+                                        btw_parent_cache.clear();
+                                    }
+                                    btw_parent_cache.insert(mid, resolved);
+                                    resolved
+                                };
+                                if let Some(hint) = sync_presentation_hint(&ev, btw_parent) {
                                     if !send_raw_text(&mut sender, &metrics, hint.to_string()).await {
                                         break;
                                     }
@@ -412,11 +510,19 @@ async fn control_sync_loop(
                         }
 
                         // Forward full event stream for subscribed missions.
-                        if subscribed_missions.contains(&mid) {
+                        if let Some(&sub_max_payload) = subscribed_missions.get(&mid) {
                             let outbound =
                                 streaming::text_op_events_for_stream(ev, &mut text_op_buffers);
                             for out_ev in outbound {
-                                if !send_agent_event_frame(&mut sender, &metrics, &out_ev, None).await {
+                                if !send_agent_event_frame(
+                                    &mut sender,
+                                    &metrics,
+                                    &out_ev,
+                                    None,
+                                    sub_max_payload,
+                                )
+                                .await
+                                {
                                     return;
                                 }
                             }
@@ -492,18 +598,29 @@ mod tests {
     }
 
     #[test]
-    fn sync_presentation_hint_strips_sensitive_payloads() {
+    fn sync_presentation_hint_strips_sensitive_payloads_and_attaches_btw_parent() {
         let mid = Uuid::new_v4();
+        let parent_id = Uuid::new_v4();
         let act = AgentEvent::MissionActivity {
             mission_id: Some(mid),
             label: "Running cargo test".to_string(),
             tool_name: String::new(),
         };
-        let hint = sync_presentation_hint(&act).expect("activity produces presentation hint");
+        let hint = sync_presentation_hint(&act, None).expect("activity produces presentation hint");
         assert_eq!(hint["type"], "mission_presentation");
         assert_eq!(hint["mission_id"], mid.to_string());
         assert_eq!(hint["kind"], "mission_activity");
         assert_eq!(hint["label"], "Running cargo test");
+        assert!(hint.get("btw_parent_id").is_none());
+
+        let tags = vec![
+            "fork-workspace:abc".to_string(),
+            format!("btw-parent:{parent_id}"),
+        ];
+        assert_eq!(extract_btw_parent_id(&tags), Some(parent_id));
+        let btw_hint =
+            sync_presentation_hint(&act, Some(parent_id)).expect("btw hint includes parent");
+        assert_eq!(btw_hint["btw_parent_id"], parent_id.to_string());
 
         // ToolCall carries arguments and must never be emitted as an offscreen hint.
         let tool = AgentEvent::ToolCall {
@@ -512,6 +629,64 @@ mod tests {
             args: serde_json::json!({"cmd": "secret"}),
             mission_id: Some(mid),
         };
-        assert!(sync_presentation_hint(&tool).is_none());
+        assert!(sync_presentation_hint(&tool, Some(parent_id)).is_none());
+    }
+
+    #[test]
+    fn format_agent_event_frame_truncates_oversized_tools_while_preserving_interactive_and_orchestration(
+    ) {
+        let mid = Uuid::new_v4();
+        let huge_output = "x".repeat(32_000);
+        let bash_res = AgentEvent::ToolResult {
+            tool_call_id: "tc-big".to_string(),
+            name: "bash".to_string(),
+            result: serde_json::json!({ "output": huge_output, "exit_code": 0 }),
+            mission_id: Some(mid),
+        };
+        let raw_truncated =
+            format_agent_event_frame(&bash_res, Some(42), Some(4096)).expect("frame formatted");
+        assert!(
+            raw_truncated.len() < 8_000,
+            "oversized tool frame must be shortened: len={}",
+            raw_truncated.len()
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&raw_truncated).unwrap();
+        assert_eq!(parsed["sequence"], 42);
+        assert_eq!(parsed["truncated"], true);
+        assert!(parsed["full_bytes"].as_u64().unwrap_or(0) > 32_000);
+        assert_eq!(parsed["result"]["exit_code"], 0);
+
+        // Without max_payload, full output is preserved for legacy subscribers.
+        let raw_full = format_agent_event_frame(&bash_res, None, None).expect("full frame");
+        assert!(raw_full.len() > 32_000);
+
+        // Interactive UI tools stay whole even when max_payload is set.
+        let interactive_call = AgentEvent::ToolCall {
+            tool_call_id: "tc-ui".to_string(),
+            name: "ui_native_request".to_string(),
+            args: serde_json::json!({ "prompt": "y".repeat(8_000) }),
+            mission_id: Some(mid),
+        };
+        let raw_ui = format_agent_event_frame(&interactive_call, None, Some(4096)).unwrap();
+        let parsed_ui: serde_json::Value = serde_json::from_str(&raw_ui).unwrap();
+        assert!(parsed_ui.get("truncated").is_none());
+
+        // Subscribe deserializes optional max_payload cleanly.
+        let msg: SyncClientMessage = serde_json::from_str(&format!(
+            r#"{{"op":"subscribe","mission_id":"{mid}","since_seq":9,"max_payload":4096}}"#
+        ))
+        .unwrap();
+        match msg {
+            SyncClientMessage::Subscribe {
+                mission_id,
+                since_seq,
+                max_payload,
+            } => {
+                assert_eq!(mission_id, mid);
+                assert_eq!(since_seq, Some(9));
+                assert_eq!(max_payload, Some(4096));
+            }
+            _ => panic!("expected Subscribe"),
+        }
     }
 }

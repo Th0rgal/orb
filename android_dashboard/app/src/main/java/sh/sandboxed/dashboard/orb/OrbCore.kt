@@ -967,6 +967,7 @@ object OrbReadCache {
     private val writeLocks = ConcurrentHashMap<String, Any>()
 
     fun clearMemory() {
+        OrbWarmSyncCoordinator.resetCaches()
         synchronized(rowsByKey) { rowsByKey.clear() }
         dictByKey.clear()
         writeJobs.values.forEach { it.cancel() }
@@ -1267,6 +1268,8 @@ class OrbCore private constructor(context: Context) {
         OrbCrashBreadcrumbs.install(context)
         OrbSharedInboxState.init(context)
         OrbKeychain.init(context)
+        OrbBackgroundSyncMonitor.init(context)
+        OrbWarmSyncCoordinator.bindCore(this)
         val savedBase = prefs.getString(BASE_URL_KEY, null) ?: ""
         val cleanBase = savedBase.trim().trimEnd('/')
         _baseURL.value = cleanBase
@@ -2060,6 +2063,7 @@ class OrbCore private constructor(context: Context) {
                     opened = true
                     webSocketOpenFailures = 0
                     syncSubscriptions()
+                    webSocket.send(OrbJSON.stringify(mapOf("op" to "ping", "ts" to System.currentTimeMillis())))
                     pingJob?.cancel()
                     pingJob = scope.launch(Dispatchers.IO) {
                         while (isActive && !closed) {
@@ -2075,7 +2079,20 @@ class OrbCore private constructor(context: Context) {
                     if (closed || text.isEmpty()) return
                     val parsed = OrbJSON.dict(OrbJSON.parse(text)) ?: return
                     val eventType = OrbJSON.str(parsed, "type") ?: return
-                    if (eventType in setOf("sync_ready", "heartbeat", "pong", "subscribed", "unsubscribed")) return
+                    if (eventType == "pong") {
+                        val ts = (parsed["ts"] as? Number)?.toLong()
+                        if (ts != null) {
+                            val rtt = (System.currentTimeMillis() - ts).toInt()
+                            if (rtt in 0..120_000) {
+                                OrbBackgroundSyncMonitor.notePingRtt(rtt)
+                            }
+                        }
+                        return
+                    }
+                    if (eventType in setOf("sync_ready", "heartbeat", "subscribed", "unsubscribed")) return
+                    if (eventType == "stream_lagged") {
+                        OrbBackgroundSyncMonitor.noteStreamLagged()
+                    }
                     val snapshot = synchronized(lock) { subs.values.toList() }
                     if (eventType == "mission_presentation") {
                         for (sub in snapshot) {
@@ -2139,6 +2156,7 @@ class OrbCore private constructor(context: Context) {
                     sub.delegateSource = sub.fallbackFactory()
                 }
             } else {
+                OrbBackgroundSyncMonitor.noteUnexpectedDisconnect()
                 for (sub in remaining) {
                     sub.onClosed(err)
                 }
@@ -2180,6 +2198,7 @@ class OrbCore private constructor(context: Context) {
                         val cmd = LinkedHashMap<String, Any?>()
                         cmd["op"] = "subscribe"
                         cmd["mission_id"] = mid
+                        cmd["max_payload"] = OrbReadCache.RESULT_KEEP_CHARS
                         if (seq != null) cmd["since_seq"] = seq
                         commands.add(cmd)
                     }
@@ -2238,6 +2257,19 @@ class OrbCore private constructor(context: Context) {
 
     @Volatile private var activeSyncHub: ControlSyncHub? = null
     @Volatile private var webSocketOpenFailures: Int = 0
+
+    val canUseMultiplexSync: Boolean
+        get() = !_token.value?.trim().isNullOrEmpty() &&
+            _baseURL.value.trim().isNotEmpty() &&
+            webSocketOpenFailures < 3
+
+    val isMultiplexSyncHealthy: Boolean
+        get() {
+            val cleanToken = _token.value?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+            val primaryBase = _baseURL.value.trim().trimEnd('/').takeIf { it.isNotEmpty() } ?: return false
+            val hub = activeSyncHub ?: return false
+            return !hub.closed && hub.opened && hub.hubScope == "$primaryBase|$cleanToken"
+        }
 
     private fun closeSyncHub() {
         activeSyncHub?.close()
@@ -2425,18 +2457,32 @@ object OrbPresentation {
             val closed = java.util.concurrent.atomic.AtomicBoolean(false)
             val stream = core.openSSE("/api/control/stream?profile=presentation&kinds=mission_presentation", onEvent = { type, data ->
                 isConnected = true
-                if (type == "status" || type == "stream_lagged") changed(null)
+                if (type == "status" || type == "stream_lagged") {
+                    changed(null)
+                    OrbWarmSyncCoordinator.notePresentationStreamDisrupted(core)
+                }
                 if (type == "mission_presentation") {
                     val hint = OrbJSON.dict(OrbJSON.parse(data))
                     val id = OrbJSON.str(hint, "mission_id")
-                    if (OrbJSON.str(hint, "kind") == "mission_activity") {
+                    val kind = OrbJSON.str(hint, "kind")
+                    if (!id.isNullOrEmpty()) {
+                        OrbWarmSyncCoordinator.notePresentationHint(
+                            core = core,
+                            missionId = id,
+                            kind = kind,
+                            btwParentId = OrbJSON.str(hint, "btw_parent_id"),
+                        )
+                    }
+                    if (kind == "mission_activity") {
                         synchronized(this) {
                             if (id in recent && account == OrbDisk.currentScope()) labels["$account|$id"] = OrbJSON.str(hint, "label")?.take(160) ?: ""
                         }
                     } else {
                         synchronized(this) { labels.remove("$account|$id") }
                         listChanged = true
-                        changed(id)
+                        if (id == null || !OrbWarmSyncCoordinator.isMissionWarmLive(core, id)) {
+                            changed(id)
+                        }
                     }
                 }
             }, onClosed = {

@@ -12,7 +12,9 @@ import {forkSource} from './missionTree';
 import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
 import {enqueueLocalMessage,queuedLocalMessages} from './localMessageQueue';
 import {extractBtwAttachmentPaths,extractBtwUserQuestion as extractBtwQuestion,replaceBtwUserQuestion as replaceBtwQuestion} from './messagePresentation';
-import {getMissionEvents,storedToStream,streamMission,type StoredEvent} from './stream';
+import {getMissionEvents,isMultiplexSyncActive,storedToStream,streamMission,type StoredEvent} from './stream';
+import {isBackgroundSyncActive,onBackgroundSyncActiveChange} from './backgroundSync';
+import {warmRecentMissionIds} from './missionCache';
 import {TranscriptReducer,type StreamItem} from './transcriptModel';
 const [agentItems,setAgentItems]=createSignal<Record<string,StreamItem[]>>({});
 export function btwItems(parent:string){const s=btwSession(parent);return s?agentItems()[s.id]??[]:[];}
@@ -715,8 +717,202 @@ export async function reconnectBtwSession(parent:string,sideId:string):Promise<B
  return session;
 }
 
-export async function reconcileBtwServerHistory(parent:string,localHistory:SideExchange[],signal?:AbortSignal):Promise<{history:SideExchange[];activeSession?:BtwSession;latest?:string}>{
- const version=connectionVersion();
+type WarmBtwEntry = {
+ connVer: number;
+ parent: string;
+ history: SideExchange[];
+ activeSession?: BtwSession;
+ latest?: string;
+ dirty: boolean;
+ followingId?: string;
+ stopFollow?: () => void;
+ refreshTimer?: ReturnType<typeof setTimeout>;
+};
+
+const warmBtwByParent = new Map<string, WarmBtwEntry>();
+const pendingDirtyBtwParents = new Set<string>();
+const warmBtwKey = (parent: string) => `${connectionVersion()}:${parent}`;
+
+export function peekWarmBtwState(
+ parent: string,
+): { history: SideExchange[]; activeSession?: BtwSession; latest?: string; clean: boolean } | undefined {
+ const entry = warmBtwByParent.get(warmBtwKey(parent));
+ if (!entry) return undefined;
+ return {
+  history: entry.history,
+  activeSession: entry.activeSession,
+  latest: entry.latest,
+  clean: !entry.dirty && !entry.activeSession,
+ };
+}
+
+export function updateWarmBtwHistory(
+ parent: string,
+ history: SideExchange[],
+ activeSession?: BtwSession,
+ latest?: string,
+): void {
+ const k = warmBtwKey(parent);
+ const existing = warmBtwByParent.get(k);
+ if (existing) {
+  existing.history = history;
+  if (activeSession !== undefined) existing.activeSession = activeSession;
+  if (latest !== undefined) existing.latest = latest;
+ } else {
+  warmBtwByParent.set(k, {
+   connVer: connectionVersion(),
+   parent,
+   history,
+   activeSession,
+   latest,
+   dirty: pendingDirtyBtwParents.has(k),
+  });
+ }
+ reconcileWarmBtwFollows();
+}
+
+function scheduleWarmBtwRefresh(entry: WarmBtwEntry): void {
+ if (entry.refreshTimer) clearTimeout(entry.refreshTimer);
+ entry.refreshTimer = setTimeout(() => {
+  entry.refreshTimer = undefined;
+  void reconcileBtwServerHistory(entry.parent, entry.history, undefined, { force: true }).catch(() => {});
+ }, 300);
+}
+
+export function reconcileWarmBtwFollows(): void {
+ const ver = connectionVersion();
+ const bgActive =
+  isMultiplexSyncActive() &&
+  isBackgroundSyncActive() &&
+  (typeof document === "undefined" || document.visibilityState !== "hidden");
+ const warmParents = bgActive ? new Set(warmRecentMissionIds()) : new Set<string>();
+ for (const [k, entry] of [...warmBtwByParent]) {
+  if (entry.connVer !== ver) {
+   entry.stopFollow?.();
+   if (entry.refreshTimer) clearTimeout(entry.refreshTimer);
+   warmBtwByParent.delete(k);
+   continue;
+  }
+  const wantFollowId = bgActive && warmParents.has(entry.parent) ? entry.latest : undefined;
+  if (!wantFollowId) {
+   if (entry.stopFollow) {
+    entry.stopFollow();
+    entry.stopFollow = undefined;
+    entry.followingId = undefined;
+   }
+   continue;
+  }
+  if (entry.followingId !== wantFollowId || !entry.stopFollow) {
+   entry.stopFollow?.();
+   entry.followingId = wantFollowId;
+   entry.stopFollow = streamMission(
+    wantFollowId,
+    (ev) => {
+     if (
+      ["user_message", "assistant_message", "assistant_message_canonical", "mission_status_changed"].includes(
+       ev.type,
+      )
+     ) {
+      entry.dirty = true;
+      scheduleWarmBtwRefresh(entry);
+     }
+    },
+    () => {
+     entry.dirty = true;
+     scheduleWarmBtwRefresh(entry);
+    },
+   );
+  }
+ }
+}
+
+export function noteBtwPresentationHint(parent: string, childMissionId?: string): void {
+ const k = warmBtwKey(parent);
+ const entry = warmBtwByParent.get(k);
+ if (entry) {
+  entry.dirty = true;
+  if (childMissionId && childMissionId !== entry.latest) {
+   entry.latest = childMissionId;
+   reconcileWarmBtwFollows();
+  }
+  if (isMultiplexSyncActive() && isBackgroundSyncActive() && warmRecentMissionIds().includes(parent)) {
+   scheduleWarmBtwRefresh(entry);
+  }
+ } else {
+  pendingDirtyBtwParents.add(k);
+ }
+}
+
+export function markUnfocusedBtwDirty(): void {
+ for (const [, entry] of warmBtwByParent) {
+  entry.dirty = true;
+ }
+}
+
+export function resetWarmBtwForTest(): void {
+ for (const [, entry] of warmBtwByParent) {
+  entry.stopFollow?.();
+  if (entry.refreshTimer) clearTimeout(entry.refreshTimer);
+ }
+ warmBtwByParent.clear();
+ pendingDirtyBtwParents.clear();
+}
+
+onBackgroundSyncActiveChange(() => reconcileWarmBtwFollows());
+
+function storeWarmBtwResult(
+ version: number,
+ parent: string,
+ result: { history: SideExchange[]; activeSession?: BtwSession; latest?: string },
+): { history: SideExchange[]; activeSession?: BtwSession; latest?: string } {
+ const k = `${version}:${parent}`;
+ pendingDirtyBtwParents.delete(k);
+ const existing = warmBtwByParent.get(k);
+ if (existing) {
+  existing.history = result.history;
+  existing.activeSession = result.activeSession;
+  existing.latest = result.latest;
+  existing.dirty = false;
+ } else {
+  while (warmBtwByParent.size >= 32) {
+   const oldestKey = warmBtwByParent.keys().next().value;
+   if (oldestKey === undefined) break;
+   const evicted = warmBtwByParent.get(oldestKey);
+   evicted?.stopFollow?.();
+   if (evicted?.refreshTimer) clearTimeout(evicted.refreshTimer);
+   warmBtwByParent.delete(oldestKey);
+  }
+  warmBtwByParent.set(k, {
+   connVer: version,
+   parent,
+   history: result.history,
+   activeSession: result.activeSession,
+   latest: result.latest,
+   dirty: false,
+  });
+ }
+ reconcileWarmBtwFollows();
+ return result;
+}
+
+export async function reconcileBtwServerHistory(
+ parent: string,
+ localHistory: SideExchange[],
+ signal?: AbortSignal,
+ options?: { force?: boolean },
+): Promise<{ history: SideExchange[]; activeSession?: BtwSession; latest?: string }> {
+ const version = connectionVersion();
+ const k = `${version}:${parent}`;
+ if (!options?.force && isMultiplexSyncActive() && !pendingDirtyBtwParents.has(k)) {
+  const cached = warmBtwByParent.get(k);
+  if (cached && !cached.dirty && !cached.activeSession) {
+   return {
+    history: cached.history.length ? cached.history : localHistory,
+    activeSession: cached.activeSession,
+    latest: cached.latest,
+   };
+  }
+ }
  let rows:Mission[]=[];
  const chain=await btwThreadChain(parent).catch(()=>[parent]);
  try{
@@ -724,9 +920,10 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
   const seen=new Set<string>();
   for(const res of pages)if(Array.isArray(res))for(const m of res)if(m&&!seen.has(m.id)){seen.add(m.id);rows.push(m);}
  }catch{return {history:localHistory};}
- if(signal?.aborted||connectionVersion()!==version||!rows.length)return {history:localHistory};
+ if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
+ if(!rows.length)return storeWarmBtwResult(version,parent,{history:localHistory});
  const valid=rows.filter(m=>m&&typeof m.id==='string'&&Array.isArray(m.tags)&&chain.some(id=>m.tags!.includes(`btw-parent:${id}`))&&!m.tags.includes('superseded'));
- if(!valid.length)return {history:localHistory};
+ if(!valid.length)return storeWarmBtwResult(version,parent,{history:localHistory});
  const sorted=[...valid].sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||''));
  // Load newest/active threads first with bounded concurrency and memoize
  // terminal threads so older multi-page /btw logs never delay live recovery.
@@ -833,14 +1030,14 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
    });
   }
  }
- if(!serverTurns.length)return {history:localHistory,activeSession:latestActive,latest:latest?.id};
+ if(!serverTurns.length)return storeWarmBtwResult(version,parent,{history:localHistory,activeSession:latestActive,latest:latest?.id});
  // Core is the record: its turns across every thread, in the order they were
  // asked, newest last. A locally cached turn never outranks it: appending
  // cache-only rows after Core's put an old answer below the newest one.
  serverTurns.sort((a,b)=>a.at.localeCompare(b.at));
  const local=new Map(localHistory.map(h=>[h.question.trim()+'\u0000'+h.answer.trim(),h]));
  const merged:SideExchange[]=serverTurns.map(({at:_at,...turn})=>{const cached=local.get(turn.question.trim()+'\u0000'+turn.answer.trim());return cached?.attachments?{...turn,attachments:cached.attachments}:turn;});
- return {history:merged.slice(-BTW_HISTORY_LIMIT),activeSession:latestActive,latest:latest?.id};
+ return storeWarmBtwResult(version,parent,{history:merged.slice(-BTW_HISTORY_LIMIT),activeSession:latestActive,latest:latest?.id});
 }
 
 /** Core before the fix of 2026-10-21 kept only an OpenCode closing line written

@@ -49,9 +49,8 @@ struct OrbConversation: View {
     @State var refreshing = false
     /// An event arrived while a refresh was running; run once more after it.
     @State var refreshAgain = false
-    @State var streamToken = UUID()
     @State var lastRefresh = Date.distantPast
-    @State var stream: Task<Void, Never>?
+    @State var warmListenerToken: UUID?
     @State var draftSaveTask: Task<Void, Never>?
     @State var eventRefreshTask: Task<Void, Never>?
     @State var optimisticPrompt: String?
@@ -256,13 +255,20 @@ struct OrbConversation: View {
                 // Warm the /btw history so the side sheet opens on it, not on a spinner.
                 .task(id: id) {
                     guard let id, !id.isEmpty else { return }
+                    if OrbWarmSyncCoordinator.shared.canSkipBtwServerCrawl(parentId: id) {
+                        return
+                    }
                     try? await Task.sleep(for: .seconds(1))
                     try? await OrbBtwStore.shared(id).refresh()
                 }
                 .confirmationDialog("Clone conversation", isPresented: $cloning, titleVisibility: .visible) { cloneActions }
                 .navigationDestination(item: $forkedMission) { OrbConversation(missionID: $0, project: effectiveProjectSlug, folder: OrbRow(mission).folder) }
                 .task {
-                    if let missionID { OrbOnScreen.opened(missionID) }
+                    let fastReopen = missionID.map { OrbWarmSyncCoordinator.shared.canSkipFullRefreshOnReopen($0) } ?? false
+                    if let missionID {
+                        OrbOnScreen.opened(missionID)
+                        OrbWarmSyncCoordinator.shared.noteOpened(missionID)
+                    }
                     id = missionID
                     // Never overwrite what the user already typed while the screen opened.
                     if text.isEmpty { text = OrbDisk.read(draftKey, as: String.self) ?? "" }
@@ -333,7 +339,13 @@ struct OrbConversation: View {
                             contextItems = await OrbContextTagging.loadItems(for: targetProject)
                         }
                     }
-                    await refresh()
+                    if fastReopen && !isCloud && mission != .null && OrbRow(mission).mobile {
+                        loading = false
+                        lastRefresh = Date()
+                        attachLiveStreamIfNeeded()
+                    } else {
+                        await refresh()
+                    }
                     scrollToBottomOnOpen(scroll: scroll)
                     if contextItems.isEmpty && !effectiveProjectSlug.isEmpty {
                         contextItems = await OrbContextTagging.loadItems(for: effectiveProjectSlug)
@@ -342,9 +354,14 @@ struct OrbConversation: View {
                         let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
                         OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts, status: mission["status"].text, hasInteraction: !pendingQuestionEvents.isEmpty)
                     }
-                    // When SSE stream is connected for local/remote agents, poll lightly (12s);
+                    // When multiplexed WS / SSE stream is connected for local/remote agents, poll lightly (30s on WS, 12s on SSE);
                     // for cloud turns without SSE, poll every 3s while working.
-                    await Poller.run(every: { (stream != nil && !isCloud) ? .seconds(12) : .seconds(3) }, immediately: false,
+                    await Poller.run(every: {
+                        if warmListenerToken != nil && !isCloud {
+                            return api.isMultiplexSyncHealthy ? .seconds(30) : .seconds(12)
+                        }
+                        return .seconds(3)
+                    }, immediately: false,
                                      while: { phase == .active && (working || isCloud) }) {
                         await refresh(force: working)
                         return true
@@ -382,12 +399,16 @@ struct OrbConversation: View {
                     OrbDisk.saveAsync(value, key: draftKey + ":files")
                 }
                 .onDisappear {
-                    if let missionID { OrbOnScreen.closed(missionID) }
+                    let closingId = id ?? missionID
+                    detachLiveStream()
+                    if let closingId {
+                        OrbOnScreen.closed(closingId)
+                        OrbWarmSyncCoordinator.shared.noteClosed(closingId)
+                    }
                     dictation.cancel()
                     draftSaveTask?.cancel()
                     eventRefreshTask?.cancel()
                     if !text.isEmpty { OrbDisk.saveAsync(text, key: draftKey) }
-                    stream?.cancel(); stream = nil
                 }
                 .onChange(of: missionID) { _, _ in dictation.cancel() }
                 .onChange(of: api.endpoint) { _, _ in dictation.cancel() }
@@ -400,10 +421,14 @@ struct OrbConversation: View {
                        reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue { dictation.cancel() }
                 }
                 .onChange(of: phase) { _, value in
-                    if value == .active { Task { await refresh(force: true) } }
-                    else {
+                    if value == .active {
+                        attachLiveStreamIfNeeded()
+                        if let id, !OrbWarmSyncCoordinator.shared.canSkipFullRefreshOnReopen(id) {
+                            Task { await refresh(force: true) }
+                        }
+                    } else {
                         if value == .background || dictation.phase != .permission { dictation.cancel() }
-                        stream?.cancel(); stream = nil
+                        detachLiveStream()
                     }
                 }
         }

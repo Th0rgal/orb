@@ -859,6 +859,7 @@ enum OrbReadCache {
     /// Settings → Debug info → Clear caches: drops memory and disk copies for every account.
     static func clearAll() {
         OrbHierarchy.reset()
+        OrbWarmSyncCoordinator.shared.resetCaches()
         for item in pending.values { item.task.cancel() }
         pending.removeAll()
         values.removeAll()
@@ -875,6 +876,7 @@ enum OrbReadCache {
     }
     /// Drops memory copies (disk copies stay) so a suspended app is a small jetsam target.
     static func trimMemory() {
+        OrbWarmSyncCoordinator.shared.resetCaches()
         values.removeAll()
         eventValues.removeAll()
         eventFetchedAt.removeAll()
@@ -986,9 +988,18 @@ enum OrbReadCache {
             ensureScope()
             let account = scope
             let stream = OrbCore.shared.streamControl(missionId: nil, kinds: ["presentation"]) { type, data in
-                if type == "status" || type == "stream_lagged" { pending.formUnion(recent) }
+                if type == "status" || type == "stream_lagged" {
+                    pending.formUnion(recent)
+                    OrbWarmSyncCoordinator.shared.notePresentationStreamDisrupted()
+                }
                 guard type == "mission_presentation", let id = data["mission_id"] as? String else { return }
-                if (data["kind"] as? String) == "mission_activity" {
+                let kind = data["kind"] as? String
+                OrbWarmSyncCoordinator.shared.notePresentationHint(
+                    missionId: id,
+                    kind: kind,
+                    btwParentId: data["btw_parent_id"] as? String
+                )
+                if kind == "mission_activity" {
                     if recent.contains(id), let label = data["label"] as? String {
                         if labels.count >= 48 { labels.removeAll() }
                         labels[scope + ":" + id] = String(label.prefix(160))
@@ -997,7 +1008,9 @@ enum OrbReadCache {
                 }
                 labels[scope + ":" + id] = nil
                 listChanged = true
-                if recent.contains(id) { pending.insert(id) }
+                if recent.contains(id) && !OrbWarmSyncCoordinator.shared.isMissionWarmLive(id) {
+                    pending.insert(id)
+                }
             }
             // Reconcile after a real reconnect, not on a polling timer.
             var closed = false
