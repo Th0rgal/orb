@@ -1053,18 +1053,12 @@ async fn write_codex_config(
     // emitted, and the Thoughts panel has nothing to persist or replay.
     // Pin "detailed" unless the profile/operator already set a value.
     let config_payload = ensure_codex_reasoning_summary(&config_payload);
-    // When CLIProxyAPI owns the ChatGPT OAuth credential, Codex must send its
-    // Responses traffic to the proxy instead of chatgpt.com.
+    // When CLIProxyAPI owns the ChatGPT OAuth credential, Codex sends its
+    // Responses traffic through a proxy endpoint (`[model_providers.cliproxy]`,
+    // rewritten per attempt by the runner when scoped through Core's
+    // `/api/llm/codex-speed` route) instead of chatgpt.com.
     let config_payload = match crate::api::oauth_owner::codex_via_cli_proxy() {
-        Some(endpoint) => {
-            if workspace_type == WorkspaceType::Container && shared_network != Some(true) {
-                tracing::warn!(
-                    base_url = %endpoint.base_url,
-                    "Codex is routed through CLIProxyAPI on the host loopback, but this container has no shared network; the proxy may be unreachable"
-                );
-            }
-            ensure_codex_model_provider(&config_payload, &endpoint.openai_v1_url())
-        }
+        Some(endpoint) => ensure_codex_model_provider(&config_payload, &endpoint.openai_v1_url()),
         None => config_payload,
     };
     write_file_atomic(&config_path, config_payload)?;

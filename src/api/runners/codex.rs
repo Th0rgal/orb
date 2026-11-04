@@ -1319,34 +1319,17 @@ async fn run_codex_turn(
         .with_terminal_reason(TerminalReason::LlmError);
     }
 
-    // A non-proxy attempt (explicit rotation override, or no CLIProxyAPI
-    // ownership at all) must not inherit the `model_provider = "cliproxy"`
-    // stanza baked into the mission config at prepare time: its
-    // `env_key = "OPENAI_API_KEY"` would resolve against a missing env var
-    // and the fallback attempt would fail instead of authenticating with
-    // its own credential. Strip only our own stanza; an operator-set
-    // provider is left untouched.
-    if codex_proxy.is_none() {
-        let config_path = mission_work_dir.join(".codex").join("config.toml");
-        if let Ok(existing) = std::fs::read_to_string(&config_path) {
-            let stripped = crate::workspace::config::strip_codex_cli_proxy_provider(&existing);
-            if stripped != existing {
-                if let Err(e) = std::fs::write(&config_path, &stripped) {
-                    tracing::warn!(
-                        mission_id = %mission_id,
-                        path = %config_path.display(),
-                        error = %e,
-                        "Failed to strip CLIProxyAPI model provider from Codex config for non-proxy attempt"
-                    );
-                } else {
-                    tracing::info!(
-                        mission_id = %mission_id,
-                        "Stripped CLIProxyAPI model provider from Codex config for non-proxy attempt"
-                    );
-                }
-            }
-        }
-    }
+    // Reconcile the mission's `[model_providers.cliproxy]` section with this
+    // attempt's credential:
+    // - Proxied attempts (including `control::speed_proxy::register` scopes
+    //   rooted at Core's `/api/llm/codex-speed` route, whose capability token
+    //   CLIProxyAPI itself would reject with 401 "Invalid API key") point
+    //   `base_url` at this attempt's endpoint.
+    // - Non-proxy attempts (explicit rotation override, or no CLIProxyAPI
+    //   ownership) strip our `cliproxy` stanza so `env_key = "OPENAI_API_KEY"`
+    //   does not resolve against a missing env var.
+    // An operator-set `model_provider` is left untouched in both cases.
+    reconcile_codex_config_for_attempt(mission_id, mission_work_dir, codex_proxy.as_ref());
 
     let workspace_exec = WorkspaceExec::new(workspace.clone());
     let cli_path = get_backend_string_setting("codex", "cli_path")
@@ -2103,10 +2086,111 @@ Update it to the latest version (`npm install -g @openai/codex@latest`) and retr
     result
 }
 
+/// Reconcile the mission's `[model_providers.cliproxy]` section with the
+/// credential selected for this attempt.
+///
+/// Mission preparation writes CLIProxyAPI's own URL into `.codex/config.toml`,
+/// whereas a speed-scoped attempt (`control::speed_proxy::register`) mints a
+/// capability token valid only against Core's `/api/llm/codex-speed` route
+/// (CLIProxyAPI rejects it with 401 "Invalid API key"). Conversely, a non-proxy
+/// fallback attempt must drop our `cliproxy` stanza so `OPENAI_API_KEY` is not
+/// required. An operator-set `model_provider` is preserved untouched.
+fn reconcile_codex_config_for_attempt(
+    mission_id: Uuid,
+    mission_work_dir: &std::path::Path,
+    codex_proxy: Option<&crate::api::oauth_owner::CliProxyEndpoint>,
+) {
+    let config_path = mission_work_dir.join(".codex").join("config.toml");
+    let Ok(existing) = std::fs::read_to_string(&config_path) else {
+        return;
+    };
+    let desired = match codex_proxy {
+        Some(endpoint) => crate::workspace::config::ensure_codex_model_provider(
+            &existing,
+            &endpoint.openai_v1_url(),
+        ),
+        None => crate::workspace::config::strip_codex_cli_proxy_provider(&existing),
+    };
+    if desired == existing {
+        return;
+    }
+    if let Err(e) = crate::workspace::config::write_file_atomic(&config_path, &desired) {
+        tracing::warn!(
+            mission_id = %mission_id,
+            path = %config_path.display(),
+            routed_via_proxy = codex_proxy.is_some(),
+            error = %e,
+            "Failed to reconcile Codex model provider config for attempt"
+        );
+    } else if codex_proxy.is_none() {
+        tracing::info!(
+            mission_id = %mission_id,
+            "Stripped CLIProxyAPI model provider from Codex config for non-proxy attempt"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{codex_transport_failure_stage, codex_transport_reason_is_retryable};
     use crate::agents::TerminalReason;
+
+    /// Replays the failing order: the mission is prepared with the
+    /// CLIProxyAPI URL, then the attempt runs with a speed-scoped endpoint
+    /// whose token only Core's speed route accepts, and a subsequent fallback
+    /// attempt without a proxy strips the `cliproxy` stanza cleanly.
+    #[test]
+    fn proxied_attempt_routes_codex_to_its_scoped_endpoint_and_fallback_strips_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        let prepared = crate::workspace::config::ensure_codex_model_provider(
+            "model = \"gpt-5.5\"\n",
+            "http://127.0.0.1:8317/v1",
+        );
+        std::fs::write(codex.join("config.toml"), &prepared).unwrap();
+        let scoped = crate::api::oauth_owner::CliProxyEndpoint {
+            base_url: "http://127.0.0.1:3000/api/llm/codex-speed".into(),
+            api_key: "scoped-token".into(),
+            identity_url: Some("http://127.0.0.1:8317".into()),
+        };
+
+        super::reconcile_codex_config_for_attempt(uuid::Uuid::nil(), dir.path(), Some(&scoped));
+
+        let routed = std::fs::read_to_string(codex.join("config.toml")).unwrap();
+        assert!(routed.contains("base_url = \"http://127.0.0.1:3000/api/llm/codex-speed/v1\""));
+        assert!(!routed.contains("127.0.0.1:8317"));
+        assert_eq!(routed.matches("[model_providers.cliproxy]").count(), 1);
+        assert!(routed.contains("model = \"gpt-5.5\""));
+
+        super::reconcile_codex_config_for_attempt(uuid::Uuid::nil(), dir.path(), None);
+
+        let stripped = std::fs::read_to_string(codex.join("config.toml")).unwrap();
+        assert!(!stripped.contains("cliproxy"));
+        assert!(!stripped.contains("codex-speed"));
+        assert!(stripped.contains("model = \"gpt-5.5\""));
+    }
+
+    #[test]
+    fn operator_model_provider_is_not_rerouted() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        let operator = "model_provider = \"azure\"\n";
+        std::fs::write(codex.join("config.toml"), operator).unwrap();
+        let scoped = crate::api::oauth_owner::CliProxyEndpoint {
+            base_url: "http://127.0.0.1:3000/api/llm/codex-speed".into(),
+            api_key: "scoped-token".into(),
+            identity_url: None,
+        };
+
+        super::reconcile_codex_config_for_attempt(uuid::Uuid::nil(), dir.path(), Some(&scoped));
+
+        assert_eq!(
+            std::fs::read_to_string(codex.join("config.toml")).unwrap(),
+            operator
+        );
+    }
 
     #[tokio::test]
     async fn native_goal_stop_without_chat_output_is_resumable_not_auth_failure() {
