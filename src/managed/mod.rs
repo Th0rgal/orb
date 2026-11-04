@@ -6484,7 +6484,7 @@ pub(crate) fn cloud_bootstrap_script(
         r#"#!/bin/sh
 set -eu
 H=/var/lib/orb-node; B=/usr/local/bin; S=/usr/local/sbin; O=/home/user/.orb
-P=$B:/usr/local/cuda/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/conda/bin
+P=/opt/boost/bin:/opt/elan/bin:/opt/orb/bin:$B:/usr/local/cuda/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/conda/bin
 E="OPENCODE_TMPDIR=/tmp/opencode GIT_TERMINAL_PROMPT=0 DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_AUTOUPDATE=1 CODEX_DISABLE_UPDATE_CHECK=1 NO_UPDATE_NOTIFIER=1"
 q() {{ "$@" >/dev/null 2>&1; }}
 if q command -v apt-get; then
@@ -6525,7 +6525,8 @@ SANDBOXED_NODE_LABELS=managed,trust=managed,provider={provider},size={size},imag
 EOF
 chmod 0600 "$O/enroll.env"
 bash "$O/provision.sh" || :
-rm -rf "$H/node.cred" "$H/work/managed-auth"
+rm -rf "$H/work/managed-auth"
+if ! q grep -F '"machine_id":"{machine_id}"' "$H/node.cred"; then rm -f "$H/node.cred"; q pkill -u orbnode -x sandboxed-node || :; fi
 if q command -v systemctl && [ -d /run/systemd/system ]; then
   UID_N=$(id -u orbnode)
   cat >/etc/systemd/system/orb-node.service <<EOF
@@ -6548,8 +6549,7 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload && systemctl enable orb-node && systemctl restart orb-node
 else
-  L=${{LD_LIBRARY_PATH:-/usr/local/nvidia/lib:/usr/local/nvidia/lib64}}:/usr/local/cuda/lib64
-  nohup bash -c "set -a; . $O/enroll.env; set +a; cd $H; while :; do runuser -u orbnode -- env HOME=$H PATH=$P LD_LIBRARY_PATH=\"$L\" $E $B/sandboxed-node || :; sleep 2; done" >"$H/orb-node.log" 2>&1 &
+  "$S/orb-node-bg" "$P" "$E"
 fi
 "#
     )

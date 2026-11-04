@@ -4802,3 +4802,78 @@ async fn boost_saturation_auto_skips_in_default_provider_and_rejects_explicit_wi
         "boost_token"
     ));
 }
+
+#[test]
+fn boost_warm_overlay_bootstrap_avoids_copyup_and_supports_non_systemd_init() {
+    assert!(
+        !PROVISION_SCRIPT.contains("chmod -R a+rX \"$repo_dir\""),
+        "recursive chmod on warm overlayfs triggers multi-GiB copy-up timeouts"
+    );
+    assert!(PROVISION_SCRIPT.contains("BOOST_WARM_REPO_DIR"));
+    assert!(
+        !PROVISION_SCRIPT.contains("BOOST_LEAN_SLOTS BOOST_REPO_DIR"),
+        "BOOST_REPO_DIR must not be globally exported into .boost-env or /opt/boost/bin/lake overrides $PWD"
+    );
+    assert!(PROVISION_SCRIPT.contains("X-mount.idmap="));
+    assert!(PROVISION_SCRIPT.contains("/run/orb-cow-worktree/sock"));
+    assert!(PROVISION_SCRIPT.contains("os.O_NOFOLLOW"));
+    assert!(PROVISION_SCRIPT.contains("nosuid,nodev,lowerdir="));
+
+    let prov_syntax = std::process::Command::new("bash")
+        .arg("-n")
+        .arg("-c")
+        .arg(PROVISION_SCRIPT)
+        .output()
+        .expect("bash -n on PROVISION_SCRIPT");
+    assert!(
+        prov_syntax.status.success(),
+        "PROVISION_SCRIPT failed bash -n: {}",
+        String::from_utf8_lossy(&prov_syntax.stderr)
+    );
+
+    let daemon_src = PROVISION_SCRIPT
+        .split("cat > /usr/local/sbin/orb-cow-worktree-d <<'COWDAEMON'\n")
+        .nth(1)
+        .and_then(|s| s.split("\nCOWDAEMON\n").next())
+        .expect("embedded orb-cow-worktree-d python source");
+    let py_syntax = std::process::Command::new("python3")
+        .arg("-c")
+        .arg("import ast, sys; ast.parse(sys.stdin.read())")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(daemon_src.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("python3 ast.parse on orb-cow-worktree-d");
+    assert!(
+        py_syntax.status.success(),
+        "orb-cow-worktree-d failed python3 ast.parse: {}",
+        String::from_utf8_lossy(&py_syntax.stderr)
+    );
+
+    let script = cloud_bootstrap_script(
+        "https://agent-core.sandboxed.example.com",
+        "mmboostwarm1",
+        "managed-mmboostwarm1",
+        &"b".repeat(64),
+        16,
+        managed_job_memory_bytes(96),
+        "boost",
+        "boost-32vcpu-96gb",
+        "ubuntu-26.04",
+    );
+    assert!(script.len() < 4096, "bootstrap bytes={}", script.len());
+    assert!(script.contains("P=/opt/boost/bin:/opt/elan/bin:/opt/orb/bin:$B:"));
+    assert!(script.contains("grep -F '\"machine_id\":\"mmboostwarm1\"' \"$H/node.cred\""));
+    assert!(script.contains("\"$S/orb-node-bg\" \"$P\" \"$E\""));
+    assert!(PROVISION_SCRIPT.contains(r#"[ ! -r \"$H/.boost-env\" ] || . \"$H/.boost-env\""#));
+    assert!(PROVISION_SCRIPT.contains("pgrep -u orbnode -x sandboxed-node"));
+}
