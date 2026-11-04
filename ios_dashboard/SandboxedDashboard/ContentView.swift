@@ -15,7 +15,6 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     private let api = OrbCore.shared
-    private var backgroundSync = OrbBackgroundSyncMonitor.shared
 
     var body: some View {
         Group {
@@ -137,11 +136,21 @@ struct SetupSheet: View {
     @State private var errorMessage: String?
 
     private let api = OrbCore.shared
-    private var backgroundSync = OrbBackgroundSyncMonitor.shared
+    private let backgroundSync = OrbBackgroundSyncMonitor.shared
 
-    var allowsDismissal = false
-    var embedded = false
+    var allowsDismissal: Bool
+    var embedded: Bool
     @Environment(\.dismiss) private var dismiss
+
+    init(
+        onComplete: @escaping () -> Void,
+        allowsDismissal: Bool = false,
+        embedded: Bool = false
+    ) {
+        self.onComplete = onComplete
+        self.allowsDismissal = allowsDismissal
+        self.embedded = embedded
+    }
 
     var body: some View {
         Group {
@@ -154,6 +163,34 @@ struct SetupSheet: View {
 
     private var isConnectedSession: Bool {
         embedded && api.isConfigured && (api.isAuthenticated || !api.authRequired) && !api.authSessionExpired
+    }
+
+    private var backgroundSyncSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Background sync").font(.subheadline).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 10) {
+                Picker(
+                    "Background sync",
+                    selection: Binding(
+                        get: { backgroundSync.mode },
+                        set: { backgroundSync.mode = $0 }
+                    )
+                ) {
+                    ForEach(OrbBackgroundSyncMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("account.background-sync")
+                Text(backgroundSync.statusText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("account.background-sync.status")
+            }
+            .padding(14)
+            .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
+        }
     }
 
     private var form: some View {
@@ -209,31 +246,7 @@ struct SetupSheet: View {
                         .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
                 }
                 if embedded {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Background sync").font(.subheadline).foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 10) {
-                            Picker(
-                                "Background sync",
-                                selection: Binding(
-                                    get: { backgroundSync.mode },
-                                    set: { backgroundSync.mode = $0 }
-                                )
-                            ) {
-                                ForEach(OrbBackgroundSyncMode.allCases) { mode in
-                                    Text(mode.label).tag(mode)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .accessibilityIdentifier("account.background-sync")
-                            Text(backgroundSync.statusText)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .accessibilityIdentifier("account.background-sync.status")
-                        }
-                        .padding(14)
-                        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
-                    }
+                    backgroundSyncSection
                 }
                 if let errorMessage { Text(errorMessage).font(.subheadline).foregroundStyle(.red) }
             }.padding(20)
@@ -317,7 +330,6 @@ struct LoginView: View {
     @FocusState private var isPasswordFocused: Bool
     
     private let api = OrbCore.shared
-    private var backgroundSync = OrbBackgroundSyncMonitor.shared
     
     init(sessionExpired: Bool = false, onLogin: @escaping () -> Void) {
         self.sessionExpired = sessionExpired
