@@ -215,158 +215,9 @@ struct OrbConversation: View {
 
     var body: some View {
         ScrollViewReader { scroll in
-            conversationContainer(scroll: scroll)
-                .background(OrbStyle.background)
-                .scrollDismissesKeyboard(.interactively)
-                .orbTrackPage("mission")
-                .navigationTitle(resolvedNavigationTitle)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
-                .toolbarBackground(.visible, for: .navigationBar)
-                // The project list's search field lives in the bottom toolbar; hiding it here
-                // makes UIKit slide it out with the push instead of drawing over the composer.
-                .toolbarVisibility(.hidden, for: .bottomBar)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        conversationToolbarMenu
-                    }
-                }
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    if !unavailable {
-                        composer
-                            .padding(.top, 4)
-                            .background(OrbStyle.background.ignoresSafeArea(edges: .bottom))
-                    }
-                }
-                .environment(\.orbFiles, OrbFileContext(scope: fileScope, shared: transcript.sharedFiles) { fileRef = $0 })
-                .sheet(item: $fileRef) { OrbFileViewerSheet(ref: $0, scope: fileScope).orbTrackPage("file_viewer", surface: .sheet, entryPoint: "mission") }
-                .sheet(isPresented: $showFiles) { OrbFilesSheet(scope: fileScope).orbTrackPage("files", surface: .sheet, entryPoint: "mission") }
-                .sheet(item: $preview) { OrbPreviewSheet(file: $0).orbTrackPage("attachment_preview", surface: .sheet) }
-                .sheet(isPresented: $showSelection, onDismiss: {
-                    if transferRequested { transferRequested = false; transferring = true }
-                }) {
-                    OrbAgentPicker(selection: $selection, existing: id != nil, onTransfer: id != nil && !isCloud ? { transferRequested = true } : nil).orbTrackPage("agent_picker", surface: .sheet)
-                }
-                .sheet(isPresented: $transferring) { OrbForkSheet(mission: mission, transfer: true) { forkedMission = $0["id"].text }.orbTrackPage("transfer", surface: .sheet) }
-                .sheet(isPresented: $showContext) { NavigationStack { OrbDocuments(project: effectiveProjectSlug, path: "").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showContext = false } } } } }
-                .alert("Rename conversation", isPresented: $rename) { TextField("Title", text: $title); Button("Save") { Task { await mutate(["title": .string(title)]) } }; Button("Cancel", role: .cancel) {} }
-                .sheet(isPresented: $moving) { moveConversationSheet.orbTrackPage("move", surface: .sheet) }
-                .sheet(isPresented: $forking) { OrbForkSheet(mission: mission) { forkedMission = $0["id"].text }.orbTrackPage("fork", surface: .sheet) }
-                .sheet(item: $sideQuestion) { OrbSideQuestionSheet(parentID: $0.parent, question: $0.question).orbTrackPage("btw", surface: .sheet) }
-                // Warm the /btw history so the side sheet opens on it, not on a spinner.
-                .task(id: id) {
-                    guard let id, !id.isEmpty else { return }
-                    if OrbWarmSyncCoordinator.shared.canSkipBtwServerCrawl(parentId: id) {
-                        return
-                    }
-                    try? await Task.sleep(for: .seconds(1))
-                    try? await OrbBtwStore.shared(id).refresh()
-                }
-                .confirmationDialog("Clone conversation", isPresented: $cloning, titleVisibility: .visible) { cloneActions }
-                .navigationDestination(item: $forkedMission) { OrbConversation(missionID: $0, project: effectiveProjectSlug, folder: OrbRow(mission).folder) }
+            conversationScaffold(scroll: scroll)
                 .task {
-                    let fastReopen = missionID.map { OrbWarmSyncCoordinator.shared.canSkipFullRefreshOnReopen($0) } ?? false
-                    if let missionID {
-                        OrbOnScreen.opened(missionID)
-                        OrbWarmSyncCoordinator.shared.noteOpened(missionID)
-                    }
-                    id = missionID
-                    // Never overwrite what the user already typed while the screen opened.
-                    if text.isEmpty { text = OrbDisk.read(draftKey, as: String.self) ?? "" }
-                    attachments = OrbDisk.read(draftKey + ":files", as: [OrbAttachment].self) ?? []
-                    if let pending = OrbDisk.read(pendingKey, as: OrbPending.self) {
-                        if OrbSendsInFlight.keys.contains(pendingKey) {
-                            // Sent from an earlier visit and still awaiting Core: show it as
-                            // working, not as a failed send, and settle when it returns.
-                            optimisticPrompt = pending.body["content"].text.isEmpty ? pending.body["prompt"].text : pending.body["content"].text
-                            Task { await settleInFlightSend() }
-                        } else {
-                            error = "An earlier send needs verification. Retry sends the same request without creating a new identity."
-                        }
-                    }
-                    if let id {
-                        mission = await OrbReadCache.readAsync("mission:\(id)") ?? .null
-                        execution = await OrbReadCache.readAsync("cloud:\(id)") ?? .null
-                        let cachedEvents = await OrbReadCache.readEventsAsync(id)
-                        guard !Task.isCancelled, id == self.id else { return }
-                        if !cachedEvents.isEmpty {
-                            events = cachedEvents
-                            rebuildWorkModel()
-                            live.reconcileStored(events, working: working, streamAdvanced: false)
-                        }
-                        rebuildHistory()
-                        scrollToBottomOnOpen(scroll: scroll)
-                        if execution != .null { selection.restore(execution["selection"]) }
-                        else if mission != .null {
-                            selection.backend = mission["backend"].text
-                            selection.node = mission["remote_node_id"].text
-                            selection.model = mission["model_override"].text
-                            selection.serviceTier = OrbCodexSpeed.of(mission)
-                        }
-                        OrbPresentation.remember(id)
-                        if mission["history"].items.isEmpty {
-                            let cached = await OrbReadCache.readAsync("presentation:\(id)")
-                            var preview = cached
-                            if preview == nil { preview = await OrbPresentation.load(id) }
-                            if let preview, id == self.id, !Task.isCancelled {
-                                var fields: [String: OrbJSON] = [:]
-                                if case .object(let existing) = mission { fields = existing }
-                                fields["history"] = .array(OrbPresentation.history(preview))
-                                fields["presentation_activity"] = preview["activity"]
-                                mission = .object(fields)
-                                rebuildHistory()
-                            }
-                        }
-                        if mission != .null { loading = false }
-                        let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
-                        OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts, status: mission["status"].text, hasInteraction: !pendingQuestionEvents.isEmpty)
-                    } else if !selection.cloud && !selection.nodePinnedByUser {
-                        let resolveAutoNode: ([OrbJSON]) -> String = { items in
-                            if selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                return "core"
-                            }
-                            return OrbSelection.firstAvailableNodeID(items, backend: selection.backend) ?? "core"
-                        }
-                        if selection.node.isEmpty, let cached = OrbReadCache.read("catalog:agent") {
-                            selection.node = resolveAutoNode(cached["nodes"]["nodes"].items)
-                        }
-                        if let catalog = try? await OrbReadCache.agentCatalog(), !selection.cloud && !selection.nodePinnedByUser {
-                            selection.node = resolveAutoNode(catalog["nodes"]["nodes"].items)
-                        }
-                    }
-                    let targetProject = effectiveProjectSlug
-                    if !targetProject.isEmpty {
-                        Task {
-                            contextItems = await OrbContextTagging.loadItems(for: targetProject)
-                        }
-                    }
-                    if fastReopen && !isCloud && mission != .null && OrbRow(mission).mobile {
-                        loading = false
-                        lastRefresh = Date()
-                        attachLiveStreamIfNeeded()
-                    } else {
-                        await refresh()
-                    }
-                    scrollToBottomOnOpen(scroll: scroll)
-                    if contextItems.isEmpty && !effectiveProjectSlug.isEmpty {
-                        contextItems = await OrbContextTagging.loadItems(for: effectiveProjectSlug)
-                    }
-                    if let id {
-                        let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
-                        OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts, status: mission["status"].text, hasInteraction: !pendingQuestionEvents.isEmpty)
-                    }
-                    // When multiplexed WS / SSE stream is connected for local/remote agents, poll lightly (30s on WS, 12s on SSE);
-                    // for cloud turns without SSE, poll every 3s while working.
-                    await Poller.run(every: {
-                        if warmListenerToken != nil && !isCloud {
-                            return api.isMultiplexSyncHealthy ? .seconds(30) : .seconds(12)
-                        }
-                        return .seconds(3)
-                    }, immediately: false,
-                                     while: { phase == .active && (working || isCloud) }) {
-                        await refresh(force: working)
-                        return true
-                    }
+                    await runOpenTask(scroll: scroll)
                 }
                 .onAppear { if let missionID { OrbCrashBreadcrumbs.enterConversation(missionId: missionID, turnCount: turns.count) } }
                 .onChange(of: turns.count) { _, count in OrbCrashBreadcrumbs.updateTurnCount(count) }
@@ -461,6 +312,9 @@ struct OrbConversation: View {
             // Warm the /btw history so the side sheet opens on it, not on a spinner.
             .task(id: id) {
                 guard let id, !id.isEmpty else { return }
+                if OrbWarmSyncCoordinator.shared.canSkipBtwServerCrawl(parentId: id) {
+                    return
+                }
                 try? await Task.sleep(for: .seconds(1))
                 try? await OrbBtwStore.shared(id).refresh()
             }
@@ -495,7 +349,11 @@ struct OrbConversation: View {
     }
 
     func runOpenTask(scroll: ScrollViewProxy) async {
-        if let missionID { OrbOnScreen.opened(missionID) }
+        let fastReopen = missionID.map { OrbWarmSyncCoordinator.shared.canSkipFullRefreshOnReopen($0) } ?? false
+        if let missionID {
+            OrbOnScreen.opened(missionID)
+            OrbWarmSyncCoordinator.shared.noteOpened(missionID)
+        }
         id = missionID
         // Never overwrite what the user already typed while the screen opened.
         if text.isEmpty { text = OrbDisk.read(draftKey, as: String.self) ?? "" }
@@ -566,7 +424,13 @@ struct OrbConversation: View {
                 contextItems = await OrbContextTagging.loadItems(for: targetProject)
             }
         }
-        await refresh()
+        if fastReopen && !isCloud && mission != .null && OrbRow(mission).mobile {
+            loading = false
+            lastRefresh = Date()
+            attachLiveStreamIfNeeded()
+        } else {
+            await refresh()
+        }
         scrollToBottomOnOpen(scroll: scroll)
         if contextItems.isEmpty && !effectiveProjectSlug.isEmpty {
             contextItems = await OrbContextTagging.loadItems(for: effectiveProjectSlug)
@@ -575,9 +439,14 @@ struct OrbConversation: View {
             let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
             OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts, status: mission["status"].text, hasInteraction: !pendingQuestionEvents.isEmpty)
         }
-        // When SSE stream is connected for local/remote agents, poll lightly (12s);
+        // When multiplexed WS / SSE stream is connected for local/remote agents, poll lightly (30s on WS, 12s on SSE);
         // for cloud turns without SSE, poll every 3s while working.
-        await Poller.run(every: { (stream != nil && !isCloud) ? .seconds(12) : .seconds(3) }, immediately: false,
+        await Poller.run(every: {
+            if warmListenerToken != nil && !isCloud {
+                return api.isMultiplexSyncHealthy ? .seconds(30) : .seconds(12)
+            }
+            return .seconds(3)
+        }, immediately: false,
                          while: { phase == .active && (working || isCloud) }) {
             await refresh(force: working)
             return true
