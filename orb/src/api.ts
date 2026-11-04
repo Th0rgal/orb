@@ -48,12 +48,16 @@ export function candidateApiUrls(primary = getApiUrl()): string[] {
 let transportBridgeEnabled = false;
 let bridgeTarget: string | null = null;
 let bridgeBaseUrl: string | null = null;
+let bridgeStreamUrls: string[] = [];
+let bridgeStreamCursor = 0;
 let bridgePending: Promise<string | null> | null = null;
 const endpointCooldownUntil = new Map<string, number>();
 
 function resetTransportState() {
   bridgeTarget = null;
   bridgeBaseUrl = null;
+  bridgeStreamUrls = [];
+  bridgeStreamCursor = 0;
   bridgePending = null;
   endpointCooldownUntil.clear();
 }
@@ -64,6 +68,8 @@ export function setTransportBridgeEnabled(enabled: boolean): void {
   if (!enabled) {
     bridgeTarget = null;
     bridgeBaseUrl = null;
+    bridgeStreamUrls = [];
+    bridgeStreamCursor = 0;
     bridgePending = null;
   }
 }
@@ -91,17 +97,32 @@ export async function resolveTransportBase(apiUrl = getApiUrl()): Promise<string
   if (bridgeTarget === clean && bridgeBaseUrl) return bridgeBaseUrl;
   if (bridgePending && bridgeTarget === clean) return bridgePending;
   bridgeTarget = clean;
-  const pending = invoke<{ proxy_base_url?: string; configured_target?: string }>("transport_bridge_configure", { apiUrl: clean })
+  const pending = invoke<{
+    proxy_base_url?: string;
+    stream_proxy_base_urls?: string[];
+    configured_target?: string;
+  }>("transport_bridge_configure", { apiUrl: clean })
     .then((info) => {
       const proxy = typeof info?.proxy_base_url === "string" && info.proxy_base_url.startsWith("http://127.0.0.1:")
         ? info.proxy_base_url.replace(/\/+$/, "")
         : null;
-      if (bridgeTarget === clean) bridgeBaseUrl = proxy;
+      const streams = Array.isArray(info?.stream_proxy_base_urls)
+        ? info.stream_proxy_base_urls
+            .filter((u): u is string => typeof u === "string" && u.startsWith("http://127.0.0.1:"))
+            .map((u) => u.replace(/\/+$/, ""))
+        : [];
+      if (bridgeTarget === clean) {
+        bridgeBaseUrl = proxy;
+        bridgeStreamUrls = streams;
+      }
       return proxy;
     })
     .catch((error) => {
       note(`transport.bridge.error: ${error instanceof Error ? error.message : String(error)}`);
-      if (bridgeTarget === clean) bridgeBaseUrl = null;
+      if (bridgeTarget === clean) {
+        bridgeBaseUrl = null;
+        bridgeStreamUrls = [];
+      }
       return null;
     })
     .finally(() => {
@@ -111,18 +132,37 @@ export async function resolveTransportBase(apiUrl = getApiUrl()): Promise<string
   return pending;
 }
 
+export function isStreamingFetch(path: string, init?: RequestInit): boolean {
+  if (path.startsWith("/api/control/stream") || path.includes("/context/stream")) return true;
+  const accept = headerValue(init?.headers, "Accept");
+  return typeof accept === "string" && accept.toLowerCase().includes("text/event-stream");
+}
+
+function pickBridgeUrl(streaming: boolean, fallback: string | null): string | null {
+  if (streaming && bridgeStreamUrls.length > 0) {
+    const idx = bridgeStreamCursor++ % bridgeStreamUrls.length;
+    return bridgeStreamUrls[idx];
+  }
+  return fallback;
+}
+
 /** Perform `fetch` against `path` using the Tauri loopback transport when active
  * (eliminating `WKWebView` CORS preflights and DNS stalls), or ordered direct/fallback
- * origins synchronously when no native bridge is active. */
+ * origins synchronously when no native bridge is active. Long-lived SSE streams are
+ * routed across sharded loopback stream ports so `WKWebView`'s 6-connection-per-origin
+ * HTTP/1.1 limit never starves JSON/REST requests. */
 export function transportFetch(path: string, init?: RequestInit, explicitBase?: string): Promise<Response> {
   const target = (explicitBase ?? getApiUrl()).trim().replace(/\/+$/, "");
   if (transportBridgeEnabled && nativeInvoke()) {
+    const streaming = isStreamingFetch(path, init);
     if (bridgeTarget === target && bridgeBaseUrl) {
-      return fetch(`${bridgeBaseUrl}${path}`, init);
+      const chosen = pickBridgeUrl(streaming, bridgeBaseUrl)!;
+      return fetch(`${chosen}${path}`, init);
     }
-    return resolveTransportBase(target).then((proxy) =>
-      proxy ? fetch(`${proxy}${path}`, init) : transportFetchDirect(target, path, init),
-    );
+    return resolveTransportBase(target).then((proxy) => {
+      const chosen = bridgeTarget === target ? pickBridgeUrl(streaming, proxy) : proxy;
+      return chosen ? fetch(`${chosen}${path}`, init) : transportFetchDirect(target, path, init);
+    });
   }
   return transportFetchDirect(target, path, init);
 }
