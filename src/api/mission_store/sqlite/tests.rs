@@ -1523,9 +1523,6 @@ async fn project_metadata_and_awaiting_kind_roundtrip() {
         .update_mission_project(
             mission.id,
             MissionProjectPatch {
-                preserve_updated_at: false,
-                tag_patch: None,
-                title: None,
                 project: Some(Some("verity-core".to_string())),
                 track: Some(Some("C3-bridge-collapse".to_string())),
                 intent: Some(Some("review_merge_pr".to_string())),
@@ -1533,6 +1530,7 @@ async fn project_metadata_and_awaiting_kind_roundtrip() {
                 tags: Some(vec!["c3".to_string(), "blocking".to_string()]),
                 desired_state: Some(Some("waiting_ci".to_string())),
                 next_check_at: Some(Some("2026-07-01T00:00:00Z".to_string())),
+                ..Default::default()
             },
         )
         .await
@@ -4529,16 +4527,8 @@ async fn board_tasks_resolve_to_their_boss_missions_project_family() {
         .expect("store");
 
     let tag = |project: &str| MissionProjectPatch {
-        preserve_updated_at: false,
-        tag_patch: None,
-        title: None,
         project: Some(Some(project.to_string())),
-        track: None,
-        intent: None,
-        github_pr: None,
-        tags: None,
-        desired_state: None,
-        next_check_at: None,
+        ..Default::default()
     };
     let task = |key: &str| NewBoardTask {
         task_key: key.to_string(),

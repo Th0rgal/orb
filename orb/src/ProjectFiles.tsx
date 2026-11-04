@@ -8,7 +8,7 @@ import {nativeComposerDrop} from "./composerDrop";
 import {importProjectFiles} from "./projectFileImport";
 import {backgroundUploads,cancelBackgroundUpload,formatFileSize,pauseBackgroundUpload,resumeBackgroundUpload,type UploadSource} from "./uploads";
 import {subscribeProjectContext} from "./projectContext";
-import { assertFolderHasNoWork, moveFolderWork, makeFileReference, readFileReference, makeCronReference, readCronReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
+import { assertFolderHasNoWork, makeFileReference, readFileReference, makeCronReference, readCronReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
 import { FolderActivityIcon, folderActivity } from "./FolderActivity";
 import { createSidebarRequests } from "./sidebarRequests";
 import { folderLabel, setFolderLabel } from "./folderLabels";
@@ -65,6 +65,8 @@ import {
   projectsVersion,
   getProjectController,
   controllerAction,
+  ApprovalTransferConfirmationRequiredError,
+  type ApprovalTransferPolicy,
   type ControllerView as ControllerData,
 } from "./api";
 import { CronGlyph, untilLabel } from "./Controller";
@@ -86,11 +88,11 @@ import { SidebarTree } from "./Tree";
 import { type TreeRow } from "./treeModel";
 import { deletingIds, setDeletingIds, createTreeSelection } from "./tree/selection";
 import { createArchivePager } from "./tree/archivePager";
-import { createMissionMoves } from "./tree/moves";
+import { createMissionMoves, type ApprovalConfirmationPrompt } from "./tree/moves";
 import { createProjectTree, missionFolder, missionIdFromTreeId, type Node, type RowData } from "./tree/TreeView";
 import { MachineBadge, missionMachine, missionCopyId, rowDetail, ROW_TIP_ID, launchedToggle as launchedToggleView, type RowTipContent } from "./tree/missionRow";
 import { FileSkeleton } from "./Skeleton";
-import { excludeBtwMissions, isBtwMission, isPartialList, mergeMission, reconcileMissionList, type Misses, resolvedParents, withHierarchy } from "./missionHierarchy";
+import { excludeBtwMissions, isBtwMission, isPartialList, mergeMission, type Misses, type PlacementCommitItem, reconcileMissionList, resolvedParents, withHierarchy } from "./missionHierarchy";
 import { forkLeaders, missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "./missionTree";
 
 export { isMissionDeleting } from "./tree/selection";
@@ -250,6 +252,8 @@ export function LiveProjectsSection(p: {
   const descendantsConfirmed = new Set<string>();
   const deleteList = (ids: readonly string[]) => deleteDescendants(ids, allKnownMissions());
   const [stopPrompt, setStopPrompt] = createSignal<{ roots: string[]; workers: number } | null>(null);
+  const [approvalTransferPrompt, setApprovalTransferPrompt] = createSignal<ApprovalConfirmationPrompt | null>(null);
+  const listMisses = new Map<string, Misses>();
   let activeDeleteWorkers = 0;
   let pendingRemoved = new Set<string>();
   let pendingUnmark = new Set<string>();
@@ -275,6 +279,7 @@ export function LiveProjectsSection(p: {
     revealDestination: (slug, path) => { setExpanded(slug, true); if (path) setExpanded(`${slug}:${path}`, true); },
     loadMissions: slug => loadMissions(slug),
     setActionError: error => setActionError(error),
+    onApprovalConfirmationRequired: prompt => setApprovalTransferPrompt(prompt),
   });
   const { tree, archiveNodes, controllerRow, controllerLaunched } = createProjectTree({
     projects, expanded, missions, dirs, dirErrors, crons, controllers, cronUnsupported, cronErrors, archiveExpanded,
@@ -304,7 +309,12 @@ export function LiveProjectsSection(p: {
   /** A moved mission leaves its old listings. Unlike `removeRows` it is not
    * remembered as deleted, so the destination still lists it. */
   const leaveProjects = (id: string, keep: string) => batch(() => {
-    for (const slug of Object.keys(missions)) if (slug !== keep && missions[slug]?.some(m => m.id === id)) setMissions(slug, rows => rows.filter(m => m.id !== id));
+    for (const slug of Object.keys(missions)) {
+      if (slug !== keep) {
+        listMisses.get(slug)?.delete(id);
+        if (missions[slug]?.some(m => m.id === id)) setMissions(slug, rows => rows.filter(m => m.id !== id));
+      }
+    }
   });
   const forgetDeleted = (ids: string[]) => {
     const removed = new Set(ids);
@@ -620,8 +630,7 @@ export function LiveProjectsSection(p: {
     });
     const selected = p.selected(), prefix = `pf:${slug}:${path}`;
     if (selected === prefix || selected?.startsWith(`${prefix}/`)) p.open(`pf:${project}:${destination}${selected.slice(prefix.length)}`);
-    try { if (project === slug) await moveFolderWork(slug, path, destination); }
-    finally { await Promise.all([loadMissions(slug), loadCrons(slug, true)]); }
+    await Promise.all([loadMissions(slug), loadCrons(slug, true)]);
   };
   const saveFileAction = async () => {
     const target = fileAction(), version = connectionVersion();
@@ -813,22 +822,50 @@ export function LiveProjectsSection(p: {
       void loadDir(detail.slug, "");
     };
     window.addEventListener("orb:project-created", onProjectCreated);
-    const onMissionMoved = (event: Event) => {
-      const { id, project, tags } = (event as CustomEvent<{ id: string; project: string; tags?: string[] }>).detail;
-      const prior = allKnownMissions().find(m => m.id === id);
-      if (!prior) return;
-      // Commit the successful write before waiting for any project refresh.
-      // Reads launched before this acknowledgement may still contain A.
-      const nextTags = tags ?? (prior.tags ?? []).filter(t => !t.startsWith("orb-folder:"));
+    const onPlacementChanged = (event: Event) => {
+      const { moves } = (event as CustomEvent<{ moves?: PlacementCommitItem[] }>).detail ?? {};
+      if (!moves?.length) return;
+      const knownById = new Map(allKnownMissions().map(m => [m.id, m]));
       missionRevision++;
       batch(() => {
-        leaveProjects(id, project);
-        const updated = mergeMission(prior, { id, project, tags: nextTags }, "partial");
-        setMissions(project, rows => [updated, ...(rows ?? []).filter(m => m.id !== id)]);
+        for (const item of moves) {
+          const targetSlug = item.project || "default";
+          leaveProjects(item.mission_id, targetSlug);
+          const prior = knownById.get(item.mission_id);
+          if (prior && !isBtwMission(prior)) {
+            const updated = mergeMission(prior, {
+              id: item.mission_id,
+              project: item.project,
+              folder: item.folder,
+              placement_revision: item.placement_revision,
+            }, "partial");
+            if (!isArchived(updated) || (missions[targetSlug] ?? []).some(m => m.id === item.mission_id)) {
+              setMissions(targetSlug, rows => [updated, ...(rows ?? []).filter(m => m.id !== item.mission_id)]);
+            }
+          } else if ((missions[targetSlug] ?? []).some(m => m.id === item.mission_id)) {
+            setMissions(targetSlug, rows => (rows ?? []).map(m => m.id === item.mission_id
+              ? mergeMission(m, { id: item.mission_id, project: item.project, folder: item.folder, placement_revision: item.placement_revision }, "partial")
+              : m));
+          }
+        }
+        const moveById = new Map(moves.map(item => [item.mission_id, item]));
+        setArchivedMissions(prev => {
+          if (!prev.some(m => moveById.has(m.id))) return prev;
+          return prev.map(m => {
+            const item = moveById.get(m.id);
+            if (!item) return m;
+            return mergeMission(m, {
+              id: m.id,
+              project: item.project,
+              folder: item.folder,
+              placement_revision: item.placement_revision,
+            }, "partial");
+          });
+        });
       });
     };
-    window.addEventListener("orb:mission-moved", onMissionMoved);
-    onCleanup(() => window.removeEventListener("orb:mission-moved", onMissionMoved));
+    window.addEventListener("orb:mission-placement-changed", onPlacementChanged);
+    onCleanup(() => window.removeEventListener("orb:mission-placement-changed", onPlacementChanged));
     const onMissionForked = (event: Event) => {
       const { mission } = (event as CustomEvent<{ mission: Mission }>).detail ?? {};
       const slug = mission?.project?.trim();
@@ -914,7 +951,6 @@ export function LiveProjectsSection(p: {
     });
   });
 
-  const listMisses = new Map<string, Misses>();
   const newerThan = (a: Mission, b: Mission) => (Date.parse(a.updated_at || "") || 0) > (Date.parse(b.updated_at || "") || 0);
   const loadMissions = (slug: string, opts?: { transcripts?: boolean; cached?: boolean }) => {
     if (!isConnected()) return Promise.resolve();
@@ -1293,7 +1329,7 @@ export function LiveProjectsSection(p: {
     setCutId(null); setPendingMoves([]); setCutCron(null); setFileClipboard(text); setActionError(null);
     await writeClipboardReference(text, clipboardData);
   };
-  const pasteItems = async (targetSlug: string, targetPath: string, text: string) => {
+  const pasteItems = async (targetSlug: string, targetPath: string, text: string, approvalPolicy: ApprovalTransferPolicy = "check") => {
     const bundle = readItemsReference(text), version = connectionVersion();
     if (!bundle || fileBusy() || movingCron() || isMoving() || text === consumedFileClipboard || isClipboardReferenceRetired(text)) return;
     setFileBusy(true); setActionMenu(null); setActionError(null);
@@ -1381,7 +1417,23 @@ export function LiveProjectsSection(p: {
           byFolder.set(dest, [...(byFolder.get(dest) ?? []), item.id]);
         }
         const plans = [...byFolder].map(([dest, ids]) => planMissionMoves(ids, targetSlug, dest, allKnownMissions()));
-        const missionFailures = (await Promise.all(plans.map(plan => moveMissions(plan, targetSlug)))).flat();
+        const missionFailures = (await Promise.all(plans.map(plan => moveMissions(plan, targetSlug, { approvalPolicy })))).flat();
+        const approvalErr = missionFailures.find(
+          f => f.error instanceof ApprovalTransferConfirmationRequiredError,
+        )?.error as ApprovalTransferConfirmationRequiredError | undefined;
+        if (approvalErr) {
+          setApprovalTransferPrompt({
+            error: approvalErr,
+            confirm: (chosenPolicy) => {
+              if (version !== connectionVersion()) return;
+              const remainingMissions = [...byFolder.values()].flat().map(id => ({ kind: "mission" as const, id }));
+              const retryRef = makeItemsReference(remainingMissions, false);
+              void pasteItems(targetSlug, targetPath, retryRef, chosenPolicy);
+            },
+            cancel: () => {},
+          });
+          return;
+        }
         for (const f of missionFailures) failures.push(`${f.id.slice(0, 8)}: ${f.error instanceof Error ? f.error.message : String(f.error)}`);
         const failedIds = new Set(missionFailures.map(f => f.id));
         for (const step of plans.flat()) if (!failedIds.has(step.id)) leaveProjects(step.id, targetSlug);
@@ -2155,10 +2207,12 @@ export function LiveProjectsSection(p: {
     if (!current) return undefined;
     // Project listings own placement; the open detail owns live status/content.
     // Its older project/folder must not reinsert a conversation we just moved.
-    return movedMission(listed ? { ...current, project: listed.project, tags: [
-      ...(current.tags ?? []).filter(tag => !tag.startsWith("orb-folder:")),
-      ...(listed.tags ?? []).filter(tag => tag.startsWith("orb-folder:")),
-    ] } : current);
+    return movedMission(listed ? {
+      ...current,
+      project: listed.project,
+      folder: listed.folder,
+      placement_revision: listed.placement_revision,
+    } : current);
   });
   // Observe identity/location, not every polling update. This also runs when a
   // restored conversation's metadata arrives after the initial selection.
@@ -2509,6 +2563,44 @@ export function LiveProjectsSection(p: {
             footer={<span>Markdown by default — a name with no extension gets {REFERENCE_FILE_EXT}.</span>}
           />
         )}
+      </Show>
+      <Show when={approvalTransferPrompt()}>
+        {(prompt) => {
+          const err = () => prompt().error;
+          const secretNames = () => [...new Set([
+            ...err().grants.map(g => g.secret_name),
+            ...err().pendingRequests.map(r => r.secret_name),
+          ].filter(Boolean))];
+          const close = () => {
+            const cur = prompt();
+            setApprovalTransferPrompt(null);
+            cur.cancel();
+          };
+          const choose = (policy: "revoke" | "keep") => {
+            const cur = prompt();
+            setApprovalTransferPrompt(null);
+            cur.confirm(policy);
+          };
+          return (
+            <Dialog
+              size="compact"
+              title="Move with active secret approvals?"
+              description={`Moving to ${err().targetProject} affects ${err().grants.length} active secret ${err().grants.length === 1 ? "grant" : "grants"} and ${err().pendingRequests.length} pending ${err().pendingRequests.length === 1 ? "request" : "requests"}.`}
+              onClose={close}
+              footer={<>
+                <DialogButton onClick={close}>Cancel</DialogButton>
+                <DialogButton variant="secondary" onClick={() => choose("keep")}>Move &amp; keep approvals</DialogButton>
+                <DialogButton variant="primary" onClick={() => choose("revoke")}>Move &amp; revoke approvals</DialogButton>
+              </>}
+            >
+              <Show when={secretNames().length > 0}>
+                <p style={{ margin: "0", color: "var(--fg-2)", "font-size": "12px", "line-height": "1.5" }}>
+                  Affected secrets: <code>{secretNames().join(", ")}</code>
+                </p>
+              </Show>
+            </Dialog>
+          );
+        }}
       </Show>
       <Show when={cronInfo()}>{(slug) => <Dialog title="Project crons" onClose={() => setCronInfo(null)} footer={<><DialogButton disabled={cronChecking()} onClick={async () => { if (!isConnected()) return; const version = connectionVersion(); setCronChecking(true); await loadCrons(slug(), true); if (!currentConnection(version)) return; setCronChecking(false); if (!cronUnsupported() && !cronErrors[slug()]) setCronInfo(null); }}>Check again</DialogButton></>}>
         <p>{cronUnsupported() ? "This backend does not support project crons yet. Update the connected backend, then choose Check again. Your canonical controller and existing project content remain available." : cronRetryable[slug()] ? "Project crons could not refresh. Previously loaded jobs are retained. Try again when the scheduler is available." : "The backend rejected this cron request. Check backend access and configuration, then check again. Previously loaded jobs are retained."}</p>

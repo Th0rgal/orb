@@ -461,7 +461,8 @@ pub(in crate::api::mission_store) fn log_event_sync(
         | AgentEvent::SessionIdUpdate { .. }
         | AgentEvent::MissionActivity { .. }
         | AgentEvent::MissionTitleChanged { .. }
-        | AgentEvent::FidoSignRequest { .. } => return Ok(()),
+        | AgentEvent::FidoSignRequest { .. }
+        | AgentEvent::MissionPlacementChanged { .. } => return Ok(()),
     };
 
     let event_type = event_type.to_string();

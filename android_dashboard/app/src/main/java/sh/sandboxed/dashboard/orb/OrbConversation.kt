@@ -1313,17 +1313,18 @@ fun OrbConversationPage(
                     core.refreshMissionsQuietly()
                 } else {
                     val slug = project.str("slug", "id") ?: project.id
-                    val tags = mutableListOf("project:$slug")
+                    val tags = mutableListOf<String>()
                     if (composeMode == OrbComposeMode.Goal) tags.add("orb-mode:goal")
-                    if (!initialFolder.isNullOrEmpty()) tags.add("orb-folder:$initialFolder")
+                    val cleanFolder = OrbMissionTree.normalizeFolder(initialFolder)
 
                     val body = mutableMapOf<String, Any?>(
                         "prompt" to finalPrompt,
                         "title" to OrbJSON.cleanTitle(baseText).take(72),
                         "project" to slug,
-                        "backend" to selectedBackend,
-                        "tags" to tags
+                        "folder" to cleanFolder,
+                        "backend" to selectedBackend
                     )
+                    if (tags.isNotEmpty()) body["tags"] = tags
                     if (selectedModel.isNotEmpty()) body["model_override"] = selectedModel
                     if (selectedWorkspaceId.isNotEmpty()) body["workspace_id"] = selectedWorkspaceId
                     val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
@@ -1970,8 +1971,9 @@ fun OrbConversationPage(
                                 leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color.White) },
                                 onClick = {
                                     showHeaderMenu = false
-                                    val projectSlug = project.str("slug", "id") ?: project.id
-                                    OrbMoveClipboard.pick(liveRow, projectSlug)
+                                    val projectSlug = OrbMissionTree.projectSlug(liveRow) ?: (project.str("slug", "id") ?: project.id)
+                                    val cachedProjectRows = OrbReadCache.readMemoryRows("project_missions_$projectSlug")
+                                    OrbMoveClipboard.pick(liveRow, projectSlug, cachedProjectRows.ifEmpty { core.missions.value })
                                     commandBanner = "Ready to move — open destination project or folder"
                                 }
                             )

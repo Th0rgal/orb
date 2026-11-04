@@ -150,8 +150,8 @@ def reset():
     ACCESS.append(dict(id='acc-1', requester_mission_id='7c1d2e3f-0000-4000-8000-000000000001', requester_title='Benchmark report', target_mission_id='9a8b7c6d-0000-4000-8000-000000000002', target_title='Lean eval run #42', scope='read', reason='Compare its pass rate with mine before writing the report.', ttl_hours=24, state='pending', created_at=iso(time.time()-60)))
     ACCESS.append(dict(id='acc-2', requester_mission_id='7c1d2e3f-0000-4000-8000-000000000005', requester_title='Supervisor', target_mission_id='9a8b7c6d-0000-4000-8000-000000000006', target_title='DGX Spark setup', scope='read', reason='Check progress', ttl_hours=24, state='approved', created_at=iso(time.time()-7200), decided_at=iso(time.time()-3600), expires_at=iso(time.time()+23*3600)))
     PROVIDERS['fixture-provider'] = dict(id='fixture-provider', name='Fixture provider', provider_type='openai', uses_oauth=False, enabled=True, status={'type':'connected'})
-    for mid, title, tags in [('existing', 'Improve image previews', ['orb-folder:Design/Images']), ('local-only','Local Mac session',['placement:client'])]:
-        MISSIONS[mid] = dict(id=mid,title=title,status='awaiting_user',project='orb-test',backend='claudecode',tags=tags,model_override='test-model',history=[dict(role='user',content=PROMPT),dict(role='assistant',content='# Ready\n\n- [x] Review complete\n\n| Feature | Status |\n| --- | --- |\n| Images | Ready |\n\n```swift\nlet orb = true\n```')])
+    for mid, title, folder, tags in [('existing', 'Improve image previews', 'Design/Images', []), ('local-only','Local Mac session', '', ['placement:client'])]:
+        MISSIONS[mid] = dict(id=mid,title=title,status='awaiting_user',project='orb-test',folder=folder,placement_revision=1 if folder else 0,backend='claudecode',tags=tags,model_override='test-model',history=[dict(role='user',content=PROMPT),dict(role='assistant',content='# Ready\n\n- [x] Review complete\n\n| Feature | Status |\n| --- | --- |\n| Images | Ready |\n\n```swift\nlet orb = true\n```')])
     MISSIONS['long-chat']=dict(id='long-chat',title='Long conversation',status='awaiting_user',project='orb-test',backend='codex',tags=[],model_override='test-model',history=[dict(role='user',content=f'Message {i:03d} — conversation history') for i in range(1,81)])
     # Long, rich transcript for scroll/keyboard tests: wide code, wide tables, long URLs.
     long_rich=[]
@@ -165,6 +165,8 @@ def reset():
     MISSIONS['rich-growth']=dict(id='rich-growth',title='Growing rich response',status='active',project='orb-test',backend='cloud_grok_bot',tags=[],cloud_execution={'selection':{'provider':'grok_bot','account':'grok_bot-test'},'turns':[{'key':'growth-turn','prompt':'Write a long response.','phase':'running','result':'Starting the response…','artifacts':[]}]})
     MISSIONS['reconnect']=dict(id='reconnect',title='Reconnect Grok',status='blocked',project='orb-test',backend='cloud_grok_bot',tags=[],cloud_execution={'selection':{'provider':'grok_bot','account':'grok_bot-test'},'turns':[{'key':'blocked-turn','prompt':'Continue the analysis.','phase':'reconnect_required','detail':'Reconnect your Grok account in Orb on your Mac.','result':'','artifacts':[]}]})
     for mission in MISSIONS.values():
+        mission.setdefault('folder', '')
+        mission.setdefault('placement_revision', 0)
         mission.update(created_at='2026-10-09T10:00:00Z', updated_at='2026-10-09T10:01:00Z')
     # A coding agent mid-turn: an earlier finished turn, then the current one with a
     # task list in harness vocabulary, edits, a running command and a linked PR.
@@ -492,6 +494,18 @@ class Handler(BaseHTTPRequestHandler):
             key=str(uuid.uuid4()); PROVIDERS[key]=dict(id=key,name=body['name'],provider_type=body['provider_type'],uses_oauth=False,enabled=True,status={'type':'connected'}); return self.send(PROVIDERS[key])
         if p=='/api/projects': PROJECTS.append(body); return self.send(body)
         if p.endswith('/file/mkdir'): return self.send({})
+        if p.endswith('/file/transfer'):
+            src=(body.get('path') or '').strip('/'); dst=(body.get('destination') or '').strip('/')
+            moved=[]
+            if not body.get('copy',False) and src and dst:
+                slug=p.split('/')[3]
+                for mid,m in MISSIONS.items():
+                    if m.get('project')==slug and (m.get('folder')==src or m.get('folder','').startswith(src+'/')):
+                        suffix=m['folder'][len(src):]
+                        next_rev=int(m.get('placement_revision',0))+1
+                        m['folder']=dst+suffix; m['placement_revision']=next_rev
+                        moved.append({'mission_id':mid,'project':slug,'folder':m['folder'],'placement_revision':next_rev})
+            return self.send({'path':dst,'moved_missions':moved})
         if p.endswith('/file'):
             if body.get('expected_revision')!=DOC['revision']: return self.send({'error':'Version conflict'},409)
             DOC.update(content=body['content'],revision=DOC['revision']+1); return self.send({'revision':DOC['revision']})
@@ -511,9 +525,27 @@ class Handler(BaseHTTPRequestHandler):
             later(mid,16,'assistant_message','SEND_ANSWER_OK: a **side** reply.',status='completed')
             RECEIPTS[key]={'id':key,'queued':False}; return self.send(RECEIPTS[key])
         if p=='/api/control/missions':
-            mid=str(uuid.uuid4()); cloud=body.get('cloud'); m=dict(body,id=mid,status='awaiting_user',backend=('cloud_'+cloud['provider']) if cloud else body['backend'],history=[{'role':'user','content':body['prompt']},{'role':'assistant','content':'**ORB_TEST_OK**\n\nA response from the test agent.'}])
+            mid=str(uuid.uuid4()); cloud=body.get('cloud'); m=dict(body,id=mid,folder=(body.get('folder') or '').strip('/'),placement_revision=0,status='awaiting_user',backend=('cloud_'+cloud['provider']) if cloud else body['backend'],history=[{'role':'user','content':body['prompt']},{'role':'assistant','content':'**ORB_TEST_OK**\n\nA response from the test agent.'}])
             if cloud: m['cloud_execution']={'mission_id':mid,'selection':cloud,'turns':[{'key':key,'prompt':body['prompt'],'result':'**ORB_TEST_OK**','phase':'response_complete','artifacts':[],'branches':[]}]}
             MISSIONS[mid]=m; RECEIPTS[key]=m; return self.send(m)
+        if p=='/api/control/missions/move':
+            moved=[]
+            target_proj=body.get('project')
+            target_folder=(body.get('folder') or '').strip('/')
+            for mid in body.get('mission_ids',[]):
+                m=MISSIONS.get(mid)
+                if not m: continue
+                next_rev=int(m.get('placement_revision',0))+1
+                m['project']=target_proj
+                m['folder']=target_folder
+                m['placement_revision']=next_rev
+                moved.append({'mission_id':mid,'project':target_proj,'folder':target_folder,'placement_revision':next_rev})
+                for cid,cm in MISSIONS.items():
+                    if cid!=mid and (cm.get('parent_mission_id')==mid or cm.get('callback_parent_mission_id')==mid or ('btw-parent:'+mid) in cm.get('tags',[])):
+                        crev=int(cm.get('placement_revision',0))+1
+                        cm['project']=target_proj; cm['folder']=''; cm['placement_revision']=crev
+                        moved.append({'mission_id':cid,'project':target_proj,'folder':'','placement_revision':crev})
+            return self.send({'moved':moved,'client_op_id':body.get('client_op_id')})
         if p=='/api/control/message' and body['mission_id']=='idle-send':
             # Prod timing: remote dispatch acks before the turn starts; user_message ~3 s
             # later, the agent answers and the job finishes quickly. A message posted

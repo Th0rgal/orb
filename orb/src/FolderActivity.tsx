@@ -1,5 +1,5 @@
 import { Show } from "solid-js";
-import type { Mission } from "./api";
+import { normalizeMissionFolder, type Mission } from "./api";
 import { missionStatusPresentation } from "./MissionGlyph";
 import { pendingMissionInteraction } from "./missionAttention";
 import * as Icon from "./sidebarIcons";
@@ -14,7 +14,7 @@ export function folderActivity(missions: Mission[], running = (m: Mission) =>
     seen.add(mission.id);
     let project = counts.get(mission.project);
     if (!project) counts.set(mission.project, project = new Map());
-    const path = mission.tags?.find(t => t.startsWith("orb-folder:"))?.slice(11) ?? "";
+    const path = normalizeMissionFolder(mission.folder);
     const parts = path.split("/").filter(Boolean);
     for (let depth = 0; depth <= parts.length; depth++) {
       const parent = parts.slice(0, depth).join("/");

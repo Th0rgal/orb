@@ -8,6 +8,7 @@ import {
 import { markUnfocusedBtwDirty, noteBtwPresentationHint } from "./btwAgent";
 import { lookupMissionById } from "./missionLookup";
 import { movedMission, withMovedMissions } from "./moves";
+import { applyServerPlacementEvent } from "./missionMove";
 import { MissionLookupContext } from "./orchestrationModel";
 import { renamedTitle, withRenamedTitles } from "./renames";
 import { readString, writeString } from "./storage";
@@ -18,7 +19,7 @@ import { connectClientLink, reportClientHarnesses, type RemoteStart } from "./cl
 import {requireSpeedSupport} from './CodexSpeedPicker';
 import { Menu } from "./Menu";
 import { missionParent } from "./missionTree";
-import { btwParentId, isBtwMission, isPartialList, mergeMission, reconcileMissionList, type Misses, resetMissionHierarchy } from "./missionHierarchy";
+import { btwParentId, isBtwMission, isPartialList, mergeMission, normalizeMissionFolder, reconcileMissionList, type Misses, type PlacementCommitItem, resetMissionHierarchy } from "./missionHierarchy";
 import { hintSideQuestionOpen, sideQuestionKey } from "./sideQuestionStorage";
 import { draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
 import {trackScrollbarHover} from "./scrollbarHover";
@@ -191,7 +192,8 @@ export default function App() {
   const [sbWidth, setSbWidth] = createSignal(220);
   const [deleteMissionRequest, setDeleteMissionRequest] = createSignal<string | null>(null);
   const [newFolder, setNewFolder] = createSignal<{ project: string; path: string } | null>(null);
-  const folderTags = (project: string | null | undefined) => newFolder()?.project === project && newFolder()?.path ? [`orb-folder:${newFolder()!.path}`] : [];
+  const newFolderPath = (project: string | null | undefined) =>
+    newFolder()?.project === project && newFolder()?.path ? normalizeMissionFolder(newFolder()!.path) : "";
   const [newProject, setNewProject] = createSignal(DEFAULT_PROJECT.slug);
   // "New project…" inside the project picker (Cursor puts creation at the
   // bottom of the picker it belongs to, never in the sidebar chrome).
@@ -664,17 +666,18 @@ export default function App() {
     const imagePaths = await stageLocalImages(root, images);
     const sent = imagePrompt(bindWorkspace(plan.prompt, root), imagePaths, images);
     const effort = normalizeEffort(pick.effort, pick.backend);
-    const body = { title, prompt: imagePrompt(typed, imagePaths, images), project: projectSlug, tags: folderTags(projectSlug), backend: pick.backend, model_override: pick.model, placement: "client" as const, working_directory: root, ...(effort ? { model_effort: effort } : {}) };
+    const folder = newFolderPath(projectSlug);
+    const body = { title, prompt: imagePrompt(typed, imagePaths, images), project: projectSlug, ...(folder ? { folder } : {}), tags: [] as string[], backend: pick.backend, model_override: pick.model, placement: "client" as const, working_directory: root, ...(effort ? { model_effort: effort } : {}) };
     const signature = JSON.stringify({...body, cyber_access:selectedCyber});
     if (remote) {
       // The request id makes a retried remote start idempotent.
-      const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,imagePaths}, {key:remote.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
+      const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,imagePaths}, {key:remote.key,title,project:projectSlug,...(folder ? {folder} : {}),prompt:body.prompt,tags:body.tags});
       setMissions(prev=>[m,...prev.filter(old=>old.id!==m.id)]);
       void refreshMissions();
       return m.id;
     }
     if (launchAttempt?.signature !== signature) launchAttempt = { signature, key: crypto.randomUUID() };
-    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
+    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,...(folder ? {folder} : {}),prompt:body.prompt,tags:body.tags});
     launchAttempt = undefined;
     setDraftCyber("standard");
     setAttachChips([]);
@@ -761,7 +764,8 @@ export default function App() {
         const effort = normalizeEffort(pick.effort, pick.backend);
         const attachments = attachChips().map(chipToAttachment);
         const sentPrompt = imagePrompt(prompt, await stageRemoteImages(images, undefined, machine), images);
-        const body = {...(pick.backend === "codex" ? {cyber_access:selectedCyber,service_tier:pick.service_tier??"standard"} : {}),...(pick.backend === "vibe" && planObjective(prompt) !== null ? {agent:"plan"} : {}),title,prompt:sentPrompt,working_directory:workingDirectory().trim() || undefined,project:projectSlug,tags:folderTags(projectSlug),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(attachments.length ? {attachments} : {})};
+        const folder = newFolderPath(projectSlug);
+        const body = {...(pick.backend === "codex" ? {cyber_access:selectedCyber,service_tier:pick.service_tier??"standard"} : {}),...(pick.backend === "vibe" && planObjective(prompt) !== null ? {agent:"plan"} : {}),title,prompt:sentPrompt,working_directory:workingDirectory().trim() || undefined,project:projectSlug,...(folder ? {folder} : {}),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(attachments.length ? {attachments} : {})};
         const signature = JSON.stringify(body);
         if (launchAttempt?.signature !== signature) launchAttempt = {signature,key:crypto.randomUUID()};
         const m = await createMission({...body,idempotency_key:launchAttempt.key});
@@ -874,16 +878,28 @@ export default function App() {
       setNewAgentRevision({ text: detail.prompt });
     };
     window.addEventListener("orb:open-page", onOpenPage);
-    const onMoved = (e: Event) => {
-      const { id, project, tags } = (e as CustomEvent<{ id: string; project: string | null; tags?: string[] }>).detail;
-      setMissions(prev => prev.map(m => {
-        if (m.id !== id) return m;
-        const nextTags = tags ?? (m.tags ?? []).filter(t => !t.startsWith("orb-folder:"));
-        return mergeMission(m, { id, project, tags: nextTags }, "partial");
-      }));
+    const onPlacementChanged = (e: Event) => {
+      const { moves } = (e as CustomEvent<{ moves?: PlacementCommitItem[] }>).detail ?? {};
+      if (!moves?.length) return;
+      const byId = new Map(moves.map(item => [item.mission_id, item]));
+      setMissions(prev => {
+        let changed = false;
+        const out = prev.map(m => {
+          const item = byId.get(m.id);
+          if (!item) return m;
+          changed = true;
+          return mergeMission(m, {
+            id: m.id,
+            project: item.project,
+            folder: item.folder,
+            placement_revision: item.placement_revision,
+          }, "partial");
+        });
+        return changed ? out : prev;
+      });
     };
-    window.addEventListener("orb:mission-moved", onMoved);
-    onCleanup(() => window.removeEventListener("orb:mission-moved", onMoved));
+    window.addEventListener("orb:mission-placement-changed", onPlacementChanged);
+    onCleanup(() => window.removeEventListener("orb:mission-placement-changed", onPlacementChanged));
     // A harness transfer archives the original: hide it at once, restore it if Core refuses.
     const archivedBefore = new Map<string, Mission>();
     const onArchived = (e: Event) => {
@@ -925,6 +941,14 @@ export default function App() {
       stopPresentation = streamMission(
         null,
         event => {
+          if (event.type === "mission_placement_changed") {
+            const moves = Array.isArray(event.data.moves)
+              ? (event.data.moves as import("./api").MissionPlacementItem[])
+              : [];
+            const clientOpId = typeof event.data.client_op_id === "number" ? event.data.client_op_id : null;
+            applyServerPlacementEvent(moves, clientOpId);
+            return;
+          }
           if (event.type !== "mission_presentation") return;
           const id = event.data.mission_id;
           const btwParent = event.data.btw_parent_id;

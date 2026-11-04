@@ -4751,6 +4751,44 @@
         "method": "orbWireTranscriptSliceStep",
         "ret": "jlong"
       }
+    },
+    {
+      "name": "orb_placement_merge_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "curRev",
+          "type": "uint64_t"
+        },
+        {
+          "name": "incRev",
+          "type": "uint64_t"
+        },
+        {
+          "name": "pendingOpId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "ackOpId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "sourceKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasPlacement",
+          "type": "uint8_t"
+        },
+        {
+          "name": "matchesOptimistic",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbPlacementMergeStep",
+        "ret": "jlong"
+      }
     }
   ]
 }

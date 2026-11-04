@@ -28,8 +28,16 @@ pub(super) async fn sync(store: &SqliteMissionStore, snapshot: Snapshot) -> Resu
   }else{
    // Plain INSERT is intentional: an offline record can NEVER adopt, replace,
    // or restart an existing mission, even when its UUID collides.
-   let tags=serde_json::to_string(&o.tags.iter().cloned().chain(std::iter::once("placement:client".to_owned())).collect::<Vec<_>>()).map_err(err)?;
-   tx.execute("INSERT INTO missions (id,status,title,workspace_id,backend,model_override,model_effort,created_at,updated_at,working_directory,requires_local_disk,project,tags,origin,agent,service_tier) VALUES (?1,'active',?2,?3,?4,?5,?11,?6,?7,?8,0,?9,?10,'orb-client',?12,?13)",params![id,o.title,crate::workspace::DEFAULT_WORKSPACE_ID.to_string(),o.backend,o.model,o.created_at,now,o.cwd,o.project,tags,o.effort,o.initial_agent(),o.service_tier.map(|tier|tier.id().to_string())]).map_err(err)?;
+   let mut raw_tags: Vec<String> = o.tags.iter().cloned().chain(std::iter::once("placement:client".to_owned())).collect();
+   let legacy_folder = crate::api::mission_store::strip_legacy_orb_folder_tags(&mut raw_tags);
+   let explicit_folder = crate::api::mission_store::normalize_mission_folder(&o.folder);
+   let folder = if !explicit_folder.is_empty() {
+    explicit_folder
+   } else {
+    legacy_folder.unwrap_or_default()
+   };
+   let tags = serde_json::to_string(&raw_tags).map_err(err)?;
+   tx.execute("INSERT INTO missions (id,status,title,workspace_id,backend,model_override,model_effort,created_at,updated_at,working_directory,requires_local_disk,project,folder,tags,origin,agent,service_tier) VALUES (?1,'active',?2,?3,?4,?5,?11,?6,?7,?8,0,?9,?14,?10,'orb-client',?12,?13)",params![id,o.title,crate::workspace::DEFAULT_WORKSPACE_ID.to_string(),o.backend,o.model,o.created_at,now,o.cwd,o.project,tags,o.effort,o.initial_agent(),o.service_tier.map(|tier|tier.id().to_string()),folder]).map_err(err)?;
    if let Some(objective)=o.prompt.trim().strip_prefix("/goal").filter(|rest| rest.starts_with(char::is_whitespace)).map(str::trim).filter(|rest| !rest.is_empty()) {
     tx.execute("UPDATE missions SET goal_mode=1,goal_objective=?2 WHERE id=?1",params![id,objective]).map_err(err)?;
    }
@@ -64,6 +72,7 @@ mod tests {
                 client_id: Uuid::new_v4(),
                 title: "Offline task".into(),
                 project: "test".into(),
+                folder: String::new(),
                 backend: "claudecode".into(),
                 model: None,
                 effort: None,

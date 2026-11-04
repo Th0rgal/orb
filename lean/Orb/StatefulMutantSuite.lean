@@ -473,4 +473,73 @@ theorem kill_node_lane_starve_coordinator_wakeup :
       nodeLaneStep 0 1 0 0 0 10 10 0 2 0 2 := by
   decide
 
+-- ===========================================================================
+-- Family 9: Mission Placement & Optimistic-Move Reconciliation Mutants (M25..M27)
+-- ===========================================================================
+
+/-- Mutant 9A (Stale poll snap-back): ignores `pendingOpId != 0` on list polls (`sourceKind == 0`),
+    allowing an in-flight poll carrying pre-move placement (`incRev == curRev`, `matchesOptimistic == 0`)
+    to overwrite the optimistic move and snap the mission back to its old folder/project. -/
+def mutantPlacementUnfencedStalePoll (p : PlacementMergeCheck) : Bool :=
+  if !(decide (p.sourceKind ≤ 3)) then false
+  else if p.sourceKind == 2 then
+    p.hasPlacement == 1 && p.ackOpId != 0
+  else if p.sourceKind == 3 then
+    p.pendingOpId != 0 && p.ackOpId == p.pendingOpId
+  else if !(p.hasPlacement == 1) then false
+  else
+    decide (p.curRev ≤ p.incRev)
+
+/-- Mutant 9B (Stale revision rollback): omits `curRev <= incRev` check when `pendingOpId == 0`,
+    allowing an out-of-order older poll (`incRev < curRev`) to revert a settled move. -/
+def mutantPlacementAcceptsOlderRevision (p : PlacementMergeCheck) : Bool :=
+  if !(decide (p.sourceKind ≤ 3)) then false
+  else if p.sourceKind == 2 then
+    p.hasPlacement == 1 && p.ackOpId != 0
+  else if p.sourceKind == 3 then
+    p.pendingOpId != 0 && p.ackOpId == p.pendingOpId
+  else if !(p.hasPlacement == 1) then false
+  else if p.pendingOpId != 0 then
+    decide (p.curRev < p.incRev) ||
+    (p.sourceKind == 1 && p.ackOpId == p.pendingOpId && decide (p.curRev ≤ p.incRev)) ||
+    (p.matchesOptimistic == 1 && p.incRev == p.curRev)
+  else
+    true
+
+/-- Mutant 9C (Unmatched rollback clobbers newer optimistic op): rolls back on `sourceKind == 3`
+    whenever `pendingOpId != 0` without checking `ackOpId == pendingOpId`, letting a failed older
+    move clobber a newer optimistic move already in flight. -/
+def mutantPlacementUnboundRollback (p : PlacementMergeCheck) : Bool :=
+  if !(decide (p.sourceKind ≤ 3)) then false
+  else if p.sourceKind == 2 then
+    p.hasPlacement == 1 && p.ackOpId != 0
+  else if p.sourceKind == 3 then
+    p.pendingOpId != 0
+  else if !(p.hasPlacement == 1) then false
+  else if p.pendingOpId != 0 then
+    decide (p.curRev < p.incRev) ||
+    (p.sourceKind == 1 && p.ackOpId == p.pendingOpId && decide (p.curRev ≤ p.incRev)) ||
+    (p.matchesOptimistic == 1 && p.incRev == p.curRev)
+  else
+    decide (p.curRev ≤ p.incRev)
+
+theorem kill_placement_unfenced_stale_poll :
+    mutantPlacementUnfencedStalePoll ⟨4, 4, 11, 0, 0, 1, 0⟩ ≠
+      placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1, 0⟩ := by
+  decide
+
+theorem kill_placement_accepts_older_revision :
+    mutantPlacementAcceptsOlderRevision ⟨5, 4, 0, 0, 0, 1, 0⟩ ≠
+      placementMergeMetaGate.gate ⟨5, 4, 0, 0, 0, 1, 0⟩ := by
+  decide
+
+theorem kill_placement_unbound_rollback :
+    mutantPlacementUnboundRollback ⟨4, 4, 12, 11, 3, 1, 0⟩ ≠
+      placementMergeMetaGate.gate ⟨4, 4, 12, 11, 3, 1, 0⟩ := by
+  decide
+
+#guard placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1, 0⟩ == false
+#guard placementMergeMetaGate.gate ⟨5, 4, 0, 0, 0, 1, 0⟩ == false
+#guard placementMergeMetaGate.gate ⟨4, 4, 12, 11, 3, 1, 0⟩ == false
+
 end Orb.StatefulMutantSuite

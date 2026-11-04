@@ -80,7 +80,16 @@ async function setup(page: Page, options: Options = {}) {
           opencode: [{ value: "xai/grok-4.6", label: "xAI — Grok 4.6" }],
         } }
       : path === "/api/remote-nodes" ? { enabled: true, nodes: [], remote_launch: { typed: true, harnesses: ["codex"], proxy_url_configured: true } }
-      : path === "/api/control/missions" ? (url.searchParams.get("project") === "test" ? missions : [])
+      : path === "/api/control/missions" ? (
+        url.searchParams.get("project") === "test"
+          ? missions.filter(m => {
+              const fp = url.searchParams.get("folder_prefix");
+              if (!fp) return true;
+              const mf = ((m as any).folder ?? "").replace(/^\/+|\/+$/g, "");
+              return mf === fp || mf.startsWith(`${fp}/`);
+            })
+          : []
+      )
       : path.endsWith("/files") ? { entries: options.entries ?? [{ name: "reference", kind: "dir" }] }
       : path.endsWith("/crons") ? { jobs: [] }
       : { job: null, runs: [] };
@@ -405,15 +414,15 @@ test("Concurrency limits expand inside Agents settings and preserve the draft", 
 });
 
 
-test("folder rename changes the real path, carries its agents, and supports cancellation", async ({ page }) => {
+test("folder rename changes the real path, carries its agents via server cascade, and supports cancellation", async ({ page }) => {
   await setup(page);
   const folders = new Set(["reference", "archive"]);
-  const transfers: any[] = [], moved: any[] = [];
-  let tags = ["orb-folder:reference"];
-  const filed = () => ({ ...missions[0], project: "test", tags });
+  const transfers: any[] = [];
+  let currentFolder = "reference";
+  let currentRev = 1;
+  const filed = () => ({ ...missions[0], project: "test", folder: currentFolder, placement_revision: currentRev, tags: [] });
   await page.route(/\/api\/control\/missions/, async route => {
     const request = route.request(), url = new URL(request.url());
-    if (url.pathname.endsWith("/project")) { const body = request.postDataJSON(); moved.push(body); tags = body.tags; return route.fulfill({ json: {} }); }
     if (url.pathname.endsWith(MISSION_ID)) return route.fulfill({ json: filed() });
     if (url.pathname === "/api/control/missions" && request.method() === "GET") return route.fulfill({ json: url.searchParams.get("project") === "test" ? [filed(), missions[1]] : [] });
     await route.fallback();
@@ -424,7 +433,13 @@ test("folder rename changes the real path, carries its agents, and supports canc
     if (url.pathname.endsWith("/file/transfer")) {
       const body = route.request().postDataJSON(); transfers.push(body);
       folders.delete(body.path); folders.add(body.destination);
-      return route.fulfill({ json: { path: body.destination } });
+      let movedMissions: any[] = [];
+      if (currentFolder === body.path || currentFolder.startsWith(`${body.path}/`)) {
+        currentFolder = body.destination + currentFolder.slice(body.path.length);
+        currentRev += 1;
+        movedMissions = [{ mission_id: MISSION_ID, project: "test", folder: currentFolder, placement_revision: currentRev }];
+      }
+      return route.fulfill({ json: { path: body.destination, moved_missions: movedMissions, moved_crons: 0 } });
     }
     await route.fallback();
   });
@@ -444,13 +459,13 @@ test("folder rename changes the real path, carries its agents, and supports canc
   await expect(page.getByRole("button", { name: "Folder actions for Research" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Folder actions for reference" })).toHaveCount(0);
   expect(transfers).toEqual([{ path: "reference", destination: "Research", copy: false }]);
-  await expect.poll(() => moved).toEqual([{ project: "test", tags: ["orb-folder:Research"] }]);
+  expect(currentFolder).toBe("Research");
   await page.locator(".row.folder", { hasText: "Research" }).click({ button: "right" });
   await page.getByRole("menuitem", { name: "Move…", exact: true }).click();
   await page.getByLabel("Destination folder", { exact: true }).fill("archive");
   await page.getByRole("button", { name: "Move", exact: true }).click();
   await expect.poll(() => transfers.at(-1)).toEqual({ path: "Research", destination: "archive/Research", copy: false });
-  await expect.poll(() => moved.at(-1)).toEqual({ project: "test", tags: ["orb-folder:archive/Research"] });
+  expect(currentFolder).toBe("archive/Research");
 });
 
 test("file actions rename, cut/paste, copy/paste, move and delete actual paths", async ({ page }) => {

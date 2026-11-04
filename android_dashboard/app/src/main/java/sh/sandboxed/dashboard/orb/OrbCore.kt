@@ -277,7 +277,60 @@ data class OrbRow(
             h = 31 * h + (raw["sequence"]?.hashCode() ?: 0)
             h = 31 * h + (raw["first_viewed_at"]?.hashCode() ?: 0)
             h = 31 * h + (raw["enabled"]?.hashCode() ?: 0)
+            h = 31 * h + (raw["project"]?.hashCode() ?: 0)
+            h = 31 * h + (raw["folder"]?.hashCode() ?: 0)
+            h = 31 * h + (raw["placement_revision"]?.hashCode() ?: 0)
             return h
+        }
+    }
+}
+
+data class OrbPlacementCommitItem(
+    val missionId: String,
+    val project: String?,
+    val folder: String,
+    val placementRevision: Long
+)
+
+class OrbApprovalTransferConfirmationException(
+    override val message: String,
+    val targetProject: String,
+    val activeGrants: List<ActiveGrant>,
+    val pendingRequests: List<PendingRequest>
+) : Exception(message) {
+    data class ActiveGrant(val id: String, val secretName: String, val sourceProject: String?)
+    data class PendingRequest(val id: String, val secretName: String, val operation: String)
+
+    companion object {
+        fun parse(error: Throwable): OrbApprovalTransferConfirmationException? {
+            val http = error as? OrbError ?: return null
+            if (http.status != 409 || http.body.isNullOrBlank()) return null
+            val json = OrbJSON.dict(OrbJSON.parse(http.body)) ?: return null
+            if (OrbJSON.str(json, "code") != "approval_transfer_confirmation_required") return null
+            val grantsRaw = OrbJSON.dictList(json["active_grants"]).ifEmpty { OrbJSON.dictList(json["grants"]) }
+            val grants = grantsRaw.map { g ->
+                ActiveGrant(
+                    id = OrbJSON.str(g, "id") ?: "",
+                    secretName = OrbJSON.str(g, "secret_name") ?: "",
+                    sourceProject = OrbJSON.str(g, "source_project")
+                )
+            }
+            val pendingRaw = OrbJSON.dictList(json["pending_requests"]).ifEmpty { OrbJSON.dictList(json["pending"]) }
+            val pending = pendingRaw.map { p ->
+                PendingRequest(
+                    id = OrbJSON.str(p, "id") ?: "",
+                    secretName = OrbJSON.str(p, "secret_name") ?: "",
+                    operation = OrbJSON.str(p, "operation") ?: ""
+                )
+            }
+            val msg = OrbJSON.str(json, "error", "message")
+                ?: "Secret approvals on this conversation will be affected by moving to another project."
+            return OrbApprovalTransferConfirmationException(
+                message = msg,
+                targetProject = OrbJSON.str(json, "target_project") ?: "",
+                activeGrants = grants,
+                pendingRequests = pending
+            )
         }
     }
 }
@@ -335,9 +388,221 @@ object OrbMissionTree {
     private val ancestorCache = java.util.concurrent.ConcurrentHashMap<String, CachedAncestor>()
     private val goneIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    data class PlacementState(
+        val project: String,
+        val folder: String,
+        val revision: Long,
+        val pendingOpId: Int = 0,
+        val optimisticProject: String? = null,
+        val optimisticFolder: String? = null
+    )
+
+    private val placements = java.util.concurrent.ConcurrentHashMap<String, PlacementState>()
+    private val nextPlacementOpId = java.util.concurrent.atomic.AtomicInteger(0)
+
+    fun normalizeFolder(raw: String?): String {
+        if (raw.isNullOrBlank()) return ""
+        return raw.trim().trim('/')
+            .split('/')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString("/")
+    }
+
+    fun allocateOpId(): Int {
+        while (true) {
+            val cur = nextPlacementOpId.get()
+            val next = if (cur >= 65535) 1 else cur + 1
+            if (nextPlacementOpId.compareAndSet(cur, next)) return next
+        }
+    }
+
+    fun placementOf(id: String): PlacementState? = if (id.isEmpty()) null else placements[id]
+
+    fun projectSlug(mission: OrbRow): String? {
+        observe(mission)
+        val id = mission.str("id") ?: mission.id
+        placements[id]?.let { state ->
+            val effective = state.optimisticProject ?: state.project
+            if (effective.isNotEmpty()) return effective
+        }
+        val pName = (mission.str("project", "project_slug", "project_id", "project_name") ?: "").trim()
+        if (pName.isNotEmpty()) return pName
+        return seenFacts[id]?.project?.takeIf { it.isNotEmpty() }
+    }
+
+    fun stageOptimisticPlacement(
+        missionIds: Collection<String>,
+        opId: Int,
+        targetProject: String?,
+        targetFolder: String
+    ) {
+        val cleanFolder = normalizeFolder(targetFolder)
+        val cleanProject = targetProject?.trim()
+        for (id in missionIds) {
+            if (id.isEmpty()) continue
+            val isChild = knownParents.containsKey(id)
+            val effFolder = if (isChild) "" else cleanFolder
+            placements.compute(id) { _, prev ->
+                val curRev = prev?.revision ?: 0L
+                val verdict = OrbKernel.placementMergeStep(
+                    curRev = curRev,
+                    incRev = curRev,
+                    pendingOpId = prev?.pendingOpId ?: 0,
+                    ackOpId = opId,
+                    sourceKind = 2,
+                    hasPlacement = true,
+                    matchesOptimistic = false
+                )
+                if (!verdict.admitted) {
+                    prev
+                } else {
+                    val curProj = cleanProject ?: prev?.project ?: seenFacts[id]?.project ?: ""
+                    PlacementState(
+                        project = prev?.project ?: curProj,
+                        folder = prev?.folder ?: effFolder,
+                        revision = curRev,
+                        pendingOpId = opId,
+                        optimisticProject = curProj,
+                        optimisticFolder = effFolder
+                    )
+                }
+            }
+        }
+    }
+
+    fun rollbackOptimisticPlacement(opId: Int): List<OrbPlacementCommitItem> {
+        if (opId <= 0) return emptyList()
+        val reverted = mutableListOf<OrbPlacementCommitItem>()
+        for (id in placements.keys.toList()) {
+            placements.computeIfPresent(id) { _, cur ->
+                val verdict = OrbKernel.placementMergeStep(
+                    curRev = cur.revision,
+                    incRev = cur.revision,
+                    pendingOpId = cur.pendingOpId,
+                    ackOpId = opId,
+                    sourceKind = 3,
+                    hasPlacement = false,
+                    matchesOptimistic = false
+                )
+                if (!verdict.admitted) {
+                    cur
+                } else {
+                    reverted.add(
+                        OrbPlacementCommitItem(
+                            missionId = id,
+                            project = cur.project.takeIf { it.isNotEmpty() },
+                            folder = if (knownParents.containsKey(id)) "" else cur.folder,
+                            placementRevision = cur.revision
+                        )
+                    )
+                    cur.copy(pendingOpId = 0, optimisticProject = null, optimisticFolder = null)
+                }
+            }
+        }
+        return reverted
+    }
+
+    fun commitAuthoritativePlacements(
+        items: List<OrbPlacementCommitItem>,
+        ackOpId: Int = 0
+    ): List<OrbPlacementCommitItem> {
+        val accepted = mutableListOf<OrbPlacementCommitItem>()
+        for (item in items) {
+            if (item.missionId.isEmpty()) continue
+            val isChild = knownParents.containsKey(item.missionId)
+            val incFolder = if (isChild) "" else normalizeFolder(item.folder)
+            val incProj = item.project?.trim() ?: ""
+            placements.compute(item.missionId) { _, prev ->
+                val curRev = prev?.revision ?: 0L
+                val pendingOp = prev?.pendingOpId ?: 0
+                val matchesOpt = prev != null &&
+                    pendingOp != 0 &&
+                    (prev.optimisticProject ?: prev.project) == incProj &&
+                    (prev.optimisticFolder ?: prev.folder) == incFolder
+                val verdict = OrbKernel.placementMergeStep(
+                    curRev = curRev,
+                    incRev = item.placementRevision,
+                    pendingOpId = pendingOp,
+                    ackOpId = ackOpId,
+                    sourceKind = 1,
+                    hasPlacement = true,
+                    matchesOptimistic = matchesOpt
+                )
+                if (!verdict.admitted) {
+                    prev
+                } else {
+                    val effProj = incProj.ifEmpty { prev?.project ?: seenFacts[item.missionId]?.project ?: "" }
+                    val nextRev = maxOf(curRev, item.placementRevision, verdict.nextRev32)
+                    accepted.add(
+                        OrbPlacementCommitItem(
+                            missionId = item.missionId,
+                            project = effProj.takeIf { it.isNotEmpty() },
+                            folder = incFolder,
+                            placementRevision = nextRev
+                        )
+                    )
+                    PlacementState(
+                        project = effProj,
+                        folder = incFolder,
+                        revision = nextRev,
+                        pendingOpId = if (verdict.clearPending) 0 else pendingOp,
+                        optimisticProject = if (verdict.clearPending) null else prev?.optimisticProject,
+                        optimisticFolder = if (verdict.clearPending) null else prev?.optimisticFolder
+                    )
+                }
+            }
+            if (incProj.isNotEmpty()) {
+                seenFacts.compute(item.missionId) { _, cur ->
+                    (cur ?: Seen()).copy(project = incProj)
+                }
+            }
+        }
+        return accepted
+    }
+
+    /** Full moving family closure (fork siblings + launched descendants at any depth) for optimistic staging. */
+    fun subtree(missions: List<OrbRow>, rootIds: Collection<String>): List<OrbRow> {
+        if (rootIds.isEmpty()) return emptyList()
+        for (m in missions) observe(m)
+        val byId = LinkedHashMap<String, OrbRow>(missions.size)
+        for (m in missions) byId.putIfAbsent(m.id, m)
+        val childrenByParent = HashMap<String, MutableList<String>>()
+        val forksBySource = HashMap<String, MutableList<String>>()
+        for (m in byId.values) {
+            parentId(m)?.let { p -> childrenByParent.getOrPut(p) { mutableListOf() }.add(m.id) }
+            forkSource(m)?.let { f ->
+                forksBySource.getOrPut(f) { mutableListOf() }.add(m.id)
+                forksBySource.getOrPut(m.id) { mutableListOf() }.add(f)
+            }
+        }
+        val visited = LinkedHashSet<String>()
+        val queue = ArrayDeque<String>()
+        for (rid in rootIds) {
+            if (rid.isNotEmpty() && visited.add(rid)) queue.add(rid)
+        }
+        while (queue.isNotEmpty()) {
+            val cur = queue.removeFirst()
+            for (kid in childrenByParent[cur].orEmpty()) {
+                if (visited.add(kid)) queue.add(kid)
+            }
+            for (fk in forksBySource[cur].orEmpty()) {
+                if (visited.add(fk)) queue.add(fk)
+            }
+        }
+        return visited.mapNotNull { byId[it] }
+    }
+
     /** Explicit re-parent (null detaches): the only way a remembered parent changes. */
     fun reparent(id: String, parent: String?) {
-        if (parent.isNullOrEmpty()) knownParents.remove(id) else knownParents[id] = parent
+        if (parent.isNullOrEmpty()) {
+            knownParents.remove(id)
+        } else {
+            knownParents[id] = parent
+            placements.computeIfPresent(id) { _, cur ->
+                cur.copy(folder = "", optimisticFolder = cur.optimisticFolder?.let { "" })
+            }
+        }
     }
 
     /** Forget every remembered link (connection switch, tests). */
@@ -347,6 +612,8 @@ object OrbMissionTree {
         seenFacts.clear()
         ancestorCache.clear()
         goneIds.clear()
+        placements.clear()
+        nextPlacementOpId.set(0)
     }
 
     private fun hasDirectBtwTag(mission: OrbRow): Boolean =
@@ -359,18 +626,69 @@ object OrbMissionTree {
         val id = mission.str("id") ?: mission.id
         if (id.isEmpty()) return
         goneIds.remove(id)
-        payloadParentId(mission)?.let { knownParents[id] = it }
+        val payloadParent = payloadParentId(mission)
+        if (payloadParent != null) knownParents[id] = payloadParent
+        val isChild = payloadParent != null || knownParents.containsKey(id)
         if (hasDirectBtwTag(mission)) knownBtw.add(id)
         val rawTitle = mission.str("title")
         val hasProjectKey = mission.raw.containsKey("project") && mission.raw["project"] is String
         val rawProject = if (hasProjectKey) (mission.raw["project"] as String).trim() else null
+        val hasFolderKey = mission.raw.containsKey("folder") && mission.raw["folder"] is String
+        val rawFolder = if (isChild) "" else if (hasFolderKey) normalizeFolder(mission.raw["folder"] as String) else null
+        val incRev = maxOf(0L, (mission.raw["placement_revision"] as? Number)?.toLong() ?: 0L)
+        val hasPlacementPayload = hasProjectKey || hasFolderKey || mission.raw.containsKey("placement_revision")
+        var resolvedProject = rawProject
+        if (hasPlacementPayload) {
+            placements.compute(id) { _, prev ->
+                val curRev = prev?.revision ?: 0L
+                val pendingOp = prev?.pendingOpId ?: 0
+                val candProj = rawProject ?: prev?.project ?: seenFacts[id]?.project ?: ""
+                val candFolder = if (isChild) "" else (rawFolder ?: prev?.folder ?: "")
+                val matchesOpt = prev != null &&
+                    pendingOp != 0 &&
+                    (prev.optimisticProject ?: prev.project) == candProj &&
+                    (prev.optimisticFolder ?: prev.folder) == candFolder
+                if (prev == null) {
+                    PlacementState(project = candProj, folder = candFolder, revision = incRev)
+                } else {
+                    val verdict = OrbKernel.placementMergeStep(
+                        curRev = curRev,
+                        incRev = incRev,
+                        pendingOpId = pendingOp,
+                        ackOpId = 0,
+                        sourceKind = 0,
+                        hasPlacement = true,
+                        matchesOptimistic = matchesOpt
+                    )
+                    if (!verdict.admitted) {
+                        resolvedProject = (prev.optimisticProject ?: prev.project).takeIf { it.isNotEmpty() }
+                        prev
+                    } else {
+                        resolvedProject = candProj.takeIf { it.isNotEmpty() }
+                        val nextRev = maxOf(curRev, incRev, verdict.nextRev32)
+                        PlacementState(
+                            project = candProj,
+                            folder = candFolder,
+                            revision = nextRev,
+                            pendingOpId = if (verdict.clearPending) 0 else pendingOp,
+                            optimisticProject = if (verdict.clearPending) null else prev.optimisticProject,
+                            optimisticFolder = if (verdict.clearPending) null else prev.optimisticFolder
+                        )
+                    }
+                }
+            }
+        } else if (isChild) {
+            placements.computeIfPresent(id) { _, cur ->
+                cur.copy(folder = "", optimisticFolder = cur.optimisticFolder?.let { "" })
+            }
+        }
         val rawStatus = mission.str("status", "state")?.takeIf { it != "unknown" }
         val rawBackend = mission.str("backend")
         seenFacts.compute(id) { _, prev ->
             val cur = prev ?: Seen()
             Seen(
                 title = rawTitle ?: cur.title,
-                project = rawProject ?: cur.project,
+                project = resolvedProject ?: cur.project,
                 status = rawStatus ?: cur.status,
                 backend = rawBackend ?: cur.backend
             )
@@ -484,13 +802,14 @@ object OrbMissionTree {
     }
 
     fun folderPath(mission: OrbRow): String? {
-        for (tag in OrbJSON.strList(mission.raw, "tags")) {
-            if (tag.lowercase().startsWith("orb-folder:")) {
-                val raw = tag.drop("orb-folder:".length).trim().trim('/')
-                if (raw.isNotEmpty()) return raw
-            }
+        observe(mission)
+        if (parentId(mission) != null) return null
+        val id = mission.str("id") ?: mission.id
+        placements[id]?.let { state ->
+            val effective = state.optimisticFolder ?: state.folder
+            return effective.takeIf { it.isNotEmpty() }
         }
-        return null
+        return normalizeFolder(mission.str("folder")).takeIf { it.isNotEmpty() }
     }
 
     private fun reaches(byId: Map<String, OrbRow>, from: OrbRow, target: String): Boolean {
@@ -647,13 +966,19 @@ object OrbMissionTree {
             null
         } else {
             val known = seen(parentId)
-            val folderTags = OrbJSON.strList(child.raw, "tags").filter { it.startsWith("orb-folder:") }
+            val knownPlacement = placementOf(parentId)
+            val resolvedProject = knownPlacement?.let { it.optimisticProject ?: it.project }?.takeIf { it.isNotEmpty() }
+                ?: known?.project
+                ?: projectSlug
+            val resolvedFolder = knownPlacement?.let { it.optimisticFolder ?: it.folder } ?: ""
             val dict = LinkedHashMap<String, Any?>().apply {
                 put("id", parentId)
                 put("title", known?.title)
                 put("status", known?.status ?: "unknown")
-                put("project", known?.project ?: projectSlug)
-                put("tags", folderTags)
+                put("project", resolvedProject)
+                put("folder", resolvedFolder)
+                put("placement_revision", knownPlacement?.revision ?: 0L)
+                put("tags", emptyList<String>())
                 put("history", emptyList<OrbDict>())
                 put("created_at", child.str("created_at"))
                 put("updated_at", activity(child))
@@ -962,14 +1287,23 @@ object OrbReadCache {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<OrbRow>>?) = size > MAX_ROW_KEYS
     }
     private val dictByKey = ConcurrentHashMap<String, OrbDict>()
+    private val cachedProjectSlugs = ConcurrentHashMap.newKeySet<String>()
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val writeJobs = ConcurrentHashMap<String, Job>()
     private val writeLocks = ConcurrentHashMap<String, Any>()
+
+    private fun trackProjectKey(key: String) {
+        if (key.startsWith("project_missions_")) {
+            val slug = key.removePrefix("project_missions_")
+            if (slug.isNotEmpty()) cachedProjectSlugs.add(slug)
+        }
+    }
 
     fun clearMemory() {
         OrbWarmSyncCoordinator.resetCaches()
         synchronized(rowsByKey) { rowsByKey.clear() }
         dictByKey.clear()
+        cachedProjectSlugs.clear()
         writeJobs.values.forEach { it.cancel() }
         writeJobs.clear()
     }
@@ -984,6 +1318,7 @@ object OrbReadCache {
     private fun bounded(key: String, rows: List<OrbRow>) = if (key.startsWith("mission_events_")) compactEvents(rows) else rows
 
     fun loadRows(key: String): List<OrbRow> {
+        trackProjectKey(key)
         val account = OrbDisk.currentScope()
         synchronized(rowsByKey) { rowsByKey[key] }?.let { return it }
         val raw = OrbDisk.read(key)
@@ -997,7 +1332,10 @@ object OrbReadCache {
     }
 
     /** Safe for composition: never performs disk I/O or JSON decoding. */
-    fun readMemoryRows(key: String): List<OrbRow> = synchronized(rowsByKey) { rowsByKey[key] } ?: emptyList()
+    fun readMemoryRows(key: String): List<OrbRow> {
+        trackProjectKey(key)
+        return synchronized(rowsByKey) { rowsByKey[key] } ?: emptyList()
+    }
 
     suspend fun loadRowsAsync(key: String): List<OrbRow> {
         val account = OrbDisk.currentScope()
@@ -1021,10 +1359,12 @@ object OrbReadCache {
     fun hasRowsInMemory(key: String): Boolean = synchronized(rowsByKey) { rowsByKey.containsKey(key) }
 
     fun saveRowsMemoryOnly(key: String, rows: List<OrbRow>) {
+        trackProjectKey(key)
         synchronized(rowsByKey) { rowsByKey[key] = bounded(key, rows) }
     }
 
     fun saveRows(key: String, rows: List<OrbRow>) {
+        trackProjectKey(key)
         val kept = bounded(key, rows)
         synchronized(rowsByKey) { rowsByKey[key] = kept }
         val account = OrbDisk.currentScope()
@@ -1073,6 +1413,72 @@ object OrbReadCache {
                 }
             }
         }
+    }
+
+    /** Reconciles cached per-project mission rosters immediately on optimistic or authoritative placement commits. */
+    fun applyPlacementCommit(
+        accepted: List<OrbPlacementCommitItem>,
+        fallbackRows: Map<String, OrbRow> = emptyMap()
+    ) {
+        if (accepted.isEmpty()) return
+        val byId = accepted.associateBy { it.missionId }
+        val touchedProjects = LinkedHashSet<String>(cachedProjectSlugs)
+        for (item in accepted) {
+            item.project?.trim()?.takeIf { it.isNotEmpty() }?.let { touchedProjects.add(it) }
+        }
+        val memoryKeys = synchronized(rowsByKey) { rowsByKey.keys.toList() }
+        for (k in memoryKeys) {
+            if (k.startsWith("project_missions_")) {
+                val slug = k.removePrefix("project_missions_")
+                if (slug.isNotEmpty()) touchedProjects.add(slug)
+            }
+        }
+        for (slug in touchedProjects) {
+            val key = "project_missions_$slug"
+            val hadInMemory = hasRowsInMemory(key)
+            val existing = if (hadInMemory) readMemoryRows(key) else loadRows(key)
+            var changed = false
+            val updated = ArrayList<OrbRow>(existing.size + accepted.size)
+            val presentIds = HashSet<String>(existing.size)
+            for (row in existing) {
+                val item = byId[row.id]
+                if (item == null) {
+                    presentIds.add(row.id)
+                    updated.add(row)
+                    continue
+                }
+                val targetProj = item.project?.trim()?.takeIf { it.isNotEmpty() }
+                if (targetProj != null && !targetProj.equals(slug, ignoreCase = true)) {
+                    changed = true
+                    continue
+                }
+                changed = true
+                presentIds.add(row.id)
+                updated.add(patchRowPlacement(row, item))
+            }
+            for (item in accepted) {
+                val targetProj = item.project?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+                if (targetProj.equals(slug, ignoreCase = true) && item.missionId !in presentIds) {
+                    val base = fallbackRows[item.missionId]
+                    if (base != null) {
+                        changed = true
+                        presentIds.add(item.missionId)
+                        updated.add(0, patchRowPlacement(base, item))
+                    }
+                }
+            }
+            if (changed) {
+                saveRows(key, updated)
+            }
+        }
+    }
+
+    fun patchRowPlacement(row: OrbRow, item: OrbPlacementCommitItem): OrbRow {
+        val next = LinkedHashMap<String, Any?>(row.raw)
+        if (!item.project.isNullOrBlank()) next["project"] = item.project
+        next["folder"] = if (OrbMissionTree.parentId(row) != null) "" else OrbMissionTree.normalizeFolder(item.folder)
+        next["placement_revision"] = item.placementRevision
+        return OrbRow(row.id, next)
     }
 }
 
@@ -1174,6 +1580,9 @@ class OrbCore private constructor(context: Context) {
 
     private val _missions = MutableStateFlow<List<OrbRow>>(emptyList())
     val missions: StateFlow<List<OrbRow>> = _missions.asStateFlow()
+
+    private val _placementVersion = MutableStateFlow(0L)
+    val placementVersion: StateFlow<Long> = _placementVersion.asStateFlow()
 
     private val _hermesSessions = MutableStateFlow<List<OrbRow>>(emptyList())
     val hermesSessions: StateFlow<List<OrbRow>> = _hermesSessions.asStateFlow()
@@ -1416,7 +1825,7 @@ class OrbCore private constructor(context: Context) {
                 OrbReadCache.saveRowsMemoryOnly("mission_msgs_${m.id}", hist)
             }
             val projTag = tags.firstOrNull { it.startsWith("project:") }?.removePrefix("project:")
-            val proj = (m.str("project", "project_slug") ?: projTag)?.lowercase()?.trim()
+            val proj = (OrbMissionTree.projectSlug(m) ?: projTag)?.lowercase()?.trim()
             if (!proj.isNullOrEmpty()) {
                 byProject.getOrPut(proj) { mutableListOf() }.add(m)
             }
@@ -1972,8 +2381,96 @@ class OrbCore private constructor(context: Context) {
         }
         val ownIds = merged.mapTo(mutableSetOf()) { it.id }
         val withParents = OrbMissionTree.withAncestors(merged) { fetchAncestor(it) }
-        val scoped = withParents.filter { it.id in ownIds || (it.str("project", "project_slug") ?: "") == projectSlug }
+        val scoped = withParents.filter { m ->
+            val effectiveProject = OrbMissionTree.projectSlug(m) ?: (m.str("project", "project_slug") ?: "")
+            if (effectiveProject.isNotEmpty()) {
+                effectiveProject.equals(projectSlug, ignoreCase = true)
+            } else {
+                m.id in ownIds
+            }
+        }
         OrbMissionTree.filterMobile(scoped)
+    }
+
+    /** Reconciles in-memory mission lists, delta cache, and per-project read caches after optimistic or authoritative placement changes. */
+    fun applyPlacementCommit(
+        accepted: List<OrbPlacementCommitItem>,
+        extraRows: Collection<OrbRow> = emptyList()
+    ) {
+        if (accepted.isEmpty()) return
+        val byId = accepted.associateBy { it.missionId }
+        val fallbackRows = LinkedHashMap<String, OrbRow>()
+        for (r in extraRows) fallbackRows[r.id] = r
+        for (r in _missions.value) fallbackRows.putIfAbsent(r.id, r)
+        for (r in missionDeltaCache) fallbackRows.putIfAbsent(r.id, r)
+
+        if (_missions.value.any { it.id in byId }) {
+            _missions.value = _missions.value.map { row ->
+                val item = byId[row.id] ?: return@map row
+                OrbReadCache.patchRowPlacement(row, item)
+            }
+        }
+        if (missionDeltaCache.any { it.id in byId }) {
+            missionDeltaCache = missionDeltaCache.map { row ->
+                val item = byId[row.id] ?: return@map row
+                OrbReadCache.patchRowPlacement(row, item)
+            }
+        }
+        OrbReadCache.applyPlacementCommit(accepted, fallbackRows)
+        _placementVersion.value = _placementVersion.value + 1L
+    }
+
+    /** Batch-moves root missions (and their full family subtrees on Core) atomically via `POST /api/control/missions/move`. */
+    suspend fun moveMissions(
+        ids: List<String>,
+        project: String?,
+        folder: String = "",
+        approvalPolicy: String = "check",
+        clientOpId: Int = 0
+    ): List<OrbPlacementCommitItem> {
+        val cleanFolder = OrbMissionTree.normalizeFolder(folder)
+        val body = LinkedHashMap<String, Any?>().apply {
+            put("mission_ids", ids)
+            put("folder", cleanFolder)
+            put("approval_policy", approvalPolicy)
+            if (!project.isNullOrBlank()) put("project", project.trim())
+            if (clientOpId > 0) put("client_op_id", clientOpId)
+        }
+        val response = try {
+            request("/api/control/missions/move", method = "POST", body = body)
+        } catch (t: Throwable) {
+            OrbApprovalTransferConfirmationException.parse(t)?.let { throw it }
+            throw t
+        }
+        val root = OrbJSON.dict(response)
+        val rawMoves = OrbJSON.dictList(root?.get("moved")).ifEmpty { OrbJSON.dictList(root?.get("moves")) }
+        val respOpId = (root?.get("client_op_id") as? Number)?.toInt() ?: clientOpId
+        val items = rawMoves.mapNotNull { m ->
+            val mid = OrbJSON.str(m, "mission_id", "id") ?: return@mapNotNull null
+            val proj = OrbJSON.str(m, "project")?.takeIf { it.isNotEmpty() } ?: project?.trim()?.takeIf { it.isNotEmpty() }
+            val fld = OrbMissionTree.normalizeFolder(OrbJSON.str(m, "folder") ?: cleanFolder)
+            val rev = maxOf(0L, (m["placement_revision"] as? Number)?.toLong() ?: 1L)
+            OrbPlacementCommitItem(missionId = mid, project = proj, folder = fld, placementRevision = rev)
+        }
+        val accepted = OrbMissionTree.commitAuthoritativePlacements(items, ackOpId = respOpId)
+        applyPlacementCommit(accepted)
+        return accepted
+    }
+
+    /** Reconciles `moved_missions` returned by `POST /api/projects/:slug/file/transfer` folder rename/move cascades. */
+    fun applyTransferMovedMissions(response: Any?, fallbackProject: String) {
+        val root = OrbJSON.dict(response) ?: return
+        val rawMoved = OrbJSON.dictList(root["moved_missions"])
+        if (rawMoved.isEmpty()) return
+        val items = rawMoved.mapNotNull { m ->
+            val mid = OrbJSON.str(m, "mission_id", "id") ?: return@mapNotNull null
+            val proj = OrbJSON.str(m, "project")?.takeIf { it.isNotEmpty() } ?: fallbackProject
+            val fld = OrbMissionTree.normalizeFolder(OrbJSON.str(m, "folder"))
+            val rev = maxOf(0L, (m["placement_revision"] as? Number)?.toLong() ?: 1L)
+            OrbPlacementCommitItem(missionId = mid, project = proj, folder = fld, placementRevision = rev)
+        }
+        val accepted = OrbMissionTree.commitAuthoritativePlacements(items, ackOpId = 0)
+        applyPlacementCommit(accepted)
     }
 
     suspend fun fetchRows(path: String, key: String?): List<OrbRow> {
@@ -2097,6 +2594,14 @@ class OrbCore private constructor(context: Context) {
                     if (eventType == "mission_presentation") {
                         for (sub in snapshot) {
                             if (sub.kindFilter == "presentation") sub.onEvent(eventType, text)
+                        }
+                        return
+                    }
+                    if (eventType == "mission_placement_changed") {
+                        for (sub in snapshot) {
+                            if (sub.kindFilter == "presentation" || sub.missionId != null || sub.kindFilter == null) {
+                                sub.onEvent(eventType, text)
+                            }
                         }
                         return
                     }

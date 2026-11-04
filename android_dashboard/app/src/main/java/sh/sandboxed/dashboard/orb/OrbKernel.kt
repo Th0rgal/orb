@@ -663,6 +663,17 @@ object OrbKernel {
         isReplayFromLog: Int
     ): Long
 
+    @JvmStatic
+    external fun orbPlacementMergeStep(
+        curRev: Long,
+        incRev: Long,
+        pendingOpId: Int,
+        ackOpId: Int,
+        sourceKind: Int,
+        hasPlacement: Int,
+        matchesOptimistic: Int
+    ): Long
+
     data class WorkfoldVerdict(val foldItem: Boolean, val foldHasToolNext: Boolean)
 
     private fun bInt(v: Boolean): Int = if (v) 1 else 0
@@ -1378,6 +1389,44 @@ object OrbKernel {
             bInt(thinkingOpen),
             enum8(normalizedAction),
             bInt(isReplayFromLog)
+        )
+    }
+
+    data class PlacementMergeVerdict(
+        val status: Int,
+        val admitted: Boolean,
+        val clearPending: Boolean,
+        val evictOtherProjects: Boolean,
+        val nextRev32: Long
+    )
+
+    fun placementMergeStep(
+        curRev: Long,
+        incRev: Long,
+        pendingOpId: Int,
+        ackOpId: Int,
+        sourceKind: Int,
+        hasPlacement: Boolean,
+        matchesOptimistic: Boolean
+    ): PlacementMergeVerdict {
+        requireNative()
+        val raw = orbPlacementMergeStep(
+            maxOf(0L, curRev),
+            maxOf(0L, incRev),
+            maxOf(0, pendingOpId),
+            maxOf(0, ackOpId),
+            enum8(sourceKind),
+            bInt(hasPlacement),
+            bInt(matchesOptimistic)
+        )
+        val lo32 = (raw and 0xFFFF_FFFFL).toInt()
+        val hi32 = (raw ushr 32) and 0xFFFF_FFFFL
+        return PlacementMergeVerdict(
+            status = lo32 and 0xFF,
+            admitted = ((lo32 ushr 8) and 1) != 0,
+            clearPending = ((lo32 ushr 9) and 1) != 0,
+            evictOtherProjects = ((lo32 ushr 10) and 1) != 0,
+            nextRev32 = hi32
         )
     }
 }

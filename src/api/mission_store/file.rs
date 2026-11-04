@@ -756,11 +756,35 @@ impl MissionStore for FileMissionStore {
         let mission = next
             .get_mut(&id)
             .ok_or_else(|| format!("Mission {} not found", id))?;
+        let mut placement_changed = patch.bump_placement_revision;
         if let Some(title) = patch.title {
             mission.title = title;
         }
         if let Some(project) = patch.project {
+            if mission.project.project != project {
+                placement_changed = true;
+            }
             mission.project.project = project;
+        }
+        let mut extracted_legacy = None;
+        if let Some(mut tags) = patch.tags {
+            extracted_legacy = super::strip_legacy_orb_folder_tags(&mut tags);
+            mission.project.tags = tags;
+        }
+        if let Some(delta) = patch.tag_patch {
+            delta.apply(&mut mission.project.tags);
+            let _ = super::strip_legacy_orb_folder_tags(&mut mission.project.tags);
+        }
+        if let Some(folder) = patch.folder.or(extracted_legacy) {
+            let norm = super::normalize_mission_folder(&folder);
+            if mission.project.folder != norm {
+                placement_changed = true;
+            }
+            mission.project.folder = norm;
+        }
+        if placement_changed {
+            mission.project.placement_revision =
+                mission.project.placement_revision.saturating_add(1);
         }
         if let Some(track) = patch.track {
             mission.project.track = track;
@@ -770,12 +794,6 @@ impl MissionStore for FileMissionStore {
         }
         if let Some(github_pr) = patch.github_pr {
             mission.project.github_pr = github_pr;
-        }
-        if let Some(tags) = patch.tags {
-            mission.project.tags = tags;
-        }
-        if let Some(delta) = patch.tag_patch {
-            delta.apply(&mut mission.project.tags);
         }
         if let Some(desired_state) = patch.desired_state {
             mission.project.desired_state = desired_state;

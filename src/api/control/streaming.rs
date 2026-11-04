@@ -61,6 +61,7 @@ pub(crate) fn parse_stream_kinds(raw: Option<&str>) -> Option<Vec<String>> {
 pub(crate) fn stream_kind_matches(kinds: &[String], event_name: &str) -> bool {
     kinds.iter().any(|k| {
         event_name == k
+            || (k == "mission_presentation" && event_name == "mission_placement_changed")
             || (event_name.len() > k.len()
                 && event_name.starts_with(k.as_str())
                 && event_name.as_bytes()[k.len()] == b'_')
@@ -638,12 +639,16 @@ pub(super) async fn control_ws_loop(
                         if mission_rx.is_some() {
                             let is_status = matches!(&ev, AgentEvent::Status { .. });
                             let is_fido = matches!(&ev, AgentEvent::FidoSignRequest { .. });
-                            if !is_status && !is_fido {
+                            let is_placement =
+                                matches!(&ev, AgentEvent::MissionPlacementChanged { .. });
+                            if !is_status && !is_fido && !is_placement {
                                 continue;
                             }
                         } else if let Some(filter) = mission_filter {
                             let is_status = matches!(&ev, AgentEvent::Status { .. });
-                            if !is_status && mission_id != Some(filter) {
+                            let is_placement =
+                                matches!(&ev, AgentEvent::MissionPlacementChanged { .. });
+                            if !is_status && !is_placement && mission_id != Some(filter) {
                                 continue;
                             }
                         }
@@ -943,7 +948,9 @@ pub async fn stream(
                             if mission_rx.is_some() {
                                 let is_status = matches!(&ev, AgentEvent::Status { .. });
                                 let is_fido = matches!(&ev, AgentEvent::FidoSignRequest { .. });
-                                if !is_status && !is_fido {
+                                let is_placement =
+                                    matches!(&ev, AgentEvent::MissionPlacementChanged { .. });
+                                if !is_status && !is_fido && !is_placement {
                                     continue;
                                 }
                             } else if let Some(filter) = mission_filter {
@@ -951,11 +958,22 @@ pub async fn stream(
                                 // (e.g. first-event race). Apply the P1-#4
                                 // filter directly.
                                 let is_status = matches!(&ev, AgentEvent::Status { .. });
-                                if !is_status && mission_id != Some(filter) {
+                                let is_placement =
+                                    matches!(&ev, AgentEvent::MissionPlacementChanged { .. });
+                                if !is_status && !is_placement && mission_id != Some(filter) {
                                     continue;
                                 }
                             }
                             if presentation {
+                                if matches!(&ev, AgentEvent::MissionPlacementChanged { .. }) {
+                                    if let Ok(payload) = deferred_messages::stream_payload(&ev) {
+                                        metrics.record_sse_chunk(payload.len());
+                                        yield Ok(Event::default()
+                                            .event("mission_placement_changed")
+                                            .data(payload));
+                                    }
+                                    continue;
+                                }
                                 if let AgentEvent::MissionActivity { mission_id: Some(id), .. } = &ev {
                                     if activity_sent.get(id).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) { continue; }
                                     if activity_sent.len() >= 512 { activity_sent.clear(); }

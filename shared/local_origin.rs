@@ -8,6 +8,8 @@ pub struct Origin {
     pub client_id: uuid::Uuid,
     pub title: String,
     pub project: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder: String,
     pub backend: String,
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,6 +85,16 @@ impl Snapshot {
             || self.text.len() > 8 * 1024 * 1024
         {
             return Err("Local transcript exceeds sync limits".into());
+        }
+        if self.origin.folder.len() > 1024
+            || self.origin.folder.contains(['\\', '\0'])
+            || self
+                .origin
+                .folder
+                .split('/')
+                .any(|seg| seg == "." || seg == "..")
+        {
+            return Err("Invalid local folder".into());
         }
         if self.origin.tags.len() > 64
             || self

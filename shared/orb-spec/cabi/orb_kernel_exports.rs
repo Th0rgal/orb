@@ -151,4 +151,5 @@ pub const EXPORTS: &[&str] = &[
     "orb_wire_scroll_slice_step",
     "orb_wire_stream_slice_step",
     "orb_wire_transcript_slice_step",
+    "orb_placement_merge_step",
 ];

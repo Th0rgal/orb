@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createMemo, createRoot } from "solid-js";
+import { ApprovalTransferConfirmationRequiredError } from "../src/api";
+import { commitAuthoritativePlacements, resetMissionHierarchy, withHierarchy } from "../src/missionHierarchy";
 import { MOVE_CONFIRM_MS, fileMoveKey, filesMovedAway, filesMovedInto, missionMoveKey, missionsMovedInto, moveOptimistically, movedMission, movingOutOf, previewMove, resetMoves, settleMove, withMovedMissions } from "../src/moves";
 
-beforeEach(() => resetMoves());
-afterEach(() => { vi.useRealTimers(); resetMoves(); });
+beforeEach(() => { resetMoves(); resetMissionHierarchy(); });
+afterEach(() => { vi.useRealTimers(); resetMoves(); resetMissionHierarchy(); });
 const deferred = () => { let resolve!: () => void, reject!: (e: unknown) => void; const promise = new Promise<void>((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
-const mission = { id: "m1", project: "alpha", tags: ["orb-folder:old", "keep"] };
+const mission = { id: "m1", project: "alpha", folder: "old", placement_revision: 1, tags: ["keep"] };
 const move = { kind: "mission" as const, fromProject: "alpha", toProject: "beta", path: "docs" };
 
 it("shows a moved mission in its destination in every view before the server answers", () => {
@@ -13,7 +15,7 @@ it("shows a moved mission in its destination in every view before the server ans
   createRoot(dispose => {
     const sidebar = createMemo(() => withMovedMissions([mission])[0]);
     void moveOptimistically(missionMoveKey("m1"), move, () => request.promise);
-    expect(sidebar()).toEqual({ id: "m1", project: "beta", tags: ["keep", "orb-folder:docs"] });
+    expect(sidebar()).toEqual({ id: "m1", project: "beta", folder: "docs", placement_revision: 1, tags: ["keep"] });
     expect(movingOutOf("m1", "alpha")).toBe(true);
     expect(missionsMovedInto("beta", [mission]).map(m => m.id)).toEqual(["m1"]);
     expect(missionsMovedInto("alpha", [mission])).toEqual([]);
@@ -34,25 +36,48 @@ it("moves it back and shows an error toast when the request fails", async () => 
   expect(document.body.textContent).toContain("403 forbidden");
 });
 
-it("does not mistake a projected destination for acknowledgement", async () => {
-  vi.useFakeTimers();
-  await moveOptimistically(missionMoveKey("m1"), move, async () => {});
-  // A list fetched before the move landed still says alpha.
-  expect(withMovedMissions([mission])[0].project).toBe("beta");
-  // Even a matching row may be the output of our own projection.
-  const confirmed = { id: "m1", project: "beta", tags: ["keep", "orb-folder:docs"] };
-  expect(movedMission(confirmed)).toBe(confirmed);
+it("rolls back silently without an error toast when approval confirmation is required", async () => {
+  document.body.innerHTML = "";
+  const done = moveOptimistically(missionMoveKey("m1"), move, async () => {
+    throw new ApprovalTransferConfirmationRequiredError("Confirm secret transfer", "beta", [], []);
+  });
+  await expect(done).rejects.toBeInstanceOf(ApprovalTransferConfirmationRequiredError);
+  expect(movedMission(mission)).toBe(mission);
   await Promise.resolve();
-  expect(movedMission(mission).project).toBe("beta");
-  settleMove(missionMoveKey("m1"));
-  expect(movedMission({ ...mission, project: "gamma" }).project).toBe("gamma");
+  expect(document.body.textContent).not.toContain("Couldn’t move");
 });
 
-it("stops overriding after the confirmation timeout", async () => {
-  vi.useFakeTimers();
-  await moveOptimistically(missionMoveKey("m1"), move, async () => {});
-  vi.advanceTimersByTime(MOVE_CONFIRM_MS);
+it("retains committed placement across stale pre-move list refreshes without needing a 30s timer", async () => {
+  await moveOptimistically(missionMoveKey("m1"), move, async (opId) => {
+    commitAuthoritativePlacements(
+      [{ mission_id: "m1", project: "beta", folder: "docs", placement_revision: 2 }],
+      opId,
+    );
+  });
+  // Pending overlay is cleared immediately on commit, while `withHierarchy` enforces revision 2.
   expect(movedMission(mission)).toBe(mission);
+  expect(withHierarchy(mission)).toEqual({
+    id: "m1",
+    project: "beta",
+    folder: "docs",
+    placement_revision: 2,
+    tags: ["keep"],
+  });
+});
+
+it("clears file overlays after the confirmation timeout", async () => {
+  vi.useFakeTimers();
+  await moveOptimistically(fileMoveKey("alpha", "notes/plan.md"), {
+    kind: "file",
+    fromProject: "alpha",
+    toProject: "beta",
+    path: "inbox/plan.md",
+    fromPath: "notes/plan.md",
+  }, async () => {});
+  expect([...filesMovedAway("alpha", "notes")]).toEqual(["plan.md"]);
+  vi.advanceTimersByTime(MOVE_CONFIRM_MS);
+  expect([...filesMovedAway("alpha", "notes")]).toEqual([]);
+  settleMove(fileMoveKey("alpha", "notes/plan.md"));
 });
 
 it("moves files and folders between project listings at once", () => {

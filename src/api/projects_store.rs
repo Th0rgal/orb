@@ -1439,6 +1439,70 @@ impl ProjectsStore {
         Ok(())
     }
 
+    /// Atomically rewrite `folder` for all crons in `slug` whose folder equals
+    /// `old_prefix` or starts with `"{old_prefix}/"`.
+    pub fn cascade_rename_cron_folder(
+        &self,
+        slug: &str,
+        old_prefix: &str,
+        new_prefix: &str,
+    ) -> Result<usize, String> {
+        let old_norm = crate::api::mission_store::normalize_mission_folder(old_prefix);
+        let new_norm = crate::api::mission_store::normalize_mission_folder(new_prefix);
+        if old_norm.is_empty() || old_norm == new_norm {
+            return Ok(0);
+        }
+        let mut connection = self.lock()?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let lower = format!("{old_norm}/");
+        let upper = format!("{old_norm}0");
+        let mut count = 0usize;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT job_id, COALESCE(folder, '')
+                     FROM project_crons
+                     WHERE slug = ?1
+                       AND (folder = ?2 OR (folder >= ?3 AND folder < ?4))",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows: Vec<(String, String)> = stmt
+                .query_map(params![slug, &old_norm, &lower, &upper], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            let mut update_stmt = tx
+                .prepare_cached(
+                    "UPDATE project_crons SET folder = ?1 WHERE slug = ?2 AND job_id = ?3",
+                )
+                .map_err(|e| e.to_string())?;
+            for (job_id, cur_folder) in rows {
+                let cur = crate::api::mission_store::normalize_mission_folder(&cur_folder);
+                let rewritten = if cur == old_norm {
+                    new_norm.clone()
+                } else if let Some(rest) = cur.strip_prefix(&lower) {
+                    if new_norm.is_empty() {
+                        rest.to_string()
+                    } else {
+                        format!("{new_norm}/{rest}")
+                    }
+                } else {
+                    continue;
+                };
+                update_stmt
+                    .execute(params![&rewritten, slug, &job_id])
+                    .map_err(|e| e.to_string())?;
+                count += 1;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(count)
+    }
+
     /// Every explicit binding, keyed by project slug. Read once per overview
     /// render rather than per row.
     pub fn bindings(&self) -> Result<HashMap<String, ProjectConversation>, String> {

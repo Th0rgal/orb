@@ -233,9 +233,110 @@ final class OrbContractTests: XCTestCase {
         XCTAssertNil(OrbContinuation.identity(for: .object([:])))
     }
 
-    func testFolderTagKeepsNestedPath() {
-        let row = OrbRow(.object(["id": .string("a"), "tags": .array([.string("orb-folder:Design/Images")])]))
+    func testFolderColumnKeepsNestedPathAndIgnoresLegacyTags() {
+        OrbHierarchy.reset()
+        let row = OrbRow(.object([
+            "id": .string("a"),
+            "project": .string("orb-test"),
+            "folder": .string(" /Design/Images/ "),
+            "placement_revision": .number(1),
+            "tags": .array([.string("orb-folder:Stale/Legacy")]),
+        ]))
         XCTAssertEqual(row.folder, "Design/Images")
+
+        // Nested launched child subagents always carry `folder == ""` regardless of incoming payload.
+        let child = OrbRow(.object([
+            "id": .string("child-a"),
+            "project": .string("orb-test"),
+            "folder": .string("Design/Images"),
+            "placement_revision": .number(1),
+            "parent_mission_id": .string("a"),
+        ]))
+        XCTAssertEqual(child.folder, "")
+        OrbHierarchy.reset()
+    }
+
+    func testPlacementMergeMonotoneReconcilerAndRollback() {
+        OrbHierarchy.reset()
+        // Seed initial state: mission `9f559751` + subagent `06203bdc` in `assistant` at rev 2.
+        let rootInit = OrbRow(.object([
+            "id": .string("9f559751"),
+            "project": .string("assistant"),
+            "folder": .string(""),
+            "placement_revision": .number(2),
+        ]))
+        let childInit = OrbRow(.object([
+            "id": .string("06203bdc"),
+            "project": .string("assistant"),
+            "folder": .string(""),
+            "placement_revision": .number(2),
+            "parent_mission_id": .string("9f559751"),
+        ]))
+        XCTAssertEqual(rootInit.project, "assistant")
+        XCTAssertEqual(childInit.project, "assistant")
+
+        // Stage optimistic move to `default/ops` with opID 42.
+        let staged = OrbHierarchy.stageOptimisticPlacement(
+            rootIDs: ["9f559751"],
+            descendantIDs: ["06203bdc"],
+            project: "default",
+            folder: "ops",
+            opID: 42
+        )
+        XCTAssertEqual(Set(staged), Set(["9f559751", "06203bdc"]))
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.project, "default")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.folder, "ops")
+        XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.project, "default")
+        XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.folder, "")
+
+        // A stale in-flight poll carrying `rev == 2` from `assistant` is fenced and preserves optimistic placement.
+        let staleRoot = OrbRow(.object([
+            "id": .string("9f559751"),
+            "project": .string("assistant"),
+            "folder": .string(""),
+            "placement_revision": .number(2),
+        ]))
+        XCTAssertEqual(staleRoot.project, "default")
+        XCTAssertEqual(staleRoot.folder, "ops")
+
+        // Rollback on 409 approval prompt restores `assistant` cleanly; mismatched opID does nothing.
+        XCTAssertTrue(OrbHierarchy.rollbackOptimisticPlacement(missionIDs: ["9f559751", "06203bdc"], opID: 99).isEmpty)
+        let rolledBack = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: ["9f559751", "06203bdc"], opID: 42)
+        XCTAssertEqual(Set(rolledBack), Set(["9f559751", "06203bdc"]))
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.project, "assistant")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.folder, "")
+
+        // Commit authoritative move at `rev == 3` to `default/ops`.
+        let committed = OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "9f559751", project: "default", folder: "ops", placementRevision: 3),
+            OrbPlacementCommitItem(missionID: "06203bdc", project: "default", folder: "ignored", placementRevision: 3),
+        ], ackOpID: 43)
+        XCTAssertEqual(committed.count, 2)
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.project, "default")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.folder, "ops")
+        XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.folder, "")
+
+        // Post-commit stale poll (`rev == 2`, `assistant`) is strictly rejected — prevents incident `9f559751`.
+        let postMoveStaleChild = OrbRow(.object([
+            "id": .string("06203bdc"),
+            "project": .string("assistant"),
+            "folder": .string(""),
+            "placement_revision": .number(2),
+            "parent_mission_id": .string("9f559751"),
+        ]))
+        XCTAssertEqual(postMoveStaleChild.project, "default")
+        XCTAssertEqual(postMoveStaleChild.placementRevision, 3)
+
+        // Parse 409 approval transfer confirmation error.
+        let errJSON = """
+        {"code":"approval_transfer_confirmation_required","error":"Moving across projects affects active secret approvals","target_project":"ethereum","active_grants":[{"id":"g1","secret_name":"PROD_DB","source_project":"assistant"}],"pending_requests":[{"id":"r1","secret_name":"STRIPE_KEY","operation":"get"}]}
+        """
+        let parsed = OrbApprovalTransferConfirmationError.parse(from: OrbHTTPError(status: 409, detail: errJSON))
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.targetProject, "ethereum")
+        XCTAssertEqual(parsed?.activeGrants.map(\.secretName), ["PROD_DB"])
+        XCTAssertEqual(parsed?.pendingRequests.map(\.secretName), ["STRIPE_KEY"])
+        OrbHierarchy.reset()
     }
     func testWireRoundTripPreservesProviderParameters() throws {
         let value = OrbJSON.object(["params": .array([.object(["id": .string("effort"), "value": .string("high")])]), "available": .bool(true)])

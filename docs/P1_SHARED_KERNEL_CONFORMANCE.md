@@ -1,14 +1,14 @@
 # Shared-kernel conformance: implementation and limits
 
 `scripts/run_shared_kernel_conformance.py` executes every public symbol in
-`shared/orb-spec/kernel_abi.json`: 109 Orb exports and 41 LeanSys exports (150
-public exports across the 151-entry manifest after `#1488` added
+`shared/orb-spec/kernel_abi.json`: 110 Orb exports and 41 LeanSys exports (151
+public exports across the 152-entry manifest after `#1488` added
 `orb_slot_bypass_step`, live node resize / coordinator lane added
 `orb_node_resize_step` and `orb_node_lane_step`, Phase R2b added
 `orb_wire_verify_slice_io`, `orb_wire_encode_slice_step`, and
-`orb_wire_decode_slice_step`, the `dgx-spark` / `lean-sys` `c8449e0` bump added 8 `leansys_*` gates plus `orb_fleet_endpoint_gate` and `orb_prefill_deadline_ms`, and Phase R4 added `orb_scroll_policy_gap`,
+`orb_wire_decode_slice_step`, the `dgx-spark` / `lean-sys` `c8449e0` bump added 8 `leansys_*` gates plus `orb_fleet_endpoint_gate` and `orb_prefill_deadline_ms`, Phase R4 added `orb_scroll_policy_gap`,
 `orb_scroll_policy_correct`, `orb_scroll_policy_step`, `orb_wire_scroll_slice_step`,
-`orb_wire_stream_slice_step`, and `orb_wire_transcript_slice_step`). The inventoried compiler helper is excluded from the
+`orb_wire_stream_slice_step`, and `orb_wire_transcript_slice_step`, and mission placement monotonicity added `orb_placement_merge_step`). The inventoried compiler helper is excluded from the
 public surface. The complete [P0–P7 roadmap](TRUSTWORTHY_SHARED_LEAN_ROADMAP.md)
 and acceptance gates still apply. No phase is accepted by this harness.
 
@@ -39,10 +39,10 @@ of command logs bind the supplied local receipts; dynamic libraries, operating
 system, compiler correctness and hardware execution remain assumptions.
 
 For each export the corpus includes six boundary vectors (0, 1, 2, 3, maximum,
-maximum minus one) and two reproducibly seeded random vectors: 1200 base cases
-across the current 150 public exports (1024 base / 1044 total at the 128-export
+maximum minus one) and two reproducibly seeded random vectors: 1208 base cases
+across the current 151 public exports (1024 base / 1044 total at the 128-export
 execution head `3c70e5ada` recorded below). Lean-witnessed domain mutation
-vectors extend a current 150-export run to 1220 cases.
+vectors extend a current 151-export run to 1228 cases.
 This small scalar corpus is not exhaustive fuzzing. Stock Lean executes wrappers
 calling the actual exported Lean definitions. Those wrappers also compile via
 stock `lean -c` and `leanc`. Native C is compiled from the vendored artifact;
@@ -182,8 +182,8 @@ Evidence directory: `/srv/sandboxed-storage/host-tmp/opencode/p1-final-e585ba9-2
 | `case-receipts.jsonl` | `c34b6a17857a35845ad8d6ec3c925fac7e8afb252dd216f0cc88cef19dd16939` |
 
 These are local unsigned receipts, not durable public artifact hosting or proof
-of complete host wiring. On current `master` (151 manifest entries including
-`orb_slot_bypass_step`, `orb_node_resize_step`, `orb_node_lane_step`, the Phase R2b `orb_wire_*_slice_*` exports, Phase R3 Cluster 1–4 partial evidence, the `dgx-spark` / `lean-sys` `c8449e0` gates, and Phase R4 Scroll / Stream / Transcript zero-copy slice ABI exports), the coverage registry remains **84 partial / 67
+of complete host wiring. On current `master` (152 manifest entries including
+`orb_slot_bypass_step`, `orb_node_resize_step`, `orb_node_lane_step`, the Phase R2b `orb_wire_*_slice_*` exports, Phase R3 Cluster 1–4 partial evidence, the `dgx-spark` / `lean-sys` `c8449e0` gates, Phase R4 Scroll / Stream / Transcript zero-copy slice ABI exports, and `orb_placement_merge_step`), the coverage registry remains **85 partial / 67
 unconnected** (`acceptance: INCOMPLETE`; 23 partial / 106 unconnected across the
 129 entries at execution head `3c70e5ada`). Physical iPhone/Pixel execution
 remains blocked. See [P3 target qualification](P3_TARGET_QUALIFICATION_REPORT.md)

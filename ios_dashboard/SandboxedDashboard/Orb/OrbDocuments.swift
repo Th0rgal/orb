@@ -206,11 +206,12 @@ struct OrbDocuments: View {
         let destination = parent.isEmpty ? input : "\(parent)/\(input)"
         guard destination != itemPath else { return }
         do {
-            _ = try await api.call(
+            let res = try await api.call(
                 "/api/projects/\(OrbCore.escape(project))/file/transfer",
                 method: "POST",
                 body: .object(["path": .string(itemPath), "destination": .string(destination), "copy": .bool(false)])
             )
+            OrbCore.applyTransferMovedMissions(res, fallbackProject: project)
             invalidateProjectCaches()
             await reload(initial: false)
         } catch { self.error = error.localizedDescription }
@@ -226,11 +227,12 @@ struct OrbDocuments: View {
             return
         }
         do {
-            _ = try await api.call(
+            let res = try await api.call(
                 "/api/projects/\(OrbCore.escape(project))/file/transfer",
                 method: "POST",
                 body: .object(["path": .string(itemPath), "destination": .string(destination), "copy": .bool(false)])
             )
+            OrbCore.applyTransferMovedMissions(res, fallbackProject: project)
             invalidateProjectCaches()
             await reload(initial: false)
         } catch { self.error = error.localizedDescription }

@@ -61,31 +61,145 @@ enum OrbContinuation {
     }
 }
 
+struct OrbPlacementCommitItem: Equatable, Sendable {
+    let missionID: String
+    let project: String?
+    let folder: String
+    let placementRevision: UInt64
+}
+
+struct OrbApprovalTransferConfirmationError: LocalizedError, Equatable, Sendable {
+    struct ActiveGrant: Equatable, Sendable {
+        let id: String
+        let secretName: String
+        let sourceProject: String?
+    }
+    struct PendingRequest: Equatable, Sendable {
+        let id: String
+        let secretName: String
+        let operation: String
+    }
+    let message: String
+    let targetProject: String
+    let activeGrants: [ActiveGrant]
+    let pendingRequests: [PendingRequest]
+
+    var errorDescription: String? { message }
+
+    var summaryText: String {
+        var names = Set<String>()
+        for g in activeGrants where !g.secretName.isEmpty { names.insert(g.secretName) }
+        for p in pendingRequests where !p.secretName.isEmpty { names.insert(p.secretName) }
+        let sorted = names.sorted()
+        var parts: [String] = []
+        if !activeGrants.isEmpty {
+            parts.append("\(activeGrants.count) active Touch-ID grant\(activeGrants.count == 1 ? "" : "s")")
+        }
+        if !pendingRequests.isEmpty {
+            parts.append("\(pendingRequests.count) pending secret request\(pendingRequests.count == 1 ? "" : "s")")
+        }
+        let detail = parts.isEmpty ? message : "This conversation tree holds \(parts.joined(separator: " and "))"
+        let suffix = sorted.isEmpty ? "" : " (\(sorted.joined(separator: ", ")))"
+        let dest = targetProject.isEmpty ? "the destination project" : targetProject
+        return "\(detail)\(suffix). Choose whether to revoke them before moving to \(dest) or keep them bound to \(dest)."
+    }
+
+    static func parse(from error: Error) -> Self? {
+        guard let http = error as? OrbHTTPError, http.status == 409,
+              let data = http.detail.data(using: .utf8),
+              let json = try? JSONDecoder().decode(OrbJSON.self, from: data),
+              json["code"].text == "approval_transfer_confirmation_required" else {
+            return nil
+        }
+        let grantsRaw = json["active_grants"].items.isEmpty ? json["grants"].items : json["active_grants"].items
+        let grants = grantsRaw.map { g in
+            ActiveGrant(
+                id: g["id"].text,
+                secretName: g["secret_name"].text,
+                sourceProject: g["source_project"] == .null ? nil : g["source_project"].text
+            )
+        }
+        let pending = json["pending_requests"].items.map { p in
+            PendingRequest(
+                id: p["id"].text,
+                secretName: p["secret_name"].text,
+                operation: p["operation"].text
+            )
+        }
+        let msg = json["error"].text.isEmpty ? "Moving across projects affects active secret approvals." : json["error"].text
+        return Self(
+            message: msg,
+            targetProject: json["target_project"].text,
+            activeGrants: grants,
+            pendingRequests: pending
+        )
+    }
+}
+
 struct OrbRow: Identifiable, Hashable, Sendable {
     let id: String
     let name: String
     let state: String
+    let project: String
     let folder: String
+    let placementRevision: UInt64
     let backend: String
     let cloud: Bool
     let updatedAt: String
     let raw: OrbJSON
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id && lhs.raw == rhs.raw }
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id == rhs.id && lhs.project == rhs.project && lhs.folder == rhs.folder &&
+        lhs.placementRevision == rhs.placementRevision && lhs.raw == rhs.raw
+    }
     func hash(into h: inout Hasher) { h.combine(id) }
-    init(_ value: OrbJSON, project: Bool = false) {
-        raw = value
-        id = value[project ? "slug" : "id"].text
+    static func normalizeFolder(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
+            .joined(separator: "/")
+    }
+    init(_ value: OrbJSON, project isProject: Bool = false) {
+        id = value[isProject ? "slug" : "id"].text
         // Forks share the conversation's name; older forks were titled "… · fork".
         let title = value["title"].text
         let placeholder = value["orb_placeholder"].flag
         name = title.isEmpty ? (placeholder ? "Parent mission" : id) : (title.hasSuffix(" · fork") ? String(title.dropLast(7)) : title)
         state = value["status"].text
-        folder = value["tags"].items.map(\.text).first(where: { $0.hasPrefix("orb-folder:") }).map { String($0.dropFirst(11)) } ?? ""
         backend = value["backend"].text
         cloud = value["backend"].text.hasPrefix("cloud_") || value["execution_kind"].text == "cloud" || value["tags"].items.contains(where: { $0.text.hasPrefix("cloud:") }) || value["cloud"] != .null
         updatedAt = value["updated_at"].text.isEmpty ? value["created_at"].text : value["updated_at"].text
-        if !project && !placeholder {
-            OrbHierarchy.observe(self)
+        let rawRev = value["placement_revision"].doubleValue.map { UInt64(max(0, $0)) } ?? 0
+        let rawFolder = Self.normalizeFolder(value["folder"].text)
+        let rawProj = value["project"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !isProject && !placeholder && !id.isEmpty {
+            let resolved = OrbHierarchy.observeAndResolvePlacement(
+                id: id,
+                value: value,
+                rawProject: rawProj,
+                rawFolder: rawFolder,
+                rawRev: rawRev,
+                rawTitle: title,
+                rawStatus: state,
+                rawBackend: backend
+            )
+            project = resolved.project
+            folder = resolved.folder
+            placementRevision = resolved.revision
+            if case var .object(dict) = value {
+                dict["project"] = resolved.project.isEmpty ? .null : .string(resolved.project)
+                dict["folder"] = .string(resolved.folder)
+                dict["placement_revision"] = .number(Double(resolved.revision))
+                raw = .object(dict)
+            } else {
+                raw = value
+            }
+        } else {
+            project = rawProj
+            folder = rawFolder
+            placementRevision = rawRev
+            raw = value
         }
     }
     var isPlaceholder: Bool { raw["orb_placeholder"].flag }
@@ -103,39 +217,61 @@ struct OrbRow: Identifiable, Hashable, Sendable {
         return OrbHierarchy.parent(of: id)
     }
     fileprivate var payloadParentID: String? {
-        let p = raw["parent_mission_id"].text
-        if !p.isEmpty && forkSource != p { return p }
-        let cp = raw["callback_parent_mission_id"].text
+        Self.extractPayloadParentID(from: raw)
+    }
+    static func extractPayloadParentID(from value: OrbJSON) -> String? {
+        let forkSrc: String? = {
+            if let tag = value["tags"].items.map(\.text).first(where: { $0.hasPrefix("fork-of:") }) { return String(tag.dropFirst(8)) }
+            let p = value["parent_mission_id"].text
+            return !p.isEmpty && value["title"].text.hasSuffix(" · fork") ? p : nil
+        }()
+        let p = value["parent_mission_id"].text
+        if !p.isEmpty && forkSrc != p { return p }
+        let cp = value["callback_parent_mission_id"].text
         if !cp.isEmpty { return cp }
-        for tag in raw["tags"].items.map(\.text) {
+        for tag in value["tags"].items.map(\.text) {
             let lower = tag.lowercased()
             for prefix in ["parent:", "parent_mission:", "parent-mission:", "spawned_by:", "spawned-by:"] {
                 if lower.hasPrefix(prefix) {
-                    let value = String(tag.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !value.isEmpty { return value }
+                    let v = String(tag.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !v.isEmpty { return v }
                 }
             }
         }
         return nil
     }
     fileprivate var hasDirectBtwTag: Bool {
-        raw["tags"].items.map(\.text).contains { $0.hasPrefix("btw-parent:") || $0 == "btw-subagent" }
+        Self.hasDirectBtwTag(in: raw)
+    }
+    static func hasDirectBtwTag(in value: OrbJSON) -> Bool {
+        value["tags"].items.map(\.text).contains { $0.hasPrefix("btw-parent:") || $0 == "btw-subagent" }
     }
     var mobile: Bool { !OrbHierarchy.isBtw(self) }
     var active: Bool { missionState?.isActive ?? false }
 }
 
-/// Parent links and `/btw` subtree markers remembered across payloads, so a partial
-/// answer cannot un-nest a child or surface a `/btw` worker as a conversation.
+/// Parent links, `/btw` subtree markers, and monotone `(project, folder, placement_revision)`
+/// state (`orb_placement_merge_step`) remembered across payloads, so a partial or delayed
+/// pre-move poll cannot un-nest a child, surface a `/btw` worker, or snap a moved mission back.
 enum OrbHierarchy {
     struct Seen: Equatable, Sendable {
         var title: String?
         var project: String?
+        var folder: String?
         var status: String?
         var backend: String?
     }
+    struct PlacementState: Equatable, Sendable {
+        var project: String
+        var folder: String
+        var revision: UInt64
+        var pendingOpID: UInt32
+        var rollbackProject: String?
+        var rollbackFolder: String?
+        var rollbackRevision: UInt64?
+    }
     private struct CachedAncestor {
-        let row: OrbRow
+        var row: OrbRow
         let fetchedAt: Date
     }
     static let ancestorTTLSeconds: TimeInterval = 60
@@ -144,28 +280,295 @@ enum OrbHierarchy {
     nonisolated(unsafe) private static var parents: [String: String] = [:]
     nonisolated(unsafe) private static var btwIDs: Set<String> = []
     nonisolated(unsafe) private static var seenFacts: [String: Seen] = [:]
+    nonisolated(unsafe) private static var placements: [String: PlacementState] = [:]
+    nonisolated(unsafe) private static var nextOpID: UInt32 = 0
     nonisolated(unsafe) private static var ancestors: [String: CachedAncestor] = [:]
     nonisolated(unsafe) private static var goneIDs: Set<String> = []
 
-    static func observe(_ row: OrbRow) {
-        guard !row.id.isEmpty, !row.isPlaceholder else { return }
-        let parent = row.payloadParentID
-        let directBtw = row.hasDirectBtwTag
-        let rawTitle = row.raw["title"].text
-        let rawProject = row.raw["project"].text
-        let rawStatus = row.state
-        let rawBackend = row.backend
+    static func allocateOpID() -> UInt32 {
+        lock.lock(); defer { lock.unlock() }
+        nextOpID = nextOpID >= 0xFFFF_FFFE ? 1 : nextOpID + 1
+        return nextOpID
+    }
+
+    private static func hasNestedParentLocked(id: String, payloadParent: String?, directBtw: Bool) -> Bool {
+        if payloadParent != nil || parents[id] != nil { return true }
+        if directBtw || btwIDs.contains(id) { return true }
+        return false
+    }
+
+    static func observeAndResolvePlacement(
+        id: String,
+        value: OrbJSON,
+        rawProject: String,
+        rawFolder: String,
+        rawRev: UInt64,
+        rawTitle: String,
+        rawStatus: String,
+        rawBackend: String
+    ) -> (project: String, folder: String, revision: UInt64) {
+        let payloadParent = OrbRow.extractPayloadParentID(from: value)
+        let directBtw = OrbRow.hasDirectBtwTag(in: value)
+        let hasProjectField: Bool = {
+            if case .object(let d) = value { return d["project"] != nil }
+            return false
+        }()
+        let hasFolderField: Bool = {
+            if case .object(let d) = value { return d["folder"] != nil }
+            return false
+        }()
+        let hasRevField: Bool = {
+            if case .object(let d) = value { return d["placement_revision"] != nil }
+            return false
+        }()
+        let hasPlacement = hasProjectField || hasFolderField || hasRevField
+
         lock.lock()
-        goneIDs.remove(row.id)
-        if let parent { parents[row.id] = parent }
-        if directBtw { btwIDs.insert(row.id) }
-        var seen = seenFacts[row.id] ?? Seen()
+        defer { lock.unlock() }
+        goneIDs.remove(id)
+        if let payloadParent { parents[id] = payloadParent }
+        if directBtw { btwIDs.insert(id) }
+        let isNested = hasNestedParentLocked(id: id, payloadParent: payloadParent, directBtw: directBtw)
+        let incFolder = isNested ? "" : rawFolder
+
+        var resolvedProject = rawProject
+        var resolvedFolder = incFolder
+        var resolvedRev = rawRev
+
+        if let cur = placements[id] {
+            if !hasPlacement {
+                resolvedProject = cur.project
+                resolvedFolder = isNested ? "" : cur.folder
+                resolvedRev = cur.revision
+            } else {
+                let effProj = hasProjectField ? rawProject : cur.project
+                let effFolder = isNested ? "" : (hasFolderField ? rawFolder : cur.folder)
+                let matchesOpt = cur.pendingOpID != 0 && effProj == cur.project && effFolder == cur.folder
+                let verdict = OrbKernel.placementMergeStep(
+                    curRev: cur.revision,
+                    incRev: rawRev,
+                    pendingOpId: cur.pendingOpID,
+                    ackOpId: 0,
+                    sourceKind: 0,
+                    hasPlacement: true,
+                    matchesOptimistic: matchesOpt
+                )
+                if verdict.admitted {
+                    let nextRev = max(cur.revision, rawRev, UInt64(verdict.nextRev32))
+                    let nextState = PlacementState(
+                        project: effProj,
+                        folder: effFolder,
+                        revision: nextRev,
+                        pendingOpID: verdict.clearPending ? 0 : cur.pendingOpID,
+                        rollbackProject: verdict.clearPending ? nil : cur.rollbackProject,
+                        rollbackFolder: verdict.clearPending ? nil : cur.rollbackFolder,
+                        rollbackRevision: verdict.clearPending ? nil : cur.rollbackRevision
+                    )
+                    placements[id] = nextState
+                    resolvedProject = nextState.project
+                    resolvedFolder = nextState.folder
+                    resolvedRev = nextState.revision
+                } else {
+                    resolvedProject = cur.project
+                    resolvedFolder = isNested ? "" : cur.folder
+                    resolvedRev = cur.revision
+                }
+            }
+        } else if hasPlacement {
+            let initState = PlacementState(
+                project: rawProject,
+                folder: incFolder,
+                revision: rawRev,
+                pendingOpID: 0
+            )
+            placements[id] = initState
+        }
+
+        var seen = seenFacts[id] ?? Seen()
         if !rawTitle.isEmpty { seen.title = rawTitle }
-        if case .string = row.raw["project"] { seen.project = rawProject }
+        if !resolvedProject.isEmpty || hasProjectField { seen.project = resolvedProject }
+        seen.folder = resolvedFolder
         if !rawStatus.isEmpty && rawStatus != "unknown" { seen.status = rawStatus }
         if !rawBackend.isEmpty { seen.backend = rawBackend }
-        seenFacts[row.id] = seen
-        lock.unlock()
+        seenFacts[id] = seen
+
+        return (resolvedProject, resolvedFolder, resolvedRev)
+    }
+
+    static func observe(_ row: OrbRow) {
+        guard !row.id.isEmpty, !row.isPlaceholder else { return }
+        _ = observeAndResolvePlacement(
+            id: row.id,
+            value: row.raw,
+            rawProject: row.project,
+            rawFolder: row.folder,
+            rawRev: row.placementRevision,
+            rawTitle: row.raw["title"].text,
+            rawStatus: row.state,
+            rawBackend: row.backend
+        )
+    }
+
+    static func stageOptimisticPlacement(
+        id: String,
+        toProject: String,
+        toFolder: String,
+        opID: UInt32,
+        fallbackProject: String = "",
+        fallbackFolder: String = "",
+        fallbackRevision: UInt64 = 0
+    ) {
+        guard !id.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        let cur = placements[id] ?? PlacementState(
+            project: fallbackProject,
+            folder: OrbRow.normalizeFolder(fallbackFolder),
+            revision: fallbackRevision,
+            pendingOpID: 0
+        )
+        let isNested = hasNestedParentLocked(id: id, payloadParent: nil, directBtw: false)
+        let normFolder = isNested ? "" : OrbRow.normalizeFolder(toFolder)
+        let normProject = toProject.trimmingCharacters(in: .whitespacesAndNewlines)
+        let verdict = OrbKernel.placementMergeStep(
+            curRev: cur.revision,
+            incRev: cur.revision,
+            pendingOpId: cur.pendingOpID,
+            ackOpId: opID,
+            sourceKind: 2,
+            hasPlacement: true,
+            matchesOptimistic: false
+        )
+        guard verdict.admitted else { return }
+        placements[id] = PlacementState(
+            project: normProject,
+            folder: normFolder,
+            revision: cur.revision,
+            pendingOpID: opID,
+            rollbackProject: cur.rollbackProject ?? cur.project,
+            rollbackFolder: cur.rollbackFolder ?? cur.folder,
+            rollbackRevision: cur.rollbackRevision ?? cur.revision
+        )
+        if var seen = seenFacts[id] {
+            seen.project = normProject
+            seen.folder = normFolder
+            seenFacts[id] = seen
+        }
+    }
+
+    @discardableResult
+    static func stageOptimisticPlacement(
+        rootIDs: [String],
+        descendantIDs: [String] = [],
+        project: String,
+        folder: String,
+        opID: UInt32
+    ) -> [String] {
+        var staged: [String] = []
+        for rid in rootIDs where !rid.isEmpty {
+            stageOptimisticPlacement(id: rid, toProject: project, toFolder: folder, opID: opID)
+            if placement(of: rid)?.pendingOpID == opID { staged.append(rid) }
+        }
+        for did in descendantIDs where !did.isEmpty {
+            stageOptimisticPlacement(id: did, toProject: project, toFolder: "", opID: opID)
+            if placement(of: did)?.pendingOpID == opID { staged.append(did) }
+        }
+        return staged
+    }
+
+    @discardableResult
+    static func rollbackOptimisticPlacement(id: String, ackOpID: UInt32) -> Bool {
+        guard !id.isEmpty else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let cur = placements[id] else { return false }
+        let verdict = OrbKernel.placementMergeStep(
+            curRev: cur.revision,
+            incRev: cur.revision,
+            pendingOpId: cur.pendingOpID,
+            ackOpId: ackOpID,
+            sourceKind: 3,
+            hasPlacement: false,
+            matchesOptimistic: false
+        )
+        guard verdict.admitted else { return false }
+        let prevProj = cur.rollbackProject ?? cur.project
+        let prevFolder = cur.rollbackFolder ?? cur.folder
+        let prevRev = cur.rollbackRevision ?? cur.revision
+        placements[id] = PlacementState(
+            project: prevProj,
+            folder: prevFolder,
+            revision: prevRev,
+            pendingOpID: 0
+        )
+        if var seen = seenFacts[id] {
+            seen.project = prevProj
+            seen.folder = prevFolder
+            seenFacts[id] = seen
+        }
+        return true
+    }
+
+    @discardableResult
+    static func rollbackOptimisticPlacement(missionIDs: [String], opID: UInt32) -> [String] {
+        missionIDs.filter { rollbackOptimisticPlacement(id: $0, ackOpID: opID) }
+    }
+
+    @discardableResult
+    static func commitAuthoritativePlacements(_ items: [OrbPlacementCommitItem], ackOpID: UInt32 = 0) -> [OrbPlacementCommitItem] {
+        var accepted: [OrbPlacementCommitItem] = []
+        lock.lock()
+        defer { lock.unlock() }
+        for item in items where !item.missionID.isEmpty {
+            let cur = placements[item.missionID]
+            let isNested = hasNestedParentLocked(id: item.missionID, payloadParent: nil, directBtw: false)
+            let normFolder = isNested ? "" : OrbRow.normalizeFolder(item.folder)
+            let normProj = (item.project ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let matchesOpt = cur != nil && cur!.pendingOpID != 0 && normProj == cur!.project && normFolder == cur!.folder
+            let verdict = OrbKernel.placementMergeStep(
+                curRev: cur?.revision ?? 0,
+                incRev: item.placementRevision,
+                pendingOpId: cur?.pendingOpID ?? 0,
+                ackOpId: ackOpID,
+                sourceKind: 1,
+                hasPlacement: true,
+                matchesOptimistic: matchesOpt
+            )
+            guard verdict.admitted else { continue }
+            let nextPending: UInt32 = verdict.clearPending ? 0 : (cur?.pendingOpID ?? 0)
+            placements[item.missionID] = PlacementState(
+                project: normProj,
+                folder: normFolder,
+                revision: item.placementRevision,
+                pendingOpID: nextPending,
+                rollbackProject: verdict.clearPending ? nil : cur?.rollbackProject,
+                rollbackFolder: verdict.clearPending ? nil : cur?.rollbackFolder,
+                rollbackRevision: verdict.clearPending ? nil : cur?.rollbackRevision
+            )
+            var seen = seenFacts[item.missionID] ?? Seen()
+            seen.project = normProj
+            seen.folder = normFolder
+            seenFacts[item.missionID] = seen
+            if var anc = ancestors[item.missionID], case var .object(dict) = anc.row.raw {
+                dict["project"] = normProj.isEmpty ? .null : .string(normProj)
+                dict["folder"] = .string(normFolder)
+                dict["placement_revision"] = .number(Double(item.placementRevision))
+                anc.row = OrbRow(.object(dict))
+                ancestors[item.missionID] = anc
+            }
+            accepted.append(OrbPlacementCommitItem(
+                missionID: item.missionID,
+                project: normProj.isEmpty ? nil : normProj,
+                folder: normFolder,
+                placementRevision: item.placementRevision
+            ))
+        }
+        return accepted
+    }
+
+    static func placement(of id: String) -> PlacementState? {
+        lock.lock(); defer { lock.unlock() }
+        return placements[id]
     }
     static func seen(_ id: String) -> Seen? {
         lock.lock(); defer { lock.unlock() }
@@ -245,6 +648,8 @@ enum OrbHierarchy {
         parents.removeAll()
         btwIDs.removeAll()
         seenFacts.removeAll()
+        placements.removeAll()
+        nextOpID = 0
         ancestors.removeAll()
         goneIDs.removeAll()
         lock.unlock()
@@ -429,13 +834,14 @@ enum OrbMissionTree {
         { parentID, child in
             if OrbHierarchy.isGone(parentID) { return nil }
             let known = OrbHierarchy.seen(parentID)
-            let folderTags = child.raw["tags"].items.filter { $0.text.hasPrefix("orb-folder:") }
+            let parentFolder = OrbRow.normalizeFolder(known?.folder ?? child.folder)
             var dict: [String: OrbJSON] = [
                 "id": .string(parentID),
                 "title": known?.title.map(OrbJSON.string) ?? .null,
                 "status": .string(known?.status ?? "unknown"),
                 "project": .string(known?.project ?? projectSlug),
-                "tags": .array(folderTags),
+                "folder": .string(parentFolder),
+                "tags": .array([]),
                 "history": .array([]),
                 "created_at": child.raw["created_at"],
                 "updated_at": .string(child.updatedAt),
@@ -721,7 +1127,15 @@ enum OrbReadCache {
     }
     private struct Pending { let id = UUID(); let task: Task<OrbJSON, Error> }
     private static var pending: [String: Pending] = [:]
-    private static func key(_ name: String) -> String { OrbDisk.url(name).absoluteString }
+    private static var cachedProjectSlugs: Set<String> = []
+    private static func key(_ name: String) -> String {
+        if name.hasPrefix("project:") {
+            let rest = String(name.dropFirst("project:".count))
+            let slug = rest.hasSuffix(":all") ? String(rest.dropLast(4)) : rest
+            if !slug.isEmpty { cachedProjectSlugs.insert(slug) }
+        }
+        return OrbDisk.url(name).absoluteString
+    }
     static func read(_ name: String) -> OrbJSON? {
         let scope = key(name)
         if let cached = values[scope]?.value { return cached }
@@ -885,6 +1299,72 @@ enum OrbReadCache {
         let scope = key(name)
         pending[scope] = nil
         if let old = values[scope] { values[scope] = Entry(value: old.value, date: .distantPast) }
+    }
+    static func applyPlacementCommit(_ accepted: [OrbPlacementCommitItem]) {
+        guard !accepted.isEmpty else { return }
+        let byID = Dictionary(uniqueKeysWithValues: accepted.map { ($0.missionID, $0) })
+        var touchedProjects: Set<String> = []
+        for item in accepted {
+            if let p = item.project, !p.isEmpty { touchedProjects.insert(p) }
+            let mKey = "mission:\(item.missionID)"
+            let mScope = key(mKey)
+            if let entry = values[mScope], case var .object(dict) = entry.value {
+                if let oldProj = dict["project"]?.text, !oldProj.isEmpty { touchedProjects.insert(oldProj) }
+                dict["project"] = item.project.map(OrbJSON.string) ?? .null
+                dict["folder"] = .string(item.folder)
+                dict["placement_revision"] = .number(Double(item.placementRevision))
+                let nextVal: OrbJSON = .object(dict)
+                values[mScope] = Entry(value: nextVal, date: entry.date)
+                OrbDisk.saveAsync(nextVal, key: mKey)
+            }
+        }
+        // Evict cross-project moved missions immediately from every cached `project:<slug>` / `project:<slug>:all` entry
+        // and update in-place on matching destination projects so stale listings never reappear.
+        let candidateSlugs = cachedProjectSlugs.union(touchedProjects)
+        for slug in candidateSlugs where !slug.isEmpty {
+            for suffix in ["", ":all"] {
+                let cacheName = "project:\(slug)\(suffix)"
+                let scopeKey = key(cacheName)
+                guard let entry = values[scopeKey] ?? OrbDisk.read(cacheName, as: OrbJSON.self).map({ Entry(value: $0, date: .distantPast) }),
+                      case var .object(root) = entry.value,
+                      case .array(let list) = root["missions"] else { continue }
+                var changed = false
+                var nextList: [OrbJSON] = []
+                nextList.reserveCapacity(list.count)
+                for raw in list {
+                    let mid = raw["id"].text
+                    guard let move = byID[mid] else {
+                        nextList.append(raw)
+                        continue
+                    }
+                    let targetProj = move.project ?? ""
+                    if targetProj != slug {
+                        changed = true
+                        touchedProjects.insert(slug)
+                        continue
+                    }
+                    if case var .object(dict) = raw {
+                        dict["project"] = targetProj.isEmpty ? .null : .string(targetProj)
+                        dict["folder"] = .string(move.folder)
+                        dict["placement_revision"] = .number(Double(move.placementRevision))
+                        nextList.append(.object(dict))
+                        changed = true
+                    } else {
+                        nextList.append(raw)
+                    }
+                }
+                if changed {
+                    root["missions"] = .array(nextList)
+                    let updated: OrbJSON = .object(root)
+                    values[scopeKey] = Entry(value: updated, date: .distantPast)
+                    OrbDisk.saveAsync(updated, key: cacheName)
+                }
+            }
+        }
+        for slug in touchedProjects where !slug.isEmpty {
+            invalidate("project:\(slug)")
+            invalidate("project:\(slug):all")
+        }
     }
     static func project(_ id: String, includeArchived: Bool = false, force: Bool = false) async throws -> OrbJSON {
         let cacheKey = includeArchived ? "project:\(id):all" : "project:\(id)"

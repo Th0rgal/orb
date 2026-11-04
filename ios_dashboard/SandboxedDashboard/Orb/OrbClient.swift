@@ -774,6 +774,12 @@ final class OrbCore {
                             }
                             continue
                         }
+                        if eventType == "mission_placement_changed" {
+                            for sub in subscribers.values where sub.kinds == ["presentation"] || sub.missionId != nil || sub.kinds == nil {
+                                sub.onEvent(eventType, obj)
+                            }
+                            continue
+                        }
                         if eventType == "fido_sign_request" {
                             for sub in subscribers.values where sub.kinds == ["fido"] || sub.missionId != nil {
                                 sub.onEvent(eventType, obj)
@@ -1032,6 +1038,75 @@ final class OrbCore {
         }
         let scoped = withParents.filter { ownIDs.contains($0.id) || $0.raw["project"].text == project }
         return OrbMissionTree.filterMobile(scoped)
+    }
+
+    @discardableResult
+    func moveMissions(
+        ids: [String],
+        project: String?,
+        folder: String,
+        approvalPolicy: String = "check",
+        clientOpID: UInt32 = 0
+    ) async throws -> [OrbPlacementCommitItem] {
+        var payload: [String: OrbJSON] = [
+            "mission_ids": .array(ids.map(OrbJSON.string)),
+            "project": project.flatMap { $0.isEmpty ? nil : OrbJSON.string($0) } ?? .null,
+            "folder": .string(OrbRow.normalizeFolder(folder)),
+            "approval_policy": .string(approvalPolicy),
+        ]
+        if clientOpID != 0 {
+            payload["client_op_id"] = .number(Double(clientOpID))
+        }
+        let response: OrbJSON
+        do {
+            response = try await call("/api/control/missions/move", method: "POST", body: .object(payload))
+        } catch {
+            if let confirmation = OrbApprovalTransferConfirmationError.parse(from: error) {
+                throw confirmation
+            }
+            throw error
+        }
+        let ackOp = UInt32(max(0, Int(response["client_op_id"].doubleValue ?? Double(clientOpID))))
+        let items: [OrbPlacementCommitItem] = response["moved"].items.compactMap { m in
+            let mid = m["mission_id"].text
+            guard !mid.isEmpty else { return nil }
+            let proj = m["project"].text.isEmpty ? nil : m["project"].text
+            let targetFolder = m["folder"].text
+            let rev = UInt64(max(0, Int64(m["placement_revision"].doubleValue ?? 0)))
+            return OrbPlacementCommitItem(missionID: mid, project: proj, folder: targetFolder, placementRevision: rev)
+        }
+        let accepted = OrbHierarchy.commitAuthoritativePlacements(items, ackOpID: ackOp)
+        if !accepted.isEmpty {
+            OrbReadCache.applyPlacementCommit(accepted)
+            NotificationCenter.default.post(
+                name: Notification.Name("OrbMissionPlacementChanged"),
+                object: nil,
+                userInfo: ["moves": accepted]
+            )
+        }
+        return accepted
+    }
+
+    static func applyTransferMovedMissions(_ response: OrbJSON, fallbackProject: String) {
+        let items: [OrbPlacementCommitItem] = response["moved_missions"].items.compactMap { m in
+            let mid = m["mission_id"].text
+            guard !mid.isEmpty else { return nil }
+            let projText = m["project"].text
+            let proj = projText.isEmpty ? (fallbackProject.isEmpty ? nil : fallbackProject) : projText
+            let targetFolder = m["folder"].text
+            let rev = UInt64(max(0, Int64(m["placement_revision"].doubleValue ?? 0)))
+            return OrbPlacementCommitItem(missionID: mid, project: proj, folder: targetFolder, placementRevision: rev)
+        }
+        guard !items.isEmpty else { return }
+        let accepted = OrbHierarchy.commitAuthoritativePlacements(items, ackOpID: 0)
+        if !accepted.isEmpty {
+            OrbReadCache.applyPlacementCommit(accepted)
+            NotificationCenter.default.post(
+                name: Notification.Name("OrbMissionPlacementChanged"),
+                object: nil,
+                userInfo: ["moves": accepted]
+            )
+        }
     }
 
     private func advanceMissionDeltaCursor(with items: [OrbJSON]) {

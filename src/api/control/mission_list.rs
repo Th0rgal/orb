@@ -23,6 +23,12 @@ pub struct ListMissionsQuery {
     /// so existing callers keep their current results.
     #[serde(default)]
     pub project_prefix: Option<String>,
+    /// Optional filter: exact folder path (`""` for root-level missions).
+    #[serde(default)]
+    pub folder: Option<String>,
+    /// Optional filter: folder subtree (`folder == P` or `folder` starts with `P/`).
+    #[serde(default)]
+    pub folder_prefix: Option<String>,
     /// Optional filter: exact track within a project.
     #[serde(default)]
     pub track: Option<String>,
@@ -561,6 +567,15 @@ pub async fn list_missions(
         status: query.status.clone(),
         project,
         project_prefix: query.project_prefix.clone(),
+        folder: query
+            .folder
+            .as_deref()
+            .map(crate::api::mission_store::normalize_mission_folder),
+        folder_prefix: query
+            .folder_prefix
+            .as_deref()
+            .map(crate::api::mission_store::normalize_mission_folder)
+            .filter(|s| !s.is_empty()),
         track: query.track.clone(),
         tag: query.tag.clone(),
         origin_session_id: query.origin_session_id.clone(),

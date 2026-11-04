@@ -559,6 +559,7 @@ fun OrbHomeScreen(
     val scope = rememberCoroutineScope()
     val projects by core.projects.collectAsState()
     val missions by core.missions.collectAsState()
+    val placementVersion by core.placementVersion.collectAsState()
     val isLoading by core.isLoading.collectAsState()
     val lastError by core.lastError.collectAsState()
     val connectionIssue by core.connectionIssue.collectAsState()
@@ -575,11 +576,11 @@ fun OrbHomeScreen(
     var renameDraft by remember { mutableStateOf("") }
     var colorPickerProject by remember { mutableStateOf<OrbRow?>(null) }
 
-    val inboxCount = remember(projects, missions, OrbInboxModel.revision, OrbMissionUnreadStore.revision) {
+    val inboxCount = remember(projects, missions, placementVersion, OrbInboxModel.revision, OrbMissionUnreadStore.revision) {
         OrbInboxModel.actionableCount(projects, missions)
     }
 
-    val liveMissionsCount = remember(projects, missions) {
+    val liveMissionsCount = remember(projects, missions, placementVersion) {
         OrbInboxModel.workingMissions(projects, missions).size
     }
 
@@ -780,10 +781,10 @@ fun OrbHomeScreen(
                                 val pColor = OrbProjectAppearance.color(proj)
                                 // Last activity across the project's missions, not the project record's
                                 // own edit time (every project showed "1w" while missions ran today).
-                                val latestTime = remember(proj, missions, projects) {
+                                val latestTime = remember(proj, missions, projects, placementVersion) {
                                     latestActivityRelative(proj, missionsForProject(proj, missions, projects))
                                 }
-                                val projectWorkingCount = remember(proj, missions, projects) {
+                                val projectWorkingCount = remember(proj, missions, projects, placementVersion) {
                                     missionsForProject(proj, missions, projects).count { m ->
                                         OrbMissionTree.isLive(m)
                                     }
@@ -871,8 +872,9 @@ fun OrbHomeScreen(
                                                     contextMenuProject = null
                                                     scope.launch {
                                                         orbTry(OrbLog.Category.Network, "OrbMoveClipboard.drop") {
-                                                            OrbMoveClipboard.drop(core, dropSlug, "")
-                                                            core.refreshMissionsQuietly()
+                                                            if (OrbMoveClipboard.drop(core, dropSlug, "")) {
+                                                                core.refreshMissionsQuietly()
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -1114,6 +1116,12 @@ fun OrbHomeScreen(
             onDismiss = { colorPickerProject = null }
         )
     }
+
+    OrbMoveApprovalDialog(
+        core = core,
+        onMoved = { scope.launch { core.refreshMissionsQuietly() } },
+        onError = { /* notice handled via core.lastError or clipboard */ }
+    )
 }
 
 @Composable
@@ -1197,6 +1205,7 @@ fun OrbProjectPage(
     val scope = rememberCoroutineScope()
     val missions by core.missions.collectAsState()
     val projects by core.projects.collectAsState()
+    val placementVersion by core.placementVersion.collectAsState()
 
     val liveProject = remember(project, projects) {
         val slug = OrbProjectAppearance.slug(project)
@@ -1327,8 +1336,14 @@ fun OrbProjectPage(
         }
     }
 
-    val projectMissions = remember(liveProject, fetchedProjectMissions, missions, projects) {
-        if (fetchedProjectMissions.isNotEmpty()) {
+    LaunchedEffect(placementVersion, projectSlug) {
+        if (placementVersion == 0L) return@LaunchedEffect
+        val cached = OrbReadCache.readMemoryRows("project_missions_$projectSlug")
+        fetchedProjectMissions = cached
+    }
+
+    val projectMissions = remember(liveProject, fetchedProjectMissions, missions, projects, placementVersion) {
+        if (fetchedProjectMissions.isNotEmpty() || OrbReadCache.hasRowsInMemory("project_missions_$projectSlug")) {
             fetchedProjectMissions
         } else {
             missionsForProject(liveProject, missions, projects)
@@ -1513,34 +1528,30 @@ fun OrbProjectPage(
     fun dropMovedMission(folder: String) {
         scope.launch {
             orbTry(OrbLog.Category.Network, "OrbMoveClipboard.drop") {
-                OrbMoveClipboard.drop(core, projectSlug, folder)
-                loadProjectData()
-                core.refreshMissionsQuietly()
+                if (OrbMoveClipboard.drop(core, projectSlug, folder)) {
+                    loadProjectData()
+                    core.refreshMissionsQuietly()
+                }
             }.onFailure { folderActionError = it.message ?: "Couldn’t move the conversation." }
         }
     }
 
-    suspend fun migrateFolderMissions(oldPath: String, destination: String) {
-        val affected = projectMissions.filter { m ->
+    suspend fun migrateVirtualFolderMissions(oldPath: String, destination: String) {
+        val byTarget = LinkedHashMap<String, MutableList<String>>()
+        for (m in projectMissions) {
+            if (OrbMissionTree.parentId(m) != null) continue
             val f = OrbMissionTree.folderPath(m) ?: ""
-            f == oldPath || f.startsWith("$oldPath/")
-        }
-        for (m in affected) {
-            val f = OrbMissionTree.folderPath(m) ?: ""
-            val suffix = f.removePrefix(oldPath)
-            val targetFolder = destination + suffix
-            val tags = OrbJSON.strList(m.raw, "tags")
-                .filter { it.isNotEmpty() && !it.startsWith("orb-folder:") }
-                .toMutableList()
-            if (targetFolder.isNotEmpty()) {
-                tags.add("orb-folder:$targetFolder")
+            if (f == oldPath || f.startsWith("$oldPath/")) {
+                val suffix = f.removePrefix(oldPath)
+                val targetFolder = OrbMissionTree.normalizeFolder(destination + suffix)
+                byTarget.getOrPut(targetFolder) { mutableListOf() }.add(m.id)
             }
-            orbTry(OrbLog.Category.Network, "core.request") {
-                core.request(
-                    path = "/api/control/missions/${core.encodeComponent(m.id)}/project",
-                    method = "POST",
-                    body = mapOf("project" to projectSlug, "tags" to tags)
-                )
+        }
+        for ((targetFolder, ids) in byTarget) {
+            if (ids.isNotEmpty()) {
+                orbTry(OrbLog.Category.Network, "core.moveMissions") {
+                    core.moveMissions(ids = ids, project = projectSlug, folder = targetFolder)
+                }
             }
         }
     }
@@ -1560,21 +1571,22 @@ fun OrbProjectPage(
                 val encoded = core.encodeComponent(projectSlug)
                 val inManifest = manifestFolders.any { it == folderPath || it.startsWith("$folderPath/") }
                 if (inManifest) {
-                    core.request(
+                    val res = core.request(
                         path = "/api/projects/$encoded/file/transfer",
                         method = "POST",
                         body = mapOf("path" to folderPath, "destination" to destination, "copy" to false)
                     )
+                    core.applyTransferMovedMissions(res, projectSlug)
                 } else {
                     core.request(
                         path = "/api/projects/$encoded/file/mkdir",
                         method = "POST",
                         body = mapOf("path" to destination)
                     )
+                    migrateVirtualFolderMissions(folderPath, destination)
                 }
                 customFolders.remove(folderPath)
                 customFolders[destination] = true
-                migrateFolderMissions(folderPath, destination)
                 loadProjectData()
                 core.refreshMissionsQuietly()
             } catch (e: Throwable) {
@@ -1598,21 +1610,22 @@ fun OrbProjectPage(
                 val encoded = core.encodeComponent(projectSlug)
                 val inManifest = manifestFolders.any { it == folderPath || it.startsWith("$folderPath/") }
                 if (inManifest) {
-                    core.request(
+                    val res = core.request(
                         path = "/api/projects/$encoded/file/transfer",
                         method = "POST",
                         body = mapOf("path" to folderPath, "destination" to destination, "copy" to false)
                     )
+                    core.applyTransferMovedMissions(res, projectSlug)
                 } else {
                     core.request(
                         path = "/api/projects/$encoded/file/mkdir",
                         method = "POST",
                         body = mapOf("path" to destination)
                     )
+                    migrateVirtualFolderMissions(folderPath, destination)
                 }
                 customFolders.remove(folderPath)
                 customFolders[destination] = true
-                migrateFolderMissions(folderPath, destination)
                 loadProjectData()
                 core.refreshMissionsQuietly()
             } catch (e: Throwable) {
@@ -1866,7 +1879,7 @@ fun OrbProjectPage(
                             },
                             onMove = {
                                 contextMenuMission = null
-                                OrbMoveClipboard.pick(node.mission, projectSlug)
+                                OrbMoveClipboard.pick(node.mission, projectSlug, projectMissions)
                             },
                             onArchive = {
                                 contextMenuMission = null
@@ -2052,7 +2065,7 @@ fun OrbProjectPage(
                                     },
                                     onMove = {
                                         contextMenuMission = null
-                                        OrbMoveClipboard.pick(node.mission, projectSlug)
+                                        OrbMoveClipboard.pick(node.mission, projectSlug, projectMissions)
                                     },
                                     onArchive = {
                                         contextMenuMission = null
@@ -2450,6 +2463,17 @@ fun OrbProjectPage(
             }
         )
     }
+
+    OrbMoveApprovalDialog(
+        core = core,
+        onMoved = {
+            scope.launch {
+                loadProjectData()
+                core.refreshMissionsQuietly()
+            }
+        },
+        onError = { folderActionError = it }
+    )
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -2777,31 +2801,198 @@ private fun latestActivityRelative(
 /** A conversation picked up with "Move", waiting for a destination chosen by
  * long-pressing a folder, the project menu, or another project. */
 object OrbMoveClipboard {
+    data class PendingApprovalPrompt(
+        val mission: OrbRow,
+        val sourceSlug: String,
+        val destinationSlug: String,
+        val destinationFolder: String,
+        val familyRows: List<OrbRow>,
+        val confirmation: OrbApprovalTransferConfirmationException
+    )
+
     var mission by mutableStateOf<OrbRow?>(null)
         private set
     var sourceSlug by mutableStateOf("")
         private set
+    private var familyRows: List<OrbRow> = emptyList()
+    var pendingApprovalPrompt by mutableStateOf<PendingApprovalPrompt?>(null)
+        private set
 
-    fun pick(target: OrbRow, slug: String) { mission = target; sourceSlug = slug }
-    fun clear() { mission = null; sourceSlug = "" }
+    fun pick(target: OrbRow, slug: String, withinRows: List<OrbRow> = emptyList()) {
+        mission = target
+        sourceSlug = slug
+        val sub = if (withinRows.isNotEmpty()) OrbMissionTree.subtree(withinRows, listOf(target.id)) else listOf(target)
+        familyRows = if (sub.isNotEmpty()) sub else listOf(target)
+    }
+
+    fun clear() {
+        mission = null
+        sourceSlug = ""
+        familyRows = emptyList()
+        pendingApprovalPrompt = null
+    }
+
+    fun cancelPendingApproval() {
+        pendingApprovalPrompt = null
+    }
+
     fun canDrop(slug: String, folder: String): Boolean {
         val m = mission ?: return false
-        return slug != sourceSlug || folder != (OrbMissionTree.folderPath(m) ?: "")
+        return slug != sourceSlug || OrbMissionTree.normalizeFolder(folder) != (OrbMissionTree.folderPath(m) ?: "")
     }
 
-    /** Keeps every tag except the folder, which becomes the destination. */
-    suspend fun drop(core: OrbCore, slug: String, folder: String) {
-        val m = mission ?: return
-        val tags = OrbJSON.strList(m.raw, "tags").filter { it.isNotEmpty() && !it.startsWith("orb-folder:") }.toMutableList()
-        if (folder.isNotEmpty()) tags.add("orb-folder:$folder")
-        core.request(
-            path = "/api/control/missions/${core.encodeComponent(m.id)}/project",
-            method = "POST",
-            body = mapOf("project" to slug, "tags" to tags)
+    /** Moves the picked mission (and its subtree/family) via `POST /api/control/missions/move`.
+     * Returns `true` when committed immediately, or `false` when paused for user confirmation on cross-project secret approvals. */
+    suspend fun drop(core: OrbCore, slug: String, folder: String, approvalPolicy: String = "check"): Boolean {
+        val m = mission ?: return false
+        val cleanFolder = OrbMissionTree.normalizeFolder(folder)
+        val rowsToStage = familyRows.ifEmpty { listOf(m) }
+        val idsToStage = rowsToStage.map { it.id }.distinct()
+        val opId = OrbMissionTree.allocateOpId()
+
+        OrbMissionTree.stageOptimisticPlacement(
+            missionIds = idsToStage,
+            opId = opId,
+            targetProject = slug,
+            targetFolder = cleanFolder
         )
-        UsageTelemetry.trackAction(UsageTelemetry.Action.SidebarMove, "sidebar")
-        clear()
+        val previewItems = rowsToStage.map { r ->
+            val isChild = OrbMissionTree.parentId(r) != null
+            val rev = OrbMissionTree.placementOf(r.id)?.revision ?: 0L
+            OrbPlacementCommitItem(
+                missionId = r.id,
+                project = slug,
+                folder = if (isChild) "" else cleanFolder,
+                placementRevision = rev
+            )
+        }
+        core.applyPlacementCommit(previewItems, extraRows = rowsToStage)
+
+        try {
+            core.moveMissions(
+                ids = listOf(m.id),
+                project = slug,
+                folder = cleanFolder,
+                approvalPolicy = approvalPolicy,
+                clientOpId = opId
+            )
+            UsageTelemetry.trackAction(UsageTelemetry.Action.SidebarMove, "sidebar")
+            clear()
+            return true
+        } catch (confirm: OrbApprovalTransferConfirmationException) {
+            val reverted = OrbMissionTree.rollbackOptimisticPlacement(opId)
+            if (reverted.isNotEmpty()) {
+                core.applyPlacementCommit(reverted, extraRows = rowsToStage)
+            }
+            pendingApprovalPrompt = PendingApprovalPrompt(
+                mission = m,
+                sourceSlug = sourceSlug,
+                destinationSlug = slug,
+                destinationFolder = cleanFolder,
+                familyRows = rowsToStage,
+                confirmation = confirm
+            )
+            return false
+        } catch (t: Throwable) {
+            val reverted = OrbMissionTree.rollbackOptimisticPlacement(opId)
+            if (reverted.isNotEmpty()) {
+                core.applyPlacementCommit(reverted, extraRows = rowsToStage)
+            }
+            throw t
+        }
     }
+
+    suspend fun confirmPendingApproval(core: OrbCore, policy: String): Boolean {
+        val prompt = pendingApprovalPrompt ?: return false
+        pendingApprovalPrompt = null
+        if (mission == null) {
+            mission = prompt.mission
+            sourceSlug = prompt.sourceSlug
+            familyRows = prompt.familyRows
+        }
+        return drop(core = core, slug = prompt.destinationSlug, folder = prompt.destinationFolder, approvalPolicy = policy)
+    }
+}
+
+@Composable
+fun OrbMoveApprovalDialog(
+    core: OrbCore,
+    onMoved: () -> Unit = {},
+    onError: (String) -> Unit = {}
+) {
+    val prompt = OrbMoveClipboard.pendingApprovalPrompt ?: return
+    val scope = rememberCoroutineScope()
+    val grantCount = prompt.confirmation.activeGrants.size
+    val pendingCount = prompt.confirmation.pendingRequests.size
+    val summary = buildString {
+        append(prompt.confirmation.message)
+        val details = mutableListOf<String>()
+        if (grantCount > 0) details.add("$grantCount active secret grant${if (grantCount == 1) "" else "s"}")
+        if (pendingCount > 0) details.add("$pendingCount pending secret request${if (pendingCount == 1) "" else "s"}")
+        if (details.isNotEmpty()) {
+            append("\n\nAffected: ")
+            append(details.joinToString(", "))
+            append(".")
+        }
+    }
+    AlertDialog(
+        onDismissRequest = { OrbMoveClipboard.cancelPendingApproval() },
+        containerColor = OrbStyle.elevated,
+        titleContentColor = Color.White,
+        textContentColor = OrbStyle.textSecondary,
+        title = { Text("Secret approvals affected", fontWeight = FontWeight.SemiBold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(summary, color = OrbStyle.textSecondary, fontSize = 14.sp)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                            .orbPressClickable {
+                                scope.launch {
+                                    orbTry(OrbLog.Category.Network, "OrbMoveClipboard.confirmPendingApproval") {
+                                        if (OrbMoveClipboard.confirmPendingApproval(core, "revoke")) {
+                                            onMoved()
+                                        }
+                                    }.onFailure { onError(it.message ?: "Couldn’t move the conversation.") }
+                                }
+                            }
+                            .padding(horizontal = 14.dp, vertical = 11.dp)
+                    ) {
+                        Text("Move & revoke approvals", color = OrbStyle.error, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                            .orbPressClickable {
+                                scope.launch {
+                                    orbTry(OrbLog.Category.Network, "OrbMoveClipboard.confirmPendingApproval") {
+                                        if (OrbMoveClipboard.confirmPendingApproval(core, "keep")) {
+                                            onMoved()
+                                        }
+                                    }.onFailure { onError(it.message ?: "Couldn’t move the conversation.") }
+                                }
+                            }
+                            .padding(horizontal = 14.dp, vertical = 11.dp)
+                    ) {
+                        Text("Move & keep approvals", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = { OrbMoveClipboard.cancelPendingApproval() }) {
+                Text("Cancel", color = OrbStyle.textSecondary)
+            }
+        }
+    )
 }
 
 @Composable

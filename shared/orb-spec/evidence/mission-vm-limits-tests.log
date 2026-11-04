@@ -1,6 +1,14 @@
-    Finished `test` profile [unoptimized] target(s) in 0.04s
+   Compiling orb-spec v1.3.0 (/Users/thomas/work/orb/worktree/feat-mission-moves/crates/orb-spec)
+    Finished `test` profile [unoptimized] target(s) in 3.56s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
+
+running 1 test
+test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-mission-moves)
+   Compiling orb-spec v1.3.0 (/Users/thomas/work/orb/worktree/feat-mission-moves/crates/orb-spec)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -172,18 +180,12 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 31.50s
+    Finished `test` profile [unoptimized] target(s) in 1m 47s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 1 test
-test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
-
 
 running 2 tests
 test managed::tests::mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_usd_budget ... ok
 test managed::tests::mission_vm_limits_bypass_saturated_global_pool_and_enforce_per_provider_caps ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3724 filtered out; finished in 0.03s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3729 filtered out; finished in 0.02s
 

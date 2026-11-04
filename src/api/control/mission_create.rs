@@ -46,6 +46,9 @@ pub struct CreateMissionRequest {
     pub deadline: Option<chrono::DateTime<chrono::Utc>>,
     /// Project tagging: stable project identifier (e.g. "verity-core").
     pub project: Option<String>,
+    /// Normalized folder path within `project` (`""` or omitted for root).
+    #[serde(default)]
+    pub folder: Option<String>,
     /// Project tagging: track / workstream within the project. Resolved
     /// against the plan (key, alias, single PR ref) and absorbed as a new
     /// `origin = absorbed` track when unknown.
@@ -1015,6 +1018,7 @@ pub(in crate::api) async fn create_mission_inner(
         not_before: None,
         deadline: None,
         project: None,
+        folder: None,
         track: None,
         idempotency_key: None,
         intent: None,
@@ -1897,8 +1901,13 @@ pub(in crate::api) async fn create_mission_inner(
         }
     }
     let mut normalized_request_tags = normalize_mission_tags(req.tags.as_deref());
+    let mut extracted_legacy_folder = None;
     if let Some(tags) = normalized_request_tags.as_mut() {
         tags.retain(|tag| tag != worker_location::INITIALIZED_TAG);
+        extracted_legacy_folder = crate::api::mission_store::strip_legacy_orb_folder_tags(tags);
+        if tags.is_empty() {
+            normalized_request_tags = None;
+        }
     }
     if normalized_request_tags
         .as_deref()
@@ -2715,7 +2724,22 @@ pub(in crate::api) async fn create_mission_inner(
             }
         }
         let mut superseded_ids: Vec<Uuid> = Vec::new();
+        let is_fork_version = tags
+            .as_deref()
+            .is_some_and(|list| list.iter().any(|t| t.starts_with("fork-of:")));
+        let is_btw_side = tags
+            .as_deref()
+            .is_some_and(|list| list.iter().any(|t| t.starts_with("btw-parent:")));
+        let is_nested_child = (req.parent_mission_id.is_some() && !is_fork_version) || is_btw_side;
+        let folder = if is_nested_child {
+            String::new()
+        } else if let Some(explicit) = req.folder.as_deref() {
+            crate::api::mission_store::normalize_mission_folder(explicit)
+        } else {
+            extracted_legacy_folder.unwrap_or_default()
+        };
         if project.is_some()
+            || !folder.is_empty()
             || track.is_some()
             || intent.is_some()
             || github_pr.is_some()
@@ -2730,6 +2754,8 @@ pub(in crate::api) async fn create_mission_inner(
                     crate::api::mission_store::MissionProjectPatch {
                         title: None,
                         project: project.clone().map(Some),
+                        folder: Some(folder.clone()),
+                        bump_placement_revision: false,
                         track: track.clone().map(Some),
                         intent: intent.clone().map(Some),
                         github_pr: github_pr.clone().map(Some),
@@ -2744,6 +2770,7 @@ pub(in crate::api) async fn create_mission_inner(
                 .map_err(internal_error)?;
             // Reflect the applied values in the returned mission without a re-fetch.
             mission.project.project = project.or(mission.project.project);
+            mission.project.folder = folder;
             mission.project.track = track.or(mission.project.track);
             mission.project.intent = intent.or(mission.project.intent);
             mission.project.github_pr = github_pr.or(mission.project.github_pr);

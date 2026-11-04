@@ -401,27 +401,80 @@ async fn write_file(
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct TransferFileRequest {
-    path: String,
-    destination: String,
+pub(crate) struct TransferFileRequest {
+    pub(crate) path: String,
+    pub(crate) destination: String,
     #[serde(default)]
-    copy: bool,
+    pub(crate) copy: bool,
 }
 
-async fn transfer_file(
+pub(crate) async fn transfer_file(
     State(state): State<Arc<super::routes::AppState>>,
+    user: Option<axum::Extension<super::auth::AuthUser>>,
     AxumPath(slug): AxumPath<String>,
     Json(req): Json<TransferFileRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let store = context_store(&state, &slug)?;
-    tokio::task::spawn_blocking(move || {
+    let src_path = req.path.clone();
+    let dst_path = req.destination.clone();
+    let is_copy = req.copy;
+    let was_directory = tokio::task::spawn_blocking(move || {
+        let was_dir = store
+            .manifest()
+            .ok()
+            .and_then(|m| m.entries.get(&src_path).map(|e| e.directory))
+            .unwrap_or(false);
         store
-            .transfer_file(&req.path, &req.destination, req.copy)
+            .transfer_file(&src_path, &dst_path, is_copy)
             .map_err(bad_request)?;
-        Ok(Json(serde_json::json!({"path":req.destination})))
+        Ok::<bool, ApiError>(was_dir)
     })
     .await
-    .map_err(internal)?
+    .map_err(internal)??;
+
+    let mut moved_missions = Vec::new();
+    let mut moved_crons = 0usize;
+    if !req.copy && was_directory {
+        let canonical = {
+            let c = state.projects.resolve_project_slug(&slug);
+            if c.is_empty() {
+                slug.clone()
+            } else {
+                c
+            }
+        };
+        if let Ok(n) =
+            state
+                .projects
+                .cascade_rename_cron_folder(&canonical, &req.path, &req.destination)
+        {
+            moved_crons = n;
+        }
+        if let Some(axum::Extension(auth_user)) = user {
+            let control = super::control::control_for_user(&state, &auth_user).await;
+            if let Ok(moved) = control
+                .mission_store
+                .cascade_rename_folder(&canonical, &req.path, &req.destination)
+                .await
+            {
+                if !moved.is_empty() {
+                    let _ = control.events_tx.send(
+                        super::control::events::AgentEvent::MissionPlacementChanged {
+                            moves: moved.clone(),
+                            client_op_id: None,
+                        },
+                    );
+                }
+                moved_missions = moved;
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "path": req.destination,
+        "moved_missions": moved_missions,
+        "moved_crons": moved_crons,
+    })))
 }
 
 /// Its own route, so a backend without it refuses instead of moving the file

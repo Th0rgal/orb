@@ -4,7 +4,7 @@ import { createSignal } from 'solid-js';
 import { folderActivity, FolderActivityIcon } from '../src/FolderActivity';
 import type { Mission } from '../src/api';
 afterEach(cleanup);
-const mission = (id: string, status: string, path = '', project = 'verity') => ({id, status, project, tags: [`orb-folder:${path}`]} as Mission);
+const mission = (id: string, status: string, path = '', project = 'verity') => ({id, status, project, folder: path, tags: []} as Mission);
 it('counts nested activity on all ancestors without leaking to siblings or projects', () => {
  const m = mission('one','active','proofs/nested');
  const counts = folderActivity([m,m,mission('two','running','proofs-other'),mission('three','completed','proofs'),mission('four','paused'),mission('five','awaiting_user'),mission('six','queued'),mission('seven','waiting_background','proofs','other')]);

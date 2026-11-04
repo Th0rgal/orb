@@ -1555,6 +1555,15 @@ unsafe extern "C" {
         raw_commit: u32,
         max_open_tail_bytes: u32,
     ) -> u64;
+    fn orb_placement_merge_step(
+        cur_rev: u64,
+        inc_rev: u64,
+        pending_op_id: u32,
+        ack_op_id: u32,
+        source_kind: u8,
+        has_placement: u8,
+        matches_optimistic: u8,
+    ) -> u64;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7019,6 +7028,18 @@ pub mod raw_cabi {
     pub fn orb_prefill_deadline_ms(a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
         unsafe { super::orb_prefill_deadline_ms(a0, a1, a2, a3) }
     }
+    #[inline]
+    pub fn orb_placement_merge_step(
+        a0: u64,
+        a1: u64,
+        a2: u32,
+        a3: u32,
+        a4: u8,
+        a5: u8,
+        a6: u8,
+    ) -> u64 {
+        unsafe { super::orb_placement_merge_step(a0, a1, a2, a3, a4, a5, a6) }
+    }
     pub fn call_u64(symbol: &str, args: &[u64]) -> Option<u64> {
         Some(match symbol {
             "orb_verify_writer_reuse" if args.len() == 6 => orb_verify_writer_reuse(
@@ -8110,6 +8131,15 @@ pub mod raw_cabi {
             "orb_prefill_deadline_ms" if args.len() == 4 => {
                 orb_prefill_deadline_ms(args[0], args[1], args[2], args[3])
             }
+            "orb_placement_merge_step" if args.len() == 7 => orb_placement_merge_step(
+                args[0],
+                args[1],
+                args[2] as u32,
+                args[3] as u32,
+                args[4] as u8,
+                args[5] as u8,
+                args[6] as u8,
+            ),
             _ => return None,
         })
     }
@@ -9442,7 +9472,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 150);
+        assert_eq!(count, 151);
     }
 }
 
@@ -10341,6 +10371,52 @@ pub fn wire_transcript_slice_step(
     Ok((verdict, written))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlacementMergeInput {
+    pub cur_rev: u64,
+    pub inc_rev: u64,
+    pub pending_op_id: u32,
+    pub ack_op_id: u32,
+    pub source_kind: u8,
+    pub has_placement: bool,
+    pub matches_optimistic: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlacementMergeVerdict {
+    pub raw: u64,
+    pub status: u8,
+    pub admitted: bool,
+    pub clear_pending: bool,
+    pub evict_other_projects: bool,
+    pub next_rev32: u32,
+}
+
+/// Typed wrapper over `orb_placement_merge_step` (`Orb.Kernel.placementMergeStep`).
+#[inline]
+pub fn placement_merge_step(input: PlacementMergeInput) -> PlacementMergeVerdict {
+    let raw = unsafe {
+        orb_placement_merge_step(
+            input.cur_rev,
+            input.inc_rev,
+            input.pending_op_id,
+            input.ack_op_id,
+            input.source_kind,
+            u8::from(input.has_placement),
+            u8::from(input.matches_optimistic),
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    PlacementMergeVerdict {
+        raw,
+        status: (lo32 & 0xFF) as u8,
+        admitted: ((lo32 >> 8) & 1) != 0,
+        clear_pending: ((lo32 >> 9) & 1) != 0,
+        evict_other_projects: ((lo32 >> 10) & 1) != 0,
+        next_rev32: (raw >> 32) as u32,
+    }
+}
+
 #[cfg(test)]
 mod stateful_tests {
     use super::*;
@@ -11031,5 +11107,85 @@ mod stateful_tests {
             ))
         );
         assert_eq!(out_small_tx, [0xDDu8; 16]);
+    }
+
+    #[test]
+    fn placement_merge_step_fences_stale_polls_and_advances_monotonically() {
+        // Optimistic pending op fences stale poll with older/equal revision.
+        let fenced_poll = placement_merge_step(PlacementMergeInput {
+            cur_rev: 5,
+            inc_rev: 5,
+            pending_op_id: 7,
+            ack_op_id: 0,
+            source_kind: 0,
+            has_placement: true,
+            matches_optimistic: false,
+        });
+        assert!(!fenced_poll.admitted);
+        assert_eq!(fenced_poll.status, 5);
+        assert!(!fenced_poll.clear_pending);
+        assert_eq!(fenced_poll.next_rev32, 5);
+
+        // Matching HTTP ack commits new revision, clears pending op, and triggers cross-project eviction.
+        let ack = placement_merge_step(PlacementMergeInput {
+            cur_rev: 5,
+            inc_rev: 6,
+            pending_op_id: 7,
+            ack_op_id: 7,
+            source_kind: 1,
+            has_placement: true,
+            matches_optimistic: true,
+        });
+        assert!(ack.admitted);
+        assert_eq!(ack.status, 1);
+        assert!(ack.clear_pending);
+        assert!(ack.evict_other_projects);
+        assert_eq!(ack.next_rev32, 6);
+
+        // Live event with strictly newer revision supersedes optimistic move cleanly.
+        let supersede = placement_merge_step(PlacementMergeInput {
+            cur_rev: 5,
+            inc_rev: 7,
+            pending_op_id: 7,
+            ack_op_id: 0,
+            source_kind: 1,
+            has_placement: true,
+            matches_optimistic: false,
+        });
+        assert!(supersede.admitted);
+        assert_eq!(supersede.status, 1);
+        assert!(supersede.clear_pending);
+        assert!(supersede.evict_other_projects);
+        assert_eq!(supersede.next_rev32, 7);
+
+        // Older revision is rejected even without a pending op.
+        let older = placement_merge_step(PlacementMergeInput {
+            cur_rev: 7,
+            inc_rev: 6,
+            pending_op_id: 0,
+            ack_op_id: 0,
+            source_kind: 0,
+            has_placement: true,
+            matches_optimistic: false,
+        });
+        assert!(!older.admitted);
+        assert_eq!(older.status, 4);
+        assert_eq!(older.next_rev32, 7);
+
+        // Rollback clears matching pending op, evicts optimistic destination bucket, and keeps revision.
+        let rollback = placement_merge_step(PlacementMergeInput {
+            cur_rev: 5,
+            inc_rev: 5,
+            pending_op_id: 7,
+            ack_op_id: 7,
+            source_kind: 3,
+            has_placement: false,
+            matches_optimistic: false,
+        });
+        assert!(rollback.admitted);
+        assert_eq!(rollback.status, 1);
+        assert!(rollback.clear_pending);
+        assert!(rollback.evict_other_projects);
+        assert_eq!(rollback.next_rev32, 5);
     }
 }

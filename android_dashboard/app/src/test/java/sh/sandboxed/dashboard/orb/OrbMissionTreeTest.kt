@@ -257,4 +257,101 @@ class OrbMissionTreeTest {
         assertFalse(OrbMissionTree.isSupersededInTree(liveSup, supMap))
         OrbMissionTree.resetHierarchy()
     }
+
+    @Test
+    fun folderColumnNormalizesNestedPathsAndIgnoresLegacyTags() {
+        OrbMissionTree.resetHierarchy()
+        val root = m(
+            "root-folder",
+            "project" to "assistant",
+            "folder" to " /Design // Images/ ",
+            "placement_revision" to 1L,
+            "tags" to listOf("orb-folder:Stale/Legacy")
+        )
+        assertEquals("Design/Images", OrbMissionTree.folderPath(root))
+
+        val legacyOnly = m(
+            "legacy-only",
+            "project" to "assistant",
+            "folder" to "",
+            "tags" to listOf("orb-folder:Stale/Legacy")
+        )
+        assertEquals(null, OrbMissionTree.folderPath(legacyOnly))
+
+        val child = m(
+            "child-folder",
+            "project" to "assistant",
+            "parent_mission_id" to "root-folder",
+            "folder" to "ShouldBeCleared",
+            "placement_revision" to 2L
+        )
+        assertEquals(null, OrbMissionTree.folderPath(child))
+        OrbMissionTree.resetHierarchy()
+    }
+
+    @Test
+    fun placementMergeMonotoneReconcilerAndOptimisticRollback() {
+        OrbMissionTree.resetHierarchy()
+        // Replay `9f559751` ("turbo-lean improvements"): moved to `default` at rev 4 with worker `06203bdc`.
+        val rootBefore = m("9f559751", "project" to "assistant", "folder" to "Research", "placement_revision" to 1L)
+        val workerBefore = m("06203bdc", "project" to "assistant", "parent_mission_id" to "9f559751", "folder" to "", "placement_revision" to 1L)
+        assertEquals("Research", OrbMissionTree.folderPath(rootBefore))
+        assertEquals("assistant", OrbMissionTree.projectSlug(rootBefore))
+        assertEquals("assistant", OrbMissionTree.projectSlug(workerBefore))
+
+        // Stage optimistic cross-project move to `default` / `""`
+        val opId = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("9f559751", "06203bdc"), opId, "default", "")
+        assertEquals("default", OrbMissionTree.projectSlug(rootBefore))
+        assertEquals("default", OrbMissionTree.projectSlug(workerBefore))
+        assertEquals(null, OrbMissionTree.folderPath(rootBefore))
+
+        // Stale poll from `assistant` at rev 1 arrives while optimistic op is in flight -> rejected!
+        OrbMissionTree.observe(rootBefore)
+        OrbMissionTree.observe(workerBefore)
+        assertEquals("default", OrbMissionTree.projectSlug(rootBefore))
+        assertEquals("default", OrbMissionTree.projectSlug(workerBefore))
+
+        // Commit authoritative move at rev 4
+        val accepted = OrbMissionTree.commitAuthoritativePlacements(
+            listOf(
+                OrbPlacementCommitItem("9f559751", "default", "Benchmarks", 4L),
+                OrbPlacementCommitItem("06203bdc", "default", "Benchmarks", 4L)
+            ),
+            ackOpId = opId
+        )
+        assertEquals(2, accepted.size)
+        assertEquals("default", OrbMissionTree.projectSlug(rootBefore))
+        assertEquals("Benchmarks", OrbMissionTree.folderPath(rootBefore))
+        assertEquals(null, OrbMissionTree.folderPath(workerBefore))
+
+        // Late stale poll at rev 3 from `assistant` MUST be rejected (zero reversion!)
+        val stalePoll = m("9f559751", "project" to "assistant", "folder" to "Research", "placement_revision" to 3L)
+        assertEquals("Benchmarks", OrbMissionTree.folderPath(stalePoll))
+        assertEquals("default", OrbMissionTree.projectSlug(stalePoll))
+
+        // Test 409 approval confirmation rollback
+        val op2 = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("9f559751", "06203bdc"), op2, "ethereum", "Audits")
+        assertEquals("ethereum", OrbMissionTree.projectSlug(stalePoll))
+        assertEquals("Audits", OrbMissionTree.folderPath(stalePoll))
+
+        val reverted = OrbMissionTree.rollbackOptimisticPlacement(op2)
+        assertEquals(2, reverted.size)
+        assertEquals("default", OrbMissionTree.projectSlug(stalePoll))
+        assertEquals("Benchmarks", OrbMissionTree.folderPath(stalePoll))
+
+        val err = OrbError(
+            message = "Secret approvals affected",
+            status = 409,
+            body = """{"code":"approval_transfer_confirmation_required","error":"Secret approvals affected","target_project":"ethereum","active_grants":[{"id":"g1","secret_name":"GITHUB_TOKEN","source_project":"default"}],"pending_requests":[{"id":"r1","secret_name":"NPM_TOKEN","operation":"get"}]}"""
+        )
+        val parsed = OrbApprovalTransferConfirmationException.parse(err)
+        assertEquals("ethereum", parsed?.targetProject)
+        assertEquals(1, parsed?.activeGrants?.size)
+        assertEquals("GITHUB_TOKEN", parsed?.activeGrants?.first()?.secretName)
+        assertEquals(1, parsed?.pendingRequests?.size)
+        assertEquals("NPM_TOKEN", parsed?.pendingRequests?.first()?.secretName)
+        OrbMissionTree.resetHierarchy()
+    }
 }

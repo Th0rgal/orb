@@ -906,6 +906,7 @@ mod tests {
                     client_id: client,
                     title: "Local task".into(),
                     project: "test".into(),
+                    folder: String::new(),
                     backend: "claudecode".into(),
                     model: None,
                     effort: None,

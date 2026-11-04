@@ -16,7 +16,7 @@
  *  - `reparentMission` is the only way to change or clear a remembered link.
  */
 import { createSignal } from "solid-js";
-import { orbHierarchyMergeStep } from "./orbKernel";
+import { orbHierarchyMergeStep, orbPlacementMergeStep, type PlacementSourceKind } from "./orbKernel";
 import { shallowEqual } from "./poll";
 
 export type HierarchyFields = {
@@ -26,8 +26,244 @@ export type HierarchyFields = {
   tags?: readonly string[] | null;
   title?: string | null;
   project?: string | null;
+  folder?: string | null;
+  placement_revision?: number;
   status?: string;
 };
+
+/** Normalize a mission folder path (`""` for project root, `"a/b"` for nested folders). */
+export function normalizeMissionFolder(raw?: string | null): string {
+  if (!raw) return "";
+  const parts: string[] = [];
+  for (const seg of raw.trim().replace(/\\/g, "/").split("/")) {
+    const clean = seg.trim();
+    if (!clean || clean === "." || clean === "..") continue;
+    parts.push(clean);
+  }
+  return parts.join("/");
+}
+
+export type PlacementCommitInput = {
+  mission_id: string;
+  project?: string | null;
+  folder?: string | null;
+  placement_revision: number;
+};
+
+export type PlacementCommitItem = {
+  mission_id: string;
+  project: string | null;
+  folder: string;
+  placement_revision: number;
+};
+
+type PlacementState = {
+  project: string | null;
+  folder: string;
+  rev: number;
+  pendingOpId: number;
+  rollback?: { project: string | null; folder: string; rev: number };
+};
+
+const placements = new Map<string, PlacementState>();
+let nextClientOpId = 0;
+
+export function allocatePlacementOpId(): number {
+  nextClientOpId = nextClientOpId >= 0xffff_fffe ? 1 : nextClientOpId + 1;
+  return nextClientOpId;
+}
+
+const normalizeProject = (project?: string | null): string | null => {
+  if (project === undefined || project === null) return null;
+  const trimmed = project.trim();
+  return trimmed ? trimmed : null;
+};
+
+const hasNestedParent = (id: string, m?: HierarchyFields): boolean => {
+  const link = links.get(id);
+  const fork = (m?.tags ?? link?.tags)?.find(t => t.startsWith("fork-of:"))?.slice(8);
+  const p = nonEmpty(m?.parent_mission_id) ?? link?.parent;
+  if (p && p !== fork) return true;
+  if (nonEmpty(m?.callback_parent_mission_id) ?? link?.callback) return true;
+  if ((m?.tags ?? []).some(isDirectBtwTag) || link?.tags.some(isDirectBtwTag)) return true;
+  return false;
+};
+
+function syncParentRowPlacement(id: string, project: string | null, folder: string, rev: number): void {
+  const s = seen.get(id);
+  if (s) {
+    s.project = project;
+    s.folder = folder;
+  }
+  const parentRow = parentRows.get(id);
+  if (parentRow) {
+    parentRows.set(id, {
+      ...parentRow,
+      project,
+      folder,
+      placement_revision: rev,
+    });
+    bumpResolver(v => v + 1);
+  }
+}
+
+/** Apply `orbPlacementMergeStep` for a list/read row (`sourceKind = 0`) and return authoritative `(project, folder, placement_revision)`. */
+function mergeIncomingPlacement(m: HierarchyFields, isPartial = false): PlacementState | undefined {
+  const hasPlacement = m.project !== undefined || m.folder !== undefined || m.placement_revision !== undefined;
+  if (!hasPlacement) {
+    return placements.get(m.id);
+  }
+  const cur = placements.get(m.id);
+  if (isPartial && m.placement_revision === undefined && cur) {
+    return cur;
+  }
+  const incRev = typeof m.placement_revision === "number" && Number.isFinite(m.placement_revision) ? Math.max(0, Math.floor(m.placement_revision)) : 0;
+  const hasParent = hasNestedParent(m.id, m);
+  const incFolder = hasParent ? "" : normalizeMissionFolder(m.folder);
+  const incProject = normalizeProject(m.project);
+  if (!cur) {
+    const state: PlacementState = {
+      project: incProject,
+      folder: incFolder,
+      rev: incRev,
+      pendingOpId: 0,
+    };
+    placements.set(m.id, state);
+    return state;
+  }
+  const effectiveProject = m.project !== undefined ? incProject : cur.project;
+  const effectiveFolder = hasParent ? "" : (m.folder !== undefined ? incFolder : cur.folder);
+  const matchesOptimistic = cur.pendingOpId !== 0 && effectiveProject === cur.project && effectiveFolder === cur.folder;
+  const verdict = orbPlacementMergeStep({
+    curRev: cur.rev,
+    incRev,
+    pendingOpId: cur.pendingOpId,
+    ackOpId: 0,
+    sourceKind: 0,
+    hasPlacement: true,
+    matchesOptimistic,
+  });
+  if (!verdict.admitted) return cur;
+  const nextState: PlacementState = {
+    project: effectiveProject,
+    folder: effectiveFolder,
+    rev: Math.max(cur.rev, incRev, verdict.nextRev32),
+    pendingOpId: verdict.clearPending ? 0 : cur.pendingOpId,
+    rollback: verdict.clearPending ? undefined : cur.rollback,
+  };
+  placements.set(m.id, nextState);
+  return nextState;
+}
+
+/** Stage an optimistic placement preview (`sourceKind = 2`) under `opId`. */
+export function stageOptimisticPlacement(
+  id: string,
+  toProject: string | null,
+  toFolder: string,
+  opId: number,
+  fallback?: { project?: string | null; folder?: string | null; placement_revision?: number },
+): void {
+  const cur = placements.get(id) ?? {
+    project: normalizeProject(fallback?.project),
+    folder: normalizeMissionFolder(fallback?.folder),
+    rev: typeof fallback?.placement_revision === "number" ? fallback.placement_revision : 0,
+    pendingOpId: 0,
+  };
+  const hasParent = hasNestedParent(id);
+  const folder = hasParent ? "" : normalizeMissionFolder(toFolder);
+  const proj = normalizeProject(toProject);
+  const verdict = orbPlacementMergeStep({
+    curRev: cur.rev,
+    incRev: cur.rev,
+    pendingOpId: cur.pendingOpId,
+    ackOpId: opId,
+    sourceKind: 2,
+    hasPlacement: true,
+    matchesOptimistic: false,
+  });
+  if (!verdict.admitted) return;
+  placements.set(id, {
+    project: proj,
+    folder,
+    rev: cur.rev,
+    pendingOpId: opId,
+    rollback: cur.rollback ?? { project: cur.project, folder: cur.folder, rev: cur.rev },
+  });
+  syncParentRowPlacement(id, proj, folder, cur.rev);
+}
+
+/** Roll back a failed or cancelled optimistic placement (`sourceKind = 3`) matching `ackOpId`. */
+export function rollbackOptimisticPlacement(id: string, ackOpId: number): boolean {
+  const cur = placements.get(id);
+  if (!cur) return false;
+  const verdict = orbPlacementMergeStep({
+    curRev: cur.rev,
+    incRev: cur.rev,
+    pendingOpId: cur.pendingOpId,
+    ackOpId,
+    sourceKind: 3,
+    hasPlacement: false,
+    matchesOptimistic: false,
+  });
+  if (!verdict.admitted) return false;
+  const prior = cur.rollback ?? { project: cur.project, folder: cur.folder, rev: cur.rev };
+  placements.set(id, {
+    project: prior.project,
+    folder: prior.folder,
+    rev: prior.rev,
+    pendingOpId: 0,
+  });
+  syncParentRowPlacement(id, prior.project, prior.folder, prior.rev);
+  return true;
+}
+
+/** Commit authoritative placement updates (`sourceKind = 1`) from `POST /api/control/missions/move` or `mission_placement_changed`. */
+export function commitAuthoritativePlacements(items: readonly PlacementCommitInput[], ackOpId = 0): PlacementCommitItem[] {
+  const accepted: PlacementCommitItem[] = [];
+  for (const item of items) {
+    if (!item || typeof item.mission_id !== "string") continue;
+    const id = item.mission_id;
+    const cur = placements.get(id);
+    const incRev = typeof item.placement_revision === "number" && Number.isFinite(item.placement_revision)
+      ? Math.max(0, Math.floor(item.placement_revision))
+      : 0;
+    const hasParent = hasNestedParent(id);
+    const folder = hasParent ? "" : normalizeMissionFolder(item.folder);
+    const proj = normalizeProject(item.project);
+    const matchesOptimistic = !!(cur && cur.pendingOpId !== 0 && proj === cur.project && folder === cur.folder);
+    const verdict = orbPlacementMergeStep({
+      curRev: cur?.rev ?? 0,
+      incRev,
+      pendingOpId: cur?.pendingOpId ?? 0,
+      ackOpId,
+      sourceKind: 1 as PlacementSourceKind,
+      hasPlacement: true,
+      matchesOptimistic,
+    });
+    if (!verdict.admitted) continue;
+    const nextPendingOpId = verdict.clearPending ? 0 : (cur?.pendingOpId ?? 0);
+    placements.set(id, {
+      project: proj,
+      folder,
+      rev: incRev,
+      pendingOpId: nextPendingOpId,
+      rollback: verdict.clearPending ? undefined : cur?.rollback,
+    });
+    syncParentRowPlacement(id, proj, folder, incRev);
+    accepted.push({
+      mission_id: id,
+      project: proj,
+      folder,
+      placement_revision: incRev,
+    });
+  }
+  return accepted;
+}
+
+/** Current authoritative placement known for `id` (if any). */
+export function authoritativePlacement(id: string): Readonly<PlacementState> | undefined {
+  return placements.get(id);
+}
 
 /** Tags that place a mission inside another one (or out of the root list). */
 export const isHierarchyTag = (tag: string) =>
@@ -38,7 +274,7 @@ export const isHierarchyTag = (tag: string) =>
 const isDirectBtwTag = (tag: string) => tag.startsWith("btw-parent:") || tag === "btw-subagent";
 
 type Link = { parent?: string; callback?: string; tags: string[] };
-type Seen = { title?: string | null; project?: string | null; status?: string };
+type Seen = { title?: string | null; project?: string | null; folder?: string; status?: string };
 
 const links = new Map<string, Link>();
 const seen = new Map<string, Seen>();
@@ -60,7 +296,7 @@ const isSupersededTag = (tag: string) =>
 const nonEmpty = (v: string | null | undefined): string | undefined => (typeof v === "string" && v.trim() ? v : undefined);
 
 /** Remember the links (and display facts) a payload carries. Never forgets. */
-export function observeMission(m: HierarchyFields | null | undefined): void {
+export function observeMission(m: HierarchyFields | null | undefined, isPartial = false): void {
   if (!m || typeof m.id !== "string") return;
   const parent = nonEmpty(m.parent_mission_id), callback = nonEmpty(m.callback_parent_mission_id);
   const tags = (m.tags ?? []).filter(isHierarchyTag);
@@ -72,25 +308,41 @@ export function observeMission(m: HierarchyFields | null | undefined): void {
     for (const tag of tags) if (!link.tags.includes(tag)) link.tags.push(tag);
     links.set(m.id, link);
   }
+  const authPlace = mergeIncomingPlacement(m, isPartial);
   const s = seen.get(m.id) ?? {};
   if (m.title !== undefined && m.title !== null) s.title = m.title;
-  if (m.project !== undefined) s.project = m.project;
+  if (authPlace) {
+    s.project = authPlace.project;
+    s.folder = authPlace.folder;
+  } else if (m.project !== undefined) {
+    s.project = m.project;
+  }
   if (typeof m.status === "string" && m.status !== "unknown") s.status = m.status;
   seen.set(m.id, s);
 }
 
-/** The payload with every remembered link restored. Same object when nothing was missing. */
+/** The payload with every remembered link and authoritative placement restored. Same object when nothing was missing. */
 export function withHierarchy<M extends HierarchyFields>(m: M): M {
   const link = links.get(m.id);
-  if (!link) return m;
+  const place = placements.get(m.id);
+  if (!link && !place) return m;
   let out: M | undefined;
   const set = (key: keyof HierarchyFields, value: unknown) => { out ??= { ...m }; (out as Record<string, unknown>)[key] = value; };
-  if (link.parent && !nonEmpty(m.parent_mission_id)) set("parent_mission_id", link.parent);
-  if (link.callback && !nonEmpty(m.callback_parent_mission_id)) set("callback_parent_mission_id", link.callback);
-  if (link.tags.length) {
-    const tags = m.tags ?? [];
-    const missing = link.tags.filter(t => !tags.includes(t));
-    if (missing.length) set("tags", [...tags, ...missing]);
+  if (link) {
+    if (link.parent && !nonEmpty(m.parent_mission_id)) set("parent_mission_id", link.parent);
+    if (link.callback && !nonEmpty(m.callback_parent_mission_id)) set("callback_parent_mission_id", link.callback);
+    if (link.tags.length) {
+      const tags = m.tags ?? [];
+      const missing = link.tags.filter(t => !tags.includes(t));
+      if (missing.length) set("tags", [...tags, ...missing]);
+    }
+  }
+  if (place) {
+    const curProject = normalizeProject(m.project);
+    if (curProject !== place.project) set("project", place.project);
+    const curFolder = normalizeMissionFolder(m.folder);
+    if (m.folder === undefined ? place.folder.length > 0 : curFolder !== place.folder) set("folder", place.folder);
+    if ((m.placement_revision ?? 0) < place.rev) set("placement_revision", place.rev);
   }
   return out ?? m;
 }
@@ -106,7 +358,7 @@ export function stickHierarchy<M extends HierarchyFields>(m: M): M { observeMiss
  */
 export function mergeMission<M extends HierarchyFields>(prev: M | undefined, next: Partial<M> & { id: string }, mode: "full" | "partial" = "full"): M {
   if (prev) observeMission(prev);
-  observeMission(next as HierarchyFields);
+  observeMission(next as HierarchyFields, mode === "partial");
   const prevLink = links.get(next.id);
   const curParentOrd = internParentOrd(prevLink?.parent ?? nonEmpty(prev?.parent_mission_id));
   const incParent = nonEmpty(next.parent_mission_id);
@@ -264,7 +516,7 @@ export function resolveParent(id: string): ParentState {
           parentRows.delete(id);
           parentState.set(id, "gone");
         } else {
-          parentRows.set(id, row);
+          parentRows.set(id, withHierarchy(row));
           parentState.set(id, "found");
         }
       }
@@ -305,7 +557,8 @@ export function markParentSeen(id: string): void {
 
 /** Tests and connection switches start from nothing. */
 export function resetMissionHierarchy(): void {
-  links.clear(); seen.clear(); parentOrds.clear(); ordParents.clear(); hierarchyEpoch = 0n;
+  links.clear(); seen.clear(); placements.clear(); nextClientOpId = 0;
+  parentOrds.clear(); ordParents.clear(); hierarchyEpoch = 0n;
   parentState.clear(); parentRows.clear(); retries.clear();
   bumpResolver(v => v + 1);
 }
