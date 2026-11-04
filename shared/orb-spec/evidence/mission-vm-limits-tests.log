@@ -1,4 +1,4 @@
-    Finished `test` profile [unoptimized] target(s) in 0.05s
+    Finished `test` profile [unoptimized] target(s) in 0.04s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
    Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-boost-ci-provider)
 warning: unreachable statement
@@ -172,7 +172,7 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 31.41s
+    Finished `test` profile [unoptimized] target(s) in 31.50s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
