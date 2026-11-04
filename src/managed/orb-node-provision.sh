@@ -4,6 +4,7 @@
 # and idempotent: heavy installs belong in orb-node-base.recipe.sh.
 # Never writes or prints a secret.
 set -euo pipefail
+cd /
 NODE_USER=orbnode
 NODE_HOME=/var/lib/orb-node
 CACHES=$NODE_HOME/work/caches
@@ -165,10 +166,12 @@ if not resp.get("ok"):
     sys.exit(1)
 PY
   then
+    head_rev=$(git -C "$dest_abs" rev-parse HEAD)
     if [ -n "$branch" ]; then
-      git -C "$dest_abs" checkout -q -B "$branch"
+      git -C "$dest_abs" update-ref "refs/heads/$branch" "$head_rev"
+      git -C "$dest_abs" symbolic-ref HEAD "refs/heads/$branch"
     else
-      git -C "$dest_abs" checkout -q --detach HEAD
+      git -C "$dest_abs" update-ref --no-deref HEAD "$head_rev"
     fi
     printf '%s\n' "$dest_abs"
     exit 0
@@ -206,7 +209,7 @@ chmod 0755 /usr/local/bin/orb-cow-worktree
 #    forcing `--project-dir /workspace/boost-cvm/lean-overlay/merged`. Never run
 #    `chmod -R` across overlayfs (77 GiB metadata copy-up); instead VFS-idmap
 #    `/opt/boost/warm-lower` to `orbnode` at `/opt/boost/warm-orb` in O(1) time.
-rm -f "$NODE_HOME/.boost-env"
+rm -f "$NODE_HOME/.boost-env" /etc/profile.d/zz-orb-boost.sh
 if [ -f /etc/profile.d/boost-vm.sh ] || [ -n "${BOOST_VM_ID:-}" ]; then
   (
     set +u
@@ -227,6 +230,20 @@ if [ -f /etc/profile.d/boost-vm.sh ] || [ -n "${BOOST_VM_ID:-}" ]; then
   chmod 0600 "$NODE_HOME/.boost-env.tmp"
   chown "$NODE_USER:$NODE_USER" "$NODE_HOME/.boost-env.tmp"
   mv "$NODE_HOME/.boost-env.tmp" "$NODE_HOME/.boost-env"
+  # sandboxed-node launches remote jobs with env_clear() + HOME=<job-cwd> via
+  # `bash -lc`, which sources /etc/profile.d/boost-vm.sh (setting BOOST_REPO_DIR
+  # and checking $HOME/.boost-env under the wrong HOME). Run after boost-vm.sh
+  # to export /var/lib/orb-node/.boost-env and clear BOOST_REPO_DIR so `lake`
+  # builds $PWD inside sub-agent CoW worktrees.
+  cat > /etc/profile.d/zz-orb-boost.sh <<'ORBBOOSTPROFILE'
+if [ -r /var/lib/orb-node/.boost-env ]; then
+  set -a
+  . /var/lib/orb-node/.boost-env
+  set +a
+  unset BOOST_REPO_DIR
+fi
+ORBBOOSTPROFILE
+  chmod 0644 /etc/profile.d/zz-orb-boost.sh
 
   for p in /workspace /workspace/boost-cvm /workspace/boost-cvm/lean-overlay /workspace/repo /workspace/boost-cvm/lean-overlay/merged /opt/boost /opt/boost/warm-lower; do
     [ -d "$p" ] && chmod a+rx "$p" 2>/dev/null || true
@@ -237,15 +254,23 @@ if [ -f /etc/profile.d/boost-vm.sh ] || [ -n "${BOOST_VM_ID:-}" ]; then
   if [ -d /opt/boost/warm-lower ]; then
     uid_n=$(id -u "$NODE_USER")
     gid_n=$(id -g "$NODE_USER")
-    uid_b=$(stat -c '%u' /opt/boost/warm-lower)
-    gid_b=$(stat -c '%g' /opt/boost/warm-lower)
+    warm_src=$(readlink -f /opt/boost/warm-lower 2>/dev/null || printf '/opt/boost/warm-lower')
+    probe_path="$warm_src"
+    for cand in "$warm_src/.lake" "$warm_src/.git"; do
+      if [ -e "$cand" ]; then
+        probe_path="$cand"
+        break
+      fi
+    done
+    uid_b=$(stat -Lc '%u' "$probe_path")
+    gid_b=$(stat -Lc '%g' "$probe_path")
     mkdir -p /opt/boost/warm-orb
     if ! mountpoint -q /opt/boost/warm-orb 2>/dev/null; then
       if [ "$uid_b" != "$uid_n" ] || [ "$gid_b" != "$gid_n" ]; then
-        mount --bind -o "X-mount.idmap=u:${uid_b}:${uid_n}:1 g:${gid_b}:${gid_n}:1" /opt/boost/warm-lower /opt/boost/warm-orb 2>/dev/null \
-          || mount --bind /opt/boost/warm-lower /opt/boost/warm-orb 2>/dev/null || true
+        mount --bind -o "X-mount.idmap=u:${uid_b}:${uid_n}:1 g:${gid_b}:${gid_n}:1" "$warm_src" /opt/boost/warm-orb 2>/dev/null \
+          || mount --bind "$warm_src" /opt/boost/warm-orb 2>/dev/null || true
       else
-        mount --bind /opt/boost/warm-lower /opt/boost/warm-orb 2>/dev/null || true
+        mount --bind "$warm_src" /opt/boost/warm-orb 2>/dev/null || true
       fi
     fi
     if mountpoint -q /opt/boost/warm-orb 2>/dev/null && [ -d /workspace/boost-cvm/lean-overlay/merged ]; then
@@ -370,7 +395,9 @@ COWDAEMON
       git config --system --add safe.directory "$repo_dir" 2>/dev/null || true
     fi
   done
-  if [ -d /workspace/repo/.git ]; then
+  # Never mutate /workspace/repo/.git when it backs /opt/boost/warm-orb as an
+  # overlayfs lowerdir (kernel overlayfs forbids lowerdir metadata changes).
+  if ! mountpoint -q /opt/boost/warm-orb 2>/dev/null && [ -d /workspace/repo/.git ]; then
     git config --system --add safe.directory /workspace/repo/.git 2>/dev/null || true
     mkdir -p /workspace/repo/.git/worktrees /workspace/repo/.git/logs/refs/heads /workspace/repo/.git/refs/heads 2>/dev/null || true
     find /workspace/repo/.git -type d -exec chgrp "$NODE_USER" {} + -exec chmod 2775 {} + 2>/dev/null || true
