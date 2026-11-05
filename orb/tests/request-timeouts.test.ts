@@ -65,4 +65,36 @@ it('skips blocking getMission when knownMission is active and recovers dropped r
  expect(JSON.parse(calls[0].body!).client_message_id).toBe('msg-fixed-id');
 });
 
+it('classifies 502/503/504/522/524 and truncated JSON from getMissionEventPage as transient network errors', async () => {
+ const { getMissionEventPage } = await import('../src/stream');
+ const { ApiError } = await import('../src/api');
+ let call = 0;
+ vi.stubGlobal('fetch', vi.fn(async () => {
+  call++;
+  return new Response('Bad Gateway', { status: 502 });
+ }));
+ const err502 = await getMissionEventPage('m-502').catch(e => e);
+ expect(err502).toBeInstanceOf(ApiError);
+ expect(err502.status).toBe(502);
+ expect(isTransientNetworkError(err502)).toBe(true);
+ // apiRaw automatically retried once on 502 before surfacing ApiError:
+ expect(call).toBe(2);
+
+ expect(isTransientNetworkError(new ApiError(522, 'Origin Connection Time-out'))).toBe(true);
+ expect(isTransientNetworkError(new ApiError(524, 'A Timeout Occurred'))).toBe(true);
+ expect(isTransientNetworkError(new ApiError(404, 'Not found'))).toBe(false);
+
+ vi.stubGlobal('fetch', vi.fn(async () => new Response('{"truncated":', {
+  status: 200,
+  headers: {
+   'X-Orb-Events-Protocol': '1',
+   'X-Has-More': 'false',
+  },
+ })));
+ const errJson = await getMissionEventPage('m-trunc').catch(e => e);
+ expect(errJson).toBeInstanceOf(InvalidApiResponseError);
+ expect(isTransientNetworkError(errJson)).toBe(true);
+});
+
+
 

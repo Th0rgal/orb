@@ -657,8 +657,11 @@ struct OrbMissionBudget: Equatable {
         let spentUsd = pool?.spent ?? 0
         let reservedUsd = pool?.reserved ?? 0
         let carvedUsd = pool?.carved ?? 0
-        let committedTotal = spentUsd + reservedUsd + carvedUsd
+        let committedPreReserved = spentUsd + carvedUsd
+        let committedTotal = committedPreReserved + reservedUsd
         let availableUsd = capUsd.map { max(0, $0 - committedTotal) } ?? 0
+        // `reservedUsd` holds up to 60m of future live-machine runtime, not incurred spend.
+        let runwayUsd = capUsd.map { max(0, $0 - committedPreReserved) } ?? 0
 
         let obsCompute = max(0, effectiveBandwidth?.currentComputeUsdPerHour ?? 0)
         let curVcpu = effectiveBandwidth?.currentVcpuPerMin ?? 0
@@ -687,11 +690,11 @@ struct OrbMissionBudget: Equatable {
 
         let etaSecs: Double? = {
             guard let capUsd else { return nil }
-            if availableUsd <= 0 { return 0 }
-            return shapedCompute > 0.005 ? (availableUsd / shapedCompute) * 3600.0 : nil
+            if runwayUsd <= 0 { return 0 }
+            return shapedCompute > 0.005 ? (runwayUsd / shapedCompute) * 3600.0 : nil
         }()
-        let unshapedEtaSecs: Double? = (capUsd != nil && availableUsd > 0 && obsCompute > 0.005)
-            ? (availableUsd / obsCompute) * 3600.0 : nil
+        let unshapedEtaSecs: Double? = (capUsd != nil && runwayUsd > 0 && obsCompute > 0.005)
+            ? (runwayUsd / obsCompute) * 3600.0 : nil
         let etaGainSecs: Double? = {
             guard let e = etaSecs, let u = unshapedEtaSecs, e > u + 120 else { return nil }
             return e - u
@@ -699,9 +702,9 @@ struct OrbMissionBudget: Equatable {
 
         var tone: RunwayForecast.Tone = .ok
         if let capUsd {
-            if availableUsd <= 0 || (etaSecs != nil && etaSecs! < 1800) {
+            if runwayUsd <= 0 || (etaSecs != nil && etaSecs! < 1800) {
                 tone = .danger
-            } else if (etaSecs != nil && etaSecs! < 7200) || (capUsd > 0 && availableUsd < capUsd * 0.15) {
+            } else if (etaSecs != nil && etaSecs! < 7200) || (capUsd > 0 && runwayUsd < capUsd * 0.15) {
                 tone = .warning
             }
         }
@@ -709,12 +712,15 @@ struct OrbMissionBudget: Equatable {
         let headline: String
         let subline: String
         if let capUsd {
-            if availableUsd <= 0 {
+            if runwayUsd <= 0 {
                 headline = "Budget exhausted"
-                subline = "\(Self.money(committedTotal)) committed of \(Self.money(capUsd)) pool"
+                subline = "\(Self.money(committedPreReserved)) spent of \(Self.money(capUsd)) pool"
             } else if let etaSecs {
                 headline = "\(Self.formatDurationEta(etaSecs)) runway left"
-                var parts = ["\(Self.money(shapedCompute))/h compute burn", "\(Self.money(availableUsd)) left (\(Self.money(capUsd)) cap)"]
+                let remPart = reservedUsd > 0.005
+                    ? "\(Self.money(availableUsd)) unallocated (\(Self.money(reservedUsd)) reserved · \(Self.money(capUsd)) cap)"
+                    : "\(Self.money(availableUsd)) left (\(Self.money(capUsd)) cap)"
+                var parts = ["\(Self.money(shapedCompute))/h compute burn", remPart]
                 if let gain = etaGainSecs {
                     let clean = Self.formatDurationEta(gain).replacingOccurrences(of: "~", with: "")
                     parts.append("+\(clean) from bandwidth cap")

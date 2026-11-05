@@ -95,9 +95,19 @@ final class OrbMissionBudgetTests: XCTestCase {
 
         let base10 = own(10)
         let unshaped = base10.computeRunwayForecast(budgetEnabled: true)
-        XCTAssertEqual(unshaped.etaSecs ?? 0, 15_120, accuracy: 1)
+        XCTAssertEqual(unshaped.etaSecs ?? 0, 15_480, accuracy: 1)
         let shaped = base10.computeRunwayForecast(draftComputeUsdPerH: "1.0", bandwidthEnabled: true, budgetEnabled: true)
-        XCTAssertEqual(shaped.etaSecs ?? 0, 30_240, accuracy: 1)
+        XCTAssertEqual(shaped.etaSecs ?? 0, 30_960, accuracy: 1)
         XCTAssertTrue(shaped.subline.contains("from bandwidth cap"))
+
+        let fullyReserved = OrbMissionBudget(.object([
+            "mission_id": .string("m1"), "own_budget_usd": .number(1), "pool_id": .string("m1"), "mode": .string("own"),
+            "pool": .object(["budget_usd": .number(1), "spent_usd": .number(0), "reserved_usd": .number(1), "carved_usd": .number(0), "available_usd": .number(0)]),
+            "effective_bandwidth": .object(["source": .string("none"), "current_compute_usd_per_hour": .number(1.0)]),
+            "children": .array([]),
+        ]))
+        let freshVm = fullyReserved.computeRunwayForecast(budgetEnabled: true)
+        XCTAssertEqual(freshVm.etaSecs ?? 0, 3_600, accuracy: 1)
+        XCTAssertTrue(freshVm.headline.contains("~1h runway left"))
     }
 }

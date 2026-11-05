@@ -1057,6 +1057,9 @@ impl ManagedError {
     }
 
     fn classify_upstream_error(err: String, fallback_code: &'static str) -> Self {
+        if let Some(msg) = err.strip_prefix("bandwidth_exceeded: ") {
+            return Self::new("bandwidth_exceeded", 429, msg.to_string());
+        }
         let lower = err.to_ascii_lowercase();
         if lower.contains("http 402")
             || lower.contains("billing_required")
@@ -1140,14 +1143,28 @@ impl std::fmt::Display for ManagedError {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ComputePacingRequest<'a> {
     pub cap_lineage: &'a [String],
     pub existing_bw_pool_id: Option<&'a str>,
-    pub target_mission_id: Option<&'a str>,
+    /// Mission used to resolve fallback lineage (`owner_mission_id`, else `requested_by_mission_id`).
+    pub lineage_mission_id: Option<&'a str>,
+    /// Mission that directly owns the VM (`owner_mission_id` only). Auto-managed
+    /// child launches pass `owner_mission_id: None` + `requested_by_mission_id: Some(parent)`,
+    /// so keeping `owner_mission_id` distinct prevents child launches from inheriting
+    /// the parent's `protect_root` bypass.
+    pub owner_mission_id: Option<&'a str>,
     pub user_id: Option<&'a str>,
     pub requested_cpu: u32,
     pub requested_usd_per_hour: f64,
     pub exclude_machine_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ComputeBandwidthVerdict {
+    Admitted(Option<String>),
+    HardReject(ManagedError),
+    PaceWait(String),
 }
 
 // ------------------------------------------------- dynamic node registry
@@ -3955,248 +3972,253 @@ impl ManagedManager {
         let quoted_offer_id = quote.and_then(|q| q.offer_id);
 
         let machine = {
-            let target_mission_for_bw = req
+            let lineage_mission_for_bw = req
                 .owner_mission_id
                 .as_deref()
                 .or(req.requested_by_mission_id.as_deref());
-            self.pace_compute_bandwidth(ComputePacingRequest {
+            let bw_req = ComputePacingRequest {
                 cap_lineage: &req.cap_lineage,
                 existing_bw_pool_id: None,
-                target_mission_id: target_mission_for_bw,
+                lineage_mission_id: lineage_mission_for_bw,
+                owner_mission_id: req.owner_mission_id.as_deref(),
                 user_id: req.owner_user_id.as_deref(),
                 requested_cpu: effective_cpu,
                 requested_usd_per_hour: effective_usd_per_hour,
                 exclude_machine_id: None,
-            })
-            .await?;
-            let _guard = self.admission.lock().await;
-            let live_snapshot = self.machines.lock().await.clone();
-            let cap_pool_id = self
-                .check_concurrency_quota(
-                    &live_snapshot,
-                    provider.name(),
-                    &req.cap_lineage,
-                    None,
-                    req.owner_mission_id
-                        .as_deref()
-                        .or(req.requested_by_mission_id.as_deref()),
-                    req.owner_user_id.as_deref(),
-                )
-                .await?;
-            let pools_snapshot = self.budgets.lock().await.clone();
-            let bw_chain = if !req.cap_lineage.is_empty() {
-                req.cap_lineage.clone()
-            } else {
-                Self::fallback_bandwidth_lineage(&pools_snapshot, None, target_mission_for_bw)
             };
-            let bandwidth_pool_id = Self::resolve_covering_bandwidth_pool(
-                &pools_snapshot,
-                &bw_chain,
-                req.owner_user_id.as_deref(),
-            );
-            let governed_by_mission_pool =
-                Self::has_active_budget_pool(&pools_snapshot, req.budget_pool_id.as_deref());
-            let (shared_spent_usd, shared_committed_usd) =
-                Self::shared_daily_usage(&live_snapshot, &pools_snapshot);
-            let new_cost = committed_minutes as f64 / 60.0 * effective_usd_per_hour;
-            if !governed_by_mission_pool {
-                if let Some(cap) = self
-                    .settings
-                    .daily_cap_usd
-                    .filter(|cap| shared_spent_usd + shared_committed_usd + new_cost > *cap)
-                {
-                    return Err(ManagedError::new(
-                        "budget_exceeded",
-                        402,
-                        format!(
-                            "Daily managed-machine budget ${:.2} would be exceeded (spent ${:.2}, committed ${:.2}, this machine up to ${:.2}); pick a smaller size or shorter TTL",
-                            cap,
-                            shared_spent_usd,
-                            shared_committed_usd,
-                            new_cost
-                        ),
-                    ));
-                }
-            }
-            let spent_plus_new_cents =
-                ((shared_spent_usd + shared_committed_usd + new_cost) * 100.0).ceil() as u64;
-            let daily_cap_cents = if governed_by_mission_pool {
-                // Active mission budget pools (`budget_usd`) override the shared
-                // daily cap and are enforced via `check_pool` below.
-                spent_plus_new_cents.saturating_add(1)
-            } else {
-                self.settings
-                    .daily_cap_usd
-                    .map(|c| (c * 100.0).floor() as u64)
-                    .unwrap_or(spent_plus_new_cents.saturating_add(1))
-            };
-            // Concurrency admission was already checked via `orb_vm_cap_admit`
-            // in `check_concurrency_quota`, so pass `(0, 1)` slots here to keep
-            // daily dollar budget and TTL gates independent of overridden pools.
-            if !crate::orb_spec::vm_spawn_admit(crate::orb_spec::VmSpawnInput {
-                size_rank: 0,
-                max_size_rank: 0,
-                secret_projected: false,
-                active_count: 0,
-                max_concurrent: 1,
-                ttl_minutes: ttl_minutes as u32,
-                max_ttl_minutes: self.settings.max_ttl_minutes.max(5) as u32,
-                job_mem_pct: 90,
-                spent_plus_new_cents,
-                daily_cap_cents,
-            }) {
-                return Err(ManagedError::new(
-                    "budget_exceeded",
-                    402,
-                    "Managed machine spawn rejected by kernel admission policy",
-                ));
-            }
-            let spent_before_cents =
-                ((shared_spent_usd + shared_committed_usd) * 100.0).ceil() as u64;
-            let cost_delta_cents = spent_plus_new_cents.saturating_sub(spent_before_cents);
-            let ledger_cap_cents = daily_cap_cents.max(spent_plus_new_cents);
-            let now_tick = Utc::now().timestamp().max(0) as u64;
-            let ttl_expiry_tick = now_tick.saturating_add(ttl_minutes.saturating_mul(60));
-            let ledger_verdict = evaluate_resource_ledger_gate(
-                crate::orb_spec::ResourceLedgerOp::Reserve,
-                0,
-                0,
-                1,
-                spent_before_cents,
-                cost_delta_cents,
-                ledger_cap_cents,
-                now_tick,
-                ttl_expiry_tick,
-            );
-            if !ledger_verdict.admitted {
-                return Err(ManagedError::new(
-                    "budget_exceeded",
-                    402,
-                    "Managed machine reservation rejected by orb_resource_ledger_step",
-                ));
-            }
-            let reserve = if committed_minutes > ttl_minutes {
-                new_cost
-            } else {
-                budget::reservation_for(ttl_minutes, effective_usd_per_hour)
-            };
-            if let Some(sub) = req.sub_budget_usd {
-                if reserve > sub {
-                    return Err(ManagedError::new(
-                        "budget_exceeded",
-                        402,
-                        format!(
-                            "The child's sub-budget ${sub:.2} cannot cover this machine's reservation ${reserve:.4} ({} for {} min); use a smaller size or a larger sub-budget",
-                            spec.size,
-                            committed_minutes.min(budget::RESERVE_MINUTES as u64).max(if is_apple_silicon { 24 * 60 } else { 0 })
-                        ),
-                    ));
-                }
-            }
-            if let Some(pool) = req.budget_pool_id.as_deref() {
-                // A sub-budget child carves its whole budget from the pool.
-                let needed = req.sub_budget_usd.unwrap_or(0.0).max(reserve);
-                self.check_pool(pool, needed, "this machine").await?;
-            }
-            let id = format!("mm{}", random_id());
-            let now = Utc::now();
-            let live_names: Vec<String> = live_snapshot
-                .iter()
-                .filter(|m| m.state.is_live() || m.state == MachineState::Stopped)
-                .map(|m| m.name.clone())
-                .collect();
-            let name_prefix = spec.size.to_ascii_lowercase();
-            let name = allocate_name(&name_prefix, &live_names);
-            let machine = ManagedMachine {
-                provisioning_mode,
-                name,
-                antigravity_projected: false,
-                node_id: format!("{NODE_PREFIX}{id}"),
-                id,
-                provider: provider.name().into(),
-                provider_id: None,
-                image: image.clone(),
-                size: spec.size.into(),
-                cpu: effective_cpu,
-                ram_gb: effective_ram_gb,
-                disk_gb: spec.disk_gb,
-                usd_per_hour: effective_usd_per_hour,
-                state: MachineState::Provisioning,
-                created_at: now,
-                expires_at: now + chrono::Duration::minutes(ttl_minutes as i64),
-                online_at: None,
-                destroyed_at: None,
-                destroy_reason: None,
-                cost_usd: 0.0,
-                cost_is_metered: false,
-                owner_kind: Some(
-                    if req.owner_mission_id.is_some() {
-                        "mission"
-                    } else {
-                        "user"
+            let pace_started = std::time::Instant::now();
+            loop {
+                self.pace_compute_bandwidth_until(bw_req, pace_started)
+                    .await?;
+                let _guard = self.admission.lock().await;
+                let live_snapshot = self.machines.lock().await.clone();
+                let pools_snapshot = self.budgets.lock().await.clone();
+                let bandwidth_pool_id =
+                    match Self::evaluate_compute_bandwidth(&pools_snapshot, &live_snapshot, bw_req)
+                    {
+                        ComputeBandwidthVerdict::Admitted(pid) => pid,
+                        ComputeBandwidthVerdict::HardReject(err) => return Err(err),
+                        ComputeBandwidthVerdict::PaceWait(msg) => {
+                            if pace_started.elapsed() >= pacing::MAX_COMPUTE_PACE_DELAY {
+                                return Err(ManagedError::new("bandwidth_exceeded", 429, msg));
+                            }
+                            continue;
+                        }
+                    };
+                let cap_pool_id = self
+                    .check_concurrency_quota(
+                        &live_snapshot,
+                        provider.name(),
+                        &req.cap_lineage,
+                        None,
+                        lineage_mission_for_bw,
+                        req.owner_user_id.as_deref(),
+                    )
+                    .await?;
+                let governed_by_mission_pool =
+                    Self::has_active_budget_pool(&pools_snapshot, req.budget_pool_id.as_deref());
+                let (shared_spent_usd, shared_committed_usd) =
+                    Self::shared_daily_usage(&live_snapshot, &pools_snapshot);
+                let new_cost = committed_minutes as f64 / 60.0 * effective_usd_per_hour;
+                if !governed_by_mission_pool {
+                    if let Some(cap) = self
+                        .settings
+                        .daily_cap_usd
+                        .filter(|cap| shared_spent_usd + shared_committed_usd + new_cost > *cap)
+                    {
+                        return Err(ManagedError::new(
+                            "budget_exceeded",
+                            402,
+                            format!(
+                                "Daily managed-machine budget ${:.2} would be exceeded (spent ${:.2}, committed ${:.2}, this machine up to ${:.2}); pick a smaller size or shorter TTL",
+                                cap,
+                                shared_spent_usd,
+                                shared_committed_usd,
+                                new_cost
+                            ),
+                        ));
                     }
-                    .into(),
-                ),
-                requested_by_mission_id: req
-                    .requested_by_mission_id
-                    .clone()
-                    .filter(|r| req.owner_mission_id.as_ref() != Some(r)),
-                owner_mission_id: req.owner_mission_id.clone(),
-                owner_user_id: req.owner_user_id.clone(),
-                reason: req.reason.clone(),
-                reap_at: None,
-                reap_reason: None,
-                error: None,
-                ledger_closed: false,
-                last_busy_at: None,
-                budget_pool_id: req.budget_pool_id.clone(),
-                cap_pool_id,
-                bandwidth_pool_id,
-                auto_extensions: 0,
-                stopped_at: None,
-                stopped_by_reaper: false,
-                source_snapshot: source_snapshot.clone(),
-                forked_from: fork_source.as_ref().map(|(id, _)| id.clone()),
-                fork_source_provider_id: fork_source.as_ref().map(|(_, pid)| pid.clone()),
-                resumes: 0,
-                secrets_wiped: false,
-                run_started_at: None,
-                cost_before_resume: 0.0,
-                prior_pool_charges: Vec::new(),
-                pool_spent_offset: 0.0,
-                project: req.snapshot_project.clone(),
-                root_mission_id: req
-                    .root_mission_id
-                    .clone()
-                    .or_else(|| req.owner_mission_id.clone()),
-                active_mission_ids: Vec::new(),
-                deletable_at: is_apple_silicon.then(|| now + chrono::Duration::hours(24)),
-                has_executed_job: false,
-                repo: validated_repo.clone(),
-                base_key: validated_base_key.clone(),
-                lean_mode: validated_lean_mode.clone(),
-                warnings: Vec::new(),
-                retain_vm_for_parent_minutes: req
-                    .retain_vm_for_parent_minutes
-                    .map(|mins| mins.min(720)),
-                pre_stop_hook: req
-                    .pre_stop_hook
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string),
-                pre_stop_ran_at: None,
-                pre_stop_trigger: None,
-                pre_stop_summary: None,
-                hard_cap_at: Some(
-                    now + chrono::Duration::minutes(self.settings.max_ttl_minutes.max(5) as i64),
-                ),
-                forkable: false,
-            };
-            self.machines.lock().await.push(machine.clone());
-            self.persist().await;
-            register_alias(&machine);
-            machine
+                }
+                let spent_plus_new_cents =
+                    ((shared_spent_usd + shared_committed_usd + new_cost) * 100.0).ceil() as u64;
+                let daily_cap_cents = if governed_by_mission_pool {
+                    // Active mission budget pools (`budget_usd`) override the shared
+                    // daily cap and are enforced via `check_pool` below.
+                    spent_plus_new_cents.saturating_add(1)
+                } else {
+                    self.settings
+                        .daily_cap_usd
+                        .map(|c| (c * 100.0).floor() as u64)
+                        .unwrap_or(spent_plus_new_cents.saturating_add(1))
+                };
+                // Concurrency admission was already checked via `orb_vm_cap_admit`
+                // in `check_concurrency_quota`, so pass `(0, 1)` slots here to keep
+                // daily dollar budget and TTL gates independent of overridden pools.
+                if !crate::orb_spec::vm_spawn_admit(crate::orb_spec::VmSpawnInput {
+                    size_rank: 0,
+                    max_size_rank: 0,
+                    secret_projected: false,
+                    active_count: 0,
+                    max_concurrent: 1,
+                    ttl_minutes: ttl_minutes as u32,
+                    max_ttl_minutes: self.settings.max_ttl_minutes.max(5) as u32,
+                    job_mem_pct: 90,
+                    spent_plus_new_cents,
+                    daily_cap_cents,
+                }) {
+                    return Err(ManagedError::new(
+                        "budget_exceeded",
+                        402,
+                        "Managed machine spawn rejected by kernel admission policy",
+                    ));
+                }
+                let spent_before_cents =
+                    ((shared_spent_usd + shared_committed_usd) * 100.0).ceil() as u64;
+                let cost_delta_cents = spent_plus_new_cents.saturating_sub(spent_before_cents);
+                let ledger_cap_cents = daily_cap_cents.max(spent_plus_new_cents);
+                let now_tick = Utc::now().timestamp().max(0) as u64;
+                let ttl_expiry_tick = now_tick.saturating_add(ttl_minutes.saturating_mul(60));
+                let ledger_verdict = evaluate_resource_ledger_gate(
+                    crate::orb_spec::ResourceLedgerOp::Reserve,
+                    0,
+                    0,
+                    1,
+                    spent_before_cents,
+                    cost_delta_cents,
+                    ledger_cap_cents,
+                    now_tick,
+                    ttl_expiry_tick,
+                );
+                if !ledger_verdict.admitted {
+                    return Err(ManagedError::new(
+                        "budget_exceeded",
+                        402,
+                        "Managed machine reservation rejected by orb_resource_ledger_step",
+                    ));
+                }
+                let reserve = if committed_minutes > ttl_minutes {
+                    new_cost
+                } else {
+                    budget::reservation_for(ttl_minutes, effective_usd_per_hour)
+                };
+                if let Some(sub) = req.sub_budget_usd {
+                    if reserve > sub {
+                        return Err(ManagedError::new(
+                            "budget_exceeded",
+                            402,
+                            format!(
+                                "The child's sub-budget ${sub:.2} cannot cover this machine's reservation ${reserve:.4} ({} for {} min); use a smaller size or a larger sub-budget",
+                                spec.size,
+                                committed_minutes.min(budget::RESERVE_MINUTES as u64).max(if is_apple_silicon { 24 * 60 } else { 0 })
+                            ),
+                        ));
+                    }
+                }
+                if let Some(pool) = req.budget_pool_id.as_deref() {
+                    // A sub-budget child carves its whole budget from the pool.
+                    let needed = req.sub_budget_usd.unwrap_or(0.0).max(reserve);
+                    self.check_pool(pool, needed, "this machine").await?;
+                }
+                let id = format!("mm{}", random_id());
+                let now = Utc::now();
+                let live_names: Vec<String> = live_snapshot
+                    .iter()
+                    .filter(|m| m.state.is_live() || m.state == MachineState::Stopped)
+                    .map(|m| m.name.clone())
+                    .collect();
+                let name_prefix = spec.size.to_ascii_lowercase();
+                let name = allocate_name(&name_prefix, &live_names);
+                let machine = ManagedMachine {
+                    provisioning_mode,
+                    name,
+                    antigravity_projected: false,
+                    node_id: format!("{NODE_PREFIX}{id}"),
+                    id,
+                    provider: provider.name().into(),
+                    provider_id: None,
+                    image: image.clone(),
+                    size: spec.size.into(),
+                    cpu: effective_cpu,
+                    ram_gb: effective_ram_gb,
+                    disk_gb: spec.disk_gb,
+                    usd_per_hour: effective_usd_per_hour,
+                    state: MachineState::Provisioning,
+                    created_at: now,
+                    expires_at: now + chrono::Duration::minutes(ttl_minutes as i64),
+                    online_at: None,
+                    destroyed_at: None,
+                    destroy_reason: None,
+                    cost_usd: 0.0,
+                    cost_is_metered: false,
+                    owner_kind: Some(
+                        if req.owner_mission_id.is_some() {
+                            "mission"
+                        } else {
+                            "user"
+                        }
+                        .into(),
+                    ),
+                    requested_by_mission_id: req
+                        .requested_by_mission_id
+                        .clone()
+                        .filter(|r| req.owner_mission_id.as_ref() != Some(r)),
+                    owner_mission_id: req.owner_mission_id.clone(),
+                    owner_user_id: req.owner_user_id.clone(),
+                    reason: req.reason.clone(),
+                    reap_at: None,
+                    reap_reason: None,
+                    error: None,
+                    ledger_closed: false,
+                    last_busy_at: None,
+                    budget_pool_id: req.budget_pool_id.clone(),
+                    cap_pool_id,
+                    bandwidth_pool_id,
+                    auto_extensions: 0,
+                    stopped_at: None,
+                    stopped_by_reaper: false,
+                    source_snapshot: source_snapshot.clone(),
+                    forked_from: fork_source.as_ref().map(|(id, _)| id.clone()),
+                    fork_source_provider_id: fork_source.as_ref().map(|(_, pid)| pid.clone()),
+                    resumes: 0,
+                    secrets_wiped: false,
+                    run_started_at: None,
+                    cost_before_resume: 0.0,
+                    prior_pool_charges: Vec::new(),
+                    pool_spent_offset: 0.0,
+                    project: req.snapshot_project.clone(),
+                    root_mission_id: req
+                        .root_mission_id
+                        .clone()
+                        .or_else(|| req.owner_mission_id.clone()),
+                    active_mission_ids: Vec::new(),
+                    deletable_at: is_apple_silicon.then(|| now + chrono::Duration::hours(24)),
+                    has_executed_job: false,
+                    repo: validated_repo.clone(),
+                    base_key: validated_base_key.clone(),
+                    lean_mode: validated_lean_mode.clone(),
+                    warnings: Vec::new(),
+                    retain_vm_for_parent_minutes: req
+                        .retain_vm_for_parent_minutes
+                        .map(|mins| mins.min(720)),
+                    pre_stop_hook: req
+                        .pre_stop_hook
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    pre_stop_ran_at: None,
+                    pre_stop_trigger: None,
+                    pre_stop_summary: None,
+                    hard_cap_at: Some(
+                        now + chrono::Duration::minutes(self.settings.max_ttl_minutes.max(5) as i64),
+                    ),
+                    forkable: false,
+                };
+                self.machines.lock().await.push(machine.clone());
+                self.persist().await;
+                register_alias(&machine);
+                break machine;
+            }
         };
         self.ledger("spawn_requested", &machine);
 
@@ -4222,6 +4244,7 @@ impl ManagedManager {
             base_key: validated_base_key,
             lean_mode: effective_lean_mode,
             memory_mib: validated_memory_mib,
+            cap_lineage: req.cap_lineage.clone(),
         };
         let this = Arc::clone(self);
         let id = machine.id.clone();
@@ -4381,47 +4404,107 @@ impl ManagedManager {
                             else {
                                 return Err(first_err);
                             };
-                            if next_quote.usd_per_hour > admitted_rate + 1e-9 {
-                                let extra_hourly = next_quote.usd_per_hour - admitted_rate;
-                                let extra_cost = ttl_minutes as f64 / 60.0 * extra_hourly;
+                            let extra_hourly = (next_quote.usd_per_hour - admitted_rate).max(0.0);
+                            let needs_bw_recheck = next_quote.cpu > m.cpu
+                                || next_quote.usd_per_hour > m.usd_per_hour + 1e-9;
+                            let pace_started = std::time::Instant::now();
+                            m = loop {
+                                if needs_bw_recheck {
+                                    let bw_req = ComputePacingRequest {
+                                        cap_lineage: &extras.cap_lineage,
+                                        existing_bw_pool_id: m.bandwidth_pool_id.as_deref(),
+                                        lineage_mission_id: m
+                                            .owner_mission_id
+                                            .as_deref()
+                                            .or(m.requested_by_mission_id.as_deref()),
+                                        owner_mission_id: m.owner_mission_id.as_deref(),
+                                        user_id: m.owner_user_id.as_deref(),
+                                        requested_cpu: next_quote.cpu,
+                                        requested_usd_per_hour: next_quote.usd_per_hour,
+                                        exclude_machine_id: Some(&m.id),
+                                    };
+                                    self.pace_compute_bandwidth_until(bw_req, pace_started)
+                                        .await
+                                        .map_err(|e| e.to_string())?;
+                                }
                                 let _guard = self.admission.lock().await;
                                 let pools_snapshot = self.budgets.lock().await.clone();
-                                if !Self::has_active_budget_pool(
-                                    &pools_snapshot,
-                                    m.budget_pool_id.as_deref(),
-                                ) {
-                                    let live_snapshot = self.machines.lock().await.clone();
-                                    let (shared_spent_usd, shared_committed_usd) =
-                                        Self::shared_daily_usage(&live_snapshot, &pools_snapshot);
-                                    if self.settings.daily_cap_usd.is_some_and(|cap| {
-                                        shared_spent_usd + shared_committed_usd + extra_cost > cap
-                                    }) {
-                                        return Err(first_err);
+                                let live_snapshot = self.machines.lock().await.clone();
+                                if needs_bw_recheck {
+                                    let bw_req = ComputePacingRequest {
+                                        cap_lineage: &extras.cap_lineage,
+                                        existing_bw_pool_id: m.bandwidth_pool_id.as_deref(),
+                                        lineage_mission_id: m
+                                            .owner_mission_id
+                                            .as_deref()
+                                            .or(m.requested_by_mission_id.as_deref()),
+                                        owner_mission_id: m.owner_mission_id.as_deref(),
+                                        user_id: m.owner_user_id.as_deref(),
+                                        requested_cpu: next_quote.cpu,
+                                        requested_usd_per_hour: next_quote.usd_per_hour,
+                                        exclude_machine_id: Some(&m.id),
+                                    };
+                                    match Self::evaluate_compute_bandwidth(
+                                        &pools_snapshot,
+                                        &live_snapshot,
+                                        bw_req,
+                                    ) {
+                                        ComputeBandwidthVerdict::Admitted(_) => {}
+                                        ComputeBandwidthVerdict::HardReject(err) => {
+                                            return Err(err.to_string());
+                                        }
+                                        ComputeBandwidthVerdict::PaceWait(msg) => {
+                                            if pace_started.elapsed()
+                                                >= pacing::MAX_COMPUTE_PACE_DELAY
+                                            {
+                                                return Err(format!("bandwidth_exceeded: {msg}"));
+                                            }
+                                            continue;
+                                        }
                                     }
                                 }
-                                if let Some(pool) = m.budget_pool_id.as_deref() {
-                                    if self
-                                        .check_pool(
-                                            pool,
-                                            budget::reservation_for(ttl_minutes, extra_hourly),
-                                            "fallback offer",
-                                        )
-                                        .await
-                                        .is_err()
-                                    {
-                                        return Err(first_err);
+                                if extra_hourly > 1e-9 {
+                                    let extra_cost = ttl_minutes as f64 / 60.0 * extra_hourly;
+                                    if !Self::has_active_budget_pool(
+                                        &pools_snapshot,
+                                        m.budget_pool_id.as_deref(),
+                                    ) {
+                                        let (shared_spent_usd, shared_committed_usd) =
+                                            Self::shared_daily_usage(
+                                                &live_snapshot,
+                                                &pools_snapshot,
+                                            );
+                                        if self.settings.daily_cap_usd.is_some_and(|cap| {
+                                            shared_spent_usd + shared_committed_usd + extra_cost
+                                                > cap
+                                        }) {
+                                            return Err(first_err);
+                                        }
                                     }
+                                    if let Some(pool) = m.budget_pool_id.as_deref() {
+                                        if self
+                                            .check_pool(
+                                                pool,
+                                                budget::reservation_for(ttl_minutes, extra_hourly),
+                                                "fallback offer",
+                                            )
+                                            .await
+                                            .is_err()
+                                        {
+                                            return Err(first_err);
+                                        }
+                                    }
+                                    admitted_rate = next_quote.usd_per_hour;
                                 }
-                                admitted_rate = next_quote.usd_per_hour;
-                            }
-                            m = self
-                                .update(id, |row| {
-                                    row.cpu = next_quote.cpu;
-                                    row.ram_gb = next_quote.ram_gb;
-                                    row.usd_per_hour = next_quote.usd_per_hour;
-                                })
-                                .await
-                                .ok_or("machine vanished")?;
+                                break self
+                                    .update(id, |row| {
+                                        row.cpu = next_quote.cpu;
+                                        row.ram_gb = next_quote.ram_gb;
+                                        row.usd_per_hour = next_quote.usd_per_hour;
+                                    })
+                                    .await
+                                    .ok_or("machine vanished")?;
+                            };
                             current_offer = Some(next_offer);
                         }
                     }
@@ -6285,119 +6368,137 @@ impl ManagedManager {
         }
     }
 
-    /// Pace or fail-fast a managed VM spawn/resume against any governing
-    /// compute bandwidth ceilings (`compute_vcpu_per_min` / `compute_usd_per_hour`)
-    /// in `cap_lineage`. Called BEFORE taking `self.admission` so transient
-    /// pacing sleeps never block unrelated tenant spawns.
-    pub(crate) async fn pace_compute_bandwidth(
-        &self,
+    /// Pure snapshot evaluation of governing compute bandwidth ceilings
+    /// (`compute_vcpu_per_min` / `compute_usd_per_hour`) in `cap_lineage`.
+    /// Shared by unlocked pacing loops (`pace_compute_bandwidth_until`) and
+    /// atomic re-verification under `self.admission`.
+    pub(crate) fn evaluate_compute_bandwidth(
+        pools: &HashMap<String, budget::BudgetPool>,
+        all_machines: &[ManagedMachine],
         req: ComputePacingRequest<'_>,
-    ) -> Result<(), ManagedError> {
+    ) -> ComputeBandwidthVerdict {
         let ComputePacingRequest {
             cap_lineage,
             existing_bw_pool_id,
-            target_mission_id,
+            lineage_mission_id,
+            owner_mission_id,
             user_id,
             requested_cpu,
             requested_usd_per_hour,
             exclude_machine_id,
         } = req;
-        let started = std::time::Instant::now();
-        loop {
-            let pools = self.budgets.lock().await.clone();
-            let chain = if !cap_lineage.is_empty() {
-                cap_lineage.to_vec()
-            } else {
-                Self::fallback_bandwidth_lineage(&pools, existing_bw_pool_id, target_mission_id)
-            };
-            let covering = Self::resolve_covering_bandwidth_pool(&pools, &chain, user_id);
-            let Some(start_pool) = covering else {
-                return Ok(());
-            };
-            let mut pool_chain = vec![start_pool.clone()];
-            pool_chain.extend(budget::ancestor_bandwidth_chain(
-                &start_pool,
-                &chain,
-                &pools,
-                user_id,
-            ));
+        let chain = if !cap_lineage.is_empty() {
+            cap_lineage.to_vec()
+        } else {
+            Self::fallback_bandwidth_lineage(pools, existing_bw_pool_id, lineage_mission_id)
+        };
+        let covering = Self::resolve_covering_bandwidth_pool(pools, &chain, user_id);
+        let Some(start_pool) = covering else {
+            return ComputeBandwidthVerdict::Admitted(None);
+        };
+        let mut pool_chain = vec![start_pool.clone()];
+        pool_chain.extend(budget::ancestor_bandwidth_chain(
+            &start_pool,
+            &chain,
+            pools,
+            user_id,
+        ));
 
-            let machines: Vec<ManagedMachine> = self
-                .machines
-                .lock()
-                .await
+        let filtered: Vec<ManagedMachine>;
+        let machines_slice: &[ManagedMachine] = if let Some(ex) = exclude_machine_id {
+            filtered = all_machines
                 .iter()
-                .filter(|m| exclude_machine_id.is_none_or(|ex| m.id != ex))
+                .filter(|m| m.id != ex)
                 .cloned()
                 .collect();
+            &filtered
+        } else {
+            all_machines
+        };
 
-            let mut transient_block: Option<String> = None;
-            for pid in &pool_chain {
-                let Some(bw) = pools.get(pid).and_then(|p| p.bandwidth_limits.as_ref()) else {
-                    continue;
-                };
-                if !bw.has_compute_limit() {
-                    continue;
-                }
-                // Single-machine hard ceiling check (waiting can never admit a single VM
-                // larger than the pool's entire compute bandwidth ceiling).
-                if let Some(max_vcpu) = bw.compute_vcpu_per_min {
-                    if requested_cpu > max_vcpu {
-                        return Err(ManagedError::new(
-                            "bandwidth_exceeded",
-                            429,
-                            format!(
-                                "Requested machine ({requested_cpu} vCPU) exceeds mission compute bandwidth limit ({max_vcpu} vCPU/min) on pool {pid}; pick a smaller size or raise the bandwidth limit"
-                            ),
-                        ));
-                    }
-                }
-                if let Some(max_usd_h) = bw.compute_usd_per_hour {
-                    if requested_usd_per_hour > max_usd_h + 1e-6 {
-                        return Err(ManagedError::new(
-                            "bandwidth_exceeded",
-                            429,
-                            format!(
-                                "Requested machine (${requested_usd_per_hour:.2}/h) exceeds mission compute burn limit (${max_usd_h:.2}/h) on pool {pid}; pick a smaller size or raise the bandwidth limit"
-                            ),
-                        ));
-                    }
-                }
-                // Root-protection bypass: when `protect_root` is enabled on `pid`,
-                // the pool owner itself skips transient pacing delays while its
-                // pooled descendants absorb the smoothing wait.
-                if bw.protect_root && target_mission_id == Some(pid.as_str()) {
-                    continue;
-                }
-                let (cur_vcpu, cur_usd_h) =
-                    budget::bandwidth_pool_compute_usage(pid, &pools, &machines);
-                if let Some(max_vcpu) = bw.compute_vcpu_per_min {
-                    if cur_vcpu.saturating_add(requested_cpu) > max_vcpu {
-                        transient_block = Some(format!(
-                            "Mission compute bandwidth on pool {pid} is full ({cur_vcpu} + {requested_cpu} > {max_vcpu} vCPU/min); wait for a running VM to finish or raise the bandwidth limit"
-                        ));
-                        break;
-                    }
-                }
-                if let Some(max_usd_h) = bw.compute_usd_per_hour {
-                    if cur_usd_h + requested_usd_per_hour > max_usd_h + 1e-6 {
-                        transient_block = Some(format!(
-                            "Mission compute burn rate on pool {pid} is full (${cur_usd_h:.2}/h + ${requested_usd_per_hour:.2}/h > ${max_usd_h:.2}/h); wait for a running VM to finish or raise the bandwidth limit"
-                        ));
-                        break;
-                    }
-                }
-            }
-
-            let Some(msg) = transient_block else {
-                return Ok(());
+        for pid in &pool_chain {
+            let Some(bw) = pools.get(pid).and_then(|p| p.bandwidth_limits.as_ref()) else {
+                continue;
             };
-            let elapsed = started.elapsed();
-            if elapsed >= pacing::MAX_COMPUTE_PACE_DELAY {
-                return Err(ManagedError::new("bandwidth_exceeded", 429, msg));
+            if !bw.has_compute_limit() {
+                continue;
             }
-            let step = (pacing::MAX_COMPUTE_PACE_DELAY - elapsed).min(Duration::from_secs(2));
-            pacing::wait_or_notified(step).await;
+            // Single-machine hard ceiling check (waiting can never admit a single VM
+            // larger than the pool's entire compute bandwidth ceiling).
+            if let Some(max_vcpu) = bw.compute_vcpu_per_min {
+                if requested_cpu > max_vcpu {
+                    return ComputeBandwidthVerdict::HardReject(ManagedError::new(
+                        "bandwidth_exceeded",
+                        429,
+                        format!(
+                            "Requested machine ({requested_cpu} vCPU) exceeds mission compute bandwidth limit ({max_vcpu} vCPU/min) on pool {pid}; pick a smaller size or raise the bandwidth limit"
+                        ),
+                    ));
+                }
+            }
+            if let Some(max_usd_h) = bw.compute_usd_per_hour {
+                if requested_usd_per_hour > max_usd_h + 1e-6 {
+                    return ComputeBandwidthVerdict::HardReject(ManagedError::new(
+                        "bandwidth_exceeded",
+                        429,
+                        format!(
+                            "Requested machine (${requested_usd_per_hour:.2}/h) exceeds mission compute burn limit (${max_usd_h:.2}/h) on pool {pid}; pick a smaller size or raise the bandwidth limit"
+                        ),
+                    ));
+                }
+            }
+            // Root-protection bypass: when `protect_root` is enabled on `pid`,
+            // only a VM directly owned by `pid` (`owner_mission_id == Some(pid)`)
+            // skips transient pacing delays while auto-launched or explicit
+            // child VMs absorb the smoothing wait.
+            if bw.protect_root && owner_mission_id == Some(pid.as_str()) {
+                continue;
+            }
+            let (cur_vcpu, cur_usd_h) =
+                budget::bandwidth_pool_compute_usage(pid, pools, machines_slice);
+            if let Some(max_vcpu) = bw.compute_vcpu_per_min {
+                if cur_vcpu.saturating_add(requested_cpu) > max_vcpu {
+                    return ComputeBandwidthVerdict::PaceWait(format!(
+                        "Mission compute bandwidth on pool {pid} is full ({cur_vcpu} + {requested_cpu} > {max_vcpu} vCPU/min); wait for a running VM to finish or raise the bandwidth limit"
+                    ));
+                }
+            }
+            if let Some(max_usd_h) = bw.compute_usd_per_hour {
+                if cur_usd_h + requested_usd_per_hour > max_usd_h + 1e-6 {
+                    return ComputeBandwidthVerdict::PaceWait(format!(
+                        "Mission compute burn rate on pool {pid} is full (${cur_usd_h:.2}/h + ${requested_usd_per_hour:.2}/h > ${max_usd_h:.2}/h); wait for a running VM to finish or raise the bandwidth limit"
+                    ));
+                }
+            }
+        }
+        ComputeBandwidthVerdict::Admitted(Some(start_pool))
+    }
+
+    /// Pace or fail-fast a managed VM spawn/resume against any governing
+    /// compute bandwidth ceilings (`compute_vcpu_per_min` / `compute_usd_per_hour`)
+    /// in `cap_lineage`. Called BEFORE taking `self.admission` so transient
+    /// pacing sleeps never block unrelated tenant spawns.
+    pub(crate) async fn pace_compute_bandwidth_until(
+        &self,
+        req: ComputePacingRequest<'_>,
+        started: std::time::Instant,
+    ) -> Result<(), ManagedError> {
+        loop {
+            let pools = self.budgets.lock().await.clone();
+            let machines = self.machines.lock().await.clone();
+            match Self::evaluate_compute_bandwidth(&pools, &machines, req) {
+                ComputeBandwidthVerdict::Admitted(_) => return Ok(()),
+                ComputeBandwidthVerdict::HardReject(err) => return Err(err),
+                ComputeBandwidthVerdict::PaceWait(msg) => {
+                    let elapsed = started.elapsed();
+                    if elapsed >= pacing::MAX_COMPUTE_PACE_DELAY {
+                        return Err(ManagedError::new("bandwidth_exceeded", 429, msg));
+                    }
+                    let step =
+                        (pacing::MAX_COMPUTE_PACE_DELAY - elapsed).min(Duration::from_secs(2));
+                    pacing::wait_or_notified(step).await;
+                }
+            }
         }
     }
 
@@ -7603,6 +7704,27 @@ impl ManagedManager {
             Self::fallback_bandwidth_lineage(&pools, None, Some(requested_by))
         };
         let target_bw_pool = Self::resolve_covering_bandwidth_pool(&pools, &eff_bw_chain, tenant);
+        if pick.bandwidth_pool_id != target_bw_pool {
+            match Self::evaluate_compute_bandwidth(
+                &pools,
+                &all_machines,
+                ComputePacingRequest {
+                    cap_lineage,
+                    existing_bw_pool_id: None,
+                    lineage_mission_id: Some(requested_by),
+                    owner_mission_id: None,
+                    user_id: tenant,
+                    requested_cpu: pick.cpu,
+                    requested_usd_per_hour: pick.usd_per_hour,
+                    exclude_machine_id: Some(&pick.id),
+                },
+            ) {
+                ComputeBandwidthVerdict::Admitted(_) => {}
+                ComputeBandwidthVerdict::HardReject(_) | ComputeBandwidthVerdict::PaceWait(_) => {
+                    return None;
+                }
+            }
+        }
         drop(pools);
         if pick.cap_pool_id != target_cap_pool {
             let others: Vec<ManagedMachine> = all_machines
@@ -7715,6 +7837,7 @@ struct SpawnExtras {
     base_key: Option<String>,
     lean_mode: Option<String>,
     memory_mib: Option<u32>,
+    cap_lineage: Vec<String>,
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -825,127 +825,142 @@ impl ManagedManager {
             .unwrap_or(self.settings.default_ttl_minutes)
             .clamp(5, self.settings.max_ttl_minutes.max(5));
         let machine = {
-            let target_mission_for_bw = m
+            let lineage_mission_for_bw = m
                 .owner_mission_id
                 .as_deref()
                 .or(m.requested_by_mission_id.as_deref());
-            self.pace_compute_bandwidth(super::ComputePacingRequest {
+            let bw_req = super::ComputePacingRequest {
                 cap_lineage,
                 existing_bw_pool_id: m.bandwidth_pool_id.as_deref(),
-                target_mission_id: target_mission_for_bw,
+                lineage_mission_id: lineage_mission_for_bw,
+                owner_mission_id: m.owner_mission_id.as_deref(),
                 user_id: m.owner_user_id.as_deref(),
                 requested_cpu: m.cpu,
                 requested_usd_per_hour: m.usd_per_hour,
                 exclude_machine_id: Some(&m.id),
-            })
-            .await?;
-            let _guard = self.admission.lock().await;
-            let live_snapshot = self.machines.lock().await.clone();
-            let cap_pool_id = self
-                .check_concurrency_quota(
-                    &live_snapshot,
-                    &m.provider,
-                    cap_lineage,
-                    m.cap_pool_id.as_deref(),
-                    m.owner_mission_id
-                        .as_deref()
-                        .or(m.requested_by_mission_id.as_deref()),
-                    m.owner_user_id.as_deref(),
-                )
-                .await?;
-            let pools_snapshot = self.budgets.lock().await.clone();
-            let bw_chain = if !cap_lineage.is_empty() {
-                cap_lineage.to_vec()
-            } else {
-                Self::fallback_bandwidth_lineage(
-                    &pools_snapshot,
-                    m.bandwidth_pool_id.as_deref(),
-                    target_mission_for_bw,
-                )
             };
-            let bandwidth_pool_id = Self::resolve_covering_bandwidth_pool(
-                &pools_snapshot,
-                &bw_chain,
-                m.owner_user_id.as_deref(),
-            );
-            let resolved_budget_pool = if !cap_lineage.is_empty() {
-                if let Some(uid) = m.owner_user_id.as_deref() {
-                    budget::nearest_pool(
-                        cap_lineage.iter().map(String::as_str),
-                        &pools_snapshot,
-                        uid,
-                    )
-                } else {
-                    m.budget_pool_id.clone()
-                }
-            } else {
-                m.budget_pool_id.clone()
-            };
-            let new_cost = ttl as f64 / 60.0 * m.usd_per_hour;
-            if !Self::has_active_budget_pool(&pools_snapshot, resolved_budget_pool.as_deref()) {
-                let (shared_spent_usd, shared_committed_usd) =
-                    Self::shared_daily_usage(&live_snapshot, &pools_snapshot);
-                if let Some(cap) = self
-                    .settings
-                    .daily_cap_usd
-                    .filter(|cap| shared_spent_usd + shared_committed_usd + new_cost > *cap)
+            let pace_started = std::time::Instant::now();
+            loop {
+                self.pace_compute_bandwidth_until(bw_req, pace_started)
+                    .await?;
+                let _guard = self.admission.lock().await;
+                let live_snapshot = self.machines.lock().await.clone();
+                if !live_snapshot
+                    .iter()
+                    .any(|x| x.id == m.id && x.state == MachineState::Stopped)
                 {
                     return Err(ManagedError::new(
-                        "budget_exceeded",
-                        402,
-                        format!("Daily managed-machine budget ${cap:.2} would be exceeded"),
+                        "not_stopped",
+                        409,
+                        "Only a stopped machine can be resumed",
                     ));
                 }
+                let pools_snapshot = self.budgets.lock().await.clone();
+                let bandwidth_pool_id =
+                    match Self::evaluate_compute_bandwidth(&pools_snapshot, &live_snapshot, bw_req)
+                    {
+                        super::ComputeBandwidthVerdict::Admitted(pid) => pid,
+                        super::ComputeBandwidthVerdict::HardReject(err) => return Err(err),
+                        super::ComputeBandwidthVerdict::PaceWait(msg) => {
+                            if pace_started.elapsed() >= super::pacing::MAX_COMPUTE_PACE_DELAY {
+                                return Err(ManagedError::new("bandwidth_exceeded", 429, msg));
+                            }
+                            continue;
+                        }
+                    };
+                let cap_pool_id = self
+                    .check_concurrency_quota(
+                        &live_snapshot,
+                        &m.provider,
+                        cap_lineage,
+                        m.cap_pool_id.as_deref(),
+                        lineage_mission_for_bw,
+                        m.owner_user_id.as_deref(),
+                    )
+                    .await?;
+                let resolved_budget_pool = if !cap_lineage.is_empty() {
+                    if let Some(uid) = m.owner_user_id.as_deref() {
+                        budget::nearest_pool(
+                            cap_lineage.iter().map(String::as_str),
+                            &pools_snapshot,
+                            uid,
+                        )
+                    } else {
+                        m.budget_pool_id.clone()
+                    }
+                } else {
+                    m.budget_pool_id.clone()
+                };
+                let new_cost = ttl as f64 / 60.0 * m.usd_per_hour;
+                if !Self::has_active_budget_pool(&pools_snapshot, resolved_budget_pool.as_deref()) {
+                    let (shared_spent_usd, shared_committed_usd) =
+                        Self::shared_daily_usage(&live_snapshot, &pools_snapshot);
+                    if let Some(cap) = self
+                        .settings
+                        .daily_cap_usd
+                        .filter(|cap| shared_spent_usd + shared_committed_usd + new_cost > *cap)
+                    {
+                        return Err(ManagedError::new(
+                            "budget_exceeded",
+                            402,
+                            format!("Daily managed-machine budget ${cap:.2} would be exceeded"),
+                        ));
+                    }
+                }
+                if let Some(pool) = resolved_budget_pool.as_deref() {
+                    self.check_pool(
+                        pool,
+                        budget::reservation_for(ttl, m.usd_per_hour),
+                        "this resume",
+                    )
+                    .await?;
+                }
+                let live: Vec<String> = live_snapshot
+                    .iter()
+                    .filter(|x| {
+                        x.id != m.id && (x.state.is_live() || x.state == MachineState::Stopped)
+                    })
+                    .map(|x| x.name.clone())
+                    .collect();
+                let now = Utc::now();
+                let cost_so_far = m.cost_usd.max(m.estimated_cost(now));
+                let name = if live.contains(&m.name) {
+                    allocate_name(&m.size, &live)
+                } else {
+                    m.name.clone()
+                };
+                let machine = self
+                    .update(&m.id, |x| {
+                        x.change_pool(resolved_budget_pool, now);
+                        x.name = name;
+                        x.state = MachineState::Provisioning;
+                        x.cap_pool_id = cap_pool_id;
+                        x.bandwidth_pool_id = bandwidth_pool_id;
+                        x.fork_source_provider_id = Some(pid.clone());
+                        x.provider_id = None;
+                        x.resumes += 1;
+                        x.cost_before_resume = cost_so_far;
+                        x.cost_usd = cost_so_far;
+                        x.cost_is_metered = false;
+                        x.ledger_closed = false;
+                        x.run_started_at = Some(now);
+                        x.expires_at = now + chrono::Duration::minutes(ttl as i64);
+                        x.stopped_at = None;
+                        x.stopped_by_reaper = false;
+                        x.destroy_reason = None;
+                        x.online_at = None;
+                        x.error = None;
+                        x.pre_stop_ran_at = None;
+                        x.pre_stop_trigger = None;
+                        x.pre_stop_summary = None;
+                    })
+                    .await
+                    .ok_or_else(|| {
+                        ManagedError::new("not_found", 404, "Unknown managed machine")
+                    })?;
+                register_alias(&machine);
+                break machine;
             }
-            if let Some(pool) = resolved_budget_pool.as_deref() {
-                self.check_pool(
-                    pool,
-                    budget::reservation_for(ttl, m.usd_per_hour),
-                    "this resume",
-                )
-                .await?;
-            }
-            let live: Vec<String> = live_snapshot
-                .iter()
-                .filter(|x| x.id != m.id && (x.state.is_live() || x.state == MachineState::Stopped))
-                .map(|x| x.name.clone())
-                .collect();
-            let now = Utc::now();
-            let cost_so_far = m.cost_usd.max(m.estimated_cost(now));
-            let name = if live.contains(&m.name) {
-                allocate_name(&m.size, &live)
-            } else {
-                m.name.clone()
-            };
-            let machine = self
-                .update(&m.id, |x| {
-                    x.change_pool(resolved_budget_pool, now);
-                    x.name = name;
-                    x.state = MachineState::Provisioning;
-                    x.cap_pool_id = cap_pool_id;
-                    x.bandwidth_pool_id = bandwidth_pool_id;
-                    x.fork_source_provider_id = Some(pid.clone());
-                    x.provider_id = None;
-                    x.resumes += 1;
-                    x.cost_before_resume = cost_so_far;
-                    x.cost_usd = cost_so_far;
-                    x.cost_is_metered = false;
-                    x.ledger_closed = false;
-                    x.run_started_at = Some(now);
-                    x.expires_at = now + chrono::Duration::minutes(ttl as i64);
-                    x.stopped_at = None;
-                    x.stopped_by_reaper = false;
-                    x.destroy_reason = None;
-                    x.online_at = None;
-                    x.error = None;
-                    x.pre_stop_ran_at = None;
-                    x.pre_stop_trigger = None;
-                    x.pre_stop_summary = None;
-                })
-                .await
-                .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
-            register_alias(&machine);
-            machine
         };
         self.ledger("resume_requested", &machine);
         let this = std::sync::Arc::clone(self);

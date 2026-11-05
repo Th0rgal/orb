@@ -41,3 +41,32 @@ export async function saveSideThread<T>(scope:string,value:T):Promise<void> {
  const database=await db();
  return new Promise((resolve,reject)=>{const tx=database.transaction('drafts','readwrite');tx.objectStore('drafts').put(value,`thread:${scope}`);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);});
 }
+export async function updateSideThread<T>(
+ scope: string,
+ updater: (current: T | undefined) => T | undefined,
+): Promise<{ updated: boolean; value: T | undefined }> {
+ const database = await db();
+ return new Promise((resolve, reject) => {
+  const tx = database.transaction('drafts', 'readwrite');
+  const store = tx.objectStore('drafts');
+  const key = `thread:${scope}`;
+  const req = store.get(key);
+  let updated = false;
+  let next: T | undefined;
+  req.onsuccess = () => {
+   try {
+    next = updater(req.result as T | undefined);
+    if (next !== undefined) {
+     updated = true;
+     store.put(next, key);
+    }
+   } catch (err) {
+    tx.abort();
+    reject(err);
+   }
+  };
+  req.onerror = () => reject(req.error);
+  tx.oncomplete = () => resolve({ updated, value: next });
+  tx.onerror = () => reject(tx.error);
+ });
+}
