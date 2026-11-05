@@ -14,7 +14,21 @@ pub(super) struct Entry {
     pub session_id: Option<String>,
     #[serde(default)]
     pub job_id: Option<Uuid>,
+    #[serde(default)]
+    pub interrupt_target_job_id: Option<Uuid>,
     pub assignment: serde_json::Value,
+}
+
+#[derive(Debug)]
+pub(super) struct EnqueueOutcome {
+    /// `true` when this message is still `waiting` and unbound (`job_id.is_none()`);
+    /// `false` when replaying an already-accepted / bound receipt.
+    pub waiting_unbound: bool,
+    /// Placement observed under `DISPATCH_ADMISSION` when admitted (or re-observed on replay).
+    pub placement: remote_grok::RemotePlacement,
+    /// Live `job_id` active when this message was originally admitted; remote
+    /// interruption is fenced to this exact `job_id`.
+    pub interrupt_target_job_id: Option<Uuid>,
 }
 
 fn assignment(mission: &Mission) -> serde_json::Value {
@@ -213,24 +227,24 @@ pub(super) async fn enqueue(
     expected: Option<&crate::api::writer_recycle::WriterContinuation>,
     content: String,
     id: Uuid,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<EnqueueOutcome, (StatusCode, String)> {
     let _guard = DISPATCH_ADMISSION.lock().await;
     let _file = dispatch_admission::durable_lock(&state.config)
         .await
         .map_err(internal_error)?;
     // Accepted receipts precede current-assignment admission on retries.
-    let previous: Option<(String, String)> = state
+    let previous: Option<(String, String, String)> = state
         .projects
         .lock()
         .map_err(internal_error)?
         .query_row(
-            "SELECT mission_id,state FROM remote_message_queue WHERE user_id=?1 AND message_id=?2",
+            "SELECT mission_id,state,payload FROM remote_message_queue WHERE user_id=?1 AND message_id=?2",
             params![user, id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(internal_error)?;
-    if let Some((owner, status)) = previous {
+    if let Some((owner, status, payload_json)) = previous {
         if !crate::orb_spec::remote_outbox_admit_enqueue(crate::orb_spec::RemoteOutboxEnqueue {
             already_exists: true,
             same_mission: owner == mid.to_string(),
@@ -244,7 +258,27 @@ pub(super) async fn enqueue(
                 "This message ID was already used or cancelled".into(),
             ));
         }
-        return Ok(());
+        let stored: Option<Entry> = serde_json::from_str(&payload_json).ok();
+        let placement =
+            remote_grok::placement(&state.config.working_dir, &control.mission_store, mid)
+                .await
+                .map_err(internal_error)?
+                .unwrap_or_else(|| remote_grok::RemotePlacement {
+                    node_id: stored
+                        .as_ref()
+                        .map(|e| e.node_id.clone())
+                        .unwrap_or_default(),
+                    job_id: Uuid::nil(),
+                    live: false,
+                });
+        let waiting_unbound =
+            status == "waiting" && stored.as_ref().is_some_and(|e| e.job_id.is_none());
+        let interrupt_target_job_id = stored.and_then(|e| e.interrupt_target_job_id);
+        return Ok(EnqueueOutcome {
+            waiting_unbound,
+            placement,
+            interrupt_target_job_id,
+        });
     }
     machine_transfer::guard(&control.mission_store, mid)
         .await
@@ -330,11 +364,12 @@ pub(super) async fn enqueue(
         };
         return Err((StatusCode::CONFLICT, msg));
     }
+    let interrupt_target_job_id = placement.live.then_some(placement.job_id);
     save(
         &state.projects,
         &Entry {
             user_id: user.into(),
-            node_id: placement.node_id,
+            node_id: placement.node_id.clone(),
             // Older OpenCode jobs use a placeholder until the stream reports
             // their real session. Do not pin that placeholder as native identity.
             session_id: mission
@@ -342,6 +377,7 @@ pub(super) async fn enqueue(
                 .clone()
                 .filter(|id| mission.backend != "opencode" || id.starts_with("ses_")),
             job_id: None,
+            interrupt_target_job_id,
             message: QueuedMessage {
                 id,
                 content,
@@ -354,7 +390,12 @@ pub(super) async fn enqueue(
             assignment: assignment(&mission),
         },
     )
-    .map_err(internal_error)
+    .map_err(internal_error)?;
+    Ok(EnqueueOutcome {
+        waiting_unbound: true,
+        placement,
+        interrupt_target_job_id,
+    })
 }
 
 /// Called *inside* dispatch admission, immediately before checking the live run.
@@ -624,6 +665,7 @@ mod tests {
                     node_id: "nippur".into(),
                     session_id: None,
                     job_id: None,
+                    interrupt_target_job_id: None,
                     assignment: serde_json::json!({}),
                     message: QueuedMessage {
                         id: *id,
@@ -693,6 +735,7 @@ mod tests {
                     node_id: "nippur".into(),
                     session_id: mission.session_id.clone(),
                     job_id: None,
+                    interrupt_target_job_id: None,
                     assignment: assignment(&mission),
                     message: QueuedMessage {
                         id,
@@ -784,6 +827,7 @@ mod tests {
                     node_id: "nippur".into(),
                     session_id: None,
                     job_id: None,
+                    interrupt_target_job_id: None,
                     assignment: assignment(mission),
                     message: QueuedMessage {
                         id: Uuid::new_v4(),
@@ -824,6 +868,7 @@ mod tests {
             node_id: "nippur".into(),
             session_id: None,
             job_id: None,
+            interrupt_target_job_id: None,
             assignment: serde_json::json!({}),
         };
         save(&db, &entry(ids[0], mid)).unwrap();
@@ -883,6 +928,7 @@ mod tests {
             node_id: "nippur".into(),
             session_id: None,
             job_id: None,
+            interrupt_target_job_id: None,
             assignment: serde_json::json!({}),
         };
         {
@@ -936,6 +982,7 @@ mod tests {
                     node_id: "managed-mm1".into(),
                     session_id: ses,
                     job_id: None,
+                    interrupt_target_job_id: None,
                     assignment: assignment(&mission),
                     message: QueuedMessage {
                         id,

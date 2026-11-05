@@ -166,6 +166,20 @@ for p in sorted(targets, reverse=True):\n\
             }
         }
     }
+    // Fallback `CancelMission` is fenced to the exact `placement.job_id` so a
+    // concurrent job transition can never cancel a newer turn.
+    let still_same_job = remote_grok::placement(
+        &state.config.working_dir,
+        &control.mission_store,
+        mission_id,
+    )
+    .await
+    .ok()
+    .flatten()
+    .is_some_and(|cur| cur.live && cur.job_id == placement.job_id);
+    if !still_same_job {
+        return false;
+    }
     let (tx, rx) = oneshot::channel();
     if control
         .cmd_tx
@@ -480,7 +494,7 @@ pub async fn post_message(
                 } else {
                     content.clone()
                 };
-            if let Err((status, error)) = remote_queue::enqueue(
+            let enqueue_outcome = match remote_queue::enqueue(
                 &state,
                 &control,
                 &user.id,
@@ -491,98 +505,134 @@ pub async fn post_message(
             )
             .await
             {
-                if auto_replace_on_same_node
-                    && error.starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)
-                {
-                    let new_id = auto_replace_remote_mission_on_same_node(
-                        &state, &control, &user, mid, &placement, &content, id,
-                    )
-                    .await?;
-                    warnings.push(format!(
-                        "Automatically spawned continuation mission {new_id} on remote node '{}' (supersedes_mission_id={mid})",
-                        placement.node_id
-                    ));
-                    return Ok(Json(ControlMessageResponse {
-                        id,
-                        queued: false,
-                        message_accepted: true,
-                        mission_id: Some(new_id),
-                        delivery_mode: (delivery_mode != MessageDeliveryMode::Queue)
-                            .then_some(delivery_mode),
-                        interrupted_tool: None,
-                        replaced_by_mission_id: Some(new_id),
-                        previous_execution: None,
-                        warnings,
-                    }));
+                Ok(outcome) => outcome,
+                Err((status, error)) => {
+                    if auto_replace_on_same_node
+                        && error.starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)
+                    {
+                        let new_id = auto_replace_remote_mission_on_same_node(
+                            &state, &control, &user, mid, &placement, &content, id,
+                        )
+                        .await?;
+                        warnings.push(format!(
+                            "Automatically spawned continuation mission {new_id} on remote node '{}' (supersedes_mission_id={mid})",
+                            placement.node_id
+                        ));
+                        return Ok(Json(ControlMessageResponse {
+                            id,
+                            queued: false,
+                            message_accepted: true,
+                            mission_id: Some(new_id),
+                            delivery_mode: (delivery_mode != MessageDeliveryMode::Queue)
+                                .then_some(delivery_mode),
+                            interrupted_tool: None,
+                            replaced_by_mission_id: Some(new_id),
+                            previous_execution: None,
+                            warnings,
+                        }));
+                    }
+                    return Err((status, error));
                 }
-                return Err((status, error));
-            }
+            };
             // Idle continuations retain their immediate-delivery behavior.
             // A racing dispatch or temporary failure leaves the durable entry
             // queued for the same-node retry loop; permanent continuation
             // refusals withdraw the unsubmitted entry and surface immediately.
+            // Replaying an already-delivered or job-bound receipt (`!waiting_unbound`)
+            // returns the receipt without re-delivering or interrupting any live turn.
             let mut interrupted_tool = None;
-            if !placement.live {
-                if let Err((status, error)) = remote_grok::deliver_queued(
-                    &state,
-                    &control,
-                    &user.id,
-                    mid,
-                    placement.clone(),
-                    id,
-                )
-                .await
-                {
-                    if error.starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)
-                        || error.starts_with(remote_grok::REMOTE_AUTH_REQUIRED)
+            if enqueue_outcome.waiting_unbound {
+                let admitted_placement = enqueue_outcome.placement;
+                if !admitted_placement.live {
+                    if let Err((status, error)) = remote_grok::deliver_queued(
+                        &state,
+                        &control,
+                        &user.id,
+                        mid,
+                        admitted_placement.clone(),
+                        id,
+                    )
+                    .await
                     {
-                        let _ = remote_queue::finish(&state.projects, &user.id, id, "cancelled");
-                        if auto_replace_on_same_node
-                            && error.starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)
+                        if error.starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)
+                            || error.starts_with(remote_grok::REMOTE_AUTH_REQUIRED)
                         {
-                            let new_id = auto_replace_remote_mission_on_same_node(
-                                &state, &control, &user, mid, &placement, &content, id,
-                            )
-                            .await?;
-                            warnings.push(format!(
-                                "Automatically spawned continuation mission {new_id} on remote node '{}' (supersedes_mission_id={mid})",
-                                placement.node_id
-                            ));
-                            return Ok(Json(ControlMessageResponse {
-                                id,
-                                queued: false,
-                                message_accepted: true,
-                                mission_id: Some(new_id),
-                                delivery_mode: (delivery_mode != MessageDeliveryMode::Queue)
-                                    .then_some(delivery_mode),
-                                interrupted_tool: None,
-                                replaced_by_mission_id: Some(new_id),
-                                previous_execution: None,
-                                warnings,
-                            }));
+                            let _ =
+                                remote_queue::finish(&state.projects, &user.id, id, "cancelled");
+                            if auto_replace_on_same_node
+                                && error
+                                    .starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)
+                            {
+                                let new_id = auto_replace_remote_mission_on_same_node(
+                                    &state,
+                                    &control,
+                                    &user,
+                                    mid,
+                                    &admitted_placement,
+                                    &content,
+                                    id,
+                                )
+                                .await?;
+                                warnings.push(format!(
+                                    "Automatically spawned continuation mission {new_id} on remote node '{}' (supersedes_mission_id={mid})",
+                                    admitted_placement.node_id
+                                ));
+                                return Ok(Json(ControlMessageResponse {
+                                    id,
+                                    queued: false,
+                                    message_accepted: true,
+                                    mission_id: Some(new_id),
+                                    delivery_mode: (delivery_mode != MessageDeliveryMode::Queue)
+                                        .then_some(delivery_mode),
+                                    interrupted_tool: None,
+                                    replaced_by_mission_id: Some(new_id),
+                                    previous_execution: None,
+                                    warnings,
+                                }));
+                            }
+                            return Err((status, error));
                         }
-                        return Err((status, error));
                     }
-                }
-            } else if delivery_mode != MessageDeliveryMode::Queue {
-                {
-                    let _guard = DISPATCH_ADMISSION.lock().await;
-                    let _file = dispatch_admission::durable_lock(&state.config)
+                } else if delivery_mode != MessageDeliveryMode::Queue {
+                    let fenced_placement = {
+                        let _guard = DISPATCH_ADMISSION.lock().await;
+                        let _file = dispatch_admission::durable_lock(&state.config)
+                            .await
+                            .map_err(internal_error)?;
+                        let current_placement = remote_grok::placement(
+                            &state.config.working_dir,
+                            &control.mission_store,
+                            mid,
+                        )
                         .await
                         .map_err(internal_error)?;
-                    if remote_queue::is_waiting(&state.projects, &user.id, id)
-                        .map_err(internal_error)?
-                    {
-                        let _ = remote_queue::promote(&state.projects, &user.id, id);
-                    }
-                }
-                let did_interrupt =
-                    interrupt_remote_mission_job(&state, &control, mid, &placement, delivery_mode)
+                        match (&current_placement, enqueue_outcome.interrupt_target_job_id) {
+                            (Some(cur), Some(expected_job))
+                                if cur.live
+                                    && cur.job_id == expected_job
+                                    && remote_queue::promote(&state.projects, &user.id, id)
+                                        .is_ok() =>
+                            {
+                                current_placement
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(target_placement) = fenced_placement {
+                        let did_interrupt = interrupt_remote_mission_job(
+                            &state,
+                            &control,
+                            mid,
+                            &target_placement,
+                            delivery_mode,
+                        )
                         .await;
-                if delivery_mode == MessageDeliveryMode::InterruptNow {
-                    interrupted_tool = Some(did_interrupt);
+                        if delivery_mode == MessageDeliveryMode::InterruptNow {
+                            interrupted_tool = Some(did_interrupt);
+                        }
+                    }
+                    remote_queue::wake();
                 }
-                remote_queue::wake();
             }
             let queued =
                 remote_queue::is_waiting(&state.projects, &user.id, id).map_err(internal_error)?;

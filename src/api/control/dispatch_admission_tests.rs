@@ -7887,6 +7887,7 @@ async fn remote_queue_status_wait_does_not_hold_admission() {
         node_id: fixture.node.id.clone(),
         session_id: None,
         job_id: Some(Uuid::new_v4()),
+        interrupt_target_job_id: None,
         assignment: json!({}),
         message: QueuedMessage {
             id,
@@ -7939,6 +7940,7 @@ async fn send_now_interrupt_promotes_remote_follow_up_with_same_id_and_keeps_que
             node_id: "absent-node".into(),
             session_id: None,
             job_id: None,
+            interrupt_target_job_id: None,
             assignment: json!({}),
             message: QueuedMessage {
                 id,
@@ -7996,6 +7998,7 @@ async fn remote_queue_retires_deleted_mission_even_with_bound_job() {
         node_id: "deleted-node".into(),
         session_id: None,
         job_id: Some(Uuid::new_v4()),
+        interrupt_target_job_id: None,
         assignment: json!({}),
         message: QueuedMessage {
             id,
@@ -19789,4 +19792,245 @@ async fn rejected_interrupt_now_does_not_signal_local_child_tools() {
         "rejected interrupt_now request must not SIGINT active writer's child tools"
     );
     let _ = parent.kill().await;
+}
+
+#[tokio::test]
+async fn replayed_remote_interrupt_now_does_not_interrupt_delivered_or_newer_job() {
+    use crate::remote_node::job_ledger::{self, JobHandle, JobHandleKind};
+
+    let h = Harness::new().await;
+    let m = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("RESERVE-1"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            m.id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                track: Some(Some("trio-reserve1".into())),
+                github_pr: Some(None),
+                tags: Some(vec!["pr-writer".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(m.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    h.state
+        .projects
+        .absorb_track("lido", "trio-reserve1", None, None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&crate::api::track_leases::lease_request(
+            "lido",
+            "trio-reserve1",
+            &m.id.to_string(),
+            "writer",
+            None,
+        ))
+        .unwrap();
+    let writer = h
+        .control
+        .mission_store
+        .get_mission(m.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let now = chrono::Utc::now();
+    let job_1 = Uuid::new_v4();
+    job_ledger::record(
+        &h.state.config.working_dir,
+        JobHandle {
+            mission_id: writer.id,
+            node_id: "unconfigured-node".into(),
+            job_id: job_1,
+            started_at: now,
+            submission_sequence: 1,
+            accepted_at: Some(now),
+            heartbeat_at: Some(now),
+            disk_reservation_bytes: 0,
+            kind: JobHandleKind::Mission,
+            identity: None,
+            wait_for_completion: None,
+            wake_on_terminal: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let msg_1 = Uuid::new_v4();
+    let identity = Harness::assertion(&writer);
+    let res1 = h
+        .request(
+            false,
+            writer.id,
+            json!({
+                "client_message_id": msg_1,
+                "content": "urgent steer 1",
+                "mode": "interrupt_now",
+                "continue_identity": identity
+            }),
+        )
+        .await;
+    assert_eq!(res1.status(), StatusCode::OK);
+    let body1: serde_json::Value = serde_json::from_str(&res1.text().await.unwrap()).unwrap();
+    assert_eq!(body1["queued"], json!(true));
+    assert_eq!(body1["interrupted_tool"], json!(true));
+
+    // Simulate `msg_1` having been delivered while `job_2` is now actively running `writer.id`.
+    assert!(remote_queue::finish(&h.state.projects, &h.user.id, msg_1, "accepted").unwrap());
+    job_ledger::remove(&h.state.config.working_dir, job_1).await;
+    let job_2 = Uuid::new_v4();
+    job_ledger::record(
+        &h.state.config.working_dir,
+        JobHandle {
+            mission_id: writer.id,
+            node_id: "unconfigured-node".into(),
+            job_id: job_2,
+            started_at: now,
+            submission_sequence: 2,
+            accepted_at: Some(now),
+            heartbeat_at: Some(now),
+            disk_reservation_bytes: 0,
+            kind: JobHandleKind::Mission,
+            identity: None,
+            wait_for_completion: None,
+            wake_on_terminal: false,
+        },
+    )
+    .await
+    .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(writer.id, MissionStatus::Active)
+        .await
+        .unwrap();
+
+    // Replaying delivered `msg_1` with `mode: "interrupt_now"` must return the accepted receipt
+    // WITHOUT interrupting `job_2`!
+    let replay_delivered = h
+        .request(
+            false,
+            writer.id,
+            json!({
+                "client_message_id": msg_1,
+                "content": "urgent steer 1",
+                "mode": "interrupt_now",
+                "continue_identity": identity
+            }),
+        )
+        .await;
+    assert_eq!(replay_delivered.status(), StatusCode::OK);
+    let replay_body: serde_json::Value =
+        serde_json::from_str(&replay_delivered.text().await.unwrap()).unwrap();
+    assert_eq!(replay_body["queued"], json!(false));
+    assert_eq!(replay_body["message_accepted"], json!(true));
+    assert_eq!(
+        replay_body["interrupted_tool"],
+        serde_json::Value::Null,
+        "replaying an already-delivered receipt must never interrupt a live remote job"
+    );
+    assert_eq!(
+        h.control
+            .mission_store
+            .get_mission(writer.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MissionStatus::Active
+    );
+
+    // Next, queue `msg_2` while `job_2` is active (`interrupt_target_job_id == Some(job_2)`),
+    // then advance the live job to `job_3` while `msg_2` is still waiting. Replaying `msg_2`
+    // must NOT interrupt `job_3` because interruption is fenced to `job_2`.
+    let msg_2 = Uuid::new_v4();
+    let res2 = h
+        .request(
+            false,
+            writer.id,
+            json!({
+                "client_message_id": msg_2,
+                "content": "urgent steer 2",
+                "mode": "interrupt_now",
+                "continue_identity": identity
+            }),
+        )
+        .await;
+    assert_eq!(res2.status(), StatusCode::OK);
+    job_ledger::remove(&h.state.config.working_dir, job_2).await;
+    let job_3 = Uuid::new_v4();
+    job_ledger::record(
+        &h.state.config.working_dir,
+        JobHandle {
+            mission_id: writer.id,
+            node_id: "unconfigured-node".into(),
+            job_id: job_3,
+            started_at: now,
+            submission_sequence: 3,
+            accepted_at: Some(now),
+            heartbeat_at: Some(now),
+            disk_reservation_bytes: 0,
+            kind: JobHandleKind::Mission,
+            identity: None,
+            wait_for_completion: None,
+            wake_on_terminal: false,
+        },
+    )
+    .await
+    .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(writer.id, MissionStatus::Active)
+        .await
+        .unwrap();
+
+    let replay_newer_job = h
+        .request(
+            false,
+            writer.id,
+            json!({
+                "client_message_id": msg_2,
+                "content": "urgent steer 2",
+                "mode": "interrupt_now",
+                "continue_identity": identity
+            }),
+        )
+        .await;
+    assert_eq!(replay_newer_job.status(), StatusCode::OK);
+    let newer_body: serde_json::Value =
+        serde_json::from_str(&replay_newer_job.text().await.unwrap()).unwrap();
+    assert_eq!(newer_body["queued"], json!(true));
+    assert_eq!(
+        newer_body["interrupted_tool"],
+        serde_json::Value::Null,
+        "replaying a waiting message after the target job moved on must not interrupt a newer job"
+    );
+    assert_eq!(
+        h.control
+            .mission_store
+            .get_mission(writer.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MissionStatus::Active
+    );
 }

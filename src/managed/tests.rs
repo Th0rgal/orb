@@ -5319,6 +5319,41 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
         "staging failure must not overwrite origin WIP ref with a stale index commit"
     );
 
+    // 4e. Provider exec wrapper must run as workspace owner (`orbnode`) when present, and any
+    // discovered `.git` marker whose repository detection fails (e.g. `safe.directory` ownership
+    // rejection or unreadable/broken `.git` pointer) must be recorded as `failed` rather than
+    // silently skipped with `dirty_repos=0`!
+    assert!(
+        stage_fail_script.contains("runuser -u orbnode -- env HOME=/var/lib/orb-node")
+            && stage_fail_script.contains("sudo -n -u orbnode env HOME=/var/lib/orb-node"),
+        "provider_exec fallback script must switch to orbnode with its Git environment"
+    );
+    std::fs::remove_dir_all(&linked_wt).unwrap();
+    let rejected_repo = work_root.join("rejected-ownership-repo");
+    std::fs::create_dir_all(&rejected_repo).unwrap();
+    std::fs::write(
+        rejected_repo.join(".git"),
+        "gitdir: /nonexistent/orbnode/rejected-gitdir\n",
+    )
+    .unwrap();
+    let detect_fail_run = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(stage_fail_script.replace(
+            "'/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'",
+            &format!("'{}'", work_root.display()),
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        !detect_fail_run.status.success(),
+        "repository detection failure on a discovered .git marker must exit non-zero"
+    );
+    let detect_fail_stdout = String::from_utf8_lossy(&detect_fail_run.stdout);
+    assert!(
+        detect_fail_stdout.contains("dirty_repos=1 pushed=0 failed=1"),
+        "expected discovered .git marker detection failure to record failed=1, got: {detect_fail_stdout}"
+    );
+
     // 5. Hard-cap teardown MUST refresh the checkpoint even after an earlier `pre_720m_hard_cap`
     // warning checkpoint already set `pre_stop_ran_at`, so work produced during the remaining
     // 10-minute window before destruction is never lost!

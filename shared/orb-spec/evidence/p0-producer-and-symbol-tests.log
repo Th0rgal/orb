@@ -2,7 +2,7 @@
 running 1 test
 test api::control::dispatch_admission_tests::remote_submission_rejects_closed_snapshots_and_records_host_observations ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.73s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3770 filtered out; finished in 0.68s
 
 
 running 14 tests
@@ -21,14 +21,14 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3755 filtered out; finished in 0.43s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3757 filtered out; finished in 0.53s
 
 
 running 2 tests
 test missing_extra_duplicate_nontext_and_imported_symbols_fail ... ok
 test real_object_and_archive_mutations_are_rejected ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.87s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.24s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -163,7 +163,7 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.23s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -298,7 +298,7 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.21s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-    Finished `test` profile [unoptimized] target(s) in 0.11s
+    Finished `test` profile [unoptimized] target(s) in 0.09s
      Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-70c0d7a6354c9bb7)

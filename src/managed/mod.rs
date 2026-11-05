@@ -5305,6 +5305,29 @@ impl ManagedManager {
         let roots_expr = quoted_roots.join(" ");
         let mut script = format!(
             r#"set +e
+[ -r /etc/orb/boost-env ] && {{ set -a; . /etc/orb/boost-env; set +a; }}
+export GIT_TERMINAL_PROMPT=0
+export GIT_AUTHOR_NAME="${{GIT_AUTHOR_NAME:-Orb Reaper}}"
+export GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-orb-reaper@localhost}}"
+export GIT_COMMITTER_NAME="${{GIT_COMMITTER_NAME:-Orb Reaper}}"
+export GIT_COMMITTER_EMAIL="${{GIT_COMMITTER_EMAIL:-orb-reaper@localhost}}"
+export SANDBOXED_SH_MISSION_ID="${{SANDBOXED_SH_MISSION_ID:-{mission_uuid}}}"
+if [ -z "${{SANDBOXED_SECRETS_DIR:-}}" ] && [ -z "${{GITHUB_TOKEN:-}}" ] && [ -z "${{GH_TOKEN:-}}" ]; then
+  for sec_base in "${{XDG_RUNTIME_DIR:-}}/paloma-secrets" "${{HOME:-}}/.paloma-secrets"; do
+    [ -d "$sec_base" ] || continue
+    if [ -r "$sec_base/$SANDBOXED_SH_MISSION_ID/GITHUB_TOKEN" ]; then
+      export SANDBOXED_SECRETS_DIR="$sec_base/$SANDBOXED_SH_MISSION_ID"
+      break
+    fi
+    for cand_tok in "$sec_base"/*/GITHUB_TOKEN; do
+      if [ -r "$cand_tok" ]; then
+        export SANDBOXED_SECRETS_DIR=$(dirname "$cand_tok")
+        break
+      fi
+    done
+    [ -n "${{SANDBOXED_SECRETS_DIR:-}}" ] && break
+  done
+fi
 ORB_WIP_REF='{wip_ref}'
 ORB_CHECKPOINT_REPOS=0
 ORB_CHECKPOINT_PUSHED=0
@@ -5312,10 +5335,34 @@ ORB_CHECKPOINT_FAILED=0
 ORB_SEEN_TOPS=""
 orb_checkpoint_repo() {{
   target_dir="$1"
-  [ -d "$target_dir" ] || return 0
-  cd "$target_dir" 2>/dev/null || return 0
-  repo_dir=$(git rev-parse --show-toplevel 2>/dev/null || true)
-  [ -n "$repo_dir" ] || return 0
+  must_be_repo="${{2:-0}}"
+  if [ ! -d "$target_dir" ] || ! cd "$target_dir" 2>/dev/null; then
+    if [ "$must_be_repo" -eq 1 ]; then
+      ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+      ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+    fi
+    return 0
+  fi
+  rev_err=""
+  if ! repo_dir=$(git rev-parse --show-toplevel 2>&1); then
+    rev_err="$repo_dir"
+    repo_dir=""
+  fi
+  if [ -z "$repo_dir" ]; then
+    case "$rev_err" in
+      *"not a git repository"*)
+        if [ "$must_be_repo" -eq 1 ]; then
+          ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+          ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+        fi
+        ;;
+      *)
+        ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+        ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+        ;;
+    esac
+    return 0
+  fi
   case "
 $ORB_SEEN_TOPS
 " in
@@ -5325,7 +5372,11 @@ $repo_dir
   esac
   ORB_SEEN_TOPS="$ORB_SEEN_TOPS
 $repo_dir"
-  cd "$repo_dir" 2>/dev/null || return 0
+  if ! cd "$repo_dir" 2>/dev/null; then
+    ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+    ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+    return 0
+  fi
   if ! status_out=$(git status --porcelain 2>/dev/null); then
     ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
     ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
@@ -5403,12 +5454,12 @@ $repo_dir"
 }}
 for root in {roots_expr}; do
   [ -d "$root" ] || continue
-  orb_checkpoint_repo "$root"
+  orb_checkpoint_repo "$root" 0
   find_list=$(mktemp "/tmp/orb-wip-find.XXXXXX")
   find "$root" -maxdepth 4 -name .git \( -type d -o -type f \) 2>/dev/null > "$find_list" || true
   while IFS= read -r gitmarker; do
     [ -n "$gitmarker" ] || continue
-    orb_checkpoint_repo "$(dirname "$gitmarker")"
+    orb_checkpoint_repo "$(dirname "$gitmarker")" 1
   done < "$find_list"
   rm -f "$find_list"
 done
@@ -5464,7 +5515,47 @@ printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d failed=%d\n'
 
         if transport == "none" {
             if let (Some(provider), Some(pid)) = (self.provider_for(&m.provider), &m.provider_id) {
-                if let Ok(val) = provider.exec(pid, &script, 45).await {
+                // Provider exec runs as `root` on Boost (`as_root: true`) or `user` on Boat,
+                // whereas worker repositories and credentials belong to `orbnode`. Switch to
+                // `orbnode` with its Git/Boost environment whenever `orbnode` exists on the VM.
+                let mut delim = "__ORB_PRE_STOP_CHECKPOINT_EOF__".to_string();
+                while script.contains(&delim) {
+                    delim.push('_');
+                }
+                let provider_exec_script = format!(
+                    r#"orb_ckpt_script=$(mktemp "/tmp/orb-ckpt-run.XXXXXX") || exit 1
+cat <<'{delim}' > "$orb_ckpt_script"
+{script}
+{delim}
+chmod 0644 "$orb_ckpt_script"
+orb_rc=1
+if [ "$(id -un 2>/dev/null)" != "orbnode" ] && id -u orbnode >/dev/null 2>&1; then
+  orb_uid=$(id -u orbnode)
+  orb_path="/opt/boost/bin:/opt/elan/bin:/opt/orb/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  if [ "$(id -u 2>/dev/null)" = "0" ]; then
+    if command -v runuser >/dev/null 2>&1; then
+      runuser -u orbnode -- env HOME=/var/lib/orb-node USER=orbnode LOGNAME=orbnode XDG_RUNTIME_DIR="/run/user/$orb_uid" SANDBOXED_SH_MISSION_ID='{mission_uuid}' GIT_TERMINAL_PROMPT=0 PATH="$orb_path" sh "$orb_ckpt_script"
+      orb_rc=$?
+    else
+      su -s /bin/sh orbnode -c "HOME=/var/lib/orb-node USER=orbnode LOGNAME=orbnode XDG_RUNTIME_DIR=/run/user/$orb_uid SANDBOXED_SH_MISSION_ID='{mission_uuid}' GIT_TERMINAL_PROMPT=0 PATH=\"$orb_path\" sh '$orb_ckpt_script'"
+      orb_rc=$?
+    fi
+  elif command -v sudo >/dev/null 2>&1 && sudo -n -u orbnode true 2>/dev/null; then
+    sudo -n -u orbnode env HOME=/var/lib/orb-node USER=orbnode LOGNAME=orbnode XDG_RUNTIME_DIR="/run/user/$orb_uid" SANDBOXED_SH_MISSION_ID='{mission_uuid}' GIT_TERMINAL_PROMPT=0 PATH="$orb_path" sh "$orb_ckpt_script"
+    orb_rc=$?
+  else
+    sh "$orb_ckpt_script"
+    orb_rc=$?
+  fi
+else
+  sh "$orb_ckpt_script"
+  orb_rc=$?
+fi
+rm -f "$orb_ckpt_script"
+exit "$orb_rc"
+"#
+                );
+                if let Ok(val) = provider.exec(pid, &provider_exec_script, 45).await {
                     transport = "provider_exec";
                     exit_code = exec_exit_code(&val).and_then(|c| i32::try_from(c).ok());
                     output_snippet = val
