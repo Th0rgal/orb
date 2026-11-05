@@ -203,6 +203,66 @@ blocked:
      follow-ups continue queueing onto that live mission so `Edit`, `Send now`,
      and `Remove` remain atomic on a single queue.
 
+## 6. Warm-cache single ownership, partial-failure dirty discipline & duplicate-question disambiguation (P0)
+
+During mission `06203bdc-3543-483e-a8c5-3bf20eb5c34a`, the user submitted a
+`/btw` question (`1013a4da-ba7a-4628-91a7-0c859b78438c`), switched missions
+while it ran, and reopened `06203bdc` after `1013a4da` had completed cleanly on
+Core. Background warm sync had already reconciled `1013a4da` (setting
+`btwSession.active = false` in `localStorage` and populating `warmBtwByParent`
+with all 13 answered turns and `dirty = false`), yet mounting `SideQuestions`
+hydrated stale 12-turn IndexedDB `saved.history` + `saved.pending`, overwrote
+`warmBtwByParent` with those stale 12 turns (`dirty = false`) from its
+persistence effect, short-circuited `reconcileBtwServerHistory` without hitting
+Core, and permanently wrote
+`"Side question interrupted. Retry to request a complete answer."` into
+IndexedDB.
+
+All clients enforce four invariants so cached and warm `/btw` state never
+fabricates an interruption or drops completed turns:
+
+1. **Single owner of warm `/btw` state (`btwAgent.ts` / `OrbBtwStore` / `OrbWarmSyncCoordinator`)**:
+   - View persistence (`SideQuestionPanel.tsx` writing IndexedDB snapshots)
+     **never** writes unverified or disk-hydrated `saved.history` back into
+     `warmBtwByParent`, and never marks an unverified entry clean (`dirty: false`).
+   - Only `btwAgent.ts` mutates `warmBtwByParent`: starting or queueing onto a
+     side session records `latest` and marks `dirty = true`; completing a turn
+     appends without erasing prior turns; only an authoritative Core
+     reconciliation (`storeWarmBtwResult`) marks `dirty = false`.
+   - On mount, if `peekWarmBtwState(parent)` already holds reconciled turns,
+     async `readSideQuestion` preserves those warm turns (merging local
+     attachment metadata) instead of rolling `history` back to an older
+     IndexedDB snapshot.
+2. **Mandatory Core verification for pending and previously-interrupted turns**:
+   - Mounting with `saved.pending` (unless `peekWarmBtwState` already proves the
+     pending turn was answered), running event/completion `resync()`, or
+     clicking `Retry` on an accepted turn (`!notSent`) passes `force: true` so
+     `reconcileBtwServerHistory` never short-circuits on a cached entry.
+   - A persisted `interruptedError` (`!notSent`) is re-verified against Core on
+     open (without flashing the stale error banner while reconnecting) and on
+     `Retry` (adopting Core's completed answer instead of sending a duplicate
+     follow-up if Core already finished the turn).
+3. **Partial or failed HTTP reads stay dirty and non-authoritative**:
+   - Any failure in `btwThreadChain`, `?tag=btw-parent:...`, direct lookup of
+     known `btwSession(parent).id`, or per-thread `getMissionEvents` marks the
+     reconciliation non-authoritative (`authoritative: false` on desktop,
+     `markBtwDirty` on iOS, `markClean = false` on Android).
+   - Non-authoritative reconciliations never mark the warm cache clean and never
+     transition `awaitingServerPending` into `"Side question interrupted..."`;
+     `SideQuestionPanel` keeps `busy = true` (`"Connection interrupted — reconnecting…"`)
+     so recovery polling/streaming heals automatically once connectivity returns.
+   - Known `btwSession(parent).id` (desktop/iOS/Android) is fetched directly
+     when absent from the `?tag=btw-parent:...&limit=50` page so tag-index lag or
+     >50 historical side threads cannot hide the active/latest session.
+4. **Pending-turn disambiguation across duplicate question text (`doesTurnAnswerPending`)**:
+   - Repeated short prompts (for example asking `"and now?"` multiple times in
+     one conversation) must not match an older completed turn against a newly
+     submitted pending turn.
+   - `doesTurnAnswerPending` matches by exact `userEventId === turnId` when
+     present, or by trimmed question text only when the reconciled match count
+     exceeds the pre-pending local match count and the latest matching turn's
+     timestamp is not older than `startedAt - 5 s`.
+
 ## Client parity
 
 - **Orb desktop (`orb/`)**: implemented in `orb/src/SideQuestionPanel.tsx`,

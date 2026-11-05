@@ -28,7 +28,8 @@ export function btwThoughts(parent:string):Thought[]{
  const stored=thoughtsOf(agentItems()[s.id]??[]),live=liveThoughts()[s.id]??[];
  return live.length>stored.length||(live.length===stored.length&&live.some(item=>!item.done))?live:stored;
 }
-import type {SideAttachment,SideEvent,SideExchange} from './sideQuestionClient';
+import {doesTurnAnswerPending,type SideAttachment,type SideEvent,type SideExchange} from './sideQuestionClient';
+export {doesTurnAnswerPending};
 import {transferFile} from './uploads';
 import {createSignal} from 'solid-js';
 import type {LocalActivity} from './localAgents';
@@ -216,6 +217,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   }
   delete s.queuedCursor;
   delete s.brokenSession;save(parent,s);
+  recordWarmBtwTurnCompleted(parent,{id:`btw:${s.id}:${Date.now()}`,question:s.question,answer:state.text,...(s.startedAt?{at:s.startedAt}:{})},s.id);
   receive({type:'done',answer:state.text});return;
  }
  let previous:string|undefined;
@@ -304,6 +306,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
     if(latestUser.timestamp){s.startedAt=latestUser.timestamp;reportedStart=latestUser.timestamp;}else delete s.startedAt;
     commitBtwDeliveredCursor(s,latestUser.event_id??undefined);
     save(parent,s);
+    if(finished)recordWarmBtwTurnCompleted(parent,finished,s.id,s);
     live=new TranscriptReducer();streamed={answer:'',narration:[]};previous=undefined;
     setLiveThoughts(all=>({...all,[s.id]:[]}));
     receive({type:'turn',question:nextQuestion,messageId:latestUser.event_id??undefined,...(latestUser.timestamp?{startedAt:latestUser.timestamp}:{}),completed:finished?{question:finished.question,answer:finished.answer,...(finished.narration?.length?{narration:finished.narration}:{})}:undefined});
@@ -348,6 +351,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
    if(maxSeq>0)s.lastSequence=maxSeq;
    delete s.queuedCursor;
    delete s.brokenSession;save(parent,s);
+   recordWarmBtwTurnCompleted(parent,{id:`btw:${s.id}:${maxSeq||Date.now()}`,question:s.question,answer:text,...(result.narration.length?{narration:result.narration}:{}),...(reportedStart?{at:reportedStart}:{})},s.id);
    receive({type:'done',answer:text,...(result.narration.length?{narration:result.narration}:{})});return;
   }
   await new Promise<void>(resolve=>{
@@ -491,6 +495,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   if(!reuse||!s!.conversationCursor)s!.conversationCursor=snapshot.cursor;
   else s!.pendingCursor=snapshot.cursor;
   s!.contextBytes=new TextEncoder().encode(snapshot.context).length;save(parent,s!);
+  noteWarmBtwSessionStarted(parent,s!);
  };
  try{
   for(let attempt=0;;attempt++){
@@ -545,7 +550,7 @@ export async function queueBtwFollowUp(
  if(version!==connectionVersion())throw new Error('Connection changed.');
  let s=btwSession(parent);
  if(!s){
-  const reconciled=await reconcileBtwServerHistory(parent,history);
+  const reconciled=await reconcileBtwServerHistory(parent,history,undefined,{force:true});
   s=reconciled.activeSession??btwSession(parent);
  }
  if(!s)throw new Error('No active side session to queue onto.');
@@ -598,7 +603,9 @@ export async function queueBtwFollowUp(
    const id=receipt.id||clientMessageId;
    const nextSession=btwSession(parent)??s;
    if(receipt.queued){
-    save(parent,recordQueuedCursor({...nextSession,id:current.id},id));
+    const queuedSession=recordQueuedCursor({...nextSession,id:current.id},id);
+    save(parent,queuedSession);
+    noteWarmBtwSessionStarted(parent,queuedSession);
    }else{
     const cleaned:BtwSession={...nextSession,id:current.id,question,active:true,pendingCursor:snapshot.cursor,startedAt:new Date().toISOString()};
     delete cleaned.queuedCursor;
@@ -607,6 +614,7 @@ export async function queueBtwFollowUp(
      if(rest.length)cleaned.queuedCursors=rest;else delete cleaned.queuedCursors;
     }
     save(parent,cleaned);
+    noteWarmBtwSessionStarted(parent,cleaned);
    }
    return {id,missionId:current.id,prompt,queued:receipt.queued,local:false};
   }catch(error){
@@ -639,22 +647,32 @@ export function btwThreadChain(parent:string):Promise<string[]>{
  return chain;
 }
 
-type ParsedBtwThread={stamp:string;turns:(SideExchange&{at:string})[];active?:BtwSession;lastSequence:number};
+type ParsedBtwThread={stamp:string;turns:(SideExchange&{sortAt:string})[];active?:BtwSession;lastSequence:number};
 const terminalThreadCache=new Map<string,ParsedBtwThread>();
 const liveThreadEventCache=new Map<string,Map<number,StoredEvent>>();
-export function resetBtwThreadCache(){terminalThreadCache.clear();liveThreadEventCache.clear();}
+export function resetBtwThreadCache(){terminalThreadCache.clear();liveThreadEventCache.clear();resetWarmBtwForTest();}
 const btwActivity=(m:Mission)=>(m as Mission&{last_activity_at?:string}).last_activity_at||m.updated_at||m.created_at||'';
 function parseBtwThread(m:Mission,events:StoredEvent[]):Omit<ParsedBtwThread,'stamp'>{
  const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
  const lastSequence=ordered.at(-1)?.sequence??0;
- const turns:(SideExchange&{at:string})[]=[];
- let curQuestion='',curAt='',curSeq=0;
+ const turns:(SideExchange&{sortAt:string})[]=[];
+ let curQuestion='',curAt='',curSeq=0,curEventId:string|undefined;
  let curAnswers:string[]=[];let curFinal:string|undefined;let curDelta:string|undefined;
  const flush=()=>{
   const q=curQuestion.trim(),{answer:a,narration}=sideAnswer(curAnswers,curFinal);
   // Stable per question event, so a re-read never renumbers a turn.
-  if(q&&a&&!isSyntheticRemoteAssistantNote(a))turns.push({id:`btw:${m.id}:${curSeq}`,question:q,answer:a,...(narration.length?{narration}:{}),at:curAt});
-  curQuestion='';curAnswers=[];curFinal=undefined;
+  if(q&&a&&!isSyntheticRemoteAssistantNote(a)){
+   turns.push({
+    id:`btw:${m.id}:${curSeq}`,
+    question:q,
+    answer:a,
+    ...(narration.length?{narration}:{}),
+    ...(curAt?{at:curAt}:{}),
+    ...(curEventId?{userEventId:curEventId}:{}),
+    sortAt:curAt,
+   });
+  }
+  curQuestion='';curAnswers=[];curFinal=undefined;curEventId=undefined;
  };
  for(const ev of ordered){
   if(ev.event_type==='user_message'){
@@ -662,6 +680,10 @@ function parseBtwThread(m:Mission,events:StoredEvent[]):Omit<ParsedBtwThread,'st
    if(curQuestion)flush();
    curAnswers=[];curFinal=undefined;curDelta=undefined;
    curQuestion=extractBtwUserQuestion(ev.content);curAt=ev.timestamp||'';curSeq=ev.sequence;
+   const metaClientId=typeof (ev.metadata as {client_message_id?:unknown}|undefined)?.client_message_id==='string'
+    ?(ev.metadata as {client_message_id:string}).client_message_id
+    :undefined;
+   curEventId=ev.event_id||metaClientId||undefined;
   }else if(ev.event_type==='text_delta'){
    curDelta=ev.content;
   }else if((ev.event_type==='assistant_message'||ev.event_type==='assistant_message_canonical')&&!isSyntheticRemoteAssistantNote(ev.content)&&ev.content.trim()){
@@ -755,7 +777,7 @@ export function updateWarmBtwHistory(
  const k = warmBtwKey(parent);
  const existing = warmBtwByParent.get(k);
  if (existing) {
-  existing.history = history;
+  if (history.length >= existing.history.length) existing.history = history;
   if (activeSession !== undefined) existing.activeSession = activeSession;
   if (latest !== undefined) existing.latest = latest;
  } else {
@@ -765,9 +787,51 @@ export function updateWarmBtwHistory(
    history,
    activeSession,
    latest,
-   dirty: pendingDirtyBtwParents.has(k),
+   dirty: true,
   });
  }
+ reconcileWarmBtwFollows();
+}
+
+function noteWarmBtwSessionStarted(parent: string, session: BtwSession): void {
+ const ver = connectionVersion();
+ const k = `${ver}:${parent}`;
+ const existing = warmBtwByParent.get(k);
+ if (existing) {
+  existing.latest = session.id;
+  if (session.active) existing.activeSession = session;
+  existing.dirty = true;
+ } else {
+  warmBtwByParent.set(k, {
+   connVer: ver,
+   parent,
+   history: [],
+   activeSession: session.active ? session : undefined,
+   latest: session.id,
+   dirty: true,
+  });
+ }
+ reconcileWarmBtwFollows();
+}
+
+function recordWarmBtwTurnCompleted(
+ parent: string,
+ turn: SideExchange & { sortAt?: string },
+ latestId?: string,
+ nextActive?: BtwSession,
+): void {
+ const existing = warmBtwByParent.get(warmBtwKey(parent));
+ if (!existing) return;
+ const { sortAt: _sortAt, ...cleanTurn } = turn;
+ const alreadyPresent = existing.history.some(
+  row => row.question.trim() === cleanTurn.question.trim() && row.answer.trim() === cleanTurn.answer.trim(),
+ );
+ if (!alreadyPresent) {
+  existing.history = [...existing.history, cleanTurn].slice(-BTW_HISTORY_LIMIT);
+ }
+ existing.activeSession = nextActive;
+ if (latestId) existing.latest = latestId;
+ existing.dirty = true;
  reconcileWarmBtwFollows();
 }
 
@@ -900,7 +964,7 @@ export async function reconcileBtwServerHistory(
  localHistory: SideExchange[],
  signal?: AbortSignal,
  options?: { force?: boolean },
-): Promise<{ history: SideExchange[]; activeSession?: BtwSession; latest?: string }> {
+): Promise<{ history: SideExchange[]; activeSession?: BtwSession; latest?: string; authoritative?: boolean }> {
  const version = connectionVersion();
  const k = `${version}:${parent}`;
  if (!options?.force && isMultiplexSyncActive() && !pendingDirtyBtwParents.has(k)) {
@@ -910,134 +974,230 @@ export async function reconcileBtwServerHistory(
     history: cached.history.length ? cached.history : localHistory,
     activeSession: cached.activeSession,
     latest: cached.latest,
+    authoritative: true,
    };
   }
  }
- let rows:Mission[]=[];
- const chain=await btwThreadChain(parent).catch(()=>[parent]);
- try{
-  const pages=await Promise.all(chain.map(id=>api<Mission[]>(`/api/control/missions?tag=${encodeURIComponent(`btw-parent:${id}`)}&all=true&limit=20`)));
-  const seen=new Set<string>();
-  for(const res of pages)if(Array.isArray(res))for(const m of res)if(m&&!seen.has(m.id)){seen.add(m.id);rows.push(m);}
- }catch{return {history:localHistory};}
- if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
- if(!rows.length)return storeWarmBtwResult(version,parent,{history:localHistory});
- const valid=rows.filter(m=>m&&typeof m.id==='string'&&Array.isArray(m.tags)&&chain.some(id=>m.tags!.includes(`btw-parent:${id}`))&&!m.tags.includes('superseded'));
- if(!valid.length)return storeWarmBtwResult(version,parent,{history:localHistory});
- const sorted=[...valid].sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||''));
- // Load newest/active threads first with bounded concurrency and memoize
- // terminal threads so older multi-page /btw logs never delay live recovery.
- const byId=new Map<string,Omit<ParsedBtwThread,'stamp'>>();
- const prioritized=[...sorted].sort((a,b)=>{
-  const aLive=ACTIVE.includes(a.status)?1:0,bLive=ACTIVE.includes(b.status)?1:0;
-  return bLive-aLive||btwActivity(b).localeCompare(btwActivity(a));
+ let authoritative = true;
+ let rows: Mission[] = [];
+ const chain = await btwThreadChain(parent).catch(() => {
+  authoritative = false;
+  return [parent];
  });
- let cursor=0;
- await Promise.all(Array.from({length:Math.min(4,prioritized.length)},async()=>{
-  while(cursor<prioritized.length){
-   const m=prioritized[cursor++];
-   if(signal?.aborted||connectionVersion()!==version)return;
-   const live=ACTIVE.includes(m.status);
-   const cacheKey=`${version}:${m.id}`,stamp=`${btwActivity(m)}\u0000${m.status}`;
-   if(!live){
-    const hit=terminalThreadCache.get(cacheKey);
-    if(hit&&hit.stamp===stamp){byId.set(m.id,hit);continue;}
-   }else{
-    terminalThreadCache.delete(cacheKey);
-   }
-   // History, not transcript: the streamed text repairs a truncated final (repairedFinal).
-   let events:StoredEvent[];
-   try{
-    let known=liveThreadEventCache.get(cacheKey)??new Map<number,StoredEvent>();
-    const maxKnown=known.size?Math.max(...known.keys()):undefined;
-    if(maxKnown!==undefined){
-     const delta=await getMissionEvents(m.id,{view:'history',since:maxKnown});
-     if(delta.length&&Math.max(...delta.map(e=>e.sequence))<maxKnown){
-      known=new Map<number,StoredEvent>();
-      for(const ev of await getMissionEvents(m.id,{view:'history'}))known.set(ev.sequence,ev);
-     }else{
-      for(const ev of delta)known.set(ev.sequence,ev);
+ const seen = new Set<string>();
+ try {
+  const pages = await Promise.all(
+   chain.map(id => api<Mission[]>(`/api/control/missions?tag=${encodeURIComponent(`btw-parent:${id}`)}&all=true&limit=50`)),
+  );
+  for (const res of pages) {
+   if (Array.isArray(res)) {
+    for (const m of res) {
+     if (m && !seen.has(m.id)) {
+      seen.add(m.id);
+      rows.push(m);
      }
-    }else{
-     for(const ev of await getMissionEvents(m.id,{view:'history'}))known.set(ev.sequence,ev);
-    }
-    events=[...known.values()].sort((a,b)=>a.sequence-b.sequence);
-    if(live){
-     liveThreadEventCache.set(cacheKey,known);
-     while(liveThreadEventCache.size>64){
-      const oldest=liveThreadEventCache.keys().next().value;
-      if(oldest===undefined)break;
-      liveThreadEventCache.delete(oldest);
-     }
-    }else{
-     liveThreadEventCache.delete(cacheKey);
-    }
-   }catch{continue;}
-   if(signal?.aborted||connectionVersion()!==version)return;
-   const parsed=parseBtwThread(m,events);
-   byId.set(m.id,parsed);
-   if(!live){
-    terminalThreadCache.set(cacheKey,{stamp,...parsed});
-    while(terminalThreadCache.size>256){
-     const oldest=terminalThreadCache.keys().next().value;
-     if(oldest===undefined)break;
-     terminalThreadCache.delete(oldest);
     }
    }
   }
- }));
- if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
- const serverTurns:(SideExchange&{at:string})[]=[];
- let latestActive:BtwSession|undefined;
- for(const m of sorted){
-  const parsed=byId.get(m.id);
-  if(!parsed)continue;
+ } catch {
+  const existingWarm = warmBtwByParent.get(k);
+  if (existingWarm) existingWarm.dirty = true;
+  return { history: existingWarm?.history.length ? existingWarm.history : localHistory, authoritative: false };
+ }
+ const knownSession = btwSession(parent);
+ if (knownSession?.id && !seen.has(knownSession.id)) {
+  try {
+   const direct = await getMission(knownSession.id, { coreOnly: true });
+   if (
+    direct &&
+    typeof direct.id === 'string' &&
+    Array.isArray(direct.tags) &&
+    chain.some(id => direct.tags!.includes(`btw-parent:${id}`)) &&
+    !direct.tags.includes('superseded')
+   ) {
+    seen.add(direct.id);
+    rows.push(direct);
+   }
+  } catch (err) {
+   if (!(err instanceof ApiError && err.status === 404)) authoritative = false;
+  }
+ }
+ if (signal?.aborted || connectionVersion() !== version) return { history: localHistory, authoritative: false };
+ const finalize = (result: { history: SideExchange[]; activeSession?: BtwSession; latest?: string }) => {
+  if (authoritative) {
+   return { ...storeWarmBtwResult(version, parent, result), authoritative: true };
+  }
+  const existingWarm = warmBtwByParent.get(k);
+  if (existingWarm) {
+   existingWarm.dirty = true;
+   if (result.history.length >= existingWarm.history.length) existingWarm.history = result.history;
+   if (result.activeSession) existingWarm.activeSession = result.activeSession;
+   if (result.latest) existingWarm.latest = result.latest;
+  }
+  return {
+   history:
+    existingWarm && existingWarm.history.length > result.history.length ? existingWarm.history : result.history,
+   activeSession: result.activeSession,
+   latest: result.latest ?? existingWarm?.latest,
+   authoritative: false,
+  };
+ };
+ if (!rows.length) return finalize({ history: localHistory });
+ const valid = rows.filter(
+  m =>
+   m &&
+   typeof m.id === 'string' &&
+   Array.isArray(m.tags) &&
+   chain.some(id => m.tags!.includes(`btw-parent:${id}`)) &&
+   !m.tags.includes('superseded'),
+ );
+ if (!valid.length) return finalize({ history: localHistory });
+ const sorted = [...valid].sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+ // Load newest/active threads first with bounded concurrency and memoize
+ // terminal threads so older multi-page /btw logs never delay live recovery.
+ const byId = new Map<string, Omit<ParsedBtwThread, 'stamp'>>();
+ const prioritized = [...sorted].sort((a, b) => {
+  const aLive = ACTIVE.includes(a.status) ? 1 : 0,
+   bLive = ACTIVE.includes(b.status) ? 1 : 0;
+  return bLive - aLive || btwActivity(b).localeCompare(btwActivity(a));
+ });
+ let cursor = 0;
+ await Promise.all(
+  Array.from({ length: Math.min(4, prioritized.length) }, async () => {
+   while (cursor < prioritized.length) {
+    const m = prioritized[cursor++];
+    if (signal?.aborted || connectionVersion() !== version) return;
+    const live = ACTIVE.includes(m.status);
+    const cacheKey = `${version}:${m.id}`,
+     stamp = `${btwActivity(m)}\u0000${m.status}`;
+    if (!live) {
+     const hit = terminalThreadCache.get(cacheKey);
+     if (hit && hit.stamp === stamp) {
+      byId.set(m.id, hit);
+      continue;
+     }
+    } else {
+     terminalThreadCache.delete(cacheKey);
+    }
+    // History, not transcript: the streamed text repairs a truncated final (repairedFinal).
+    let events: StoredEvent[];
+    try {
+     let known = liveThreadEventCache.get(cacheKey) ?? new Map<number, StoredEvent>();
+     const maxKnown = known.size ? Math.max(...known.keys()) : undefined;
+     if (maxKnown !== undefined) {
+      const delta = await getMissionEvents(m.id, { view: 'history', since: maxKnown });
+      if (delta.length && Math.max(...delta.map(e => e.sequence)) < maxKnown) {
+       known = new Map<number, StoredEvent>();
+       for (const ev of await getMissionEvents(m.id, { view: 'history' })) known.set(ev.sequence, ev);
+      } else {
+       for (const ev of delta) known.set(ev.sequence, ev);
+      }
+     } else {
+      for (const ev of await getMissionEvents(m.id, { view: 'history' })) known.set(ev.sequence, ev);
+     }
+     events = [...known.values()].sort((a, b) => a.sequence - b.sequence);
+     if (live) {
+      liveThreadEventCache.set(cacheKey, known);
+      while (liveThreadEventCache.size > 64) {
+       const oldest = liveThreadEventCache.keys().next().value;
+       if (oldest === undefined) break;
+       liveThreadEventCache.delete(oldest);
+      }
+     } else {
+      liveThreadEventCache.delete(cacheKey);
+     }
+    } catch {
+     authoritative = false;
+     continue;
+    }
+    if (signal?.aborted || connectionVersion() !== version) return;
+    const parsed = parseBtwThread(m, events);
+    byId.set(m.id, parsed);
+    if (!live) {
+     terminalThreadCache.set(cacheKey, { stamp, ...parsed });
+     while (terminalThreadCache.size > 256) {
+      const oldest = terminalThreadCache.keys().next().value;
+      if (oldest === undefined) break;
+      terminalThreadCache.delete(oldest);
+     }
+    }
+   }
+  }),
+ );
+ if (signal?.aborted || connectionVersion() !== version) return { history: localHistory, authoritative: false };
+ const serverTurns: (SideExchange & { sortAt: string })[] = [];
+ let latestActive: BtwSession | undefined;
+ for (const m of sorted) {
+  const parsed = byId.get(m.id);
+  if (!parsed) continue;
   serverTurns.push(...parsed.turns);
-  if(parsed.active)latestActive=parsed.active;
+  if (parsed.active) latestActive = parsed.active;
  }
  // The newest thread is the one with the latest activity: each /btw question
  // re-dispatches a job on the same mission, so an old thread can be the live one.
- const latest=[...sorted].sort((a,b)=>btwActivity(a).localeCompare(btwActivity(b))).at(-1);
- let existing=btwSession(parent);
+ const latest = [...sorted].sort((a, b) => btwActivity(a).localeCompare(btwActivity(b))).at(-1);
+ let existing = btwSession(parent);
  // A session saved as running whose thread Core reports finished (or that is
- // no longer listed) is stale: it must not pin the tab to an old thread.
- if(existing?.active&&!valid.some(m=>m.id===existing!.id&&ACTIVE.includes(m.status)))existing={...existing,active:false};
- if(latestActive&&(!existing||!existing.active||existing.id!==latestActive.id||(latestActive.startedAt&&existing.startedAt!==latestActive.startedAt))){
-  save(parent,existing?.id===latestActive.id?syncSessionCursors(parent,{...existing,...latestActive}):latestActive);
- }else if(latest&&RESUMABLE.includes(latest.status)&&!existing?.active){
-  const local=latest.tags?.includes('placement:client')??false;
-  const latestParsed=byId.get(latest.id);
-  const turnCount=latestParsed?.turns.length??existing?.turnCount;
-  const lastSequence=latestParsed?.lastSequence??existing?.lastSequence;
-  const lastTurn=serverTurns.at(-1);
-  const sameSession=existing?.id===latest.id;
-  const freshSession=sameSession?existing?.freshSession:undefined;
-  if(lastTurn&&(!existing||!sameSession||existing.question!==lastTurn.question||existing.turnCount!==turnCount||existing.lastSequence!==lastSequence)){
-   save(parent,{
-    id:latest.id,
-    question:lastTurn.question,
-    harness:latest.backend||existing?.harness||'opencode',
-    model:latest.model_override||existing?.model||'builtin/smart',
+ // no longer listed on an authoritative read) is stale: it must not pin the tab to an old thread.
+ if (
+  existing?.active &&
+  !valid.some(m => m.id === existing!.id && ACTIVE.includes(m.status)) &&
+  (authoritative || valid.some(m => m.id === existing!.id))
+ ) {
+  existing = { ...existing, active: false };
+ }
+ if (
+  latestActive &&
+  (!existing ||
+   !existing.active ||
+   existing.id !== latestActive.id ||
+   (latestActive.startedAt && existing.startedAt !== latestActive.startedAt))
+ ) {
+  save(parent, existing?.id === latestActive.id ? syncSessionCursors(parent, { ...existing, ...latestActive }) : latestActive);
+ } else if (latest && RESUMABLE.includes(latest.status) && !existing?.active) {
+  const local = latest.tags?.includes('placement:client') ?? false;
+  const latestParsed = byId.get(latest.id);
+  const turnCount = latestParsed?.turns.length ?? existing?.turnCount;
+  const lastSequence = latestParsed?.lastSequence ?? existing?.lastSequence;
+  const lastTurn = serverTurns.at(-1);
+  const sameSession = existing?.id === latest.id;
+  const freshSession = sameSession ? existing?.freshSession : undefined;
+  if (
+   lastTurn &&
+   (!existing ||
+    !sameSession ||
+    existing.question !== lastTurn.question ||
+    existing.turnCount !== turnCount ||
+    existing.lastSequence !== lastSequence)
+  ) {
+   save(parent, {
+    id: latest.id,
+    question: lastTurn.question,
+    harness: latest.backend || existing?.harness || 'opencode',
+    model: latest.model_override || existing?.model || 'builtin/smart',
     local,
-    active:false,
-    baseline:0,
-    placement:sameSession?existing?.placement:undefined,
-    contextVersion:sameSession?existing?.contextVersion:undefined,
-    conversationCursor:freshSession?undefined:(sameSession?existing?.conversationCursor:undefined),
-    ...(turnCount!==undefined?{turnCount}:{}),
-    ...(lastSequence!==undefined?{lastSequence}:{}),
-    ...(freshSession?{freshSession:true}:{}),
+    active: false,
+    baseline: 0,
+    placement: sameSession ? existing?.placement : undefined,
+    contextVersion: sameSession ? existing?.contextVersion : undefined,
+    conversationCursor: freshSession ? undefined : sameSession ? existing?.conversationCursor : undefined,
+    ...(turnCount !== undefined ? { turnCount } : {}),
+    ...(lastSequence !== undefined ? { lastSequence } : {}),
+    ...(freshSession ? { freshSession: true } : {}),
    });
   }
  }
- if(!serverTurns.length)return storeWarmBtwResult(version,parent,{history:localHistory,activeSession:latestActive,latest:latest?.id});
+ if (!serverTurns.length) return finalize({ history: localHistory, activeSession: latestActive, latest: latest?.id });
  // Core is the record: its turns across every thread, in the order they were
  // asked, newest last. A locally cached turn never outranks it: appending
  // cache-only rows after Core's put an old answer below the newest one.
- serverTurns.sort((a,b)=>a.at.localeCompare(b.at));
- const local=new Map(localHistory.map(h=>[h.question.trim()+'\u0000'+h.answer.trim(),h]));
- const merged:SideExchange[]=serverTurns.map(({at:_at,...turn})=>{const cached=local.get(turn.question.trim()+'\u0000'+turn.answer.trim());return cached?.attachments?{...turn,attachments:cached.attachments}:turn;});
- return storeWarmBtwResult(version,parent,{history:merged.slice(-BTW_HISTORY_LIMIT),activeSession:latestActive,latest:latest?.id});
+ serverTurns.sort((a, b) => a.sortAt.localeCompare(b.sortAt));
+ const local = new Map(localHistory.map(h => [h.question.trim() + '\u0000' + h.answer.trim(), h]));
+ const merged: SideExchange[] = serverTurns.map(({ sortAt: _sortAt, ...turn }) => {
+  const cached = local.get(turn.question.trim() + '\u0000' + turn.answer.trim());
+  return cached?.attachments ? { ...turn, attachments: cached.attachments } : turn;
+ });
+ return finalize({ history: merged.slice(-BTW_HISTORY_LIMIT), activeSession: latestActive, latest: latest?.id });
 }
 
 /** Core before the fix of 2026-10-21 kept only an OpenCode closing line written

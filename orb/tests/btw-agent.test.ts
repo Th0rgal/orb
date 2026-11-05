@@ -1079,3 +1079,106 @@ it('propagates server user_message timestamps into activeSession.startedAt and w
   });
  }finally{vi.useRealTimers();}
 });
+
+it('never marks warm /btw state clean when reconcileBtwServerHistory hits a partial event-read failure',async()=>{
+ const streamMod=await import('../src/stream');
+ const muxSpy=vi.spyOn(streamMod,'isMultiplexSyncActive').mockReturnValue(true);
+ const {peekWarmBtwState,reconcileBtwServerHistory}=await import('../src/btwAgent');
+ try{
+  vi.mocked(api).mockImplementation(async(path:string)=>{
+   if(path.startsWith('/api/control/missions?tag=')){
+    return [
+     {id:'side-old',status:'completed',created_at:'2026-11-04T22:00:00Z',updated_at:'2026-11-04T22:01:00Z',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:partial-parent'],history:[],title:null},
+     {id:'side-new',status:'completed',created_at:'2026-11-04T23:04:25Z',updated_at:'2026-11-04T23:05:54Z',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:partial-parent'],history:[],title:null},
+    ] as any;
+   }
+   return [] as any;
+  });
+  let failNewest=true;
+  vi.mocked(streamMod.getMissionEvents).mockImplementation(async(id:string)=>{
+   if(id==='side-old'){
+    return [
+     {id:1,sequence:1,event_type:'user_message',content:'Earlier question',timestamp:'2026-11-04T22:00:01Z'},
+     {id:2,sequence:2,event_type:'assistant_message',content:'Earlier answer.',timestamp:'2026-11-04T22:00:30Z'},
+    ];
+   }
+   if(failNewest)throw new TypeError('Load failed');
+   return [
+    {id:3,sequence:1,event_type:'user_message',event_id:'aae35757-783a-4754-b132-451ada03f287',content:'nothing has been merged on main for 8h, why?',timestamp:'2026-11-04T23:04:25Z'},
+    {id:4,sequence:2,event_type:'assistant_message',content:'PR #1543 is waiting on CI.',timestamp:'2026-11-04T23:05:54Z'},
+   ];
+  });
+  const partial=await reconcileBtwServerHistory('partial-parent',[]);
+  expect(partial.authoritative).toBe(false);
+  expect(partial.history.map(h=>h.answer)).toEqual(['Earlier answer.']);
+  expect(peekWarmBtwState('partial-parent')?.clean).not.toBe(true);
+
+  // Because the partial crawl was not marked clean, an unforced reconcile re-queries Core instead of returning stale cache:
+  failNewest=false;
+  const full=await reconcileBtwServerHistory('partial-parent',partial.history);
+  expect(full.authoritative).toBe(true);
+  expect(full.history.map(h=>h.answer)).toEqual(['Earlier answer.','PR #1543 is waiting on CI.']);
+  expect(full.history[1]?.userEventId).toBe('aae35757-783a-4754-b132-451ada03f287');
+  expect(peekWarmBtwState('partial-parent')?.clean).toBe(true);
+ }finally{
+  muxSpy.mockRestore();
+ }
+});
+
+it('recovers known btwSession by direct getMission lookup when omitted from the tag page and disambiguates duplicate questions',async()=>{
+ const {getMissionEvents}=await import('../src/stream');
+ const {doesTurnAnswerPending,reconcileBtwServerHistory}=await import('../src/btwAgent');
+ localStorage.setItem(
+  'agent:'+sideQuestionKey('06203bdc-3543-483e-a8c5-3bf20eb5c34a'),
+  JSON.stringify({
+   id:'1013a4da-ba7a-4628-91a7-0c859b78438c',
+   question:'nothing has been merged on main for 8h, why?',
+   harness:'opencode',
+   model:'builtin/smart',
+   local:false,
+   active:true,
+   baseline:0,
+  }),
+ );
+ vi.mocked(api).mockImplementation(async()=>[
+  {id:'3d7b16e7-older',status:'completed',created_at:'2026-11-04T19:20:00Z',updated_at:'2026-11-04T19:21:00Z',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:06203bdc-3543-483e-a8c5-3bf20eb5c34a'],history:[],title:null},
+ ] as any);
+ vi.mocked(getMission).mockImplementation(async(id:string)=>{
+  if(id==='1013a4da-ba7a-4628-91a7-0c859b78438c'){
+   return {
+    id,
+    status:'completed',
+    created_at:'2026-11-04T23:04:25Z',
+    updated_at:'2026-11-04T23:05:54Z',
+    backend:'opencode',
+    model_override:'builtin/smart',
+    tags:['btw-parent:06203bdc-3543-483e-a8c5-3bf20eb5c34a'],
+    history:[],
+    title:null,
+   } as any;
+  }
+  return {id,status:'active',tags:[],history:[],title:'Main',created_at:'',updated_at:''} as any;
+ });
+ vi.mocked(getMissionEvents).mockImplementation(async(id:string)=>{
+  if(id==='3d7b16e7-older'){
+   return [
+    {id:1,sequence:1,event_type:'user_message',content:'and now?',timestamp:'2026-11-04T19:20:01Z'},
+    {id:2,sequence:2,event_type:'assistant_message',content:'First status.',timestamp:'2026-11-04T19:21:00Z'},
+   ];
+  }
+  return [
+   {id:3,sequence:1,event_type:'user_message',event_id:'aae35757-783a-4754-b132-451ada03f287',content:'nothing has been merged on main for 8h, why?',timestamp:'2026-11-04T23:04:25Z'},
+   {id:4,sequence:2,event_type:'assistant_message',content:'Merge queue explanation.',timestamp:'2026-11-04T23:05:54Z'},
+  ];
+ });
+ const res=await reconcileBtwServerHistory('06203bdc-3543-483e-a8c5-3bf20eb5c34a',[]);
+ expect(getMission).toHaveBeenCalledWith('1013a4da-ba7a-4628-91a7-0c859b78438c',{coreOnly:true});
+ expect(res.history.map(h=>h.answer)).toEqual(['First status.','Merge queue explanation.']);
+
+ // Duplicate question disambiguation ("and now?" asked a second time):
+ const firstOnly=[res.history[0]];
+ expect(doesTurnAnswerPending({question:'and now?',startedAt:'2026-11-04T20:07:00Z'},firstOnly,firstOnly)).toBe(false);
+ expect(doesTurnAnswerPending({question:'and now?',startedAt:'2026-11-04T20:07:00Z'},firstOnly,[])).toBe(false);
+ const both=[...firstOnly,{id:'3d7b16e7-older:4',question:'and now?',answer:'Second status.',at:'2026-11-04T20:07:02Z'}];
+ expect(doesTurnAnswerPending({question:'and now?',startedAt:'2026-11-04T20:07:00Z'},both,firstOnly)).toBe(true);
+});

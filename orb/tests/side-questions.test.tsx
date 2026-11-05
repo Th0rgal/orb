@@ -5,13 +5,17 @@ import { Composer } from '../src/composer/Composer';
 import { SideQuestions, type SideQuestionsHandle } from '../src/SideQuestionPanel';
 import { askSide, boundedHistory, sideContext } from '../src/sideQuestionClient';
 const serverReconcile=vi.hoisted(()=>({
- fn:async(_parent:string,local:any[])=>({history:local} as {history:any[];activeSession?:any;latest?:string}),
+ fn:async(_parent:string,local:any[],_signal?:AbortSignal,_options?:{force?:boolean})=>({history:local} as {history:any[];activeSession?:any;latest?:string;authoritative?:boolean}),
  reconnect:async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0}),
+}));
+const warmMock=vi.hoisted(()=>({
+ current:new Map<string,{history:any[];activeSession?:any;latest?:string;clean:boolean}>(),
+ updateSpy:vi.fn(),
 }));
 const watchMock=vi.hoisted(()=>({fn:async(_parent:string,_signal:AbortSignal,_receive:(e:any)=>void)=>{}}));
 const queueFollowUpMock=vi.hoisted(()=>({enabled:false,fn:vi.fn()}));
 const sessionMock=vi.hoisted(()=>({current:undefined as any,rev:undefined as (()=>number)|undefined,bump:undefined as (()=>void)|undefined}));
-vi.mock('../src/btwAgent',async()=>{const {createSignal}=await import('solid-js');const [rev,setRev]=createSignal(0);sessionMock.rev=rev;sessionMock.bump=()=>setRev(v=>v+1);const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>{sessionMock.rev?.();return sessionMock.current;},startFreshBtwSession:()=>{if(sessionMock.current){sessionMock.current={...sessionMock.current,freshSession:true};sessionMock.bump?.();}},btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[])=>serverReconcile.fn(parent,local),get queueBtwFollowUp(){return queueFollowUpMock.enabled?queueFollowUpMock.fn:undefined;},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
+vi.mock('../src/btwAgent',async()=>{const {createSignal}=await import('solid-js');const [rev,setRev]=createSignal(0);sessionMock.rev=rev;sessionMock.bump=()=>setRev(v=>v+1);const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>{sessionMock.rev?.();return sessionMock.current;},startFreshBtwSession:()=>{if(sessionMock.current){sessionMock.current={...sessionMock.current,freshSession:true};sessionMock.bump?.();}},btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[],signal?:AbortSignal,options?:{force?:boolean})=>serverReconcile.fn(parent,local,signal,options),peekWarmBtwState:(parent:string)=>warmMock.current.get(parent),updateWarmBtwHistory:(...args:any[])=>warmMock.updateSpy(...args),get queueBtwFollowUp(){return queueFollowUpMock.enabled?queueFollowUpMock.fn:undefined;},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
 const thoughts=vi.hoisted(()=>({value:[] as {kind:'think';key:string;text:string;done:boolean}[]}));
 const storage=vi.hoisted(()=>new Map<string,unknown>());
 vi.mock('../src/composerDrafts',()=>({
@@ -20,7 +24,7 @@ vi.mock('../src/composerDrafts',()=>({
  readSideThread:async(key:string)=>storage.get('thread:'+key),
  saveSideThread:async(key:string,value:unknown)=>{storage.set('thread:'+key,structuredClone(value));},
 }));
-afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];sessionMock.current=undefined;queueFollowUpMock.enabled=false;queueFollowUpMock.fn.mockReset();watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];sessionMock.current=undefined;warmMock.current.clear();warmMock.updateSpy.mockReset();queueFollowUpMock.enabled=false;queueFollowUpMock.fn.mockReset();watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
 it('routes /btw away from the working agent while it is busy',async()=>{
  const send=vi.fn(),ask=vi.fn(()=>true),stop=vi.fn();
  render(()=><Composer placeholder="Follow-up" busy onSend={send} onStop={stop} onBtw={ask}/>);
@@ -491,4 +495,178 @@ it('anchors Working elapsed time on the turn start timestamp across page reloads
   const progress=document.querySelector('.btw-progress')?.textContent??'';
   expect(progress).toBe('Working…');
  });
+});
+
+it('replays 06203bdc: never overwrites a clean warm /btw completion with stale IndexedDB pending history',async()=>{
+ const parentId='06203bdc-3543-483e-a8c5-3bf20eb5c34a';
+ const sideId='1013a4da-ba7a-4628-91a7-0c859b78438c';
+ const {sideQuestionKey,readSideQuestion,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ const staleTwelveTurns=Array.from({length:12},(_,i)=>({
+  id:`prior-${i+1}`,
+  question:`Earlier question ${i+1}`,
+  answer:`Earlier answer ${i+1}`,
+ }));
+ const completedThirteenTurns=[
+  ...staleTwelveTurns,
+  {
+   id:`${sideId}:10`,
+   question:'nothing has been merged on main for 8h, why?',
+   answer:'PR #1543 is waiting on the required CI check.',
+   at:'2026-11-04T23:05:54Z',
+   userEventId:'aae35757-783a-4754-b132-451ada03f287',
+  },
+ ];
+ await writeSideQuestion(sideQuestionKey(parentId),{
+  history:staleTwelveTurns,
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{
+   question:'nothing has been merged on main for 8h, why?',
+   answer:'',
+   error:'',
+   turnId:'aae35757-783a-4754-b132-451ada03f287',
+   startedAt:'2026-11-04T23:04:25Z',
+  },
+ });
+ // Background warm sync already reconciled Core and flipped session.active -> false:
+ sessionMock.current={id:sideId,question:'nothing has been merged on main for 8h, why?',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0};
+ warmMock.current.set(parentId,{history:completedThirteenTurns,latest:sideId,clean:true});
+ serverReconcile.fn=async(parent)=>({
+  history:warmMock.current.get(parent)?.history??[],
+  latest:sideId,
+  authoritative:true,
+ });
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission={parentId} items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ expect(await screen.findByText('PR #1543 is waiting on the required CI check.')).toBeTruthy();
+ expect(screen.queryByText(/Side question interrupted/)).toBeNull();
+ expect(warmMock.updateSpy).not.toHaveBeenCalled();
+ await waitFor(async()=>{
+  const healed=await readSideQuestion(sideQuestionKey(parentId));
+  expect(healed?.history).toHaveLength(13);
+  expect(healed?.pending).toBeUndefined();
+ });
+});
+
+it('auto-heals an already-persisted Side question interrupted state via forced Core reconcile without flashing the error',async()=>{
+ const parentId='06203bdc-healed';
+ const {sideQuestionKey,readSideQuestion,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ await writeSideQuestion(sideQuestionKey(parentId),{
+  history:[{id:'p1',question:'Prior?',answer:'Prior answer.'}],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{
+   question:'nothing has been merged on main for 8h, why?',
+   answer:'',
+   error:'Side question interrupted. Retry to request a complete answer.',
+   turnId:'aae35757-783a-4754-b132-451ada03f287',
+  },
+ });
+ let finishReconcile!:(res:{history:any[];latest?:string;authoritative?:boolean})=>void;
+ const reconcileCalls:Array<{force?:boolean}|undefined>=[];
+ serverReconcile.fn=(_parent,_local,_sig,options)=>{
+  reconcileCalls.push(options);
+  return new Promise(resolve=>{finishReconcile=resolve;});
+ };
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission={parentId} items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ expect(await screen.findByText('Reconnecting…')).toBeTruthy();
+ expect(screen.queryByText(/Side question interrupted/)).toBeNull();
+ expect(reconcileCalls[0]).toEqual({force:true});
+ finishReconcile({
+  history:[
+   {id:'p1',question:'Prior?',answer:'Prior answer.'},
+   {id:'p2',question:'nothing has been merged on main for 8h, why?',answer:'Recovered authoritative Core answer.',userEventId:'aae35757-783a-4754-b132-451ada03f287'},
+  ],
+  latest:'1013a4da-ba7a-4628-91a7-0c859b78438c',
+  authoritative:true,
+ });
+ expect(await screen.findByText('Recovered authoritative Core answer.')).toBeTruthy();
+ expect(screen.queryByText(/Side question interrupted/)).toBeNull();
+ await waitFor(async()=>{
+  const healed=await readSideQuestion(sideQuestionKey(parentId));
+  expect(healed?.pending).toBeUndefined();
+ });
+});
+
+it('keeps awaitingServerPending in reconnecting state on non-authoritative reconcile and heals when connectivity returns',async()=>{
+ const parentId='net-blip-btw';
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ await writeSideQuestion(sideQuestionKey(parentId),{
+  history:[],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{question:'Check build logs',answer:'',error:''},
+ });
+ let streamReconnect:(()=>void)|undefined;
+ const streamMod=await import('../src/stream');
+ const spy=vi.spyOn(streamMod,'streamMission').mockImplementation((_id,_cb,onReconnect)=>{
+  streamReconnect=onReconnect;
+  return ()=>{};
+ });
+ let attempt=0;
+ serverReconcile.fn=async()=>{
+  attempt++;
+  if(attempt===1)return {history:[],latest:'side-net-1',authoritative:false};
+  return {
+   history:[{id:'s1',question:'Check build logs',answer:'All green after reconnect.'}],
+   latest:'side-net-1',
+   authoritative:true,
+  };
+ };
+ let handle!:SideQuestionsHandle;
+ try{
+  render(()=><SideQuestions mission={parentId} items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+  expect(await screen.findByText('Connection interrupted — reconnecting…')).toBeTruthy();
+  expect(screen.queryByText(/Side question interrupted/)).toBeNull();
+  streamReconnect?.();
+  expect(await screen.findByText('All green after reconnect.')).toBeTruthy();
+  expect(screen.queryByText(/Side question interrupted/)).toBeNull();
+ }finally{
+  spy.mockRestore();
+ }
+});
+
+it('disambiguates duplicate question prompts ("and now?") and makes Retry adopt Core completion without resending',async()=>{
+ const parentId='dup-and-retry';
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ await writeSideQuestion(sideQuestionKey(parentId),{
+  history:[{id:'t1',question:'and now?',answer:'First status check.',at:'2026-11-04T19:21:00Z'}],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{question:'and now?',answer:'',error:'',startedAt:'2026-11-04T20:07:00Z'},
+ });
+ const fetchSpy=vi.fn(async()=>response([{type:'done',answer:'Should never be called'}]));
+ vi.stubGlobal('fetch',fetchSpy);
+ // Initial reconcile returns only the first "and now?" (second turn was interrupted before completing):
+ serverReconcile.fn=async()=>({
+  history:[{id:'t1',question:'and now?',answer:'First status check.',at:'2026-11-04T19:21:00Z'}],
+  authoritative:true,
+ });
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission={parentId} items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ // Must NOT falsely treat the first "and now?" as answering the second "and now?":
+ expect(await screen.findByText(/Side question interrupted/)).toBeTruthy();
+ expect(screen.getByText('First status check.')).toBeTruthy();
+
+ // Core has now completed the second "and now?" before the user clicks Retry:
+ serverReconcile.fn=async()=>({
+  history:[
+   {id:'t1',question:'and now?',answer:'First status check.',at:'2026-11-04T19:21:00Z'},
+   {id:'t2',question:'and now?',answer:'Second status check complete.',at:'2026-11-04T20:07:30Z'},
+  ],
+  authoritative:true,
+ });
+ fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+ expect(await screen.findByText('Second status check complete.')).toBeTruthy();
+ expect(screen.queryByText(/Side question interrupted/)).toBeNull();
+ expect(fetchSpy).not.toHaveBeenCalled();
 });
