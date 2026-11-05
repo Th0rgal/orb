@@ -354,21 +354,75 @@ class IdentityTests(unittest.TestCase):
         privd = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(privd)
 
-        # Valid ops_read command
         packed = privd.check_scope_restrictions(
-            "ops_read", None, ["journalctl", "-u", "orb-core", "-n", "20", "--no-pager"], cwd="/var/log"
+            "ops_read", None, ["journalctl", "--disk-usage"], cwd="/var/log"
         )
         self.assertEqual(packed, 1793)
+        for safe_argv in (
+            ["cat", "/proc/cpuinfo"],
+            ["head", "/proc/meminfo"],
+            ["tail", "/proc/loadavg"],
+            ["stat", "/etc/os-release"],
+            ["free", "-h"],
+            ["df", "-hT"],
+            ["uptime"],
+            ["uname", "-r"],
+            ["lsblk"],
+            ["ps", "-eo", "pid,ppid,uid,comm"],
+            ["ss", "-lntu"],
+            ["systemctl", "is-active", "orb-core.service"],
+            ["systemctl", "is-failed", "orb-core"],
+        ):
+            self.assertEqual(
+                privd.check_scope_restrictions("ops_read", None, safe_argv, cwd="/"),
+                1793,
+            )
 
-        # Valid service_deploy command for matching unit
+        for root_argv in (
+            ["cat", "/etc/hostname"],
+            ["docker", "inspect", "orb-core"],
+            ["ps", "-ef"],
+            ["systemctl", "show", "orb-core"],
+        ):
+            self.assertEqual(
+                privd.check_scope_restrictions("root_exec", None, root_argv, cwd="/root"),
+                1795,
+            )
+
         packed_deploy = privd.check_scope_restrictions(
             "service_deploy", "orb-core", ["systemctl", "restart", "orb-core.service"], cwd="/root"
         )
         self.assertEqual(packed_deploy, 1794)
 
-        # Attack vectors: shell metacharacters, path traversal, unsafe env, wrong unit, escalation
+        for blocked_argv in (
+            ["ps; id"],
+            ["cat", "/etc/shadow"],
+            ["cat", "/root/.env"],
+            ["cat", "/proc/1/environ"],
+            ["head", "/proc/self/environ"],
+            ["cat", "/proc/1/mem"],
+            ["stat", "/proc/self/fd"],
+            ["cat", "/proc/1/fd/0"],
+            ["docker", "inspect", "orb-core"],
+            ["docker", "ps"],
+            ["ps", "aux"],
+            ["ps", "-ef"],
+            ["ps", "-eo", "pid,args"],
+            ["systemctl", "show", "orb-core"],
+            ["systemctl", "show", "-p", "Environment", "orb-core"],
+            ["systemctl", "status", "orb-core"],
+            ["journalctl", "-u", "orb-core", "-n", "20", "--no-pager"],
+            ["grep", "TOKEN", "/proc/cpuinfo"],
+            ["ls", "/root"],
+            ["du", "-sh", "/root"],
+            ["cat", "/proc//cpuinfo"],
+            ["cat", "/proc/./cpuinfo"],
+        ):
+            with self.assertRaises(ValueError):
+                privd.check_scope_restrictions("ops_read", None, blocked_argv, cwd="/")
+
         with self.assertRaises(ValueError):
-            privd.check_scope_restrictions("ops_read", None, ["ps; id"], cwd="/root")
+            privd.check_scope_restrictions("ops_read", None, ["uptime"], cwd="/var//log")
         with self.assertRaises(ValueError):
             privd.check_scope_restrictions("root_exec", None, ["id"], cwd="/var/lib/../../etc")
         with self.assertRaises(ValueError):
@@ -383,7 +437,6 @@ class IdentityTests(unittest.TestCase):
             privd.check_scope_restrictions(
                 "ops_read", None, ["systemctl", "restart", "orb-core"], cwd="/root"
             )
-        # Path-qualified executable bypass vectors must be rejected fail-closed
         with self.assertRaises(ValueError):
             privd.check_scope_restrictions("ops_read", None, ["/attacker-controlled/ps"], cwd="/root")
         with self.assertRaises(ValueError):
@@ -394,6 +447,100 @@ class IdentityTests(unittest.TestCase):
             privd.check_scope_restrictions(
                 "service_deploy", "orb-core", ["./systemctl", "restart", "orb-core"], cwd="/root"
             )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            uid = os.geteuid()
+            root_dir = Path(tmp)
+            os.chmod(root_dir, 0o755)
+            public_dir = root_dir / "public"
+            secret_dir = root_dir / "secret"
+            public_dir.mkdir(mode=0o755)
+            secret_dir.mkdir(mode=0o700)
+            public_file = public_dir / "cpuinfo"
+            secret_file = secret_dir / "environ"
+            public_file.write_text("processor\t: 0\n", encoding="utf-8")
+            secret_file.write_text("SYNTHETIC_SECRET=1\n", encoding="utf-8")
+            os.chmod(public_file, 0o644)
+            os.chmod(secret_file, 0o600)
+            symlink_leaf = public_dir / "cpuinfo-link"
+            symlink_leaf.symlink_to(secret_file)
+            symlink_dir = root_dir / "linked"
+            symlink_dir.symlink_to(public_dir)
+
+            allow_set = {
+                str(public_file),
+                str(symlink_leaf),
+                str(symlink_dir / "cpuinfo"),
+            }
+            exec_argv, exec_cwd = privd.prepare_ops_read(
+                ["cat", str(public_file)],
+                str(public_dir),
+                allowed_paths=allow_set,
+                trusted_uid=uid,
+            )
+            self.assertEqual(exec_cwd, str(public_dir))
+            self.assertEqual(exec_argv[-1], str(public_file))
+
+            with self.assertRaises(ValueError):
+                privd.prepare_ops_read(
+                    ["cat", str(symlink_leaf)],
+                    str(public_dir),
+                    allowed_paths=allow_set,
+                    trusted_uid=uid,
+                )
+            with self.assertRaises(ValueError):
+                privd.prepare_ops_read(
+                    ["cat", str(symlink_dir / "cpuinfo")],
+                    str(public_dir),
+                    allowed_paths=allow_set,
+                    trusted_uid=uid,
+                )
+            with self.assertRaises(ValueError):
+                privd.prepare_ops_read(
+                    ["uptime"],
+                    str(symlink_dir),
+                    allowed_paths=allow_set,
+                    trusted_uid=uid,
+                )
+            with self.assertRaises(ValueError):
+                privd.check_scope_restrictions(
+                    "ops_read", None, ["uptime"], cwd=str(symlink_dir / "sub")
+                )
+
+            uutils_bin_dir = root_dir / "usr_bin"
+            uutils_lib_dir = root_dir / "usr_lib_cargo_coreutils"
+            uutils_bin_dir.mkdir(mode=0o755)
+            uutils_lib_dir.mkdir(mode=0o755)
+            multicall_target = uutils_lib_dir / "coreutils"
+            multicall_target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(multicall_target, 0o755)
+            uutils_cat = uutils_bin_dir / "cat"
+            uutils_cat.symlink_to(multicall_target)
+            orig_dirs = privd.TRUSTED_EXEC_DIRS
+            orig_prefixes = privd.TRUSTED_RESOLVED_EXEC_PREFIXES
+            orig_path = privd.TRUSTED_EXEC_PATH
+            try:
+                privd.TRUSTED_EXEC_DIRS = (str(uutils_bin_dir),)
+                privd.TRUSTED_RESOLVED_EXEC_PREFIXES = (str(uutils_lib_dir) + "/",)
+                privd.TRUSTED_EXEC_PATH = str(uutils_bin_dir)
+                mc_argv, mc_cwd = privd.prepare_ops_read(
+                    ["cat", str(public_file)],
+                    str(public_dir),
+                    allowed_paths=allow_set,
+                    trusted_uid=uid,
+                )
+                self.assertEqual(mc_argv[0], str(uutils_cat))
+                self.assertEqual(mc_argv[1], str(public_file))
+                self.assertEqual(mc_cwd, str(public_dir))
+            finally:
+                privd.TRUSTED_EXEC_DIRS = orig_dirs
+                privd.TRUSTED_RESOLVED_EXEC_PREFIXES = orig_prefixes
+                privd.TRUSTED_EXEC_PATH = orig_path
+
+        real_exec_argv, real_exec_cwd = privd.prepare_ops_read(["cat", "/etc/os-release"], "/")
+        self.assertEqual(real_exec_cwd, "/")
+        self.assertIn(real_exec_argv[-1], {"/etc/os-release", "/usr/lib/os-release"})
+        self.assertEqual(privd.execute_ops_read(["uptime"], "/"), 0)
 
     def test_exhaustive_ctypes_equivalence_against_liborb_kernel_so(self):
         import ctypes

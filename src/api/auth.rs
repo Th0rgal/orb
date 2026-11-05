@@ -79,73 +79,192 @@ pub fn implicit_single_tenant_user(config: &Config) -> AuthUser {
     implicit_single_tenant_user_from_id(config, configured_single_tenant_user_id())
 }
 
-pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    if a_bytes.len() != b_bytes.len() {
+pub(crate) fn constant_time_eq_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
         return false;
     }
-    let mut diff: u8 = 0;
-    for i in 0..a_bytes.len() {
-        diff |= a_bytes[i] ^ b_bytes[i];
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= std::hint::black_box(x ^ y);
     }
-    diff == 0
+    std::hint::black_box(diff) == 0
 }
 
-/// Hash a password using PBKDF2-SHA256.
-/// Returns a string in the format `pbkdf2:100000:<hex_salt>:<hex_hash>`.
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
+    constant_time_eq_bytes(a.as_bytes(), b.as_bytes())
+}
+
+fn verify_dummy_password_for_timing(password: &str, users: &[UserAccount]) {
+    let uses_pbkdf2 = users
+        .iter()
+        .any(|u| u.password.trim().starts_with("pbkdf2:"));
+    if uses_pbkdf2 {
+        let mut dummy = [0u8; PASSWORD_DIGEST_LEN];
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+            password.as_bytes(),
+            &[0xa5u8; PASSWORD_SALT_LEN],
+            PASSWORD_HASH_ITERATIONS,
+            &mut dummy,
+        );
+        let _ = constant_time_eq_bytes(&dummy, &[0x5au8; PASSWORD_DIGEST_LEN]);
+    } else {
+        let _ = constant_time_eq(password, "dummy_password_for_timing");
+    }
+}
+
+fn verify_configured_password_value(password: &str, configured: &str) -> bool {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        return false;
+    }
+    if configured.starts_with("pbkdf2:") {
+        verify_password_hash(password, configured)
+    } else {
+        constant_time_eq(password, configured)
+    }
+}
+
+const PASSWORD_HASH_ITERATIONS: u32 = 600_000;
+const MIN_PASSWORD_HASH_ITERATIONS: u32 = 100_000;
+const MAX_PASSWORD_HASH_ITERATIONS: u32 = 2_000_000;
+const PASSWORD_SALT_LEN: usize = 32;
+const MIN_PASSWORD_SALT_LEN: usize = 16;
+const MAX_PASSWORD_SALT_LEN: usize = 64;
+const PASSWORD_DIGEST_LEN: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasswordVerifyOutcome {
+    Invalid,
+    ValidCurrent,
+    ValidNeedsRehash,
+}
+
+struct ParsedPasswordHash {
+    iterations: u32,
+    salt: Vec<u8>,
+    expected_hash: [u8; PASSWORD_DIGEST_LEN],
+}
+
+fn parse_password_hash(stored: &str) -> Option<ParsedPasswordHash> {
+    let mut parts = stored.split(':');
+    let scheme = parts.next()?;
+    let iterations_str = parts.next()?;
+    let salt_hex = parts.next()?;
+    let hash_hex = parts.next()?;
+    if parts.next().is_some() || scheme != "pbkdf2" {
+        return None;
+    }
+
+    if iterations_str.is_empty() || !iterations_str.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let iterations: u32 = iterations_str.parse().ok()?;
+    if !(MIN_PASSWORD_HASH_ITERATIONS..=MAX_PASSWORD_HASH_ITERATIONS).contains(&iterations) {
+        return None;
+    }
+
+    if salt_hex.len() < MIN_PASSWORD_SALT_LEN * 2
+        || salt_hex.len() > MAX_PASSWORD_SALT_LEN * 2
+        || salt_hex.len() % 2 != 0
+    {
+        return None;
+    }
+    if hash_hex.len() != PASSWORD_DIGEST_LEN * 2 {
+        return None;
+    }
+
+    let salt = hex::decode(salt_hex).ok()?;
+    if !(MIN_PASSWORD_SALT_LEN..=MAX_PASSWORD_SALT_LEN).contains(&salt.len()) {
+        return None;
+    }
+
+    let mut expected_hash = [0u8; PASSWORD_DIGEST_LEN];
+    hex::decode_to_slice(hash_hex, &mut expected_hash).ok()?;
+
+    Some(ParsedPasswordHash {
+        iterations,
+        salt,
+        expected_hash,
+    })
+}
+
 pub fn hash_password(password: &str) -> String {
-    use hmac::Hmac;
-    use pbkdf2::pbkdf2;
-    use rand::RngCore;
+    use rand::{rngs::OsRng, RngCore};
     use sha2::Sha256;
 
-    let iterations = 100_000u32;
-    let mut salt = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut salt);
+    let mut salt = [0u8; PASSWORD_SALT_LEN];
+    OsRng.fill_bytes(&mut salt);
 
-    let mut hash = [0u8; 32];
-    pbkdf2::<Hmac<Sha256>>(password.as_bytes(), &salt, iterations, &mut hash)
-        .expect("PBKDF2 should not fail");
+    let mut hash = [0u8; PASSWORD_DIGEST_LEN];
+    pbkdf2::pbkdf2_hmac::<Sha256>(
+        password.as_bytes(),
+        &salt,
+        PASSWORD_HASH_ITERATIONS,
+        &mut hash,
+    );
 
     format!(
         "pbkdf2:{}:{}:{}",
-        iterations,
+        PASSWORD_HASH_ITERATIONS,
         hex::encode(salt),
         hex::encode(hash)
     )
 }
 
-/// Verify a password against a stored PBKDF2 hash string.
-pub fn verify_password_hash(password: &str, stored: &str) -> bool {
-    use hmac::Hmac;
-    use pbkdf2::pbkdf2;
+pub fn verify_password_hash_outcome(password: &str, stored: &str) -> PasswordVerifyOutcome {
     use sha2::Sha256;
 
-    let parts: Vec<&str> = stored.split(':').collect();
-    if parts.len() != 4 || parts[0] != "pbkdf2" {
-        return false;
+    let Some(parsed) = parse_password_hash(stored) else {
+        return PasswordVerifyOutcome::Invalid;
+    };
+
+    let mut computed = [0u8; PASSWORD_DIGEST_LEN];
+    pbkdf2::pbkdf2_hmac::<Sha256>(
+        password.as_bytes(),
+        &parsed.salt,
+        parsed.iterations,
+        &mut computed,
+    );
+
+    if !constant_time_eq_bytes(&computed, &parsed.expected_hash) {
+        return PasswordVerifyOutcome::Invalid;
     }
 
-    let iterations: u32 = match parts[1].parse() {
-        Ok(n) => n,
-        Err(_) => return false,
-    };
-    let salt = match hex::decode(parts[2]) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let expected_hash = match hex::decode(parts[3]) {
-        Ok(h) => h,
-        Err(_) => return false,
-    };
-
-    let mut computed = vec![0u8; expected_hash.len()];
-    if pbkdf2::<Hmac<Sha256>>(password.as_bytes(), &salt, iterations, &mut computed).is_err() {
-        return false;
+    if parsed.iterations < PASSWORD_HASH_ITERATIONS || parsed.salt.len() < PASSWORD_SALT_LEN {
+        PasswordVerifyOutcome::ValidNeedsRehash
+    } else {
+        PasswordVerifyOutcome::ValidCurrent
     }
+}
 
-    constant_time_eq(&hex::encode(&computed), &hex::encode(&expected_hash))
+pub fn verify_password_hash(password: &str, stored: &str) -> bool {
+    !matches!(
+        verify_password_hash_outcome(password, stored),
+        PasswordVerifyOutcome::Invalid
+    )
+}
+
+pub async fn verify_and_upgrade_stored_password(
+    settings: &crate::settings::SettingsStore,
+    password: &str,
+) -> Option<bool> {
+    let stored_auth = settings.get_auth_settings().await?;
+    let current_hash = stored_auth.password_hash?;
+    let password = password.trim();
+    match verify_password_hash_outcome(password, &current_hash) {
+        PasswordVerifyOutcome::Invalid => Some(false),
+        PasswordVerifyOutcome::ValidCurrent => Some(true),
+        PasswordVerifyOutcome::ValidNeedsRehash => {
+            let upgraded = hash_password(password);
+            if let Err(err) = settings
+                .upgrade_password_hash_if_current(&current_hash, upgraded)
+                .await
+            {
+                tracing::warn!(error = %err, "Failed to persist upgraded password hash");
+            }
+            Some(true)
+        }
+    }
 }
 
 pub(crate) fn issue_jwt(
@@ -321,13 +440,9 @@ pub async fn login(
                 .find(|u| u.username.trim() == username);
 
             let valid = match account {
-                Some(acc) => {
-                    !acc.password.trim().is_empty()
-                        && constant_time_eq(req.password.trim(), acc.password.trim())
-                }
+                Some(acc) => verify_configured_password_value(req.password.trim(), &acc.password),
                 None => {
-                    // Perform a dummy comparison to prevent timing attacks
-                    let _ = constant_time_eq(req.password.trim(), "dummy_password_for_timing");
+                    verify_dummy_password_for_timing(req.password.trim(), &state.config.auth.users);
                     false
                 }
             };
@@ -350,32 +465,19 @@ pub async fn login(
             }
         }
         AuthMode::SingleTenant | AuthMode::Disabled => {
-            // If dev_mode is enabled, we still allow login, but it won't be required.
-            // Check dashboard-managed password hash first, then fall back to env var.
-            let stored_auth = state.settings.get_auth_settings().await;
-            let valid = if let Some(ref auth_settings) = stored_auth {
-                if let Some(ref hash) = auth_settings.password_hash {
-                    verify_password_hash(req.password.trim(), hash)
-                } else {
-                    // No stored hash — fall back to env var
-                    let expected = state
-                        .config
-                        .auth
-                        .dashboard_password
-                        .as_deref()
-                        .unwrap_or("");
-                    !expected.is_empty() && constant_time_eq(req.password.trim(), expected)
-                }
-            } else {
-                // No auth settings at all — fall back to env var
-                let expected = state
-                    .config
-                    .auth
-                    .dashboard_password
-                    .as_deref()
-                    .unwrap_or("");
-                !expected.is_empty() && constant_time_eq(req.password.trim(), expected)
-            };
+            let valid =
+                match verify_and_upgrade_stored_password(&state.settings, &req.password).await {
+                    Some(valid) => valid,
+                    None => {
+                        let expected = state
+                            .config
+                            .auth
+                            .dashboard_password
+                            .as_deref()
+                            .unwrap_or("");
+                        verify_configured_password_value(req.password.trim(), expected)
+                    }
+                };
 
             if !valid {
                 return Err((StatusCode::UNAUTHORIZED, "Invalid password".to_string()));
@@ -663,7 +765,7 @@ pub async fn change_password(
                 .dashboard_password
                 .as_deref()
                 .unwrap_or("");
-            constant_time_eq(current, expected)
+            verify_configured_password_value(current, expected)
         };
 
         if !current_valid {
@@ -876,5 +978,240 @@ mod tests {
                 .as_deref(),
             Some(jwt.as_str())
         );
+    }
+
+    fn legacy_hash_password_100k(password: &str, salt: &[u8]) -> String {
+        let mut digest = [0u8; 32];
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), salt, 100_000, &mut digest);
+        format!(
+            "pbkdf2:100000:{}:{}",
+            hex::encode(salt),
+            hex::encode(digest)
+        )
+    }
+
+    #[test]
+    fn hash_password_uses_600k_iterations_32_byte_salt_and_verifies() {
+        let password = "correct-horse-battery-staple";
+        let h1 = hash_password(password);
+        let h2 = hash_password(password);
+        assert_ne!(h1, h2);
+
+        let parts: Vec<&str> = h1.split(':').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "pbkdf2");
+        assert_eq!(parts[1], "600000");
+        assert_eq!(hex::decode(parts[2]).unwrap().len(), 32);
+        assert_eq!(hex::decode(parts[3]).unwrap().len(), 32);
+
+        assert!(verify_password_hash(password, &h1));
+        assert_eq!(
+            verify_password_hash_outcome(password, &h1),
+            PasswordVerifyOutcome::ValidCurrent
+        );
+        assert!(!verify_password_hash("wrong-horse-battery-staple", &h1));
+        assert_eq!(
+            verify_password_hash_outcome("wrong-horse-battery-staple", &h1),
+            PasswordVerifyOutcome::Invalid
+        );
+    }
+
+    #[test]
+    fn legacy_100k_hash_verifies_and_flags_rehash() {
+        let password = "legacy-stored-password";
+        let legacy = legacy_hash_password_100k(password, &[0x42; 16]);
+
+        assert!(verify_password_hash(password, &legacy));
+        assert_eq!(
+            verify_password_hash_outcome(password, &legacy),
+            PasswordVerifyOutcome::ValidNeedsRehash
+        );
+        assert!(!verify_password_hash("incorrect-password", &legacy));
+        assert_eq!(
+            verify_password_hash_outcome("incorrect-password", &legacy),
+            PasswordVerifyOutcome::Invalid
+        );
+
+        let short_salt_600k = {
+            let salt = [0x11u8; 16];
+            let mut digest = [0u8; 32];
+            pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+                password.as_bytes(),
+                &salt,
+                PASSWORD_HASH_ITERATIONS,
+                &mut digest,
+            );
+            format!(
+                "pbkdf2:{}:{}:{}",
+                PASSWORD_HASH_ITERATIONS,
+                hex::encode(salt),
+                hex::encode(digest)
+            )
+        };
+        assert_eq!(
+            verify_password_hash_outcome(password, &short_salt_600k),
+            PasswordVerifyOutcome::ValidNeedsRehash
+        );
+    }
+
+    #[test]
+    fn verify_password_hash_rejects_malformed_and_unreasonable_parameters() {
+        let password = "test-password-123";
+        let valid_salt_hex = hex::encode([0xabu8; 32]);
+        let valid_digest_hex = {
+            let mut digest = [0u8; 32];
+            pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+                password.as_bytes(),
+                &[0xabu8; 32],
+                100_000,
+                &mut digest,
+            );
+            hex::encode(digest)
+        };
+
+        let cases = [
+            "".to_string(),
+            "plaintext".to_string(),
+            format!("argon2:600000:{valid_salt_hex}:{valid_digest_hex}"),
+            format!("pbkdf2:600000:{valid_salt_hex}"),
+            format!("pbkdf2:600000:{valid_salt_hex}:{valid_digest_hex}:extra"),
+            format!("pbkdf2:0:{valid_salt_hex}:{valid_digest_hex}"),
+            format!("pbkdf2:1:{valid_salt_hex}:{valid_digest_hex}"),
+            format!("pbkdf2:99999:{valid_salt_hex}:{valid_digest_hex}"),
+            format!("pbkdf2:2000001:{valid_salt_hex}:{valid_digest_hex}"),
+            format!("pbkdf2:4294967295:{valid_salt_hex}:{valid_digest_hex}"),
+            format!("pbkdf2:99999999999999999999:{valid_salt_hex}:{valid_digest_hex}"),
+            format!("pbkdf2:+600000:{valid_salt_hex}:{valid_digest_hex}"),
+            format!("pbkdf2:-100000:{valid_salt_hex}:{valid_digest_hex}"),
+            format!("pbkdf2:notanumber:{valid_salt_hex}:{valid_digest_hex}"),
+            format!("pbkdf2:600000::{valid_digest_hex}"),
+            format!(
+                "pbkdf2:600000:{}:{valid_digest_hex}",
+                hex::encode([0xabu8; 15])
+            ),
+            format!(
+                "pbkdf2:600000:{}:{valid_digest_hex}",
+                hex::encode([0xabu8; 65])
+            ),
+            format!("pbkdf2:600000:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz:{valid_digest_hex}"),
+            format!("pbkdf2:600000:{valid_salt_hex}:"),
+            format!("pbkdf2:600000:{valid_salt_hex}:{}", hex::encode([0xcd; 31])),
+            format!("pbkdf2:600000:{valid_salt_hex}:{}", hex::encode([0xcd; 33])),
+            format!("pbkdf2:600000:{valid_salt_hex}:{}", "g".repeat(64)),
+        ];
+
+        for malformed in cases {
+            assert!(
+                !verify_password_hash(password, &malformed),
+                "expected malformed hash to be rejected"
+            );
+            assert_eq!(
+                verify_password_hash_outcome(password, &malformed),
+                PasswordVerifyOutcome::Invalid
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transparent_rehash_upgrades_legacy_store_and_preserves_concurrent_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::settings::SettingsStore::new(dir.path()).await;
+
+        assert_eq!(
+            verify_and_upgrade_stored_password(&store, "any-password").await,
+            None
+        );
+
+        let password = "upgrade-me-on-login";
+        let legacy = legacy_hash_password_100k(password, &[0x77; 16]);
+        let original_changed_at = "2026-01-01T00:00:00Z".to_string();
+        store
+            .set_auth_settings(crate::settings::AuthSettings {
+                password_hash: Some(legacy.clone()),
+                password_changed_at: Some(original_changed_at.clone()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            verify_and_upgrade_stored_password(&store, "wrong-password").await,
+            Some(false)
+        );
+        assert_eq!(
+            store
+                .get_auth_settings()
+                .await
+                .unwrap()
+                .password_hash
+                .as_deref(),
+            Some(legacy.as_str())
+        );
+
+        assert_eq!(
+            verify_and_upgrade_stored_password(&store, "  upgrade-me-on-login  ").await,
+            Some(true)
+        );
+        let upgraded_auth = store.get_auth_settings().await.unwrap();
+        assert_eq!(
+            upgraded_auth.password_changed_at.as_deref(),
+            Some(original_changed_at.as_str())
+        );
+        let upgraded_hash = upgraded_auth.password_hash.unwrap();
+        assert_ne!(upgraded_hash, legacy);
+        assert!(upgraded_hash.starts_with("pbkdf2:600000:"));
+        assert_eq!(
+            verify_password_hash_outcome(password, &upgraded_hash),
+            PasswordVerifyOutcome::ValidCurrent
+        );
+
+        let reloaded = crate::settings::SettingsStore::new(dir.path()).await;
+        assert_eq!(
+            reloaded
+                .get_auth_settings()
+                .await
+                .unwrap()
+                .password_hash
+                .as_deref(),
+            Some(upgraded_hash.as_str())
+        );
+
+        let newer_password = "concurrently-rotated-password";
+        let newer_hash = hash_password(newer_password);
+        store
+            .set_auth_settings(crate::settings::AuthSettings {
+                password_hash: Some(newer_hash.clone()),
+                password_changed_at: Some("2026-02-01T00:00:00Z".to_string()),
+            })
+            .await
+            .unwrap();
+        assert!(!store
+            .upgrade_password_hash_if_current(&legacy, hash_password(password))
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .get_auth_settings()
+                .await
+                .unwrap()
+                .password_hash
+                .as_deref(),
+            Some(newer_hash.as_str())
+        );
+    }
+
+    #[test]
+    fn configured_password_value_supports_plaintext_and_pbkdf2_without_mutation() {
+        let password = "env-configured-password";
+        assert!(verify_configured_password_value(password, password));
+        assert!(!verify_configured_password_value("wrong", password));
+        assert!(!verify_configured_password_value("", ""));
+
+        let hashed = hash_password(password);
+        assert!(verify_configured_password_value(password, &hashed));
+        assert!(!verify_configured_password_value("wrong", &hashed));
+        assert!(!verify_configured_password_value(
+            "pbkdf2:0:aa:bb",
+            "pbkdf2:0:aa:bb"
+        ));
     }
 }
