@@ -149,6 +149,45 @@ impl Drop for SessionGuard {
     }
 }
 
+static HARNESS_PIDS: LazyLock<Mutex<HashMap<Uuid, u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Guard removing a running harness PID registration when the turn completes.
+pub(crate) struct HarnessPidGuard(Uuid, u32);
+
+impl Drop for HarnessPidGuard {
+    fn drop(&mut self) {
+        let mut map = HARNESS_PIDS.lock().unwrap_or_else(|e| e.into_inner());
+        if map.get(&self.0).copied() == Some(self.1) {
+            map.remove(&self.0);
+        }
+    }
+}
+
+/// Register the spawned harness leader PID for `mission_id` so `interrupt_now`
+/// can deliver `SIGINT` to in-flight child tools (`bash`/`lake`/`lean`).
+pub(crate) fn register_harness_pid(mission_id: Uuid, pid: u32) -> HarnessPidGuard {
+    HARNESS_PIDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(mission_id, pid);
+    HarnessPidGuard(mission_id, pid)
+}
+
+/// Deliver `SIGINT` to any in-flight child tool processes under the local
+/// harness leader PID for `mission_id`. Returns the number of child PIDs signalled.
+pub(crate) fn interrupt_child_tools(mission_id: Uuid) -> usize {
+    let pid = HARNESS_PIDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&mission_id)
+        .copied();
+    let Some(pid) = pid else {
+        return 0;
+    };
+    crate::node::tool_interrupt::sigint_inflight_child_tools(pid, None)
+}
+
 /// Background tasks the CLI reports as live. Prefer its authoritative
 /// snapshot; older CLIs expose only the edges.
 #[derive(Default)]

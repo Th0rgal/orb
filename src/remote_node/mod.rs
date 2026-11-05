@@ -552,6 +552,7 @@ mod tests {
             node_id: "babylon".to_string(),
             lease_token: token,
             command: "true".to_string(),
+            side_lane: false,
         };
         let err = run_lease_command(
             "babylon",
@@ -588,6 +589,7 @@ mod tests {
                 lease_token: token,
                 command: "printf scratch > \"$TMPDIR/probe\"; printf out; printf err >&2; exit 7"
                     .into(),
+                side_lane: false,
             },
         )
         .await

@@ -73,6 +73,7 @@ pub mod remote_node;
 pub mod secrets;
 pub mod settings;
 pub mod task;
+pub mod tool_loop_progress;
 pub mod tools;
 pub mod uploads;
 pub mod util;

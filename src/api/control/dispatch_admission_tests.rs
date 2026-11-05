@@ -5277,6 +5277,7 @@ struct FixtureNode {
     submit_delay: Arc<std::sync::Mutex<std::time::Duration>>,
     status_delay: Arc<std::sync::Mutex<std::time::Duration>>,
     status_requests: Arc<std::sync::atomic::AtomicUsize>,
+    execute_stdout: Arc<std::sync::Mutex<String>>,
     _server: tokio::task::JoinHandle<()>,
 }
 
@@ -5303,6 +5304,7 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
     let status_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let log = Arc::new(std::sync::Mutex::new(String::new()));
     let capabilities = Arc::new(std::sync::Mutex::new((StatusCode::NOT_FOUND, json!({}))));
+    let execute_stdout = Arc::new(std::sync::Mutex::new(String::new()));
     let app = axum::Router::new()
         .route(
             "/machine-transfer/capabilities",
@@ -5420,6 +5422,34 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
             }),
         )
         .route(
+            "/execute",
+            axum::routing::post({
+                let execute_stdout = execute_stdout.clone();
+                let node_id = id.to_string();
+                move |Json(body): Json<Value>| {
+                    let stdout = execute_stdout.lock().unwrap().clone();
+                    let node_id = node_id.clone();
+                    async move {
+                        let mission_id = body["mission_id"]
+                            .as_str()
+                            .and_then(|s| Uuid::parse_str(s).ok())
+                            .unwrap_or_else(Uuid::nil);
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "accepted": true,
+                                "node_id": node_id,
+                                "mission_id": mission_id,
+                                "exit_code": 0,
+                                "stdout": stdout,
+                                "stderr": "",
+                            })),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
             "/heartbeat",
             axum::routing::get({
                 let node_id = id.to_string();
@@ -5463,6 +5493,7 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
         status_delay,
         status_requests,
         log,
+        execute_stdout,
         _server: server,
     }
 }
@@ -7856,6 +7887,7 @@ async fn remote_queue_status_wait_does_not_hold_admission() {
         node_id: fixture.node.id.clone(),
         session_id: None,
         job_id: Some(Uuid::new_v4()),
+        interrupt_target_job_id: None,
         assignment: json!({}),
         message: QueuedMessage {
             id,
@@ -7908,6 +7940,7 @@ async fn send_now_interrupt_promotes_remote_follow_up_with_same_id_and_keeps_que
             node_id: "absent-node".into(),
             session_id: None,
             job_id: None,
+            interrupt_target_job_id: None,
             assignment: json!({}),
             message: QueuedMessage {
                 id,
@@ -7965,6 +7998,7 @@ async fn remote_queue_retires_deleted_mission_even_with_bound_job() {
         node_id: "deleted-node".into(),
         session_id: None,
         job_id: Some(Uuid::new_v4()),
+        interrupt_target_job_id: None,
         assignment: json!({}),
         message: QueuedMessage {
             id,
@@ -17255,6 +17289,7 @@ impl crate::managed::ManagedProvider for AutoEnrollingBoatFixtureProvider {
             state: "ready".into(),
             name: spec.name.clone(),
             deletable_at: None,
+            ..Default::default()
         })
     }
     async fn get(&self, provider_id: &str) -> Result<crate::managed::ProviderMachine, String> {
@@ -17263,6 +17298,7 @@ impl crate::managed::ManagedProvider for AutoEnrollingBoatFixtureProvider {
             state: "ready".into(),
             name: String::new(),
             deletable_at: None,
+            ..Default::default()
         })
     }
     async fn list(&self) -> Result<Vec<crate::managed::ProviderMachine>, String> {
@@ -18228,6 +18264,7 @@ async fn bugbot_regressions_pin_boat_provider_exclude_vibe_cleanup_rented_vm_and
                 state: "ready".into(),
                 name: String::new(),
                 deletable_at: None,
+                ..Default::default()
             })
         }
         async fn list(&self) -> Result<Vec<crate::managed::ProviderMachine>, String> {
@@ -19362,4 +19399,1056 @@ async fn secret_broker_subagent_tree_inherits_grants_and_development_identity_gi
             .allows("CUSTOM_VERIFIER_TOKEN", Some("bw-shared-proj")),
         "/btw side mission must not inherit parent secret grant"
     );
+}
+
+#[tokio::test]
+async fn remote_opencode_writer_reattaches_sqlite_session_and_gateway_fails_synchronously_when_node_gone(
+) {
+    std::env::set_var("SANDBOXED_PUBLIC_URL", "http://127.0.0.1:9");
+    let fixture = spawn_fixture_node(
+        "managed-mm-reattach",
+        "REMOTE_OPENCODE_REATTACH_TOKEN",
+        "running",
+    )
+    .await;
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::opencode::OpenCodeBackend::new("http://127.0.0.1:9".into(), None, false),
+    ));
+
+    let create_body = json!({
+        "title": "Boat OpenCode PR Writer",
+        "project": "lido",
+        "track": "evm-fast-proof",
+        "github_pr": "Layr-Labs/evm.fast#101",
+        "writer": true,
+        "backend": "opencode",
+        "model_override": "xai/grok-4.6",
+        "remote_node_id": "managed-mm-reattach",
+        "prompt": "Prove the lemma and push WIP",
+        "idempotency_key": "opencode-writer-launch-1",
+    });
+    let created_res = h
+        .state
+        .http_client
+        .post(format!("{}/missions", h.url))
+        .json(&create_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        created_res.status(),
+        StatusCode::OK,
+        "{}",
+        created_res.text().await.unwrap()
+    );
+    let created: Value = created_res.json().await.unwrap();
+    let mid = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+    let store = h.control.mission_store.clone();
+    let mission = store.get_mission(mid).await.unwrap().unwrap();
+    assert!(mission.project.tags.iter().any(|t| t == "pr-writer"));
+    assert_eq!(
+        mission.project.github_pr.as_deref(),
+        Some("Layr-Labs/evm.fast#101")
+    );
+
+    // Finish first turn without streaming `ses_...` in the job log, but expose it via
+    // remote `/execute` SQLite probe (`STATE=1` + `SES=ses_persisted_remote_db`).
+    *fixture.execute_stdout.lock().unwrap() = "STATE=1\nSES=ses_persisted_remote_db\n".to_string();
+    fixture.set_state("succeeded");
+    wait_until("first remote OpenCode turn settles", 20, || async {
+        store.get_mission(mid).await.unwrap().unwrap().status == MissionStatus::Completed
+            && crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+                .await
+                .unwrap()
+                .is_empty()
+    })
+    .await;
+
+    // 1. Follow-up on the still-online remote managed node reattaches to `ses_persisted_remote_db`
+    //    with a refreshed writer lease instead of failing with `409 REMOTE_RESUME_REQUIRES_REPLACEMENT`!
+    fixture.set_state("running");
+    let followup_res = h
+        .request(
+            false,
+            mid,
+            json!({
+                "content": "Push WIP commit before hard cap",
+                "continue_identity": {
+                    "project": "lido",
+                    "track": "evm-fast-proof",
+                    "github_pr": "Layr-Labs/evm.fast#101"
+                }
+            }),
+        )
+        .await;
+    let followup_status = followup_res.status();
+    let followup_body: Value = followup_res.json().await.unwrap();
+    assert_eq!(followup_status, StatusCode::OK, "{followup_body}");
+    assert_eq!(followup_body["message_accepted"], true);
+    assert_eq!(followup_body["queued"], false);
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+    let resumed_cmd = fixture.submissions.lock().unwrap()[1]["payload"]["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        resumed_cmd.contains("ses_persisted_remote_db"),
+        "expected OpenCode continuation to reattach persisted SQLite session, got: {resumed_cmd}"
+    );
+    assert_eq!(
+        store
+            .get_mission(mid)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some("ses_persisted_remote_db")
+    );
+
+    // Settle second turn so the mission is idle again.
+    fixture.set_state("succeeded");
+    wait_until("second remote OpenCode turn settles", 20, || async {
+        crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+            .await
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+
+    // 2. Simulate an unresumable idle mission on an unconfigured/reaped node and verify
+    //    MCP `gateway::dispatch` fails synchronously (`accepted == "no"`, no `queued` action)!
+    let orphan = store
+        .create_mission(
+            Some("Reaped Node Mission"),
+            None,
+            None,
+            None,
+            None,
+            Some("claudecode"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            orphan.id,
+            MissionProjectPatch {
+                tags: Some(vec!["remote_node:managed-mm-reaped-gone".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .set_mission_requires_local_disk(orphan.id, false)
+        .await
+        .unwrap();
+    store
+        .update_mission_status(orphan.id, MissionStatus::Interrupted)
+        .await
+        .unwrap();
+
+    let coordinator = crate::control_mcp::gateway::Principal {
+        sub: h.user.id.clone(),
+        username: h.user.username.clone(),
+        role: crate::control_mcp::Role::Coordinator,
+        mission_id: None,
+        project: None,
+        action_run_generation: None,
+        session_id: Uuid::new_v4(),
+        exp: (chrono::Utc::now().timestamp() + 3600) as usize,
+        client_kind: None,
+        client_label: None,
+        host_hint: None,
+    };
+    let mcp_call = crate::control_mcp::gateway::Call {
+        name: "send_message_to_mission".into(),
+        arguments: json!({
+            "mission_id": orphan.id.to_string(),
+            "content": "Attempt follow-up on reaped node",
+            "idempotency_key": "sync-fail-reaped-node-1"
+        }),
+    };
+    let Json(mcp_resp) = crate::control_mcp::gateway::call(
+        State(h.state.clone()),
+        Extension(coordinator.clone()),
+        Json(mcp_call.clone()),
+    )
+    .await;
+    assert_eq!(mcp_resp["ok"], false, "{mcp_resp}");
+    assert_eq!(
+        mcp_resp["error"]["code"],
+        "remote_resume_requires_replacement"
+    );
+    assert_eq!(mcp_resp["error"]["accepted"], "no");
+    assert!(mcp_resp["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT));
+    let conn = h.state.projects.connection.lock().unwrap();
+    assert!(
+        crate::control_mcp::actions::existing(&conn, &coordinator, &mcp_call)
+            .unwrap()
+            .is_none(),
+        "must not leave a queued action receipt when continuation is impossible"
+    );
+    drop(conn);
+
+    // 3. On a still-online node (`managed-mm-reattach`), when native continuation is impossible
+    //    (e.g. Grok mission whose launch died before session creation) and `auto_replace_on_same_node: true`
+    //    is passed, `post_message` spawns a continuation mission on the same node automatically!
+    let unstarted_grok = store
+        .create_mission(
+            Some("Unstarted Grok Worker"),
+            None,
+            None,
+            None,
+            None,
+            Some("grok"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            unstarted_grok.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                tags: Some(vec!["remote_node:managed-mm-reattach".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .set_mission_requires_local_disk(unstarted_grok.id, false)
+        .await
+        .unwrap();
+    store
+        .update_mission_status(unstarted_grok.id, MissionStatus::Failed)
+        .await
+        .unwrap();
+    // Register grok + managed_auth so replacement creation succeeds on `managed-mm-reattach`.
+    h.state
+        .backend_registry
+        .write()
+        .await
+        .register(Arc::new(crate::backend::grok::GrokBackend::new()));
+    h.state.fleet.record_heartbeat(
+        "managed-mm-reattach",
+        serde_json::from_value(json!({
+            "node_id": "managed-mm-reattach",
+            "online": true,
+            "capacity_total": 2,
+            "capacity_available": 2,
+            "active_leases": 0,
+            "version": "test",
+            "protocol_version": crate::remote_node::protocol::NODE_PROTOCOL_VERSION,
+            "managed_auth": ["grok"]
+        }))
+        .unwrap(),
+    );
+    fixture.set_state("running");
+    let auto_replace_res = h
+        .request(
+            false,
+            unstarted_grok.id,
+            json!({
+                "content": "Continue in auto-spawned replacement on same node",
+                "auto_replace_on_same_node": true
+            }),
+        )
+        .await;
+    let auto_status = auto_replace_res.status();
+    let auto_text = auto_replace_res.text().await.unwrap();
+    assert_eq!(auto_status, StatusCode::OK, "{auto_text}");
+    let auto_body: Value = serde_json::from_str(&auto_text).unwrap();
+    let replaced_id = Uuid::parse_str(
+        auto_body["replaced_by_mission_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("replaced_by_mission_id must be returned, got: {auto_body}")),
+    )
+    .unwrap();
+    assert_ne!(replaced_id, unstarted_grok.id);
+    assert_eq!(auto_body["mission_id"], json!(replaced_id.to_string()));
+    let prior_after = store.get_mission(unstarted_grok.id).await.unwrap().unwrap();
+    assert!(prior_after
+        .project
+        .tags
+        .contains(&format!("superseded_by:{replaced_id}")));
+
+    // 4. Verify a deleted OpenCode workspace (`STATE=0`, no `SES=...`, no switched assistant history)
+    //    is rejected with `REMOTE_RESUME_REQUIRES_REPLACEMENT` instead of falsely passing via probe cwd!
+    let wiped_opencode = store
+        .create_mission(
+            Some("Wiped OpenCode Workspace"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            wiped_opencode.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                tags: Some(vec!["remote_node:managed-mm-reattach".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .set_mission_requires_local_disk(wiped_opencode.id, false)
+        .await
+        .unwrap();
+    store
+        .update_mission_status(wiped_opencode.id, MissionStatus::Interrupted)
+        .await
+        .unwrap();
+    *fixture.execute_stdout.lock().unwrap() = "STATE=0\n".to_string();
+    let wiped_res = h
+        .request(
+            false,
+            wiped_opencode.id,
+            json!({ "content": "Attempt resume on wiped OpenCode dir" }),
+        )
+        .await;
+    let wiped_status = wiped_res.status();
+    let wiped_text = wiped_res.text().await.unwrap();
+    assert_eq!(wiped_status, StatusCode::CONFLICT, "{wiped_text}");
+    assert!(
+        wiped_text.contains(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT),
+        "wiped OpenCode workspace without session DB must require replacement, got: {wiped_text}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn rejected_interrupt_now_does_not_signal_local_child_tools() {
+    let h = Harness::new().await;
+    let writer = h.writer(MissionStatus::Active, Some("#42")).await;
+
+    // Stand-in local harness process with a live `sleep 30` child tool registered
+    // under `writer.id` in `live_session`.
+    let mut parent = tokio::process::Command::new("bash")
+        .arg("-c")
+        .arg("sleep 30; sleep 5")
+        .spawn()
+        .expect("spawn stand-in harness");
+    let root_pid = parent.id().expect("stand-in harness pid");
+    let _pid_guard = crate::api::runners::live_session::register_harness_pid(writer.id, root_pid);
+
+    for _ in 0..40 {
+        if crate::node::tool_interrupt::has_inflight_child_tools(root_pid, None) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let child_pids_before =
+        crate::node::tool_interrupt::collect_inflight_child_tool_pids(root_pid, None);
+    assert!(
+        !child_pids_before.is_empty(),
+        "expected in-flight child tool PID before post_message"
+    );
+
+    // Send `interrupt_now` with a stale `continue_identity` (`github_pr: "#99"` != `"#42"`).
+    // `AdmitDispatch` must reject with 409 `writer_identity_stale` BEFORE any local
+    // child tool receives SIGINT.
+    let res = h
+        .request(
+            false,
+            writer.id,
+            json!({
+                "content": "Urgent steer with stale identity",
+                "mode": "interrupt_now",
+                "continue_identity": {
+                    "project": "lido",
+                    "track": "trio-reserve1",
+                    "github_pr": "#99"
+                }
+            }),
+        )
+        .await;
+    let status = res.status();
+    let body = res.text().await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.contains("writer_identity_stale"),
+        "expected writer_identity_stale rejection, got: {body}"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let child_pids_after =
+        crate::node::tool_interrupt::collect_inflight_child_tool_pids(root_pid, None);
+    assert_eq!(
+        child_pids_after, child_pids_before,
+        "rejected interrupt_now request must not SIGINT active writer's child tools"
+    );
+    let _ = parent.kill().await;
+}
+
+#[tokio::test]
+async fn replayed_remote_interrupt_now_does_not_interrupt_delivered_or_newer_job() {
+    use crate::remote_node::job_ledger::{self, JobHandle, JobHandleKind};
+
+    let h = Harness::new().await;
+    let m = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("RESERVE-1"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            m.id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                track: Some(Some("trio-reserve1".into())),
+                github_pr: Some(None),
+                tags: Some(vec!["pr-writer".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(m.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    h.state
+        .projects
+        .absorb_track("lido", "trio-reserve1", None, None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&crate::api::track_leases::lease_request(
+            "lido",
+            "trio-reserve1",
+            &m.id.to_string(),
+            "writer",
+            None,
+        ))
+        .unwrap();
+    let writer = h
+        .control
+        .mission_store
+        .get_mission(m.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let now = chrono::Utc::now();
+    let job_1 = Uuid::new_v4();
+    job_ledger::record(
+        &h.state.config.working_dir,
+        JobHandle {
+            mission_id: writer.id,
+            node_id: "unconfigured-node".into(),
+            job_id: job_1,
+            started_at: now,
+            submission_sequence: 1,
+            accepted_at: Some(now),
+            heartbeat_at: Some(now),
+            disk_reservation_bytes: 0,
+            kind: JobHandleKind::Mission,
+            identity: None,
+            wait_for_completion: None,
+            wake_on_terminal: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let msg_1 = Uuid::new_v4();
+    let identity = Harness::assertion(&writer);
+    let res1 = h
+        .request(
+            false,
+            writer.id,
+            json!({
+                "client_message_id": msg_1,
+                "content": "urgent steer 1",
+                "mode": "interrupt_now",
+                "continue_identity": identity
+            }),
+        )
+        .await;
+    assert_eq!(res1.status(), StatusCode::OK);
+    let body1: serde_json::Value = serde_json::from_str(&res1.text().await.unwrap()).unwrap();
+    assert_eq!(body1["queued"], json!(true));
+    assert_eq!(body1["interrupted_tool"], json!(true));
+
+    // Simulate `msg_1` having been delivered while `job_2` is now actively running `writer.id`.
+    assert!(remote_queue::finish(&h.state.projects, &h.user.id, msg_1, "accepted").unwrap());
+    job_ledger::remove(&h.state.config.working_dir, job_1).await;
+    let job_2 = Uuid::new_v4();
+    job_ledger::record(
+        &h.state.config.working_dir,
+        JobHandle {
+            mission_id: writer.id,
+            node_id: "unconfigured-node".into(),
+            job_id: job_2,
+            started_at: now,
+            submission_sequence: 2,
+            accepted_at: Some(now),
+            heartbeat_at: Some(now),
+            disk_reservation_bytes: 0,
+            kind: JobHandleKind::Mission,
+            identity: None,
+            wait_for_completion: None,
+            wake_on_terminal: false,
+        },
+    )
+    .await
+    .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(writer.id, MissionStatus::Active)
+        .await
+        .unwrap();
+
+    // Replaying delivered `msg_1` with `mode: "interrupt_now"` must return the accepted receipt
+    // WITHOUT interrupting `job_2`!
+    let replay_delivered = h
+        .request(
+            false,
+            writer.id,
+            json!({
+                "client_message_id": msg_1,
+                "content": "urgent steer 1",
+                "mode": "interrupt_now",
+                "continue_identity": identity
+            }),
+        )
+        .await;
+    assert_eq!(replay_delivered.status(), StatusCode::OK);
+    let replay_body: serde_json::Value =
+        serde_json::from_str(&replay_delivered.text().await.unwrap()).unwrap();
+    assert_eq!(replay_body["queued"], json!(false));
+    assert_eq!(replay_body["message_accepted"], json!(true));
+    assert_eq!(
+        replay_body["interrupted_tool"],
+        serde_json::Value::Null,
+        "replaying an already-delivered receipt must never interrupt a live remote job"
+    );
+    assert_eq!(
+        h.control
+            .mission_store
+            .get_mission(writer.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MissionStatus::Active
+    );
+
+    // Next, queue `msg_2` while `job_2` is active (`interrupt_target_job_id == Some(job_2)`),
+    // then advance the live job to `job_3` while `msg_2` is still waiting. Replaying `msg_2`
+    // must NOT interrupt `job_3` because interruption is fenced to `job_2`.
+    let msg_2 = Uuid::new_v4();
+    let res2 = h
+        .request(
+            false,
+            writer.id,
+            json!({
+                "client_message_id": msg_2,
+                "content": "urgent steer 2",
+                "mode": "interrupt_now",
+                "continue_identity": identity
+            }),
+        )
+        .await;
+    assert_eq!(res2.status(), StatusCode::OK);
+    job_ledger::remove(&h.state.config.working_dir, job_2).await;
+    let job_3 = Uuid::new_v4();
+    job_ledger::record(
+        &h.state.config.working_dir,
+        JobHandle {
+            mission_id: writer.id,
+            node_id: "unconfigured-node".into(),
+            job_id: job_3,
+            started_at: now,
+            submission_sequence: 3,
+            accepted_at: Some(now),
+            heartbeat_at: Some(now),
+            disk_reservation_bytes: 0,
+            kind: JobHandleKind::Mission,
+            identity: None,
+            wait_for_completion: None,
+            wake_on_terminal: false,
+        },
+    )
+    .await
+    .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(writer.id, MissionStatus::Active)
+        .await
+        .unwrap();
+
+    let replay_newer_job = h
+        .request(
+            false,
+            writer.id,
+            json!({
+                "client_message_id": msg_2,
+                "content": "urgent steer 2",
+                "mode": "interrupt_now",
+                "continue_identity": identity
+            }),
+        )
+        .await;
+    assert_eq!(replay_newer_job.status(), StatusCode::OK);
+    let newer_body: serde_json::Value =
+        serde_json::from_str(&replay_newer_job.text().await.unwrap()).unwrap();
+    assert_eq!(newer_body["queued"], json!(true));
+    assert_eq!(
+        newer_body["interrupted_tool"],
+        serde_json::Value::Null,
+        "replaying a waiting message after the target job moved on must not interrupt a newer job"
+    );
+    assert_eq!(
+        h.control
+            .mission_store
+            .get_mission(writer.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MissionStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn fallback_remote_steering_preserves_children_and_fleet_sweep_includes_fork_lineage() {
+    use crate::api::mission_store::{
+        Automation, AutomationDriver, MissionProjectPatch, RetryConfig, StopPolicy, TriggerType,
+    };
+    use crate::remote_node::job_ledger::{self, JobHandle, JobHandleKind};
+    use std::sync::atomic::Ordering;
+
+    let fixture = spawn_fixture_node("legacy-node-404", "LEGACY_NODE_404_TOKEN", "running").await;
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    let store = h.control.mission_store.clone();
+
+    // 1. Create an active coordinator with an active child worker + active continuation
+    //    both on the legacy node (`404` on `/jobs/:id/interrupt`) and on an unconfigured node
+    //    (exercising both the direct `cancel_job` fallback and the `CancelMission { keep_remote_queue: true }` fallback).
+    for (idx, node_id) in [
+        (1, fixture.node.id.as_str()),
+        (2, "unconfigured-fallback-node"),
+    ] {
+        let coord = store
+            .create_mission(
+                Some(&format!("Coordinator {idx}")),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                coord.id,
+                MissionProjectPatch {
+                    project: Some(Some("lido".into())),
+                    tags: Some(vec![format!("remote_node:{node_id}")]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(coord.id, MissionStatus::Active)
+            .await
+            .unwrap();
+
+        let child = store
+            .create_mission_with_parent(
+                Some(&format!("Active Child Worker {idx}")),
+                None,
+                None,
+                None,
+                None,
+                false,
+                Some("opencode"),
+                None,
+                Some(coord.id),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(child.id, MissionStatus::Active)
+            .await
+            .unwrap();
+
+        let coord_auto = Automation {
+            id: Uuid::new_v4(),
+            mission_id: coord.id,
+            command_source: crate::api::mission_store::CommandSource::Inline {
+                content: "coordinator scheduled wakeup".into(),
+            },
+            trigger: TriggerType::Interval { seconds: 600 },
+            driver: AutomationDriver::Scheduler,
+            variables: HashMap::new(),
+            active: true,
+            created_at: crate::api::mission_store::now_string(),
+            last_triggered_at: None,
+            stop_policy: StopPolicy::Never,
+            fresh_session: Default::default(),
+            retry_config: RetryConfig::default(),
+            consecutive_failures: 0,
+        };
+        let child_auto = Automation {
+            id: Uuid::new_v4(),
+            mission_id: child.id,
+            command_source: crate::api::mission_store::CommandSource::Inline {
+                content: "worker scheduled wakeup".into(),
+            },
+            trigger: TriggerType::Interval { seconds: 600 },
+            driver: AutomationDriver::Scheduler,
+            variables: HashMap::new(),
+            active: true,
+            created_at: crate::api::mission_store::now_string(),
+            last_triggered_at: None,
+            stop_policy: StopPolicy::Never,
+            fresh_session: Default::default(),
+            retry_config: RetryConfig::default(),
+            consecutive_failures: 0,
+        };
+        store.create_automation(coord_auto.clone()).await.unwrap();
+        store.create_automation(child_auto.clone()).await.unwrap();
+
+        let now = chrono::Utc::now();
+        let coord_job = Uuid::new_v4();
+        job_ledger::record(
+            &h.state.config.working_dir,
+            JobHandle {
+                mission_id: coord.id,
+                node_id: node_id.into(),
+                job_id: coord_job,
+                started_at: now,
+                submission_sequence: idx,
+                accepted_at: Some(now),
+                heartbeat_at: Some(now),
+                disk_reservation_bytes: 0,
+                kind: JobHandleKind::Mission,
+                identity: None,
+                wait_for_completion: None,
+                wake_on_terminal: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let steer_res = h
+            .request(
+                false,
+                coord.id,
+                json!({
+                    "content": "steer coordinator without killing child workers",
+                    "mode": "interrupt_now"
+                }),
+            )
+            .await;
+        assert_eq!(steer_res.status(), StatusCode::OK);
+        if idx == 1 {
+            assert_eq!(
+                fixture.cancels.load(Ordering::SeqCst),
+                1,
+                "legacy node 404 on /interrupt must invoke job-scoped /jobs/:id/cancel"
+            );
+            assert_eq!(
+                store.get_mission(coord.id).await.unwrap().unwrap().status,
+                MissionStatus::Active,
+                "job-scoped cancel must leave coordinator mission status Active while poller observes job stop"
+            );
+        }
+
+        let child_after = store.get_mission(child.id).await.unwrap().unwrap();
+        assert_eq!(
+            child_after.status,
+            MissionStatus::Active,
+            "fallback steering on coordinator {idx} must NOT cascade-cancel active child worker"
+        );
+        assert!(
+            store
+                .get_automation(coord_auto.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .active,
+            "fallback steering on coordinator {idx} must NOT revoke coordinator continuations"
+        );
+        assert!(
+            store
+                .get_automation(child_auto.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .active,
+            "fallback steering on coordinator {idx} must NOT revoke child worker continuations"
+        );
+    }
+
+    // 2. Verify `get_fleet_sweep` seeds traversal from `fork_lineage(parent_id)` so a forked
+    //    coordinator (`fork-of:<pred_coord>`) sees workers spawned under its predecessor.
+    let pred_coord = store
+        .create_mission(
+            Some("Predecessor Coordinator"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    let inherited_worker = store
+        .create_mission_with_parent(
+            Some("Inherited Predecessor Worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(pred_coord.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(inherited_worker.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    let forked_coord = store
+        .create_mission(
+            Some("Forked Coordinator"),
+            None,
+            None,
+            None,
+            None,
+            Some("claudecode"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            forked_coord.id,
+            MissionProjectPatch {
+                tags: Some(vec![format!("fork-of:{}", pred_coord.id)]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let new_worker = store
+        .create_mission_with_parent(
+            Some("New Forked Coordinator Worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(forked_coord.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(new_worker.id, MissionStatus::Active)
+        .await
+        .unwrap();
+
+    let forked_principal = crate::control_mcp::gateway::Principal {
+        sub: h.user.id.clone(),
+        username: h.user.username.clone(),
+        role: crate::control_mcp::Role::Executor,
+        mission_id: Some(forked_coord.id),
+        project: None,
+        action_run_generation: None,
+        session_id: Uuid::new_v4(),
+        exp: (chrono::Utc::now().timestamp() + 3600) as usize,
+        client_kind: None,
+        client_label: None,
+        host_hint: None,
+    };
+    let sweep_call = crate::control_mcp::gateway::Call {
+        name: "get_fleet_sweep".into(),
+        arguments: json!({
+            "include_machines": false
+        }),
+    };
+    let Json(sweep_resp) = crate::control_mcp::gateway::call(
+        State(h.state.clone()),
+        Extension(forked_principal.clone()),
+        Json(sweep_call),
+    )
+    .await;
+    assert_eq!(sweep_resp["ok"], true, "{sweep_resp}");
+    let worker_ids: Vec<String> = sweep_resp["result"]["workers"]
+        .as_array()
+        .expect("workers array")
+        .iter()
+        .filter_map(|w| w["mission_id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        worker_ids.contains(&inherited_worker.id.to_string()),
+        "fleet sweep from forked coordinator must include workers of fork predecessor, got: {worker_ids:?}"
+    );
+    assert!(
+        worker_ids.contains(&new_worker.id.to_string()),
+        "fleet sweep from forked coordinator must include its own workers, got: {worker_ids:?}"
+    );
+    assert_eq!(sweep_resp["result"]["summary"]["workers_active"], json!(2));
+    assert_eq!(sweep_resp["result"]["truncated"], json!(false));
+    assert_eq!(sweep_resp["result"]["next_offset"], Value::Null);
+
+    // 3. Verify `get_fleet_sweep(include_completed=false)` filters BEFORE applying `limit`
+    //    (so >128 terminal children never starve later active children or deeper active
+    //    grandchildren) and exposes `truncated` + `next_offset` pagination.
+    for i in 0..135 {
+        let done = store
+            .create_mission_with_parent(
+                Some(&format!("Terminal Sibling {i}")),
+                None,
+                None,
+                None,
+                None,
+                false,
+                Some("opencode"),
+                None,
+                Some(forked_coord.id),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(done.id, MissionStatus::Completed)
+            .await
+            .unwrap();
+    }
+    let late_active_parent = store
+        .create_mission_with_parent(
+            Some("Late Completed Subcoordinator"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(forked_coord.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(late_active_parent.id, MissionStatus::Completed)
+        .await
+        .unwrap();
+    let deep_active_worker = store
+        .create_mission_with_parent(
+            Some("Deep Active Grandchild Beyond 128"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(late_active_parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(deep_active_worker.id, MissionStatus::Active)
+        .await
+        .unwrap();
+
+    let Json(active_only_page1) = crate::control_mcp::gateway::call(
+        State(h.state.clone()),
+        Extension(forked_principal.clone()),
+        Json(crate::control_mcp::gateway::Call {
+            name: "get_fleet_sweep".into(),
+            arguments: json!({
+                "include_completed": false,
+                "include_machines": false,
+                "limit": 2
+            }),
+        }),
+    )
+    .await;
+    assert_eq!(active_only_page1["ok"], true, "{active_only_page1}");
+    assert_eq!(
+        active_only_page1["result"]["summary"]["workers_active"],
+        json!(3),
+        "all 3 active workers across >128 terminal siblings must be counted"
+    );
+    assert_eq!(
+        active_only_page1["result"]["summary"]["workers_total"],
+        json!(3)
+    );
+    assert_eq!(
+        active_only_page1["result"]["summary"]["workers_returned"],
+        json!(2)
+    );
+    assert_eq!(
+        active_only_page1["result"]["summary"]["workers_omitted"],
+        json!(1)
+    );
+    assert_eq!(active_only_page1["result"]["truncated"], json!(true));
+    assert_eq!(active_only_page1["result"]["next_offset"], json!(2));
+
+    let Json(active_only_page2) = crate::control_mcp::gateway::call(
+        State(h.state.clone()),
+        Extension(forked_principal),
+        Json(crate::control_mcp::gateway::Call {
+            name: "get_fleet_sweep".into(),
+            arguments: json!({
+                "include_completed": false,
+                "include_machines": false,
+                "offset": 2,
+                "limit": 2
+            }),
+        }),
+    )
+    .await;
+    assert_eq!(active_only_page2["ok"], true, "{active_only_page2}");
+    assert_eq!(active_only_page2["result"]["truncated"], json!(false));
+    assert_eq!(active_only_page2["result"]["next_offset"], Value::Null);
+    let page2_ids: Vec<String> = active_only_page2["result"]["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w["mission_id"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(page2_ids, vec![deep_active_worker.id.to_string()]);
 }

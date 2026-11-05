@@ -3297,6 +3297,11 @@ pub struct MissionRunner {
     /// without holding the runner's outer lock.
     pub active_tool_calls: Arc<std::sync::atomic::AtomicUsize>,
 
+    /// Set when `steer_between_tools` promoted a queued message while a tool
+    /// call was in flight; cleared and triggers `interrupt_for_promoted_followup`
+    /// as soon as `active_tool_calls` drops back to zero.
+    pub steer_after_tool: std::sync::atomic::AtomicBool,
+
     /// In-flight background shell tasks started this mission (`Bash` with
     /// `run_in_background: true`), keyed by background-task id.
     ///
@@ -3371,6 +3376,7 @@ impl MissionRunner {
             working_directory: None,
             user: None,
             active_tool_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            steer_after_tool: std::sync::atomic::AtomicBool::new(false),
             background_tasks: HashMap::new(),
             durable_run: None,
             session_store: None,
@@ -3503,6 +3509,8 @@ impl MissionRunner {
     fn reset_turn_tool_calls(&self) {
         self.active_tool_calls
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.steer_after_tool
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Queue a message for this mission.
@@ -6525,6 +6533,28 @@ fn custom_opencode_provider_definition(
     }))
 }
 
+/// Model metadata for OpenCode providers backed by Core's OpenAI-compatible
+/// `/v1` proxy (`builtin/*`, `google/*`, `antigravity/*`, `muse-code/*`).
+///
+/// OpenCode defaults custom `@ai-sdk/openai-compatible` models to text-only
+/// (`capabilities.input.image = false`), causing its `Read` tool to strip
+/// screenshots and emit `ERROR: Cannot read image (this model does not support
+/// image input)` before the request ever reaches Core's proxy.
+fn opencode_proxy_vision_model_entry(name: &str, upstream_id: Option<&str>) -> serde_json::Value {
+    let mut model = serde_json::json!({
+        "name": name,
+        "attachment": true,
+        "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+        }
+    });
+    if let Some(id) = upstream_id {
+        model["id"] = serde_json::json!(id);
+    }
+    model
+}
+
 pub(crate) fn ensure_opencode_provider_for_model(
     opencode_config_dir: &std::path::Path,
     app_working_dir: &std::path::Path,
@@ -6663,10 +6693,9 @@ pub(crate) fn ensure_opencode_provider_for_model(
                     crate::api::proxy_liveness::MISSION_ID_HEADER: mid
                 });
             }
-            let mut model = serde_json::json!({"name": model_id});
-            if provider_id != "builtin" {
-                model["id"] = serde_json::json!(format!("{provider_id}/{model_id}"));
-            }
+            let upstream_id =
+                (provider_id != "builtin").then(|| format!("{provider_id}/{model_id}"));
+            let model = opencode_proxy_vision_model_entry(model_id, upstream_id.as_deref());
             Some(serde_json::json!({
                 "npm": "@ai-sdk/openai-compatible",
                 "name": match provider_id { "antigravity" => "Antigravity subscription", "muse-code" => "Muse Code", _ => "Builtin" },
@@ -6744,7 +6773,7 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "Google",
                 "models": {
-                    model_id: { "name": model_id }
+                    model_id: opencode_proxy_vision_model_entry(model_id, None)
                 },
                 "options": options
             }))
@@ -6785,9 +6814,13 @@ pub(crate) fn ensure_opencode_provider_for_model(
     }
 
     // A mission may register its explicit override and then its agent default.
-    // Refresh the Google transport while retaining both model definitions.
+    // Refresh proxy-backed transports while retaining all registered model
+    // definitions and updating stale entries (e.g. backfilling vision modalities).
     let mut provider_def = provider_def;
-    if matches!(provider_id, "google" | "gemini") {
+    if matches!(
+        provider_id,
+        "builtin" | "google" | "gemini" | "antigravity" | "muse-code" | "kimi"
+    ) {
         if let Some(existing) = providers_map.get(provider_id).and_then(|v| v.as_object()) {
             let mut merged = existing.clone();
             let mut models = existing
@@ -6799,9 +6832,20 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 merged.extend(definition.clone());
                 if let Some(new_models) = definition.get("models").and_then(|v| v.as_object()) {
                     for (id, definition) in new_models {
-                        models
-                            .entry(id.clone())
-                            .or_insert_with(|| definition.clone());
+                        match models.get_mut(id).and_then(|v| v.as_object_mut()) {
+                            Some(existing_model) => {
+                                if let Some(new_fields) = definition.as_object() {
+                                    for (k, v) in new_fields {
+                                        existing_model
+                                            .entry(k.clone())
+                                            .or_insert_with(|| v.clone());
+                                    }
+                                }
+                            }
+                            None => {
+                                models.insert(id.clone(), definition.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -10106,6 +10150,10 @@ pub struct RunningMissionInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_unit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_node_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_job_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status_conflict: Option<String>,
 }
 
@@ -10144,6 +10192,17 @@ impl From<&MissionRunner> for RunningMissionInfo {
                 .durable_run
                 .as_ref()
                 .and_then(|run| run.scope_unit.clone()),
+            remote_node_id: runner
+                .durable_run
+                .as_ref()
+                .and_then(|run| run.scope_unit.as_deref())
+                .and_then(|s| s.strip_prefix("remote-node:"))
+                .map(str::to_string),
+            remote_job_id: runner
+                .durable_run
+                .as_ref()
+                .and_then(|run| run.owner_actor_id.strip_prefix("remote-job:"))
+                .and_then(|s| Uuid::parse_str(s).ok()),
             status_conflict: runner
                 .durable_run
                 .is_none()
@@ -12606,6 +12665,80 @@ mod tests {
             .as_str()
             .expect("mission id header");
         assert_eq!(mission_header, "00000000-0000-0000-0000-000000000123");
+        let smart = &opencode_json["provider"]["builtin"]["models"]["smart"];
+        assert_eq!(smart["attachment"], true);
+        assert_eq!(smart["modalities"]["input"], json!(["text", "image"]));
+        assert_eq!(smart["modalities"]["output"], json!(["text"]));
+    }
+
+    #[test]
+    fn ensure_opencode_provider_builtin_preserves_multiple_routes_and_backfills_vision() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("ws");
+        let app_dir = temp.path().join("app");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(
+            config_dir.join("opencode.json"),
+            serde_json::to_vec(&json!({
+                "provider": {
+                    "builtin": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "Builtin",
+                        "models": {
+                            "smart": { "name": "smart" },
+                            "fast": { "name": "fast" }
+                        }
+                    },
+                    "google": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "Google",
+                        "models": {
+                            "gemini-4-carbon-eap": {
+                                "name": "Custom Carbon",
+                                "limit": { "context": 512_000, "output": 32_000 }
+                            }
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        ensure_opencode_provider_for_model(
+            &config_dir,
+            &app_dir,
+            "builtin/smart",
+            "10.88.0.1",
+            None,
+        );
+        ensure_opencode_provider_for_model(
+            &config_dir,
+            &app_dir,
+            "google/gemini-4-carbon-eap",
+            "10.88.0.1",
+            None,
+        );
+
+        let config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(config_dir.join("opencode.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            config["provider"]["builtin"]["models"]["smart"]["modalities"]["input"],
+            json!(["text", "image"])
+        );
+        assert_eq!(
+            config["provider"]["builtin"]["models"]["smart"]["attachment"],
+            true
+        );
+        assert!(config["provider"]["builtin"]["models"]["fast"].is_object());
+        let carbon = &config["provider"]["google"]["models"]["gemini-4-carbon-eap"];
+        assert_eq!(carbon["modalities"]["input"], json!(["text", "image"]));
+        assert_eq!(carbon["attachment"], true);
+        assert_eq!(carbon["name"], "Custom Carbon");
+        assert_eq!(carbon["limit"]["context"], 512_000);
+        assert_eq!(carbon["limit"]["output"], 32_000);
     }
 
     #[test]

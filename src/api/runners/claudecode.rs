@@ -1665,6 +1665,9 @@ pub fn run_claudecode_turn<'a>(
                     .with_terminal_reason(TerminalReason::LlmError);
             }
         };
+        let _harness_pid_guard = pty
+            .process_id()
+            .map(|pid| super::live_session::register_harness_pid(mission_id, pid));
 
         // Keep stdin open - dropping the writer (closing stdin) can cause some Claude CLI
         // agent modes to hang. In argv mode stdin is unused but must stay open;

@@ -11,6 +11,7 @@ pub mod managed_auth;
 pub mod resource_history;
 pub mod runner;
 pub mod slot;
+pub mod tool_interrupt;
 
 pub use capacity::{Admission, NodeCapacity};
 pub use job_store::{JobRecord, JobState, JobStore};

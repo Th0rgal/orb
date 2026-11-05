@@ -142,6 +142,14 @@ pub struct CreateMissionRequest {
     /// Optional `boost.ci` RAM override in MiB (`4096..=131072`, multiple of `1024`).
     #[serde(default)]
     pub managed_memory_mib: Option<u32>,
+    /// Optional grace window (minutes, `0..=720`) to retain an auto-managed child VM
+    /// after its child mission completes while its parent mission is still alive.
+    #[serde(default, alias = "managed_retain_for_parent_minutes")]
+    pub retain_vm_for_parent_minutes: Option<u64>,
+    /// Optional shell command executed out-of-band on an auto-managed child VM
+    /// before TTL/720m hard-cap expiry.
+    #[serde(default, alias = "pre_stop_hook")]
+    pub managed_pre_stop_hook: Option<String>,
     /// Optional managed-machine spending budget (USD) for this mission and
     /// its descendants. Under an ancestor budget it is a sub-budget and must
     /// fit the ancestor pool's remaining amount.
@@ -1046,6 +1054,8 @@ pub(in crate::api) async fn create_mission_inner(
         managed_base_key: None,
         managed_lean_mode: None,
         managed_memory_mib: None,
+        retain_vm_for_parent_minutes: None,
+        managed_pre_stop_hook: None,
         budget_usd: None,
         validate_only: None,
         extra: Default::default(),
@@ -2312,6 +2322,8 @@ pub(in crate::api) async fn create_mission_inner(
             base_key: req.managed_base_key.clone(),
             lean_mode: req.managed_lean_mode.clone(),
             memory_mib: req.managed_memory_mib,
+            retain_vm_for_parent_minutes: req.retain_vm_for_parent_minutes,
+            pre_stop_hook: req.managed_pre_stop_hook.clone(),
         };
         let (machine, reused) = crate::api::managed_machines::spawn_for_inner(
             &state,

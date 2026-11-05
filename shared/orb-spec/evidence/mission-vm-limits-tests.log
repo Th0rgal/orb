@@ -1,45 +1,12 @@
-   Compiling orb-spec v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup/crates/orb-spec)
-    Finished `test` profile [unoptimized] target(s) in 2.95s
-     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/orb_spec-4c486aa5e7ada9e6)
+    Finished `test` profile [unoptimized] target(s) in 0.12s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-d791927b4d2534f0)
 
 running 1 test
 test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
+   Compiling sandboxed_sh v1.3.0 (/var/lib/sandboxed-node/work/8f8e1c2b-e2d6-4e2b-857f-bebba571969f/orb)
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -172,19 +139,13 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 43.03s
-     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 50.82s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 2 tests
 test managed::tests::mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_usd_budget ... ok
 test managed::tests::mission_vm_limits_bypass_saturated_global_pool_and_enforce_per_provider_caps ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3733 filtered out; finished in 0.02s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3775 filtered out; finished in 0.03s
 

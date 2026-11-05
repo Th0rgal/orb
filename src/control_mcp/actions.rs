@@ -5,6 +5,15 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+/// Notifies `wait_actions` callers whenever an action receipt settles (`finish`,
+/// `cancel`, or `reconcile`).
+pub static ACTION_SETTLED: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
+
+pub fn is_settled_state(state: &str) -> bool {
+    !matches!(state, "queued" | "dispatching" | "running")
+}
+
 pub fn init(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS mcp_actions_v1 (
         id TEXT PRIMARY KEY, owner TEXT NOT NULL, scope TEXT NOT NULL,
@@ -172,6 +181,7 @@ pub fn cancel(conn: &Connection, p: &Principal, call: &Call) -> Result<Value, St
     tx.execute("UPDATE mcp_actions_v1 SET state='completed',result=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2 AND state='queued'",
         params![result.to_string(),id]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
+    ACTION_SETTLED.notify_waiters();
     Ok(result)
 }
 pub fn finish(conn: &Connection, id: &str, value: &Value) -> Result<(), String> {
@@ -180,6 +190,7 @@ pub fn finish(conn: &Connection, id: &str, value: &Value) -> Result<(), String> 
     if count != 1 {
         return Err("Action was not dispatching".into());
     }
+    ACTION_SETTLED.notify_waiters();
     Ok(())
 }
 
@@ -222,6 +233,7 @@ pub fn reconcile(conn: &Connection, p: &Principal, call: &Call) -> Result<Value,
     let result = json!({"action_id":id,"state":"completed","result":{"target_action_id":target,"receipt":settled}});
     tx.execute("UPDATE mcp_actions_v1 SET state='completed',result=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2 AND state='queued'",params![result.to_string(),id]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
+    ACTION_SETTLED.notify_waiters();
     Ok(result)
 }
 /// History deletion preserves files and action receipts. Unlike filesystem

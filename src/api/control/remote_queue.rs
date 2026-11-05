@@ -14,7 +14,21 @@ pub(super) struct Entry {
     pub session_id: Option<String>,
     #[serde(default)]
     pub job_id: Option<Uuid>,
+    #[serde(default)]
+    pub interrupt_target_job_id: Option<Uuid>,
     pub assignment: serde_json::Value,
+}
+
+#[derive(Debug)]
+pub(super) struct EnqueueOutcome {
+    /// `true` when this message is still `waiting` and unbound (`job_id.is_none()`);
+    /// `false` when replaying an already-accepted / bound receipt.
+    pub waiting_unbound: bool,
+    /// Placement observed under `DISPATCH_ADMISSION` when admitted (or re-observed on replay).
+    pub placement: remote_grok::RemotePlacement,
+    /// Live `job_id` active when this message was originally admitted; remote
+    /// interruption is fenced to this exact `job_id`.
+    pub interrupt_target_job_id: Option<Uuid>,
 }
 
 fn assignment(mission: &Mission) -> serde_json::Value {
@@ -87,6 +101,124 @@ pub(super) fn allow_abandon(store: &ProjectsStore, user: &str, id: Uuid) -> Resu
     Ok(())
 }
 
+pub(crate) async fn check_remote_continuation_admissibility(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    mission: &Mission,
+    placement: &remote_grok::RemotePlacement,
+) -> Result<(), String> {
+    if !matches!(
+        mission.backend.as_str(),
+        "grok" | "codex" | "claudecode" | "opencode" | "antigravity" | "vibe"
+    ) {
+        return Err("This remote harness cannot continue its session".into());
+    }
+    if crate::api::mission_horizon::superseded_by(mission).is_some() {
+        return Err(format!(
+            "{}: mission {} has been superseded",
+            remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+            mission.id
+        ));
+    }
+    let has_pr_writer = mission.project.tags.iter().any(|tag| tag == "pr-writer");
+    let has_pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
+    if has_pr_writer && has_pr_readonly {
+        return Err(format!(
+            "{}: mission {} carries contradictory PR capability tags",
+            remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+            mission.id
+        ));
+    }
+    if let Some(pr) = mission.project.github_pr.as_deref() {
+        if !has_pr_writer && !has_pr_readonly {
+            return Err(format!(
+                "{}: PR mission {} lacks admitted writer/readonly capability tag; create a remote replacement with supersedes_mission_id={}",
+                remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                mission.id,
+                mission.id
+            ));
+        }
+        if has_pr_writer && !placement.live {
+            if let Some(existing) =
+                super::find_existing_pr_writer_global(&state.control, pr, Some(mission.id)).await?
+            {
+                return Err(format!(
+                    "{}: PR writer lease for {} is already held by mission {} (status={})",
+                    remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                    super::canonical_github_pr(pr),
+                    existing.id,
+                    existing.status
+                ));
+            }
+        }
+    }
+    if !placement.live {
+        if !state.config.remote_nodes.enabled
+            || state.config.remote_nodes.node(&placement.node_id).is_none()
+            || crate::managed::node_provably_gone(&placement.node_id).await
+        {
+            return Err(format!(
+                "{}: remote node '{}' is no longer configured or online; create a replacement mission",
+                remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                placement.node_id
+            ));
+        }
+        if let Some(track) = mission.project.track.as_deref() {
+            let Some(slug) = mission.project.project.as_deref() else {
+                return Err(format!(
+                    "{}: track '{}' has no project binding; create a replacement mission with supersedes_mission_id={}",
+                    remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                    track,
+                    mission.id
+                ));
+            };
+            let canonical = state
+                .projects
+                .track(slug, track)
+                .map_err(|e| e.to_string())?;
+            let Some(canonical) = canonical else {
+                return Err(format!(
+                    "{}: track '{}' on project '{}' is missing; create a replacement mission with supersedes_mission_id={}",
+                    remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                    track,
+                    slug,
+                    mission.id
+                ));
+            };
+            if canonical.track != track
+                || matches!(
+                    canonical.status.as_deref(),
+                    Some("cancelled" | "done" | "satisfied")
+                )
+            {
+                return Err(format!(
+                    "{}: track '{}' on project '{}' is closed; create a replacement mission with supersedes_mission_id={}",
+                    remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                    track,
+                    slug,
+                    mission.id
+                ));
+            }
+        }
+        let session_ready = mission
+            .session_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+            || machine_transfer::committed(&control.mission_store, mission.id)
+                .await?
+                .is_some()
+            || mission.backend == "opencode";
+        if !session_ready {
+            return Err(format!(
+                "{}: mission {} has no recorded native session",
+                remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                mission.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn enqueue(
     state: &Arc<AppState>,
     control: &ControlState,
@@ -95,24 +227,24 @@ pub(super) async fn enqueue(
     expected: Option<&crate::api::writer_recycle::WriterContinuation>,
     content: String,
     id: Uuid,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<EnqueueOutcome, (StatusCode, String)> {
     let _guard = DISPATCH_ADMISSION.lock().await;
     let _file = dispatch_admission::durable_lock(&state.config)
         .await
         .map_err(internal_error)?;
     // Accepted receipts precede current-assignment admission on retries.
-    let previous: Option<(String, String)> = state
+    let previous: Option<(String, String, String)> = state
         .projects
         .lock()
         .map_err(internal_error)?
         .query_row(
-            "SELECT mission_id,state FROM remote_message_queue WHERE user_id=?1 AND message_id=?2",
+            "SELECT mission_id,state,payload FROM remote_message_queue WHERE user_id=?1 AND message_id=?2",
             params![user, id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(internal_error)?;
-    if let Some((owner, status)) = previous {
+    if let Some((owner, status, payload_json)) = previous {
         if !crate::orb_spec::remote_outbox_admit_enqueue(crate::orb_spec::RemoteOutboxEnqueue {
             already_exists: true,
             same_mission: owner == mid.to_string(),
@@ -126,7 +258,27 @@ pub(super) async fn enqueue(
                 "This message ID was already used or cancelled".into(),
             ));
         }
-        return Ok(());
+        let stored: Option<Entry> = serde_json::from_str(&payload_json).ok();
+        let placement =
+            remote_grok::placement(&state.config.working_dir, &control.mission_store, mid)
+                .await
+                .map_err(internal_error)?
+                .unwrap_or_else(|| remote_grok::RemotePlacement {
+                    node_id: stored
+                        .as_ref()
+                        .map(|e| e.node_id.clone())
+                        .unwrap_or_default(),
+                    job_id: Uuid::nil(),
+                    live: false,
+                });
+        let waiting_unbound =
+            status == "waiting" && stored.as_ref().is_some_and(|e| e.job_id.is_none());
+        let interrupt_target_job_id = stored.and_then(|e| e.interrupt_target_job_id);
+        return Ok(EnqueueOutcome {
+            waiting_unbound,
+            placement,
+            interrupt_target_job_id,
+        });
     }
     machine_transfer::guard(&control.mission_store, mid)
         .await
@@ -151,6 +303,22 @@ pub(super) async fn enqueue(
         ));
     }
     let is_superseded = crate::api::mission_horizon::superseded_by(&mission).is_some();
+    // Validate only new messages: an accepted ID retains its receipt even if
+    // the assignment changed after a response was lost. Admission protects
+    // this identity read and the persisted queue snapshot from reassignment.
+    // Run before track/PR admissibility checks so a racing project/track
+    // reassignment always surfaces `writer_identity_stale`.
+    if !is_superseded {
+        if let Some(expected) = expected {
+            writer_reuse_or_conflict(
+                &mission,
+                &crate::api::writer_recycle::WriterIdentityPatch {
+                    continue_identity: Some(expected.clone()),
+                    ..Default::default()
+                },
+            )?;
+        }
+    }
     let session_ready = placement.live
         || mission
             .session_id
@@ -161,11 +329,11 @@ pub(super) async fn enqueue(
             .map_err(internal_error)?
             .is_some()
         || mission.backend == "opencode";
-    let writer_identity = mission.project.tags.iter().any(|tag| tag == "pr-writer")
-        || mission.project.track.as_ref().is_some_and(|track| {
-            track != &crate::api::track_leases::generated_track_key(&mid.to_string())
-        });
-    let unsupported = mission.project.github_pr.is_some() || (writer_identity && !placement.live);
+    let admissibility_err =
+        check_remote_continuation_admissibility(state, control, &mission, &placement)
+            .await
+            .err();
+    let unsupported = !is_superseded && session_ready && admissibility_err.is_some();
     if !crate::orb_spec::remote_outbox_admit_enqueue(crate::orb_spec::RemoteOutboxEnqueue {
         already_exists: false,
         same_mission: true,
@@ -184,6 +352,8 @@ pub(super) async fn enqueue(
                 "{}: mission {mid} has no recorded native session",
                 remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT
             )
+        } else if let Some(err) = admissibility_err {
+            err
         } else {
             let prefix = if placement.live {
                 remote_grok::REMOTE_JOB_STILL_RUNNING
@@ -194,23 +364,12 @@ pub(super) async fn enqueue(
         };
         return Err((StatusCode::CONFLICT, msg));
     }
-    // Validate only new messages: an accepted ID retains its receipt even if
-    // the assignment changed after a response was lost. Admission protects
-    // this identity read and the persisted queue snapshot from reassignment.
-    if let Some(expected) = expected {
-        writer_reuse_or_conflict(
-            &mission,
-            &crate::api::writer_recycle::WriterIdentityPatch {
-                continue_identity: Some(expected.clone()),
-                ..Default::default()
-            },
-        )?;
-    }
+    let interrupt_target_job_id = placement.live.then_some(placement.job_id);
     save(
         &state.projects,
         &Entry {
             user_id: user.into(),
-            node_id: placement.node_id,
+            node_id: placement.node_id.clone(),
             // Older OpenCode jobs use a placeholder until the stream reports
             // their real session. Do not pin that placeholder as native identity.
             session_id: mission
@@ -218,6 +377,7 @@ pub(super) async fn enqueue(
                 .clone()
                 .filter(|id| mission.backend != "opencode" || id.starts_with("ses_")),
             job_id: None,
+            interrupt_target_job_id,
             message: QueuedMessage {
                 id,
                 content,
@@ -230,7 +390,12 @@ pub(super) async fn enqueue(
             assignment: assignment(&mission),
         },
     )
-    .map_err(internal_error)
+    .map_err(internal_error)?;
+    Ok(EnqueueOutcome {
+        waiting_unbound: true,
+        placement,
+        interrupt_target_job_id,
+    })
 }
 
 /// Called *inside* dispatch admission, immediately before checking the live run.
@@ -500,6 +665,7 @@ mod tests {
                     node_id: "nippur".into(),
                     session_id: None,
                     job_id: None,
+                    interrupt_target_job_id: None,
                     assignment: serde_json::json!({}),
                     message: QueuedMessage {
                         id: *id,
@@ -569,6 +735,7 @@ mod tests {
                     node_id: "nippur".into(),
                     session_id: mission.session_id.clone(),
                     job_id: None,
+                    interrupt_target_job_id: None,
                     assignment: assignment(&mission),
                     message: QueuedMessage {
                         id,
@@ -660,6 +827,7 @@ mod tests {
                     node_id: "nippur".into(),
                     session_id: None,
                     job_id: None,
+                    interrupt_target_job_id: None,
                     assignment: assignment(mission),
                     message: QueuedMessage {
                         id: Uuid::new_v4(),
@@ -700,6 +868,7 @@ mod tests {
             node_id: "nippur".into(),
             session_id: None,
             job_id: None,
+            interrupt_target_job_id: None,
             assignment: serde_json::json!({}),
         };
         save(&db, &entry(ids[0], mid)).unwrap();
@@ -759,6 +928,7 @@ mod tests {
             node_id: "nippur".into(),
             session_id: None,
             job_id: None,
+            interrupt_target_job_id: None,
             assignment: serde_json::json!({}),
         };
         {
@@ -786,6 +956,94 @@ mod tests {
         assert!(waiting(&db, None).unwrap().is_empty());
         assert!(!finish(&db, "u", first, "cancelled").unwrap());
     }
+
+    #[tokio::test]
+    async fn rebind_session_id_updates_placeholder_and_unbound_waiting_entries_without_touching_foreign_sessions(
+    ) {
+        let missions = crate::api::mission_store::InMemoryMissionStore::new();
+        let mut mission = missions
+            .create_mission(None, None, None, None, None, Some("opencode"), None)
+            .await
+            .unwrap();
+        mission.session_id = Some("legacy-placeholder-uuid".into());
+        let db = ProjectsStore::open_in_memory().unwrap();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let foreign = Uuid::new_v4();
+        for (id, ses) in [
+            (first, Some("legacy-placeholder-uuid".to_string())),
+            (second, None),
+            (foreign, Some("ses_other_generation".to_string())),
+        ] {
+            save(
+                &db,
+                &Entry {
+                    user_id: "u".into(),
+                    node_id: "managed-mm1".into(),
+                    session_id: ses,
+                    job_id: None,
+                    interrupt_target_job_id: None,
+                    assignment: assignment(&mission),
+                    message: QueuedMessage {
+                        id,
+                        content: "continue".into(),
+                        agent: None,
+                        mission_id: Some(mission.id),
+                        source: Some("remote-queue".into()),
+                        inflight: false,
+                        queue_error: None,
+                    },
+                },
+            )
+            .unwrap();
+        }
+        // Once OpenCode session recovery persists `ses_recovered`, the old placeholder
+        // would fail `validate` unless rebound under dispatch admission.
+        mission.session_id = Some("ses_recovered".into());
+        assert!(validate(&db, "u", first, &mission, "managed-mm1").is_err());
+
+        let updated = rebind_session_id(
+            &db,
+            mission.id,
+            Some("legacy-placeholder-uuid"),
+            "ses_recovered",
+        )
+        .unwrap();
+        assert_eq!(updated, 2);
+
+        let e1 = validate(&db, "u", first, &mission, "managed-mm1").unwrap();
+        assert_eq!(e1.session_id.as_deref(), Some("ses_recovered"));
+        assert!(finish(&db, "u", first, "accepted").unwrap());
+
+        let e2 = validate(&db, "u", second, &mission, "managed-mm1").unwrap();
+        assert_eq!(e2.session_id.as_deref(), Some("ses_recovered"));
+        assert!(finish(&db, "u", second, "accepted").unwrap());
+
+        // An entry bound to a distinct real session ID is never overwritten.
+        assert!(validate(&db, "u", foreign, &mission, "managed-mm1").is_err());
+    }
+}
+
+/// Update waiting outbox bindings for `mission_id` under dispatch admission when
+/// OpenCode session recovery replaces a legacy placeholder (or unbound `None`)
+/// with the discovered native `ses_...` identity.
+pub(super) fn rebind_session_id(
+    store: &ProjectsStore,
+    mission_id: Uuid,
+    previous_session_id: Option<&str>,
+    new_session_id: &str,
+) -> Result<usize, String> {
+    let conn = store.lock()?;
+    conn.execute(
+        "UPDATE remote_message_queue \
+         SET payload = json_set(payload, '$.session_id', ?2) \
+         WHERE mission_id = ?1 \
+           AND state = 'waiting' \
+           AND (json_extract(payload, '$.session_id') IS NULL \
+                OR (?3 IS NOT NULL AND json_extract(payload, '$.session_id') = ?3))",
+        params![mission_id.to_string(), new_session_id, previous_session_id],
+    )
+    .map_err(|e| e.to_string())
 }
 
 // Bind before submit, under dispatch admission. Unlike scheduled wake receipts,

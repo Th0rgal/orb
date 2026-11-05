@@ -397,6 +397,9 @@ pub async fn follow_up(
         queued: true,
         message_accepted: true,
         mission_id: Some(mid),
+        delivery_mode: None,
+        interrupted_tool: None,
+        replaced_by_mission_id: None,
         previous_execution: None,
         warnings: vec![],
     })))
