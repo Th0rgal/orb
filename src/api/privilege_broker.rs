@@ -130,6 +130,14 @@ const PUBLIC_DIAGNOSTIC_PATHS: &[&str] = &[
 ];
 
 const TRUSTED_EXEC_DIRS: &[&str] = &["/bin", "/usr/bin", "/sbin", "/usr/sbin"];
+const TRUSTED_RESOLVED_EXEC_PREFIXES: &[&str] = &[
+    "/bin/",
+    "/usr/bin/",
+    "/sbin/",
+    "/usr/sbin/",
+    "/usr/lib/",
+    "/lib/",
+];
 const TRUSTED_EXEC_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 
 const UNSAFE_ENV_KEYS: &[&str] = &[
@@ -289,10 +297,11 @@ fn is_trusted_executable_token(raw_exe: &str) -> bool {
             && std::fs::canonicalize(exe_path)
                 .ok()
                 .and_then(|canon| {
-                    canon
-                        .parent()
-                        .and_then(|p| p.to_str())
-                        .map(|d| !TRUSTED_EXEC_DIRS.contains(&d))
+                    canon.to_str().map(|s| {
+                        !TRUSTED_RESOLVED_EXEC_PREFIXES
+                            .iter()
+                            .any(|prefix| s.starts_with(prefix))
+                    })
                 })
                 .unwrap_or(true)
     });
@@ -304,36 +313,52 @@ fn resolve_trusted_ops_read_executable(
     prog: &str,
     trusted_uid: u32,
 ) -> Result<PathBuf, String> {
-    if raw_exe.starts_with('/') {
-        if !is_canonical_absolute_path_str(raw_exe) {
-            return Err("Ambiguous diagnostic executable path".into());
-        }
-        let canon = std::fs::canonicalize(raw_exe)
-            .map_err(|_| "Diagnostic executable is unavailable".to_string())?;
-        let parent = canon.parent().and_then(|p| p.to_str()).unwrap_or("");
-        if !TRUSTED_EXEC_DIRS.contains(&parent)
-            || canon.file_name().and_then(|n| n.to_str()) != Some(prog)
-        {
-            return Err("Untrusted resolved diagnostic executable".into());
-        }
-        let canon_str = canon.to_str().ok_or("Invalid diagnostic executable path")?;
-        return confined_existing_path(canon_str, false, false, trusted_uid);
+    use std::os::unix::fs::MetadataExt;
+    if raw_exe.starts_with('/') && !is_canonical_absolute_path_str(raw_exe) {
+        return Err("Ambiguous diagnostic executable path".into());
     }
-    for dir in TRUSTED_EXEC_PATH.split(':') {
-        let candidate = PathBuf::from(dir).join(prog);
-        if let Ok(canon) = std::fs::canonicalize(&candidate) {
-            let parent = canon.parent().and_then(|p| p.to_str()).unwrap_or("");
-            if TRUSTED_EXEC_DIRS.contains(&parent)
-                && canon.file_name().and_then(|n| n.to_str()) == Some(prog)
-            {
-                if let Some(canon_str) = canon.to_str() {
-                    if let Ok(confined) =
-                        confined_existing_path(canon_str, false, false, trusted_uid)
-                    {
-                        return Ok(confined);
-                    }
-                }
-            }
+    let candidates: Vec<PathBuf> = if raw_exe.starts_with('/') {
+        vec![PathBuf::from(raw_exe)]
+    } else {
+        TRUSTED_EXEC_PATH
+            .split(':')
+            .map(|dir| PathBuf::from(dir).join(prog))
+            .collect()
+    };
+    for candidate in candidates {
+        let parent = candidate.parent().and_then(|p| p.to_str()).unwrap_or("");
+        if !TRUSTED_EXEC_DIRS.contains(&parent)
+            || candidate.file_name().and_then(|n| n.to_str()) != Some(prog)
+        {
+            continue;
+        }
+        let Ok(parent_meta) = std::fs::symlink_metadata(parent) else {
+            continue;
+        };
+        let Ok(cand_meta) = std::fs::symlink_metadata(&candidate) else {
+            continue;
+        };
+        if (parent_meta.uid() != 0 && parent_meta.uid() != trusted_uid)
+            || (parent_meta.mode() & 0o002) != 0
+            || (cand_meta.uid() != 0 && cand_meta.uid() != trusted_uid)
+            || (!cand_meta.file_type().is_symlink() && (cand_meta.mode() & 0o002) != 0)
+        {
+            continue;
+        }
+        let Ok(canon) = std::fs::canonicalize(&candidate) else {
+            continue;
+        };
+        let Some(canon_str) = canon.to_str() else {
+            continue;
+        };
+        if !TRUSTED_RESOLVED_EXEC_PREFIXES
+            .iter()
+            .any(|prefix| canon_str.starts_with(prefix))
+        {
+            continue;
+        }
+        if confined_existing_path(canon_str, false, false, trusted_uid).is_ok() {
+            return Ok(candidate);
         }
     }
     Err("Diagnostic executable is unavailable".into())
@@ -416,6 +441,7 @@ fn build_remote_ops_read_command(argv: &[String], cwd: Option<&str>) -> Result<S
         "import os, shutil, stat, sys\n",
         "from pathlib import Path\n",
         "TRUSTED_DIRS = ('/bin', '/usr/bin', '/sbin', '/usr/sbin')\n",
+        "TRUSTED_PREFIXES = ('/bin/', '/usr/bin/', '/sbin/', '/usr/sbin/', '/usr/lib/', '/lib/')\n",
         "TRUSTED_PATH = '/usr/sbin:/usr/bin:/sbin:/bin'\n",
         "PUBLIC_PATHS = {'/proc/cpuinfo','/proc/meminfo','/proc/loadavg','/proc/uptime','/proc/version','/proc/stat','/proc/diskstats','/proc/mdstat','/etc/os-release','/usr/lib/os-release'}\n",
         "def canon_str(s):\n",
@@ -441,13 +467,23 @@ fn build_remote_ops_read_command(argv: &[String], cwd: Option<&str>) -> Result<S
         "prog = Path(argv[0]).name\n",
         "if Path(argv[0]).is_absolute():\n",
         "    if not canon_str(argv[0]): raise SystemExit(126)\n",
-        "    rexe = Path(argv[0]).resolve(strict=True)\n",
+        "    cands = [Path(argv[0])]\n",
         "else:\n",
-        "    found = shutil.which(prog, path=TRUSTED_PATH)\n",
-        "    if not found: raise SystemExit(126)\n",
-        "    rexe = Path(found).resolve(strict=True)\n",
-        "if str(rexe.parent) not in TRUSTED_DIRS or rexe.name != prog: raise SystemExit(126)\n",
-        "exe = confine(str(rexe))\n",
+        "    cands = [Path(d) / prog for d in TRUSTED_PATH.split(':')]\n",
+        "exe = None\n",
+        "for cand in cands:\n",
+        "    if str(cand.parent) not in TRUSTED_DIRS or cand.name != prog: continue\n",
+        "    try:\n",
+        "        pm, cm = cand.parent.lstat(), cand.lstat()\n",
+        "        rexe = cand.resolve(strict=True)\n",
+        "    except OSError:\n",
+        "        continue\n",
+        "    if pm.st_uid != 0 or (pm.st_mode & 0o002) or cm.st_uid != 0 or (not stat.S_ISLNK(cm.st_mode) and (cm.st_mode & 0o002)): continue\n",
+        "    if not str(rexe).startswith(TRUSTED_PREFIXES): continue\n",
+        "    confine(str(rexe))\n",
+        "    exe = cand\n",
+        "    break\n",
+        "if exe is None: raise SystemExit(126)\n",
         "cwd = confine(cwd_raw, directory=True)\n",
         "args = list(argv[1:])\n",
         "if prog in {'cat','head','tail','stat'}:\n",

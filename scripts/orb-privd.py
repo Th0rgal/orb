@@ -82,6 +82,7 @@ UNSAFE_ENV_KEYS = {
 
 
 TRUSTED_EXEC_DIRS = ("/bin", "/usr/bin", "/sbin", "/usr/sbin")
+TRUSTED_RESOLVED_EXEC_PREFIXES = ("/bin/", "/usr/bin/", "/sbin/", "/usr/sbin/", "/usr/lib/", "/lib/")
 TRUSTED_EXEC_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 PUBLIC_DIAGNOSTIC_PATHS = {
     "/proc/cpuinfo",
@@ -201,10 +202,10 @@ def _is_trusted_executable_token(raw_exe: str) -> bool:
         return False
     if exe_path.is_symlink():
         try:
-            canon_parent = str(exe_path.resolve().parent)
+            canon_str = str(exe_path.resolve(strict=True))
         except OSError:
             return False
-        if canon_parent not in TRUSTED_EXEC_DIRS:
+        if not canon_str.startswith(TRUSTED_RESOLVED_EXEC_PREFIXES):
             return False
     return True
 
@@ -283,6 +284,45 @@ def confined_existing_path(
     return path
 
 
+def _resolve_trusted_ops_read_executable(raw_exe: str, prog: str, *, trusted_uid: int = 0) -> Path:
+    import stat
+
+    candidates = (
+        [Path(raw_exe)]
+        if Path(raw_exe).is_absolute()
+        else [Path(d) / prog for d in TRUSTED_EXEC_PATH.split(":")]
+    )
+    if Path(raw_exe).is_absolute() and not _is_canonical_absolute_path_str(raw_exe):
+        raise ValueError("Ambiguous diagnostic executable path")
+    for candidate in candidates:
+        if str(candidate.parent) not in TRUSTED_EXEC_DIRS or candidate.name != prog:
+            continue
+        try:
+            parent_meta = candidate.parent.lstat()
+            cand_meta = candidate.lstat()
+        except OSError:
+            continue
+        if (
+            (parent_meta.st_uid not in {0, trusted_uid})
+            or (parent_meta.st_mode & 0o002)
+            or (cand_meta.st_uid not in {0, trusted_uid})
+            or (not stat.S_ISLNK(cand_meta.st_mode) and (cand_meta.st_mode & 0o002))
+        ):
+            continue
+        try:
+            resolved_exe = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not str(resolved_exe).startswith(TRUSTED_RESOLVED_EXEC_PREFIXES):
+            continue
+        try:
+            confined_existing_path(str(resolved_exe), trusted_uid=trusted_uid)
+        except ValueError:
+            continue
+        return candidate
+    raise ValueError("Untrusted resolved diagnostic executable")
+
+
 def prepare_ops_read(
     argv: list[str],
     cwd: str | None,
@@ -299,21 +339,7 @@ def prepare_ops_read(
             raise ValueError("Diagnostic command is not allowlisted")
     elif not ops_read_command_allowed(prog, argv[1:]):
         raise ValueError("Diagnostic command is not allowlisted")
-    if Path(argv[0]).is_absolute():
-        if not _is_canonical_absolute_path_str(argv[0]):
-            raise ValueError("Ambiguous diagnostic executable path")
-        resolved_exe = Path(argv[0]).resolve(strict=True)
-        if str(resolved_exe.parent) not in TRUSTED_EXEC_DIRS or resolved_exe.name != prog:
-            raise ValueError("Untrusted resolved diagnostic executable")
-        executable = confined_existing_path(str(resolved_exe), trusted_uid=trusted_uid)
-    else:
-        found = shutil.which(prog, path=TRUSTED_EXEC_PATH)
-        if not found:
-            raise ValueError("Diagnostic executable is unavailable")
-        resolved_exe = Path(found).resolve(strict=True)
-        if str(resolved_exe.parent) not in TRUSTED_EXEC_DIRS or resolved_exe.name != prog:
-            raise ValueError("Untrusted resolved diagnostic executable")
-        executable = confined_existing_path(str(resolved_exe), trusted_uid=trusted_uid)
+    executable = _resolve_trusted_ops_read_executable(argv[0], prog, trusted_uid=trusted_uid)
     raw_cwd = (cwd or "/").strip() or "/"
     execution_cwd = str(confined_existing_path(raw_cwd, directory=True, trusted_uid=trusted_uid))
     exec_args = list(argv[1:])

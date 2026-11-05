@@ -507,6 +507,36 @@ class IdentityTests(unittest.TestCase):
                     "ops_read", None, ["uptime"], cwd=str(symlink_dir / "sub")
                 )
 
+            uutils_bin_dir = root_dir / "usr_bin"
+            uutils_lib_dir = root_dir / "usr_lib_cargo_coreutils"
+            uutils_bin_dir.mkdir(mode=0o755)
+            uutils_lib_dir.mkdir(mode=0o755)
+            multicall_target = uutils_lib_dir / "coreutils"
+            multicall_target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(multicall_target, 0o755)
+            uutils_cat = uutils_bin_dir / "cat"
+            uutils_cat.symlink_to(multicall_target)
+            orig_dirs = privd.TRUSTED_EXEC_DIRS
+            orig_prefixes = privd.TRUSTED_RESOLVED_EXEC_PREFIXES
+            orig_path = privd.TRUSTED_EXEC_PATH
+            try:
+                privd.TRUSTED_EXEC_DIRS = (str(uutils_bin_dir),)
+                privd.TRUSTED_RESOLVED_EXEC_PREFIXES = (str(uutils_lib_dir) + "/",)
+                privd.TRUSTED_EXEC_PATH = str(uutils_bin_dir)
+                mc_argv, mc_cwd = privd.prepare_ops_read(
+                    ["cat", str(public_file)],
+                    str(public_dir),
+                    allowed_paths=allow_set,
+                    trusted_uid=uid,
+                )
+                self.assertEqual(mc_argv[0], str(uutils_cat))
+                self.assertEqual(mc_argv[1], str(public_file))
+                self.assertEqual(mc_cwd, str(public_dir))
+            finally:
+                privd.TRUSTED_EXEC_DIRS = orig_dirs
+                privd.TRUSTED_RESOLVED_EXEC_PREFIXES = orig_prefixes
+                privd.TRUSTED_EXEC_PATH = orig_path
+
         real_exec_argv, real_exec_cwd = privd.prepare_ops_read(["cat", "/etc/os-release"], "/")
         self.assertEqual(real_exec_cwd, "/")
         self.assertIn(real_exec_argv[-1], {"/etc/os-release", "/usr/lib/os-release"})
