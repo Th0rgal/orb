@@ -37,8 +37,10 @@ async fn interrupt_remote_mission_job(
                 }
                 Err(err) if err.is_not_found() => {
                     // Un-upgraded node without `/jobs/:id/interrupt`: for `InterruptNow`,
-                    // best-effort SIGINT child tools via `/execute` (`side_lane: true`),
-                    // then cancel the turn while preserving the promoted remote queue row.
+                    // best-effort SIGINT only descendant child tools inside this specific
+                    // job's systemd scope (`-job-<simple_job_id>.scope`) or whose `/proc`
+                    // `HOME` matches this mission's isolated workspace directory, never
+                    // matching processes across other missions on the node.
                     if mode == MessageDeliveryMode::InterruptNow {
                         let mission_tags = control
                             .mission_store
@@ -63,6 +65,80 @@ async fn interrupt_remote_mission_job(
                         if let Ok(lease_token) =
                             crate::remote_node::create_lease_token(&claims, &token)
                         {
+                            let scoped_sigint_cmd = format!(
+                                "python3 -c 'import os, signal\n\
+me = os.getpid()\n\
+ppid = os.getppid()\n\
+scope_suf = {scope_suf:?}\n\
+ws = os.path.realpath(os.getcwd())\n\
+table = {{}}\n\
+kids = {{}}\n\
+roots = set()\n\
+for name in os.listdir(\"/proc\"):\n\
+    if not name.isdigit():\n\
+        continue\n\
+    pid = int(name)\n\
+    if pid in (1, me, ppid):\n\
+        continue\n\
+    try:\n\
+        st = open(f\"/proc/{{pid}}/stat\", \"r\", errors=\"replace\").read()\n\
+        i = st.find(\"(\")\n\
+        j = st.rfind(\") \")\n\
+        if i < 0 or j < 0:\n\
+            continue\n\
+        comm = st[i+1:j]\n\
+        fields = st[j+2:].split()\n\
+        if not fields or fields[0] in (\"Z\", \"X\"):\n\
+            continue\n\
+        parent = int(fields[1])\n\
+        cmd = open(f\"/proc/{{pid}}/cmdline\", \"rb\").read().replace(b\"\\x00\", b\" \").decode(\"utf-8\", \"replace\")\n\
+        table[pid] = (parent, comm, cmd)\n\
+        kids.setdefault(parent, []).append(pid)\n\
+        cg = open(f\"/proc/{{pid}}/cgroup\", \"r\", errors=\"replace\").read()\n\
+        if any(line.endswith(scope_suf) for line in cg.splitlines()):\n\
+            roots.add(pid)\n\
+    except Exception:\n\
+        pass\n\
+if not roots:\n\
+    for pid, (_, comm, cmd) in table.items():\n\
+        if comm in (\"opencode\", \"claude\", \"codex\", \"grok\", \"agy\", \"antigravity\", \"vibe-acp\") or (comm in (\"node\", \"bun\") and any(h in cmd for h in (\"opencode\", \"claude\", \"codex\", \"grok\"))):\n\
+            try:\n\
+                env = open(f\"/proc/{{pid}}/environ\", \"rb\").read().split(b\"\\x00\")\n\
+                homes = [e[5:].decode(\"utf-8\", \"replace\") for e in env if e.startswith(b\"HOME=\")]\n\
+                if any(os.path.realpath(h) == ws for h in homes):\n\
+                    roots.add(pid)\n\
+            except Exception:\n\
+                pass\n\
+sub = set()\n\
+stack = list(roots)\n\
+while stack:\n\
+    p = stack.pop()\n\
+    if p in sub or p in (1, me, ppid):\n\
+        continue\n\
+    sub.add(p)\n\
+    stack.extend(kids.get(p, []))\n\
+harnesses = {{p for p in sub if p in table and (table[p][1] in (\"opencode\", \"claude\", \"codex\", \"grok\", \"agy\", \"antigravity\", \"vibe-acp\") or (table[p][1] in (\"node\", \"bun\") and any(h in table[p][2] for h in (\"opencode\", \"claude\", \"codex\", \"grok\", \"antigravity\", \"agy\")))) }}\n\
+cands = [k for h in harnesses for k in kids.get(h, []) if k not in harnesses] if harnesses else [p for p in sub if table.get(p, (0,))[0] in sub]\n\
+targets = []\n\
+seen = set()\n\
+tstack = list(cands)\n\
+while tstack:\n\
+    p = tstack.pop()\n\
+    if p in seen or p in harnesses or p in (1, me, ppid) or p not in table:\n\
+        continue\n\
+    seen.add(p)\n\
+    _, comm, cmd = table[p]\n\
+    if \"mcp\" in comm or \"sandboxed-mcp\" in cmd or \"control_mcp\" in cmd or \"--mcp\" in cmd or comm in (\"systemd-run\", \"nsenter\", \"script\", \"sandboxed-launch\"):\n\
+        continue\n\
+    targets.append(p)\n\
+    tstack.extend(kids.get(p, []))\n\
+for p in sorted(targets, reverse=True):\n\
+    try:\n\
+        os.kill(p, signal.SIGINT)\n\
+    except Exception:\n\
+        pass\n'",
+                                scope_suf = format!("-job-{}.scope", placement.job_id.simple()),
+                            );
                             let _ = client
                                 .execute(
                                     node,
@@ -71,9 +147,7 @@ async fn interrupt_remote_mission_job(
                                         mission_id: ws_mid,
                                         node_id: node.id.clone(),
                                         lease_token,
-                                        command:
-                                            "pkill -INT -f 'lake|lean|cargo|pytest' >/dev/null 2>&1 || true"
-                                                .to_string(),
+                                        command: scoped_sigint_cmd,
                                         side_lane: true,
                                     },
                                 )

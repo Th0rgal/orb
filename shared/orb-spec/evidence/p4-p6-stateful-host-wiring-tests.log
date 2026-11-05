@@ -1,5 +1,4 @@
-   Compiling orb-spec v1.3.0 (/var/lib/sandboxed-node/work/8f8e1c2b-e2d6-4e2b-857f-bebba571969f/orb/crates/orb-spec)
-    Finished `test` profile [unoptimized] target(s) in 3.09s
+    Finished `test` profile [unoptimized] target(s) in 0.13s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-d791927b4d2534f0)
 
 running 1 test
@@ -141,13 +140,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 1m 05s
+    Finished `test` profile [unoptimized] target(s) in 53.88s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test orb_spec::tests::host_orb_wire_machine_patch_and_fd_bounds_gates_verified ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -282,13 +281,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.31s
+    Finished `test` profile [unoptimized] target(s) in 0.27s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::mission_store::harness_session_tests::phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.18s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.15s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -423,13 +422,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.33s
+    Finished `test` profile [unoptimized] target(s) in 0.21s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::control::remote_grok::tests::phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -564,13 +563,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.33s
+    Finished `test` profile [unoptimized] target(s) in 0.21s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::control::control_queue::native_schedule_pool_tests::outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -705,13 +704,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.33s
+    Finished `test` profile [unoptimized] target(s) in 0.27s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test provider_health::tests::provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -846,13 +845,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.34s
+    Finished `test` profile [unoptimized] target(s) in 0.21s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::privilege_broker::tests::auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -987,13 +986,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.34s
+    Finished `test` profile [unoptimized] target(s) in 0.28s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test managed::tests::resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1128,11 +1127,11 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.33s
+    Finished `test` profile [unoptimized] target(s) in 0.24s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::control::tests::stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
 

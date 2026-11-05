@@ -49,6 +49,7 @@ struct FakeProvider {
     saved: std::sync::Mutex<Vec<(String, String)>>,
     deleted_snapshots: std::sync::Mutex<Vec<String>>,
     fail_wipe: std::sync::atomic::AtomicBool,
+    fail_exec: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -97,6 +98,9 @@ impl ManagedProvider for FakeProvider {
     }
     async fn exec(&self, _: &str, command: &str, _: u64) -> Result<Value, String> {
         self.execs.lock().unwrap().push(command.to_string());
+        if command.contains("orb_pre_stop_checkpoint") && self.fail_exec.load(Ordering::SeqCst) {
+            return Err("provider exec temporarily unavailable".into());
+        }
         if command.contains(".paloma-secrets") && self.fail_wipe.load(Ordering::SeqCst) {
             return Ok(serde_json::json!({"exitCode": 1}));
         }
@@ -4927,4 +4931,63 @@ fn boost_warm_overlay_bootstrap_avoids_copyup_and_supports_non_systemd_init() {
         "! mountpoint -q /opt/boost/warm-orb 2>/dev/null && [ -d /workspace/repo/.git ]"
     ));
     assert!(PROVISION_SCRIPT.contains("symbolic-ref HEAD \"refs/heads/$branch\""));
+}
+
+#[tokio::test]
+async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    let spawned = m
+        .spawn(SpawnRequest {
+            wait: Some(false),
+            ttl_minutes: Some(15),
+            owner_mission_id: Some(uuid::Uuid::new_v4().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // Bring machine online with a deterministic `provider_id` at `expires_at - 3m`
+    // so `reap_once` triggers `pre_ttl_expiry` without racing background `provision()`.
+    let now = Utc::now();
+    m.update(&spawned.id, |row| {
+        row.state = MachineState::Online;
+        row.provider_id = Some("bx_fake_pre_stop".into());
+        row.expires_at = now + chrono::Duration::minutes(3);
+    })
+    .await;
+
+    // 1. Both side-lane (no enrolled node) and provider exec fail -> `pre_stop_ran_at` stays None!
+    fake.fail_exec.store(true, Ordering::SeqCst);
+    m.reap_once().await;
+    let after_fail = m.get(&spawned.id).await.unwrap();
+    assert!(
+        after_fail.pre_stop_ran_at.is_none(),
+        "failed checkpoint must not set pre_stop_ran_at"
+    );
+    assert_eq!(
+        after_fail
+            .pre_stop_summary
+            .as_ref()
+            .and_then(|v| v.get("succeeded"))
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+
+    // 2. Next reaper pass succeeds once provider exec recovers -> `pre_stop_ran_at` is recorded!
+    fake.fail_exec.store(false, Ordering::SeqCst);
+    m.reap_once().await;
+    let after_ok = m.get(&spawned.id).await.unwrap();
+    assert!(
+        after_ok.pre_stop_ran_at.is_some(),
+        "successful retry must record pre_stop_ran_at"
+    );
+    assert_eq!(
+        after_ok
+            .pre_stop_summary
+            .as_ref()
+            .and_then(|v| v.get("succeeded"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
 }

@@ -19450,8 +19450,8 @@ async fn remote_opencode_writer_reattaches_sqlite_session_and_gateway_fails_sync
     );
 
     // Finish first turn without streaming `ses_...` in the job log, but expose it via
-    // remote `/execute` SQLite probe (`WS=1` + `SES=ses_persisted_remote_db`).
-    *fixture.execute_stdout.lock().unwrap() = "WS=1\nSES=ses_persisted_remote_db\n".to_string();
+    // remote `/execute` SQLite probe (`STATE=1` + `SES=ses_persisted_remote_db`).
+    *fixture.execute_stdout.lock().unwrap() = "STATE=1\nSES=ses_persisted_remote_db\n".to_string();
     fixture.set_state("succeeded");
     wait_until("first remote OpenCode turn settles", 20, || async {
         store.get_mission(mid).await.unwrap().unwrap().status == MissionStatus::Completed
@@ -19675,4 +19675,53 @@ async fn remote_opencode_writer_reattaches_sqlite_session_and_gateway_fails_sync
         .project
         .tags
         .contains(&format!("superseded_by:{replaced_id}")));
+
+    // 4. Verify a deleted OpenCode workspace (`STATE=0`, no `SES=...`, no switched assistant history)
+    //    is rejected with `REMOTE_RESUME_REQUIRES_REPLACEMENT` instead of falsely passing via probe cwd!
+    let wiped_opencode = store
+        .create_mission(
+            Some("Wiped OpenCode Workspace"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            wiped_opencode.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                tags: Some(vec!["remote_node:managed-mm-reattach".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .set_mission_requires_local_disk(wiped_opencode.id, false)
+        .await
+        .unwrap();
+    store
+        .update_mission_status(wiped_opencode.id, MissionStatus::Interrupted)
+        .await
+        .unwrap();
+    *fixture.execute_stdout.lock().unwrap() = "STATE=0\n".to_string();
+    let wiped_res = h
+        .request(
+            false,
+            wiped_opencode.id,
+            json!({ "content": "Attempt resume on wiped OpenCode dir" }),
+        )
+        .await;
+    let wiped_status = wiped_res.status();
+    let wiped_text = wiped_res.text().await.unwrap();
+    assert_eq!(wiped_status, StatusCode::CONFLICT, "{wiped_text}");
+    assert!(
+        wiped_text.contains(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT),
+        "wiped OpenCode workspace without session DB must require replacement, got: {wiped_text}"
+    );
 }

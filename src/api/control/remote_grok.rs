@@ -3634,7 +3634,7 @@ async fn continue_inner(
     // Jobs launched before OpenCode streaming was enabled have a placeholder
     // session id. Recover the native identity from that exact job's log.
     let mut native_session = mission.session_id.clone();
-    let mut remote_opencode_workspace_exists = false;
+    let mut remote_opencode_state_exists = false;
     let transferred = super::machine_transfer::committed(&store, mission_id)
         .await
         .map_err(internal)?
@@ -3689,12 +3689,15 @@ async fn continue_inner(
                     "python3 -c 'import os, sqlite3\n\
 mid = {mid:?}\n\
 cands = [os.getcwd(), f\"/var/lib/orb-node/work/{{mid}}\", f\"/var/lib/sandboxed-node/work/{{mid}}\"]\n\
-ws = any(os.path.isdir(d) for d in cands)\n\
+state_ok = False\n\
 ses = \"\"\n\
 for d in cands:\n\
+    if not os.path.isdir(d):\n\
+        continue\n\
     for rel in [\".local/share/opencode/opencode.db\", \".opencode/opencode.db\"]:\n\
         p = os.path.join(d, rel)\n\
         if os.path.isfile(p):\n\
+            state_ok = True\n\
             try:\n\
                 con = sqlite3.connect(f\"file:{{p}}?mode=ro\", uri=True)\n\
                 cur = con.cursor()\n\
@@ -3706,9 +3709,11 @@ for d in cands:\n\
                     break\n\
             except Exception:\n\
                 pass\n\
+    if os.path.isdir(os.path.join(d, \".local/share/opencode/storage\")):\n\
+        state_ok = True\n\
     if ses:\n\
         break\n\
-print(f\"WS={{1 if ws else 0}}\")\n\
+print(f\"STATE={{1 if state_ok else 0}}\")\n\
 if ses:\n\
     print(f\"SES={{ses}}\")\n'",
                     mid = ws_mid.to_string()
@@ -3723,11 +3728,12 @@ if ses:\n\
                 if let Ok(resp) = client.execute(&_node, &token, &req).await {
                     if resp.accepted {
                         for line in resp.stdout.lines() {
-                            if line.trim() == "WS=1" {
-                                remote_opencode_workspace_exists = true;
+                            if line.trim() == "STATE=1" {
+                                remote_opencode_state_exists = true;
                             } else if let Some(ses) = line.trim().strip_prefix("SES=") {
                                 if ses.starts_with("ses_") {
                                     native_session = Some(ses.to_string());
+                                    remote_opencode_state_exists = true;
                                 }
                             }
                         }
@@ -3784,7 +3790,7 @@ if ses:\n\
     if session_id.is_none()
         && !transferred
         && opencode_switched_history.is_none()
-        && !remote_opencode_workspace_exists
+        && !remote_opencode_state_exists
     {
         return Err((
             StatusCode::CONFLICT,

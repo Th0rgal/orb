@@ -5266,9 +5266,11 @@ printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d\n' '{trigger
             }
         }
 
+        let checkpoint_succeeded = transport != "none" && exit_code.unwrap_or(0) == 0;
         let summary = serde_json::json!({
             "trigger": trigger,
             "transport": transport,
+            "succeeded": checkpoint_succeeded,
             "wip_ref": wip_ref,
             "custom_hook": custom_hook.is_some(),
             "exit_code": exit_code,
@@ -5278,13 +5280,23 @@ printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d\n' '{trigger
         let summary_clone = summary.clone();
         if let Some(updated) = self
             .update(&m.id, |row| {
-                row.pre_stop_ran_at = Some(now);
+                if checkpoint_succeeded {
+                    row.pre_stop_ran_at = Some(now);
+                }
                 row.pre_stop_trigger = Some(trig);
                 row.pre_stop_summary = Some(summary_clone);
             })
             .await
         {
-            self.ledger_with("pre_stop_hook", &updated, summary);
+            self.ledger_with(
+                if checkpoint_succeeded {
+                    "pre_stop_hook"
+                } else {
+                    "pre_stop_hook_failed"
+                },
+                &updated,
+                summary,
+            );
         }
     }
 
