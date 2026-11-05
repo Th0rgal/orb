@@ -698,6 +698,24 @@ pub async fn get_mission_digest(
         .as_ref()
         .map(|run| mission_execution_projection(run, mission.status));
 
+    let remote_placement = super::remote_grok::placement(
+        &state.config.working_dir,
+        &control.mission_store,
+        mission.id,
+    )
+    .await
+    .ok()
+    .flatten();
+    let remote_node_id = remote_placement
+        .as_ref()
+        .map(|p| p.node_id.clone())
+        .or_else(|| {
+            latest_run
+                .as_ref()
+                .and_then(|r| r.scope_unit.as_deref())
+                .and_then(|s| s.strip_prefix("remote-node:"))
+                .map(str::to_string)
+        });
     let goal = mission_goal_digest(&mission);
     let queue_wait = super::dispatch_capacity::queue_wait_for(
         &mission,
@@ -724,6 +742,7 @@ pub async fn get_mission_digest(
         "model_effort": mission.model_effort,
         "workspace_id": mission.workspace_id,
         "workspace_name": mission.workspace_name,
+        "remote_node_id": remote_node_id,
         "project": mission.project,
         "created_at": mission.created_at,
         "updated_at": mission.updated_at,

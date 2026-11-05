@@ -614,6 +614,37 @@ fn format_error(label: &str, status: reqwest::StatusCode, body: &str) -> String 
     format!("{label} -> HTTP {}: {detail}", status.as_u16())
 }
 
+fn normalize_boost_lean_mode(raw: Option<&str>) -> Option<&'static str> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => None,
+        Some(m) if m.eq_ignore_ascii_case("auto") => Some("auto"),
+        Some(m) if m.eq_ignore_ascii_case("cache-only") || m.eq_ignore_ascii_case("cache_only") => {
+            Some("cache-only")
+        }
+        Some(m) if m.eq_ignore_ascii_case("off") || m.eq_ignore_ascii_case("none") => Some("off"),
+        Some(_) => None,
+    }
+}
+
+/// Detect upstream `boost.ci` HTTP 403/404 rejections specific to an inaccessible
+/// or unconnected `repo=` warm overlay (as opposed to workspace quota or auth errors).
+pub(crate) fn is_repo_overlay_forbidden_or_unavailable(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("quota") && lower.contains("exceed") {
+        return false;
+    }
+    let is_403 = lower.contains("http 403") || lower.contains("forbidden");
+    if is_403 {
+        return true;
+    }
+    let is_404 = lower.contains("http 404") || lower.contains("not_found");
+    is_404
+        && (lower.contains("repository")
+            || lower.contains("overlay")
+            || lower.contains("not connected")
+            || lower.contains("repo"))
+}
+
 #[async_trait]
 impl ManagedProvider for BoostProvider {
     fn name(&self) -> &'static str {
@@ -677,13 +708,32 @@ impl ManagedProvider for BoostProvider {
             Some(raw) => Some(self.resolve_snapshot_id(raw).await?),
             None => None,
         };
-        let caps = self
+        let effective_mode = normalize_boost_lean_mode(spec.lean_mode.as_deref());
+        let caps = match self
             .fetch_capabilities(
                 spec.repo.as_deref(),
                 spec.base_key.as_deref(),
                 resolved_snap.as_deref(),
             )
-            .await?;
+            .await
+        {
+            Ok(caps) => caps,
+            Err(err)
+                if spec.repo.is_some()
+                    && spec.base_key.is_none()
+                    && effective_mode != Some("cache-only")
+                    && is_repo_overlay_forbidden_or_unavailable(&err) =>
+            {
+                tracing::warn!(
+                    repo = ?spec.repo,
+                    error = %err,
+                    "boost.ci capabilities rejected repo= overlay; retrying quote with lean_mode=off"
+                );
+                self.fetch_capabilities(None, None, resolved_snap.as_deref())
+                    .await?
+            }
+            Err(err) => return Err(err),
+        };
         if resolved_snap.is_none() && spec.repo.is_none() && spec.base_key.is_none() {
             let availability = Self::derive_availability(&caps);
             if let Ok(mut slot) = self.capabilities_cache.write() {
@@ -762,7 +812,7 @@ impl ManagedProvider for BoostProvider {
         let lean_mode: Option<&str> = if requested_raw_vanilla {
             Some("off")
         } else {
-            spec.lean_mode.as_deref()
+            normalize_boost_lean_mode(spec.lean_mode.as_deref()).or(spec.lean_mode.as_deref())
         };
         let (repo, base_key) = if snapshot_id.is_some() {
             (None, None)
@@ -787,8 +837,68 @@ impl ManagedProvider for BoostProvider {
         }
         let created_res: Result<VmEnvelope, String> = self.send_json("POST /vms", req).await;
         self.invalidate_capabilities_cache();
+        let mut warnings = Vec::new();
+        let mut effective_lean_mode: Option<String> = None;
+        let mut effective_repo: Option<Option<String>> = None;
         let vm = match created_res {
             Ok(env) => env.vm,
+            Err(err)
+                if repo.is_some()
+                    && base_key.is_none()
+                    && lean_mode != Some("cache-only")
+                    && is_repo_overlay_forbidden_or_unavailable(&err) =>
+            {
+                let rejected_repo = repo.unwrap_or_default();
+                let warning = format!(
+                    "boost_repo_overlay_unavailable: upstream boost.ci rejected warm repo overlay '{rejected_repo}' ({err}); auto-fell back to lean_mode=\"off\" without prewarmed overlay"
+                );
+                tracing::warn!(repo = %rejected_repo, error = %err, "boost.ci POST /vms rejected repo= overlay; retrying with lean_mode=off");
+                let fallback_body = CreateVmBody {
+                    name: &spec.name,
+                    runner_label: size_spec.size,
+                    ttl_secs: spec.ttl_seconds.clamp(60, 86_400),
+                    memory_mib: spec.memory_mib,
+                    lean_mode: Some("off"),
+                    repo: None,
+                    base_key: None,
+                    snapshot_id: snapshot_id.as_deref(),
+                };
+                let mut fallback_req = self.req(reqwest::Method::POST, "/vms").json(&fallback_body);
+                if !spec.idempotency_key.is_empty() {
+                    fallback_req = fallback_req.header(
+                        "Idempotency-Key",
+                        format!("{}-lean-off", spec.idempotency_key),
+                    );
+                }
+                let fallback_res: Result<VmEnvelope, String> = self
+                    .send_json("POST /vms (lean_mode=off fallback)", fallback_req)
+                    .await;
+                self.invalidate_capabilities_cache();
+                match fallback_res {
+                    Ok(env) => {
+                        warnings.push(warning);
+                        effective_lean_mode = Some("off".into());
+                        effective_repo = Some(None);
+                        env.vm
+                    }
+                    Err(fb_err) => {
+                        if let Ok(existing) = self.list().await {
+                            if let Some(mut found) = existing
+                                .into_iter()
+                                .find(|pm| pm.name == spec.name && !is_stopped_state(&pm.state))
+                            {
+                                found.warnings.push(warning);
+                                found.effective_lean_mode = Some("off".into());
+                                found.effective_repo = Some(None);
+                                return Ok(found);
+                            }
+                        }
+                        return Err(format!(
+                            "{err}; fallback with lean_mode=off also failed: {fb_err}"
+                        ));
+                    }
+                }
+            }
             Err(err) => {
                 // Reconcile by unique VM name if the response was lost mid-flight.
                 if let Ok(existing) = self.list().await {
@@ -807,6 +917,9 @@ impl ManagedProvider for BoostProvider {
             state: map_vm_state(&vm.status),
             name: vm.name.unwrap_or_default(),
             deletable_at: None,
+            warnings,
+            effective_lean_mode,
+            effective_repo,
         })
     }
 
@@ -832,6 +945,7 @@ impl ManagedProvider for BoostProvider {
             state,
             name: env.vm.name.unwrap_or_default(),
             deletable_at: None,
+            ..Default::default()
         })
     }
 
@@ -847,6 +961,7 @@ impl ManagedProvider for BoostProvider {
                 state: map_vm_state(&vm.status),
                 name: vm.name.unwrap_or_default(),
                 deletable_at: None,
+                ..Default::default()
             })
             .collect())
     }

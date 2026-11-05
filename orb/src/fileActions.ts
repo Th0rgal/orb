@@ -93,14 +93,33 @@ export function readItemsReference(text: string): ItemsClipboard | null {
   } catch { return null; }
 }
 
+const containsFolder = (path: string, folder: string) => folder === path || folder.startsWith(`${path}/`);
+const missionFolderIn = (slug: string, path: string, mission: Mission) =>
+  mission.project === slug ? (mission.tags ?? []).find(tag => tag.startsWith("orb-folder:") && containsFolder(path, tag.slice(11)))?.slice(11) : undefined;
+
+/** Synchronous check against missions and crons already loaded in memory. */
+export function folderWorkError(
+  slug: string,
+  path: string,
+  knownMissions: readonly Mission[],
+  knownCrons: readonly { folder?: string | null }[] = [],
+  action = "deleting",
+): string | null {
+  if (knownMissions.some(mission => missionFolderIn(slug, path, mission) !== undefined)) {
+    return `Move the agents out of this folder before ${action} it.`;
+  }
+  if (knownCrons.some(job => containsFolder(path, job.folder ?? ""))) {
+    return `Move or delete the crons in this folder before ${action} it.`;
+  }
+  return null;
+}
+
 /** Agents and crons filed in a folder or below it. */
 async function folderWork(slug: string, path: string, first = false) {
   const version = connectionVersion();
-  const contains = (folder: string) => folder === path || folder.startsWith(`${path}/`);
   const checkConnection = () => { if (version !== connectionVersion()) throw new Error("Connection changed. Try again."); };
-  const folder = (mission: Mission) => mission.project === slug ? (mission.tags ?? []).find(tag => tag.startsWith("orb-folder:") && contains(tag.slice(11)))?.slice(11) : undefined;
   const missions = new Map<string, string>();
-  const collect = (list: Mission[]) => { for (const mission of list) { const at = folder(mission); if (at !== undefined) missions.set(mission.id, at); } };
+  const collect = (list: Mission[]) => { for (const mission of list) { const at = missionFolderIn(slug, path, mission); if (at !== undefined) missions.set(mission.id, at); } };
   if (!first) {
     const [, , rawCrons] = await Promise.all([
       import("./localOrigins").then(m => m.localOrigins()).then(local => { checkConnection(); collect(local); }),
@@ -115,7 +134,7 @@ async function folderWork(slug: string, path: string, first = false) {
       listProjectCrons(slug),
     ]);
     checkConnection();
-    return { missions, crons: rawCrons.filter(job => contains(job.folder ?? "")) };
+    return { missions, crons: rawCrons.filter(job => containsFolder(path, job.folder ?? "")) };
   }
   collect(await import("./localOrigins").then(m => m.localOrigins()));
   checkConnection();
@@ -127,7 +146,7 @@ async function folderWork(slug: string, path: string, first = false) {
     if (missions.size) return { missions, crons: [] };
     if (page.length < 200) break;
   }
-  const crons = (await listProjectCrons(slug)).filter(job => contains(job.folder ?? ""));
+  const crons = (await listProjectCrons(slug)).filter(job => containsFolder(path, job.folder ?? ""));
   checkConnection();
   return { missions, crons };
 }

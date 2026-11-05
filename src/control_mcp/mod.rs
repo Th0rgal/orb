@@ -65,6 +65,8 @@ fn policy(name: &str) -> Option<(Role, bool)> {
     use Role::*;
     Some(match name {
         "get_action"
+        | "wait_actions"
+        | "get_fleet_sweep"
         | "get_capabilities"
         | "get_mission"
         | "get_mission_events"
@@ -159,6 +161,93 @@ pub fn registry() -> Vec<Tool> {
         input_schema: json!({"type":"object","required":["action_id"],"properties":{"action_id":{"type":"string","format":"uuid"}},"additionalProperties":false}),
     }, handler: Handler::Capabilities, minimum_role: Role::Executor, mutation: false });
     entries.push(Tool { definition: ToolDefinition {
+        name: "wait_actions".into(),
+        description: "Await one or more accepted action receipts server-side (up to timeout_ms, default 15000) without bash sleep loops, returning their current/settled receipts in a single call.".into(),
+        input_schema: json!({
+            "type": "object",
+            "required": ["action_ids"],
+            "properties": {
+                "action_ids": {
+                    "type": "array",
+                    "items": { "type": "string", "format": "uuid" },
+                    "minItems": 1,
+                    "maxItems": 64,
+                    "description": "Accepted action UUIDs to poll/await."
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 30000,
+                    "default": 15000,
+                    "description": "Maximum milliseconds to wait for settlement before returning the latest snapshot (default 15000)."
+                },
+                "return_when": {
+                    "type": "string",
+                    "enum": ["all", "any"],
+                    "default": "all",
+                    "description": "Return when `all` (default) or `any` of `action_ids` settle."
+                }
+            },
+            "additionalProperties": false
+        }),
+    }, handler: Handler::Capabilities, minimum_role: Role::Executor, mutation: false });
+    entries.push(Tool { definition: ToolDefinition {
+        name: "get_fleet_sweep".into(),
+        description: "Single-call orchestrator sweep for a parent mission: returns compact health + loop signals + live runner/remote-VM status for all child/descendant workers, own-pool managed VMs (with created_at, hard_cap_at, forkable), budget summary, and optional pending action receipts (`action_ids` with optional `wait_timeout_ms`). Replaces multi-call get_mission_health + list_managed_machines + get_action + sleep loops.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "parent_mission_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Parent/root mission UUID to sweep (defaults to caller's own mission, or `/btw` parent mission)."
+                },
+                "mission_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Alias for `parent_mission_id`."
+                },
+                "include_completed": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Include terminal child missions in `workers` (default true)."
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Offset into the filtered worker list (use `next_offset` from a truncated sweep to paginate)."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 256,
+                    "default": 128,
+                    "description": "Maximum filtered workers returned in `workers` (default 128, max 256)."
+                },
+                "include_machines": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Include own-pool managed VMs (`created_at`, `hard_cap_at`, `forkable`, `warnings`) and budget summary (default true)."
+                },
+                "action_ids": {
+                    "type": "array",
+                    "items": { "type": "string", "format": "uuid" },
+                    "maxItems": 64,
+                    "description": "Optional accepted action UUIDs to read/await in the same sweep."
+                },
+                "wait_timeout_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 25000,
+                    "default": 0,
+                    "description": "Optional milliseconds to await `action_ids` settlement before taking the sweep snapshot."
+                }
+            },
+            "additionalProperties": false
+        }),
+    }, handler: Handler::Capabilities, minimum_role: Role::Executor, mutation: false });
+    entries.push(Tool { definition: ToolDefinition {
         name: "cancel_action".into(), description: "Cancel an action that is still queued. Returns a durable cancellation receipt. Once dispatch started, cancellation is not claimed: inspect the target and use cancel_mission or cancel_workspace_job.".into(),
         input_schema: json!({"type":"object","required":["action_id","idempotency_key"],"properties":{
             "action_id":{"type":"string","format":"uuid"},
@@ -230,9 +319,11 @@ pub fn registry() -> Vec<Tool> {
                 definition.input_schema["properties"]["managed_from_snapshot"] = json!({"type":"string","description":"Only with remote_node_id auto-managed (boat/boost): optional warm project snapshot (`list_managed_snapshots`), \"latest\" for the newest ready project snapshot, or \"light\"/\"none\" for the clean base image. Omitted defaults to light mode (clean base image, no snapshot files restored)."});
                 definition.input_schema["properties"]["managed_repo"] = json!({"type":"string","description":"Only with remote_node_id auto-managed:boost:<size>: GitHub `owner/repo` (e.g. `Layr-Labs/evm.fast`) to mount the latest warm `.olean` CoW overlay."});
                 definition.input_schema["properties"]["managed_base_key"] = json!({"type":"string","description":"Only with remote_node_id auto-managed:boost:<size>: exact warm base commit/cache key override."});
-                definition.input_schema["properties"]["managed_lean_mode"] = json!({"type":"string","enum":["auto","cache-only","off"],"description":"Only with remote_node_id auto-managed:boost:<size>: Lean overlay mode (`auto` default, `cache-only`, or `off`)."});
+                definition.input_schema["properties"]["managed_lean_mode"] = json!({"type":"string","enum":["auto","cache-only","off","none"],"description":"Only with remote_node_id auto-managed:boost:<size>: Lean overlay mode (`auto` default, `cache-only`, or `off`; `none` is accepted as an alias for `off`)."});
                 definition.input_schema["properties"]["managed_memory_mib"] = json!({"type":"integer","minimum":4096,"maximum":131072,"description":"Only with remote_node_id auto-managed:boost:<size>: optional RAM override in MiB (multiple of 1024)."});
                 definition.input_schema["properties"]["managed_allow_24h_commitment"] = json!({"type":"boolean","description":"Only with remote_node_id auto-managed:scaleway:<M2-*> (Apple Silicon): explicitly authorize the 24-hour minimum lease commitment."});
+                definition.input_schema["properties"]["retain_vm_for_parent_minutes"] = json!({"type":"integer","minimum":0,"maximum":720,"description":"Only with remote_node_id auto-managed: grace window in minutes (0..=720) to keep the child's VM alive after the child finishes while the parent mission is still active, so the parent's wakeup can inspect or fork uncommitted files."});
+                definition.input_schema["properties"]["managed_pre_stop_hook"] = json!({"type":"string","description":"Only with remote_node_id auto-managed: optional shell command executed out-of-band on the VM (alongside Orb's automatic git WIP-checkpoint) at expires_at - 5m and created_at + 710m before hard-cap kill."});
                 definition.input_schema["properties"]["budget_usd"] = json!({"type":"number","minimum":0,"description":"Optional managed-VM budget (USD) for the child and its descendants. Under your own budget pool it is a sub-budget carved from it and must not exceed its remaining amount (see get_budget). Omit to let the child share your pool."});
                 definition.description="Launch one native or cloud mission. Native launches select a backend/workspace/model; child/subagent launches default to Boat (auto-managed, or auto fallback) unless remote_node_id=\"same\" is passed to inspect uncommitted local workspace state. Cloud launches select cloud.provider/account and optional repository/model. Discover cloud availability with list_cloud_accounts and list_cloud_models. Every role can use owner cloud accounts within quotas. Core supplies the parent identity for executors. Pass project/track and acceptance criteria for governed work; reviewers use writer=false. For a review or second opinion from another model, call consult_model instead. Mission completion and accepted project evidence remain separate.".into();
             }

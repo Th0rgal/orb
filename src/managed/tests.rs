@@ -49,6 +49,7 @@ struct FakeProvider {
     saved: std::sync::Mutex<Vec<(String, String)>>,
     deleted_snapshots: std::sync::Mutex<Vec<String>>,
     fail_wipe: std::sync::atomic::AtomicBool,
+    fail_exec: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -69,6 +70,7 @@ impl ManagedProvider for FakeProvider {
             state: "ready".into(),
             name: spec.name.clone(),
             deletable_at: None,
+            ..Default::default()
         })
     }
     async fn get(&self, provider_id: &str) -> Result<ProviderMachine, String> {
@@ -77,6 +79,7 @@ impl ManagedProvider for FakeProvider {
             state: "ready".into(),
             name: String::new(),
             deletable_at: None,
+            ..Default::default()
         })
     }
     async fn list(&self) -> Result<Vec<ProviderMachine>, String> {
@@ -95,6 +98,9 @@ impl ManagedProvider for FakeProvider {
     }
     async fn exec(&self, _: &str, command: &str, _: u64) -> Result<Value, String> {
         self.execs.lock().unwrap().push(command.to_string());
+        if command.contains("orb_pre_stop_checkpoint") && self.fail_exec.load(Ordering::SeqCst) {
+            return Err("provider exec temporarily unavailable".into());
+        }
         if command.contains(".paloma-secrets") && self.fail_wipe.load(Ordering::SeqCst) {
             return Ok(serde_json::json!({"exitCode": 1}));
         }
@@ -326,18 +332,21 @@ async fn reconcile_stops_tagged_orphans_only() {
             state: "ready".into(),
             name: "orb-managed-mmzzzz".into(),
             deletable_at: None,
+            ..Default::default()
         },
         ProviderMachine {
             provider_id: "bx_research".into(),
             state: "ready".into(),
             name: "autoresearch run".into(),
             deletable_at: None,
+            ..Default::default()
         },
         ProviderMachine {
             provider_id: "bx_old".into(),
             state: "archived".into(),
             name: "orb-managed-mmold".into(),
             deletable_at: None,
+            ..Default::default()
         },
     ];
     let report = m.reconcile_once().await.unwrap();
@@ -587,6 +596,14 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         repo: None,
         base_key: None,
         lean_mode: None,
+        warnings: Vec::new(),
+        retain_vm_for_parent_minutes: None,
+        pre_stop_hook: None,
+        pre_stop_ran_at: None,
+        pre_stop_trigger: None,
+        pre_stop_summary: None,
+        hard_cap_at: None,
+        forkable: false,
     };
     register_node(&machine, 3999, "tok");
     let settings = crate::remote_node::RemoteNodeSettings {
@@ -991,6 +1008,14 @@ fn spend_machine(
         repo: None,
         base_key: None,
         lean_mode: None,
+        warnings: Vec::new(),
+        retain_vm_for_parent_minutes: None,
+        pre_stop_hook: None,
+        pre_stop_ran_at: None,
+        pre_stop_trigger: None,
+        pre_stop_summary: None,
+        hard_cap_at: None,
+        forkable: false,
     }
 }
 
@@ -1252,6 +1277,7 @@ async fn reconcile_orphan_grace_and_vanished_rows() {
         state: "ready".into(),
         name: "not ours".into(),
         deletable_at: None,
+        ..Default::default()
     };
     *fake.listed.lock().unwrap() = vec![
         ProviderMachine {
@@ -1259,6 +1285,7 @@ async fn reconcile_orphan_grace_and_vanished_rows() {
             state: "ready".into(),
             name: "orb-managed-mmzz".into(),
             deletable_at: None,
+            ..Default::default()
         },
         other.clone(),
     ];
@@ -1308,6 +1335,7 @@ async fn reconcile_dry_run_keeps_orphans() {
         state: "ready".into(),
         name: "orb-managed-mmzz".into(),
         deletable_at: None,
+        ..Default::default()
     }];
     let r = m.reconcile_once().await.unwrap();
     assert_eq!(r["dry_run"], serde_json::json!(true));
@@ -1537,6 +1565,8 @@ async fn idle_machine_of_an_ended_sibling_is_reused_once() {
                 tenant: Some("t1"),
                 budget_pool_id: None,
                 sub_budget_usd: None,
+                retain_vm_for_parent_minutes: Some(30),
+                pre_stop_hook: Some("echo child-hook"),
             },
             &|o| o == "sib-done",
         )
@@ -1545,6 +1575,8 @@ async fn idle_machine_of_an_ended_sibling_is_reused_once() {
     assert_eq!(got.id, vm.id);
     assert_eq!(got.owner_mission_id, None);
     assert_eq!(got.requested_by_mission_id.as_deref(), Some("parent"));
+    assert_eq!(got.retain_vm_for_parent_minutes, Some(30));
+    assert_eq!(got.pre_stop_hook.as_deref(), Some("echo child-hook"));
     // Wrong size, other tenant, or already taken: nothing.
     assert!(m
         .take_idle_sibling(
@@ -1554,7 +1586,9 @@ async fn idle_machine_of_an_ended_sibling_is_reused_once() {
                 requested_by: "parent",
                 tenant: Some("t1"),
                 budget_pool_id: None,
-                sub_budget_usd: None
+                sub_budget_usd: None,
+                retain_vm_for_parent_minutes: None,
+                pre_stop_hook: None,
             },
             &|o| o == "sib-done"
         )
@@ -1569,7 +1603,9 @@ async fn idle_machine_of_an_ended_sibling_is_reused_once() {
                 requested_by: "parent",
                 tenant: Some("t1"),
                 budget_pool_id: None,
-                sub_budget_usd: None
+                sub_budget_usd: None,
+                retain_vm_for_parent_minutes: None,
+                pre_stop_hook: None,
             },
             &|_| true
         )
@@ -1583,7 +1619,9 @@ async fn idle_machine_of_an_ended_sibling_is_reused_once() {
                 requested_by: "parent",
                 tenant: Some("t2"),
                 budget_pool_id: None,
-                sub_budget_usd: None
+                sub_budget_usd: None,
+                retain_vm_for_parent_minutes: None,
+                pre_stop_hook: None,
             },
             &|_| true
         )
@@ -1676,7 +1714,9 @@ async fn reusing_an_idle_sibling_vm_respects_the_target_budget() {
                 requested_by: "parent",
                 tenant: Some("t1"),
                 budget_pool_id: Some("parent"),
-                sub_budget_usd: None
+                sub_budget_usd: None,
+                retain_vm_for_parent_minutes: None,
+                pre_stop_hook: None,
             },
             &|_| true
         )
@@ -1694,7 +1734,9 @@ async fn reusing_an_idle_sibling_vm_respects_the_target_budget() {
                 requested_by: "parent",
                 tenant: Some("t1"),
                 budget_pool_id: Some("parent"),
-                sub_budget_usd: Some(0.01)
+                sub_budget_usd: Some(0.01),
+                retain_vm_for_parent_minutes: None,
+                pre_stop_hook: None,
             },
             &|_| true
         )
@@ -1715,6 +1757,8 @@ async fn reusing_an_idle_sibling_vm_respects_the_target_budget() {
                 tenant: Some("t1"),
                 budget_pool_id: Some("parent"),
                 sub_budget_usd: Some(1.0),
+                retain_vm_for_parent_minutes: None,
+                pre_stop_hook: None,
             },
             &|_| true,
         )
@@ -3213,6 +3257,14 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
         repo: None,
         base_key: None,
         lean_mode: None,
+        warnings: Vec::new(),
+        retain_vm_for_parent_minutes: None,
+        pre_stop_hook: None,
+        pre_stop_ran_at: None,
+        pre_stop_trigger: None,
+        pre_stop_summary: None,
+        hard_cap_at: None,
+        forkable: false,
     };
     let view = ListView {
         enabled: true,
@@ -4116,19 +4168,39 @@ async fn dispatch_reservation_reuses_unclaimed_vm_and_clears_on_claim() {
     // Retrying with the same `(tenant, parent, idempotency_key)` before claim
     // reuses the exact pre-spawned VM requested by `parent-1`.
     let reused = m
-        .take_unclaimed_for_dispatch("t1", Some("parent-1"), "dispatch:parent-1:key-1")
+        .take_unclaimed_for_dispatch(
+            "t1",
+            Some("parent-1"),
+            "dispatch:parent-1:key-1",
+            Some(25),
+            Some("echo retry-hook"),
+        )
         .await
         .expect("should reuse unclaimed reservation");
     assert_eq!(reused.id, vm.id);
+    assert_eq!(reused.retain_vm_for_parent_minutes, Some(25));
+    assert_eq!(reused.pre_stop_hook.as_deref(), Some("echo retry-hook"));
 
     // Re-record to test tenant/parent isolation: another tenant or wrong parent
     // cannot hijack the reservation (and invalid lookups drop stale keys).
     assert!(m
-        .take_unclaimed_for_dispatch("t2", Some("parent-1"), "dispatch:parent-1:key-1")
+        .take_unclaimed_for_dispatch(
+            "t2",
+            Some("parent-1"),
+            "dispatch:parent-1:key-1",
+            None,
+            None,
+        )
         .await
         .is_none());
     assert!(m
-        .take_unclaimed_for_dispatch("t1", Some("other-parent"), "dispatch:parent-1:key-1")
+        .take_unclaimed_for_dispatch(
+            "t1",
+            Some("other-parent"),
+            "dispatch:parent-1:key-1",
+            None,
+            None,
+        )
         .await
         .is_none());
     m.record_dispatch_reservation("t1", "dispatch:parent-1:key-1", &vm.id)
@@ -4143,7 +4215,13 @@ async fn dispatch_reservation_reuses_unclaimed_vm_and_clears_on_claim() {
     assert_eq!(claimed.owner_mission_id.as_deref(), Some("child-1"));
     assert_eq!(claimed.requested_by_mission_id.as_deref(), Some("parent-1"));
     assert!(m
-        .take_unclaimed_for_dispatch("t1", Some("parent-1"), "dispatch:parent-1:key-1")
+        .take_unclaimed_for_dispatch(
+            "t1",
+            Some("parent-1"),
+            "dispatch:parent-1:key-1",
+            None,
+            None,
+        )
         .await
         .is_none());
 }
@@ -4903,6 +4981,610 @@ fn boost_warm_overlay_bootstrap_avoids_copyup_and_supports_non_systemd_init() {
 }
 
 #[tokio::test]
+async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    let owner_mid = uuid::Uuid::new_v4().to_string();
+    let spawned = online_machine(&m, &owner_mid).await;
+
+    // Place `expires_at` within the 5m pre-TTL checkpoint window.
+    let now = Utc::now();
+    m.update(&spawned.id, |row| {
+        row.expires_at = now + chrono::Duration::minutes(3);
+    })
+    .await;
+
+    // 1. Both side-lane (no enrolled node) and provider exec fail -> `pre_stop_ran_at` stays None!
+    fake.fail_exec.store(true, Ordering::SeqCst);
+    m.reap_once().await;
+    let after_fail = m.get(&spawned.id).await.unwrap();
+    assert!(
+        after_fail.pre_stop_ran_at.is_none(),
+        "failed checkpoint must not set pre_stop_ran_at"
+    );
+    assert_eq!(
+        after_fail
+            .pre_stop_summary
+            .as_ref()
+            .and_then(|v| v.get("succeeded"))
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+
+    // 2. Next reaper pass succeeds once provider exec recovers -> `pre_stop_ran_at` is recorded!
+    fake.fail_exec.store(false, Ordering::SeqCst);
+    m.reap_once().await;
+    let after_ok = m.get(&spawned.id).await.unwrap();
+    assert!(
+        after_ok.pre_stop_ran_at.is_some(),
+        "successful retry must record pre_stop_ran_at"
+    );
+    assert_eq!(
+        after_ok
+            .pre_stop_summary
+            .as_ref()
+            .and_then(|v| v.get("succeeded"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    let last_script = fake
+        .execs
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|s| s.contains("orb_pre_stop_checkpoint"))
+        .cloned()
+        .expect("checkpoint script executed");
+    assert!(
+        last_script.contains("ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))")
+            && last_script.contains("[ \"$ORB_CHECKPOINT_FAILED\" -eq 0 ]"),
+        "checkpoint script must exit non-zero when dirty repo preservation or custom hook fails"
+    );
+
+    // 3. Extending TTL resets `pre_stop_ran_at` so later work before the new deadline or
+    // hard cap will take a fresh checkpoint instead of reusing the earlier snapshot!
+    let extended = m.extend(&spawned.id, 30).await.unwrap();
+    assert!(
+        extended.pre_stop_ran_at.is_none(),
+        "extend() must reset pre_stop_ran_at for subsequent expiry/teardown checkpoints"
+    );
+
+    // 4. Execute the generated checkpoint script against a real git repo + bare `origin`
+    // to verify clean worktrees with unpushed local commits are preserved and pushed!
+    let git_fixture = tempfile::tempdir().unwrap();
+    let bare_origin = git_fixture.path().join("origin.git");
+    let work_root = git_fixture.path().join("work");
+    let repo_dir = work_root.join("mission-repo");
+    std::fs::create_dir_all(&work_root).unwrap();
+
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    std::fs::create_dir_all(&bare_origin).unwrap();
+    git(&bare_origin, &["init", "--bare", "-b", "main"]);
+    git(
+        git_fixture.path(),
+        &[
+            "clone",
+            bare_origin.to_str().unwrap(),
+            repo_dir.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(
+        repo_dir.join("Proof.lean"),
+        "theorem t1 : True := trivial\n",
+    )
+    .unwrap();
+    git(&repo_dir, &["add", "Proof.lean"]);
+    git(&repo_dir, &["commit", "-m", "initial"]);
+    git(&repo_dir, &["push", "-u", "origin", "HEAD:main"]);
+
+    let rewritten_script = last_script.replace(
+        "for root in '/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'; do",
+        &format!("for root in '{}'; do", work_root.display()),
+    );
+    assert_ne!(
+        rewritten_script, last_script,
+        "expected default roots expression in checkpoint script"
+    );
+    let wip_ref = after_ok
+        .pre_stop_summary
+        .as_ref()
+        .and_then(|v| v.get("wip_ref"))
+        .and_then(Value::as_str)
+        .expect("wip_ref in summary");
+
+    // 4a. Clean repo whose HEAD is already on `origin/main` is skipped cleanly.
+    let clean_synced = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&rewritten_script)
+        .output()
+        .unwrap();
+    assert!(clean_synced.status.success());
+    let synced_stdout = String::from_utf8_lossy(&clean_synced.stdout);
+    assert!(
+        synced_stdout.contains("dirty_repos=0 pushed=0 exported=0 failed=0"),
+        "expected synced clean repo to skip, got: {synced_stdout}"
+    );
+
+    // 4b. Worker commits locally (`git status --porcelain` is empty!) without pushing.
+    // Checkpoint must detect the unpushed commit on HEAD, bundle it, and push to `ORB_WIP_REF`!
+    std::fs::write(
+        repo_dir.join("Proof.lean"),
+        "theorem t1 : True := trivial\ntheorem t2 : True := trivial\n",
+    )
+    .unwrap();
+    git(&repo_dir, &["add", "Proof.lean"]);
+    git(&repo_dir, &["commit", "-m", "local unpushed lemma"]);
+    assert!(
+        git(&repo_dir, &["status", "--porcelain"]).is_empty(),
+        "precondition: worktree must be clean"
+    );
+    let local_head = git(&repo_dir, &["rev-parse", "HEAD"]);
+
+    let clean_unpushed = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&rewritten_script)
+        .output()
+        .unwrap();
+    assert!(
+        clean_unpushed.status.success(),
+        "checkpoint script failed: {}",
+        String::from_utf8_lossy(&clean_unpushed.stderr)
+    );
+    let unpushed_stdout = String::from_utf8_lossy(&clean_unpushed.stdout);
+    assert!(
+        unpushed_stdout.contains("dirty_repos=1 pushed=1 exported=0 failed=0"),
+        "expected clean repo with unpushed commit to push, got: {unpushed_stdout}"
+    );
+    let remote_wip_sha = git(&bare_origin, &["rev-parse", wip_ref]);
+    assert_eq!(
+        remote_wip_sha, local_head,
+        "unpushed HEAD commit must be preserved on origin WIP ref"
+    );
+    assert!(
+        std::fs::read_dir(repo_dir.join(".git"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| e
+                .file_name()
+                .to_string_lossy()
+                .starts_with("orb-pre-stop-wip-")),
+        "local bundle backup must be written inside .git without polluting worktree"
+    );
+    assert!(
+        git(&repo_dir, &["status", "--porcelain"]).is_empty(),
+        "checkpoint bundle must not dirty a clean worktree"
+    );
+
+    // Push `local_head` to `origin/main` so `repo_dir` is clean+synced before testing linked worktree.
+    git(&repo_dir, &["push", "origin", "HEAD:main"]);
+
+    // 4c. Linked git worktree (`git worktree add`, where `.git` is a file, not a directory,
+    // matching `orb-cow-worktree`) AND custom mission root outside default `/var/lib/orb-node/work`
+    // (resolved via `set_mission_roots_probe`, e.g. `/home/orb/project/subdir`)!
+    let custom_base = git_fixture.path().join("home-orb-project");
+    let linked_wt = custom_base.join("worker-wt");
+    let linked_subdir = linked_wt.join("src/nested");
+    std::fs::create_dir_all(&custom_base).unwrap();
+    git(
+        &repo_dir,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            linked_wt.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(
+        linked_wt.join(".git").is_file(),
+        "linked git worktree must use a .git file"
+    );
+    std::fs::create_dir_all(&linked_subdir).unwrap();
+    std::fs::write(
+        linked_subdir.join("Extra.lean"),
+        "theorem linked_dirty : True := trivial\n",
+    )
+    .unwrap();
+
+    let probe_path = linked_subdir.to_string_lossy().into_owned();
+    m.set_mission_roots_probe(Arc::new(move |_tenant, _mids| {
+        let p = probe_path.clone();
+        Box::pin(async move { vec![p] })
+    }));
+    // Trigger another pre-stop checkpoint by placing `expires_at` within the 5m window again.
+    let now2 = Utc::now();
+    m.update(&spawned.id, |row| {
+        row.expires_at = now2 + chrono::Duration::minutes(3);
+    })
+    .await;
+    m.reap_once().await;
+    let probe_script = fake
+        .execs
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|s| s.contains("orb_pre_stop_checkpoint"))
+        .cloned()
+        .expect("probed checkpoint script executed");
+    assert!(
+        probe_script.contains(&linked_subdir.display().to_string()),
+        "checkpoint script must include mission's probed execution directory"
+    );
+    let probe_run = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(probe_script.replace(
+            "'/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'",
+            &format!("'{}'", work_root.display()),
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        probe_run.status.success(),
+        "POSIX sh execution of linked-worktree + custom-cwd checkpoint failed: {}",
+        String::from_utf8_lossy(&probe_run.stderr)
+    );
+    let probe_stdout = String::from_utf8_lossy(&probe_run.stdout);
+    assert!(
+        probe_stdout.contains("dirty_repos=1 pushed=1 exported=0 failed=0"),
+        "expected dirty linked worktree in custom mission root to checkpoint and push, got: {probe_stdout}"
+    );
+    let linked_wip_sha = git(&bare_origin, &["rev-parse", wip_ref]);
+    assert_ne!(
+        linked_wip_sha, local_head,
+        "dirty linked worktree must produce a new synthetic WIP commit on origin"
+    );
+    let files_in_wip = git(
+        &bare_origin,
+        &["ls-tree", "-r", "--name-only", &linked_wip_sha],
+    );
+    assert!(
+        files_in_wip.contains("src/nested/Extra.lean"),
+        "linked worktree uncommitted file must be captured in WIP commit tree, got: {files_in_wip}"
+    );
+    let wip_branches = git(
+        &bare_origin,
+        &["for-each-ref", "--format=%(refname)", "refs/heads/orb/wip/"],
+    );
+    assert!(
+        wip_branches.lines().count() >= 2,
+        "expected canonical WIP ref plus per-worktree disambiguated WIP ref, got: {wip_branches}"
+    );
+
+    // 4d. Required clean filter failure during `git add -A` must fail closed (`failed=1`, non-zero
+    // exit status) and NEVER serialize/push a stale commit from the copied index!
+    git(&repo_dir, &["config", "filter.failclean.clean", "false"]);
+    git(&repo_dir, &["config", "filter.failclean.required", "true"]);
+    std::fs::write(
+        linked_wt.join(".gitattributes"),
+        "*.filtered filter=failclean\n",
+    )
+    .unwrap();
+    std::fs::write(linked_wt.join("broken.filtered"), "unsaved worker edits\n").unwrap();
+
+    let now3 = Utc::now();
+    m.update(&spawned.id, |row| {
+        row.pre_stop_ran_at = None;
+        row.expires_at = now3 + chrono::Duration::minutes(3);
+    })
+    .await;
+    m.reap_once().await;
+    let stage_fail_script = fake
+        .execs
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|s| s.contains("orb_pre_stop_checkpoint"))
+        .cloned()
+        .expect("stage-fail checkpoint script executed");
+    let stage_fail_run = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(stage_fail_script.replace(
+            "'/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'",
+            &format!("'{}'", work_root.display()),
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        !stage_fail_run.status.success(),
+        "staging failure (`git add -A`) must cause checkpoint script to exit non-zero"
+    );
+    let stage_fail_stdout = String::from_utf8_lossy(&stage_fail_run.stdout);
+    assert!(
+        stage_fail_stdout.contains("dirty_repos=1 pushed=0 exported=0 failed=1"),
+        "expected staging failure to record pushed=0 exported=0 failed=1, got: {stage_fail_stdout}"
+    );
+    assert_eq!(
+        git(&bare_origin, &["rev-parse", wip_ref]),
+        linked_wip_sha,
+        "staging failure must not overwrite origin WIP ref with a stale index commit"
+    );
+
+    // 4e. Provider exec wrapper must run as workspace owner (`orbnode`) when present, and any
+    // discovered `.git` marker whose repository detection fails (e.g. `safe.directory` ownership
+    // rejection or unreadable/broken `.git` pointer) must be recorded as `failed` rather than
+    // silently skipped with `dirty_repos=0`!
+    assert!(
+        stage_fail_script.contains("runuser -u orbnode -- env HOME=/var/lib/orb-node")
+            && stage_fail_script.contains("sudo -n -u orbnode env HOME=/var/lib/orb-node"),
+        "provider_exec fallback script must switch to orbnode with its Git environment"
+    );
+    std::fs::remove_dir_all(&linked_wt).unwrap();
+    let rejected_repo = work_root.join("rejected-ownership-repo");
+    std::fs::create_dir_all(&rejected_repo).unwrap();
+    std::fs::write(
+        rejected_repo.join(".git"),
+        "gitdir: /nonexistent/orbnode/rejected-gitdir\n",
+    )
+    .unwrap();
+    let detect_fail_run = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(stage_fail_script.replace(
+            "'/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'",
+            &format!("'{}'", work_root.display()),
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        !detect_fail_run.status.success(),
+        "repository detection failure on a discovered .git marker must exit non-zero"
+    );
+    let detect_fail_stdout = String::from_utf8_lossy(&detect_fail_run.stdout);
+    assert!(
+        detect_fail_stdout.contains("dirty_repos=1 pushed=0 exported=0 failed=1"),
+        "expected discovered .git marker detection failure to record failed=1, got: {detect_fail_stdout}"
+    );
+
+    // 4f. Local-only repository (no `origin` remote and no custom hook): checkpoint script must
+    // emit `ORB_BUNDLE_EXPORT_BEGIN ... ORB_BUNDLE_EXPORT_END` so Core persists the git bundle
+    // onto host storage before VM destruction (and fails closed if bundle export exceeds the cap)!
+    std::fs::remove_dir_all(&rejected_repo).unwrap();
+    let local_only_repo = work_root.join("local-only-repo");
+    std::fs::create_dir_all(&local_only_repo).unwrap();
+    git(&local_only_repo, &["init", "-b", "main"]);
+    git(&local_only_repo, &["config", "user.email", "test@orb.test"]);
+    git(&local_only_repo, &["config", "user.name", "Test"]);
+    std::fs::write(
+        local_only_repo.join("ScratchProof.lean"),
+        "theorem local_only_preserved : True := trivial\n",
+    )
+    .unwrap();
+    // Remove `custom_hook` so we test the default no-origin + no-custom-hook path.
+    m.update(&spawned.id, |row| {
+        row.pre_stop_hook = None;
+        row.pre_stop_ran_at = None;
+        row.expires_at = Utc::now() + chrono::Duration::minutes(3);
+    })
+    .await;
+    m.reap_once().await;
+    let no_hook_script = fake
+        .execs
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|s| s.contains("orb_pre_stop_checkpoint"))
+        .cloned()
+        .expect("no-hook checkpoint script executed");
+    let local_export_run = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(no_hook_script.replace(
+            "'/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'",
+            &format!("'{}'", work_root.display()),
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        local_export_run.status.success(),
+        "local-only repo bundle export should succeed: {}",
+        String::from_utf8_lossy(&local_export_run.stderr)
+    );
+    let local_export_stdout = String::from_utf8_lossy(&local_export_run.stdout);
+    assert!(
+        local_export_stdout.contains("dirty_repos=1 pushed=0 exported=1 failed=0"),
+        "expected local-only repo to report exported=1 failed=0, got: {local_export_stdout}"
+    );
+    let (cleaned_out, saved_bundles, confirmed_commits, persist_failed) =
+        persist_exported_checkpoint_bundles(&m.dir, &spawned.id, &local_export_stdout);
+    assert!(!persist_failed, "Core bundle persistence must succeed");
+    assert_eq!(saved_bundles.len(), 1, "expected 1 persisted host bundle");
+    assert_eq!(
+        confirmed_commits.len(),
+        1,
+        "expected 1 confirmed host-persisted repo:commit token"
+    );
+    assert!(
+        !cleaned_out.contains("ORB_BUNDLE_EXPORT_BEGIN"),
+        "cleaned output snippet must strip base64 bundle payload"
+    );
+    // Destroy the VM local repo directory completely, then clone/restore from the host-persisted bundle!
+    std::fs::remove_dir_all(&local_only_repo).unwrap();
+    let restored_repo = git_fixture.path().join("restored-from-host-bundle");
+    std::fs::create_dir_all(&restored_repo).unwrap();
+    git(&restored_repo, &["init", "-b", "main"]);
+    git(
+        &restored_repo,
+        &[
+            "fetch",
+            &saved_bundles[0],
+            "+refs/orb-pre-stop/*:refs/orb-pre-stop/*",
+        ],
+    );
+    let restored_refs = git(
+        &restored_repo,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/orb-pre-stop/",
+        ],
+    );
+    let restored_sha = restored_refs.lines().next().expect("bundle commit");
+    let restored_files = git(
+        &restored_repo,
+        &["ls-tree", "-r", "--name-only", restored_sha],
+    );
+    assert!(
+        restored_files.contains("ScratchProof.lean"),
+        "host-persisted bundle must preserve uncommitted local-only repo files after VM deletion, got: {restored_files}"
+    );
+
+    // And if a clean local-only repo (already committed, `git status --porcelain` empty!) cannot
+    // be exported (e.g. exceeds ORB_MAX_BUNDLE_EXPORT_BYTES) or Core has not confirmed persistence:
+    //   1) First attempt MUST fail closed (`failed=1`, non-zero exit).
+    //   2) Second attempt MUST STILL fail closed (`dirty_repos=1 exported=0 failed=1`) rather than
+    //      trusting the VM-local `$latest_ref` and silently skipping with `dirty_repos=0`!
+    //   3) Once export succeeds and Core passes `ORB_CONFIRMED_EXPORTS`, a subsequent pass skips cleanly.
+    let oversized_repo = work_root.join("oversized-local-only-repo");
+    std::fs::create_dir_all(&oversized_repo).unwrap();
+    git(&oversized_repo, &["init", "-b", "main"]);
+    git(&oversized_repo, &["config", "user.email", "test@orb.test"]);
+    git(&oversized_repo, &["config", "user.name", "Test"]);
+    std::fs::write(oversized_repo.join("Big.bin"), vec![b'x'; 256]).unwrap();
+    git(&oversized_repo, &["add", "Big.bin"]);
+    git(
+        &oversized_repo,
+        &["commit", "-m", "committed local-only work"],
+    );
+    assert!(
+        git(&oversized_repo, &["status", "--porcelain"]).is_empty(),
+        "precondition: clean local-only repo with committed work"
+    );
+    let cap_fail_script = no_hook_script
+        .replace(
+            "'/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'",
+            &format!("'{}'", work_root.display()),
+        )
+        .replace(
+            "ORB_MAX_BUNDLE_EXPORT_BYTES=1572864",
+            "ORB_MAX_BUNDLE_EXPORT_BYTES=16",
+        );
+    for attempt in 1..=2 {
+        let cap_fail_run = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cap_fail_script)
+            .output()
+            .unwrap();
+        assert!(
+            !cap_fail_run.status.success(),
+            "attempt {attempt}: clean local-only repo without confirmed Core export must exit non-zero"
+        );
+        let cap_fail_stdout = String::from_utf8_lossy(&cap_fail_run.stdout);
+        assert!(
+            cap_fail_stdout.contains("dirty_repos=1 pushed=0 exported=0 failed=1"),
+            "attempt {attempt}: expected unexportable clean local-only repo to retry and fail, got: {cap_fail_stdout}"
+        );
+    }
+    // Now run with normal cap (succeeds & emits bundle), persist on Core, and verify a follow-up
+    // pass with `ORB_CONFIRMED_EXPORTS` skips cleanly (`dirty_repos=0`).
+    let normal_cap_script = no_hook_script.replace(
+        "'/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'",
+        &format!("'{}'", work_root.display()),
+    );
+    let ok_export_run = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&normal_cap_script)
+        .output()
+        .unwrap();
+    assert!(ok_export_run.status.success());
+    let ok_export_stdout = String::from_utf8_lossy(&ok_export_run.stdout);
+    assert!(
+        ok_export_stdout.contains("dirty_repos=1 pushed=0 exported=1 failed=0"),
+        "expected clean local-only repo to export once cap allows, got: {ok_export_stdout}"
+    );
+    let (_, _, confirmed2, persist_failed2) =
+        persist_exported_checkpoint_bundles(&m.dir, &spawned.id, &ok_export_stdout);
+    assert!(!persist_failed2 && confirmed2.len() == 1);
+    let confirmed_pass_script = normal_cap_script.replace(
+        "ORB_CONFIRMED_EXPORTS=''",
+        &format!("ORB_CONFIRMED_EXPORTS='{}'", confirmed2[0]),
+    );
+    let skip_after_confirm = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&confirmed_pass_script)
+        .output()
+        .unwrap();
+    assert!(skip_after_confirm.status.success());
+    let skip_stdout = String::from_utf8_lossy(&skip_after_confirm.stdout);
+    assert!(
+        skip_stdout.contains("dirty_repos=0 pushed=0 exported=0 failed=0"),
+        "expected Core-confirmed clean local-only repo to skip on subsequent pass, got: {skip_stdout}"
+    );
+
+    // 5. Hard-cap teardown MUST refresh the checkpoint even after an earlier `pre_720m_hard_cap`
+    // warning checkpoint already set `pre_stop_ran_at`, so work produced during the remaining
+    // 10-minute window before destruction is never lost!
+    let now4 = Utc::now();
+    let max_ttl = m.settings.max_ttl_minutes as i64;
+    m.update(&spawned.id, |row| {
+        row.created_at = now4 - chrono::Duration::minutes(max_ttl - 5);
+        row.expires_at = now4 + chrono::Duration::minutes(5);
+        row.pre_stop_ran_at = None;
+        row.pre_stop_trigger = None;
+    })
+    .await;
+    m.reap_once().await;
+    let after_warning = m.get(&spawned.id).await.unwrap();
+    assert_eq!(after_warning.state, MachineState::Online);
+    assert_eq!(
+        after_warning.pre_stop_trigger.as_deref(),
+        Some("pre_720m_hard_cap")
+    );
+    assert!(after_warning.pre_stop_ran_at.is_some());
+    let checkpoints_before_destroy = fake
+        .execs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.contains("orb_pre_stop_checkpoint"))
+        .count();
+
+    // Advance past `expires_at` (`ttl_expired` at hard cap) without clearing `pre_stop_ran_at`.
+    m.update(&spawned.id, |row| {
+        row.expires_at = Utc::now() - chrono::Duration::minutes(1);
+    })
+    .await;
+    m.reap_once().await;
+    let after_destroy = m.get(&spawned.id).await.unwrap();
+    assert_eq!(after_destroy.state, MachineState::Destroyed);
+    assert_eq!(
+        after_destroy.pre_stop_trigger.as_deref(),
+        Some("pre_destroy"),
+        "destructive teardown must refresh checkpoint even when pre_720m_hard_cap already ran"
+    );
+    let checkpoints_after_destroy = fake
+        .execs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.contains("orb_pre_stop_checkpoint"))
+        .count();
+    assert_eq!(
+        checkpoints_after_destroy,
+        checkpoints_before_destroy + 1,
+        "expected exactly one fresh pre_destroy checkpoint right before hard-cap destruction"
+    );
+}
+
+#[tokio::test]
 async fn mission_bandwidth_limits_enforce_ancestor_monotonicity_and_pace_subagent_spawns() {
     let dir = tempfile::tempdir().unwrap();
     let mut st = settings();
@@ -5040,4 +5722,183 @@ async fn mission_bandwidth_limits_enforce_ancestor_monotonicity_and_pace_subagen
     assert_eq!(view.effective_bandwidth.compute_vcpu_per_min, Some(4));
     assert_eq!(view.effective_bandwidth.current_vcpu_per_min, 4);
     assert!(view.effective_bandwidth.protect_root);
+}
+
+#[tokio::test]
+async fn mission_bandwidth_protect_root_paces_auto_child_and_concurrent_burst() {
+    let dir = tempfile::tempdir().unwrap();
+    let boat = NamedFakeProvider::new("boat");
+    let mut cfg = settings();
+    cfg.max_concurrent = Some(16);
+    cfg.max_size = "xlarge".into();
+    let m = Arc::new(ManagedManager::new(
+        cfg,
+        Some(boat as Arc<dyn ManagedProvider>),
+        dir.path(),
+        3000,
+    ));
+
+    // Root sets `compute_vcpu_per_min = 2` (exact fit for one `small` 2-vCPU VM) with `protect_root = true`.
+    m.set_mission_bandwidth_limits(
+        "root",
+        Some(budget::BandwidthLimits {
+            tokens_per_min: None,
+            compute_vcpu_per_min: Some(2),
+            compute_usd_per_hour: None,
+            protect_root: true,
+        }),
+        &["root".into()],
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    // Two concurrent auto-managed child spawns (`owner_mission_id: None`, `requested_by_mission_id: Some("root")`):
+    // 1) Neither may bypass pacing via `protect_root`.
+    // 2) Only ONE may enter admission at 2 vCPU; the second must re-verify under `self.admission` and wait!
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let m1 = Arc::clone(&m);
+    let b1 = Arc::clone(&barrier);
+    let t1 = tokio::spawn(async move {
+        b1.wait().await;
+        m1.spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            owner_mission_id: None,
+            requested_by_mission_id: Some("root".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["root".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+    });
+    let m2 = Arc::clone(&m);
+    let b2 = Arc::clone(&barrier);
+    let t2 = tokio::spawn(async move {
+        b2.wait().await;
+        m2.spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            owner_mission_id: None,
+            requested_by_mission_id: Some("root".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["root".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let live = m
+        .machines_snapshot()
+        .await
+        .into_iter()
+        .filter(|x| x.state.is_live())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        live.len(),
+        1,
+        "exactly one concurrent auto-child VM should be admitted under 2 vCPU/min ceiling"
+    );
+    assert!(
+        t1.is_finished() ^ t2.is_finished(),
+        "second auto-child spawn must wait rather than bypass protect_root or race admission"
+    );
+
+    // Freeing the first VM immediately unblocks the waiting auto-child spawn.
+    m.destroy(&live[0].id, "done").await.unwrap();
+    let (r1, r2) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(t1, t2) })
+        .await
+        .expect("second auto-child spawn unblocked after destroy");
+    assert!(r1.unwrap().is_ok());
+    assert!(r2.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn vastai_fallback_rejects_offer_exceeding_compute_bandwidth_ceiling() {
+    use axum::{
+        extract::Path,
+        http::StatusCode,
+        routing::{post, put},
+        Json, Router,
+    };
+
+    let app = Router::new()
+        .route(
+            "/bundles/",
+            post(|| async {
+                Json(serde_json::json!({
+                    "offers": [
+                        // Initial quote fits 20 vCPU ceiling (sniped on PUT)
+                        {"id": 9101, "dph_total": 0.45, "cpu_cores_effective": 16.0, "cpu_ram": 65536.0},
+                        // Fallback offer exceeds 20 vCPU bandwidth ceiling (64 vCPU)
+                        {"id": 9102, "dph_total": 0.50, "cpu_cores_effective": 64.0, "cpu_ram": 131072.0}
+                    ]
+                }))
+            }),
+        )
+        .route(
+            "/asks/:offer_id/",
+            put(|Path(offer_id): Path<String>| async move {
+                if offer_id == "9101" {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({"error": "offer 9101 already rented"})),
+                    );
+                }
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"success": true, "new_contract": 999102})),
+                )
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = settings();
+    cfg.daily_cap_usd = Some(5.0);
+    let vast: Arc<dyn ManagedProvider> = Arc::new(vastai::VastAiProvider::new(
+        format!("http://{addr}"),
+        "vast-test-key",
+    ));
+    let mgr = Arc::new(ManagedManager::new(cfg, Some(vast), dir.path(), 3000));
+    mgr.set_mission_bandwidth_limits(
+        "root",
+        Some(budget::BandwidthLimits {
+            tokens_per_min: None,
+            compute_vcpu_per_min: Some(20),
+            compute_usd_per_hour: None,
+            protect_root: true,
+        }),
+        &["root".into()],
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    let err = mgr
+        .spawn(SpawnRequest {
+            provider: Some("vastai".into()),
+            size: Some("rtx4090".into()),
+            ttl_minutes: Some(60),
+            owner_mission_id: Some("root".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["root".into()],
+            wait: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.error, "bandwidth_exceeded");
+    assert_eq!(err.status, 429);
+    srv.abort();
 }

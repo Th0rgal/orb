@@ -13,7 +13,12 @@ fn configuration(base: &str, route: &str, mission: &str) -> Value {
             "options": {"baseURL": format!("{}/v1",base.trim_end_matches('/')),
                 "apiKey": "{env:ORB_ROUTING_KEY}",
                 "headers": {"x-sandboxed-mission-id": mission}},
-            "models": {(route): {"name": route, "id": route}}
+            "models": {(route): {
+                "name": route,
+                "id": route,
+                "attachment": true,
+                "modalities": {"input": ["text", "image"], "output": ["text"]}
+            }}
         }}
     })
 }
@@ -228,7 +233,11 @@ mod tests {
         for route in ["builtin/smart", "reviewer", "team/custom"] {
             let c = configuration("https://core.test/", route, "mission");
             assert_eq!(c["model"], format!("orb-routing/{route}"));
-            assert_eq!(c["provider"]["orb-routing"]["models"][route]["id"], route);
+            let model = &c["provider"]["orb-routing"]["models"][route];
+            assert_eq!(model["id"], route);
+            assert_eq!(model["attachment"], true);
+            assert_eq!(model["modalities"]["input"], json!(["text", "image"]));
+            assert_eq!(model["modalities"]["output"], json!(["text"]));
             assert_eq!(
                 c["provider"]["orb-routing"]["options"]["baseURL"],
                 "https://core.test/v1"

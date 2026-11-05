@@ -358,6 +358,7 @@ fn instance_from(v: &Value) -> Option<ProviderMachine> {
         state,
         name,
         deletable_at: None,
+        ..Default::default()
     })
 }
 
@@ -481,6 +482,7 @@ impl ManagedProvider for VastAiProvider {
             state: "loading".into(),
             name: spec.name.clone(),
             deletable_at: None,
+            ..Default::default()
         })
     }
 

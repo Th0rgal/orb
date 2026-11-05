@@ -102,12 +102,30 @@ pub fn ask_store_if_initialized() -> Option<Arc<AskStore>> {
     ASK_STORE.get().cloned()
 }
 
+/// Remote `orb-node` (`sandboxed-node`) placement for an Ask turn whose
+/// mission workspace lives on a remote/managed VM instead of Core's local host
+/// filesystem.
+#[derive(Clone)]
+pub struct RemoteAskTarget {
+    pub node: crate::remote_node::RemoteNodeConfig,
+    pub secret: String,
+    pub workspace_mission_id: Uuid,
+    /// Optional explicit directory override (e.g. a transferred workspace root
+    /// or an isolated `/tmp/ask-sandbox-<uuid>` worktree on the remote node).
+    pub cwd_override: Option<String>,
+    /// Display path shown in the Ask system prompt.
+    pub display_cwd: String,
+    /// Whether the remote placement had a live job handle when Ask started.
+    pub live: bool,
+}
+
 /// Everything the Ask loop needs for one turn.
 pub struct AskTurn {
     pub ask_store: Arc<AskStore>,
     pub mission_store: Arc<dyn MissionStore>,
     pub workspace_exec: WorkspaceExec,
     pub work_dir: PathBuf,
+    pub remote_target: Option<RemoteAskTarget>,
     pub llm: AskClient,
     pub mission_id: Uuid,
     pub thread_id: Uuid,
@@ -579,8 +597,21 @@ async fn build_system_prompt(turn: &AskTurn, user_content: &str) -> String {
     };
 
     let cwd = turn
-        .workspace_exec
-        .translate_path_for_container(&turn.work_dir);
+        .remote_target
+        .as_ref()
+        .map(|rt| {
+            format!(
+                "{} (on remote node {})",
+                rt.cwd_override
+                    .as_deref()
+                    .unwrap_or(rt.display_cwd.as_str()),
+                rt.node.id
+            )
+        })
+        .unwrap_or_else(|| {
+            turn.workspace_exec
+                .translate_path_for_container(&turn.work_dir)
+        });
     format!(
         "You are the Ask co-pilot for an autonomous coding mission. A separate \
          \"working agent\" is doing the real work in this same workspace; you are a \
@@ -1220,6 +1251,21 @@ async fn cancel_working_agent(turn: &AskTurn) -> Result<(), String> {
 /// On any failure we return `false`, degrading to the authoritative UserMessage
 /// path (which starts a turn when idle and queues when running).
 async fn mission_has_live_turn(turn: &AskTurn) -> bool {
+    if turn.remote_target.is_some() {
+        // Local `ask_store` operator notes are only drained by local
+        // `mission_runner` turns; remote missions must fall through to the
+        // authoritative `ControlCommand::UserMessage` outbox path.
+        return false;
+    }
+    if let Ok(Some(run)) = turn
+        .mission_store
+        .get_latest_mission_run(turn.mission_id)
+        .await
+    {
+        if !run.execution_state.is_terminal() {
+            return true;
+        }
+    }
     let (tx, rx) = tokio::sync::oneshot::channel();
     if turn
         .control_cmd_tx
@@ -1233,6 +1279,149 @@ async fn mission_has_live_turn(turn: &AskTurn) -> bool {
         Ok(Ok(list)) => list.iter().any(|m| m.mission_id == turn.mission_id),
         _ => false,
     }
+}
+
+/// Execute a bash command on a remote `orb-node` (`sandboxed-node`) daemon in
+/// the mission's remote workspace using a `side_lane` lease (falling back to
+/// managed VM `provider.exec` if an un-upgraded remote node rejects with 429
+/// because a main job is occupying its sole main slot).
+pub async fn exec_remote_ask_command(
+    target: &RemoteAskTarget,
+    command: &str,
+) -> Result<(i32, String, String), String> {
+    let wrapped = match target.cwd_override.as_deref() {
+        Some(cwd) if !cwd.is_empty() => {
+            format!("cd -- {} || exit 78; {command}", single_quote(cwd))
+        }
+        _ => command.to_string(),
+    };
+    let claims = crate::remote_node::LeaseClaims {
+        mission_id: target.workspace_mission_id,
+        node_id: target.node.id.clone(),
+        scope: crate::remote_node::SCOPE_MISSION_EXECUTE.into(),
+        expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).timestamp(),
+        job_id: None,
+    };
+    let token = crate::remote_node::create_lease_token(&claims, &target.secret)
+        .map_err(|_| "cannot issue remote node lease token".to_string())?;
+    let request = crate::remote_node::LeaseRequest {
+        mission_id: target.workspace_mission_id,
+        node_id: target.node.id.clone(),
+        lease_token: token,
+        command: wrapped.clone(),
+        side_lane: true,
+    };
+    match crate::remote_node::RemoteNodeClient::default()
+        .execute(&target.node, &target.secret, &request)
+        .await
+    {
+        Ok(res) if res.accepted => Ok((res.exit_code.unwrap_or(-1), res.stdout, res.stderr)),
+        Ok(_) => Err("remote node refused Ask workspace command".to_string()),
+        Err(err) => {
+            let err_msg = err.to_string();
+            // Legacy remote nodes before `side_lane` support return HTTP 429 when
+            // the main worker slot is busy. For managed VMs, fall back to direct
+            // provider exec inside the mission workspace as `orbnode`.
+            if err_msg.contains("429") || err_msg.contains("at capacity") {
+                if let Some(manager) = crate::managed::global() {
+                    if let Some(machine) = manager.get(&target.node.id).await {
+                        if let (Some(provider), Some(provider_id)) = (
+                            manager.provider_for(&machine.provider),
+                            machine.provider_id.as_deref(),
+                        ) {
+                            let mid = target.workspace_mission_id.to_string();
+                            let script = format!(
+                                "for d in /var/lib/orb-node/work/{mid} /var/lib/sandboxed-node/work/{mid}; do \
+                                   if [ -d \"$d\" ]; then cd -- \"$d\" && break; fi; \
+                                 done; {wrapped}"
+                            );
+                            let cmd = format!(
+                                "if id orbnode >/dev/null 2>&1; then su -s /bin/bash orbnode -c {}; else /bin/bash -lc {}; fi",
+                                single_quote(&script),
+                                single_quote(&script),
+                            );
+                            let val = provider.exec(provider_id, &cmd, 60).await?;
+                            let code = val
+                                .get("exit_code")
+                                .or_else(|| val.get("exitCode"))
+                                .and_then(Value::as_i64)
+                                .and_then(|c| i32::try_from(c).ok())
+                                .unwrap_or(0);
+                            let stdout = val
+                                .get("stdout")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string();
+                            let stderr = val
+                                .get("stderr")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string();
+                            return Ok((code, stdout, stderr));
+                        }
+                    }
+                }
+            }
+            Err(err_msg)
+        }
+    }
+}
+
+/// Prepare an isolated sandbox directory (`/tmp/ask-sandbox-<uuid>`) on a
+/// remote `orb-node` for `sandbox: true` Ask turns.
+pub async fn prepare_remote_sandbox(target: &RemoteAskTarget) -> Option<String> {
+    let sandbox_dir = format!("/tmp/ask-sandbox-{}", Uuid::new_v4());
+    let script = format!(
+        "set -e; s={s}; rm -rf \"$s\"; \
+         if git rev-parse --git-dir >/dev/null 2>&1; then \
+           git worktree add --detach \"$s\" HEAD >/dev/null; \
+         else \
+           mkdir -p \"$s\"; \
+           if command -v rsync >/dev/null 2>&1; then \
+             rsync -a --exclude .git --exclude .lake --exclude node_modules --exclude target --exclude .next -- ./ \"$s\"/; \
+           else \
+             tar --exclude .git --exclude .lake --exclude node_modules --exclude target --exclude .next -cf - . | (cd \"$s\" && tar -xf -); \
+           fi; \
+         fi; echo SANDBOX_OK",
+        s = single_quote(&sandbox_dir),
+    );
+    match exec_remote_ask_command(target, &script).await {
+        Ok((0, stdout, _)) if stdout.contains("SANDBOX_OK") => Some(sandbox_dir),
+        _ => {
+            cleanup_remote_sandbox(target, &sandbox_dir).await;
+            None
+        }
+    }
+}
+
+/// Clean up a remote sandbox created by [`prepare_remote_sandbox`].
+pub async fn cleanup_remote_sandbox(base_target: &RemoteAskTarget, sandbox_dir: &str) {
+    let cmd = format!(
+        "git worktree remove --force {s} 2>/dev/null || rm -rf {s}; \
+         git worktree prune 2>/dev/null || true",
+        s = single_quote(sandbox_dir),
+    );
+    let _ = exec_remote_ask_command(base_target, &cmd).await;
+}
+
+async fn run_turn_command_raw(
+    turn: &AskTurn,
+    command: &str,
+) -> Result<(i32, String, String), String> {
+    if let Some(rt) = &turn.remote_target {
+        return exec_remote_ask_command(rt, command).await;
+    }
+    let args = vec!["-lc".to_string(), command.to_string()];
+    let output = turn
+        .workspace_exec
+        .output(&turn.work_dir, "/bin/bash", &args, HashMap::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok((
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
 }
 
 /// Leave a durable audit record of a Copilot-initiated stop in the mission
@@ -1264,15 +1453,8 @@ fn mask_value(v: &str) -> String {
 }
 
 async fn run_bash(turn: &AskTurn, command: &str) -> String {
-    let args = vec!["-lc".to_string(), command.to_string()];
-    match turn
-        .workspace_exec
-        .output(&turn.work_dir, "/bin/bash", &args, HashMap::new())
-        .await
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
+    match run_turn_command_raw(turn, command).await {
+        Ok((code, stdout, stderr)) => {
             let mut out = String::new();
             if !stdout.trim().is_empty() {
                 out.push_str(stdout.trim_end());
@@ -1284,7 +1466,6 @@ async fn run_bash(turn: &AskTurn, command: &str) -> String {
                 out.push_str("[stderr] ");
                 out.push_str(stderr.trim_end());
             }
-            let code = output.status.code().unwrap_or(-1);
             if code != 0 {
                 out.push_str(&format!("\n[exit code {code}]"));
             }
@@ -1301,20 +1482,16 @@ async fn run_bash(turn: &AskTurn, command: &str) -> String {
 /// Snapshot `git status --porcelain` (tracked + untracked) as a set of lines.
 /// Returns `None` when the workspace is not a git repo (no detection possible).
 async fn git_status_set(turn: &AskTurn) -> Option<HashSet<String>> {
-    let args = vec![
-        "-lc".to_string(),
-        "git status --porcelain=v1 --untracked-files=all 2>/dev/null".to_string(),
-    ];
-    let output = turn
-        .workspace_exec
-        .output(&turn.work_dir, "/bin/bash", &args, HashMap::new())
-        .await
-        .ok()?;
-    if !output.status.success() {
+    let (code, stdout, _) = run_turn_command_raw(
+        turn,
+        "git status --porcelain=v1 --untracked-files=all 2>/dev/null",
+    )
+    .await
+    .ok()?;
+    if code != 0 {
         return None; // not a git repo (or git unavailable)
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    Some(text.lines().map(|l| l.to_string()).collect())
+    Some(stdout.lines().map(|l| l.to_string()).collect())
 }
 
 /// Baseline of the working tree captured before an Ask bash command, used to
@@ -1332,13 +1509,8 @@ async fn capture_write_baseline(turn: &AskTurn) -> WriteBaseline {
         return WriteBaseline::Git(set);
     }
     // Non-git fallback: capture an epoch marker for mtime-based detection.
-    let args = vec!["-lc".to_string(), "date +%s".to_string()];
-    if let Ok(out) = turn
-        .workspace_exec
-        .output(&turn.work_dir, "/bin/bash", &args, HashMap::new())
-        .await
-    {
-        let epoch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if let Ok((0, stdout, _)) = run_turn_command_raw(turn, "date +%s").await {
+        let epoch = stdout.trim().to_string();
         if !epoch.is_empty() && epoch.chars().all(|c| c.is_ascii_digit()) {
             return WriteBaseline::Mtime(epoch);
         }
@@ -1368,13 +1540,8 @@ async fn record_writes(turn: &AskTurn, command: &str, baseline: WriteBaseline) {
                  -not -path './.git/*' -not -path './node_modules/*' \
                  -not -path './target/*' 2>/dev/null | head -50"
             );
-            let args = vec!["-lc".to_string(), cmd];
-            match turn
-                .workspace_exec
-                .output(&turn.work_dir, "/bin/bash", &args, HashMap::new())
-                .await
-            {
-                Ok(out) => String::from_utf8_lossy(&out.stdout)
+            match run_turn_command_raw(turn, &cmd).await {
+                Ok((_, stdout, _)) => stdout
                     .lines()
                     .map(|l| l.trim().to_string())
                     .filter(|l| !l.is_empty())

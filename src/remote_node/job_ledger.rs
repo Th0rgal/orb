@@ -1150,6 +1150,25 @@ pub async fn terminal_receipts_for_mission(
         .collect())
 }
 
+/// Return every distinct `mission_id` that currently holds a job handle or
+/// completed terminal receipt on `node_id`.
+pub async fn mission_ids_for_node(working_dir: &Path, node_id: &str) -> Vec<Uuid> {
+    let mut ids = Vec::new();
+    if let Ok(snap) = dir_ledger(working_dir).load_snapshot().await {
+        for h in &snap.handles {
+            if h.node_id == node_id && !ids.contains(&h.mission_id) {
+                ids.push(h.mission_id);
+            }
+        }
+        for r in &snap.receipts {
+            if r.node_id == node_id && !ids.contains(&r.mission_id) {
+                ids.push(r.mission_id);
+            }
+        }
+    }
+    ids
+}
+
 /// Resolve an immutable validation identity across mission boundaries.
 ///
 /// The ledger and receipt snapshots are swapped atomically via [`ArcSwap`] so

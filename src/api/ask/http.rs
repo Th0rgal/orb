@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::store::{AskMessage, AskThread};
-use super::{run_ask_turn, run_ask_turn_streaming, AskClient, AskTurn};
+use super::{run_ask_turn, run_ask_turn_streaming, AskClient, AskTurn, RemoteAskTarget};
 use crate::api::auth::AuthUser;
 use crate::api::routes::AppState;
 
@@ -161,6 +161,97 @@ fn resolve_base_work_dir(
     }
 }
 
+fn resolve_remote_ask_cwd(
+    workspace_mission_id: Uuid,
+    transferred_root: Option<String>,
+    working_directory: Option<&str>,
+) -> Result<(Option<String>, String), (StatusCode, String)> {
+    let explicit_remote_wd = match working_directory.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(directory) => {
+            if !std::path::Path::new(directory).is_absolute() {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "Remote working_directory must be absolute".to_string(),
+                ));
+            }
+            Some(directory.to_string())
+        }
+        None => None,
+    };
+    let cwd_override = transferred_root.or(explicit_remote_wd);
+    let display_cwd = cwd_override
+        .clone()
+        .unwrap_or_else(|| format!("/var/lib/orb-node/work/{workspace_mission_id}"));
+    Ok((cwd_override, display_cwd))
+}
+
+/// Resolve a remote `orb-node` (`sandboxed-node`) Ask target when the mission
+/// was placed on a remote or managed VM. Returns `Ok(None)` for ordinary local
+/// host/nspawn missions so they continue using [`resolve_base_work_dir`].
+async fn resolve_remote_ask_target(
+    state: &AppState,
+    control: &crate::api::control::ControlState,
+    mission: &crate::api::mission_store::Mission,
+) -> Result<Option<RemoteAskTarget>, (StatusCode, String)> {
+    let placement = crate::api::control::remote_grok::placement(
+        &state.config.working_dir,
+        &control.mission_store,
+        mission.id,
+    )
+    .await
+    .map_err(|e| (StatusCode::CONFLICT, e))?;
+    let Some(placement) = placement else {
+        return Ok(None);
+    };
+    let node = state
+        .config
+        .remote_nodes
+        .node(&placement.node_id)
+        .cloned()
+        .ok_or_else(|| {
+            (
+                StatusCode::CONFLICT,
+                format!(
+                    "remote mission node '{}' is unavailable or has been reaped",
+                    placement.node_id
+                ),
+            )
+        })?;
+    let secret = crate::remote_node::node_token(&node.token_env).map_err(|_| {
+        (
+            StatusCode::CONFLICT,
+            format!("remote node '{}' authentication unavailable", node.id),
+        )
+    })?;
+    let workspace_mission_id = mission
+        .project
+        .tags
+        .iter()
+        .find_map(|tag| {
+            tag.strip_prefix("fork-workspace:")
+                .and_then(|s| Uuid::parse_str(s.trim()).ok())
+        })
+        .unwrap_or(mission.id);
+    let transferred_root =
+        crate::api::control::machine_transfer::committed(&control.mission_store, mission.id)
+            .await
+            .map_err(|e| (StatusCode::CONFLICT, e))?
+            .and_then(|t| t.destination_root);
+    let (cwd_override, display_cwd) = resolve_remote_ask_cwd(
+        workspace_mission_id,
+        transferred_root,
+        mission.working_directory.as_deref(),
+    )?;
+    Ok(Some(RemoteAskTarget {
+        node,
+        secret,
+        workspace_mission_id,
+        cwd_override,
+        display_cwd,
+        live: placement.live,
+    }))
+}
+
 /// POST /api/control/missions/:id/ask — send a question to the Ask assistant.
 pub async fn ask_send(
     State(state): State<Arc<AppState>>,
@@ -180,9 +271,10 @@ pub async fn ask_send(
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "Mission not found".to_string()))?;
 
-    // Resolve the assistant model/config, Ask store, and live workspace concurrently
-    // now that mission ownership is verified.
-    let (cfg_opt, ask_store_res, workspace) = tokio::join!(
+    // Resolve the assistant model/config, Ask store, live workspace, and remote
+    // target concurrently before mutating ask_store so unavailable/remote mission
+    // workspaces reject cleanly with 409 without leaving an empty orphan thread.
+    let (cfg_opt, ask_store_res, workspace, base_remote_target_res) = tokio::join!(
         async {
             let model_override = state.settings.get().await.ask_assistant_model;
             crate::api::metadata_llm::build_assistant_llm_config(
@@ -198,27 +290,39 @@ pub async fn ask_send(
             &state.config,
             Some(mission.workspace_id),
         ),
+        resolve_remote_ask_target(&state, &control, &mission),
     );
     let cfg = cfg_opt.ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "No assistant LLM configured (set a Cerebras key or ASK_ASSISTANT_MODEL)".to_string(),
     ))?;
     let ask_store = ask_store_res.map_err(internal)?;
+    let base_remote_target = base_remote_target_res?;
     let nspawn_container = workspace.workspace_type == crate::workspace::WorkspaceType::Container
         && crate::workspace::use_nspawn_for_workspace(&workspace);
-    let base_work_dir = resolve_base_work_dir(
-        mission.working_directory.as_deref(),
-        &workspace,
-        nspawn_container,
-        mission_id,
-        mission.parent_mission_id,
-    )
-    .map_err(|e| (StatusCode::CONFLICT, e))?;
+    let base_work_dir = if let Some(rt) = &base_remote_target {
+        std::path::PathBuf::from(&rt.display_cwd)
+    } else {
+        resolve_base_work_dir(
+            mission.working_directory.as_deref(),
+            &workspace,
+            nspawn_container,
+            mission_id,
+            mission.parent_mission_id,
+        )
+        .map_err(|e| (StatusCode::CONFLICT, e))?
+    };
 
     // Optional sandbox-copy isolation: writes go to a throwaway worktree/copy.
     let setup_exec = crate::workspace_exec::WorkspaceExec::new(workspace.clone());
+    let mut remote_sandbox_dir: Option<String> = None;
     let sandbox_dir = if req.sandbox {
-        super::prepare_sandbox(&setup_exec, &base_work_dir).await
+        if let Some(rt) = &base_remote_target {
+            remote_sandbox_dir = super::prepare_remote_sandbox(rt).await;
+            remote_sandbox_dir.as_deref().map(std::path::PathBuf::from)
+        } else {
+            super::prepare_sandbox(&setup_exec, &base_work_dir).await
+        }
     } else {
         None
     };
@@ -240,7 +344,9 @@ pub async fn ask_send(
                 .map_err(internal)?
                 .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
             if t.mission_id != mission_id {
-                if let Some(dir) = &sandbox_dir {
+                if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
+                    super::cleanup_remote_sandbox(rt, sdir).await;
+                } else if let Some(dir) = &sandbox_dir {
                     super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
                 }
                 return Err((
@@ -257,7 +363,9 @@ pub async fn ask_send(
             {
                 Ok(t) => t,
                 Err(e) => {
-                    if let Some(dir) = &sandbox_dir {
+                    if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
+                        super::cleanup_remote_sandbox(rt, sdir).await;
+                    } else if let Some(dir) = &sandbox_dir {
                         super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
                     }
                     return Err(internal(e));
@@ -267,6 +375,13 @@ pub async fn ask_send(
     };
     let used_sandbox = sandbox_dir.is_some();
     let work_dir = sandbox_dir.clone().unwrap_or_else(|| base_work_dir.clone());
+    let turn_remote_target = base_remote_target.clone().map(|mut rt| {
+        if let Some(sdir) = &remote_sandbox_dir {
+            rt.cwd_override = Some(sdir.clone());
+            rt.display_cwd = sdir.clone();
+        }
+        rt
+    });
 
     let workspace_id = workspace.id;
     let turn = AskTurn {
@@ -274,6 +389,7 @@ pub async fn ask_send(
         mission_store: Arc::clone(&control.mission_store),
         workspace_exec: crate::workspace_exec::WorkspaceExec::new(workspace),
         work_dir,
+        remote_target: turn_remote_target,
         llm: AskClient::new(
             state.http_client.clone(),
             cfg,
@@ -292,7 +408,9 @@ pub async fn ask_send(
     let answer_result = run_ask_turn(&turn, &req.content).await;
 
     // Tear down the sandbox regardless of how the turn ended.
-    if let Some(dir) = &sandbox_dir {
+    if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
+        super::cleanup_remote_sandbox(rt, sdir).await;
+    } else if let Some(dir) = &sandbox_dir {
         super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
     }
     let answer = answer_result.map_err(internal)?;
@@ -333,7 +451,7 @@ pub async fn ask_send_stream(
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "Mission not found".to_string()))?;
 
-    let (cfg_opt, ask_store_res, workspace) = tokio::join!(
+    let (cfg_opt, ask_store_res, workspace, base_remote_target_res) = tokio::join!(
         async {
             crate::api::metadata_llm::build_assistant_llm_config(
                 &state.ai_providers,
@@ -348,28 +466,40 @@ pub async fn ask_send_stream(
             &state.config,
             Some(mission.workspace_id),
         ),
+        resolve_remote_ask_target(&state, &control, &mission),
     );
     let cfg = cfg_opt.ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "No assistant LLM configured (set a Cerebras key or ASK_ASSISTANT_MODEL)".to_string(),
     ))?;
     let ask_store = ask_store_res.map_err(internal)?;
+    let base_remote_target = base_remote_target_res?;
     let nspawn_container = workspace.workspace_type == crate::workspace::WorkspaceType::Container
         && crate::workspace::use_nspawn_for_workspace(&workspace);
-    let base_work_dir = resolve_base_work_dir(
-        mission.working_directory.as_deref(),
-        &workspace,
-        nspawn_container,
-        mission_id,
-        mission.parent_mission_id,
-    )
-    .map_err(|e| (StatusCode::CONFLICT, e))?;
+    let base_work_dir = if let Some(rt) = &base_remote_target {
+        std::path::PathBuf::from(&rt.display_cwd)
+    } else {
+        resolve_base_work_dir(
+            mission.working_directory.as_deref(),
+            &workspace,
+            nspawn_container,
+            mission_id,
+            mission.parent_mission_id,
+        )
+        .map_err(|e| (StatusCode::CONFLICT, e))?
+    };
 
     // Optional sandbox-copy isolation (same as the synchronous path): set up a
     // throwaway worktree, run the streamed turn in it, tear it down after.
     let setup_exec = crate::workspace_exec::WorkspaceExec::new(workspace.clone());
+    let mut remote_sandbox_dir: Option<String> = None;
     let sandbox_dir = if req.sandbox {
-        super::prepare_sandbox(&setup_exec, &base_work_dir).await
+        if let Some(rt) = &base_remote_target {
+            remote_sandbox_dir = super::prepare_remote_sandbox(rt).await;
+            remote_sandbox_dir.as_deref().map(std::path::PathBuf::from)
+        } else {
+            super::prepare_sandbox(&setup_exec, &base_work_dir).await
+        }
     } else {
         None
     };
@@ -390,7 +520,9 @@ pub async fn ask_send_stream(
                 .map_err(internal)?
                 .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
             if t.mission_id != mission_id {
-                if let Some(dir) = &sandbox_dir {
+                if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
+                    super::cleanup_remote_sandbox(rt, sdir).await;
+                } else if let Some(dir) = &sandbox_dir {
                     super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
                 }
                 return Err((
@@ -407,7 +539,9 @@ pub async fn ask_send_stream(
             {
                 Ok(t) => t,
                 Err(e) => {
-                    if let Some(dir) = &sandbox_dir {
+                    if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
+                        super::cleanup_remote_sandbox(rt, sdir).await;
+                    } else if let Some(dir) = &sandbox_dir {
                         super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
                     }
                     return Err(internal(e));
@@ -417,6 +551,13 @@ pub async fn ask_send_stream(
     };
     let used_sandbox = sandbox_dir.is_some();
     let work_dir = sandbox_dir.clone().unwrap_or_else(|| base_work_dir.clone());
+    let turn_remote_target = base_remote_target.clone().map(|mut rt| {
+        if let Some(sdir) = &remote_sandbox_dir {
+            rt.cwd_override = Some(sdir.clone());
+            rt.display_cwd = sdir.clone();
+        }
+        rt
+    });
 
     let workspace_id = workspace.id;
     let turn = AskTurn {
@@ -424,6 +565,7 @@ pub async fn ask_send_stream(
         mission_store: Arc::clone(&control.mission_store),
         workspace_exec: crate::workspace_exec::WorkspaceExec::new(workspace),
         work_dir,
+        remote_target: turn_remote_target,
         llm: AskClient::new(
             state.http_client.clone(),
             cfg,
@@ -454,7 +596,9 @@ pub async fn ask_send_stream(
                 .set_thread_title(thread_id, &derive_title(&content))
                 .await;
         }
-        if let Some(dir) = &sandbox_dir {
+        if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
+            super::cleanup_remote_sandbox(rt, sdir).await;
+        } else if let Some(dir) = &sandbox_dir {
             super::cleanup_sandbox(&setup_exec, &cleanup_base, dir).await;
         }
     });
@@ -662,5 +806,40 @@ mod tests {
         assert!(
             crate::workspace::mission_workspace_dir_for_workspace(&workspace, mission).exists()
         );
+    }
+
+    #[test]
+    fn remote_ask_cwd_honors_arbitrary_absolute_working_directory_and_rejects_relative() {
+        let mid = Uuid::parse_str("abcd0000-0000-4000-8000-000000000000").unwrap();
+
+        // Explicit remote directory outside `/var/lib/orb-node/` (e.g. `/home/orb/project`
+        // or `/workspace/repo`) must be preserved as `cwd_override`.
+        let (cwd_override, display_cwd) =
+            resolve_remote_ask_cwd(mid, None, Some("/home/orb/project")).unwrap();
+        assert_eq!(cwd_override.as_deref(), Some("/home/orb/project"));
+        assert_eq!(display_cwd, "/home/orb/project");
+
+        // Transferred root takes precedence over mission.working_directory, matching `remote_jobs.rs`.
+        let (tx_override, tx_display) = resolve_remote_ask_cwd(
+            mid,
+            Some("/var/lib/orb-node/transferred/repo".to_string()),
+            Some("/home/orb/project"),
+        )
+        .unwrap();
+        assert_eq!(
+            tx_override.as_deref(),
+            Some("/var/lib/orb-node/transferred/repo")
+        );
+        assert_eq!(tx_display, "/var/lib/orb-node/transferred/repo");
+
+        // Default (`None`) leaves `cwd_override` as `None` and displays the default remote mission root.
+        let (default_override, default_display) = resolve_remote_ask_cwd(mid, None, None).unwrap();
+        assert_eq!(default_override, None);
+        assert_eq!(default_display, format!("/var/lib/orb-node/work/{mid}"));
+
+        // Relative remote working_directory is rejected with 409 Conflict, matching `remote_jobs.rs`.
+        let (status, err) = resolve_remote_ask_cwd(mid, None, Some("relative/subdir")).unwrap_err();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(err, "Remote working_directory must be absolute");
     }
 }

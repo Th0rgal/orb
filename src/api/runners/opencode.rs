@@ -875,6 +875,9 @@ pub async fn run_opencode_turn(
             return AgentResult::failure(err_msg, 0).with_terminal_reason(TerminalReason::LlmError);
         }
     };
+    let _harness_pid_guard = child
+        .id()
+        .map(|pid| super::live_session::register_harness_pid(mission_id, pid));
 
     // Get stdout and stderr for reading output
     let stdout = match child.stdout.take() {

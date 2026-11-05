@@ -160,6 +160,7 @@ pub async fn execute(
                 quote(script),
                 quote(&args.to_string())
             ),
+            side_lane: false,
         };
         let result = crate::remote_node::RemoteNodeClient::default()
             .execute(node, &secret, &request)

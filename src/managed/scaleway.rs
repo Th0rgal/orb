@@ -584,6 +584,7 @@ pub(crate) fn parse_apple_silicon_machine(v: &Value, zone: &str) -> Option<Provi
             .unwrap_or_default()
             .to_string(),
         deletable_at,
+        ..Default::default()
     })
 }
 
@@ -603,6 +604,7 @@ fn parse_instance_machine(v: &Value, zone: &str) -> Option<ProviderMachine> {
             .unwrap_or_default()
             .to_string(),
         deletable_at: None,
+        ..Default::default()
     })
 }
 

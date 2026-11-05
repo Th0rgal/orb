@@ -17,9 +17,10 @@ export type PendingMove = {
   toProject: string;
   /** Destination folder (missions) or destination path (files). */
   path: string;
-  /** Files: the source path; `directory` for folders. */
+  /** Files: the source path; `directory` for folders; `delete` when removing. */
   fromPath?: string;
   directory?: boolean;
+  delete?: boolean;
   acceptedAt?: number;
 };
 
@@ -85,12 +86,12 @@ export const movingOutOf = (id: string, project: string) => { const move = pendi
 const parentOf = (path: string) => path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
 const baseOf = (path: string) => path.slice(path.lastIndexOf("/") + 1);
 
-/** Names in `slug:dir` that are being moved elsewhere. */
+/** Names in `slug:dir` that are being moved elsewhere or deleted. */
 export function filesMovedAway(slug: string, dir: string): Set<string> {
   const out = new Set<string>();
   for (const [key, move] of pending()) {
     if (move.kind !== "file" || !move.fromPath || !key.startsWith(`file:${slug}:`)) continue;
-    if (parentOf(move.fromPath) === dir && !(move.toProject === slug && move.path === move.fromPath)) out.add(baseOf(move.fromPath));
+    if (parentOf(move.fromPath) === dir && (move.delete || !(move.toProject === slug && move.path === move.fromPath))) out.add(baseOf(move.fromPath));
   }
   return out;
 }
@@ -98,9 +99,22 @@ export function filesMovedAway(slug: string, dir: string): Set<string> {
 export function filesMovedInto(toProject: string, dir: string): { name: string; kind: "dir" | "file" }[] {
   const out: { name: string; kind: "dir" | "file" }[] = [];
   for (const move of pending().values()) {
-    if (move.kind === "file" && move.toProject === toProject && parentOf(move.path) === dir) out.push({ name: baseOf(move.path), kind: move.directory ? "dir" : "file" });
+    if (move.kind === "file" && !move.delete && move.toProject === toProject && parentOf(move.path) === dir) out.push({ name: baseOf(move.path), kind: move.directory ? "dir" : "file" });
   }
   return out;
+}
+
+const pathsOverlap = (a: string, b: string) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+
+/** Whether `slug:path` (or an ancestor/descendant folder) has an unsettled file move or delete. */
+export function isFilePathPending(slug: string, path: string): boolean {
+  if (!path) return false;
+  for (const move of pending().values()) {
+    if (move.kind !== "file") continue;
+    if (move.fromProject === slug && move.fromPath && pathsOverlap(path, move.fromPath)) return true;
+    if (!move.delete && move.toProject === slug && move.path && pathsOverlap(path, move.path)) return true;
+  }
+  return false;
 }
 
 /**
@@ -125,8 +139,9 @@ export async function moveBatchOptimistically(
   } catch (error) {
     for (const { key, entry } of staged) clearIf(key, entry);
     const primary = items[0]!;
-    log.warn(`move.${primary.move.kind}`, errorText(error), { key: primary.key, to: primary.move.toProject });
-    notify({ kind: "error", key: `move:${primary.key}`, title: `Couldn’t move ${label}`, message: errorText(error) });
+    const verb = primary.move.delete ? "delete" : "move";
+    log.warn(`${verb}.${primary.move.kind}`, errorText(error), { key: primary.key, to: primary.move.toProject });
+    notify({ kind: "error", key: `${verb}:${primary.key}`, title: `Couldn’t ${verb} ${label}`, message: errorText(error) });
     throw error;
   }
   const now = Date.now();
@@ -148,6 +163,14 @@ export async function moveBatchOptimistically(
  */
 export async function moveOptimistically(key: string, move: PendingMove, save: () => Promise<unknown>, label = "the conversation"): Promise<void> {
   await moveBatchOptimistically([{ key, move }], save, label);
+}
+
+/**
+ * Hide a file or folder now and delete it with `save`. On failure it returns
+ * to its place, an error toast is shown and the error is rethrown.
+ */
+export async function deleteFileOptimistically(slug: string, path: string, directory: boolean, save: () => Promise<unknown>, label = baseOf(path)): Promise<void> {
+  await moveOptimistically(fileMoveKey(slug, path), { kind: "file", fromProject: slug, toProject: "", path: "", fromPath: path, directory, delete: true }, save, label);
 }
 
 /** Show a move that will be sent shortly (a batch shows all its items at once). */

@@ -14,8 +14,12 @@ const warmMock=vi.hoisted(()=>({
 }));
 const watchMock=vi.hoisted(()=>({fn:async(_parent:string,_signal:AbortSignal,_receive:(e:any)=>void)=>{}}));
 const queueFollowUpMock=vi.hoisted(()=>({enabled:false,fn:vi.fn()}));
+const launchMock=vi.hoisted(()=>({
+ pending:undefined as Promise<void>|undefined,
+ lastError:undefined as {error:string;notSent:boolean}|undefined,
+}));
 const sessionMock=vi.hoisted(()=>({current:undefined as any,rev:undefined as (()=>number)|undefined,bump:undefined as (()=>void)|undefined}));
-vi.mock('../src/btwAgent',async()=>{const {createSignal}=await import('solid-js');const [rev,setRev]=createSignal(0);sessionMock.rev=rev;sessionMock.bump=()=>setRev(v=>v+1);const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>{sessionMock.rev?.();return sessionMock.current;},startFreshBtwSession:()=>{if(sessionMock.current){sessionMock.current={...sessionMock.current,freshSession:true};sessionMock.bump?.();}},btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[],signal?:AbortSignal,options?:{force?:boolean})=>serverReconcile.fn(parent,local,signal,options),peekWarmBtwState:(parent:string)=>warmMock.current.get(parent),updateWarmBtwHistory:(...args:any[])=>warmMock.updateSpy(...args),get queueBtwFollowUp(){return queueFollowUpMock.enabled?queueFollowUpMock.fn:undefined;},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
+vi.mock('../src/btwAgent',async()=>{const {createSignal}=await import('solid-js');const [rev,setRev]=createSignal(0);sessionMock.rev=rev;sessionMock.bump=()=>setRev(v=>v+1);const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>{sessionMock.rev?.();return sessionMock.current;},btwLaunchPending:()=>launchMock.pending,btwLastLaunchError:()=>launchMock.lastError,startFreshBtwSession:()=>{if(sessionMock.current){sessionMock.current={...sessionMock.current,freshSession:true};sessionMock.bump?.();}},btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[],signal?:AbortSignal,options?:{force?:boolean})=>serverReconcile.fn(parent,local,signal,options),peekWarmBtwState:(parent:string)=>warmMock.current.get(parent),updateWarmBtwHistory:(...args:any[])=>warmMock.updateSpy(...args),get queueBtwFollowUp(){return queueFollowUpMock.enabled?queueFollowUpMock.fn:undefined;},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
 const thoughts=vi.hoisted(()=>({value:[] as {kind:'think';key:string;text:string;done:boolean}[]}));
 const storage=vi.hoisted(()=>new Map<string,unknown>());
 vi.mock('../src/composerDrafts',()=>({
@@ -24,7 +28,7 @@ vi.mock('../src/composerDrafts',()=>({
  readSideThread:async(key:string)=>storage.get('thread:'+key),
  saveSideThread:async(key:string,value:unknown)=>{storage.set('thread:'+key,structuredClone(value));},
 }));
-afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];sessionMock.current=undefined;warmMock.current.clear();warmMock.updateSpy.mockReset();queueFollowUpMock.enabled=false;queueFollowUpMock.fn.mockReset();watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];sessionMock.current=undefined;launchMock.pending=undefined;launchMock.lastError=undefined;warmMock.current.clear();warmMock.updateSpy.mockReset();queueFollowUpMock.enabled=false;queueFollowUpMock.fn.mockReset();watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
 it('routes /btw away from the working agent while it is busy',async()=>{
  const send=vi.fn(),ask=vi.fn(()=>true),stop=vi.fn();
  render(()=><Composer placeholder="Follow-up" busy onSend={send} onStop={stop} onBtw={ask}/>);
@@ -670,3 +674,65 @@ it('disambiguates duplicate question prompts ("and now?") and makes Retry adopt 
  expect(screen.queryByText(/Side question interrupted/)).toBeNull();
  expect(fetchSpy).not.toHaveBeenCalled();
 });
+
+it('reconciles with Core when an unmounted btwLaunchPending settles to inactive, and preserves BtwNotSentError when launch never reached Core',async()=>{
+ const {sideQuestionKey,readSideQuestion,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ // Case 1: launch settled and Core already completed the fast side turn while unmounted:
+ const fastParent='fast-launch-settled';
+ await writeSideQuestion(sideQuestionKey(fastParent),{
+  history:[],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{question:'Fast status check?',answer:'',error:'',turnId:'fast-turn-1'},
+ });
+ let resolveLaunch!:()=>void;
+ launchMock.pending=new Promise<void>(r=>{resolveLaunch=r;});
+ let serverFinished=false;
+ serverReconcile.fn=async()=>serverFinished
+  ?{history:[{id:'f1',question:'Fast status check?',answer:'Fast answer from Core.',userEventId:'fast-turn-1'}],latest:'fast-side-1',authoritative:true}
+  :{history:[],authoritative:true};
+ let handle!:SideQuestionsHandle;
+ const view1=render(()=><SideQuestions mission={fastParent} items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ expect(await screen.findByText('Starting side agent…')).toBeTruthy();
+
+ // Launch finishes and background/Core already marked session inactive:
+ sessionMock.current={id:'fast-side-1',question:'Fast status check?',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0};
+ serverFinished=true;
+ launchMock.pending=undefined;
+ resolveLaunch();
+
+ expect(await screen.findByText('Fast answer from Core.')).toBeTruthy();
+ expect(screen.queryByText(/Side question interrupted/)).toBeNull();
+ view1.unmount();
+
+ // Case 2: launch failed pre-acceptance (BtwNotSentError) while unmounted:
+ const notSentParent='launch-not-sent';
+ await writeSideQuestion(sideQuestionKey(notSentParent),{
+  history:[],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{question:'Offline question?',answer:'',error:'',turnId:'offline-turn-1'},
+ });
+ sessionMock.current=undefined;
+ let resolveFailedLaunch!:()=>void;
+ launchMock.pending=new Promise<void>(r=>{resolveFailedLaunch=r;});
+ render(()=><SideQuestions mission={notSentParent} items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ expect(await screen.findByText('Starting side agent…')).toBeTruthy();
+
+ launchMock.lastError={error:'Connection interrupted — your question was not sent. Retry to send it.',notSent:true};
+ launchMock.pending=undefined;
+ resolveFailedLaunch();
+
+ expect(await screen.findByText('Question not sent')).toBeTruthy();
+ expect(screen.getByText('Connection interrupted — your question was not sent. Retry to send it.')).toBeTruthy();
+ expect(screen.queryByText(/Side question interrupted/)).toBeNull();
+ await waitFor(async()=>{
+  const saved=await readSideQuestion(sideQuestionKey(notSentParent));
+  expect(saved?.pending?.notSent).toBe(true);
+ });
+});
+

@@ -42,7 +42,7 @@ pub(super) fn require_mission_id(
 }
 
 /// Query the control actor for the list of currently running missions.
-pub(super) async fn get_running_missions(
+pub(crate) async fn get_running_missions(
     control: &ControlState,
 ) -> Result<Vec<super::super::mission_runner::RunningMissionInfo>, (StatusCode, String)> {
     let actor_fut = async {
@@ -75,7 +75,9 @@ pub(super) async fn get_running_missions(
     .await
     .map_err(internal_error)?;
     let mut projected = Vec::with_capacity(durable_runs.len() + actor_by_mission.len());
+    let mut seen_missions = HashSet::new();
     for (run, mission) in durable_runs.into_iter().zip(missions) {
+        seen_missions.insert(run.mission_id);
         let heartbeat_age = chrono::DateTime::parse_from_rfc3339(&run.heartbeat_at)
             .ok()
             .map(|timestamp| {
@@ -90,6 +92,15 @@ pub(super) async fn get_running_missions(
         });
         let healthy_detached_remote_wait =
             detached_remote_wait_is_healthy(run.execution_state, heartbeat_age);
+        let remote_node_id = run
+            .scope_unit
+            .as_deref()
+            .and_then(|s| s.strip_prefix("remote-node:"))
+            .map(str::to_string);
+        let remote_job_id = run
+            .owner_actor_id
+            .strip_prefix("remote-job:")
+            .and_then(|s| Uuid::parse_str(s).ok());
         let mut row = actor_by_mission.remove(&run.mission_id).unwrap_or_else(|| {
             super::super::mission_runner::RunningMissionInfo {
                 mission_id: run.mission_id,
@@ -120,6 +131,8 @@ pub(super) async fn get_running_missions(
                 generation: Some(run.generation),
                 heartbeat_at: Some(run.heartbeat_at.clone()),
                 scope_unit: run.scope_unit.clone(),
+                remote_node_id: remote_node_id.clone(),
+                remote_job_id,
                 status_conflict: (!healthy_detached_remote_wait)
                     .then(|| "durable_run_without_registered_actor".to_string()),
             }
@@ -129,6 +142,12 @@ pub(super) async fn get_running_missions(
         row.generation = Some(run.generation);
         row.heartbeat_at = Some(run.heartbeat_at.clone());
         row.scope_unit = run.scope_unit.clone();
+        if row.remote_node_id.is_none() {
+            row.remote_node_id = remote_node_id;
+        }
+        if row.remote_job_id.is_none() {
+            row.remote_job_id = remote_job_id;
+        }
         if let Some(conflict) = presentation_conflict {
             row.status_conflict = Some(conflict.clone());
             row.health =
@@ -141,11 +160,78 @@ pub(super) async fn get_running_missions(
         projected.push(row);
     }
     for (_, mut row) in actor_by_mission {
+        seen_missions.insert(row.mission_id);
         row.status_conflict = Some("registered_actor_without_durable_run".to_string());
         row.health = super::super::mission_runner::MissionHealth::Reconciling {
             reason: "registered_actor_without_durable_run".to_string(),
         };
         projected.push(row);
+    }
+    // Also surface active remote mission jobs from `job_ledger` so managed-VM
+    // missions (`managed-mm*`) never appear with `live = null` if their durable
+    // run lease lagged or is mid-reconciliation.
+    if let Ok(handles) = crate::remote_node::job_ledger::load(&control.working_dir).await {
+        let now = chrono::Utc::now();
+        for handle in handles {
+            if handle.kind != crate::remote_node::job_ledger::JobHandleKind::Mission {
+                continue;
+            }
+            if seen_missions.contains(&handle.mission_id) {
+                if let Some(existing) = projected
+                    .iter_mut()
+                    .find(|r| r.mission_id == handle.mission_id)
+                {
+                    if existing.remote_node_id.is_none() {
+                        existing.remote_node_id = Some(handle.node_id.clone());
+                    }
+                    if existing.remote_job_id.is_none() {
+                        existing.remote_job_id = Some(handle.job_id);
+                    }
+                }
+                continue;
+            }
+            let Ok(Some(mission)) = control.mission_store.get_mission(handle.mission_id).await
+            else {
+                continue;
+            };
+            if mission.status.is_terminal() || mission.status == MissionStatus::Acknowledged {
+                continue;
+            }
+            seen_missions.insert(handle.mission_id);
+            let anchor = handle
+                .heartbeat_at
+                .or(handle.accepted_at)
+                .unwrap_or(handle.started_at);
+            let age = (now - anchor).num_seconds().max(0) as u64;
+            let healthy = age <= 90;
+            projected.push(super::super::mission_runner::RunningMissionInfo {
+                mission_id: handle.mission_id,
+                backend_id: Some(mission.backend.clone()),
+                state: "waiting_remote_job".to_string(),
+                queue_len: 0,
+                history_len: mission.history.len(),
+                seconds_since_activity: age,
+                tool_call_in_flight: true,
+                health: if healthy {
+                    super::super::mission_runner::MissionHealth::Healthy
+                } else {
+                    super::super::mission_runner::MissionHealth::Reconciling {
+                        reason: format!("remote_job_heartbeat_stale_{age}s"),
+                    }
+                },
+                expected_deliverables: 0,
+                current_activity: Some(format!("Remote job on {}", handle.node_id)),
+                subtask_total: 0,
+                subtask_completed: 0,
+                run_id: None,
+                generation: None,
+                heartbeat_at: Some(anchor.to_rfc3339()),
+                scope_unit: Some(format!("remote-node:{}", handle.node_id)),
+                remote_node_id: Some(handle.node_id),
+                remote_job_id: Some(handle.job_id),
+                status_conflict: (!healthy).then(|| format!("remote_job_heartbeat_stale_{age}s")),
+            });
+        }
     }
     Ok(projected)
 }

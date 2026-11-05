@@ -628,6 +628,8 @@ pub async fn clone_mission(
         managed_base_key: None,
         managed_lean_mode: None,
         managed_memory_mib: None,
+        retain_vm_for_parent_minutes: None,
+        managed_pre_stop_hook: None,
         budget_usd: None,
         validate_only: None,
         extra: Default::default(),

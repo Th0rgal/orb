@@ -370,14 +370,28 @@ pub(in crate::api::mission_store) fn log_event_sync(
             name,
             result,
             ..
-        } => (
-            "tool_result",
-            None,
-            Some(tool_call_id.clone()),
-            Some(name.clone()),
-            result.to_string(),
-            serde_json::json!({}),
-        ),
+        } => {
+            let mut meta = serde_json::Map::new();
+            if let Some(code) = crate::tool_loop_progress::extract_exit_code_from_value(result) {
+                meta.insert("exit_code".to_string(), serde_json::json!(code));
+            }
+            if let Some(hash) = result
+                .get("watched_tree_hash")
+                .or_else(|| result.pointer("/metadata/watched_tree_hash"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                meta.insert("watched_tree_hash".to_string(), serde_json::json!(hash));
+            }
+            (
+                "tool_result",
+                None,
+                Some(tool_call_id.clone()),
+                Some(name.clone()),
+                result.to_string(),
+                serde_json::Value::Object(meta),
+            )
+        }
         AgentEvent::Error {
             message, resumable, ..
         } => (

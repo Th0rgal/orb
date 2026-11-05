@@ -1,4 +1,4 @@
-    Finished `test` profile [unoptimized] target(s) in 0.12s
+    Finished `test` profile [unoptimized] target(s) in 0.13s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-d791927b4d2534f0)
 
 running 1 test
@@ -168,13 +168,13 @@ warning: method `note_activity` is never used
    |            ^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 1m 32s
+    Finished `test` profile [unoptimized] target(s) in 39.05s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 1 test
 test api::privilege_broker::tests::phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3760 filtered out; finished in 0.04s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3782 filtered out; finished in 0.02s
 
 warning: function `populate_activity` is never used
     --> src/api/control/mission_list.rs:1177:21
@@ -337,13 +337,13 @@ warning: method `note_activity` is never used
    |            ^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.45s
+    Finished `test` profile [unoptimized] target(s) in 0.20s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 1 test
 test api::control::remote_jobs::boot_leftover_tests::phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3760 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3782 filtered out; finished in 0.00s
 
 warning: function `populate_activity` is never used
     --> src/api/control/mission_list.rs:1177:21
@@ -506,7 +506,7 @@ warning: method `note_activity` is never used
    |            ^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.40s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 13 tests
@@ -524,7 +524,7 @@ test api::mission_access::tests::scope_hint_points_reads_and_control_to_the_tool
 test api::mission_access::tests::state_survives_restart ... ok
 test api::mission_access::tests::ttl_is_clamped_and_self_requests_refused ... ok
 
-test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 3748 filtered out; finished in 0.07s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 3770 filtered out; finished in 0.04s
 
 warning: function `populate_activity` is never used
     --> src/api/control/mission_list.rs:1177:21
@@ -687,7 +687,7 @@ warning: method `note_activity` is never used
    |            ^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.44s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 21 tests
@@ -713,7 +713,7 @@ test remote_node::job_ledger::tests::submission_sequence_breaks_equal_timestamp_
 test remote_node::job_ledger::tests::tentative_handles_round_trip ... ok
 test remote_node::job_ledger::tests::terminal_tentative_handle_never_becomes_validation_receipt ... ok
 
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3740 filtered out; finished in 7.04s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 5.99s
 
 warning: function `populate_activity` is never used
     --> src/api/control/mission_list.rs:1177:21
@@ -876,13 +876,13 @@ warning: method `note_activity` is never used
    |            ^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.34s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 1 test
 test api::proxy::latency_tests::keepalives_fill_long_pauses_between_events_only ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3760 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3782 filtered out; finished in 0.00s
 
 warning: function `populate_activity` is never used
     --> src/api/control/mission_list.rs:1177:21
@@ -1045,13 +1045,13 @@ warning: method `note_activity` is never used
    |            ^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.33s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 1 test
 test api::proxy::latency_tests::stall_before_output_is_rerouted_transparently ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3760 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3782 filtered out; finished in 0.00s
 
 warning: function `populate_activity` is never used
     --> src/api/control/mission_list.rs:1177:21
@@ -1214,11 +1214,11 @@ warning: method `note_activity` is never used
    |            ^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.32s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 1 test
 test api::proxy::latency_tests::stall_after_output_is_surfaced_not_retried ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3760 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3782 filtered out; finished in 0.00s
 
