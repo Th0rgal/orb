@@ -318,11 +318,14 @@ test('expanding and shrinking the /btw composer recomputes --btw-dock-height wit
  expect(Math.abs(reopened.dockHeight-compact.dockHeight)).toBeLessThanOrEqual(2);
 });
 
-test('/btw thread wraps long unbroken tokens and keeps wide code blocks and tables from horizontally scrolling the thread',async({page})=>{
+test('/btw thread wraps long unbroken tokens and keeps wide code blocks, tables, and inline math from horizontally scrolling the thread',async({page})=>{
  const unbrokenToken='antigravity_projected_verity_core_wave8_r16k_stage5_closer_rehearsal_receipt_ccf4bcda321e56eaa3ea264ffe6e741a';
  const longPath='packages/verity_evm/VerityEvm/Proofs/Depth0FrameOpen/WkHostPayloadHeaders_WkBlockAuxLeaves_SoundnessRehearsal.lean';
+ const wideInlineMath='$' + Array.from({length:24},(_,i)=>`x_{${i+1}} + y_{${i+1}}`).join(' + ') + ' = z_{\\text{tail}}$';
  const answer=[
   `Confirmed pointer \`${unbrokenToken}\` and module ${longPath} without delta recompilation.`,
+  '',
+  `Bound check: ${wideInlineMath} holds across every shard.`,
   '',
   '```bash',
   'scripts/check_wave8_controller.sh --manifest work/WAVE8_CONTROLLER.md --state work/wave8-state.json --strict-sweep 600 --verify-tail-token FINAL_CODE_TOKEN',
@@ -340,6 +343,7 @@ test('/btw thread wraps long unbroken tokens and keeps wide code blocks and tabl
  await expect(thread).toContainText('Confirmed pointer');
  await expect(thread.locator('.md-code-block pre')).toBeVisible();
  await expect(thread.locator('.md-table-wrap table')).toBeVisible();
+ await expect(thread.locator('.md-math-inline .katex')).toBeVisible();
 
  const checkNoHorizontalThreadScroll=()=>thread.evaluate(el=>{
   el.scrollLeft=120;
@@ -357,8 +361,12 @@ test('/btw thread wraps long unbroken tokens and keeps wide code blocks and tabl
  expect(desktop.scrollWidth).toBeLessThanOrEqual(desktop.clientWidth);
  expect(desktop.scrollLeft).toBe(0);
 
- // Code block and table still scroll horizontally inside their own wrappers.
+ // Code block, table, and oversized inline math remain horizontally scrollable inside their own wrappers.
  expect(await thread.locator('.md-code-block pre').evaluate(el=>el.scrollWidth>el.clientWidth)).toBe(true);
+ expect(await thread.locator('.md-math-inline').evaluate(el=>{
+  el.scrollLeft=80;
+  return el.scrollWidth>el.clientWidth&&el.scrollLeft>0;
+ })).toBe(true);
 
  await page.setViewportSize({width:390,height:844});
  const mobile=await checkNoHorizontalThreadScroll();

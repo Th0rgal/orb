@@ -2951,7 +2951,8 @@ select.orb-select-native:disabled { cursor: default; }
 .mission-lead .provider-logo > span { width: 15px; height: 15px; }
 
 .md-math-block { display:block; overflow-x:auto; padding:8px 0; }
-.md-math-inline { white-space:nowrap; }
+.md-math-inline { display:inline-flex; align-items:baseline; max-width:100%; overflow-x:auto; overflow-y:hidden; white-space:nowrap; vertical-align:baseline; scrollbar-width:none; }
+.md-math-inline::-webkit-scrollbar { display:none; }
 
 .md-image { display:block; max-width:100%; max-height:560px; object-fit:contain; border-radius:8px; margin:12px 0; }
 
