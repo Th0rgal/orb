@@ -6692,16 +6692,9 @@ fn remote_antigravity_plan_uses_native_plan_mode() {
 #[test]
 fn remote_opencode_config_declares_a_context_limit() {
     let config = remote_opencode_config("private", "https://core.example");
-    let model = &config["provider"]["builtin"]["models"]["private"];
-    let limit = &model["limit"];
+    let limit = &config["provider"]["builtin"]["models"]["private"]["limit"];
     assert_eq!(limit["context"], 200_000);
     assert_eq!(limit["output"], 32_000);
-    assert_eq!(model["attachment"], true);
-    assert_eq!(
-        model["modalities"]["input"],
-        serde_json::json!(["text", "image"])
-    );
-    assert_eq!(model["modalities"]["output"], serde_json::json!(["text"]));
 }
 
 #[test]

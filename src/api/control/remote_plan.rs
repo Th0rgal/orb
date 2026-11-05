@@ -791,3 +791,18 @@ pub(super) fn strip_remote_plan_prefix(prompt: &str) -> Option<&str> {
 pub(crate) fn remote_launch_key_name(mission_id: Uuid) -> String {
     format!("remote-launch:{mission_id}")
 }
+
+#[cfg(test)]
+mod vision_tests {
+    use super::remote_opencode_config;
+    use serde_json::json;
+
+    #[test]
+    fn remote_opencode_config_declares_image_modalities() {
+        let config = remote_opencode_config("smart", "https://core.example");
+        let model = &config["provider"]["builtin"]["models"]["smart"];
+        assert_eq!(model["attachment"], true);
+        assert_eq!(model["modalities"]["input"], json!(["text", "image"]));
+        assert_eq!(model["modalities"]["output"], json!(["text"]));
+    }
+}
