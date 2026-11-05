@@ -580,14 +580,26 @@ enum OrbHierarchy {
             )
             guard verdict.admitted else { continue }
             let nextPending: UInt32 = verdict.clearPending ? 0 : (cur?.pendingOpID ?? 0)
+            if !verdict.clearPending, nextPending != 0, let cur {
+                placements[item.missionID] = PlacementState(
+                    project: cur.project,
+                    folder: cur.folder,
+                    revision: item.placementRevision,
+                    pendingOpID: nextPending,
+                    rollbackProject: normProj,
+                    rollbackFolder: normFolder,
+                    rollbackRevision: item.placementRevision
+                )
+                continue
+            }
             placements[item.missionID] = PlacementState(
                 project: normProj,
                 folder: normFolder,
                 revision: item.placementRevision,
                 pendingOpID: nextPending,
-                rollbackProject: verdict.clearPending ? nil : cur?.rollbackProject,
-                rollbackFolder: verdict.clearPending ? nil : cur?.rollbackFolder,
-                rollbackRevision: verdict.clearPending ? nil : cur?.rollbackRevision
+                rollbackProject: nil,
+                rollbackFolder: nil,
+                rollbackRevision: nil
             )
             var seen = seenFacts[item.missionID] ?? Seen()
             seen.project = normProj

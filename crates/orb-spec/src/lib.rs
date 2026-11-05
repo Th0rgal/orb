@@ -11142,7 +11142,7 @@ mod stateful_tests {
         assert!(ack.evict_other_projects);
         assert_eq!(ack.next_rev32, 6);
 
-        // Live event with strictly newer revision supersedes optimistic move cleanly.
+        // Live event with strictly newer revision (`ack_op_id = 0`) supersedes optimistic move cleanly.
         let supersede = placement_merge_step(PlacementMergeInput {
             cur_rev: 5,
             inc_rev: 7,
@@ -11157,6 +11157,23 @@ mod stateful_tests {
         assert!(supersede.clear_pending);
         assert!(supersede.evict_other_projects);
         assert_eq!(supersede.next_rev32, 7);
+
+        // Overlapping moves: earlier ack (`ack_op_id = 1 < pending_op_id = 2`) advances revision
+        // without clearing the newer pending op so `op 2`'s preview stays fenced until `op 2` settles.
+        let earlier_ack = placement_merge_step(PlacementMergeInput {
+            cur_rev: 0,
+            inc_rev: 1,
+            pending_op_id: 2,
+            ack_op_id: 1,
+            source_kind: 1,
+            has_placement: true,
+            matches_optimistic: false,
+        });
+        assert!(earlier_ack.admitted);
+        assert_eq!(earlier_ack.status, 1);
+        assert!(!earlier_ack.clear_pending);
+        assert!(earlier_ack.evict_other_projects);
+        assert_eq!(earlier_ack.next_rev32, 1);
 
         // Older revision is rejected even without a pending op.
         let older = placement_merge_step(PlacementMergeInput {

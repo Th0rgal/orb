@@ -8158,7 +8158,13 @@ theorem placementMerge_admit_eq (p : PlacementMergeCheck) :
           · simp only [hpend, ite_true]
             by_cases hgt : p.curRev < p.incRev
             · simp only [hgt, decide_true, ite_true, Bool.true_or]
-              decide
+              cases hsk1 : (p.sourceKind == 1) <;>
+                cases hack0 : (p.ackOpId != 0) <;>
+                by_cases hlt_op : p.ackOpId < p.pendingOpId <;>
+                cases hmo : (p.matchesOptimistic == 1) <;>
+                (simp only [hsk1, hack0, hlt_op, decide_true, decide_false, hmo,
+                  Bool.true_and, Bool.false_and, Bool.false_eq_true, ite_true, ite_false];
+                 decide)
             · simp only [hgt, decide_false, Bool.false_eq_true, ite_false, Bool.false_or]
               cases hsk1 : (p.sourceKind == 1) <;>
                 cases hack : (p.ackOpId == p.pendingOpId) <;>
@@ -8344,11 +8350,13 @@ theorem placement_merge_fences_stale_polls_and_advances_monotonically
       ite_false, h0_eq2, h0_eq3, h1_eq1, h0_eq1, hp0]
     decide
   · intro h_ovf
+    have h_not_lt_op : ¬ (pendingOpId < pendingOpId) := UInt32.lt_irrefl pendingOpId
     unfold placementMergeStep placementMergeLo32
     rw [pack32_lo]
     dsimp only [GT.gt, GE.ge]
-    simp only [hsk1_3, h_ovf, decide_true, decide_false, Bool.not_true, Bool.false_eq_true,
-      ite_false, h1_eq2, h1_eq3, h1_eq1, h_pend, ite_true]
+    simp only [hsk1_3, h_ovf, h_not_lt_op, decide_true, decide_false, Bool.not_true,
+      Bool.false_eq_true, ite_false, h1_eq2, h1_eq3, h1_eq1, h_pend, ite_true,
+      Bool.and_false]
     decide
 
 end Orb.Spec

@@ -1275,18 +1275,29 @@ pub async fn move_missions(
     // Fast path: intra-project folder move (`cross_ids.is_empty()`).
     // Executes in a single atomic SQLite `IMMEDIATE` transaction on `missions.db`
     // without queuing behind the control actor, `durable_lock`, or `projects.db`.
+    // Revalidates every entry's observed `project` inside the transaction; if a
+    // concurrent request transferred any member to another project since planning,
+    // aborts without writing a hybrid `(other_project, folder)` row and falls
+    // through to the serialized `ControlCommand::MoveMissions` path.
     if cross_ids.is_empty() {
-        let updates: Vec<(Uuid, Option<Option<String>>, String)> = plan
+        let updates: Vec<crate::api::mission_store::CheckedPlacementUpdate> = plan
             .entries
             .iter()
-            .map(|(id, _, folder)| (*id, None, folder.clone()))
+            .map(
+                |(id, m, folder)| crate::api::mission_store::CheckedPlacementUpdate {
+                    id: *id,
+                    expected_project: Some(m.project.project.clone()),
+                    next_project: None,
+                    next_folder: folder.clone(),
+                },
+            )
             .collect();
         match control
             .mission_store
-            .batch_set_mission_placement(&updates)
+            .batch_set_mission_placement_checked(&updates)
             .await
         {
-            Ok(moved) => {
+            Ok(Some(moved)) => {
                 if !moved.is_empty() {
                     let _ = control.events_tx.send(AgentEvent::MissionPlacementChanged {
                         moves: moved.clone(),
@@ -1301,6 +1312,10 @@ pub async fn move_missions(
                     }),
                 )
                     .into_response();
+            }
+            Ok(None) => {
+                // Concurrent project change invalidated `plan`: fall through to
+                // `ControlCommand::MoveMissions` to replan under actor serialization.
             }
             Err(err) => {
                 return (
@@ -1357,31 +1372,52 @@ where
     let cross_ids = check_approval_transfer_preflight(&state, &plan, req.approval_policy).await?;
 
     let Some(target_project) = plan.resolved_project.clone() else {
-        let updates: Vec<(Uuid, Option<Option<String>>, String)> = plan
-            .entries
-            .iter()
-            .map(|(id, _, folder)| (*id, None, folder.clone()))
-            .collect();
-        let moved = control
-            .mission_store
-            .batch_set_mission_placement(&updates)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    serde_json::json!({ "error": e }),
+        for attempt in 0..2 {
+            let active_plan = if attempt == 0 {
+                &plan
+            } else {
+                &plan_expanded_move_family(&state, &control.mission_store, &req).await?
+            };
+            let updates: Vec<crate::api::mission_store::CheckedPlacementUpdate> = active_plan
+                .entries
+                .iter()
+                .map(
+                    |(id, m, folder)| crate::api::mission_store::CheckedPlacementUpdate {
+                        id: *id,
+                        expected_project: Some(m.project.project.clone()),
+                        next_project: None,
+                        next_folder: folder.clone(),
+                    },
                 )
-            })?;
-        if !moved.is_empty() {
-            let _ = control.events_tx.send(AgentEvent::MissionPlacementChanged {
-                moves: moved.clone(),
+                .collect();
+            let Some(moved) = control
+                .mission_store
+                .batch_set_mission_placement_checked(&updates)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        serde_json::json!({ "error": e }),
+                    )
+                })?
+            else {
+                continue;
+            };
+            if !moved.is_empty() {
+                let _ = control.events_tx.send(AgentEvent::MissionPlacementChanged {
+                    moves: moved.clone(),
+                    client_op_id: req.client_op_id,
+                });
+            }
+            return Ok(MoveMissionsResponse {
+                moved,
                 client_op_id: req.client_op_id,
             });
         }
-        return Ok(MoveMissionsResponse {
-            moved,
-            client_op_id: req.client_op_id,
-        });
+        return Err((
+            StatusCode::CONFLICT,
+            serde_json::json!({ "error": "Mission project changed concurrently during move; retry." }),
+        ));
     };
 
     let map_str_err = |(code, msg): (StatusCode, String)| -> (StatusCode, serde_json::Value) {
@@ -1478,11 +1514,17 @@ where
     // updates for any family member already in `target_project`.
     let mut wave1_active: Vec<(Uuid, Mission, String)> = Vec::new();
     let mut wave2_passive: Vec<(Uuid, Mission, String)> = Vec::new();
-    let mut same_project_folder_updates: Vec<(Uuid, Option<Option<String>>, String)> = Vec::new();
+    let mut same_project_folder_updates: Vec<crate::api::mission_store::CheckedPlacementUpdate> =
+        Vec::new();
 
     for (mid, m, target_folder) in entries {
         if m.project.project == target_project {
-            same_project_folder_updates.push((mid, None, target_folder));
+            same_project_folder_updates.push(crate::api::mission_store::CheckedPlacementUpdate {
+                id: mid,
+                expected_project: Some(target_project.clone()),
+                next_project: None,
+                next_folder: target_folder,
+            });
             continue;
         }
         let holds_track = match subtree_ctx.holds_track(&state.control, mid).await {
@@ -1654,18 +1696,33 @@ where
     }
 
     if !same_project_folder_updates.is_empty() {
-        if let Err(err) = control
+        match control
             .mission_store
-            .batch_set_mission_placement(&same_project_folder_updates)
+            .batch_set_mission_placement_checked(&same_project_folder_updates)
             .await
         {
-            if rollback_moved_missions(&state, &control.mission_store, &moved_snaps)
-                .await
-                .is_ok()
-            {
-                let _ = state.projects.clear_subtree_project_edit(&root_key);
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if rollback_moved_missions(&state, &control.mission_store, &moved_snaps)
+                    .await
+                    .is_ok()
+                {
+                    let _ = state.projects.clear_subtree_project_edit(&root_key);
+                }
+                return Err((
+                    StatusCode::CONFLICT,
+                    serde_json::json!({ "error": "Mission project changed concurrently during move; retry." }),
+                ));
             }
-            return Err(map_str_err(internal_error(err)));
+            Err(err) => {
+                if rollback_moved_missions(&state, &control.mission_store, &moved_snaps)
+                    .await
+                    .is_ok()
+                {
+                    let _ = state.projects.clear_subtree_project_edit(&root_key);
+                }
+                return Err(map_str_err(internal_error(err)));
+            }
         }
     }
 
@@ -1692,7 +1749,7 @@ where
     for id in moved_snaps
         .iter()
         .map(|s| s.id)
-        .chain(same_project_folder_updates.iter().map(|(id, _, _)| *id))
+        .chain(same_project_folder_updates.iter().map(|u| u.id))
     {
         if !seen_out.insert(id) {
             continue;

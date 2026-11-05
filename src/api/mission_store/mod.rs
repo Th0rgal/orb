@@ -2736,6 +2736,18 @@ pub enum ClientIngest {
     Refused,
 }
 
+/// Atomic placement batch item with an optional expected-project precondition.
+#[derive(Debug, Clone)]
+pub struct CheckedPlacementUpdate {
+    pub id: Uuid,
+    /// When `Some(expected)`, the entire batch aborts (`Ok(None)`) if the row's
+    /// current `project` differs from `expected`.
+    pub expected_project: Option<Option<String>>,
+    /// `None` preserves the current project; `Some(project)` overwrites it.
+    pub next_project: Option<Option<String>>,
+    pub next_folder: String,
+}
+
 /// Mission store trait - implemented by all storage backends.
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
@@ -3256,18 +3268,52 @@ pub trait MissionStore: Send + Sync {
         &self,
         updates: &[(Uuid, Option<Option<String>>, String)],
     ) -> Result<Vec<crate::api::control::events::MissionPlacementItem>, String> {
-        let mut moved = Vec::new();
-        for (id, next_project, next_folder) in updates {
-            let Some(cur) = self.get_mission_metadata(*id).await? else {
+        let checked: Vec<CheckedPlacementUpdate> = updates
+            .iter()
+            .map(|(id, next_project, next_folder)| CheckedPlacementUpdate {
+                id: *id,
+                expected_project: None,
+                next_project: next_project.clone(),
+                next_folder: next_folder.clone(),
+            })
+            .collect();
+        self.batch_set_mission_placement_checked(&checked)
+            .await?
+            .ok_or_else(|| "unexpected project precondition failure".to_string())
+    }
+
+    /// Atomically update `(project, folder)` for a batch of missions after
+    /// verifying that every row with `expected_project = Some(exp)` still has
+    /// `project == exp`. Returns `Ok(None)` without mutating any row if any
+    /// expected project changed concurrently.
+    async fn batch_set_mission_placement_checked(
+        &self,
+        updates: &[CheckedPlacementUpdate],
+    ) -> Result<Option<Vec<crate::api::control::events::MissionPlacementItem>>, String> {
+        let mut current = Vec::with_capacity(updates.len());
+        for item in updates {
+            let Some(cur) = self.get_mission_metadata(item.id).await? else {
                 continue;
             };
-            let norm_folder = normalize_mission_folder(next_folder);
-            let target_project = next_project
-                .clone()
-                .unwrap_or_else(|| cur.project.project.clone());
+            if let Some(ref exp) = item.expected_project {
+                if &cur.project.project != exp {
+                    return Ok(None);
+                }
+            }
+            current.push((
+                item.id,
+                cur,
+                item.next_project.clone(),
+                item.next_folder.clone(),
+            ));
+        }
+        let mut moved = Vec::with_capacity(current.len());
+        for (id, cur, next_project, next_folder) in current {
+            let norm_folder = normalize_mission_folder(&next_folder);
+            let target_project = next_project.unwrap_or_else(|| cur.project.project.clone());
             if cur.project.project == target_project && cur.project.folder == norm_folder {
                 moved.push(crate::api::control::events::MissionPlacementItem {
-                    mission_id: *id,
+                    mission_id: id,
                     project: cur.project.project,
                     folder: cur.project.folder,
                     placement_revision: cur.project.placement_revision,
@@ -3275,7 +3321,7 @@ pub trait MissionStore: Send + Sync {
                 continue;
             }
             self.update_mission_project(
-                *id,
+                id,
                 MissionProjectPatch {
                     preserve_updated_at: true,
                     bump_placement_revision: true,
@@ -3285,16 +3331,16 @@ pub trait MissionStore: Send + Sync {
                 },
             )
             .await?;
-            if let Some(after) = self.get_mission_metadata(*id).await? {
+            if let Some(after) = self.get_mission_metadata(id).await? {
                 moved.push(crate::api::control::events::MissionPlacementItem {
-                    mission_id: *id,
+                    mission_id: id,
                     project: after.project.project,
                     folder: after.project.folder,
                     placement_revision: after.project.placement_revision,
                 });
             }
         }
-        Ok(moved)
+        Ok(Some(moved))
     }
 
     /// Atomically rewrite `folder` for all missions in `project` whose folder

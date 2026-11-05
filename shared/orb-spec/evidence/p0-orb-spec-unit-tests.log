@@ -1,4 +1,5 @@
-    Finished `test` profile [unoptimized] target(s) in 0.16s
+   Compiling orb-spec v1.3.0 (/Users/thomas/work/orb/worktree/feat-mission-moves/crates/orb-spec)
+    Finished `test` profile [unoptimized] target(s) in 4.55s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
 
 running 41 tests

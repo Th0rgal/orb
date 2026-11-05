@@ -553,20 +553,23 @@ object OrbMissionTree {
                 } else {
                     val effProj = if (item.explicitProject) incProj else incProj.ifEmpty { prev?.project ?: seenFacts[item.missionId]?.project ?: "" }
                     val nextRev = maxOf(curRev, item.placementRevision, verdict.nextRev32)
-                    val resolved = OrbPlacementCommitItem(
-                        missionId = item.missionId,
-                        project = effProj.takeIf { it.isNotEmpty() },
-                        folder = incFolder,
-                        placementRevision = nextRev,
-                        explicitProject = item.explicitProject || effProj.isNotEmpty()
-                    )
-                    committedItem = resolved
-                    accepted.add(resolved)
+                    val nextPending = if (verdict.clearPending) 0 else pendingOp
+                    if (verdict.clearPending || nextPending == 0) {
+                        val resolved = OrbPlacementCommitItem(
+                            missionId = item.missionId,
+                            project = effProj.takeIf { it.isNotEmpty() },
+                            folder = incFolder,
+                            placementRevision = nextRev,
+                            explicitProject = item.explicitProject || effProj.isNotEmpty()
+                        )
+                        committedItem = resolved
+                        accepted.add(resolved)
+                    }
                     PlacementState(
                         project = effProj,
                         folder = incFolder,
                         revision = nextRev,
-                        pendingOpId = if (verdict.clearPending) 0 else pendingOp,
+                        pendingOpId = nextPending,
                         optimisticProject = if (verdict.clearPending) null else prev?.optimisticProject,
                         optimisticFolder = if (verdict.clearPending) null else prev?.optimisticFolder
                     )
@@ -576,14 +579,14 @@ object OrbMissionTree {
                 ancestorCache.computeIfPresent(item.missionId) { _, entry ->
                     entry.copy(row = OrbReadCache.patchRowPlacement(entry.row, committed))
                 }
-            }
-            if (incProj.isNotEmpty()) {
-                seenFacts.compute(item.missionId) { _, cur ->
-                    (cur ?: Seen()).copy(project = incProj)
-                }
-            } else if (item.explicitProject) {
-                seenFacts.compute(item.missionId) { _, cur ->
-                    cur?.copy(project = null)
+                if (incProj.isNotEmpty()) {
+                    seenFacts.compute(item.missionId) { _, cur ->
+                        (cur ?: Seen()).copy(project = incProj)
+                    }
+                } else if (item.explicitProject) {
+                    seenFacts.compute(item.missionId) { _, cur ->
+                        cur?.copy(project = null)
+                    }
                 }
             }
         }

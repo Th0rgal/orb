@@ -401,6 +401,33 @@ class OrbMissionTreeTest {
 
         assertEquals(setOf("v2", "v1", "v1-worker"), OrbMissionTree.subtree(roster, listOf("v2")).map { it.id }.toSet())
         assertEquals(setOf("v1", "v1-worker"), OrbMissionTree.subtree(roster, listOf("v1")).map { it.id }.toSet())
+
+        // Overlapping optimistic moves: an earlier ack (`opA < opB`) advances revision & rollback base
+        // without clobbering `opB`'s optimistic preview or allowing a rev-1 poll to revert `FolderB`.
+        OrbMissionTree.resetHierarchy()
+        val rapid0 = m("rapid-kt", "project" to "assistant", "folder" to "", "placement_revision" to 0L)
+        OrbMissionTree.observe(rapid0)
+        val opA = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opA, "assistant", "FolderA")
+        val opB = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opB, "assistant", "FolderB")
+
+        val acceptedA = OrbMissionTree.commitAuthoritativePlacements(
+            listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderA", 1L, explicitProject = true)),
+            ackOpId = opA
+        )
+        assertEquals(0, acceptedA.size)
+        assertEquals(opB, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+        assertEquals("FolderB", OrbMissionTree.folderPath(rapid0))
+
+        val pollAt1 = m("rapid-kt", "project" to "assistant", "folder" to "FolderA", "placement_revision" to 1L)
+        assertEquals("FolderB", OrbMissionTree.folderPath(pollAt1))
+
+        val revertedB = OrbMissionTree.rollbackOptimisticPlacement(opB)
+        assertEquals(1, revertedB.size)
+        assertEquals("FolderA", revertedB.first().folder)
+        assertEquals(1L, revertedB.first().placementRevision)
+        assertEquals("FolderA", OrbMissionTree.folderPath(pollAt1))
         OrbMissionTree.resetHierarchy()
     }
 }

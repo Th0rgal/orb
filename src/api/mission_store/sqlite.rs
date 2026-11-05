@@ -1015,6 +1015,12 @@ impl MissionStore for SqliteMissionStore {
     ) -> Result<Vec<crate::api::control::events::MissionPlacementItem>, String> {
         SqliteMissionStore::batch_set_mission_placement(self, updates).await
     }
+    async fn batch_set_mission_placement_checked(
+        &self,
+        updates: &[crate::api::mission_store::CheckedPlacementUpdate],
+    ) -> Result<Option<Vec<crate::api::control::events::MissionPlacementItem>>, String> {
+        SqliteMissionStore::batch_set_mission_placement_checked(self, updates).await
+    }
     async fn cascade_rename_folder(
         &self,
         project: &str,

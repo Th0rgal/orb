@@ -248,12 +248,22 @@ export function commitAuthoritativePlacements(items: readonly PlacementCommitInp
     });
     if (!verdict.admitted) continue;
     const nextPendingOpId = verdict.clearPending ? 0 : (cur?.pendingOpId ?? 0);
+    if (!verdict.clearPending && nextPendingOpId !== 0 && cur) {
+      placements.set(id, {
+        project: cur.project,
+        folder: cur.folder,
+        rev: incRev,
+        pendingOpId: nextPendingOpId,
+        rollback: { project: proj, folder, rev: incRev },
+      });
+      continue;
+    }
     placements.set(id, {
       project: proj,
       folder,
       rev: incRev,
       pendingOpId: nextPendingOpId,
-      rollback: verdict.clearPending ? undefined : cur?.rollback,
+      rollback: undefined,
     });
     syncParentRowPlacement(id, proj, folder, incRev);
     accepted.push({

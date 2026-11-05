@@ -1757,19 +1757,38 @@ impl SqliteMissionStore {
         &self,
         updates: &[(Uuid, Option<Option<String>>, String)],
     ) -> Result<Vec<crate::api::control::events::MissionPlacementItem>, String> {
+        let checked: Vec<crate::api::mission_store::CheckedPlacementUpdate> = updates
+            .iter()
+            .map(
+                |(id, proj, folder)| crate::api::mission_store::CheckedPlacementUpdate {
+                    id: *id,
+                    expected_project: None,
+                    next_project: proj.clone(),
+                    next_folder: folder.clone(),
+                },
+            )
+            .collect();
+        self.batch_set_mission_placement_checked(&checked)
+            .await?
+            .ok_or_else(|| "unexpected project precondition failure".to_string())
+    }
+
+    pub(super) async fn batch_set_mission_placement_checked(
+        &self,
+        updates: &[crate::api::mission_store::CheckedPlacementUpdate],
+    ) -> Result<Option<Vec<crate::api::control::events::MissionPlacementItem>>, String> {
         if updates.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Some(Vec::new()));
         }
         let conn = self.conn.clone();
         let now = now_string();
-        let updates: Vec<(Uuid, Option<Option<String>>, String)> = updates
+        let updates: Vec<crate::api::mission_store::CheckedPlacementUpdate> = updates
             .iter()
-            .map(|(id, proj, folder)| {
-                (
-                    *id,
-                    proj.clone(),
-                    crate::api::mission_store::normalize_mission_folder(folder),
-                )
+            .map(|item| crate::api::mission_store::CheckedPlacementUpdate {
+                id: item.id,
+                expected_project: item.expected_project.clone(),
+                next_project: item.next_project.clone(),
+                next_folder: crate::api::mission_store::normalize_mission_folder(&item.next_folder),
             })
             .collect();
         tokio::task::spawn_blocking(move || {
@@ -1785,6 +1804,35 @@ impl SqliteMissionStore {
                          FROM missions WHERE id = ?1",
                     )
                     .map_err(|e| e.to_string())?;
+                let mut loaded = Vec::with_capacity(updates.len());
+                for item in updates {
+                    let id_str = item.id.to_string();
+                    let cur: Option<(Option<String>, String, i64, Option<String>)> = select_stmt
+                        .query_row(params![&id_str], |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                        })
+                        .optional()
+                        .map_err(|e| e.to_string())?;
+                    let Some((cur_proj, cur_folder, cur_rev, raw_tags)) = cur else {
+                        continue;
+                    };
+                    if let Some(ref exp) = item.expected_project {
+                        if &cur_proj != exp {
+                            return Ok(None);
+                        }
+                    }
+                    loaded.push((
+                        item.id,
+                        id_str,
+                        cur_proj,
+                        cur_folder,
+                        cur_rev,
+                        raw_tags,
+                        item.next_project,
+                        item.next_folder,
+                    ));
+                }
+
                 let mut update_stmt = tx
                     .prepare_cached(
                         "UPDATE missions
@@ -1797,17 +1845,17 @@ impl SqliteMissionStore {
                     )
                     .map_err(|e| e.to_string())?;
 
-                for (id, next_project, next_folder) in updates {
-                    let id_str = id.to_string();
-                    let cur: Option<(Option<String>, String, i64, Option<String>)> = select_stmt
-                        .query_row(params![&id_str], |row| {
-                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                        })
-                        .optional()
-                        .map_err(|e| e.to_string())?;
-                    let Some((cur_proj, cur_folder, cur_rev, raw_tags)) = cur else {
-                        continue;
-                    };
+                for (
+                    id,
+                    id_str,
+                    cur_proj,
+                    cur_folder,
+                    cur_rev,
+                    raw_tags,
+                    next_project,
+                    next_folder,
+                ) in loaded
+                {
                     let mut cleaned_tags = raw_tags.clone();
                     let mut stripped_legacy = false;
                     if let Some(ref raw) = raw_tags {
@@ -1859,7 +1907,7 @@ impl SqliteMissionStore {
                 }
             }
             tx.commit().map_err(|e| e.to_string())?;
-            Ok(moved)
+            Ok(Some(moved))
         })
         .await
         .map_err(|e| e.to_string())?

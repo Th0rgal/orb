@@ -321,3 +321,56 @@ it("keeps pendingOpId and rollback intact when merging projected rows for the cu
     pendingOpId: 0,
   });
 });
+
+it("preserves newer optimistic move when an earlier overlapping move acknowledgement arrives", () => {
+  const RAPID_ID = "rapid-move-9999";
+  stickHierarchy({
+    id: RAPID_ID,
+    project: "assistant",
+    folder: "",
+    placement_revision: 0,
+    status: "active",
+  });
+  const op1 = allocatePlacementOpId();
+  stageOptimisticPlacement(RAPID_ID, "assistant", "FolderA", op1);
+  const op2 = allocatePlacementOpId();
+  stageOptimisticPlacement(RAPID_ID, "assistant", "FolderB", op2);
+  expect(op2).toBeGreaterThan(op1);
+
+  // Move 1 (`op1`) completes at `placement_revision: 1` while `op2` is still in flight:
+  const accepted1 = commitAuthoritativePlacements(
+    [{ mission_id: RAPID_ID, project: "assistant", folder: "FolderA", placement_revision: 1 }],
+    op1,
+  );
+  expect(accepted1).toEqual([]);
+  expect(authoritativePlacement(RAPID_ID)).toMatchObject({
+    project: "assistant",
+    folder: "FolderB",
+    rev: 1,
+    pendingOpId: op2,
+    rollback: { project: "assistant", folder: "FolderA", rev: 1 },
+  });
+
+  // Stale poll at `placement_revision: 1` (`FolderA`) stays fenced while `op2` is pending:
+  const pollAt1 = stickHierarchy({
+    id: RAPID_ID,
+    project: "assistant",
+    folder: "FolderA",
+    placement_revision: 1,
+    status: "active",
+  });
+  expect(withHierarchy(pollAt1)).toMatchObject({
+    project: "assistant",
+    folder: "FolderB",
+    placement_revision: 1,
+  });
+
+  // If `op2` later fails, rollback restores Move 1's committed `FolderA` at `rev: 1`:
+  expect(rollbackOptimisticPlacement(RAPID_ID, op2)).toBe(true);
+  expect(authoritativePlacement(RAPID_ID)).toMatchObject({
+    project: "assistant",
+    folder: "FolderA",
+    rev: 1,
+    pendingOpId: 0,
+  });
+});
