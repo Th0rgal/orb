@@ -420,16 +420,32 @@ object OrbMissionTree {
 
     fun placementOf(id: String): PlacementState? = if (id.isEmpty()) null else placements[id]
 
+    fun hasAuthoritativePlacement(mission: OrbRow): Boolean {
+        val id = mission.str("id") ?: mission.id
+        return id.isNotEmpty() && placements.containsKey(id)
+    }
+
     fun projectSlug(mission: OrbRow): String? {
         observe(mission)
         val id = mission.str("id") ?: mission.id
         placements[id]?.let { state ->
             val effective = state.optimisticProject ?: state.project
-            if (effective.isNotEmpty()) return effective
+            return effective.takeIf { it.isNotEmpty() }
         }
         val pName = (mission.str("project", "project_slug", "project_id", "project_name") ?: "").trim()
         if (pName.isNotEmpty()) return pName
         return seenFacts[id]?.project?.takeIf { it.isNotEmpty() }
+    }
+
+    /** Resolves the mission's effective project slug, honoring an authoritative unassigned (`""`) placement over stale row fields. */
+    fun effectiveProject(mission: OrbRow, fallback: String? = null): String {
+        val slug = projectSlug(mission)
+        if (slug != null) return slug
+        val id = mission.str("id") ?: mission.id
+        if (id.isNotEmpty() && placements.containsKey(id)) return ""
+        val pName = (mission.str("project", "project_slug", "project_id", "project_name") ?: "").trim()
+        if (pName.isNotEmpty()) return pName
+        return fallback?.trim() ?: ""
     }
 
     fun stageOptimisticPlacement(
@@ -514,6 +530,7 @@ object OrbMissionTree {
             val isChild = knownParents.containsKey(item.missionId)
             val incFolder = if (isChild) "" else normalizeFolder(item.folder)
             val incProj = item.project?.trim() ?: ""
+            var committedItem: OrbPlacementCommitItem? = null
             placements.compute(item.missionId) { _, prev ->
                 val curRev = prev?.revision ?: 0L
                 val pendingOp = prev?.pendingOpId ?: 0
@@ -535,15 +552,15 @@ object OrbMissionTree {
                 } else {
                     val effProj = if (item.explicitProject) incProj else incProj.ifEmpty { prev?.project ?: seenFacts[item.missionId]?.project ?: "" }
                     val nextRev = maxOf(curRev, item.placementRevision, verdict.nextRev32)
-                    accepted.add(
-                        OrbPlacementCommitItem(
-                            missionId = item.missionId,
-                            project = effProj.takeIf { it.isNotEmpty() },
-                            folder = incFolder,
-                            placementRevision = nextRev,
-                            explicitProject = item.explicitProject || effProj.isNotEmpty()
-                        )
+                    val resolved = OrbPlacementCommitItem(
+                        missionId = item.missionId,
+                        project = effProj.takeIf { it.isNotEmpty() },
+                        folder = incFolder,
+                        placementRevision = nextRev,
+                        explicitProject = item.explicitProject || effProj.isNotEmpty()
                     )
+                    committedItem = resolved
+                    accepted.add(resolved)
                     PlacementState(
                         project = effProj,
                         folder = incFolder,
@@ -552,6 +569,11 @@ object OrbMissionTree {
                         optimisticProject = if (verdict.clearPending) null else prev?.optimisticProject,
                         optimisticFolder = if (verdict.clearPending) null else prev?.optimisticFolder
                     )
+                }
+            }
+            committedItem?.let { committed ->
+                ancestorCache.computeIfPresent(item.missionId) { _, entry ->
+                    entry.copy(row = OrbReadCache.patchRowPlacement(entry.row, committed))
                 }
             }
             if (incProj.isNotEmpty()) {
@@ -1004,9 +1026,11 @@ object OrbMissionTree {
         } else {
             val known = seen(parentId)
             val knownPlacement = placementOf(parentId)
-            val resolvedProject = knownPlacement?.let { it.optimisticProject ?: it.project }?.takeIf { it.isNotEmpty() }
-                ?: known?.project
-                ?: projectSlug
+            val resolvedProject = if (knownPlacement != null) {
+                (knownPlacement.optimisticProject ?: knownPlacement.project).ifEmpty { projectSlug }
+            } else {
+                known?.project ?: projectSlug
+            }
             val resolvedFolder = knownPlacement?.let { it.optimisticFolder ?: it.folder } ?: ""
             val dict = LinkedHashMap<String, Any?>().apply {
                 put("id", parentId)
@@ -1866,8 +1890,8 @@ class OrbCore private constructor(context: Context) {
                 OrbReadCache.saveRowsMemoryOnly("mission_msgs_${m.id}", hist)
             }
             val projTag = tags.firstOrNull { it.startsWith("project:") }?.removePrefix("project:")
-            val proj = (OrbMissionTree.projectSlug(m) ?: projTag)?.lowercase()?.trim()
-            if (!proj.isNullOrEmpty()) {
+            val proj = OrbMissionTree.effectiveProject(m, fallback = projTag).lowercase().trim()
+            if (proj.isNotEmpty()) {
                 byProject.getOrPut(proj) { mutableListOf() }.add(m)
             }
         }
@@ -2428,9 +2452,11 @@ class OrbCore private constructor(context: Context) {
         val ownIds = merged.mapTo(mutableSetOf()) { it.id }
         val withParents = OrbMissionTree.withAncestors(merged) { fetchAncestor(it) }
         val scoped = withParents.filter { m ->
-            val effectiveProject = OrbMissionTree.projectSlug(m) ?: (m.str("project", "project_slug") ?: "")
+            val effectiveProject = OrbMissionTree.effectiveProject(m)
             if (effectiveProject.isNotEmpty()) {
                 effectiveProject.equals(projectSlug, ignoreCase = true)
+            } else if (OrbMissionTree.hasAuthoritativePlacement(m)) {
+                false
             } else {
                 m.id in ownIds
             }

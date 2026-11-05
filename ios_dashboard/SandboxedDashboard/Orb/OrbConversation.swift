@@ -207,7 +207,18 @@ struct OrbConversation: View {
         return missionID == nil ? "New agent" : "Conversation"
     }
 
+    var effectiveFolderPath: String {
+        if let id, !id.isEmpty, let state = OrbHierarchy.placement(of: id) {
+            return state.folder
+        }
+        return OrbRow.normalizeFolder(mission["folder"].text)
+    }
+
     var effectiveProjectSlug: String {
+        if let id, !id.isEmpty, let state = OrbHierarchy.placement(of: id) {
+            if !state.project.isEmpty { return state.project }
+            return project.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         let mProj = mission["project"].text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !mProj.isEmpty { return mProj }
         return project.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -322,13 +333,14 @@ struct OrbConversation: View {
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OrbMissionPlacementChanged"))) { _ in
                 guard let id, !id.isEmpty,
                       let state = OrbHierarchy.placement(of: id),
+                      state.pendingOpID == 0,
                       case var .object(dict) = mission else { return }
                 dict["project"] = state.project.isEmpty ? .null : .string(state.project)
                 dict["folder"] = .string(state.folder)
                 dict["placement_revision"] = .number(Double(state.revision))
                 mission = .object(dict)
             }
-            .navigationDestination(item: $forkedMission) { OrbConversation(missionID: $0, project: effectiveProjectSlug, folder: OrbRow(mission).folder) }
+            .navigationDestination(item: $forkedMission) { OrbConversation(missionID: $0, project: effectiveProjectSlug, folder: effectiveFolderPath) }
     }
 
     func handleTextChange(_ value: String) {

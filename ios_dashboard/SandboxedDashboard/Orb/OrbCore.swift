@@ -202,7 +202,7 @@ struct OrbRow: Identifiable, Hashable, Sendable {
             raw = value
         }
     }
-    fileprivate func withPatchedPlacement(project nextProject: String, folder nextFolder: String, revision nextRevision: UInt64) -> Self {
+    func withPatchedPlacement(project nextProject: String, folder nextFolder: String, revision nextRevision: UInt64) -> Self {
         var nextRaw = raw
         if case var .object(dict) = nextRaw {
             dict["project"] = nextProject.isEmpty ? .null : .string(nextProject)

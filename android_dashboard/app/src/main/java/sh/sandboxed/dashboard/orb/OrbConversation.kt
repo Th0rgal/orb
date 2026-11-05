@@ -1990,7 +1990,9 @@ fun OrbConversationPage(
                                 leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color.White) },
                                 onClick = {
                                     showHeaderMenu = false
-                                    val projectSlug = OrbMissionTree.projectSlug(liveRow) ?: (project.str("slug", "id") ?: project.id)
+                                    val projectSlug = OrbMissionTree.effectiveProject(liveRow).ifEmpty {
+                                        if (OrbMissionTree.hasAuthoritativePlacement(liveRow)) "" else (project.str("slug", "id") ?: project.id)
+                                    }
                                     val cachedProjectRows = OrbReadCache.readMemoryRows("project_missions_$projectSlug")
                                     OrbMoveClipboard.pick(liveRow, projectSlug, cachedProjectRows.ifEmpty { core.missions.value })
                                     commandBanner = "Ready to move — open destination project or folder"

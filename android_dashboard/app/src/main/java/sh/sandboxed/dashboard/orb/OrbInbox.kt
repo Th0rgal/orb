@@ -944,7 +944,7 @@ object OrbInboxModel {
             if (isSubagent(mission)) continue
             if (MissionState.of(state)?.live == true) continue
 
-            val rawSlug = (OrbMissionTree.projectSlug(mission) ?: mission.str("project", "project_slug") ?: "").trim().lowercase()
+            val rawSlug = OrbMissionTree.effectiveProject(mission).trim().lowercase()
             val tags = OrbJSON.strList(mission.raw, "tags")
             val isClient = tags.contains("placement:client")
             if (activeProjects.isNotEmpty()) {
@@ -1552,7 +1552,8 @@ object OrbInboxModel {
     }
 
     fun resolveProject(mission: OrbRow, projects: List<OrbRow>): OrbRow {
-        val pName = (OrbMissionTree.projectSlug(mission) ?: mission.str("project", "project_slug", "project_id", "project_name") ?: "").lowercase()
+        val authoritativePlacement = OrbMissionTree.hasAuthoritativePlacement(mission)
+        val pName = OrbMissionTree.effectiveProject(mission).lowercase()
         val mSession = mission.str("origin_session_id", "session_id", "bound_session_id")
         val tags = OrbJSON.strList(mission.raw, "tags").map { it.lowercase() }
 
@@ -1563,7 +1564,7 @@ object OrbInboxModel {
             if (slug.isNotEmpty() && pName == slug) {
                 return project
             }
-            if (pName.isEmpty() && slug.isNotEmpty() && (tags.contains("project:$slug") || tags.contains(slug))) {
+            if (!authoritativePlacement && pName.isEmpty() && slug.isNotEmpty() && (tags.contains("project:$slug") || tags.contains(slug))) {
                 return project
             }
             if (name.isNotEmpty() && pName == name) {

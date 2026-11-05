@@ -290,6 +290,12 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.project, "default")
         XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.folder, "")
 
+        // Optimistic UI row preview (`withPatchedPlacement`) does NOT re-observe or clear `pendingOpID`.
+        let previewRoot = rootInit.withPatchedPlacement(project: "default", folder: "ops", revision: rootInit.placementRevision)
+        XCTAssertEqual(previewRoot.project, "default")
+        XCTAssertEqual(previewRoot.folder, "ops")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.pendingOpID, 42)
+
         // A stale in-flight poll carrying `rev == 2` from `assistant` is fenced and preserves optimistic placement.
         let staleRoot = OrbRow(.object([
             "id": .string("9f559751"),

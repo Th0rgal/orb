@@ -1625,15 +1625,12 @@ struct OrbProjectPage: View {
                 changed = true
                 continue
             }
-            if case var .object(dict) = row.raw {
-                dict["project"] = targetProj.isEmpty ? .null : .string(targetProj)
-                dict["folder"] = .string(move.folder)
-                dict["placement_revision"] = .number(Double(move.placementRevision))
-                nextMissions.append(OrbRow(.object(dict)))
-                changed = true
-            } else {
-                nextMissions.append(row)
-            }
+            nextMissions.append(row.withPatchedPlacement(
+                project: targetProj,
+                folder: move.folder,
+                revision: move.placementRevision
+            ))
+            changed = true
         }
         if changed {
             missions = nextMissions

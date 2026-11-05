@@ -357,6 +357,8 @@ class OrbMissionTreeTest {
         assertEquals("ethereum", OrbMissionTree.projectSlug(workerBefore))
         assertEquals(null, OrbMissionTree.folderPath(workerBefore))
 
+        OrbMissionTree.storeAncestor(m("9f559751", "project" to "ethereum", "folder" to "Specs/Consensus", "placement_revision" to 6L))
+
         val remoteUnassignEvent = OrbJSON.parse(
             """{"type":"mission_placement_changed","moves":[{"mission_id":"9f559751","project":null,"folder":"","placement_revision":7}]}"""
         )
@@ -364,6 +366,12 @@ class OrbMissionTreeTest {
         assertEquals(1, committedUnassign.size)
         assertEquals(null, OrbMissionTree.projectSlug(unassignedPoll))
         assertEquals(null, OrbMissionTree.folderPath(unassignedPoll))
+        // Stale row or cached ancestor carrying former `project: "ethereum"` MUST resolve to unassigned, never falling back!
+        assertEquals(null, OrbMissionTree.projectSlug(stalePoll))
+        assertEquals("", OrbMissionTree.effectiveProject(stalePoll, fallback = "ethereum"))
+        assertTrue(OrbMissionTree.hasAuthoritativePlacement(stalePoll))
+        assertEquals(null, OrbMissionTree.cachedAncestor("9f559751")?.str("project"))
+        assertEquals(7L, (OrbMissionTree.cachedAncestor("9f559751")?.raw?.get("placement_revision") as? Number)?.toLong())
 
         val err = OrbError(
             message = "Secret approvals affected",
