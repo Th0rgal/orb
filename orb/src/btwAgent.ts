@@ -7,7 +7,7 @@ import {prepareBtwContext,type ConversationCursor} from './btwContext';
 import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion,isTransientNetworkError} from './api';
 import {note} from './diagnostics';
 import {btwConfig} from './btwSettings';
-import {sideQuestionKey,BTW_HISTORY_LIMIT} from './sideQuestionStorage';
+import {reconcileSavedSideQuestion,sideQuestionKey,BTW_HISTORY_LIMIT} from './sideQuestionStorage';
 import {forkSource} from './missionTree';
 import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
 import {enqueueLocalMessage,queuedLocalMessages} from './localMessageQueue';
@@ -175,7 +175,9 @@ async function currentSide(parent:string,s:BtwSession,signal?:AbortSignal,versio
  throw new Error('Side session recovery chain is too long.');
 }
 const locks=new Map<string,Promise<void>>();
+const launchErrors=new Map<string,{error:string;notSent:boolean}>();
 export function btwLaunchPending(parent:string):Promise<void>|undefined{return locks.get(storageKey(parent));}
+export function btwLastLaunchError(parent:string):{error:string;notSent:boolean}|undefined{return launchErrors.get(storageKey(parent));}
 export async function stopBtw(parent:string){const s=btwSession(parent);if(!s)return;if(s.queuedCursor||s.queuedCursors){delete s.queuedCursor;delete s.queuedCursors;save(parent,s);}if(s.local){await stopLocal(s.id);await flushClientLink(s.id);await setClientMissionStatus(s.id,'interrupted');}else{await currentSide(parent,s);await cancelMission(s.id);}}
 export function btwActivities(parent:string){const s=btwSession(parent);return s?.local?localActivities(s.id):s?remoteActivities()[s.id]??[]:[];}
 async function upload(attachments:SideAttachment[],destination:string){
@@ -387,6 +389,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
  if(allowCleanRetry)usageTelemetry.action('btw','side_question');
  const version=connectionVersion();
  const key=storageKey(parent);if(locks.has(key))throw new Error('A side question is already starting.');
+ launchErrors.delete(key);
  let unlock!:()=>void;locks.set(key,new Promise<void>(r=>{unlock=r;}));
  let reusedExisting=false;
  // Set once Core accepted the question. Later failures are the side agent's,
@@ -503,13 +506,29 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    catch(error){
     if(accepted)throw error;
     // Stop, a new connection, or a refusal: never resend on our own.
-    if(launchSignal.aborted||connectionVersion()!==version||!isTransientNetworkError(error)||attempt>=BTW_SEND_RETRY_MS.length)throw notSent(error);
+    if(launchSignal.aborted||connectionVersion()!==version||!isTransientNetworkError(error)||attempt>=BTW_SEND_RETRY_MS.length){
+     const wrapped=notSent(error);
+     launchErrors.set(key,{error:wrapped.message,notSent:true});
+     throw wrapped;
+    }
     note('btw-send-retry',{attempt:attempt+1,error:error instanceof Error?`${error.name}: ${error.message}`.slice(0,200):String(error).slice(0,200)});
     receive({type:'status',text:BTW_INTERRUPTED});
     await pause(BTW_SEND_RETRY_MS[attempt],launchSignal);
-    if(launchSignal.aborted)throw notSent(new Error('Side question cancelled.'));
+    if(launchSignal.aborted){
+     const wrapped=notSent(new Error('Side question cancelled.'));
+     launchErrors.set(key,{error:wrapped.message,notSent:true});
+     throw wrapped;
+    }
    }
   }
+ }catch(error){
+  if(!launchErrors.has(key)){
+   launchErrors.set(key,{
+    error:error instanceof Error?error.message:String(error),
+    notSent:(error as {notSent?:unknown})?.notSent===true,
+   });
+  }
+  throw error;
  }finally{locks.delete(key);unlock();}
  if(signal.aborted)return;
  try{
@@ -636,7 +655,11 @@ export function btwThreadChain(parent:string):Promise<string[]>{
   chain=(async()=>{
    const ids=[parent];
    for(let id=parent;ids.length<16;){
-    const source=forkSource(await getMission(id,{coreOnly:true}).catch(()=>({} as Mission)));
+    const mission=await getMission(id,{coreOnly:true}).catch(err=>{
+     if(err instanceof ApiError&&err.status===404)return {} as Mission;
+     throw err;
+    });
+    const source=forkSource(mission);
     if(!source||ids.includes(source))break;
     ids.push(source);id=source;
    }
@@ -920,9 +943,23 @@ export function resetWarmBtwForTest(): void {
  }
  warmBtwByParent.clear();
  pendingDirtyBtwParents.clear();
+ launchErrors.clear();
+ chains.clear();
 }
 
 onBackgroundSyncActiveChange(() => reconcileWarmBtwFollows());
+
+function healSavedSideQuestionFromServer(
+ version: number,
+ parent: string,
+ result: { history: SideExchange[]; activeSession?: BtwSession },
+): void {
+ if (!result.history.length || result.activeSession) return;
+ void reconcileSavedSideQuestion(sideQuestionKey(parent), result.history, {
+  canCommit: () => connectionVersion() === version,
+  isIgnoredAnswer: isSyntheticRemoteAssistantNote,
+ }).catch(() => {});
+}
 
 function storeWarmBtwResult(
  version: number,
@@ -956,6 +993,7 @@ function storeWarmBtwResult(
   });
  }
  reconcileWarmBtwFollows();
+ healSavedSideQuestionFromServer(version, parent, result);
  return result;
 }
 
@@ -967,7 +1005,7 @@ export async function reconcileBtwServerHistory(
 ): Promise<{ history: SideExchange[]; activeSession?: BtwSession; latest?: string; authoritative?: boolean }> {
  const version = connectionVersion();
  const k = `${version}:${parent}`;
- if (!options?.force && isMultiplexSyncActive() && !pendingDirtyBtwParents.has(k)) {
+ if (!options?.force && isMultiplexSyncActive() && !pendingDirtyBtwParents.has(k) && !btwSession(parent)?.active) {
   const cached = warmBtwByParent.get(k);
   if (cached && !cached.dirty && !cached.activeSession) {
    return {
@@ -1007,10 +1045,22 @@ export async function reconcileBtwServerHistory(
  const knownSession = btwSession(parent);
  if (knownSession?.id && !seen.has(knownSession.id)) {
   try {
-   const direct = await getMission(knownSession.id, { coreOnly: true });
+   let direct = await getMission(knownSession.id, { coreOnly: true });
+   const visited = new Set<string>();
+   for (let hop = 0; hop < 16; hop++) {
+    const nextId = direct?.tags?.find(tag => tag.startsWith('superseded_by:'))?.slice('superseded_by:'.length);
+    if (!nextId || visited.has(nextId)) break;
+    visited.add(direct.id);
+    if (seen.has(nextId)) {
+     direct = undefined as unknown as Mission;
+     break;
+    }
+    direct = await getMission(nextId, { coreOnly: true });
+   }
    if (
     direct &&
     typeof direct.id === 'string' &&
+    !seen.has(direct.id) &&
     Array.isArray(direct.tags) &&
     chain.some(id => direct.tags!.includes(`btw-parent:${id}`)) &&
     !direct.tags.includes('superseded')

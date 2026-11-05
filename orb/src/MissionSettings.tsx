@@ -68,6 +68,7 @@ export function MissionSettings(p: {
   onOpen?: (id: string) => void;
   /** Injected in tests and the gallery; default to the Core API. */
   load?: (id: string) => Promise<MissionBudget>;
+  pollIntervalMs?: number;
   loadResources?: (id: string) => Promise<MissionResourcesResponse | null>;
   save?: (id: string, budget: number | null) => Promise<MissionBudget>;
   saveVmLimits?: (id: string, limits: VmConcurrencyLimits | null) => Promise<MissionBudget>;
@@ -143,27 +144,35 @@ export function MissionSettings(p: {
     setBwEdited(false);
   };
 
+  // Monotonic generation bumped on every mutation start/settle so an in-flight
+  // background poll never overwrites optimistic or newly saved settings.
+  let mutationGen = 0;
+
   const load = async (background = false) => {
+    if (background && busy()) return;
+    const genAtStart = mutationGen;
     if (!background) setLoadError(null);
     try {
       const [v, res] = await Promise.all([
         loadBudget(p.missionId),
         loadResourcesApi(p.missionId).catch(() => null),
       ]);
+      if (genAtStart !== mutationGen || busy()) return;
       setView(v);
       if (res) setResources(res);
       if (!budgetEdited()) setDraft(v.own_budget_usd != null ? String(v.own_budget_usd) : "");
       if (!vmEdited()) syncLimitDrafts(v);
       if (!bwEdited()) syncBandwidthDrafts(v);
     } catch (e) {
+      if (genAtStart !== mutationGen) return;
       if (!background) setLoadError(e instanceof Error ? e.message : String(e));
     }
   };
 
   onMount(() => {
     void load(false);
-    if (isConnected() && !p.load) {
-      const stop = pollWhileVisible(() => void load(true), 15_000);
+    if (p.pollIntervalMs || (isConnected() && !p.load)) {
+      const stop = pollWhileVisible(() => void load(true), p.pollIntervalMs ?? 15_000);
       onCleanup(stop);
     }
   });
@@ -172,6 +181,7 @@ export function MissionSettings(p: {
   const commit = async (amount: number | null) => {
     const before = view();
     if (!before || busy()) return;
+    mutationGen += 1;
     setBusy(true);
     setSaveError(null);
     setRetry(null);
@@ -181,10 +191,12 @@ export function MissionSettings(p: {
     setBudgetEdited(false);
     try {
       const next = await saveBudgetApi(p.missionId, amount);
+      mutationGen += 1;
       setView(next);
       setDraft(next.own_budget_usd != null ? String(next.own_budget_usd) : "");
       setBudgetEdited(false);
     } catch (e) {
+      mutationGen += 1;
       setView(before);
       setDraft(before.own_budget_usd != null ? String(before.own_budget_usd) : "");
       setBudgetEdited(false);
@@ -199,6 +211,7 @@ export function MissionSettings(p: {
   const commitLimits = async (limits: VmConcurrencyLimits | null) => {
     const before = view();
     if (!before || busy()) return;
+    mutationGen += 1;
     setBusy(true);
     setLimitSaveError(null);
     setLimitRetry(null);
@@ -207,9 +220,11 @@ export function MissionSettings(p: {
     syncLimitDrafts(opt);
     try {
       const next = await saveLimitsApi(p.missionId, limits);
+      mutationGen += 1;
       setView(next);
       syncLimitDrafts(next);
     } catch (e) {
+      mutationGen += 1;
       setView(before);
       syncLimitDrafts(before);
       setLimitSaveError(e instanceof Error ? e.message : String(e));
@@ -223,6 +238,7 @@ export function MissionSettings(p: {
   const commitBandwidth = async (limits: BandwidthLimits | null) => {
     const before = view();
     if (!before || busy()) return;
+    mutationGen += 1;
     setBusy(true);
     setBwSaveError(null);
     setBwRetry(null);
@@ -231,9 +247,11 @@ export function MissionSettings(p: {
     syncBandwidthDrafts(opt);
     try {
       const next = await saveBandwidthApi(p.missionId, limits);
+      mutationGen += 1;
       setView(next);
       syncBandwidthDrafts(next);
     } catch (e) {
+      mutationGen += 1;
       setView(before);
       syncBandwidthDrafts(before);
       setBwSaveError(e instanceof Error ? e.message : String(e));
@@ -541,7 +559,7 @@ export function MissionSettings(p: {
                       {path => <path class="ms-fc-unshaped" d={path()} />}
                     </Show>
                     <path class="ms-fc-proj" data-tone={forecast().tone} d={forecast().chart.projectedLinePath} />
-                    <circle class="ms-fc-dot" cx={forecast().chart.nowX} cy={forecast().chart.reservedTopY} r="3" />
+                    <circle class="ms-fc-dot" cx={forecast().chart.nowX} cy={forecast().chart.nowY} r="3" />
                     <Show when={forecast().chart.exhaustionX != null && forecast().chart.capY != null}>
                       <circle
                         class="ms-fc-exhaust-dot"

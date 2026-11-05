@@ -1228,6 +1228,7 @@ fun OrbProjectPage(
     val expandedParents = remember { mutableStateMapOf<String, Boolean>() }
     val collapsedFolders = remember { mutableStateMapOf<String, Boolean>() }
     val customFolders = remember { mutableStateMapOf<String, Boolean>() }
+    val pendingFolderDeletes = remember { mutableStateMapOf<String, Boolean>() }
     var contextMenuMission by remember { mutableStateOf<OrbRow?>(null) }
     var contextMenuFolder by remember { mutableStateOf<String?>(null) }
     var renameFolderTarget by remember { mutableStateOf<String?>(null) }
@@ -1386,10 +1387,14 @@ fun OrbProjectPage(
 
     val filtering = searchQuery.trim().isNotEmpty() || filter != OrbProjectFilter.All
 
-    val foldersMap = remember(nestedRoots, manifestFolders, customFolders.keys.toSet(), filtering) {
+    val foldersMap = remember(nestedRoots, manifestFolders, customFolders.keys.toSet(), pendingFolderDeletes.keys.toSet(), filtering) {
         val map = linkedMapOf<String, MutableList<OrbNestedMission>>()
         val allPaths = sortedSetOf<String>()
-        val sources = (if (filtering) emptyList() else (manifestFolders + customFolders.keys)) +
+        val isDeleting: (String) -> Boolean = { candidate ->
+            pendingFolderDeletes.keys.any { candidate == it || candidate.startsWith("$it/") }
+        }
+        val activeFolders = (manifestFolders + customFolders.keys).filterNot(isDeleting)
+        val sources = (if (filtering) emptyList() else activeFolders) +
             nestedRoots.mapNotNull { OrbMissionTree.folderPath(it.mission) }
         for (path in sources) {
             if (path.isEmpty()) continue
@@ -1635,6 +1640,7 @@ fun OrbProjectPage(
     }
 
     fun performDeleteFolder(folderPath: String) {
+        if (pendingFolderDeletes.containsKey(folderPath)) return
         val hasActiveOrCompletedMissions = projectMissions.any { m ->
             if (OrbMissionTree.isArchived(m)) return@any false
             val f = OrbMissionTree.folderPath(m) ?: ""
@@ -1645,6 +1651,7 @@ fun OrbProjectPage(
             return
         }
         folderActionError = null
+        pendingFolderDeletes[folderPath] = true
         scope.launch {
             try {
                 val encoded = core.encodeComponent(projectSlug)
@@ -1659,6 +1666,8 @@ fun OrbProjectPage(
                 loadProjectData()
             } catch (e: Throwable) {
                 folderActionError = e.message ?: "Failed to delete folder"
+            } finally {
+                pendingFolderDeletes.remove(folderPath)
             }
         }
     }

@@ -372,7 +372,7 @@ export function noteAbort(request: string, reason: AbortReason, ms: number): voi
  * stalled, dropped or timed out, or a proxy answered for an unreachable Core.
  * Only idempotent operations may retry on it. */
 export function isTransientNetworkError(error: unknown): boolean {
-  if (error instanceof ApiError) return [502, 503, 504].includes(error.status);
+  if (error instanceof ApiError) return [502, 503, 504, 522, 524].includes(error.status);
   if (error instanceof InvalidApiResponseError) return true;
   if (isAbortError(error)) return true;
   return error instanceof TypeError && /load failed|failed to fetch|networkerror|network connection|internet connection|could not connect/i.test(error.message);

@@ -372,8 +372,11 @@ data class OrbMissionBudget(
         val spentUsd = pool?.spent ?: 0.0
         val reservedUsd = pool?.reserved ?: 0.0
         val carvedUsd = pool?.carved ?: 0.0
-        val committedTotal = spentUsd + reservedUsd + carvedUsd
+        val committedPreReserved = spentUsd + carvedUsd
+        val committedTotal = committedPreReserved + reservedUsd
         val availableUsd = capUsd?.let { maxOf(0.0, it - committedTotal) } ?: 0.0
+        // `reservedUsd` holds up to 60m of future live-machine runtime, not incurred spend.
+        val runwayUsd = capUsd?.let { maxOf(0.0, it - committedPreReserved) } ?: 0.0
 
         val obsCompute = maxOf(0.0, effectiveBandwidth?.currentComputeUsdPerHour ?: 0.0)
         val curVcpu = effectiveBandwidth?.currentVcpuPerMin ?: 0
@@ -400,12 +403,12 @@ data class OrbMissionBudget(
 
         val etaSecs: Double? = when {
             capUsd == null -> null
-            availableUsd <= 0.0 -> 0.0
-            shapedCompute > 0.005 -> (availableUsd / shapedCompute) * 3600.0
+            runwayUsd <= 0.0 -> 0.0
+            shapedCompute > 0.005 -> (runwayUsd / shapedCompute) * 3600.0
             else -> null
         }
-        val unshapedEtaSecs: Double? = if (capUsd != null && availableUsd > 0.0 && obsCompute > 0.005) {
-            (availableUsd / obsCompute) * 3600.0
+        val unshapedEtaSecs: Double? = if (capUsd != null && runwayUsd > 0.0 && obsCompute > 0.005) {
+            (runwayUsd / obsCompute) * 3600.0
         } else {
             null
         }
@@ -417,9 +420,9 @@ data class OrbMissionBudget(
 
         var tone = RunwayForecast.Tone.OK
         if (capUsd != null) {
-            if (availableUsd <= 0.0 || (etaSecs != null && etaSecs < 1800.0)) {
+            if (runwayUsd <= 0.0 || (etaSecs != null && etaSecs < 1800.0)) {
                 tone = RunwayForecast.Tone.DANGER
-            } else if ((etaSecs != null && etaSecs < 7200.0) || (capUsd > 0.0 && availableUsd < capUsd * 0.15)) {
+            } else if ((etaSecs != null && etaSecs < 7200.0) || (capUsd > 0.0 && runwayUsd < capUsd * 0.15)) {
                 tone = RunwayForecast.Tone.WARNING
             }
         }
@@ -427,14 +430,19 @@ data class OrbMissionBudget(
         val headline: String
         val subline: String
         if (capUsd != null) {
-            if (availableUsd <= 0.0) {
+            if (runwayUsd <= 0.0) {
                 headline = "Budget exhausted"
-                subline = "${money(committedTotal)} committed of ${money(capUsd)} pool"
+                subline = "${money(committedPreReserved)} spent of ${money(capUsd)} pool"
             } else if (etaSecs != null) {
                 headline = "${formatDurationEta(etaSecs)} runway left"
+                val remPart = if (reservedUsd > 0.005) {
+                    "${money(availableUsd)} unallocated (${money(reservedUsd)} reserved · ${money(capUsd)} cap)"
+                } else {
+                    "${money(availableUsd)} left (${money(capUsd)} cap)"
+                }
                 val parts = mutableListOf(
                     "${money(shapedCompute)}/h compute burn",
-                    "${money(availableUsd)} left (${money(capUsd)} cap)",
+                    remPart,
                 )
                 if (etaGainSecs != null) {
                     val clean = formatDurationEta(etaGainSecs).replace("~", "")

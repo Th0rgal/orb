@@ -233,27 +233,49 @@ fabricates an interruption or drops completed turns:
      async `readSideQuestion` preserves those warm turns (merging local
      attachment metadata) instead of rolling `history` back to an older
      IndexedDB snapshot.
-2. **Mandatory Core verification for pending and previously-interrupted turns**:
+   - Whenever `reconcileBtwServerHistory` completes authoritatively, it asks the
+     single storage owner (`reconcileSavedSideQuestion` in `sideQuestionStorage.ts`,
+     backed by per-key serialization and a single `'readwrite'` IndexedDB
+     transaction via `updateSideThread`) to conditionally heal `parent`: only if
+     the currently stored `pending` turn (`!notSent`) is still answered by the
+     reconciled history does it clear `pending` and write merged history,
+     preserving any newer `draft`, `queue`, or subsequent `pending` turn saved
+     concurrently by a mounted panel.
+2. **Mandatory Core verification for pending, in-flight launch, and previously-interrupted turns**:
    - Mounting with `saved.pending` (unless `peekWarmBtwState` already proves the
-     pending turn was answered), running event/completion `resync()`, or
-     clicking `Retry` on an accepted turn (`!notSent`) passes `force: true` so
-     `reconcileBtwServerHistory` never short-circuits on a cached entry.
+     pending turn was answered), settling an unmounted `btwLaunchPending(parent)`
+     promise when `launched?.active` is false (for example a fast turn that
+     finished while switched away, or a failed pre-send), running event/completion
+     `resync()`, or clicking `Retry` on an accepted turn (`!notSent`) passes
+     `force: true` so `reconcileBtwServerHistory` never short-circuits on a
+     cached entry (nor may `reconcileBtwServerHistory` use its non-forced cache
+     while `btwSession(parent)?.active` is true).
+   - If `btwLaunchPending(parent)` rejects before Core accepts the question
+     (`BtwNotSentError`), `btwLastLaunchError(parent)` surfaces the exact
+     `notSent` error on remount instead of fabricating `"Side question interrupted..."`.
    - A persisted `interruptedError` (`!notSent`) is re-verified against Core on
      open (without flashing the stale error banner while reconnecting) and on
      `Retry` (adopting Core's completed answer instead of sending a duplicate
      follow-up if Core already finished the turn).
 3. **Partial or failed HTTP reads stay dirty and non-authoritative**:
-   - Any failure in `btwThreadChain`, `?tag=btw-parent:...`, direct lookup of
-     known `btwSession(parent).id`, or per-thread `getMissionEvents` marks the
-     reconciliation non-authoritative (`authoritative: false` on desktop,
-     `markBtwDirty` on iOS, `markClean = false` on Android).
+   - `btwThreadChain` never memoizes a degraded fallback when `getMission` fails
+     transiently; any failure in `btwThreadChain`, `?tag=btw-parent:...`, direct
+     lookup of known `btwSession(parent).id`, or per-thread `getMissionEvents`
+     marks the reconciliation non-authoritative (`authoritative: false` on
+     desktop, `markBtwDirty` on iOS, `markClean = false` on Android).
+   - `apiRawOnce` (`stream.ts`, backing `getMissionEventPage` / `getMissionEvents`)
+     throws typed `ApiError` and `InvalidApiResponseError`, and
+     `isTransientNetworkError` covers gateway statuses `502`, `503`, `504`, `522`,
+     and `524`, so brief proxy/deploy blips during `watchBtw` or reconciliation
+     retry cleanly rather than failing an active side turn.
    - Non-authoritative reconciliations never mark the warm cache clean and never
      transition `awaitingServerPending` into `"Side question interrupted..."`;
      `SideQuestionPanel` keeps `busy = true` (`"Connection interrupted — reconnecting…"`)
      so recovery polling/streaming heals automatically once connectivity returns.
    - Known `btwSession(parent).id` (desktop/iOS/Android) is fetched directly
-     when absent from the `?tag=btw-parent:...&limit=50` page so tag-index lag or
-     >50 historical side threads cannot hide the active/latest session.
+     (resolving any `superseded_by:` hop) when absent from the
+     `?tag=btw-parent:...&limit=50` page so tag-index lag, supersession, or >50
+     historical side threads cannot hide the active/latest session.
 4. **Pending-turn disambiguation across duplicate question text (`doesTurnAnswerPending`)**:
    - Repeated short prompts (for example asking `"and now?"` multiple times in
      one conversation) must not match an older completed turn against a newly

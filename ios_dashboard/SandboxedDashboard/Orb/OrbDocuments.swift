@@ -17,7 +17,15 @@ struct OrbDocuments: View {
     @State private var moveDraft = ""
     @State private var deletingPath: String?
     @State private var deletingIsDir = false
+    @State private var pendingDeletes: Set<String> = []
     private let api = OrbCore.shared
+
+    private var visibleEntries: [OrbJSON] {
+        entries.filter { entry in
+            let child = path.isEmpty ? entry["name"].text : "\(path)/\(entry["name"].text)"
+            return !pendingDeletes.contains(child)
+        }
+    }
 
     private static func parentDir(_ p: String) -> String {
         guard let idx = p.lastIndex(of: "/") else { return "" }
@@ -30,7 +38,7 @@ struct OrbDocuments: View {
     var body: some View {
         List {
             if !error.isEmpty { OrbNotice(message: error) }
-            if loading && entries.isEmpty {
+            if loading && visibleEntries.isEmpty {
                 ForEach(0..<4, id: \.self) { index in
                     HStack(spacing: 12) {
                         OrbListIcon(symbol: index.isMultiple(of: 2) ? "folder" : "doc.text")
@@ -42,8 +50,8 @@ struct OrbDocuments: View {
                     .listRowBackground(Color.clear)
                 }
             }
-            ForEach(entries.indices, id: \.self) { index in
-                let entry = entries[index]
+            ForEach(visibleEntries.indices, id: \.self) { index in
+                let entry = visibleEntries[index]
                 let name = entry["name"].text
                 let child = path.isEmpty ? name : "\(path)/\(name)"
                 let isDir = entry["kind"].text == "dir" || entry["is_dir"].flag || entry["is_directory"].flag || entry["type"].text == "directory"
@@ -239,12 +247,17 @@ struct OrbDocuments: View {
     }
 
     private func deleteItem(_ itemPath: String) async {
+        guard !pendingDeletes.contains(itemPath) else { return }
+        pendingDeletes.insert(itemPath)
+        defer { pendingDeletes.remove(itemPath) }
         do {
             _ = try await api.call("/api/projects/\(OrbCore.escape(project))/file?path=\(OrbCore.escape(itemPath))", method: "DELETE")
             entries.removeAll { (path.isEmpty ? $0["name"].text : "\(path)/\($0["name"].text)") == itemPath }
             invalidateProjectCaches()
             await reload(initial: false)
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 }
 

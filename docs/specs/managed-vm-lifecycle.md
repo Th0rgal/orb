@@ -253,14 +253,17 @@ Operators can configure `bandwidth_limits` on any mission via
 and `vm_limits`):
 
 - `tokens_per_min`: optional LLM throughput ceiling (`1_000..=100_000_000`
-  tokens/min across input + output + reasoning tokens) for the pool's subtree;
+  tokens/min across uncached + cached input + output tokens; reasoning tokens
+  are already included in output and never double-counted) for the pool's subtree;
 - `compute_vcpu_per_min`: optional active managed-VM vCPU bandwidth ceiling
   (`1..=4_096` vCPU-min/min, i.e., active vCPU across live VMs in the pool);
 - `compute_usd_per_hour`: optional active managed-VM dollar burn rate ceiling
   (`0.01..=10_000.0` USD/hour across live VMs in the pool);
-- `protect_root`: boolean (`false` by default). When `true`, the mission that
-  owns the bandwidth pool bypasses pacing delays itself while its pooled
-  descendants absorb the smoothing delay.
+- `protect_root`: boolean (`false` by default). When `true`, VMs directly owned
+  by the pool's root mission (`owner_mission_id == pool_id`) bypass transient
+  pacing delays while pooled child missions (including auto-managed child spawns
+  with `owner_mission_id = None` and `requested_by_mission_id = parent`) absorb
+  the smoothing delay.
 
 Hierarchical inheritance & pace/delay enforcement:
 
@@ -288,9 +291,11 @@ Hierarchical inheritance & pace/delay enforcement:
      `effective_usd_per_hour > compute_usd_per_hour`), Core fails fast with
      `429 bandwidth_exceeded` since waiting can never admit it;
    - otherwise, while active subtree compute + the requested VM exceeds the
-     ceiling (unless `protect_root` exempts the pool root), Core paces and awaits
-     capacity release or limit edits (up to `45s`) before proceeding to
-     admission.
+     ceiling (unless `protect_root` exempts a VM with `owner_mission_id == pool_id`),
+     Core paces outside `self.admission` (up to `45s`) and atomically re-verifies
+     compute capacity under `self.admission` (looping back to pace if a concurrent
+     admission consumed capacity), as well as re-evaluating marketplace fallback
+     offers before accepting higher CPU or hourly burn.
 4. **Surface & runway forecast:** `GET /api/control/missions/:id/budget` and MCP
    `list_managed_machines` return `own_bandwidth_limits`, `bandwidth_mode`
    (`"own" | "pooled" | "none"`), `bandwidth_pool_id`, and `effective_bandwidth`
@@ -298,8 +303,9 @@ Hierarchical inheritance & pace/delay enforcement:
    `current_compute_usd_per_hour`, `pacing_active`, and `paced_delay_ms`). Orb
    renders Mission Settings as a full-page view (`ms:<id>`) with a top compact
    spend/runway forecast chart showing observed burn, `now`, reserved hold, cap
-   line, and estimated time until budget exhaustion at the effective (or draft
-   shaped) burn rate.
+   line, and estimated time until budget exhaustion computed from unspent pool
+   funds (`max(0, cap_usd - spent_usd - carved_usd)`) at the effective (or draft
+   shaped) burn rate so live 60-minute VM reservations are not subtracted twice.
 
 ## Provisioning
 

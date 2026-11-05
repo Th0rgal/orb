@@ -1,3 +1,15 @@
+const sideThreadStore=vi.hoisted(()=>new Map<string,unknown>());
+vi.mock('../src/composerDrafts',()=>({
+ readComposerDraft:async()=>undefined,
+ saveComposerDraft:async()=>{},
+ readSideThread:async(key:string)=>sideThreadStore.get(key),
+ saveSideThread:async(key:string,value:unknown)=>{sideThreadStore.set(key,structuredClone(value));},
+ updateSideThread:async(key:string,updater:(current:any)=>any)=>{
+  const next=updater(structuredClone(sideThreadStore.get(key)));
+  if(next!==undefined)sideThreadStore.set(key,structuredClone(next));
+  return {updated:next!==undefined,value:next};
+ },
+}));
 vi.mock('../src/btwContext',()=>({prepareBtwContext:vi.fn(async(_s:any,context:string)=>({context,cursor:{sequence:10,visibleHash:'hash'}}))}));
 import {it,expect,vi,afterEach} from 'vitest';
 import {askBtwAgent,btwSession,resetBtwThreadCache,stopBtw,btwTurnEvents} from '../src/btwAgent';
@@ -7,7 +19,7 @@ vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLoca
 import {ApiError,api,getMission,sendMissionMessage,cancelMission} from '../src/api';
 vi.mock('../src/api',async original=>({...await original<typeof import('../src/api')>(),api:vi.fn(),getMission:vi.fn(),sendMissionMessage:vi.fn(),cancelMission:vi.fn(),appendClientTranscript:vi.fn(),setClientMissionStatus:vi.fn()}));
 vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),streamMission:vi.fn(()=>vi.fn()),getMissionEvents:vi.fn(async()=>[{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}])}));
-afterEach(async()=>{resetBtwThreadCache();localStorage.clear();vi.clearAllMocks();const {getMissionEvents,streamMission}=await import('../src/stream');vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}]);vi.mocked(streamMission).mockImplementation(()=>vi.fn());});
+afterEach(async()=>{resetBtwThreadCache();sideThreadStore.clear();localStorage.clear();vi.clearAllMocks();const {getMissionEvents,streamMission}=await import('../src/stream');vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}]);vi.mocked(streamMission).mockImplementation(()=>vi.fn());});
 it('creates a distinct side agent and never sends to the parent',async()=>{
  vi.mocked(getMission).mockImplementation(async(id)=>({id,status:id==='parent'?'active':'awaiting_user',history:[],tags:[],title:'Main',created_at:'',updated_at:''}));
  vi.mocked(api).mockResolvedValue({id:'child'});
@@ -1182,3 +1194,157 @@ it('recovers known btwSession by direct getMission lookup when omitted from the 
  const both=[...firstOnly,{id:'3d7b16e7-older:4',question:'and now?',answer:'Second status.',at:'2026-11-04T20:07:02Z'}];
  expect(doesTurnAnswerPending({question:'and now?',startedAt:'2026-11-04T20:07:00Z'},both,firstOnly)).toBe(true);
 });
+
+it('heals persisted sideQuestionStorage pending turn during background reconcile, avoids caching transient btwThreadChain failures, and walks superseded_by on direct session lookup',async()=>{
+ const streamMod=await import('../src/stream');
+ const muxSpy=vi.spyOn(streamMod,'isMultiplexSyncActive').mockReturnValue(true);
+ const {readSideQuestion,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ const {btwThreadChain,reconcileBtwServerHistory}=await import('../src/btwAgent');
+ const parentId='06203bdc-bg-heal';
+ try{
+  await writeSideQuestion(sideQuestionKey(parentId),{
+   history:[{id:'t1',question:'Turn 1',answer:'Answer 1',attachments:[{name:'note.txt',media_type:'text/plain',data_base64:'YWJj'}]}],
+   draft:'keep draft',
+   model:'opencode · builtin/smart',
+   open:false,
+   docked:true,
+   pending:{
+    question:'where are we now? Are we ready to commit and push and merge to master?',
+    answer:'',
+    error:'',
+    turnId:'f504e8ab-dcaf-4bef-9e61-f06226bb02b0',
+    startedAt:'2026-11-05T11:20:02Z',
+   },
+  });
+  localStorage.setItem(
+   'agent:'+sideQuestionKey(parentId),
+   JSON.stringify({
+    id:'old-superseded-side',
+    question:'where are we now? Are we ready to commit and push and merge to master?',
+    harness:'opencode',
+    model:'builtin/smart',
+    local:false,
+    active:true,
+    baseline:0,
+   }),
+  );
+
+  // 1) Transient failure in btwThreadChain must NOT be cached as a clean 1-element chain:
+  let failParentLookup=true;
+  vi.mocked(getMission).mockImplementation(async(id:string)=>{
+   if(id===parentId){
+    if(failParentLookup)throw new TypeError('Load failed');
+    return {id:parentId,status:'active',tags:['fork-of:earlier-parent'],history:[],title:'Main',created_at:'',updated_at:''} as any;
+   }
+   if(id==='earlier-parent'){
+    return {id:'earlier-parent',status:'completed',tags:[],history:[],title:'Earlier',created_at:'',updated_at:''} as any;
+   }
+   if(id==='old-superseded-side'){
+    return {id,status:'interrupted',tags:[`btw-parent:${parentId}`,'superseded','superseded_by:1013a4da-replacement'],history:[],title:null,created_at:'2026-11-05T11:19:00Z',updated_at:'2026-11-05T11:19:30Z'} as any;
+   }
+   if(id==='1013a4da-replacement'){
+    return {id,status:'completed',backend:'opencode',model_override:'builtin/smart',tags:[`btw-parent:${parentId}`],history:[],title:null,created_at:'2026-11-05T11:20:00Z',updated_at:'2026-11-05T11:20:54Z'} as any;
+   }
+   throw new ApiError(404,'Not found');
+  });
+  vi.mocked(api).mockImplementation(async()=>[] as any);
+  vi.mocked(streamMod.getMissionEvents).mockImplementation(async(id:string)=>{
+   if(id==='1013a4da-replacement'){
+    return [
+     {id:1,sequence:1,event_type:'user_message',content:'Turn 1',timestamp:'2026-11-05T11:10:00Z'},
+     {id:2,sequence:2,event_type:'assistant_message',content:'Answer 1',timestamp:'2026-11-05T11:10:20Z'},
+     {id:34,sequence:34,event_type:'user_message',event_id:'f504e8ab-dcaf-4bef-9e61-f06226bb02b0',content:'<main_conversation_update>\nctx\n</main_conversation_update>\n\nCurrent request:\nwhere are we now? Are we ready to commit and push and merge to master?',timestamp:'2026-11-05T11:20:02Z'},
+     {id:46,sequence:46,event_type:'assistant_message',content:'Yes — ready to commit, push, and merge once CI is green.',timestamp:'2026-11-05T11:20:54Z'},
+    ];
+   }
+   return [];
+  });
+
+  const degraded=await reconcileBtwServerHistory(parentId,[],undefined,{force:true});
+  expect(degraded.authoritative).toBe(false);
+
+  // Once connectivity recovers, btwThreadChain retries and discovers earlier-parent,
+  // direct lookup resolves old-superseded-side -> 1013a4da-replacement, and sideQuestionStorage is healed:
+  failParentLookup=false;
+  const chain=await btwThreadChain(parentId);
+  expect(chain).toEqual([parentId,'earlier-parent']);
+
+  const healedRes=await reconcileBtwServerHistory(parentId,[],undefined,{force:true});
+  expect(healedRes.authoritative).toBe(true);
+  expect(healedRes.history).toHaveLength(2);
+  expect(healedRes.history[1]?.answer).toBe('Yes — ready to commit, push, and merge once CI is green.');
+
+  await vi.waitFor(async()=>{
+   const stored=await readSideQuestion(sideQuestionKey(parentId));
+   expect(stored?.pending).toBeUndefined();
+   expect(stored?.draft).toBe('keep draft');
+   expect(stored?.history).toHaveLength(2);
+   expect(stored?.history[0]?.attachments).toHaveLength(1);
+   expect(stored?.history[1]?.answer).toBe('Yes — ready to commit, push, and merge once CI is green.');
+  });
+ }finally{
+  muxSpy.mockRestore();
+ }
+});
+
+it('serializes reconcileSavedSideQuestion with concurrent panel writes so newer drafts and newer pending turns are never clobbered',async()=>{
+ const draftsMod=await import('../src/composerDrafts');
+ const {readSideQuestion,writeSideQuestion,reconcileSavedSideQuestion}=await import('../src/sideQuestionStorage');
+ const key=sideQuestionKey('concurrent-panel-race');
+ const serverHistory=[
+  {id:'t1',question:'Turn 1',answer:'Answer 1',at:'2026-11-05T11:10:00Z'},
+  {id:'t2',question:'Turn 2',answer:'Answer 2',at:'2026-11-05T11:20:54Z',userEventId:'turn-2'},
+ ];
+
+ // Case 1: panel saves a newer draft while Turn 2 is still pending; reconcile heals Turn 2 without losing the new draft.
+ await writeSideQuestion(key,{
+  history:[{id:'t1',question:'Turn 1',answer:'Answer 1'}],
+  draft:'old draft',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{question:'Turn 2',answer:'',turnId:'turn-2',startedAt:'2026-11-05T11:20:02Z'},
+ });
+ let releaseWrite!:()=>void;
+ const gate=new Promise<void>(resolve=>{releaseWrite=resolve;});
+ const origSave=draftsMod.saveSideThread;
+ const saveSpy=vi.spyOn(draftsMod,'saveSideThread').mockImplementationOnce(async(k:string,v:unknown)=>{
+  await gate;
+  return origSave(k,v);
+ });
+ const panelDraftWrite=writeSideQuestion(key,{
+  history:[{id:'t1',question:'Turn 1',answer:'Answer 1'}],
+  draft:'newer draft typed while in flight',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{question:'Turn 2',answer:'',turnId:'turn-2',startedAt:'2026-11-05T11:20:02Z'},
+ });
+ const healTurn2=reconcileSavedSideQuestion(key,serverHistory);
+ releaseWrite();
+ const [,healed]=await Promise.all([panelDraftWrite,healTurn2]);
+ expect(healed).toBe(true);
+ const afterDraftRace=await readSideQuestion(key);
+ expect(afterDraftRace?.pending).toBeUndefined();
+ expect(afterDraftRace?.draft).toBe('newer draft typed while in flight');
+ expect(afterDraftRace?.history).toHaveLength(2);
+
+ // Case 2: panel submits a new pending Turn 3 before Turn 2 reconciliation commits; Turn 3 and its draft stay intact.
+ const panelNewTurnWrite=writeSideQuestion(key,{
+  history:serverHistory,
+  draft:'draft for turn 4',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{question:'Turn 3?',answer:'',turnId:'turn-3',startedAt:'2026-11-05T11:25:00Z'},
+ });
+ const staleHeal=reconcileSavedSideQuestion(key,serverHistory);
+ const [,didOverwriteNewTurn]=await Promise.all([panelNewTurnWrite,staleHeal]);
+ expect(didOverwriteNewTurn).toBe(false);
+ const afterNewTurnRace=await readSideQuestion(key);
+ expect(afterNewTurnRace?.pending?.turnId).toBe('turn-3');
+ expect(afterNewTurnRace?.pending?.question).toBe('Turn 3?');
+ expect(afterNewTurnRace?.draft).toBe('draft for turn 4');
+ saveSpy.mockRestore();
+});
+

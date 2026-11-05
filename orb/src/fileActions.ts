@@ -116,22 +116,41 @@ export function readItemsReference(text: string): ItemsClipboard | null {
   } catch { return null; }
 }
 
+const containsFolder = (path: string, folder: string) => {
+  const normPrefix = normalizeMissionFolder(path);
+  const norm = normalizeMissionFolder(folder);
+  return norm === normPrefix || (!!normPrefix && norm.startsWith(`${normPrefix}/`));
+};
+const missionFolderIn = (slug: string, path: string, mission: Mission) => {
+  if (mission.project !== slug) return undefined;
+  const norm = normalizeMissionFolder(mission.folder);
+  return norm && containsFolder(path, norm) ? norm : undefined;
+};
+
+/** Synchronous check against missions and crons already loaded in memory. */
+export function folderWorkError(
+  slug: string,
+  path: string,
+  knownMissions: readonly Mission[],
+  knownCrons: readonly { folder?: string | null }[] = [],
+  action = "deleting",
+): string | null {
+  if (knownMissions.some(mission => missionFolderIn(slug, path, mission) !== undefined)) {
+    return `Move the agents out of this folder before ${action} it.`;
+  }
+  if (knownCrons.some(job => containsFolder(path, job.folder ?? ""))) {
+    return `Move or delete the crons in this folder before ${action} it.`;
+  }
+  return null;
+}
+
 /** Agents and crons filed in a folder or below it. */
 async function folderWork(slug: string, path: string, first = false) {
   const normPrefix = normalizeMissionFolder(path);
   const version = connectionVersion();
-  const contains = (folder: string) => {
-    const norm = normalizeMissionFolder(folder);
-    return norm === normPrefix || (!!normPrefix && norm.startsWith(`${normPrefix}/`));
-  };
   const checkConnection = () => { if (version !== connectionVersion()) throw new Error("Connection changed. Try again."); };
-  const folder = (mission: Mission) => {
-    if (mission.project && mission.project !== slug) return undefined;
-    const norm = normalizeMissionFolder(mission.folder);
-    return contains(norm) ? norm : undefined;
-  };
   const missions = new Map<string, string>();
-  const collect = (list: Mission[]) => { for (const mission of list) { const at = folder(mission); if (at !== undefined) missions.set(mission.id, at); } };
+  const collect = (list: Mission[]) => { for (const mission of list) { const at = missionFolderIn(slug, path, mission); if (at !== undefined) missions.set(mission.id, at); } };
   collect(await import("./localOrigins").then(m => m.localOrigins()));
   checkConnection();
   if (first && missions.size) return { missions, crons: [] };
@@ -144,7 +163,7 @@ async function folderWork(slug: string, path: string, first = false) {
     if (first && missions.size) return { missions, crons: [] };
     if (page.length < (first ? 1 : 200)) break;
   }
-  const crons = (await listProjectCrons(slug)).filter(job => contains(job.folder ?? ""));
+  const crons = (await listProjectCrons(slug)).filter(job => containsFolder(path, job.folder ?? ""));
   checkConnection();
   return { missions, crons };
 }

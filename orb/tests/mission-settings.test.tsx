@@ -147,11 +147,14 @@ it("parses bandwidth limits, shorthand k/M tokens, and enforces ancestor ceiling
   expect(parseBandwidthLimits("40k", "8", "2.0", true, childView)).toHaveProperty("error");
 });
 
-it("computes runway forecast and reacts live to bandwidth burn shaping", () => {
-  const b = own(10); // available = $8.40, current_compute_usd_per_hour = $2.00/h -> 4.2h (15,120s)
+it("computes runway forecast from unspent pool funds without double-counting live VM reservations", () => {
+  // spent = $0.40, carved = $1.00, reserved = $0.20 -> runwayUsd = $8.60, available = $8.40
+  // current_compute_usd_per_hour = $2.00/h -> 4.3h (15,480s)
+  const b = own(10);
   const unshaped = computeRunwayForecast({ budget: b, budgetEnabled: true });
-  expect(unshaped.etaSecs).toBeCloseTo(15_120, 0);
-  expect(unshaped.headline).toContain("~4h 12m runway left");
+  expect(unshaped.etaSecs).toBeCloseTo(15_480, 0);
+  expect(unshaped.headline).toContain("~4h 18m runway left");
+  expect(unshaped.subline).toContain("$8.40 unallocated ($0.20 reserved · $10 cap)");
 
   const shaped = computeRunwayForecast({
     budget: b,
@@ -159,10 +162,35 @@ it("computes runway forecast and reacts live to bandwidth burn shaping", () => {
     bandwidthEnabled: true,
     draftComputeUsdPerH: "1.0",
   });
-  expect(shaped.etaSecs).toBeCloseTo(30_240, 0);
-  expect(shaped.etaGainSecs).toBeCloseTo(15_120, 0);
+  expect(shaped.etaSecs).toBeCloseTo(30_960, 0);
+  expect(shaped.etaGainSecs).toBeCloseTo(15_480, 0);
   expect(shaped.subline).toContain("from bandwidth cap");
   expect(shaped.chart.unshapedLinePath).toBeTruthy();
+
+  // Fresh $1/h VM on a $1 pool holding a 1-hour ($1.00) reservation has $0 unallocated
+  // (`available_usd = 0`) yet still has ~1h (3,600s) of paid runway before exhaustion!
+  const fullyReserved = base({
+    own_budget_usd: 1,
+    pool_id: "m1",
+    mode: "own",
+    pool: {
+      pool_id: "m1",
+      budget_usd: 1,
+      spent_usd: 0,
+      reserved_usd: 1,
+      carved_usd: 0,
+      available_usd: 0,
+      live_machines: 1,
+    },
+    effective_bandwidth: {
+      ...base().effective_bandwidth!,
+      current_compute_usd_per_hour: 1.0,
+    },
+  });
+  const freshVmForecast = computeRunwayForecast({ budget: fullyReserved, budgetEnabled: true });
+  expect(freshVmForecast.etaSecs).toBeCloseTo(3_600, 0);
+  expect(freshVmForecast.headline).toContain("~1h runway left");
+  expect(freshVmForecast.headline).not.toContain("Budget exhausted");
 });
 
 it("derives the optimistic view, mode lines, and empty model fallback", () => {
@@ -213,7 +241,7 @@ it("turns bandwidth limits on, updates live runway preview, and saves pace setti
     saveBandwidthLimits={async (_id, lim) => { savedBw = lim; return optimisticBandwidthLimits(own(10), lim); }} />);
   const toggle = await screen.findByRole("switch", { name: "Bandwidth limit" });
   expect(toggle.getAttribute("aria-checked")).toBe("false");
-  expect(screen.getByTestId("mission-forecast-card").textContent).toContain("~4h 12m runway left");
+  expect(screen.getByTestId("mission-forecast-card").textContent).toContain("~4h 18m runway left");
 
   fireEvent.click(toggle);
   await waitFor(() => expect((screen.getByLabelText("Tokens per minute") as HTMLInputElement).value).toBe("120000"));
@@ -224,7 +252,7 @@ it("turns bandwidth limits on, updates live runway preview, and saves pace setti
   fireEvent.input(usdHInput, { target: { value: "1.0" } });
 
   // Forecast card updates live before saving.
-  expect(screen.getByTestId("mission-forecast-card").textContent).toContain("~8h 24m runway left");
+  expect(screen.getByTestId("mission-forecast-card").textContent).toContain("~8h 36m runway left");
 
   fireEvent.click(screen.getByRole("button", { name: "Save bandwidth" }));
   await waitFor(() => expect(savedBw).toEqual({
@@ -233,6 +261,48 @@ it("turns bandwidth limits on, updates live runway preview, and saves pace setti
     compute_usd_per_hour: 1,
     protect_root: true,
   }));
+});
+
+it("ignores stale background poll responses captured before a settings mutation", async () => {
+  let loadCount = 0;
+  let resolveStalePoll!: (v: MissionBudget) => void;
+  render(() => (
+    <MissionSettings
+      missionId="m1"
+      title="PollRace"
+      onClose={() => {}}
+      pollIntervalMs={20}
+      loadStats={pendingStats}
+      load={async () => {
+        loadCount += 1;
+        if (loadCount === 1) return own(10);
+        if (loadCount === 2) {
+          return new Promise<MissionBudget>(r => {
+            resolveStalePoll = r;
+          });
+        }
+        return own(25);
+      }}
+      save={async (_id, amount) => own(amount!)}
+    />
+  ));
+
+  const input = (await screen.findByLabelText("Amount (USD)")) as HTMLInputElement;
+  expect(input.value).toBe("10");
+
+  // Wait for the background poll (#2) to be in flight with stale state.
+  await waitFor(() => expect(loadCount).toBeGreaterThanOrEqual(2));
+
+  // User saves $25 while poll #2 is still in flight.
+  fireEvent.input(input, { target: { value: "25" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save budget" }));
+  await waitFor(() => expect(screen.getByText(/of \$25(?:\.00)?/)).toBeTruthy());
+
+  // Now resolve the stale poll (#2) with old $10 budget — must NOT overwrite $25!
+  resolveStalePoll(own(10));
+  await new Promise(r => setTimeout(r, 30));
+  expect((screen.getByLabelText("Amount (USD)") as HTMLInputElement).value).toBe("25");
+  expect(screen.getByText(/of \$25(?:\.00)?/)).toBeTruthy();
 });
 
 it("turns machine limits on, expands per-provider limits, and saves overrides", async () => {

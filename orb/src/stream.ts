@@ -1,5 +1,5 @@
 import {batch} from "solid-js";
-import { api, clearConnection, getJwt, connectionVersion, isAbortError, isTransientNetworkError, noteAbort, orderedApiCandidates, REQUEST_TIMEOUT_MS, RequestTimeoutError, transportFetch } from "./api";
+import { ApiError, InvalidApiResponseError, api, clearConnection, getJwt, connectionVersion, isAbortError, isTransientNetworkError, noteAbort, orderedApiCandidates, REQUEST_TIMEOUT_MS, RequestTimeoutError, transportFetch } from "./api";
 import { nativeInvoke } from "./native";
 import { requestDone, streamLoad, timed } from "./diagnostics";
 import {
@@ -141,7 +141,7 @@ async function apiRawOnce(path: string): Promise<Response> {
     clearConnection();
     throw new Error("401 Unauthorized — reconnect in Settings → Account");
   }
-  if (!res.ok) throw new Error(`${res.status} ${await res.text().catch(() => "")}`.trim());
+  if (!res.ok) throw new ApiError(res.status, (await res.text().catch(() => "")).trim());
   return res;
 }
 
@@ -182,7 +182,16 @@ export async function getMissionEventPage(id:string, cursor:{since?:number;befor
  if(cursor.since!==undefined)query.set('since_seq',String(cursor.since));
  if(cursor.before!==undefined)query.set('before_seq',String(cursor.before));
  const response=await apiRaw(`/api/control/missions/${id}/events?${query}`);
- const events=await response.json() as StoredEvent[];
+ let events:StoredEvent[];
+ try{
+  events=await response.json() as StoredEvent[];
+ }catch(cause){
+  if(isAbortError(cause)){
+   noteAbort(`GET /api/control/missions/${id}/events`, "timeout", 0);
+   throw new RequestTimeoutError();
+  }
+  throw new InvalidApiResponseError(`GET /api/control/missions/${id}/events`, { cause });
+ }
  if(!Array.isArray(events)||response.headers.get('X-Orb-Events-Protocol')!=='1'||!response.headers.has('X-Has-More'))throw Error('Invalid event page protocol. Redeploy Orb and the backend together.');
  const number=(name:string)=>{const value=response.headers.get(name);if(value===null)return undefined;const n=Number(value);if(!value.trim()||!Number.isSafeInteger(n)||n<0)throw Error(`Invalid event cursor: ${name}`);return n;};
  const nextCursor=number('X-Next-Cursor'),pageMax=number('X-Page-Max-Sequence'),max=number('X-Max-Sequence'),more=response.headers.get('X-Has-More');
