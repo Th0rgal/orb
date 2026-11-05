@@ -15,6 +15,7 @@ struct OrbMissionBudget: Equatable {
         ("hetzner", "Hetzner"),
         ("vastai", "Vast.ai"),
         ("scaleway", "Scaleway"),
+        ("colab", "Google Colab"),
     ]
 
     struct ParseError: Error, Equatable, LocalizedError {

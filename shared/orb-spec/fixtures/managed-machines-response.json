@@ -433,6 +433,79 @@
       ],
       "supports_free_stop": false,
       "supports_snapshots": false
+    },
+    {
+      "configured": false,
+      "display_name": "Google Colab",
+      "enabled": true,
+      "provider": "colab",
+      "sizes": [
+        {
+          "arch": "x86_64",
+          "cpu": 8,
+          "disk_gb": 100,
+          "gpu": "Auto GPU",
+          "ram_gb": 30,
+          "size": "colab-auto",
+          "usd_per_hour": 0.225
+        },
+        {
+          "arch": "x86_64",
+          "cpu": 2,
+          "disk_gb": 80,
+          "gpu": "Tesla T4",
+          "ram_gb": 12,
+          "size": "t4",
+          "usd_per_hour": 0.1
+        },
+        {
+          "arch": "x86_64",
+          "cpu": 8,
+          "disk_gb": 100,
+          "gpu": "NVIDIA L4",
+          "ram_gb": 30,
+          "size": "l4",
+          "usd_per_hour": 0.225
+        },
+        {
+          "arch": "x86_64",
+          "cpu": 12,
+          "disk_gb": 150,
+          "gpu": "A100",
+          "ram_gb": 80,
+          "size": "a100",
+          "usd_per_hour": 0.675
+        },
+        {
+          "arch": "x86_64",
+          "cpu": 12,
+          "disk_gb": 150,
+          "gpu": "H100",
+          "ram_gb": 80,
+          "size": "h100",
+          "usd_per_hour": 1.2
+        },
+        {
+          "arch": "x86_64",
+          "cpu": 8,
+          "disk_gb": 100,
+          "gpu": "TPU v5e-1",
+          "ram_gb": 32,
+          "size": "v5e1",
+          "usd_per_hour": 0.475
+        },
+        {
+          "arch": "x86_64",
+          "cpu": 8,
+          "disk_gb": 100,
+          "gpu": "TPU v6e-1",
+          "ram_gb": 32,
+          "size": "v6e1",
+          "usd_per_hour": 0.675
+        }
+      ],
+      "supports_free_stop": false,
+      "supports_snapshots": false
     }
   ],
   "sizes": [

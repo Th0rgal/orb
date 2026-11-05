@@ -33,11 +33,13 @@ E="${2:-OPENCODE_TMPDIR=/tmp/opencode GIT_TERMINAL_PROMPT=0 DISABLE_AUTOUPDATER=
 H=/var/lib/orb-node
 O=/home/user/.orb
 B=/usr/local/bin
-L="${LD_LIBRARY_PATH:-/usr/local/nvidia/lib:/usr/local/nvidia/lib64}:/usr/local/cuda/lib64"
+L="${LD_LIBRARY_PATH:-/usr/lib64-nvidia:/usr/local/nvidia/lib:/usr/local/nvidia/lib64}:/usr/lib64-nvidia:/usr/local/cuda/lib64"
+# Preserve Colab TPU/GPU runtime env vars (COLAB_*, TPU_*, PJRT_*) when present.
+C_ENV=$(env | grep -E '^(COLAB_|TPU_|PJRT_|NVIDIA_|CUDA_)[A-Z0-9_]*=' | tr '\n' ' ' || true)
 if pgrep -u orbnode -x sandboxed-node >/dev/null 2>&1; then
   exit 0
 fi
-nohup bash -c "set -a; . \"$O/enroll.env\"; [ ! -r /etc/orb/boost-env ] || . /etc/orb/boost-env; set +a; cd \"$H\"; while :; do runuser -u orbnode -- env HOME=\"$H\" PATH=\"$P\" LD_LIBRARY_PATH=\"$L\" $E \"$B/sandboxed-node\" || :; sleep 2; done" </dev/null >"$H/orb-node.log" 2>&1 &
+nohup bash -c "set -a; . \"$O/enroll.env\"; [ ! -r /etc/orb/boost-env ] || . /etc/orb/boost-env; set +a; cd \"$H\"; while :; do runuser -u orbnode -- env HOME=\"$H\" PATH=\"$P\" LD_LIBRARY_PATH=\"$L\" $C_ENV $E \"$B/sandboxed-node\" || :; sleep 2; done" </dev/null >"$H/orb-node.log" 2>&1 &
 ORBBG
 chmod 0755 /usr/local/sbin/orb-node-bg
 
