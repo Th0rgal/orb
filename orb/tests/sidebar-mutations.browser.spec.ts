@@ -42,9 +42,24 @@ test('folder rename retains expanded descendants and surfaces work migration err
   await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
   let root='reference';
   let failCronMove=false;
+  let holdNextTransfer=false;
+  let pendingTransfer: (() => void) | null = null;
   await page.route('**/api/**',async route=>{
     const req=route.request(),url=new URL(req.url()),path=url.pathname;
-    if(path.endsWith('/file/transfer')) {root=req.postDataJSON().destination;return route.fulfill({json:{}});}
+    if(path.endsWith('/file/transfer')) {
+      if (holdNextTransfer) {
+        holdNextTransfer=false;
+        await new Promise<void>(resolve=>{pendingTransfer=resolve;});
+        pendingTransfer=null;
+      }
+      root=req.postDataJSON().destination;
+      return route.fulfill({json:{}});
+    }
+    if(req.method()==='GET' && path.endsWith('/file')) {
+      const requested=url.searchParams.get('path')??'';
+      if(requested===`${root}/nested/notes.md`) return route.fulfill({json:{content:'# Audit notes',revision:1}});
+      return route.fulfill({status:404,body:'file not found'});
+    }
     if(req.method()==='PATCH' && path.includes('/crons/')) {
       if(failCronMove) return route.fulfill({status:500,body:'scheduler busy'});
       return route.fulfill({json:{slug:'one',job:{id:'job-1',name:'Nightly audit',schedule:'every 1h',enabled:true,failure_streak:0,folder:root},runs:[]}});
@@ -58,12 +73,23 @@ test('folder rename retains expanded descendants and surfaces work migration err
   await page.goto('/');await page.getByRole('button',{name:'One',exact:true}).click();
   await page.getByRole('button',{name:'reference',exact:true}).click();
   await page.getByRole('button',{name:'nested',exact:true}).click();
-  await expect(page.locator('[data-tree-id="pf:one:reference/nested/notes.md"]')).toBeVisible();
+  const noteRow=page.locator('[data-tree-id="pf:one:reference/nested/notes.md"]');
+  await expect(noteRow).toBeVisible();
+  await noteRow.getByRole('button',{name:'notes.md',exact:true}).click();
+  await page.getByRole('button',{name:'Edit',exact:true}).click();
+  await expect(page.locator('.pf-path')).toHaveText('one/reference/nested/notes.md');
+
+  // Gate the transfer so renaming while editing does not read the destination before the server moves it.
+  holdNextTransfer=true;
   await page.getByRole('button',{name:'reference',exact:true}).click({button:'right'});
   await page.getByRole('menuitem',{name:'Rename',exact:true}).click();
   await page.getByLabel('Folder name',{exact:true}).fill('Research');
   await page.getByRole('dialog').getByRole('button',{name:'Rename',exact:true}).click();
   await expect(page.locator('[data-tree-id="pf:one:Research/nested/notes.md"]')).toBeVisible();
+  await expect.poll(()=>pendingTransfer!==null).toBe(true);
+  pendingTransfer!();
+  await expect(page.locator('.pf-path')).toHaveText('one/Research/nested/notes.md');
+  await expect(page.locator('.file-view .error-notice')).toHaveCount(0);
   await expect(page.getByRole('button',{name:'nested',exact:true})).toHaveAttribute('aria-expanded','true');
   await expect(page.getByRole('button',{name:'reference',exact:true})).toHaveCount(0);
 

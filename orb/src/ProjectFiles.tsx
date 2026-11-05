@@ -607,13 +607,18 @@ export function LiveProjectsSection(p: {
           setDirs(newPrefix + key.slice(oldPrefix.length), reconcile([...dirs[key]]));
         }
       }
-      const selected = p.selected(), prefix = `pf:${slug}:${path}`;
-      if (selected === prefix || selected?.startsWith(`${prefix}/`)) p.open(`pf:${project}:${destination}${selected.slice(prefix.length)}`);
     });
+  };
+  const openMovedSelection = (slug: string, path: string, destination: string, directory: boolean, project = slug) => {
+    const selected = p.selected(), prefix = `pf:${slug}:${path}`;
+    if (selected === prefix || (directory && selected?.startsWith(`${prefix}/`))) {
+      p.open(`pf:${project}:${destination}${selected.slice(prefix.length)}`);
+    }
   };
   const folderMoved = async (slug: string, path: string, destination: string, project = slug, alreadyProjected = false) => {
     setFolderLabel(slug, path, fileBaseName(path));
     if (!alreadyProjected) applyOptimisticFolderMove(slug, path, destination, project);
+    openMovedSelection(slug, path, destination, true, project);
     try { if (project === slug) await moveFolderWork(slug, path, destination); }
     finally { await Promise.all([loadMissions(slug), loadCrons(slug, true)]); }
   };
@@ -683,13 +688,10 @@ export function LiveProjectsSection(p: {
       setFileActionError(`"${fileBaseName(destination)}" already exists at the destination.`);
       return;
     }
-    const previousSelection = p.selected();
     const label = target.directory ? folderLabel(target.slug, target.path) : fileBaseName(target.path);
     setFileAction(null);
     if (target.directory) {
       applyOptimisticFolderMove(target.slug, target.path, destination);
-    } else if (previousSelection === `pf:${target.slug}:${target.path}`) {
-      p.open(`pf:${target.slug}:${destination}`);
     }
     try {
       await moveOptimistically(
@@ -699,16 +701,11 @@ export function LiveProjectsSection(p: {
         label,
       );
     } catch {
-      if (version === connectionVersion()) {
-        if (target.directory) {
-          const newPrefix = `${target.slug}:${destination}`;
-          batch(() => {
-            for (const key of Object.keys(expanded)) if (key === newPrefix || key.startsWith(`${newPrefix}/`)) setExpanded(key, false);
-          });
-        }
-        if (previousSelection && p.selected()?.startsWith(`pf:${target.slug}:${destination}`)) {
-          p.open(previousSelection);
-        }
+      if (version === connectionVersion() && target.directory) {
+        const newPrefix = `${target.slug}:${destination}`;
+        batch(() => {
+          for (const key of Object.keys(expanded)) if (key === newPrefix || key.startsWith(`${newPrefix}/`)) setExpanded(key, false);
+        });
       }
       return;
     }
@@ -722,6 +719,7 @@ export function LiveProjectsSection(p: {
         }
         return;
       }
+      openMovedSelection(target.slug, target.path, destination, false);
       await refreshFileParents(target.slug, target.path, destination);
       settleMove(moveKey);
     } catch (e) {
