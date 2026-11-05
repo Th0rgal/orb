@@ -519,7 +519,7 @@ export default function ProvidersPage() {
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
   const [usageData, setUsageData] = useState<Record<string, ProviderUsage>>({});
   const [usageLoading, setUsageLoading] = useState<Record<string, boolean>>({});
-  const [confirmResetId, setConfirmResetId] = useState<string | null>(null);
+  const [confirmReset, setConfirmReset] = useState<{ id: string; key: string } | null>(null);
   const [resetBusyId, setResetBusyId] = useState<string | null>(null);
   const [resetError, setResetError] = useState<Record<string, string>>({});
   const [usageWindow, setUsageWindow] = useState<UsageWindow>('7d');
@@ -1179,12 +1179,12 @@ export default function ProvidersPage() {
                                           </span>
                                         ) : null}
                                       </div>
-                                      {confirmResetId === provider.id ? (
+                                      {confirmReset?.id === provider.id ? (
                                         <div className="flex items-center gap-1.5">
                                           <button
                                             type="button"
                                             disabled={resetBusyId === provider.id}
-                                            onClick={() => setConfirmResetId(null)}
+                                            onClick={() => setConfirmReset(null)}
                                             className="px-2 py-1 rounded text-[11px] text-white/50 hover:text-white/80 bg-white/[0.04] cursor-pointer disabled:opacity-50"
                                           >
                                             Cancel
@@ -1193,15 +1193,16 @@ export default function ProvidersPage() {
                                             type="button"
                                             disabled={resetBusyId === provider.id}
                                             onClick={async () => {
+                                              const idemKey = confirmReset.key;
                                               setResetBusyId(provider.id);
                                               setResetError((prev) => ({ ...prev, [provider.id]: '' }));
                                               try {
                                                 const updated = await resetProviderUsage(provider.id, {
-                                                  idempotency_key: crypto.randomUUID(),
+                                                  idempotency_key: idemKey,
                                                   grant_id: primaryGrant?.id,
                                                 });
                                                 setUsageData((prev) => ({ ...prev, [provider.id]: updated }));
-                                                setConfirmResetId(null);
+                                                setConfirmReset(null);
                                                 void mutateProviders();
                                                 void mutateBulkUsage();
                                               } catch (err) {
@@ -1222,7 +1223,12 @@ export default function ProvidersPage() {
                                         <button
                                           type="button"
                                           disabled={!resets.usable_now}
-                                          onClick={() => setConfirmResetId(provider.id)}
+                                          onClick={() =>
+                                            setConfirmReset({
+                                              id: provider.id,
+                                              key: crypto.randomUUID(),
+                                            })
+                                          }
                                           className="px-2 py-1 rounded text-[11px] text-white/70 hover:text-white bg-white/[0.06] hover:bg-white/[0.1] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                                         >
                                           Use reset…

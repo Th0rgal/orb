@@ -2700,7 +2700,14 @@ CLI error: {"data":{"message":"Failed to execute statement"},"name":"UnknownErro
             routing::{get, post},
             Json, Router,
         };
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         use serde_json::{json, Value};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let codex_exhausted = Arc::new(AtomicBool::new(false));
+        let codex_consumes = Arc::new(AtomicUsize::new(0));
+        let codex_exhausted_route = Arc::clone(&codex_exhausted);
+        let codex_consumes_route = Arc::clone(&codex_consumes);
 
         let app = Router::new()
             .route(
@@ -2730,6 +2737,39 @@ CLI error: {"data":{"message":"Failed to execute statement"},"name":"UnknownErro
                         Json(json!({ "result": "reset", "resets_left": 0 }))
                     },
                 ),
+            )
+            .route(
+                "/wham/usage",
+                get(move || {
+                    let exhausted = codex_exhausted_route.load(Ordering::SeqCst);
+                    async move {
+                        Json(json!({
+                            "plan_type": "pro",
+                            "rate_limit": {
+                                "allowed": !exhausted,
+                                "limit_reached": exhausted,
+                                "primary_window": {
+                                    "used_percent": if exhausted { 100 } else { 35 },
+                                    "limit_window_seconds": 18000,
+                                    "reset_at": 1791000000
+                                }
+                            },
+                            "rate_limit_reset_credits": {
+                                "available_count": 1
+                            }
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/wham/rate-limit-reset-credits/consume",
+                post(move || {
+                    let consumes = Arc::clone(&codex_consumes_route);
+                    async move {
+                        consumes.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({ "status": "consumed", "remaining_count": 0 }))
+                    }
+                }),
             );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2770,6 +2810,62 @@ CLI error: {"data":{"message":"Failed to execute statement"},"name":"UnknownErro
             .limit
             .contains("Subscription reset redeemed on Primary Max"));
         assert!(wait.resume_at <= Utc::now() + Duration::seconds(30));
+
+        // Codex auto-reset must skip an account that already has capacity again
+        // (e.g. 35% used after a concurrent mission redeemed a reset), even though
+        // manual reset eligibility (`usable_now`) is true whenever usage > 0.
+        let jwt_claims = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "https://api.openai.com/auth": { "chatgpt_account_id": "acct_codex_test" }
+            }))
+            .unwrap(),
+        );
+        let codex_jwt = format!("eyJhbGciOiJub25lIn0.{jwt_claims}.sig");
+        let mut codex_acct = crate::ai_providers::AIProvider::new(
+            crate::ai_providers::ProviderType::OpenAI,
+            "ChatGPT Pro".to_string(),
+        );
+        codex_acct.label = Some("Codex Pro".to_string());
+        codex_acct.auto_reset_on_limit = true;
+        codex_acct.oauth = Some(crate::ai_providers::OAuthCredentials {
+            access_token: codex_jwt,
+            refresh_token: "ref_codex".to_string(),
+            expires_at: (Utc::now() + Duration::hours(2)).timestamp_millis(),
+        });
+        std::fs::write(
+            &providers_path,
+            serde_json::to_vec_pretty(&vec![&acct, &codex_acct]).unwrap(),
+        )
+        .unwrap();
+
+        let codex_mission = active_mission(&store, "codex").await;
+        assert_eq!(
+            crate::api::ai_providers::try_auto_reset_subscription_on_limit(
+                dir.path(),
+                None,
+                "codex",
+                codex_mission.id,
+                "run:codex-not-exhausted",
+            )
+            .await,
+            None
+        );
+        assert_eq!(codex_consumes.load(Ordering::SeqCst), 0);
+
+        codex_exhausted.store(true, Ordering::SeqCst);
+        assert_eq!(
+            crate::api::ai_providers::try_auto_reset_subscription_on_limit(
+                dir.path(),
+                None,
+                "codex",
+                codex_mission.id,
+                "run:codex-exhausted",
+            )
+            .await
+            .as_deref(),
+            Some("Codex Pro")
+        );
+        assert_eq!(codex_consumes.load(Ordering::SeqCst), 1);
 
         crate::api::ai_providers::set_test_subscription_reset_bases(None);
 

@@ -84,6 +84,7 @@ struct OrbProvidersSettings: View {
     @State private var keySheet = false
     @State private var login: OrbProviderLogin?
     @State private var resetTarget: OrbResetPrompt?
+    @State private var pendingResetKeys: [String: String] = [:]
     static let subscriptionTypes = ["anthropic", "openai", "google", "xai", "kimi"]
     var body: some View {
         List {
@@ -104,11 +105,14 @@ struct OrbProvidersSettings: View {
                                 }
                             }
                             Button("Use subscription reset…") {
+                                let pid = provider["id"].text
+                                let key = pendingResetKeys[pid] ?? UUID().uuidString.lowercased()
+                                pendingResetKeys[pid] = key
                                 resetTarget = OrbResetPrompt(
-                                    id: provider["id"].text,
+                                    id: pid,
                                     provider: provider,
                                     summary: reset,
-                                    idempotencyKey: UUID().uuidString.lowercased()
+                                    idempotencyKey: key
                                 )
                             }
                             .disabled(!ready || busy || !reset.usableNow)
@@ -195,7 +199,10 @@ struct OrbProvidersSettings: View {
             isPresented: Binding(get: { resetTarget != nil }, set: { if !$0 { resetTarget = nil } }),
             presenting: resetTarget
         ) { prompt in
-            Button("Cancel", role: .cancel) { resetTarget = nil }
+            Button("Cancel", role: .cancel) {
+                pendingResetKeys.removeValue(forKey: prompt.id)
+                resetTarget = nil
+            }
             Button("Use reset", role: .destructive) { Task { await redeemReset(prompt) } }
         } message: { prompt in
             let parsed = Self.splitDisplayName(prompt.provider)
@@ -357,6 +364,7 @@ struct OrbProvidersSettings: View {
         }
         do {
             let updated = try await client.call("/api/ai/providers/\(OrbCore.escape(prompt.id))/reset-usage", method: "POST", body: .object(payload))
+            pendingResetKeys.removeValue(forKey: prompt.id)
             var entries: [String: OrbJSON] = { if case .object(let existing) = usage { return existing }; return [:] }()
             entries[prompt.id] = updated
             usage = .object(entries)

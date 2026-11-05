@@ -403,6 +403,7 @@ fun OrbProvidersSettingsPage(
     var busy by remember { mutableStateOf(false) }
     var resetPrompt by remember { mutableStateOf<Triple<OrbRow, OrbSubscriptionResetSummary, String>?>(null) }
     var resetBusy by remember { mutableStateOf(false) }
+    var resetDialogError by remember { mutableStateOf<String?>(null) }
 
     var showConnectSubscriptionMenu by remember { mutableStateOf(false) }
     var oauthProviderType by remember { mutableStateOf<String?>(null) }
@@ -1028,6 +1029,7 @@ fun OrbProvidersSettingsPage(
                                                                 .let { mod ->
                                                                     if (resetSummary.usableNow && !busy && !resetBusy) {
                                                                         mod.orbPressClickable {
+                                                                            resetDialogError = null
                                                                             resetPrompt = Triple(provider, resetSummary, java.util.UUID.randomUUID().toString())
                                                                         }
                                                                     } else mod
@@ -1577,19 +1579,30 @@ fun OrbProvidersSettingsPage(
         val label = split.account.ifEmpty { split.title }
         val detailSentence = if (summary.detail.isNotEmpty()) "${summary.detail}. " else ""
         AlertDialog(
-            onDismissRequest = { if (!resetBusy) resetPrompt = null },
+            onDismissRequest = {
+                if (!resetBusy) {
+                    resetDialogError = null
+                    resetPrompt = null
+                }
+            },
             containerColor = OrbStyle.elevated,
             titleContentColor = Color.White,
             textContentColor = OrbStyle.textSecondary,
             title = { Text("Use subscription reset?", fontWeight = FontWeight.SemiBold) },
             text = {
-                Text("Redeem 1 banked subscription reset on $label? ${detailSentence}This immediately consumes a reset on your subscription and cannot be undone.")
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Redeem 1 banked subscription reset on $label? ${detailSentence}This immediately consumes a reset on your subscription and cannot be undone.")
+                    resetDialogError?.takeIf { it.isNotEmpty() }?.let { errMsg ->
+                        Text(errMsg, color = OrbStyle.error, fontSize = 12.sp)
+                    }
+                }
             },
             confirmButton = {
                 TextButton(
                     enabled = !resetBusy,
                     onClick = {
                         resetBusy = true
+                        resetDialogError = null
                         scope.launch {
                             try {
                                 val body = mutableMapOf<String, Any?>("idempotency_key" to idemKey)
@@ -1600,13 +1613,14 @@ fun OrbProvidersSettingsPage(
                                     body = body
                                 )
                                 OrbJSON.dict(resp)?.let { usageEntries = usageEntries + (targetProvider.id to it) }
+                                resetDialogError = null
                                 resetPrompt = null
                                 statusBanner = "Redeemed subscription reset"
                                 loadProvidersAndUsage()
                                 core.refreshAll()
                             } catch (e: Throwable) {
+                                resetDialogError = e.message ?: "Reset failed; try again."
                                 errorBanner = e.message
-                                resetPrompt = null
                             } finally {
                                 resetBusy = false
                             }
@@ -1617,7 +1631,13 @@ fun OrbProvidersSettingsPage(
                 }
             },
             dismissButton = {
-                TextButton(enabled = !resetBusy, onClick = { resetPrompt = null }) {
+                TextButton(
+                    enabled = !resetBusy,
+                    onClick = {
+                        resetDialogError = null
+                        resetPrompt = null
+                    }
+                ) {
                     Text("Cancel", color = OrbStyle.textSecondary)
                 }
             }

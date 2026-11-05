@@ -10791,43 +10791,9 @@ async fn reset_provider_usage(
                 outcome,
                 super::subscription_usage::ResetRedeemOutcome::AlreadyRedeemed
             );
-            release_provider_limit(&state, uuid, true).await;
-            let key = uuid.to_string();
-            super::subscription_usage::AnthropicResetStore::shared()
-                .invalidate(&key)
-                .await;
-            state.codex_usage.invalidate(&key).await;
-            state.provider_usage_cache.remove(&key).await;
-
-            let mut refreshed = match live_fetch_and_cache(Arc::clone(&state), key).await {
-                Ok(val) => val,
-                Err(_) => serde_json::json!({
-                    "provider_type": provider.provider_type.id(),
-                    "provider_name": provider.name,
-                    "account_email": provider.account_email,
-                    "status": "connected",
-                }),
-            };
-
-            if was_already_redeemed {
-                let still_capped = refreshed.get("unified_status").and_then(|v| v.as_str())
-                    == Some("rejected")
-                    || refreshed
-                        .get("codex_limit_reached")
-                        .and_then(|v| v.as_bool())
-                        == Some(true);
-                if still_capped {
-                    return Err((
-                        StatusCode::CONFLICT,
-                        "That subscription reset grant was already redeemed".to_string(),
-                    ));
-                }
-            }
-
-            let woken = state
-                .control
-                .wake_usage_limit_waits(provider.provider_type.id())
-                .await;
+            let (mut refreshed, woken) =
+                reconcile_subscription_reset(&provider, Some(&state), was_already_redeemed, true)
+                    .await?;
 
             if let Some(obj) = refreshed.as_object_mut() {
                 obj.insert("reset_redeemed".to_string(), serde_json::json!(true));
@@ -10854,12 +10820,75 @@ async fn reset_provider_usage(
     }
 }
 
-/// Attempt to redeem a banked subscription reset automatically when a mission
-/// hits a usage limit across all configured accounts and an eligible account
-/// has `auto_reset_on_limit == true`.
-///
-/// Returns `Some(account_label)` when a reset was redeemed and the account's
-/// cooldown was cleared so the mission can resume immediately.
+async fn reconcile_subscription_reset(
+    provider: &crate::ai_providers::AIProvider,
+    state_opt: Option<&Arc<super::routes::AppState>>,
+    was_already_redeemed: bool,
+    refresh_inline: bool,
+) -> Result<(serde_json::Value, usize), (StatusCode, String)> {
+    let limits = crate::account_limits::shared();
+    limits.clear(&crate::account_limits::account_key(provider.id));
+    if let Some(sub_key) =
+        crate::provider_health::store_account_subscription_key(provider.provider_type, provider)
+    {
+        limits.clear(&crate::account_limits::subscription_key(&sub_key.0));
+    }
+    let key = provider.id.to_string();
+    super::subscription_usage::AnthropicResetStore::shared()
+        .invalidate(&key)
+        .await;
+
+    let fallback = || {
+        serde_json::json!({
+            "provider_type": provider.provider_type.id(),
+            "provider_name": provider.name,
+            "account_email": provider.account_email,
+            "status": "connected",
+        })
+    };
+
+    let Some(state) = state_opt else {
+        return Ok((fallback(), 0));
+    };
+
+    release_provider_limit(state, provider.id, true).await;
+    state.codex_usage.invalidate(&key).await;
+    state.provider_usage_cache.remove(&key).await;
+
+    let refreshed = if refresh_inline || was_already_redeemed {
+        live_fetch_and_cache(Arc::clone(state), key)
+            .await
+            .unwrap_or_else(|_| fallback())
+    } else {
+        let bg_state = Arc::clone(state);
+        tokio::spawn(async move {
+            let _ = live_fetch_and_cache(bg_state, key).await;
+        });
+        fallback()
+    };
+
+    if was_already_redeemed {
+        let still_capped = refreshed.get("unified_status").and_then(|v| v.as_str())
+            == Some("rejected")
+            || refreshed
+                .get("codex_limit_reached")
+                .and_then(|v| v.as_bool())
+                == Some(true);
+        if still_capped {
+            return Err((
+                StatusCode::CONFLICT,
+                "That subscription reset grant was already redeemed".to_string(),
+            ));
+        }
+    }
+
+    let woken = state
+        .control
+        .wake_usage_limit_waits(provider.provider_type.id())
+        .await;
+    Ok((refreshed, woken))
+}
+
 pub(crate) fn auto_reset_idempotency_key(
     provider_id: uuid::Uuid,
     mission_id: uuid::Uuid,
@@ -10876,6 +10905,8 @@ pub(crate) fn auto_reset_idempotency_key(
     format!("auto-{}", &hex[..40])
 }
 
+/// Returns `Some(account_label)` when a reset was redeemed and the account's
+/// cooldown + parked waits were cleared so missions can resume immediately.
 pub(crate) async fn try_auto_reset_subscription_on_limit(
     working_dir: &Path,
     state_opt: Option<&Arc<super::routes::AppState>>,
@@ -11022,6 +11053,12 @@ pub(crate) async fn try_auto_reset_subscription_on_limit(
                 else {
                     continue;
                 };
+                let exhausted = snap.limit_reached == Some(true)
+                    || snap.primary_used_percent.is_some_and(|pct| pct >= 100.0)
+                    || snap.secondary_used_percent.is_some_and(|pct| pct >= 100.0);
+                if !exhausted {
+                    continue;
+                }
                 let Some(resets) = snap
                     .subscription_resets
                     .filter(|r| r.available_count > 0 && r.usable_now)
@@ -11046,31 +11083,21 @@ pub(crate) async fn try_auto_reset_subscription_on_limit(
             _ => continue,
         };
 
-        if matches!(
+        let was_already_redeemed = matches!(
+            outcome,
+            super::subscription_usage::ResetRedeemOutcome::AlreadyRedeemed
+        );
+        let accepted = matches!(
             outcome,
             super::subscription_usage::ResetRedeemOutcome::Reset { .. }
-        ) {
-            let limits = crate::account_limits::shared();
-            limits.clear(&crate::account_limits::account_key(provider.id));
-            if let Some(sub_key) = crate::provider_health::store_account_subscription_key(
-                provider.provider_type,
-                &provider,
-            ) {
-                limits.clear(&crate::account_limits::subscription_key(&sub_key.0));
-            }
-            if let Some(state) = state_opt {
-                release_provider_limit(state, provider.id, true).await;
-                let key = provider.id.to_string();
-                super::subscription_usage::AnthropicResetStore::shared()
-                    .invalidate(&key)
-                    .await;
-                state.codex_usage.invalidate(&key).await;
-                state.provider_usage_cache.remove(&key).await;
-                let bg_state = Arc::clone(state);
-                tokio::spawn(async move {
-                    let _ = live_fetch_and_cache(bg_state, key).await;
-                });
-            }
+        ) || (was_already_redeemed && state_opt.is_some());
+        if accepted {
+            let Ok((_val, woken)) =
+                reconcile_subscription_reset(&provider, state_opt, was_already_redeemed, false)
+                    .await
+            else {
+                continue;
+            };
             let account_label = provider
                 .label
                 .filter(|s| !s.trim().is_empty())
@@ -11080,6 +11107,7 @@ pub(crate) async fn try_auto_reset_subscription_on_limit(
                 provider_id = %provider.id,
                 %mission_id,
                 %backend,
+                woken_missions = woken,
                 account = %account_label,
                 "Automatically redeemed subscription reset after usage limit"
             );
