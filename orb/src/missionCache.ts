@@ -238,7 +238,7 @@ function ensureWarmSub(id: string): WarmMissionSub {
   };
 
   const handleEvent = (ev: StreamEvent) => {
-    if (ev.type === "mission_status_changed" || ev.type === "status") {
+    if (ev.type === "mission_status_changed" || ev.type === "status" || ev.type === "mission_settings_updated") {
       if (ev.type === "mission_status_changed" && typeof ev.data.status === "string") {
         sub.lastStatus = ev.data.status;
         sub.lastStatusSummary =

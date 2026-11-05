@@ -20452,3 +20452,126 @@ async fn fallback_remote_steering_preserves_children_and_fleet_sweep_includes_fo
         .collect();
     assert_eq!(page2_ids, vec![deep_active_worker.id.to_string()]);
 }
+#[tokio::test]
+async fn update_mission_settings_switches_opencode_model_across_active_and_completed_statuses() {
+    let h = Harness::new().await;
+    {
+        let mut reg = h.state.backend_registry.write().await;
+        reg.register(Arc::new(crate::backend::opencode::OpenCodeBackend::new(
+            "http://127.0.0.1:9".into(),
+            None,
+            false,
+        )));
+    }
+    let mission = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("Switch OpenCode model live"),
+            None,
+            None,
+            Some("builtin/smart"),
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_session_id(mission.id, "ses_live_switch", "opencode", None)
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(mission.id, MissionStatus::Active)
+        .await
+        .unwrap();
+
+    let mut events_rx = h.control.events_tx.subscribe();
+
+    // 1. Live switch while Active: preserves session_id, updates model_override, emits SSE event.
+    let Json(updated_live) = update_mission_settings(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Json(
+            serde_json::from_value(json!({
+                "model_override": "xai/grok-4.6",
+                "resume": false,
+            }))
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        updated_live.get("model_override").and_then(Value::as_str),
+        Some("xai/grok-4.6")
+    );
+    assert_eq!(
+        updated_live.get("session_id").and_then(Value::as_str),
+        Some("ses_live_switch")
+    );
+    let stored_live = h
+        .control
+        .mission_store
+        .get_mission(mission.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored_live.status, MissionStatus::Active);
+    assert_eq!(stored_live.model_override.as_deref(), Some("xai/grok-4.6"));
+    assert_eq!(stored_live.session_id.as_deref(), Some("ses_live_switch"));
+
+    let emitted = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Ok(AgentEvent::MissionSettingsUpdated {
+                mission_id,
+                model_override,
+                session_id,
+                ..
+            }) = events_rx.recv().await
+            {
+                if mission_id == mission.id {
+                    break (model_override, session_id);
+                }
+            }
+        }
+    })
+    .await
+    .expect("expected MissionSettingsUpdated SSE event");
+    assert_eq!(emitted.0.as_deref(), Some("xai/grok-4.6"));
+    assert_eq!(emitted.1.as_deref(), Some("ses_live_switch"));
+
+    // 2. Settled remote-style switch while Completed: switches cleanly to another route/model.
+    h.control
+        .mission_store
+        .update_mission_status(mission.id, MissionStatus::Completed)
+        .await
+        .unwrap();
+    let Json(updated_completed) = update_mission_settings(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Json(
+            serde_json::from_value(json!({
+                "model_override": "openai/gpt-6-astra",
+                "resume": false,
+            }))
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        updated_completed
+            .get("model_override")
+            .and_then(Value::as_str),
+        Some("openai/gpt-6-astra")
+    );
+    assert_eq!(
+        updated_completed.get("session_id").and_then(Value::as_str),
+        Some("ses_live_switch")
+    );
+}

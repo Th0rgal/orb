@@ -30,6 +30,7 @@ import {
 } from "../localAgents";
 import {
   isConnected,
+  modelPickerItems,
   shortModelLabel,
   connectionVersion,
   getApiUrl,
@@ -820,12 +821,16 @@ export function Composer(p: {
           </div>
           <span class="picks-sep">·</span>
           <div class="model-wrap">
-            <button class={`model ${which() === "model" ? "on" : ""}`} title="Model" onClick={() => setWhich(which() === "model" ? null : "model")}>
+            <button class={`model ${which() === "model" ? "on" : ""}`} title="Model" onClick={() => {
+              const opening = which() !== "model";
+              setWhich(opening ? "model" : null);
+              if (opening && isConnected()) void refreshHarnessChoices();
+            }}>
               {modelLabel()} <Ic.ChevronDown size={12} />
             </button>
             <Show when={which() === "model"}>
               <Picker label="Models" searchLabel="Search models" selected={pick()?.model}
-                items={(choice()?.models ?? []).map(m => ({id:m.value,label:shortModelLabel(m.label)}))}
+                items={modelPickerItems(choice()?.models ?? [])}
                 onClose={() => setWhich(null)} onSelect={value => {
                   const backend = choice()!.backend.id;
                   const effort = normalizeEffort(pick()?.effort, backend);

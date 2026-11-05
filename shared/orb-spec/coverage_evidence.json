@@ -69,7 +69,7 @@
         },
         {
           "path": "src/api/control/dispatch_admission_tests.rs",
-          "sha256": "f0043e2e78ada8e743203e49262ff8ebd2066af7049b5d7e967705357dac7930"
+          "sha256": "d05fc376f1658da0121fd9f723e86b3bf4370a92519e1e9e77a081e167aa6f28"
         }
       ],
       "execution": {
@@ -1114,7 +1114,7 @@
         },
         {
           "path": "src/api/control/remote_grok.rs",
-          "sha256": "de89ba80a9c63effc281757166fd48684a3b22817f016f11f3ef0fc8b55a992e"
+          "sha256": "b86e23fa7577c0bbf8b0c3bc665f73d766cffb1a809adfddce445c6dd7e6b0a8"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
@@ -3718,7 +3718,7 @@
         },
         {
           "path": "src/api/control/dispatch_admission_tests.rs",
-          "sha256": "f0043e2e78ada8e743203e49262ff8ebd2066af7049b5d7e967705357dac7930"
+          "sha256": "d05fc376f1658da0121fd9f723e86b3bf4370a92519e1e9e77a081e167aa6f28"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
@@ -4519,7 +4519,7 @@
         },
         {
           "path": "src/api/control/remote_grok.rs",
-          "sha256": "de89ba80a9c63effc281757166fd48684a3b22817f016f11f3ef0fc8b55a992e"
+          "sha256": "b86e23fa7577c0bbf8b0c3bc665f73d766cffb1a809adfddce445c6dd7e6b0a8"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
@@ -4580,7 +4580,7 @@
         },
         {
           "path": "src/api/control/remote_grok.rs",
-          "sha256": "de89ba80a9c63effc281757166fd48684a3b22817f016f11f3ef0fc8b55a992e"
+          "sha256": "b86e23fa7577c0bbf8b0c3bc665f73d766cffb1a809adfddce445c6dd7e6b0a8"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
@@ -4763,7 +4763,7 @@
         },
         {
           "path": "src/api/control/remote_grok.rs",
-          "sha256": "de89ba80a9c63effc281757166fd48684a3b22817f016f11f3ef0fc8b55a992e"
+          "sha256": "b86e23fa7577c0bbf8b0c3bc665f73d766cffb1a809adfddce445c6dd7e6b0a8"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",

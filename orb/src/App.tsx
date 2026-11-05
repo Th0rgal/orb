@@ -39,7 +39,7 @@ import {preferSparkAdministration} from "./machineDestinations";
 import { CloudAgentPage } from "./CloudAgents";
 import { monitorSoftware } from "./softwareInventory";
 import {startLocalQueueWorker} from "./localMessageQueue";
-import {BtwSettings} from "./btwSettings";
+const BtwSettings = lazy(() => import("./btwSettings").then(module => ({ default: module.BtwSettings })));
 import { screenName, startUsageTelemetry, usageTelemetry } from "./usageTelemetry";
 import {type PlanProgressData} from "./PlanProgress";
 import { startLocalOrigin, localAgentForLaunch } from "./localAgents";
@@ -104,7 +104,7 @@ import {
   refreshLocalAgents,
   writeLocalFiles,
 } from "./localAgents";
-import { ControllerView } from "./Controller";
+const ControllerView = lazy(() => import("./Controller").then(module => ({ default: module.ControllerView })));
 import {
   createMission,
   getMission,
@@ -136,7 +136,9 @@ const BitwardenSettings = lazy(() => import("./BitwardenSettings").then(module =
 import { InboxPage } from "./Inbox";
 import { requestInboxDigest } from "./inboxDigest";
 import { countUnreadInboxMissions, listUnreadInboxCandidates } from "./inboxModel";
-import { InboxSettings, InboxSummariesSettings, inboxConfig } from "./inboxSettings";
+import { inboxConfig } from "./inboxSettings";
+const InboxSettings = lazy(() => import("./inboxSettings").then(module => ({ default: module.InboxSettings })));
+const InboxSummariesSettings = lazy(() => import("./inboxSettings").then(module => ({ default: module.InboxSummariesSettings })));
 import { shouldRequestInboxDigest } from "./inboxPolicy";
 import { pendingMissionInteraction } from "./missionAttention";
 import { markMissionRead, unreadVersion } from "./missionUnread";
@@ -270,6 +272,38 @@ export default function App() {
   const [previewContext, setPreviewContext] = createSignal<{id: string; pct: number | null} | null>(null);
   const [previewPlan, setPreviewPlan] = createSignal<{id:string; data:PlanProgressData | undefined}>();
   const [openMission, setOpenMission] = createSignal<Mission | null>(null);
+  const syncOpenMission = (next: Mission | null, authoritative = false) => {
+    setOpenMission(next);
+    if (!next) return;
+    const syncRow = (row: Mission) => {
+      if (row.id !== next.id) return row;
+      const nextUpdatedAt = authoritative ? (next.updated_at ?? row.updated_at) : (next.updated_at || row.updated_at);
+      if (
+        row.backend === next.backend &&
+        row.agent === next.agent &&
+        row.model_override === next.model_override &&
+        row.model_effort === next.model_effort &&
+        row.fast_mode === next.fast_mode &&
+        row.service_tier === next.service_tier &&
+        row.config_profile === next.config_profile &&
+        row.updated_at === nextUpdatedAt
+      ) {
+        return row;
+      }
+      return {
+        ...row,
+        backend: next.backend,
+        agent: next.agent,
+        model_override: next.model_override,
+        model_effort: next.model_effort,
+        fast_mode: next.fast_mode,
+        service_tier: next.service_tier,
+        config_profile: next.config_profile,
+        updated_at: nextUpdatedAt,
+      };
+    };
+    setMissions(rows => rows.some(r => r.id === next.id) ? rows.map(syncRow) : rows);
+  };
   /** Only missions still doing something: the sidebar is a place to act,
    * not a history. Everything else lives under its project. */
   const [fleetNodes, setFleetNodes] = createSignal<RemoteNodeView[]>([]);
@@ -1579,8 +1613,8 @@ export default function App() {
           </Match>
           <Match when={currentMissionId() || (selected()===null && launchPreview())}>
             <Show when={currentMissionId() ? launchedViewKeys.get(currentMissionId()!) || currentMissionId() : launchViewKey()} keyed>{viewKey =>
-              <Show when={viewKey===launchViewKey()} fallback={<MissionLookupContext.Provider value={id=>missions().find(m=>m.id===id) ?? lookupMissionById(id)}><MissionView id={currentMissionId()!} initial={missions().find(m=>m.id===currentMissionId())} onMission={setOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id,pct)=>setPreviewContext({id,pct})} onFork={commitFork}/></MissionLookupContext.Provider>}>
-                <NativeMissionView id={currentMissionId() || ''} initial={missions().find(m=>m.id===currentMissionId())} launch={launchPreview()??undefined} launchError={createError()??undefined} onRetryLaunch={()=>retryLaunch?.()} onMission={setOpenMission} onContext={(id,pct)=>setPreviewContext({id,pct})} onPlan={(id,data)=>setPreviewPlan({id,data})} onFork={commitFork}/>
+              <Show when={viewKey===launchViewKey()} fallback={<MissionLookupContext.Provider value={id=>missions().find(m=>m.id===id) ?? lookupMissionById(id)}><MissionView id={currentMissionId()!} initial={missions().find(m=>m.id===currentMissionId())} onMission={syncOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id,pct)=>setPreviewContext({id,pct})} onFork={commitFork}/></MissionLookupContext.Provider>}>
+                <NativeMissionView id={currentMissionId() || ''} initial={missions().find(m=>m.id===currentMissionId())} launch={launchPreview()??undefined} launchError={createError()??undefined} onRetryLaunch={()=>retryLaunch?.()} onMission={syncOpenMission} onContext={(id,pct)=>setPreviewContext({id,pct})} onPlan={(id,data)=>setPreviewPlan({id,data})} onFork={commitFork}/>
               </Show>
             }</Show>
           </Match>

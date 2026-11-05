@@ -755,6 +755,25 @@ enum OrbReadCache {
         seedMemory(name, value: value)
         OrbDisk.saveAsync(value, key: name)
     }
+    /// Reconciles an authoritative mission mutation (e.g. `PATCH /settings` or `mission_settings_updated`)
+    /// into the in-memory and disk read cache while preserving any cached conversation history and
+    /// fencing any in-flight read started before the mutation so it cannot overwrite the cache.
+    static func saveMission(_ id: String, value: OrbJSON) {
+        let name = "mission:\(id)"
+        let scope = key(name)
+        pending[scope] = nil
+        var merged = value
+        if merged["history"].items.isEmpty,
+           let existing = values[scope]?.value ?? OrbDisk.read(name, as: OrbJSON.self),
+           !existing["history"].items.isEmpty,
+           case var .object(fields) = merged {
+            fields["history"] = existing["history"]
+            merged = .object(fields)
+        }
+        if values.count >= 256, let oldest = values.min(by: { $0.value.date < $1.value.date })?.key { values[oldest] = nil }
+        values[scope] = Entry(value: merged, date: Date())
+        OrbDisk.saveAsync(merged, key: name)
+    }
     static func seedFromGlobalMissions(_ rawMissions: [OrbJSON]) {
         var byProject: [String: [OrbJSON]] = [:]
         for item in rawMissions {

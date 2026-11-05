@@ -53,6 +53,11 @@ struct OrbConversation: View {
     @State var warmListenerToken: UUID?
     @State var draftSaveTask: Task<Void, Never>?
     @State var eventRefreshTask: Task<Void, Never>?
+    @State var settingsSaveTask: Task<Void, Never>?
+    @State var settingsSaveGeneration: Int = 0
+    @State var settingsSyncedGeneration: Int = 0
+    @State var settingsRemoteRevision: Int = 0
+    @State var confirmedSettingsBaseline: (model: String, tier: String)? = nil
     @State var optimisticPrompt: String?
     /// Streamed reply text, one update per frame; only the streaming bubble reads `text`.
     @State var live = OrbLiveText()
@@ -243,6 +248,7 @@ struct OrbConversation: View {
                 .sheet(item: $preview) { OrbPreviewSheet(file: $0).orbTrackPage("attachment_preview", surface: .sheet) }
                 .sheet(isPresented: $showSelection, onDismiss: {
                     if transferRequested { transferRequested = false; transferring = true }
+                    else { scheduleMissionSettingsSave() }
                 }) {
                     OrbAgentPicker(selection: $selection, existing: id != nil, onTransfer: id != nil && !isCloud ? { transferRequested = true } : nil).orbTrackPage("agent_picker", surface: .sheet)
                 }
