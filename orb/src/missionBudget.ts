@@ -609,6 +609,10 @@ export function computeRunwayForecast(opts: {
   const committedPreReserved = spentUsd + carvedUsd;
   const committedTotal = committedPreReserved + reservedUsd;
   const availableUsd = capUsd != null ? Math.max(0, capUsd - committedTotal) : 0;
+  // `reservedUsd` holds up to 60 minutes of future runtime for live machines,
+  // not incurred spend. Use `runwayUsd` (`cap - spent - carved`) when dividing
+  // by live burn so active VM reservations are not counted twice against ETA.
+  const runwayUsd = capUsd != null ? Math.max(0, capUsd - committedPreReserved) : 0;
 
   const timelineObsCompute = latestNonNull(res?.timeline.observed_compute_usd_per_h);
   const observedComputeBurnUsdPerH = Math.max(
@@ -649,15 +653,15 @@ export function computeRunwayForecast(opts: {
   }
 
   const etaSecs =
-    capUsd != null && availableUsd > 0 && shapedComputeBurnUsdPerH > 0.005
-      ? (availableUsd / shapedComputeBurnUsdPerH) * 3600
-      : capUsd != null && availableUsd <= 0
+    capUsd != null && runwayUsd > 0 && shapedComputeBurnUsdPerH > 0.005
+      ? (runwayUsd / shapedComputeBurnUsdPerH) * 3600
+      : capUsd != null && runwayUsd <= 0
         ? 0
         : null;
 
   const unshapedEtaSecs =
-    capUsd != null && availableUsd > 0 && observedComputeBurnUsdPerH > 0.005
-      ? (availableUsd / observedComputeBurnUsdPerH) * 3600
+    capUsd != null && runwayUsd > 0 && observedComputeBurnUsdPerH > 0.005
+      ? (runwayUsd / observedComputeBurnUsdPerH) * 3600
       : null;
 
   const etaGainSecs =
@@ -671,9 +675,9 @@ export function computeRunwayForecast(opts: {
 
   let tone: "ok" | "warning" | "danger" = "ok";
   if (capUsd != null) {
-    if (availableUsd <= 0 || (etaSecs != null && etaSecs < 1800) || exhaustsBeforeMissionEta) {
+    if (runwayUsd <= 0 || (etaSecs != null && etaSecs < 1800) || exhaustsBeforeMissionEta) {
       tone = "danger";
-    } else if ((etaSecs != null && etaSecs < 7200) || (capUsd > 0 && availableUsd < capUsd * 0.15)) {
+    } else if ((etaSecs != null && etaSecs < 7200) || (capUsd > 0 && runwayUsd < capUsd * 0.15)) {
       tone = "warning";
     }
   }
@@ -681,12 +685,17 @@ export function computeRunwayForecast(opts: {
   let headline: string;
   let subline: string;
   if (capUsd != null) {
-    if (availableUsd <= 0) {
+    if (runwayUsd <= 0) {
       headline = "Budget exhausted";
-      subline = `${money(committedTotal)} committed of ${money(capUsd)} pool`;
+      subline = `${money(committedPreReserved)} spent of ${money(capUsd)} pool`;
     } else if (etaSecs != null) {
       headline = `${formatDurationEta(etaSecs)} runway left`;
-      const parts = [`${money(shapedComputeBurnUsdPerH)}/h compute burn`, `${money(availableUsd)} left (${money(capUsd)} cap)`];
+      const parts = [
+        `${money(shapedComputeBurnUsdPerH)}/h compute burn`,
+        reservedUsd > 0.005
+          ? `${money(availableUsd)} unallocated (${money(reservedUsd)} reserved · ${money(capUsd)} cap)`
+          : `${money(availableUsd)} left (${money(capUsd)} cap)`,
+      ];
       if (etaGainSecs != null) parts.push(`+${formatDurationEta(etaGainSecs).replace(/^~/, "")} from bandwidth cap`);
       if (exhaustsBeforeMissionEta && missionEtaSecs != null) {
         parts.push(`exhausts before ${formatDurationEta(missionEtaSecs)} task ETA`);
@@ -722,8 +731,8 @@ export function computeRunwayForecast(opts: {
     Math.max(etaSecs ?? missionEtaSecs ?? 7200, 1800),
     86_400,
   );
-  const projectedEnd = committedTotal + shapedComputeBurnUsdPerH * (projHorizonSecs / 3600);
-  const unshapedEnd = committedTotal + observedComputeBurnUsdPerH * (projHorizonSecs / 3600);
+  const projectedEnd = committedPreReserved + shapedComputeBurnUsdPerH * (projHorizonSecs / 3600);
+  const unshapedEnd = committedPreReserved + observedComputeBurnUsdPerH * (projHorizonSecs / 3600);
   const maxVal = Math.max(
     capUsd ?? 0,
     committedTotal,
@@ -777,19 +786,19 @@ export function computeRunwayForecast(opts: {
   const observedAreaPath = `${observedLinePath} L${nowX},${baselineY} L${padLeft},${baselineY} Z`;
 
   let exhaustionX: number | null = null;
-  if (capUsd != null && availableUsd > 0 && shapedComputeBurnUsdPerH > 0.005 && etaSecs != null && etaSecs <= projHorizonSecs) {
+  if (capUsd != null && runwayUsd > 0 && shapedComputeBurnUsdPerH > 0.005 && etaSecs != null && etaSecs <= projHorizonSecs) {
     const frac = Math.max(0, Math.min(1, etaSecs / projHorizonSecs));
     exhaustionX = Math.round((nowX + (endX - nowX) * frac) * 10) / 10;
   }
 
   const projectedLinePath = exhaustionX != null && capY != null
-    ? `M${nowX},${reservedTopY} L${exhaustionX},${capY} L${endX},${capY}`
-    : `M${nowX},${reservedTopY} L${endX},${projEndY}`;
+    ? `M${nowX},${nowY} L${exhaustionX},${capY} L${endX},${capY}`
+    : `M${nowX},${nowY} L${endX},${projEndY}`;
 
   let unshapedLinePath: string | null = null;
   if (shapedComputeBurnUsdPerH + 0.01 < observedComputeBurnUsdPerH) {
     const unshapedEndY = yOf(Math.min(maxVal, unshapedEnd));
-    unshapedLinePath = `M${nowX},${reservedTopY} L${endX},${unshapedEndY}`;
+    unshapedLinePath = `M${nowX},${nowY} L${endX},${unshapedEndY}`;
   }
 
   return {

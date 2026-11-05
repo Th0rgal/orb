@@ -5041,3 +5041,182 @@ async fn mission_bandwidth_limits_enforce_ancestor_monotonicity_and_pace_subagen
     assert_eq!(view.effective_bandwidth.current_vcpu_per_min, 4);
     assert!(view.effective_bandwidth.protect_root);
 }
+
+#[tokio::test]
+async fn mission_bandwidth_protect_root_paces_auto_child_and_concurrent_burst() {
+    let dir = tempfile::tempdir().unwrap();
+    let boat = NamedFakeProvider::new("boat");
+    let mut cfg = settings();
+    cfg.max_concurrent = Some(16);
+    cfg.max_size = "xlarge".into();
+    let m = Arc::new(ManagedManager::new(
+        cfg,
+        Some(boat as Arc<dyn ManagedProvider>),
+        dir.path(),
+        3000,
+    ));
+
+    // Root sets `compute_vcpu_per_min = 2` (exact fit for one `small` 2-vCPU VM) with `protect_root = true`.
+    m.set_mission_bandwidth_limits(
+        "root",
+        Some(budget::BandwidthLimits {
+            tokens_per_min: None,
+            compute_vcpu_per_min: Some(2),
+            compute_usd_per_hour: None,
+            protect_root: true,
+        }),
+        &["root".into()],
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    // Two concurrent auto-managed child spawns (`owner_mission_id: None`, `requested_by_mission_id: Some("root")`):
+    // 1) Neither may bypass pacing via `protect_root`.
+    // 2) Only ONE may enter admission at 2 vCPU; the second must re-verify under `self.admission` and wait!
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let m1 = Arc::clone(&m);
+    let b1 = Arc::clone(&barrier);
+    let t1 = tokio::spawn(async move {
+        b1.wait().await;
+        m1.spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            owner_mission_id: None,
+            requested_by_mission_id: Some("root".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["root".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+    });
+    let m2 = Arc::clone(&m);
+    let b2 = Arc::clone(&barrier);
+    let t2 = tokio::spawn(async move {
+        b2.wait().await;
+        m2.spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            owner_mission_id: None,
+            requested_by_mission_id: Some("root".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["root".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let live = m
+        .machines_snapshot()
+        .await
+        .into_iter()
+        .filter(|x| x.state.is_live())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        live.len(),
+        1,
+        "exactly one concurrent auto-child VM should be admitted under 2 vCPU/min ceiling"
+    );
+    assert!(
+        t1.is_finished() ^ t2.is_finished(),
+        "second auto-child spawn must wait rather than bypass protect_root or race admission"
+    );
+
+    // Freeing the first VM immediately unblocks the waiting auto-child spawn.
+    m.destroy(&live[0].id, "done").await.unwrap();
+    let (r1, r2) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(t1, t2) })
+        .await
+        .expect("second auto-child spawn unblocked after destroy");
+    assert!(r1.unwrap().is_ok());
+    assert!(r2.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn vastai_fallback_rejects_offer_exceeding_compute_bandwidth_ceiling() {
+    use axum::{
+        extract::Path,
+        http::StatusCode,
+        routing::{post, put},
+        Json, Router,
+    };
+
+    let app = Router::new()
+        .route(
+            "/bundles/",
+            post(|| async {
+                Json(serde_json::json!({
+                    "offers": [
+                        // Initial quote fits 20 vCPU ceiling (sniped on PUT)
+                        {"id": 9101, "dph_total": 0.45, "cpu_cores_effective": 16.0, "cpu_ram": 65536.0},
+                        // Fallback offer exceeds 20 vCPU bandwidth ceiling (64 vCPU)
+                        {"id": 9102, "dph_total": 0.50, "cpu_cores_effective": 64.0, "cpu_ram": 131072.0}
+                    ]
+                }))
+            }),
+        )
+        .route(
+            "/asks/:offer_id/",
+            put(|Path(offer_id): Path<String>| async move {
+                if offer_id == "9101" {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({"error": "offer 9101 already rented"})),
+                    );
+                }
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"success": true, "new_contract": 999102})),
+                )
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = settings();
+    cfg.daily_cap_usd = Some(5.0);
+    let vast: Arc<dyn ManagedProvider> = Arc::new(vastai::VastAiProvider::new(
+        format!("http://{addr}"),
+        "vast-test-key",
+    ));
+    let mgr = Arc::new(ManagedManager::new(cfg, Some(vast), dir.path(), 3000));
+    mgr.set_mission_bandwidth_limits(
+        "root",
+        Some(budget::BandwidthLimits {
+            tokens_per_min: None,
+            compute_vcpu_per_min: Some(20),
+            compute_usd_per_hour: None,
+            protect_root: true,
+        }),
+        &["root".into()],
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    let err = mgr
+        .spawn(SpawnRequest {
+            provider: Some("vastai".into()),
+            size: Some("rtx4090".into()),
+            ttl_minutes: Some(60),
+            owner_mission_id: Some("root".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["root".into()],
+            wait: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.error, "bandwidth_exceeded");
+    assert_eq!(err.status, 429);
+    srv.abort();
+}
