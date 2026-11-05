@@ -6824,7 +6824,20 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 merged.extend(definition.clone());
                 if let Some(new_models) = definition.get("models").and_then(|v| v.as_object()) {
                     for (id, definition) in new_models {
-                        models.insert(id.clone(), definition.clone());
+                        match models.get_mut(id).and_then(|v| v.as_object_mut()) {
+                            Some(existing_model) => {
+                                if let Some(new_fields) = definition.as_object() {
+                                    for (k, v) in new_fields {
+                                        existing_model
+                                            .entry(k.clone())
+                                            .or_insert_with(|| v.clone());
+                                    }
+                                }
+                            }
+                            None => {
+                                models.insert(id.clone(), definition.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -12658,7 +12671,10 @@ mod tests {
                         "npm": "@ai-sdk/openai-compatible",
                         "name": "Google",
                         "models": {
-                            "gemini-4-carbon-eap": { "name": "gemini-4-carbon-eap" }
+                            "gemini-4-carbon-eap": {
+                                "name": "Custom Carbon",
+                                "limit": { "context": 512_000, "output": 32_000 }
+                            }
                         }
                     }
                 }
@@ -12694,14 +12710,12 @@ mod tests {
             true
         );
         assert!(config["provider"]["builtin"]["models"]["fast"].is_object());
-        assert_eq!(
-            config["provider"]["google"]["models"]["gemini-4-carbon-eap"]["modalities"]["input"],
-            json!(["text", "image"])
-        );
-        assert_eq!(
-            config["provider"]["google"]["models"]["gemini-4-carbon-eap"]["attachment"],
-            true
-        );
+        let carbon = &config["provider"]["google"]["models"]["gemini-4-carbon-eap"];
+        assert_eq!(carbon["modalities"]["input"], json!(["text", "image"]));
+        assert_eq!(carbon["attachment"], true);
+        assert_eq!(carbon["name"], "Custom Carbon");
+        assert_eq!(carbon["limit"]["context"], 512_000);
+        assert_eq!(carbon["limit"]["output"], 32_000);
     }
 
     #[test]
