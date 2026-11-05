@@ -2528,6 +2528,141 @@ pub fn spawn_cache_gc(work_root: PathBuf, store: super::JobStore) {
     });
 }
 
+/// Minimum age before stale OpenCode `.log` files are pruned from mission dirs
+/// (exceeds live job ceilings so an active run's `opencode.log` stays intact).
+pub(crate) const OPENCODE_LOG_MIN_MAX_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+
+fn opencode_subdir_no_symlinks(mission_dir: &Path, leaf: &str) -> Option<PathBuf> {
+    let mut dir = mission_dir.to_path_buf();
+    for part in [".local", "share", "opencode", leaf] {
+        dir.push(part);
+        let meta = std::fs::symlink_metadata(&dir).ok()?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return None;
+        }
+    }
+    Some(dir)
+}
+
+/// Byte-offset snapshot of `.local/share/opencode/log/*.log` before a job runs,
+/// ensuring post-mortem failure inspection only examines bytes written by the run.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OpencodeLogSnapshot {
+    files: HashMap<String, u64>,
+}
+
+pub(crate) fn capture_opencode_log_snapshot(mission_dir: &Path) -> OpencodeLogSnapshot {
+    let Some(dir) = opencode_subdir_no_symlinks(mission_dir, "log") else {
+        return OpencodeLogSnapshot::default();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return OpencodeLogSnapshot::default();
+    };
+    let mut files = HashMap::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.ends_with(".log") {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            continue;
+        }
+        files.insert(name, meta.len());
+    }
+    OpencodeLogSnapshot { files }
+}
+
+/// Inspect bytes appended to `.local/share/opencode/log/*.log` since `before`
+/// and return a static, secret-free diagnostic when OpenCode logged a SQLite
+/// write failure or `ENOSPC` (which OpenCode 1.18+ redacts to `Unexpected server error` on stdout).
+pub(crate) fn detect_opencode_log_storage_error(
+    mission_dir: &Path,
+    before: &OpencodeLogSnapshot,
+) -> Option<&'static str> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const MAX_TAIL_BYTES: u64 = 64 * 1024;
+    let dir = opencode_subdir_no_symlinks(mission_dir, "log")?;
+    let entries = std::fs::read_dir(&dir).ok()?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.ends_with(".log") {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            continue;
+        }
+        let current_len = meta.len();
+        let start_offset = match before.files.get(&name) {
+            Some(&prev_len) if current_len == prev_len => continue,
+            Some(&prev_len) if current_len > prev_len => prev_len,
+            _ => 0,
+        };
+        if current_len == 0 {
+            continue;
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_NOFOLLOW);
+        }
+        let Ok(mut file) = opts.open(&path) else {
+            continue;
+        };
+        if !file.metadata().map(|m| m.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let read_from = start_offset.max(current_len.saturating_sub(MAX_TAIL_BYTES));
+        if file.seek(SeekFrom::Start(read_from)).is_err() {
+            continue;
+        }
+        let mut buf = Vec::new();
+        if (&mut file)
+            .take(MAX_TAIL_BYTES)
+            .read_to_end(&mut buf)
+            .is_err()
+        {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&buf);
+        for line in text.lines().rev() {
+            let lower = line.to_ascii_lowercase();
+            let is_error_line = lower.contains("level=error")
+                || lower.contains("sqliteerror")
+                || lower.contains("enospc")
+                || lower.contains("error=");
+            if !is_error_line {
+                continue;
+            }
+            if lower.contains("no space left on device") || lower.contains("enospc") {
+                return Some("ENOSPC: no space left on device");
+            }
+            if lower.contains("failed to execute statement")
+                || lower.contains("database or disk is full")
+                || lower.contains("sqlite_full")
+                || lower.contains("sqlite_ioerr")
+                || lower.contains("disk i/o error")
+            {
+                return Some("Failed to execute statement");
+            }
+        }
+    }
+    None
+}
+
 /// Prune stale OpenCode `tool_*` spill files inside `<mission_dir>/.local/share/opencode/tool-output/`
 /// without following symlinks, keeping `opencode.db` and recent outputs intact.
 pub(crate) fn prune_opencode_tool_outputs_in_mission_dir(
@@ -2536,16 +2671,9 @@ pub(crate) fn prune_opencode_tool_outputs_in_mission_dir(
     now: SystemTime,
 ) -> usize {
     let cutoff = now.checked_sub(max_age).unwrap_or(SystemTime::UNIX_EPOCH);
-    let mut dir = mission_dir.to_path_buf();
-    for part in [".local", "share", "opencode", "tool-output"] {
-        dir.push(part);
-        let Ok(meta) = std::fs::symlink_metadata(&dir) else {
-            return 0;
-        };
-        if meta.file_type().is_symlink() || !meta.is_dir() {
-            return 0;
-        }
-    }
+    let Some(dir) = opencode_subdir_no_symlinks(mission_dir, "tool-output") else {
+        return 0;
+    };
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return 0;
     };
@@ -2572,12 +2700,18 @@ pub(crate) fn prune_opencode_tool_outputs_in_mission_dir(
     removed
 }
 
-pub(crate) fn prune_all_opencode_tool_outputs(
-    work_root: &Path,
+/// Prune stale OpenCode `.log` files inside `<mission_dir>/.local/share/opencode/log/`
+/// without following symlinks, keeping `opencode.db` and active logs intact.
+pub(crate) fn prune_opencode_logs_in_mission_dir(
+    mission_dir: &Path,
     max_age: Duration,
     now: SystemTime,
 ) -> usize {
-    let Ok(entries) = std::fs::read_dir(work_root) else {
+    let cutoff = now.checked_sub(max_age).unwrap_or(SystemTime::UNIX_EPOCH);
+    let Some(dir) = opencode_subdir_no_symlinks(mission_dir, "log") else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
         return 0;
     };
     let mut removed = 0usize;
@@ -2585,9 +2719,42 @@ pub(crate) fn prune_all_opencode_tool_outputs(
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if uuid::Uuid::parse_str(&name).is_err() {
+        if !name.ends_with(".log") {
             continue;
         }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            continue;
+        }
+        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        if mtime <= cutoff && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+pub(crate) fn prune_all_opencode_tool_outputs(
+    work_root: &Path,
+    max_age: Duration,
+    now: SystemTime,
+    active_missions: &std::collections::HashSet<uuid::Uuid>,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(work_root) else {
+        return 0;
+    };
+    let log_max_age = max_age.max(OPENCODE_LOG_MIN_MAX_AGE);
+    let mut removed = 0usize;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(mission_id) = uuid::Uuid::parse_str(&name) else {
+            continue;
+        };
         let path = entry.path();
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
             continue;
@@ -2596,6 +2763,9 @@ pub(crate) fn prune_all_opencode_tool_outputs(
             continue;
         }
         removed += prune_opencode_tool_outputs_in_mission_dir(&path, max_age, now);
+        if !active_missions.contains(&mission_id) {
+            removed += prune_opencode_logs_in_mission_dir(&path, log_max_age, now);
+        }
     }
     removed
 }
@@ -2629,9 +2799,51 @@ async fn run_gc_pass(work_root: &Path, store: &super::JobStore) {
     } else {
         Duration::from_secs(60 * 60)
     };
+    let active_missions = match store.live_mission_ids().await {
+        Ok(ids) => Some(ids),
+        Err(err) => {
+            tracing::warn!(
+                "node cache GC: live mission query failed; skipping OpenCode log prune: {err}"
+            );
+            None
+        }
+    };
     let tool_root = work_root.to_path_buf();
     let _ = tokio::task::spawn_blocking(move || {
-        prune_all_opencode_tool_outputs(&tool_root, tool_output_max_age, SystemTime::now())
+        if let Some(active) = active_missions {
+            prune_all_opencode_tool_outputs(
+                &tool_root,
+                tool_output_max_age,
+                SystemTime::now(),
+                &active,
+            )
+        } else {
+            let Ok(entries) = std::fs::read_dir(&tool_root) else {
+                return 0;
+            };
+            let mut removed = 0usize;
+            for entry in entries.filter_map(|e| e.ok()) {
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if uuid::Uuid::parse_str(&name).is_err() {
+                    continue;
+                }
+                let path = entry.path();
+                let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    continue;
+                }
+                removed += prune_opencode_tool_outputs_in_mission_dir(
+                    &path,
+                    tool_output_max_age,
+                    SystemTime::now(),
+                );
+            }
+            removed
+        }
     })
     .await;
     let free = fs2::available_space(work_root).unwrap_or(free);
@@ -5040,7 +5252,8 @@ mod tests {
     #[test]
     fn opencode_tool_output_prune_removes_only_stale_regular_tool_files() {
         let dir = tempfile::tempdir().unwrap();
-        let mission_dir = dir.path().join(uuid::Uuid::new_v4().to_string());
+        let mission_id = uuid::Uuid::new_v4();
+        let mission_dir = dir.path().join(mission_id.to_string());
         let opencode_dir = mission_dir.join(".local/share/opencode");
         let tool_dir = opencode_dir.join("tool-output");
         std::fs::create_dir_all(&tool_dir).unwrap();
@@ -5053,9 +5266,15 @@ mod tests {
         std::fs::write(&fresh_tool, b"fresh").unwrap();
         std::fs::write(&non_tool, b"keep").unwrap();
 
+        let no_active = std::collections::HashSet::new();
         let future_now = SystemTime::now() + Duration::from_secs(3600);
         assert_eq!(
-            prune_all_opencode_tool_outputs(dir.path(), Duration::from_secs(1800), future_now),
+            prune_all_opencode_tool_outputs(
+                dir.path(),
+                Duration::from_secs(1800),
+                future_now,
+                &no_active,
+            ),
             2
         );
         assert!(db.exists());
@@ -5068,11 +5287,104 @@ mod tests {
             prune_all_opencode_tool_outputs(
                 dir.path(),
                 Duration::from_secs(1800),
-                SystemTime::now()
+                SystemTime::now(),
+                &no_active,
             ),
             0
         );
         assert!(fresh_tool.exists());
+
+        // Stale `.local/share/opencode/log/*.log` files are pruned after the
+        // 6-hour log retention floor only when the mission has no live job,
+        // while `opencode.db` and non-log files stay.
+        let log_dir = opencode_dir.join("log");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let opencode_log = log_dir.join("opencode.log");
+        let keep_note = log_dir.join("README.txt");
+        std::fs::write(
+            &opencode_log,
+            b"timestamp=2026-11-01T00:00:00Z level=ERROR error=\"Failed to execute statement\"\n",
+        )
+        .unwrap();
+        std::fs::write(&keep_note, b"keep").unwrap();
+
+        let before = capture_opencode_log_snapshot(&mission_dir);
+        assert_eq!(
+            detect_opencode_log_storage_error(&mission_dir, &before),
+            None,
+            "historical errors prior to run snapshot must be ignored"
+        );
+
+        // Appending a non-storage line does not trigger storage exhaustion.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&opencode_log)
+                .unwrap();
+            writeln!(f, "timestamp=2026-11-05T07:02:18Z level=INFO message=step").unwrap();
+        }
+        assert_eq!(
+            detect_opencode_log_storage_error(&mission_dir, &before),
+            None
+        );
+
+        // Appending the exact OpenCode SQLite error line surfaces the sanitized static reason.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&opencode_log)
+                .unwrap();
+            writeln!(
+                f,
+                "timestamp=2026-11-05T07:02:19.807Z level=ERROR run=843254e7 message=process session.id=ses_e6cdbc328ffeq5GNkBQONlVXDN error=\"Failed to execute statement\""
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            detect_opencode_log_storage_error(&mission_dir, &before),
+            Some("Failed to execute statement")
+        );
+
+        // Log files younger than 6 hours are preserved even when tool-output max_age is 30m.
+        assert_eq!(
+            prune_all_opencode_tool_outputs(
+                dir.path(),
+                Duration::from_secs(1800),
+                SystemTime::now() + Duration::from_secs(3600),
+                &no_active,
+            ),
+            1 // removes `fresh_tool`, keeps `opencode.log`
+        );
+        assert!(opencode_log.exists());
+
+        // Even past the 6-hour log floor, active missions' `.log` files are never unlinked.
+        let active_set = std::collections::HashSet::from([mission_id]);
+        assert_eq!(
+            prune_all_opencode_tool_outputs(
+                dir.path(),
+                Duration::from_secs(1800),
+                SystemTime::now() + Duration::from_secs(7 * 3600),
+                &active_set,
+            ),
+            0
+        );
+        assert!(opencode_log.exists());
+
+        // Once the mission has no live jobs, stale `.log` files past the 6-hour floor are reclaimed.
+        assert_eq!(
+            prune_all_opencode_tool_outputs(
+                dir.path(),
+                Duration::from_secs(1800),
+                SystemTime::now() + Duration::from_secs(7 * 3600),
+                &no_active,
+            ),
+            1
+        );
+        assert!(!opencode_log.exists());
+        assert!(keep_note.exists());
+        assert!(db.exists());
     }
 
     #[test]

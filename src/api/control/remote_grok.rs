@@ -2607,10 +2607,27 @@ impl NativeGrokObserver {
         } else {
             String::new()
         };
+        // OpenCode 1.18+ redacts mid-turn SQLite/disk write failures on stdout to
+        // `Unexpected server error` (`err_<hex>`) while logging the real SQLite
+        // failure to `.local/share/opencode/log/*.log`. When the node runner
+        // surfaces that storage failure in `status.error`, preserve it alongside
+        // the CLI error so both classification and auto-recovery see `StorageExhausted`.
+        let node_storage_exhausted = !succeeded
+            && status.error.as_deref().is_some_and(|err| {
+                super::remote_failure::classify(err).kind
+                    == super::remote_failure::FailureKind::StorageExhausted
+            });
+        let effective_cli_error = match (&self.stream.error, status.error.as_deref()) {
+            (Some(stream_err), Some(node_err)) if node_storage_exhausted => {
+                Some(format!("{stream_err}\n{node_err}"))
+            }
+            (None, Some(node_err)) if node_storage_exhausted => Some(node_err.to_string()),
+            (other, _) => other.clone(),
+        };
         let raw_failure = if !startup_evidence.is_empty() && exited_before_output {
             startup_evidence.as_str()
         } else {
-            self.stream.error.as_deref().unwrap_or(&startup_evidence)
+            effective_cli_error.as_deref().unwrap_or(&startup_evidence)
         };
         let failure = super::remote_failure::classify(raw_failure);
         let location_unsupported = super::remote_failure::is_node_location_unsupported(raw_failure)
@@ -2794,7 +2811,7 @@ impl NativeGrokObserver {
             success,
             content,
             status_reason,
-            cli_error: self.stream.error.clone(),
+            cli_error: effective_cli_error,
             quarantine_reason,
         }
     }
@@ -5724,6 +5741,150 @@ mod tests {
                 assert_eq!(verdict.status_reason, "remote_node_job");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn opencode_redacted_500_verdict_and_storage_log_schedule_remote_recovery() {
+        use crate::api::control::usage_limit_wait;
+        use crate::api::mission_store::SqliteMissionStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().join("missions"), "opencode-9409f9a9")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(
+                Some("wave8 controller"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_session_id(
+                mission.id,
+                "ses_e6cdbc328ffeq5GNkBQONlVXDN",
+                "opencode",
+                None,
+            )
+            .await
+            .unwrap();
+        let owner = RemoteMissionOwner {
+            mission_store: store.clone(),
+            events_tx: None,
+        };
+        let redacted_error_event = concat!(
+            "{\"type\":\"step_start\",\"sessionID\":\"ses_e6cdbc328ffeq5GNkBQONlVXDN\",\"part\":{\"id\":\"prt_1\",\"type\":\"step-start\"}}\n",
+            "{\"type\":\"error\",\"sessionID\":\"ses_e6cdbc328ffeq5GNkBQONlVXDN\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_a0964479\"}}}\n",
+        );
+
+        // 1. Bare redacted HTTP 500 (`err_a0964479`) without a SQLite log line
+        //    classifies as `remote_transport_error` and schedules auto-recovery.
+        let job_transport = Uuid::new_v4();
+        let mut obs_transport =
+            NativeGrokObserver::attach(&owner, "ashur", mission.id, job_transport)
+                .await
+                .unwrap();
+        obs_transport.streaming = LogStreaming::Supported;
+        obs_transport.stream.feed(redacted_error_event);
+        let status_transport: NodeJobStatus = serde_json::from_value(serde_json::json!({
+            "job_id": job_transport,
+            "mission_id": mission.id,
+            "state": "failed",
+            "exit_code": 1,
+            "error": "command exited with Some(1)",
+            "created_at": "2026-11-05T06:46:37Z"
+        }))
+        .unwrap();
+        let verdict_transport = obs_transport.verdict(&status_transport, "ashur").await;
+        assert!(!verdict_transport.success);
+        assert_eq!(verdict_transport.status_reason, "remote_transport_error");
+        let wait_transport = usage_limit_wait::plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            verdict_transport.success,
+            verdict_transport
+                .cli_error
+                .as_deref()
+                .unwrap_or(&verdict_transport.content),
+            job_transport,
+            true,
+        )
+        .await
+        .expect("redacted OpenCode HTTP 500 must schedule remote auto-recovery");
+        assert!(usage_limit_wait::is_transient_wait(&wait_transport.limit));
+
+        // 2. When `sandboxed-node` surfaces the underlying SQLite error from
+        //    `.local/share/opencode/log/opencode.log`, verdict upgrades to
+        //    `remote_storage_exhausted` and `plan_remote` schedules storage recovery.
+        let mission_storage = store
+            .create_mission(
+                Some("wave8 controller storage"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_session_id(
+                mission_storage.id,
+                "ses_e6cdbc328ffeq5GNkBQONlVXDN",
+                "opencode",
+                None,
+            )
+            .await
+            .unwrap();
+        let job_storage = Uuid::new_v4();
+        let mut obs_storage =
+            NativeGrokObserver::attach(&owner, "ashur", mission_storage.id, job_storage)
+                .await
+                .unwrap();
+        obs_storage.streaming = LogStreaming::Supported;
+        obs_storage.stream.feed(redacted_error_event);
+        let status_storage: NodeJobStatus = serde_json::from_value(serde_json::json!({
+            "job_id": job_storage,
+            "mission_id": mission_storage.id,
+            "state": "failed",
+            "exit_code": 1,
+            "error": "command exited with Some(1); opencode server log: Failed to execute statement",
+            "created_at": "2026-11-05T06:46:37Z"
+        }))
+        .unwrap();
+        let verdict_storage = obs_storage.verdict(&status_storage, "ashur").await;
+        assert!(!verdict_storage.success);
+        assert_eq!(verdict_storage.status_reason, "remote_storage_exhausted");
+        assert!(verdict_storage
+            .cli_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Failed to execute statement"));
+        let wait_storage = usage_limit_wait::plan_remote(
+            dir.path(),
+            &store,
+            mission_storage.id,
+            verdict_storage.success,
+            verdict_storage
+                .cli_error
+                .as_deref()
+                .unwrap_or(&verdict_storage.content),
+            job_storage,
+            true,
+        )
+        .await
+        .expect("storage exhaustion surfaced from node log must schedule auto-recovery");
+        assert!(usage_limit_wait::is_transient_wait(&wait_storage.limit));
+        assert!(usage_limit_wait::remote_resume_prompt(&wait_storage.limit).contains("df -h"));
     }
 
     #[test]

@@ -2533,6 +2533,7 @@ pub(super) async fn poll_remote_job(
                                 | "remote_transport_error"
                                 | "remote_quota"
                                 | "remote_startup_stalled"
+                                | "remote_storage_exhausted"
                         )
                     {
                         let sustained_progress = usage_limit_wait::sustained_recovery_progress(

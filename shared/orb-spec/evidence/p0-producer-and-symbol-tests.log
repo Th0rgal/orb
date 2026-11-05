@@ -1,3 +1,4 @@
+   Compiling sandboxed_sh v1.3.0 (/tmp/orb-evidence-rebase/repo)
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -131,14 +132,15 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.33s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
+    Finished `test` profile [unoptimized] target(s) in 1m 05s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0a7ffb45d4522a6b)
 
 running 1 test
 test api::control::dispatch_admission_tests::remote_submission_rejects_closed_snapshots_and_records_host_observations ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3776 filtered out; finished in 0.97s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3780 filtered out; finished in 0.73s
 
+   Compiling sandboxed_sh v1.3.0 (/tmp/orb-evidence-rebase/repo)
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -272,8 +274,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.34s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
+    Finished `test` profile [unoptimized] target(s) in 1m 08s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0a7ffb45d4522a6b)
 
 running 14 tests
 test api::control::fork::tests::an_edited_message_replaces_the_rest_of_the_conversation ... ok
@@ -291,14 +293,15 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.59s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3767 filtered out; finished in 0.48s
 
-    Finished `test` profile [unoptimized] target(s) in 0.24s
-     Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-70c0d7a6354c9bb7)
+   Compiling orb-spec v1.3.0 (/tmp/orb-evidence-rebase/repo/crates/orb-spec)
+    Finished `test` profile [unoptimized] target(s) in 1.17s
+     Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-e77990039172b282)
 
 running 2 tests
 test missing_extra_duplicate_nontext_and_imported_symbols_fail ... ok
 test real_object_and_archive_mutations_are_rejected ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.39s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.67s
 
