@@ -419,6 +419,24 @@ impl SettingsStore {
         self.save_to_disk().await
     }
 
+    pub async fn upgrade_password_hash_if_current(
+        &self,
+        expected_current_hash: &str,
+        upgraded_hash: String,
+    ) -> Result<bool, std::io::Error> {
+        let mut settings = self.settings.write().await;
+        let Some(ref mut auth) = settings.auth else {
+            return Ok(false);
+        };
+        if auth.password_hash.as_deref() != Some(expected_current_hash) {
+            return Ok(false);
+        }
+        auth.password_hash = Some(upgraded_hash);
+        drop(settings);
+        self.save_to_disk().await?;
+        Ok(true)
+    }
+
     /// Get the max parallel missions setting.
     /// Returns None if not explicitly set (caller should check env var as fallback).
     pub async fn get_max_parallel_missions(&self) -> Option<usize> {

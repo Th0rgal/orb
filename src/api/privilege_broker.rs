@@ -103,25 +103,42 @@ pub fn evaluate_auth_toctou_gate(
 const OPS_READ_BINARIES: &[&str] = &[
     "journalctl",
     "systemctl",
-    "docker",
-    "nft",
     "ss",
     "ps",
     "df",
-    "du",
     "free",
     "uptime",
     "uname",
     "cat",
     "head",
     "tail",
-    "ls",
     "stat",
-    "grep",
-    "mdadm",
     "lsblk",
-    "smartctl",
 ];
+
+const PUBLIC_DIAGNOSTIC_PATHS: &[&str] = &[
+    "/proc/cpuinfo",
+    "/proc/meminfo",
+    "/proc/loadavg",
+    "/proc/uptime",
+    "/proc/version",
+    "/proc/stat",
+    "/proc/diskstats",
+    "/proc/mdstat",
+    "/etc/os-release",
+    "/usr/lib/os-release",
+];
+
+const TRUSTED_EXEC_DIRS: &[&str] = &["/bin", "/usr/bin", "/sbin", "/usr/sbin"];
+const TRUSTED_RESOLVED_EXEC_PREFIXES: &[&str] = &[
+    "/bin/",
+    "/usr/bin/",
+    "/sbin/",
+    "/usr/sbin/",
+    "/usr/lib/",
+    "/lib/",
+];
+const TRUSTED_EXEC_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 
 const UNSAFE_ENV_KEYS: &[&str] = &[
     "LD_PRELOAD",
@@ -159,77 +176,333 @@ pub fn unit_matches_deploy_service(allowed_unit: &str, target_service: &str) -> 
     is_prod_orb(a) && is_prod_orb(b)
 }
 
-fn read_only_option_allowed(prog: &str, arg: &str) -> bool {
-    if !arg.starts_with('-') {
-        return prog == "journalctl"
-            || arg.starts_with("/dev/")
-            || (!arg.is_empty()
-                && arg.chars().all(|c| {
-                    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ',' | '=' | '-')
-                }));
+fn is_canonical_absolute_path_str(raw: &str) -> bool {
+    if raw.is_empty() || !raw.starts_with('/') || raw.contains('\\') || raw.contains("//") {
+        return false;
     }
-    let flag = arg.split('=').next().unwrap_or(arg);
+    if raw.len() > 1 && raw.ends_with('/') {
+        return false;
+    }
+    !raw.split('/').any(|part| matches!(part, "." | ".."))
+}
+
+fn ops_read_command_allowed_with_paths(prog: &str, args: &[&str], public_paths: &[&str]) -> bool {
     match prog {
-        "journalctl" => matches!(
-            flag,
-            "-u" | "--unit"
-                | "-n"
-                | "--lines"
-                | "--since"
-                | "--until"
-                | "-p"
-                | "--priority"
-                | "-b"
-                | "--boot"
-                | "--no-pager"
-                | "-o"
-                | "--output"
-                | "-k"
-                | "--dmesg"
-                | "-r"
-                | "--reverse"
-                | "-x"
-                | "--catalog"
-                | "-e"
-                | "--pager-end"
-                | "--list-boots"
-                | "--disk-usage"
-                | "-g"
-                | "--grep"
-        ),
-        "mdadm" => matches!(
-            flag,
-            "--detail"
-                | "-D"
-                | "--examine"
-                | "-E"
-                | "--query"
-                | "-Q"
-                | "--scan"
-                | "-s"
-                | "--verbose"
-                | "-v"
-                | "--brief"
-                | "-b"
-        ),
-        "smartctl" => matches!(
-            flag,
-            "-a" | "--all"
-                | "-x"
-                | "--xall"
-                | "-i"
-                | "--info"
-                | "-H"
-                | "--health"
-                | "-A"
-                | "--attributes"
-                | "-d"
-                | "--device"
-                | "-j"
-                | "--json"
-        ),
-        _ => true,
+        "cat" | "head" | "tail" | "stat" => args.len() == 1 && public_paths.contains(&args[0]),
+        "free" => args.is_empty() || args == ["-h"] || args == ["-m"],
+        "df" => args.is_empty() || args == ["-h"] || args == ["-hT"],
+        "uptime" => args.is_empty(),
+        "uname" => args.is_empty() || args == ["-a"] || args == ["-r"],
+        "lsblk" => args.is_empty(),
+        "ps" => args == ["-eo", "pid,ppid,uid,comm"],
+        "ss" => args == ["-lntu"] || args == ["-s"],
+        "journalctl" => args == ["--disk-usage"],
+        "systemctl" => {
+            args.len() == 2
+                && matches!(args[0], "is-active" | "is-failed")
+                && !args[1].starts_with('-')
+                && !args[1].is_empty()
+                && args[1]
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"_.@:-".contains(&c))
+        }
+        _ => false,
     }
+}
+
+fn ops_read_command_allowed(prog: &str, args: &[&str]) -> bool {
+    ops_read_command_allowed_with_paths(prog, args, PUBLIC_DIAGNOSTIC_PATHS)
+}
+
+fn confined_existing_path(
+    raw: &str,
+    directory: bool,
+    allow_symlink_leaf: bool,
+    trusted_uid: u32,
+) -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !is_canonical_absolute_path_str(raw) {
+        return Err("Ambiguous diagnostic path".into());
+    }
+    let path = std::path::Path::new(raw);
+    let mut ancestors: Vec<&std::path::Path> = path.ancestors().skip(1).collect();
+    ancestors.reverse();
+    for component in ancestors {
+        let metadata = std::fs::symlink_metadata(component)
+            .map_err(|_| "Untrusted diagnostic path component".to_string())?;
+        let mode = metadata.mode();
+        if metadata.file_type().is_symlink()
+            || (metadata.uid() != 0 && metadata.uid() != trusted_uid)
+            || ((mode & 0o002) != 0 && (mode & 0o1000) == 0)
+        {
+            return Err("Untrusted diagnostic path component".into());
+        }
+    }
+    let leaf = std::fs::symlink_metadata(path)
+        .map_err(|_| "Diagnostic path is unavailable".to_string())?;
+    if leaf.uid() != 0 && leaf.uid() != trusted_uid {
+        return Err("Untrusted diagnostic path owner".into());
+    }
+    if leaf.file_type().is_symlink() {
+        if !allow_symlink_leaf || directory {
+            return Err("Symlink diagnostic path rejected".into());
+        }
+        let resolved = std::fs::canonicalize(path)
+            .map_err(|_| "Untrusted resolved diagnostic path".to_string())?;
+        let resolved_str = resolved
+            .to_str()
+            .ok_or("Untrusted resolved diagnostic path")?;
+        return confined_existing_path(resolved_str, false, false, trusted_uid);
+    }
+    if (leaf.mode() & 0o002) != 0 {
+        return Err("Writable diagnostic path rejected".into());
+    }
+    let canon =
+        std::fs::canonicalize(path).map_err(|_| "Noncanonical diagnostic path".to_string())?;
+    if canon != path {
+        return Err("Noncanonical diagnostic path".into());
+    }
+    if directory && !leaf.is_dir() {
+        return Err("Diagnostic cwd is not a directory".into());
+    }
+    if !directory && !leaf.is_file() {
+        return Err("Diagnostic path is not a regular file".into());
+    }
+    Ok(canon)
+}
+
+fn is_trusted_executable_token(raw_exe: &str) -> bool {
+    if raw_exe.is_empty() {
+        return false;
+    }
+    if !raw_exe.contains('/') && !raw_exe.contains('\\') {
+        return raw_exe != "." && raw_exe != "..";
+    }
+    if raw_exe.contains('\\')
+        || raw_exe.starts_with("./")
+        || raw_exe.starts_with("../")
+        || raw_exe.contains("/./")
+        || raw_exe.contains("/../")
+    {
+        return false;
+    }
+    let exe_path = std::path::Path::new(raw_exe);
+    let parent_ok = exe_path
+        .parent()
+        .and_then(|p| p.to_str())
+        .is_some_and(|dir| TRUSTED_EXEC_DIRS.contains(&dir));
+    let symlink_bad = std::fs::symlink_metadata(exe_path).ok().is_some_and(|m| {
+        m.file_type().is_symlink()
+            && std::fs::canonicalize(exe_path)
+                .ok()
+                .and_then(|canon| {
+                    canon.to_str().map(|s| {
+                        !TRUSTED_RESOLVED_EXEC_PREFIXES
+                            .iter()
+                            .any(|prefix| s.starts_with(prefix))
+                    })
+                })
+                .unwrap_or(true)
+    });
+    parent_ok && !symlink_bad
+}
+
+fn resolve_trusted_ops_read_executable(
+    raw_exe: &str,
+    prog: &str,
+    trusted_uid: u32,
+) -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+    if raw_exe.starts_with('/') && !is_canonical_absolute_path_str(raw_exe) {
+        return Err("Ambiguous diagnostic executable path".into());
+    }
+    let candidates: Vec<PathBuf> = if raw_exe.starts_with('/') {
+        vec![PathBuf::from(raw_exe)]
+    } else {
+        TRUSTED_EXEC_PATH
+            .split(':')
+            .map(|dir| PathBuf::from(dir).join(prog))
+            .collect()
+    };
+    for candidate in candidates {
+        let parent = candidate.parent().and_then(|p| p.to_str()).unwrap_or("");
+        if !TRUSTED_EXEC_DIRS.contains(&parent)
+            || candidate.file_name().and_then(|n| n.to_str()) != Some(prog)
+        {
+            continue;
+        }
+        let Ok(parent_meta) = std::fs::symlink_metadata(parent) else {
+            continue;
+        };
+        let Ok(cand_meta) = std::fs::symlink_metadata(&candidate) else {
+            continue;
+        };
+        if (parent_meta.uid() != 0 && parent_meta.uid() != trusted_uid)
+            || (parent_meta.mode() & 0o002) != 0
+            || (cand_meta.uid() != 0 && cand_meta.uid() != trusted_uid)
+            || (!cand_meta.file_type().is_symlink() && (cand_meta.mode() & 0o002) != 0)
+        {
+            continue;
+        }
+        let Ok(canon) = std::fs::canonicalize(&candidate) else {
+            continue;
+        };
+        let Some(canon_str) = canon.to_str() else {
+            continue;
+        };
+        if !TRUSTED_RESOLVED_EXEC_PREFIXES
+            .iter()
+            .any(|prefix| canon_str.starts_with(prefix))
+        {
+            continue;
+        }
+        if confined_existing_path(canon_str, false, false, trusted_uid).is_ok() {
+            return Ok(candidate);
+        }
+    }
+    Err("Diagnostic executable is unavailable".into())
+}
+
+fn prepare_local_ops_read_with_paths(
+    argv: &[String],
+    cwd: Option<&str>,
+    public_paths: &[&str],
+    trusted_uid: u32,
+) -> Result<(Vec<String>, PathBuf), String> {
+    let raw_exe = argv
+        .first()
+        .map(String::as_str)
+        .ok_or("Untrusted diagnostic executable")?;
+    if !is_trusted_executable_token(raw_exe) {
+        return Err("Untrusted diagnostic executable".into());
+    }
+    let prog = std::path::Path::new(raw_exe)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("Untrusted diagnostic executable")?;
+    let arg_refs: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+    if !ops_read_command_allowed_with_paths(prog, &arg_refs, public_paths) {
+        return Err("Diagnostic command is not allowlisted".into());
+    }
+    let executable = resolve_trusted_ops_read_executable(raw_exe, prog, trusted_uid)?;
+    let raw_cwd = cwd.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("/");
+    let execution_cwd = confined_existing_path(raw_cwd, true, false, trusted_uid)?;
+    let mut exec_argv = Vec::with_capacity(argv.len());
+    exec_argv.push(
+        executable
+            .to_str()
+            .ok_or("Invalid diagnostic executable path")?
+            .to_string(),
+    );
+    if matches!(prog, "cat" | "head" | "tail" | "stat") {
+        let allow_symlink_leaf =
+            matches!(argv[1].as_str(), "/etc/os-release" | "/usr/lib/os-release");
+        let target = confined_existing_path(&argv[1], false, allow_symlink_leaf, trusted_uid)?;
+        let target_str = target.to_str().ok_or("Invalid diagnostic path")?;
+        if !public_paths.contains(&target_str) {
+            return Err("Resolved diagnostic file outside public allowlist".into());
+        }
+        exec_argv.push(target_str.to_string());
+    } else {
+        exec_argv.extend(argv[1..].iter().cloned());
+    }
+    Ok((exec_argv, execution_cwd))
+}
+
+fn prepare_local_ops_read(
+    argv: &[String],
+    cwd: Option<&str>,
+) -> Result<(Vec<String>, PathBuf), String> {
+    prepare_local_ops_read_with_paths(argv, cwd, PUBLIC_DIAGNOSTIC_PATHS, 0)
+}
+
+fn build_remote_ops_read_command(argv: &[String], cwd: Option<&str>) -> Result<String, String> {
+    let raw_exe = argv
+        .first()
+        .map(String::as_str)
+        .ok_or("Untrusted diagnostic executable")?;
+    if !is_trusted_executable_token(raw_exe) {
+        return Err("Untrusted diagnostic executable".into());
+    }
+    let prog = std::path::Path::new(raw_exe)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("Untrusted diagnostic executable")?;
+    let arg_refs: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+    if !ops_read_command_allowed(prog, &arg_refs) {
+        return Err("Diagnostic command is not allowlisted".into());
+    }
+    let raw_cwd = cwd.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("/");
+    if !is_canonical_absolute_path_str(raw_cwd) {
+        return Err("Ambiguous diagnostic cwd".into());
+    }
+    let script = concat!(
+        "import os, shutil, stat, sys\n",
+        "from pathlib import Path\n",
+        "TRUSTED_DIRS = ('/bin', '/usr/bin', '/sbin', '/usr/sbin')\n",
+        "TRUSTED_PREFIXES = ('/bin/', '/usr/bin/', '/sbin/', '/usr/sbin/', '/usr/lib/', '/lib/')\n",
+        "TRUSTED_PATH = '/usr/sbin:/usr/bin:/sbin:/bin'\n",
+        "PUBLIC_PATHS = {'/proc/cpuinfo','/proc/meminfo','/proc/loadavg','/proc/uptime','/proc/version','/proc/stat','/proc/diskstats','/proc/mdstat','/etc/os-release','/usr/lib/os-release'}\n",
+        "def canon_str(s):\n",
+        "    return bool(s) and s.startswith('/') and s == str(Path(s)) and '\\\\' not in s and not any(p in {'.','..'} for p in s.split('/'))\n",
+        "def confine(raw, directory=False, allow_symlink_leaf=False):\n",
+        "    if not canon_str(raw): raise SystemExit(126)\n",
+        "    p = Path(raw)\n",
+        "    for c in reversed(p.parents):\n",
+        "        m = c.lstat()\n",
+        "        if stat.S_ISLNK(m.st_mode) or m.st_uid != 0 or ((m.st_mode & 0o002) and not (m.st_mode & stat.S_ISVTX)): raise SystemExit(126)\n",
+        "    m = p.lstat()\n",
+        "    if m.st_uid != 0: raise SystemExit(126)\n",
+        "    if stat.S_ISLNK(m.st_mode):\n",
+        "        if not allow_symlink_leaf or directory: raise SystemExit(126)\n",
+        "        return confine(str(p.resolve(strict=True)), directory=False, allow_symlink_leaf=False)\n",
+        "    if m.st_mode & 0o002 or p.resolve(strict=True) != p: raise SystemExit(126)\n",
+        "    if directory and not p.is_dir(): raise SystemExit(126)\n",
+        "    if not directory and not p.is_file(): raise SystemExit(126)\n",
+        "    return p\n",
+        "cwd_raw = sys.argv[1]\n",
+        "argv = sys.argv[2:]\n",
+        "if not argv: raise SystemExit(126)\n",
+        "prog = Path(argv[0]).name\n",
+        "if Path(argv[0]).is_absolute():\n",
+        "    if not canon_str(argv[0]): raise SystemExit(126)\n",
+        "    cands = [Path(argv[0])]\n",
+        "else:\n",
+        "    cands = [Path(d) / prog for d in TRUSTED_PATH.split(':')]\n",
+        "exe = None\n",
+        "for cand in cands:\n",
+        "    if str(cand.parent) not in TRUSTED_DIRS or cand.name != prog: continue\n",
+        "    try:\n",
+        "        pm, cm = cand.parent.lstat(), cand.lstat()\n",
+        "        rexe = cand.resolve(strict=True)\n",
+        "    except OSError:\n",
+        "        continue\n",
+        "    if pm.st_uid != 0 or (pm.st_mode & 0o002) or cm.st_uid != 0 or (not stat.S_ISLNK(cm.st_mode) and (cm.st_mode & 0o002)): continue\n",
+        "    if not str(rexe).startswith(TRUSTED_PREFIXES): continue\n",
+        "    confine(str(rexe))\n",
+        "    exe = cand\n",
+        "    break\n",
+        "if exe is None: raise SystemExit(126)\n",
+        "cwd = confine(cwd_raw, directory=True)\n",
+        "args = list(argv[1:])\n",
+        "if prog in {'cat','head','tail','stat'}:\n",
+        "    if len(args) != 1 or args[0] not in PUBLIC_PATHS: raise SystemExit(126)\n",
+        "    t = confine(args[0], allow_symlink_leaf=args[0] in {'/etc/os-release','/usr/lib/os-release'})\n",
+        "    if str(t) not in PUBLIC_PATHS: raise SystemExit(126)\n",
+        "    args = [str(t)]\n",
+        "os.chdir(str(cwd))\n",
+        "os.execve(str(exe), [str(exe), *args], {'PATH': TRUSTED_PATH, 'HOME': '/', 'LANG': 'C.UTF-8', 'SYSTEMD_PAGER': 'cat', 'SYSTEMD_PAGERSECURE': '1'})\n"
+    );
+    let mut remote_cmd = String::from("exec /usr/bin/python3 -c ");
+    remote_cmd.push_str(&shell_single_quote(script));
+    remote_cmd.push(' ');
+    remote_cmd.push_str(&shell_single_quote(raw_cwd));
+    for arg in argv {
+        remote_cmd.push(' ');
+        remote_cmd.push_str(&shell_single_quote(arg));
+    }
+    Ok(remote_cmd)
 }
 
 /// Evaluate `orb_privd_command_step` (`GrammarConfinement`, `PathConfinement`,
@@ -278,46 +551,28 @@ pub fn evaluate_privd_command_confinement(
         {
             return true;
         }
-        std::fs::symlink_metadata(p)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
+        if grant_scope == PrivilegeScope::OpsRead && !is_canonical_absolute_path_str(trimmed) {
+            return true;
+        }
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            return true;
+        }
+        grant_scope == PrivilegeScope::OpsRead
+            && p.ancestors()
+                .skip(1)
+                .any(|anc| std::fs::symlink_metadata(anc).is_ok_and(|m| m.file_type().is_symlink()))
     });
     let argv_traversal = tokens.iter().any(|tok| {
-        *tok == ".." || tok.starts_with("../") || tok.ends_with("/..") || tok.contains("/../")
+        *tok == ".."
+            || tok.starts_with("../")
+            || tok.ends_with("/..")
+            || tok.contains("/../")
+            || (grant_scope == PrivilegeScope::OpsRead
+                && tok.starts_with('/')
+                && !is_canonical_absolute_path_str(tok))
     });
-    const TRUSTED_EXEC_DIRS: &[&str] = &["/bin", "/usr/bin", "/sbin", "/usr/sbin"];
     let raw_exe = tokens.first().copied().unwrap_or("");
-    let exe_path_trusted = if raw_exe.is_empty() {
-        false
-    } else if !raw_exe.contains('/') && !raw_exe.contains('\\') {
-        raw_exe != "." && raw_exe != ".."
-    } else if raw_exe.contains('\\')
-        || raw_exe.starts_with("./")
-        || raw_exe.starts_with("../")
-        || raw_exe.contains("/./")
-        || raw_exe.contains("/../")
-    {
-        false
-    } else {
-        let exe_path = std::path::Path::new(raw_exe);
-        let parent_ok = exe_path
-            .parent()
-            .and_then(|p| p.to_str())
-            .is_some_and(|dir| TRUSTED_EXEC_DIRS.contains(&dir));
-        let symlink_bad = std::fs::symlink_metadata(exe_path).ok().is_some_and(|m| {
-            m.file_type().is_symlink()
-                && std::fs::canonicalize(exe_path)
-                    .ok()
-                    .and_then(|canon| {
-                        canon
-                            .parent()
-                            .and_then(|p| p.to_str())
-                            .map(|d| !TRUSTED_EXEC_DIRS.contains(&d))
-                    })
-                    .unwrap_or(true)
-        });
-        parent_ok && !symlink_bad
-    };
+    let exe_path_trusted = is_trusted_executable_token(raw_exe);
     let has_path_traversal_or_symlink =
         cwd_traversal_or_symlink || argv_traversal || (!raw_exe.is_empty() && !exe_path_trusted);
 
@@ -356,49 +611,15 @@ pub fn evaluate_privd_command_confinement(
         )
         && tokens[1..].iter().all(|a| !a.starts_with('-'));
 
-    let is_ops_read_safe = OPS_READ_BINARIES.contains(&prog) && {
-        match prog {
-            "systemctl" => {
-                tokens.len() >= 2
-                    && matches!(
-                        tokens[1],
-                        "status" | "show" | "list-units" | "is-active" | "is-failed"
-                    )
-                    && tokens[2..].iter().all(|a| !a.starts_with('-'))
-            }
-            "docker" => {
-                tokens.len() >= 2
-                    && matches!(
-                        tokens[1],
-                        "ps" | "logs" | "inspect" | "stats" | "info" | "version"
-                    )
-            }
-            "nft" => tokens.get(1..) == Some(&["list", "ruleset"]),
-            "mdadm" => {
-                tokens.get(1).is_some_and(|a| {
-                    matches!(
-                        *a,
-                        "--detail" | "-D" | "--examine" | "-E" | "--query" | "-Q"
-                    )
-                }) && tokens[1..]
-                    .iter()
-                    .all(|a| read_only_option_allowed("mdadm", a))
-            }
-            "journalctl" | "smartctl" => tokens[1..]
-                .iter()
-                .all(|a| read_only_option_allowed(prog, a)),
-            _ => tokens[1..].iter().all(|a| !a.starts_with("--force")),
-        }
-    };
+    let is_ops_read_safe =
+        OPS_READ_BINARIES.contains(&prog) && ops_read_command_allowed(prog, &tokens[1..]);
 
     let flag_bypass = (grant_scope == PrivilegeScope::ServiceDeploy
         && prog == "systemctl"
         && tokens[1..].iter().any(|a| a.starts_with('-')))
         || (grant_scope == PrivilegeScope::OpsRead
-            && matches!(prog, "journalctl" | "mdadm" | "smartctl")
-            && !tokens[1..]
-                .iter()
-                .all(|a| read_only_option_allowed(prog, a)));
+            && OPS_READ_BINARIES.contains(&prog)
+            && !is_ops_read_safe);
 
     let has_shell_metachar_or_flag_bypass = token_has_metachar || flag_bypass;
 
@@ -2440,27 +2661,32 @@ pub async fn handle_tool(
             // 2. Execute confined argv on the target host (local only for an explicit `agent-core` grant, otherwise via Core's SSH tunnel to `dgx-spark`/fleet host).
             let t0 = std::time::Instant::now();
             let output_res = if let Some(dest) = ssh_dest {
-                let mut remote_cmd = String::new();
-                if let Some(ref dir) = cwd {
-                    remote_cmd.push_str("cd ");
-                    remote_cmd.push_str(&shell_single_quote(dir));
-                    remote_cmd.push_str(" && ");
-                }
-                if dest.starts_with("ubuntu@")
-                    && matches!(
-                        pre_verified.scope,
-                        PrivilegeScope::RootExec | PrivilegeScope::ServiceDeploy
-                    )
-                    && argv.first().map(String::as_str) != Some("sudo")
-                {
-                    remote_cmd.push_str("exec sudo -n --");
+                let remote_cmd = if pre_verified.scope == PrivilegeScope::OpsRead {
+                    build_remote_ops_read_command(&argv, cwd.as_deref())?
                 } else {
-                    remote_cmd.push_str("exec");
-                }
-                for arg in &argv {
-                    remote_cmd.push(' ');
-                    remote_cmd.push_str(&shell_single_quote(arg));
-                }
+                    let mut remote_cmd = String::new();
+                    if let Some(ref dir) = cwd {
+                        remote_cmd.push_str("cd ");
+                        remote_cmd.push_str(&shell_single_quote(dir));
+                        remote_cmd.push_str(" && ");
+                    }
+                    if dest.starts_with("ubuntu@")
+                        && matches!(
+                            pre_verified.scope,
+                            PrivilegeScope::RootExec | PrivilegeScope::ServiceDeploy
+                        )
+                        && argv.first().map(String::as_str) != Some("sudo")
+                    {
+                        remote_cmd.push_str("exec sudo -n --");
+                    } else {
+                        remote_cmd.push_str("exec");
+                    }
+                    for arg in &argv {
+                        remote_cmd.push(' ');
+                        remote_cmd.push_str(&shell_single_quote(arg));
+                    }
+                    remote_cmd
+                };
                 let mut cmd = tokio::process::Command::new("ssh");
                 cmd.args([
                     "-o",
@@ -2472,6 +2698,18 @@ pub async fn handle_tool(
                     dest,
                     &remote_cmd,
                 ]);
+                tokio::time::timeout(Duration::from_secs(120), cmd.output()).await
+            } else if pre_verified.scope == PrivilegeScope::OpsRead {
+                let (exec_argv, execution_cwd) = prepare_local_ops_read(&argv, cwd.as_deref())?;
+                let mut cmd = tokio::process::Command::new(&exec_argv[0]);
+                cmd.args(&exec_argv[1..])
+                    .current_dir(execution_cwd)
+                    .env_clear()
+                    .env("PATH", TRUSTED_EXEC_PATH)
+                    .env("HOME", "/")
+                    .env("LANG", "C.UTF-8")
+                    .env("SYSTEMD_PAGER", "cat")
+                    .env("SYSTEMD_PAGERSECURE", "1");
                 tokio::time::timeout(Duration::from_secs(120), cmd.output()).await
             } else {
                 let mut cmd = tokio::process::Command::new(&argv[0]);
@@ -3839,7 +4077,6 @@ mod tests {
             .unwrap();
         let root_token = broker.lease_token_for(root_req.id).await.unwrap();
 
-        // 1. Valid OpsRead command (`journalctl -u orb-core -n 50 --no-pager`) is admitted
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
                 executing_host: None,
@@ -3848,15 +4085,8 @@ mod tests {
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
                 requested_scope: Some(PrivilegeScope::OpsRead),
-                command: "journalctl -u orb-core -n 50 --no-pager".into(),
-                argv: vec![
-                    "journalctl".into(),
-                    "-u".into(),
-                    "orb-core".into(),
-                    "-n".into(),
-                    "50".into(),
-                    "--no-pager".into(),
-                ],
+                command: "journalctl --disk-usage".into(),
+                argv: vec!["journalctl".into(), "--disk-usage".into()],
                 cwd: Some("/var/log".into()),
                 exit_code: None,
                 duration_ms: None,
@@ -4469,6 +4699,215 @@ mod tests {
 
         let snap = auth_toctou_shadow_counter().snapshot("orb_auth_toctou_execute_step");
         assert!(snap.total_events >= 4);
+        assert_eq!(snap.total_divergences, 0);
+    }
+
+    #[test]
+    fn ops_read_confinement_blocks_secret_reads_and_preserves_safe_diagnostics_and_root_exec() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let allowed_forms: &[&[&str]] = &[
+            &["cat", "/proc/cpuinfo"],
+            &["head", "/proc/meminfo"],
+            &["tail", "/proc/loadavg"],
+            &["stat", "/etc/os-release"],
+            &["free", "-h"],
+            &["df", "-hT"],
+            &["uptime"],
+            &["uname", "-r"],
+            &["lsblk"],
+            &["ps", "-eo", "pid,ppid,uid,comm"],
+            &["ss", "-lntu"],
+            &["journalctl", "--disk-usage"],
+            &["systemctl", "is-active", "orb-core.service"],
+            &["systemctl", "is-failed", "orb-core"],
+        ];
+        for argv_slice in allowed_forms {
+            let argv: Vec<String> = argv_slice.iter().map(|s| (*s).to_string()).collect();
+            let verdict = evaluate_privd_command_confinement(
+                true,
+                PrivilegeScope::OpsRead,
+                None,
+                &argv.join(" "),
+                &argv,
+                Some("/"),
+                &[],
+                false,
+            );
+            assert!(
+                verdict.allow_exec,
+                "expected allowed ops_read form: {argv:?}"
+            );
+        }
+
+        let blocked_forms: &[&[&str]] = &[
+            &["cat", "/etc/shadow"],
+            &["cat", "/root/.env"],
+            &["cat", "/proc/1/environ"],
+            &["head", "/proc/self/environ"],
+            &["cat", "/proc/1/mem"],
+            &["stat", "/proc/self/fd"],
+            &["cat", "/proc/1/fd/0"],
+            &["docker", "inspect", "orb-core"],
+            &["docker", "ps"],
+            &["ps", "aux"],
+            &["ps", "-ef"],
+            &["ps", "-eo", "pid,args"],
+            &["systemctl", "show", "orb-core"],
+            &["systemctl", "show", "-p", "Environment", "orb-core"],
+            &["systemctl", "status", "orb-core"],
+            &["journalctl", "-u", "orb-core", "-n", "20", "--no-pager"],
+            &["grep", "TOKEN", "/proc/cpuinfo"],
+            &["ls", "/root"],
+            &["du", "-sh", "/root"],
+            &["cat", "/proc//cpuinfo"],
+            &["cat", "/proc/./cpuinfo"],
+        ];
+        for argv_slice in blocked_forms {
+            let argv: Vec<String> = argv_slice.iter().map(|s| (*s).to_string()).collect();
+            let ro_verdict = evaluate_privd_command_confinement(
+                true,
+                PrivilegeScope::OpsRead,
+                None,
+                &argv.join(" "),
+                &argv,
+                Some("/"),
+                &[],
+                false,
+            );
+            assert!(
+                !ro_verdict.allow_exec,
+                "expected blocked ops_read form: {argv:?}"
+            );
+        }
+
+        let root_preserved: &[&[&str]] = &[
+            &["cat", "/etc/hostname"],
+            &["docker", "inspect", "orb-core"],
+            &["ps", "-ef"],
+            &["systemctl", "show", "orb-core"],
+        ];
+        for argv_slice in root_preserved {
+            let argv: Vec<String> = argv_slice.iter().map(|s| (*s).to_string()).collect();
+            let root_verdict = evaluate_privd_command_confinement(
+                true,
+                PrivilegeScope::RootExec,
+                None,
+                &argv.join(" "),
+                &argv,
+                Some("/"),
+                &[],
+                false,
+            );
+            assert!(
+                root_verdict.allow_exec,
+                "expected root_exec preserved for: {argv:?}"
+            );
+        }
+
+        let uid = unsafe { libc::geteuid() };
+        let fixture_root =
+            std::env::temp_dir().join(format!("ops-read-fixture-{}", Uuid::new_v4()));
+        let safe_dir = fixture_root.join("public");
+        let secret_dir = fixture_root.join("secret");
+        std::fs::create_dir_all(&safe_dir).unwrap();
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::set_permissions(&fixture_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&safe_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&secret_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let safe_file = safe_dir.join("cpuinfo");
+        let secret_file = secret_dir.join("environ");
+        let symlink_leaf = safe_dir.join("os-release-link");
+        let symlink_dir = fixture_root.join("linked-dir");
+        std::fs::write(&safe_file, b"processor\t: 0\n").unwrap();
+        std::fs::write(&secret_file, b"SYNTHETIC_SECRET=1\n").unwrap();
+        std::fs::set_permissions(&safe_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&secret_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&secret_file, &symlink_leaf).unwrap();
+        std::os::unix::fs::symlink(&safe_dir, &symlink_dir).unwrap();
+
+        let safe_file_str = safe_file.to_str().unwrap();
+        let symlink_leaf_str = symlink_leaf.to_str().unwrap();
+        let symlinked_child_str = format!("{}/cpuinfo", symlink_dir.to_str().unwrap());
+        let synthetic_allowlist = [
+            safe_file_str,
+            symlink_leaf_str,
+            symlinked_child_str.as_str(),
+        ];
+
+        let ok_prep = prepare_local_ops_read_with_paths(
+            &["cat".to_string(), safe_file_str.to_string()],
+            Some(safe_dir.to_str().unwrap()),
+            &synthetic_allowlist,
+            uid,
+        );
+        assert!(
+            ok_prep.is_ok(),
+            "expected safe synthetic diagnostic read: {ok_prep:?}"
+        );
+
+        let rejected_leaf = prepare_local_ops_read_with_paths(
+            &["cat".to_string(), symlink_leaf_str.to_string()],
+            Some(safe_dir.to_str().unwrap()),
+            &synthetic_allowlist,
+            uid,
+        );
+        assert!(rejected_leaf.is_err());
+
+        let rejected_parent_link = prepare_local_ops_read_with_paths(
+            &["cat".to_string(), symlinked_child_str.clone()],
+            Some(safe_dir.to_str().unwrap()),
+            &synthetic_allowlist,
+            uid,
+        );
+        assert!(rejected_parent_link.is_err());
+
+        let rejected_cwd_link = prepare_local_ops_read_with_paths(
+            &["uptime".to_string()],
+            Some(symlink_dir.to_str().unwrap()),
+            &synthetic_allowlist,
+            uid,
+        );
+        assert!(rejected_cwd_link.is_err());
+
+        let remote_cmd = build_remote_ops_read_command(
+            &["cat".to_string(), "/etc/os-release".to_string()],
+            Some("/"),
+        )
+        .unwrap();
+        assert!(remote_cmd.starts_with("exec /usr/bin/python3 -c "));
+        let os_release_local = prepare_local_ops_read(
+            &["cat".to_string(), "/etc/os-release".to_string()],
+            Some("/"),
+        );
+        assert!(
+            os_release_local.is_ok(),
+            "expected /etc/os-release local ops_read prep: {os_release_local:?}"
+        );
+        let remote_out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&remote_cmd)
+            .output()
+            .unwrap();
+        assert!(
+            remote_out.status.success(),
+            "expected remote ops_read wrapper to execute cleanly: {:?}",
+            String::from_utf8_lossy(&remote_out.stderr)
+        );
+        assert!(!remote_out.stdout.is_empty());
+        assert!(build_remote_ops_read_command(
+            &["cat".to_string(), "/etc/shadow".to_string()],
+            Some("/"),
+        )
+        .is_err());
+        assert!(
+            build_remote_ops_read_command(&["uptime".to_string()], Some("/var//log"),).is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(&fixture_root);
+
+        let snap = privd_command_shadow_counter().snapshot("orb_privd_command_step");
         assert_eq!(snap.total_divergences, 0);
     }
 }
