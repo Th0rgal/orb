@@ -104,6 +104,19 @@ export function filesMovedInto(toProject: string, dir: string): { name: string; 
   return out;
 }
 
+const pathsOverlap = (a: string, b: string) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+
+/** Whether `slug:path` (or an ancestor/descendant folder) has an unsettled file move or delete. */
+export function isFilePathPending(slug: string, path: string): boolean {
+  if (!path) return false;
+  for (const move of pending().values()) {
+    if (move.kind !== "file") continue;
+    if (move.fromProject === slug && move.fromPath && pathsOverlap(path, move.fromPath)) return true;
+    if (!move.delete && move.toProject === slug && move.path && pathsOverlap(path, move.path)) return true;
+  }
+  return false;
+}
+
 /**
  * Show one or more related moves (e.g. a mission and its launched subtree)
  * now and persist them via a single `save` call. On failure every entry

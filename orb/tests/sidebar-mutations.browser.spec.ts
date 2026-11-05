@@ -87,6 +87,10 @@ test('folder rename retains expanded descendants and surfaces work migration err
   await page.getByRole('dialog').getByRole('button',{name:'Rename',exact:true}).click();
   await expect(page.locator('[data-tree-id="pf:one:Research/nested/notes.md"]')).toBeVisible();
   await expect.poll(()=>pendingTransfer!==null).toBe(true);
+  // While the folder move is still unsettled, mutating its optimistic destination is disabled.
+  await page.getByRole('button',{name:'Research',exact:true}).click({button:'right'});
+  await expect(page.getByRole('menuitem',{name:'Rename',exact:true})).toBeDisabled();
+  await page.keyboard.press('Escape');
   pendingTransfer!();
   await expect(page.locator('.pf-path')).toHaveText('one/Research/nested/notes.md');
   await expect(page.locator('.file-view .error-notice')).toHaveCount(0);
