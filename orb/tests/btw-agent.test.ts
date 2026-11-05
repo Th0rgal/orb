@@ -1,3 +1,10 @@
+const sideThreadStore=vi.hoisted(()=>new Map<string,unknown>());
+vi.mock('../src/composerDrafts',()=>({
+ readComposerDraft:async()=>undefined,
+ saveComposerDraft:async()=>{},
+ readSideThread:async(key:string)=>sideThreadStore.get(key),
+ saveSideThread:async(key:string,value:unknown)=>{sideThreadStore.set(key,structuredClone(value));},
+}));
 vi.mock('../src/btwContext',()=>({prepareBtwContext:vi.fn(async(_s:any,context:string)=>({context,cursor:{sequence:10,visibleHash:'hash'}}))}));
 import {it,expect,vi,afterEach} from 'vitest';
 import {askBtwAgent,btwSession,resetBtwThreadCache,stopBtw,btwTurnEvents} from '../src/btwAgent';
@@ -7,7 +14,7 @@ vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLoca
 import {ApiError,api,getMission,sendMissionMessage,cancelMission} from '../src/api';
 vi.mock('../src/api',async original=>({...await original<typeof import('../src/api')>(),api:vi.fn(),getMission:vi.fn(),sendMissionMessage:vi.fn(),cancelMission:vi.fn(),appendClientTranscript:vi.fn(),setClientMissionStatus:vi.fn()}));
 vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),streamMission:vi.fn(()=>vi.fn()),getMissionEvents:vi.fn(async()=>[{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}])}));
-afterEach(async()=>{resetBtwThreadCache();localStorage.clear();vi.clearAllMocks();const {getMissionEvents,streamMission}=await import('../src/stream');vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}]);vi.mocked(streamMission).mockImplementation(()=>vi.fn());});
+afterEach(async()=>{resetBtwThreadCache();sideThreadStore.clear();localStorage.clear();vi.clearAllMocks();const {getMissionEvents,streamMission}=await import('../src/stream');vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}]);vi.mocked(streamMission).mockImplementation(()=>vi.fn());});
 it('creates a distinct side agent and never sends to the parent',async()=>{
  vi.mocked(getMission).mockImplementation(async(id)=>({id,status:id==='parent'?'active':'awaiting_user',history:[],tags:[],title:'Main',created_at:'',updated_at:''}));
  vi.mocked(api).mockResolvedValue({id:'child'});
