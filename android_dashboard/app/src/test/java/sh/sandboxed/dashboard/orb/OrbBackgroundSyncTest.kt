@@ -158,4 +158,46 @@ class OrbBackgroundSyncTest {
         assertEquals("Run gradle test", history[0].str("content"))
         assertEquals("All unit tests passed.", history[1].str("content"))
     }
+
+    @Test
+    fun disambiguatesDuplicateBtwQuestionsAcrossReconciles() {
+        val firstTurn = OrbSideAgent.Turn(
+            id = "btw:3d7b16e7:83",
+            question = "and now?",
+            answer = "First status.",
+            at = "2026-11-04T19:21:00Z"
+        )
+        val secondAskedAtMs = OrbJSON.dateEpochMs("2026-11-04T20:07:00Z")
+        assertNotNull(secondAskedAtMs)
+        assertFalse(
+            OrbSideAgent.doesTurnAnswerPending(
+                question = "and now?",
+                localAskedAtMs = secondAskedAtMs,
+                reconciledTurns = listOf(firstTurn),
+                priorTurns = listOf(firstTurn)
+            )
+        )
+        assertFalse(
+            OrbSideAgent.doesTurnAnswerPending(
+                question = "and now?",
+                localAskedAtMs = secondAskedAtMs,
+                reconciledTurns = listOf(firstTurn),
+                priorTurns = emptyList()
+            )
+        )
+        val secondTurn = OrbSideAgent.Turn(
+            id = "btw:3d7b16e7:98",
+            question = "and now?",
+            answer = "Second status.",
+            at = "2026-11-04T20:07:30Z"
+        )
+        assertTrue(
+            OrbSideAgent.doesTurnAnswerPending(
+                question = "and now?",
+                localAskedAtMs = secondAskedAtMs,
+                reconciledTurns = listOf(firstTurn, secondTurn),
+                priorTurns = listOf(firstTurn)
+            )
+        )
+    }
 }

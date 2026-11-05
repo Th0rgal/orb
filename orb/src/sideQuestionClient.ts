@@ -3,7 +3,37 @@ import type { DraftImage } from "./imageAttachments";
 import { connectionVersion, getApiUrl, getJwt } from "./api";
 import type { StreamItem } from "./transcriptModel";
 export type SideAttachment = { name:string; data_base64:string; media_type:string };
-export type SideExchange = { id?: string; question: string; answer: string; narration?: string[]; attachments?:SideAttachment[] };
+export type SideExchange = { id?: string; question: string; answer: string; narration?: string[]; attachments?:SideAttachment[]; at?: string; userEventId?: string };
+
+/** Disambiguates whether `reconciledHistory` contains Core's answer to `pending`,
+ * avoiding false matches against an earlier identical prompt (e.g. `"and now?"`). */
+export function doesTurnAnswerPending(
+ pending: { question: string; turnId?: string; startedAt?: string },
+ reconciledHistory: readonly SideExchange[],
+ priorHistory: readonly SideExchange[] = [],
+ historyLimit = 200,
+): boolean {
+ const q = pending.question.trim();
+ if (!q) return false;
+ if (pending.turnId && reconciledHistory.some(h => h.userEventId && h.userEventId === pending.turnId)) {
+  return true;
+ }
+ const matches = reconciledHistory.filter(h => h.question.trim() === q);
+ if (!matches.length) return false;
+ const priorMatches = priorHistory.filter(h => h.question.trim() === q).length;
+ if (reconciledHistory.length < historyLimit && matches.length <= priorMatches) {
+  return false;
+ }
+ const startedMs = pending.startedAt ? Date.parse(pending.startedAt) : NaN;
+ if (Number.isFinite(startedMs)) {
+  const latest = matches.at(-1)!;
+  const turnMs = latest.at ? Date.parse(latest.at) : NaN;
+  if (Number.isFinite(turnMs) && turnMs < startedMs - 5_000) {
+   return false;
+  }
+ }
+ return true;
+}
 export async function sideAttachments(images:DraftImage[], files:UploadedFile[]):Promise<SideAttachment[]> {
  const result:SideAttachment[]=images.map(image=>({name:image.name,data_base64:image.dataUrl.split(',')[1],media_type:image.type}));
  for(const file of files)result.push({name:file.source.name,data_base64:file.dataBase64??await encoded(file.source),media_type:file.source.file?.type||'application/octet-stream'});
@@ -42,7 +72,7 @@ export async function askSide(mission:string, question:string, context:string, h
   const version=connectionVersion();
   const response=await fetch(`${getApiUrl()}/api/control/missions/${encodeURIComponent(mission)}/btw`,{
     method:'POST', headers:{'Content-Type':'application/json',Authorization:`Bearer ${getJwt()??''}`},
-    body:JSON.stringify({question,context,history:boundedHistory(history,24*1024*1024-attachments.reduce((n,file)=>n+file.data_base64.length,0)).map(({narration:_narration,...exchange})=>({...exchange,attachments:exchange.attachments?.length?exchange.attachments:undefined})),...(attachments.length?{attachments}:{})}),signal,
+    body:JSON.stringify({question,context,history:boundedHistory(history,24*1024*1024-attachments.reduce((n,file)=>n+file.data_base64.length,0)).map(({narration:_narration,at:_at,userEventId:_userEventId,...exchange})=>({...exchange,attachments:exchange.attachments?.length?exchange.attachments:undefined})),...(attachments.length?{attachments}:{})}),signal,
   });
   if(!response.ok) { const detail=await response.text().catch(()=>''); throw new Error(response.status===400||response.status===413?detail.slice(0,500):response.status===422?'Core needs an update to accept these attachments. Your working agent is unaffected.':response.status===404?'Side questions are unavailable on this Core, or this conversation has not synced yet.':`Could not ask the side question (${response.status}). Check the connection and Ask model configuration.`); }
   if(!response.body) throw new Error('No answer stream received.');

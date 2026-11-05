@@ -701,6 +701,13 @@ final class OrbWarmSyncCoordinator {
         checkedCleanBtwParents.insert(parentId)
     }
 
+    func markBtwDirty(parentId: String) {
+        guard !parentId.isEmpty else { return }
+        ensureScope()
+        dirtyBtwParents.insert(parentId)
+        checkedCleanBtwParents.remove(parentId)
+    }
+
     func canSkipBtwServerCrawl(parentId: String) -> Bool {
         ensureScope()
         guard OrbCore.shared.isMultiplexSyncHealthy,

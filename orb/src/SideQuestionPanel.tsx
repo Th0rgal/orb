@@ -13,7 +13,7 @@ import { Portal } from 'solid-js/web';
 import { useSidePanel } from './FilePanel';
 import { createPinnedScroll } from './mission/pinnedScroll';
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
-import { connectionVersion, sendMissionMessage, type QueuedMessage } from './api';
+import { connectionVersion, isTransientNetworkError, sendMissionMessage, type QueuedMessage } from './api';
 import { consumeSideQuestionOpenHint, readSideQuestion, peekSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion } from './sideQuestionStorage';
 import { RemoteQueue, type PendingRemoteQueueItem, type RemoteQueueHandle } from './RemoteQueue';
 import { QueuedMessages } from './QueuedMessages';
@@ -26,7 +26,7 @@ import { UserTurn, ThoughtSequence } from "./Transcript";
 import { MdView } from './Markdown';
 import { ErrorNotice } from './ErrorNotice';
 import { remoteLog } from './remoteLog';
-import { sideContext, sideAttachments, type SideAttachment, type SideExchange } from './sideQuestionClient';
+import { doesTurnAnswerPending, sideContext, sideAttachments, type SideAttachment, type SideExchange } from './sideQuestionClient';
 import { formatElapsed, useNow } from './time';
 import type { StreamItem } from './transcriptModel';
 import * as Ic from './icons';
@@ -35,6 +35,17 @@ function appendTurn(rows:SideExchange[],turn:SideExchange):SideExchange[]{
  const last=rows.at(-1);
  if(last&&last.question.trim()===turn.question.trim()&&last.answer.trim()===turn.answer.trim())return rows;
  return [...rows,turn].slice(-BTW_HISTORY_LIMIT);
+}
+function mergeLocalAttachments(serverRows:SideExchange[],localRows:SideExchange[]):SideExchange[]{
+ if(!localRows.length)return serverRows.map(row=>({...row,id:row.id??crypto.randomUUID()}));
+ const byPair=new Map<string,SideAttachment[]>();
+ for(const row of localRows){
+  if(row.attachments?.length)byPair.set(`${row.question.trim()}\u0000${row.answer.trim()}`,row.attachments);
+ }
+ return serverRows.map(row=>{
+  const attached=row.attachments?.length?row.attachments:byPair.get(`${row.question.trim()}\u0000${row.answer.trim()}`);
+  return {...row,id:row.id??crypto.randomUUID(),...(attached?.length?{attachments:attached}:{})};
+ });
 }
 export type SideQuestionsHandle={ask:(question:string,images?:DraftImage[],files?:UploadedFile[])=>Promise<boolean>;open:()=>void};
 // Local side history stays separate from mission events and the main draft.
@@ -64,6 +75,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  let abort:AbortController|undefined;
  // Set while this panel itself is launching/answering a question.
  let asking=false;
+ let pendingBaselineHistory:SideExchange[]=[];
  let launchAbort:AbortController|undefined;
  const pin=createPinnedScroll({key:()=>(open()?loadedKey():'')});
  // Sending explicitly returns to the latest turn, even after reading older replies.
@@ -122,6 +134,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  let watchActiveSession:((agent:NonNullable<ReturnType<typeof btwSession>>,initialAttachments?:SideAttachment[])=>void)|undefined;
  createEffect(on(key,current=>{
   abort?.abort();queuedEdit.finish(true);
+  pendingBaselineHistory=[];
   setLoadedKey('');setBusy(false);setHistory([]);setError('');setQueue([]);setQueueToast('');setStartedAt(undefined);
   setSideSessionId('');setSideSessionLocal(false);
   setPendingQueued([]);setConfirmedQueued([]);setDeliveredQueuedIds([]);setRemoteQueuedIds([]);setHandoffId(undefined);
@@ -141,6 +154,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   };
   const watchActive=(agent:NonNullable<ReturnType<typeof btwSession>>,initialAttachments?:SideAttachment[])=>{
    refreshSideSession(missionId,agent);
+   if(!question().trim()||question().trim()!==agent.question.trim())pendingBaselineHistory=history();
    if(agent.startedAt)setStartedAt(agent.startedAt);
    abort?.abort();
    const controller=new AbortController();abort=controller;setBusy(true);setQuestion(agent.question);setAnswer('');setNarration([]);setError('');setNotSent(false);
@@ -157,6 +171,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
       const doneTurn=event.completed;
       setHistory(rows=>rows.some(row=>row.answer.trim()===doneTurn.answer.trim()&&row.question.trim()===doneTurn.question.trim())?rows:appendTurn(rows,{id:turnId(),question:doneTurn.question,answer:doneTurn.answer,...(doneTurn.narration?.length?{narration:doneTurn.narration}:{}),...(currentAttachments?.length?{attachments:currentAttachments}:{})}));
      }
+     pendingBaselineHistory=history();
      currentQuestion=event.question;
      currentAttachments=undefined;
      markDelivered(event.messageId);
@@ -172,6 +187,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      const narrated=event.narration?.length?{narration:event.narration}:{};
      const attached=currentAttachments?.length?{attachments:currentAttachments}:{};
      setHistory(rows=>rows.some(row=>row.answer.trim()===event.answer.trim()&&row.question.trim()===currentQuestion.trim())?rows:appendTurn(rows,{id:turnId(),question:currentQuestion,answer:event.answer,...narrated,...attached}));
+     pendingBaselineHistory=[];
      setBusy(false);setStartedAt(undefined);setRunStatus('');setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());resync?.();
      if(remoteQueuedIds().length){setTimeout(()=>{if(!stale)resync?.();},350);}
      queueMicrotask(sendNext);}
@@ -195,6 +211,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    try{if('reconnectBtwSession' in btwMod)reconnectFn=btwMod.reconnectBtwSession;}catch{}
    const session=typeof reconnectFn==='function'?await reconnectFn(missionId,sideId):undefined;
    if(stale||key()!==current)return;
+   pendingBaselineHistory=[];
    setError('');setNotSent(false);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);
    if(unsent&&!draft().trim())setDraftRevision({text:unsent});
    if(session?.active)watchActive(session);
@@ -205,35 +222,56 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   if(stale)return;
   const shouldOpen=consumeSideQuestionOpenHint(current)||Boolean(saved?.open);
   const cleanHistory=(saved?.history??[]).filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()}));
-  setHistory(cleanHistory);setBusy(false);setOpen(shouldOpen);
-  setQuestion(saved?.pending?.question??'');
-  setAnswer(saved?.pending?.answer&&!isSyntheticRemoteAssistantNote(saved.pending.answer)?saved.pending.answer:'');
+  const warmNow='peekWarmBtwState' in btwMod && typeof btwMod.peekWarmBtwState==='function'?btwMod.peekWarmBtwState(missionId):undefined;
+  const initialHistory=warmNow&&(warmNow.clean||warmNow.history.length>cleanHistory.length)?mergeLocalAttachments(warmNow.history,cleanHistory):cleanHistory;
+  if(warmNow?.latest)setSideSessionId(warmNow.latest);
   let launching:Promise<void>|undefined;
   try{if('btwLaunchPending' in btwMod&&typeof btwMod.btwLaunchPending==='function')launching=btwMod.btwLaunchPending(missionId);}catch{}
   let reconcileServer:typeof btwMod.reconcileBtwServerHistory|undefined;
   try{if('reconcileBtwServerHistory' in btwMod)reconcileServer=btwMod.reconcileBtwServerHistory;}catch{}
   const hasReconcile=typeof reconcileServer==='function';
+  const agent=refreshSideSession(missionId,warmNow?.activeSession);
+  const warmAnsweredPending=Boolean(
+   saved?.pending&&
+   !saved.pending.notSent&&
+   !launching&&
+   !agent?.active&&
+   warmNow&&
+   doesTurnAnswerPending(saved.pending,warmNow.history,cleanHistory,BTW_HISTORY_LIMIT),
+  );
+  setHistory(initialHistory);setBusy(false);setOpen(shouldOpen);
   const interruptedError='Side question interrupted. Retry to request a complete answer.';
   const rawSavedError=saved?.pending?.error||'';
   const normalizedSavedError=rawSavedError.includes('Check its activity for tool errors')&&btwActivities(missionId).length===0
    ? rawSavedError.replace('Check its activity for tool errors, then retry.','The model returned an empty completion without running any tools; retry to start a clean side session.')
    : rawSavedError;
-  setError(saved?.pending&&!launching?(normalizedSavedError||(hasReconcile?'':interruptedError)):'');
-  setNotSent(!!saved?.pending?.notSent&&!launching);
-  // Retry after a restart resends under the same id, so Core can drop a copy.
-  if(saved?.pending?.turnId)setTurnId(saved.pending.turnId as ReturnType<typeof crypto.randomUUID>);
-  setPendingAttachments(saved?.pending?.attachments??[]);setDraft(saved?.draft??'');setModel(saved?.model??'');setStorageError(false);
+  const recoverableInterrupted=hasReconcile&&Boolean(saved?.pending&&!saved.pending.notSent&&normalizedSavedError===interruptedError);
+  if(warmAnsweredPending){
+   pendingBaselineHistory=[];
+   setQuestion('');setAnswer('');setNarration([]);setError('');setNotSent(false);
+   setPendingAttachments([]);setStartedAt(undefined);setTurnId(crypto.randomUUID());
+  }else{
+   pendingBaselineHistory=saved?.pending?cleanHistory:[];
+   setQuestion(saved?.pending?.question??'');
+   setAnswer(saved?.pending?.answer&&!isSyntheticRemoteAssistantNote(saved.pending.answer)?saved.pending.answer:'');
+   setError(saved?.pending&&!launching?(recoverableInterrupted?'':(normalizedSavedError||(hasReconcile?'':interruptedError))):'');
+   setNotSent(!!saved?.pending?.notSent&&!launching);
+   // Retry after a restart resends under the same id, so Core can drop a copy.
+   if(saved?.pending?.turnId)setTurnId(saved.pending.turnId as ReturnType<typeof crypto.randomUUID>);
+   setPendingAttachments(saved?.pending?.attachments??[]);
+   setStartedAt(agent?.startedAt??saved?.pending?.startedAt);
+  }
+  setDraft(saved?.draft??'');setModel(saved?.model??'');setStorageError(false);
   const legacySavedQueue=saved?.queue??[];
   unmigratedLegacyQueue=hasReconcile&&hasQueueFollowUp()?[...legacySavedQueue]:[];
   setQueue(legacySavedQueue);
-  const agent=refreshSideSession(missionId);
-  setStartedAt(agent?.startedAt??saved?.pending?.startedAt);
-  const lastSaved=saved?.history.at(-1);
+  const lastSaved=initialHistory.at(-1)??saved?.history.at(-1);
   const lastAnswer=lastSaved?.answer;
-  const emptyReply=lastAnswer!==undefined&&(lastAnswer==='The side agent finished without a text response.'||!lastAnswer.replace(/[.\s…]/g,''));
-  const syntheticReply=lastAnswer!==undefined&&isSyntheticRemoteAssistantNote(lastAnswer)&&!saved?.pending;
-  if(emptyReply){setHistory(rows=>rows.slice(0,-1));setQuestion(lastSaved!.question);setAnswer('');setNarration([]);}
-  if(syntheticReply){setQuestion(lastSaved!.question);setAnswer('');setNarration([]);if(!agent?.active)setError('Side question was interrupted before the agent answered. Retry to request a complete answer.');}
+  const emptyReply=!warmAnsweredPending&&lastAnswer!==undefined&&(lastAnswer==='The side agent finished without a text response.'||!lastAnswer.replace(/[.\s…]/g,''));
+  const rawLastSaved=saved?.history.at(-1);
+  const syntheticReply=!warmAnsweredPending&&rawLastSaved?.answer!==undefined&&isSyntheticRemoteAssistantNote(rawLastSaved.answer)&&!saved?.pending&&initialHistory.length===cleanHistory.length;
+  if(emptyReply){pendingBaselineHistory=initialHistory.slice(0,-1);setHistory(rows=>rows.slice(0,-1));setQuestion(lastSaved!.question);setAnswer('');setNarration([]);}
+  if(syntheticReply){pendingBaselineHistory=initialHistory;setQuestion(rawLastSaved!.question);setAnswer('');setNarration([]);if(!agent?.active)setError('Side question was interrupted before the agent answered. Retry to request a complete answer.');}
   let awaitingServerPending=false;
   if(launching){
    setBusy(true);setRunStatus('Starting side agent…');
@@ -245,7 +283,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    });
   }else if(agent&&(agent.active||emptyReply)){
    watchActive(agent);
-  }else if(saved?.pending&&!normalizedSavedError&&hasReconcile){
+  }else if(!warmAnsweredPending&&saved?.pending&&(!normalizedSavedError||recoverableInterrupted)&&hasReconcile){
    // An in-flight side turn runs on Core across panel unmounts and mission switches;
    // reconcile with Core before claiming the answer was interrupted.
    awaitingServerPending=true;
@@ -313,14 +351,17 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
       }
      }
      const pendingQ=question().trim();
-     if(pendingQ&&error()&&reconciled.history.some(h=>h.question.trim()===pendingQ)){
-      setError('');setNotSent(false);setQuestion('');setAnswer('');setNarration([]);
+     const answeredPending=pendingQ?doesTurnAnswerPending({question:pendingQ,turnId:turnId(),startedAt:startedAt()},reconciled.history,pendingBaselineHistory,BTW_HISTORY_LIMIT):false;
+     if(answeredPending&&error()){
+      pendingBaselineHistory=[];
+      setError('');setNotSent(false);setStartedAt(undefined);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());
      }
      // A restored pending turn ("Starting side agent…" or "Reconnecting…") that
      // Core has since answered is finished: show Core's answer instead of a stale spinner.
-     if(pendingQ&&busy()&&!asking&&!reconciled.activeSession&&reconciled.history.some(h=>h.question.trim()===pendingQ)){
+     if(answeredPending&&busy()&&!asking&&!reconciled.activeSession){
       awaitingServerPending=false;
-      abort?.abort();setBusy(false);setStartedAt(undefined);setRunStatus('');setQuestion('');setAnswer('');setNarration([]);setTurnId(crypto.randomUUID());
+      pendingBaselineHistory=[];
+      abort?.abort();setBusy(false);setStartedAt(undefined);setRunStatus('');setError('');setNotSent(false);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());
       queueMicrotask(sendNext);
      }
      if(reconciled.activeSession&&(!busy()||(awaitingServerPending&&!asking)||handoffId())){
@@ -328,19 +369,27 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
       setHandoffId(undefined);
       watchActive(reconciled.activeSession);
      }else if(awaitingServerPending&&!asking&&!reconciled.activeSession){
-      awaitingServerPending=false;
-      setBusy(false);setStartedAt(undefined);setRunStatus('');setError(interruptedError);
+      if(reconciled.authoritative===false){
+       setBusy(true);setRunStatus('Connection interrupted — reconnecting…');
+      }else{
+       awaitingServerPending=false;
+       setBusy(false);setStartedAt(undefined);setRunStatus('');setError(interruptedError);
+      }
      }
     }).catch(e=>{
      if(!stale&&key()===current&&mine===generation&&awaitingServerPending&&!asking){
-      awaitingServerPending=false;
-      setBusy(false);setStartedAt(undefined);setRunStatus('');setError(interruptedError);
+      if(isTransientNetworkError(e)){
+       setBusy(true);setRunStatus('Connection interrupted — reconnecting…');
+      }else{
+       awaitingServerPending=false;
+       setBusy(false);setStartedAt(undefined);setRunStatus('');setError(interruptedError);
+      }
      }
      swallow("sideQuestions.reconcile")(e);
     }).finally(()=>{inFlight=Math.max(0,inFlight-1);});
    };
-   resync=()=>{if(!stale)sync(history());};
-   sync(cleanHistory);
+   resync=()=>{if(!stale)sync(history(),true);};
+   sync(initialHistory,Boolean((saved?.pending&&!warmAnsweredPending)||(warmNow&&!warmNow.clean)));
   }
   });
  }));
@@ -350,9 +399,6 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     pending:(busy()||error())?{question:question(),answer:answer(),error:error(),attachments:pendingAttachments(),turnId:turnId(),...(startedAt()?{startedAt:startedAt()}:{}),...(notSent()?{notSent:true}:{})}:undefined,
     queue:queue()};
   if(loadedKey()===current){
-   if('updateWarmBtwHistory' in btwMod && typeof btwMod.updateWarmBtwHistory==='function'){
-    btwMod.updateWarmBtwHistory(p.mission,history(),undefined,sideSessionId()||undefined);
-   }
    void writeSideQuestion(current,snapshot).then(saved=>{if(key()===current)setStorageError(!saved);});
   }
  });
@@ -414,6 +460,29 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   if(busy()){
    return submitQueuedFollowUp(text,images,files,retryAttachments,clientMessageId);
   }
+  if(retryTurn&&!notSent()&&'reconcileBtwServerHistory' in btwMod&&typeof btwMod.reconcileBtwServerHistory==='function'){
+   const current=key(),missionId=p.mission;
+   setBusy(true);setError('');setRunStatus('Reconnecting…');
+   const reconciled=await btwMod.reconcileBtwServerHistory(missionId,history(),undefined,{force:true}).catch(()=>undefined);
+   if(current!==key())return false;
+   if(reconciled){
+    if(reconciled.latest)setSideSessionId(prev=>prev||reconciled.latest!);
+    refreshSideSession(missionId,reconciled.activeSession);
+    const changed=reconciled.history.length!==history().length||reconciled.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
+    if(changed)setHistory(reconciled.history);
+    if(doesTurnAnswerPending({question:text,turnId:turnId(),startedAt:startedAt()},reconciled.history,pendingBaselineHistory,BTW_HISTORY_LIMIT)&&!reconciled.activeSession){
+     pendingBaselineHistory=[];
+     setBusy(false);setStartedAt(undefined);setRunStatus('');setError('');setNotSent(false);
+     setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());
+     queueMicrotask(sendNext);
+     return true;
+    }
+    if(reconciled.activeSession&&reconciled.activeSession.question.trim()===text){
+     watchActiveSession?.(reconciled.activeSession,retryAttachments);
+     return true;
+    }
+   }
+  }
   if(clientMessageId)setTurnId(clientMessageId);
   else if(!preparing()&&!retryTurn)setTurnId(crypto.randomUUID());
   setPreparing(false);
@@ -426,6 +495,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   if(launchController.signal.aborted)return false;
   for(const file of files)text=text.replaceAll(uploadToken(file.path),`[File: ${file.source.name}]`);
   if(current===key()){
+   pendingBaselineHistory=history();
    setPendingAttachments(attachments);
    setOpen(true);side?.show();setBusy(true);setQuestion(text);setAnswer('');setNarration([]);setError('');setNotSent(false);setDraft('');
    revealSentQuestion();
@@ -444,6 +514,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      const doneTurn=event.completed;
      setHistory(rows=>rows.some(row=>row.answer.trim()===doneTurn.answer.trim()&&row.question.trim()===doneTurn.question.trim())?rows:appendTurn(rows,{id:turnId(),question:doneTurn.question,answer:doneTurn.answer,...(doneTurn.narration?.length?{narration:doneTurn.narration}:{})}));
     }
+    pendingBaselineHistory=history();
     currentQuestion=event.question;
     if(event.messageId){
      setDeliveredQueuedIds(prev=>prev.includes(event.messageId!)?prev:[...prev,event.messageId!]);
@@ -456,9 +527,10 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     setRunStatus('Starting side agent…');
    }
    if(event.type==='done'){
-    setAnswer(event.answer);setNarration(event.narration??[]);
     const next=appendTurn(history(),{id:turnId(),question:currentQuestion,answer:event.answer,...(event.narration?.length?{narration:event.narration}:{}),...(currentQuestion===text?{attachments}:{})});
+    pendingBaselineHistory=[];
     setHistory(next);setBusy(false);setStartedAt(undefined);setRunStatus('');
+    setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());
    }
   },attachments,launchController.signal,activeTurnId).catch(e=>{
    if(current!==key()||controller.signal.aborted)return;
@@ -493,6 +565,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    await sendMissionMessage(targetId,row.content,undefined,row.id).catch(e=>setQueueToast(e instanceof Error?e.message:String(e)));
   }
   const presented=messagePresentation(first.content).text;
+  pendingBaselineHistory=history();
   setTurnId(first.id as ReturnType<typeof crypto.randomUUID>);
   setStartedAt(new Date().toISOString());
   setBusy(true);setQuestion(presented);setAnswer('');setNarration([]);setError('');setNotSent(false);setRunStatus('Starting side agent…');
@@ -528,7 +601,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  onCleanup(()=>window.removeEventListener('keydown',escape));
  const cancel=()=>{launchAbort?.abort();void stopBtw(p.mission).then(()=>{abort?.abort();setConfirmedQueued([]);setPendingQueued([]);setBusy(false);setStartedAt(undefined);setRunStatus('');setError('Side agent stopped.');}).catch(e=>setError(String(e)));};
  const retry=()=>{const asked=question(),files=pendingAttachments();void ask(asked,[],[],files,true);};
- const dismiss=()=>{setError('');setNotSent(false);setStartedAt(undefined);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);queueMicrotask(sendNext);};
+ const dismiss=()=>{pendingBaselineHistory=[];setError('');setNotSent(false);setStartedAt(undefined);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);queueMicrotask(sendNext);};
  // Reconcile the same turn through preparation, streaming and persistence.
  const [turns,setTurns]=createStore<Array<SideExchange & {id:string;pending?:boolean;error?:string}>>([]);
  createEffect(()=>{

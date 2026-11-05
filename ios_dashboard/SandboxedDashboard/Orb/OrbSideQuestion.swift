@@ -265,6 +265,26 @@ enum OrbBtwThreads {
         }
         return sorted.map { $0.turn }
     }
+
+    /// Disambiguates whether `reconciledTurns` contains Core's answer to `question`,
+    /// avoiding false matches against an earlier identical prompt (e.g. `"and now?"`).
+    static func doesTurnAnswerPending(
+        question: String,
+        askedAt: Date?,
+        reconciledTurns: [Turn],
+        priorTurns: [Turn] = []
+    ) -> Bool {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return false }
+        let matches = reconciledTurns.filter { $0.question.trimmingCharacters(in: .whitespacesAndNewlines) == q }
+        guard let latest = matches.last else { return false }
+        let priorMatches = priorTurns.filter { $0.question.trimmingCharacters(in: .whitespacesAndNewlines) == q }.count
+        if matches.count <= priorMatches { return false }
+        if let askedAt, let turnAt = OrbTurnSummary.parseDate(latest.at), turnAt < askedAt.addingTimeInterval(-5) {
+            return false
+        }
+        return true
+    }
 }
 
 /// The /btw state of one conversation, kept in memory and on disk so the sheet
@@ -380,13 +400,28 @@ final class OrbBtwStore {
             bound = .object(fields)
         }
         if let existing = eventCache[id] { eventCache[id] = ("", existing.events) }
+        OrbWarmSyncCoordinator.shared.markBtwDirty(parentId: parent)
         syncStreamSubscription()
     }
 
     private func load() async throws {
         let tag = "btw-parent:\(parent)"
         let rows = try await OrbCore.shared.call("/api/control/missions?tag=\(OrbCore.escape(tag))&all=true&limit=50")
-        let threads = OrbBtwThreads.threads(rows["missions"].items.isEmpty ? rows.items : rows["missions"].items, parent: parent)
+        var threads = OrbBtwThreads.threads(rows["missions"].items.isEmpty ? rows.items : rows["missions"].items, parent: parent)
+        var hadReadFailure = false
+        let knownID = boundID ?? UserDefaults.standard.string(forKey: OrbBtwConfig.sessionKey(parent))
+        if let knownID, !knownID.isEmpty, !threads.contains(where: { $0["id"].text == knownID }) {
+            do {
+                let direct = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(knownID))?include_history=false")
+                if !OrbBtwThreads.threads([direct], parent: parent).isEmpty {
+                    threads = OrbBtwThreads.threads(threads + [direct], parent: parent)
+                }
+            } catch let e as OrbHTTPError where e.status == 404 {
+                // Deleted/unknown session id; ignore.
+            } catch {
+                hadReadFailure = true
+            }
+        }
         var fetched: [String: [StoredEvent]] = [:]
         // Threads are read concurrently; a finished thread whose activity has
         // not changed is not read again, and cached threads fetch only `sinceSeq` deltas.
@@ -410,7 +445,10 @@ final class OrbBtwStore {
             }))
         }
         for read in reads {
-            guard let events = await read.task.value else { continue }
+            guard let events = await read.task.value else {
+                hadReadFailure = true
+                continue
+            }
             fetched[read.id] = events
             eventCache[read.id] = (read.stamp, events)
         }
@@ -436,6 +474,7 @@ final class OrbBtwStore {
         if let id = boundID, running, !threads.contains(where: { $0["id"].text == id }) {
             if merged != turns { turns = merged }
             loaded = true
+            OrbWarmSyncCoordinator.shared.markBtwDirty(parentId: parent)
             return
         }
         if merged != turns { turns = merged; OrbDisk.saveAsync(merged, key: cacheKey) }
@@ -451,7 +490,11 @@ final class OrbBtwStore {
         }
         if let id = boundID { UserDefaults.standard.set(id, forKey: OrbBtwConfig.sessionKey(parent)) }
         loaded = true
-        OrbWarmSyncCoordinator.shared.markBtwClean(parentId: parent)
+        if hadReadFailure {
+            OrbWarmSyncCoordinator.shared.markBtwDirty(parentId: parent)
+        } else {
+            OrbWarmSyncCoordinator.shared.markBtwClean(parentId: parent)
+        }
         syncStreamSubscription()
         OrbWarmSyncCoordinator.shared.reconcile()
     }
@@ -604,6 +647,7 @@ struct OrbSideQuestionSheet: View {
     /// The question just sent, shown at once until Core's history has it.
     @State private var pending: String?
     @State private var askedAt: Date?
+    @State private var pendingBaselineTurns: [OrbBtwThreads.Turn] = []
     @State private var autoAsked = false
     @State private var scroller = OrbTranscriptScroller()
     @State private var followUps = OrbFollowUpQueue()
@@ -622,9 +666,8 @@ struct OrbSideQuestionSheet: View {
     /// The optimistic bubble, until Core's thread holds the question.
     private var pendingBubble: String? {
         guard let pending else { return nil }
-        if store.open?.question == pending { return nil }
-        if let askedAt, let last = store.turns.last, last.question == pending,
-           let at = OrbTurnSummary.parseDate(last.at), at >= askedAt.addingTimeInterval(-5) { return nil }
+        if store.open?.question.trimmingCharacters(in: .whitespacesAndNewlines) == pending.trimmingCharacters(in: .whitespacesAndNewlines) { return nil }
+        if OrbBtwThreads.doesTurnAnswerPending(question: pending, askedAt: askedAt, reconciledTurns: store.turns, priorTurns: pendingBaselineTurns) { return nil }
         return pending
     }
     private var canSend: Bool { !busy && !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -919,7 +962,7 @@ struct OrbSideQuestionSheet: View {
     private func follow() async {
         guard phase == .active else { return }
         do {
-            try await store.refresh()
+            try await store.refresh(force: pending != nil)
             await refreshQueue()
             settlePending()
         } catch is CancellationError {
@@ -938,7 +981,7 @@ struct OrbSideQuestionSheet: View {
             while: { phase == .active && (!OrbCore.shared.isMultiplexSyncHealthy || !store.isWarmCaughtUp || waiting || busy || followUps.count > 0) }
         ) {
             do {
-                try await store.refresh()
+                try await store.refresh(force: pending != nil)
                 await refreshQueue()
                 settlePending()
                 return true
@@ -950,7 +993,7 @@ struct OrbSideQuestionSheet: View {
     }
 
     private func settlePending() {
-        if pending != nil && !busy && pendingBubble == nil { pending = nil; askedAt = nil }
+        if pending != nil && !busy && pendingBubble == nil { pending = nil; askedAt = nil; pendingBaselineTurns = [] }
     }
 
     private func ask() async {
@@ -966,7 +1009,7 @@ struct OrbSideQuestionSheet: View {
             if queueing {
                 question = ""
             } else {
-                pending = text; askedAt = Date(); question = ""
+                pendingBaselineTurns = store.turns; pending = text; askedAt = Date(); question = ""
             }
         }
         let files = attachments
@@ -1007,7 +1050,7 @@ struct OrbSideQuestionSheet: View {
                 let receiptID = result["id"].text.isEmpty ? messageID : result["id"].text
                 rawQueuedByID[receiptID] = content
                 if queueing || queuedNow {
-                    pending = nil; askedAt = nil
+                    pending = nil; askedAt = nil; pendingBaselineTurns = []
                     if receiptID == messageID {
                         followUps = followUps.posted(messageID, queued: queuedNow)
                     } else {
@@ -1016,7 +1059,7 @@ struct OrbSideQuestionSheet: View {
                             followUps = followUps.enqueue(receiptID, text, lastSequence: store.boundDeliveredMessages.last?.sequence).posted(receiptID, queued: true)
                         }
                     }
-                    if !queuedNow { pending = text; askedAt = Date(); store.sent(to: id) }
+                    if !queuedNow { pendingBaselineTurns = store.turns; pending = text; askedAt = Date(); store.sent(to: id) }
                 } else if !shouldQueue {
                     store.sent(to: id)
                 }
@@ -1106,6 +1149,7 @@ struct OrbSideQuestionSheet: View {
         let wireContent = rawQueuedByID[queueID] ?? row.content
         withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) {
             followUps = followUps.hide(queueID)
+            pendingBaselineTurns = store.turns
             pending = row.content.trimmingCharacters(in: .whitespacesAndNewlines)
             askedAt = Date()
             scroller.scrollToBottom()
@@ -1126,7 +1170,7 @@ struct OrbSideQuestionSheet: View {
         } catch {
             withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) {
                 followUps = followUps.unhide(queueID)
-                pending = nil; askedAt = nil
+                pending = nil; askedAt = nil; pendingBaselineTurns = []
             }
             self.error = "Couldn’t send now. \(error.localizedDescription)"
         }
@@ -1134,7 +1178,7 @@ struct OrbSideQuestionSheet: View {
 
     /// A failed send puts the question back in the field instead of losing it.
     private func restore(_ text: String, _ files: [OrbAttachment]) {
-        pending = nil; askedAt = nil
+        pending = nil; askedAt = nil; pendingBaselineTurns = []
         if question.isEmpty { question = text }
         if attachments.isEmpty { attachments = files }
     }

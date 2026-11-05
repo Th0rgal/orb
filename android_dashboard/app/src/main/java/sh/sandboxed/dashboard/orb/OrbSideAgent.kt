@@ -283,6 +283,29 @@ object OrbSideAgent {
             }
             .map { it.value }
 
+    /**
+     * Disambiguates whether [reconciledTurns] contains Core's answer to [question],
+     * avoiding false matches against an earlier identical prompt (e.g. `"and now?"`).
+     */
+    fun doesTurnAnswerPending(
+        question: String,
+        localAskedAtMs: Long?,
+        reconciledTurns: List<Turn>,
+        priorTurns: List<Turn> = emptyList()
+    ): Boolean {
+        val q = question.trim()
+        if (q.isEmpty()) return false
+        val matches = reconciledTurns.filter { it.question.trim() == q }
+        val latest = matches.lastOrNull() ?: return false
+        val priorMatches = priorTurns.count { it.question.trim() == q }
+        if (matches.size <= priorMatches) return false
+        if (localAskedAtMs != null) {
+            val turnMs = OrbJSON.dateEpochMs(latest.at)
+            if (turnMs != null && turnMs < localAskedAtMs - 5_000L) return false
+        }
+        return true
+    }
+
     fun activityStamp(m: OrbRow): String = "${activity(m)}\u0000${m.str("status").orEmpty()}"
 
     private fun eventSeq(ev: OrbRow, fallback: Long): Long =
@@ -661,6 +684,7 @@ fun OrbSideAgentSheet(
     }
 
     var localAskedAtMs by remember(session.parentId) { mutableStateOf<Long?>(null) }
+    var pendingBaselineTurns by remember(session.parentId) { mutableStateOf<List<OrbSideAgent.Turn>>(emptyList()) }
     var nowMs by remember(session.parentId) { mutableLongStateOf(System.currentTimeMillis()) }
 
     DisposableEffect(session.parentId) {
@@ -674,9 +698,14 @@ fun OrbSideAgentSheet(
             cachedThreads.putAll(snap.cachedThreads)
             cachedEventsByThread.putAll(snap.cachedEventsByThread)
             val pending = pendingQuestion?.trim()
-            if (!pending.isNullOrEmpty() && (snap.openTurn?.question?.trim() == pending || snap.turns.any { it.question.trim() == pending })) {
+            if (!pending.isNullOrEmpty() && (
+                    snap.openTurn?.question?.trim() == pending ||
+                    OrbSideAgent.doesTurnAnswerPending(pending, localAskedAtMs, snap.turns, pendingBaselineTurns)
+                )
+            ) {
                 pendingQuestion = null
                 localAskedAtMs = null
+                pendingBaselineTurns = emptyList()
             }
             loading = false
         }
@@ -710,7 +739,7 @@ fun OrbSideAgentSheet(
     }
 
     suspend fun refreshThreads(force: Boolean = false): OrbRow? {
-        if (!force && !loading && !running && OrbWarmSyncCoordinator.canSkipBtwServerCrawl(core, session.parentId)) {
+        if (!force && !loading && !running && pendingQuestion == null && OrbWarmSyncCoordinator.canSkipBtwServerCrawl(core, session.parentId)) {
             return boundMission
         }
         val allRows = try {
@@ -719,17 +748,21 @@ fun OrbSideAgentSheet(
         } catch (e: CancellationException) {
             throw e
         } catch (_: Throwable) {
+            OrbWarmSyncCoordinator.markBtwDirty(core, session.parentId)
             loading = false
             return boundMission
         }
+        var hadReadFailure = false
         val matching = OrbSideAgent.threads(allRows, session.parentId).toMutableList()
         val explicitId = boundId ?: session.missionId
         if (!explicitId.isNullOrEmpty() && matching.none { it.id == explicitId }) {
             try {
-                matching.add(OrbRow(explicitId, core.fetchDict("/api/control/missions/${core.encodeComponent(explicitId)}")))
+                val direct = OrbRow(explicitId, core.fetchDict("/api/control/missions/${core.encodeComponent(explicitId)}"))
+                matching.addAll(OrbSideAgent.threads(listOf(direct), session.parentId))
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                if (e !is OrbError || e.status != 404) hadReadFailure = true
                 boundMission?.takeIf { it.id == explicitId }?.let { matching.add(it) }
             }
         }
@@ -744,7 +777,8 @@ fun OrbSideAgentSheet(
                     openTurn = openTurn,
                     cachedThreads = cachedThreads.toMap(),
                     cachedEventsByThread = cachedEventsByThread.toMap(),
-                )
+                ),
+                markClean = !hadReadFailure
             )
             return boundMission
         }
@@ -759,6 +793,7 @@ fun OrbSideAgentSheet(
         } catch (e: CancellationException) {
             throw e
         } catch (_: Throwable) {
+            hadReadFailure = true
             boundMission?.takeIf { it.id == target.id }?.let { target = it }
         }
         boundMission = target
@@ -807,6 +842,7 @@ fun OrbSideAgentSheet(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Throwable) {
+                    hadReadFailure = true
                     // Preserve already-rendered thread turns and open progress on transient errors.
                     cached?.second?.let { prev -> if (isLive) prev else prev.copy(open = null) }
                 }
@@ -831,9 +867,12 @@ fun OrbSideAgentSheet(
             followUps = followUps.withDelivered(latestDelivered)
         }
         val pending = pendingQuestion?.trim()
-        if (!pending.isNullOrEmpty() && (latestOpen?.question?.trim() == pending || merged.any { it.question.trim() == pending })) {
+        val answeredPending = !pending.isNullOrEmpty() &&
+            OrbSideAgent.doesTurnAnswerPending(pending, localAskedAtMs, merged, pendingBaselineTurns)
+        if (!pending.isNullOrEmpty() && (latestOpen?.question?.trim() == pending || answeredPending)) {
             pendingQuestion = null
-            if (!latestOpen?.at.isNullOrEmpty() || merged.any { it.question.trim() == pending }) {
+            pendingBaselineTurns = emptyList()
+            if (!latestOpen?.at.isNullOrEmpty() || answeredPending) {
                 localAskedAtMs = null
             }
         }
@@ -847,7 +886,8 @@ fun OrbSideAgentSheet(
                 openTurn = latestOpen,
                 cachedThreads = cachedThreads.toMap(),
                 cachedEventsByThread = cachedEventsByThread.toMap(),
-            )
+            ),
+            markClean = !hadReadFailure
         )
         refreshQueue(target.id)
         return target
@@ -876,9 +916,11 @@ fun OrbSideAgentSheet(
                     followUps = followUps.enqueue(clientId, text)
                     UsageTelemetry.trackAction(UsageTelemetry.Action.Queue, "btw")
                 } else {
+                    pendingBaselineTurns = turns
                     pendingQuestion = text
                     localAskedAtMs = System.currentTimeMillis()
                 }
+                OrbWarmSyncCoordinator.markBtwDirty(core, session.parentId)
                 val receipt = OrbJSON.dict(
                     OrbSideAgent.retrying {
                         core.request(
@@ -906,13 +948,16 @@ fun OrbSideAgentSheet(
                         }
                     }
                     if (!queuedNow) {
+                        pendingBaselineTurns = turns
                         pendingQuestion = text
                         localAskedAtMs = System.currentTimeMillis()
                     }
                 }
             } else {
+                pendingBaselineTurns = turns
                 pendingQuestion = text
                 localAskedAtMs = System.currentTimeMillis()
+                OrbWarmSyncCoordinator.markBtwDirty(core, session.parentId)
                 val created = OrbSideAgent.launch(
                     core,
                     session.parentId,
@@ -930,6 +975,7 @@ fun OrbSideAgentSheet(
             followUps = followUps.postFailed(clientId)
             pendingQuestion = null
             localAskedAtMs = null
+            pendingBaselineTurns = emptyList()
             if (inputText.isEmpty()) inputText = text
             error = e.message ?: "Couldn't send side question."
         } finally {
@@ -1028,8 +1074,10 @@ fun OrbSideAgentSheet(
         if (row.sending) return
         val wireContent = rawQueuedById[queueId] ?: row.content
         followUps = followUps.hide(queueId)
+        pendingBaselineTurns = turns
         pendingQuestion = row.content.trim()
         localAskedAtMs = System.currentTimeMillis()
+        OrbWarmSyncCoordinator.markBtwDirty(core, session.parentId)
         scope.launch {
             try {
                 val resp = OrbJSON.dict(
@@ -1049,6 +1097,7 @@ fun OrbSideAgentSheet(
                 followUps = followUps.unhide(queueId)
                 pendingQuestion = null
                 localAskedAtMs = null
+                pendingBaselineTurns = emptyList()
                 error = e.message ?: "Couldn't send now."
             }
         }
@@ -1061,6 +1110,8 @@ fun OrbSideAgentSheet(
                 core.request("/api/control/missions/${core.encodeComponent(targetId)}/cancel", method = "POST")
                 pendingQuestion = null
                 localAskedAtMs = null
+                pendingBaselineTurns = emptyList()
+                OrbWarmSyncCoordinator.markBtwDirty(core, session.parentId)
                 refreshThreads(force = true)
                 refreshQueue(targetId)
             } catch (e: Throwable) {
