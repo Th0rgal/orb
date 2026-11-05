@@ -1,4 +1,4 @@
-import { deleteFileOptimistically, fileMoveKey, isFilePathPending, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, withMovedMissions } from "./moves";
+import { deleteFileOptimistically, fileMoveKey, isFilePathPending, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, waitForFilePathSettled, withMovedMissions } from "./moves";
 import { renameOptimistically } from "./renames";
 import { isArchivable, isReopenable, isRunning, isLive, isWorking, presentedStatus } from "./missionStatus";
 import { swallow } from "./log";
@@ -724,8 +724,11 @@ export function LiveProjectsSection(p: {
         return;
       }
       openMovedSelection(target.slug, target.path, destination, false);
-      await refreshFileParents(target.slug, target.path, destination);
-      settleMove(moveKey);
+      try {
+        await refreshFileParents(target.slug, target.path, destination);
+      } finally {
+        settleMove(moveKey);
+      }
     } catch (e) {
       if (version === connectionVersion()) setActionError(e instanceof Error ? e.message : String(e));
     }
@@ -738,12 +741,16 @@ export function LiveProjectsSection(p: {
   };
   const pasteFile = async (slug: string, path: string, text: string) => {
     const item = readFileReference(text), version = connectionVersion();
-    if (!item || fileBusy() || isFilePathPending(item.slug, item.path) || isFilePathPending(slug, path) || text === consumedFileClipboard || isClipboardReferenceRetired(text)) return;
+    if (!item || fileBusy() || text === consumedFileClipboard || isClipboardReferenceRetired(text)) return;
     setFileBusy(true); setActionMenu(null); setActionError(null);
     try {
       const other = item.slug !== slug;
       const destination = other ? [path, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, path, false);
-      if (!item.copy && isFilePathPending(slug, destination)) return;
+      if (isFilePathPending(item.slug, item.path) || isFilePathPending(slug, path) || (!item.copy && isFilePathPending(slug, destination))) {
+        await Promise.all([waitForFilePathSettled(item.slug, item.path), waitForFilePathSettled(slug, path), ...(!item.copy ? [waitForFilePathSettled(slug, destination)] : [])]);
+        const parent = dirs[`${item.slug}:${fileParent(item.path)}`];
+        if (version !== connectionVersion() || text === consumedFileClipboard || isClipboardReferenceRetired(text) || (parent && !parent.some(e => e.name === fileBaseName(item.path) && e.kind === (item.directory ? "dir" : "file")))) return;
+      }
       // Agents and crons belong to their project: only documents cross over.
       const transfer = async () => {
         if (other && item.directory && !item.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
@@ -1064,14 +1071,17 @@ export function LiveProjectsSection(p: {
     prevActivityByProject = nextSignatures;
   }));
 
+  const dirGenerations = new Map<string, number>();
   const loadDir = (slug: string, path: string, force = false) => {
     if (!isConnected()) return Promise.resolve();
     const version = connectionVersion();
     const key = `${slug}:${path}`;
+    const gen = (dirGenerations.get(key) ?? 0) + (force ? 1 : 0);
+    if (force) dirGenerations.set(key, gen);
     setDirErrors(key, null);
     return requests.read(`files:${version}:${key}`, () => listProjectFiles(slug, path), force)
-      .then((entries) => { if (currentConnection(version)) setDirs(key, reconcile(entries, {key: "name"})); })
-      .catch((e) => { if (currentConnection(version)) setDirErrors(key, e instanceof Error ? e.message : String(e)); });
+      .then((entries) => { if (currentConnection(version) && (dirGenerations.get(key) ?? 0) === gen) setDirs(key, reconcile(entries, {key: "name"})); })
+      .catch((e) => { if (currentConnection(version) && (dirGenerations.get(key) ?? 0) === gen) setDirErrors(key, e instanceof Error ? e.message : String(e)); });
   };
 
   const warmupOne = async (slug: string) => {
