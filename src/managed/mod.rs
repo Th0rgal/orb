@@ -5387,6 +5387,23 @@ impl ManagedManager {
         }
         let roots_expr = quoted_roots.join(" ");
         let has_custom_hook = custom_hook.is_some() as u8;
+        let confirmed_exports = m
+            .pre_stop_summary
+            .as_ref()
+            .and_then(|s| s.get("confirmed_bundle_commits"))
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|entry| {
+                        entry
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_'))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
         let mut script = format!(
             r#"set +e
 [ -r /etc/orb/boost-env ] && {{ set -a; . /etc/orb/boost-env; set +a; }}
@@ -5414,6 +5431,7 @@ if [ -z "${{SANDBOXED_SECRETS_DIR:-}}" ] && [ -z "${{GITHUB_TOKEN:-}}" ] && [ -z
 fi
 ORB_WIP_REF='{wip_ref}'
 ORB_HAS_CUSTOM_HOOK={has_custom_hook}
+ORB_CONFIRMED_EXPORTS='{confirmed_exports}'
 ORB_MAX_BUNDLE_EXPORT_BYTES=1572864
 ORB_CHECKPOINT_REPOS=0
 ORB_CHECKPOINT_PUSHED=0
@@ -5423,7 +5441,8 @@ ORB_SEEN_TOPS=""
 orb_emit_bundle() {{
   bfile="$1"
   rhash="$2"
-  rpath="$3"
+  csha="$3"
+  rpath="$4"
   [ -r "$bfile" ] || return 1
   bsize=$(wc -c < "$bfile" 2>/dev/null | tr -d '[:space:]')
   [ -n "$bsize" ] || return 1
@@ -5437,7 +5456,7 @@ orb_emit_bundle() {{
     return 1
   fi
   [ -n "$b64" ] || return 1
-  printf 'ORB_BUNDLE_EXPORT_BEGIN hash=%s size=%s repo=%s\n%s\nORB_BUNDLE_EXPORT_END\n' "$rhash" "$bsize" "$rpath" "$b64"
+  printf 'ORB_BUNDLE_EXPORT_BEGIN hash=%s commit=%s size=%s repo=%s\n%s\nORB_BUNDLE_EXPORT_END\n' "$rhash" "$csha" "$bsize" "$rpath" "$b64"
   return 0
 }}
 orb_checkpoint_repo() {{
@@ -5492,8 +5511,9 @@ $repo_dir"
   head_sha=$(git rev-parse --verify HEAD 2>/dev/null || true)
   repo_gitdir=$(git rev-parse --git-dir 2>/dev/null || printf '.git')
   common_gitdir=$(git rev-parse --git-common-dir 2>/dev/null || printf '%s' "$repo_gitdir")
-  bundle_path="$common_gitdir/orb-pre-stop-wip-$(printf '%s' "$repo_dir" | cksum | awk '{{print $1}}').bundle"
-  latest_ref="refs/orb-pre-stop/latest-$(printf '%s' "$repo_dir" | cksum | awk '{{print $1}}')"
+  repo_suffix=$(printf '%s' "$repo_dir" | cksum | awk '{{print $1}}')
+  bundle_path="$common_gitdir/orb-pre-stop-wip-$repo_suffix.bundle"
+  latest_ref="refs/orb-pre-stop/latest-$repo_suffix"
   unpushed=0
   if [ -z "$status_out" ] && [ -n "$head_sha" ]; then
     if git remote get-url origin >/dev/null 2>&1; then
@@ -5504,10 +5524,10 @@ $repo_dir"
         unpushed=1
       fi
     else
-      local_saved=$(git rev-parse --verify "$latest_ref" 2>/dev/null || true)
-      if [ "$local_saved" != "$head_sha" ]; then
-        unpushed=1
-      fi
+      case " $ORB_CONFIRMED_EXPORTS " in
+        *" $repo_suffix:$head_sha "*) ;;
+        *) unpushed=1 ;;
+      esac
     fi
   fi
   if [ -z "$status_out" ] && [ "$unpushed" -eq 0 ]; then
@@ -5542,7 +5562,6 @@ $repo_dir"
   fi
   if [ -n "$commit_sha" ]; then
     local_ok=1
-    repo_suffix=$(printf '%s' "$repo_dir" | cksum | awk '{{print $1}}')
     git update-ref "$latest_ref" "$commit_sha" 2>/dev/null || local_ok=0
     git update-ref "refs/orb-pre-stop/latest" "$commit_sha" 2>/dev/null || true
     git bundle create "$bundle_path" "$latest_ref" >/dev/null 2>&1 || local_ok=0
@@ -5553,10 +5572,14 @@ $repo_dir"
         ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
       fi
     elif [ "$local_ok" -eq 1 ]; then
-      if orb_emit_bundle "$bundle_path" "$repo_suffix" "$repo_dir"; then
+      if orb_emit_bundle "$bundle_path" "$repo_suffix" "$commit_sha" "$repo_dir"; then
         ORB_CHECKPOINT_EXPORTED=$((ORB_CHECKPOINT_EXPORTED + 1))
-      elif [ "$ORB_HAS_CUSTOM_HOOK" -ne 1 ]; then
-        ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+      else
+        git update-ref -d "$latest_ref" 2>/dev/null || true
+        rm -f "$bundle_path" 2>/dev/null || true
+        if [ "$ORB_HAS_CUSTOM_HOOK" -ne 1 ]; then
+          ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+        fi
       fi
     else
       ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
@@ -5680,8 +5703,29 @@ exit "$orb_rc"
             }
         }
 
-        let (cleaned_output, exported_bundles, bundle_persist_failed) =
+        let mut merged_confirmed: Vec<String> = m
+            .pre_stop_summary
+            .as_ref()
+            .and_then(|s| s.get("confirmed_bundle_commits"))
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (cleaned_output, exported_bundles, new_confirmed_commits, bundle_persist_failed) =
             persist_exported_checkpoint_bundles(&self.dir, &m.id, &raw_stdout);
+        for tok in new_confirmed_commits {
+            if let Some((prefix, _)) = tok.split_once(':') {
+                let prefix_colon = format!("{prefix}:");
+                merged_confirmed.retain(|existing| !existing.starts_with(&prefix_colon));
+            }
+            if !merged_confirmed.contains(&tok) {
+                merged_confirmed.push(tok);
+            }
+        }
         let output_snippet: String = cleaned_output.chars().take(500).collect();
 
         let checkpoint_succeeded =
@@ -5693,6 +5737,7 @@ exit "$orb_rc"
             "wip_ref": wip_ref,
             "custom_hook": custom_hook.is_some(),
             "exported_bundles": exported_bundles,
+            "confirmed_bundle_commits": merged_confirmed,
             "exit_code": exit_code,
             "output": output_snippet,
         });
@@ -8091,7 +8136,7 @@ pub(crate) fn persist_exported_checkpoint_bundles(
     managed_dir: &std::path::Path,
     machine_id: &str,
     stdout: &str,
-) -> (String, Vec<String>, bool) {
+) -> (String, Vec<String>, Vec<String>, bool) {
     use base64::Engine as _;
 
     let safe_machine: String = machine_id
@@ -8106,6 +8151,7 @@ pub(crate) fn persist_exported_checkpoint_bundles(
 
     let mut cleaned_lines = Vec::new();
     let mut exported_paths = Vec::new();
+    let mut confirmed_commits = Vec::new();
     let mut persist_failed = false;
 
     let mut lines = stdout.lines();
@@ -8115,13 +8161,15 @@ pub(crate) fn persist_exported_checkpoint_bundles(
             continue;
         };
         let mut hash_tag = String::new();
+        let mut commit_tag = String::new();
         for tok in rest.split_whitespace() {
             if let Some(h) = tok.strip_prefix("hash=") {
                 hash_tag = h
                     .chars()
                     .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
                     .collect();
-                break;
+            } else if let Some(c) = tok.strip_prefix("commit=") {
+                commit_tag = c.chars().filter(|ch| ch.is_ascii_hexdigit()).collect();
             }
         }
         if hash_tag.is_empty() {
@@ -8159,10 +8207,18 @@ pub(crate) fn persist_exported_checkpoint_bundles(
             persist_failed = true;
             continue;
         }
+        if !commit_tag.is_empty() {
+            confirmed_commits.push(format!("{hash_tag}:{commit_tag}"));
+        }
         exported_paths.push(dest.to_string_lossy().into_owned());
     }
 
-    (cleaned_lines.join("\n"), exported_paths, persist_failed)
+    (
+        cleaned_lines.join("\n"),
+        exported_paths,
+        confirmed_commits,
+        persist_failed,
+    )
 }
 
 #[cfg(test)]

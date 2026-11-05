@@ -5403,10 +5403,15 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
         local_export_stdout.contains("dirty_repos=1 pushed=0 exported=1 failed=0"),
         "expected local-only repo to report exported=1 failed=0, got: {local_export_stdout}"
     );
-    let (cleaned_out, saved_bundles, persist_failed) =
+    let (cleaned_out, saved_bundles, confirmed_commits, persist_failed) =
         persist_exported_checkpoint_bundles(&m.dir, &spawned.id, &local_export_stdout);
     assert!(!persist_failed, "Core bundle persistence must succeed");
     assert_eq!(saved_bundles.len(), 1, "expected 1 persisted host bundle");
+    assert_eq!(
+        confirmed_commits.len(),
+        1,
+        "expected 1 confirmed host-persisted repo:commit token"
+    );
     assert!(
         !cleaned_out.contains("ORB_BUNDLE_EXPORT_BEGIN"),
         "cleaned output snippet must strip base64 bundle payload"
@@ -5442,14 +5447,27 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
         "host-persisted bundle must preserve uncommitted local-only repo files after VM deletion, got: {restored_files}"
     );
 
-    // And if a local-only repo's bundle cannot be exported (e.g. exceeds ORB_MAX_BUNDLE_EXPORT_BYTES)
-    // and no custom hook is configured, the script MUST fail closed (`failed=1`, non-zero exit)!
+    // And if a clean local-only repo (already committed, `git status --porcelain` empty!) cannot
+    // be exported (e.g. exceeds ORB_MAX_BUNDLE_EXPORT_BYTES) or Core has not confirmed persistence:
+    //   1) First attempt MUST fail closed (`failed=1`, non-zero exit).
+    //   2) Second attempt MUST STILL fail closed (`dirty_repos=1 exported=0 failed=1`) rather than
+    //      trusting the VM-local `$latest_ref` and silently skipping with `dirty_repos=0`!
+    //   3) Once export succeeds and Core passes `ORB_CONFIRMED_EXPORTS`, a subsequent pass skips cleanly.
     let oversized_repo = work_root.join("oversized-local-only-repo");
     std::fs::create_dir_all(&oversized_repo).unwrap();
     git(&oversized_repo, &["init", "-b", "main"]);
     git(&oversized_repo, &["config", "user.email", "test@orb.test"]);
     git(&oversized_repo, &["config", "user.name", "Test"]);
     std::fs::write(oversized_repo.join("Big.bin"), vec![b'x'; 256]).unwrap();
+    git(&oversized_repo, &["add", "Big.bin"]);
+    git(
+        &oversized_repo,
+        &["commit", "-m", "committed local-only work"],
+    );
+    assert!(
+        git(&oversized_repo, &["status", "--porcelain"]).is_empty(),
+        "precondition: clean local-only repo with committed work"
+    );
     let cap_fail_script = no_hook_script
         .replace(
             "'/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'",
@@ -5459,19 +5477,56 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
             "ORB_MAX_BUNDLE_EXPORT_BYTES=1572864",
             "ORB_MAX_BUNDLE_EXPORT_BYTES=16",
         );
-    let cap_fail_run = std::process::Command::new("sh")
+    for attempt in 1..=2 {
+        let cap_fail_run = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cap_fail_script)
+            .output()
+            .unwrap();
+        assert!(
+            !cap_fail_run.status.success(),
+            "attempt {attempt}: clean local-only repo without confirmed Core export must exit non-zero"
+        );
+        let cap_fail_stdout = String::from_utf8_lossy(&cap_fail_run.stdout);
+        assert!(
+            cap_fail_stdout.contains("dirty_repos=1 pushed=0 exported=0 failed=1"),
+            "attempt {attempt}: expected unexportable clean local-only repo to retry and fail, got: {cap_fail_stdout}"
+        );
+    }
+    // Now run with normal cap (succeeds & emits bundle), persist on Core, and verify a follow-up
+    // pass with `ORB_CONFIRMED_EXPORTS` skips cleanly (`dirty_repos=0`).
+    let normal_cap_script = no_hook_script.replace(
+        "'/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'",
+        &format!("'{}'", work_root.display()),
+    );
+    let ok_export_run = std::process::Command::new("sh")
         .arg("-c")
-        .arg(&cap_fail_script)
+        .arg(&normal_cap_script)
         .output()
         .unwrap();
+    assert!(ok_export_run.status.success());
+    let ok_export_stdout = String::from_utf8_lossy(&ok_export_run.stdout);
     assert!(
-        !cap_fail_run.status.success(),
-        "local-only repo whose bundle cannot be exported off-VM must exit non-zero"
+        ok_export_stdout.contains("dirty_repos=1 pushed=0 exported=1 failed=0"),
+        "expected clean local-only repo to export once cap allows, got: {ok_export_stdout}"
     );
-    let cap_fail_stdout = String::from_utf8_lossy(&cap_fail_run.stdout);
+    let (_, _, confirmed2, persist_failed2) =
+        persist_exported_checkpoint_bundles(&m.dir, &spawned.id, &ok_export_stdout);
+    assert!(!persist_failed2 && confirmed2.len() == 1);
+    let confirmed_pass_script = normal_cap_script.replace(
+        "ORB_CONFIRMED_EXPORTS=''",
+        &format!("ORB_CONFIRMED_EXPORTS='{}'", confirmed2[0]),
+    );
+    let skip_after_confirm = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&confirmed_pass_script)
+        .output()
+        .unwrap();
+    assert!(skip_after_confirm.status.success());
+    let skip_stdout = String::from_utf8_lossy(&skip_after_confirm.stdout);
     assert!(
-        cap_fail_stdout.contains("dirty_repos=1 pushed=0 exported=0 failed=1"),
-        "expected unexportable local-only repo to report failed=1, got: {cap_fail_stdout}"
+        skip_stdout.contains("dirty_repos=0 pushed=0 exported=0 failed=0"),
+        "expected Core-confirmed clean local-only repo to skip on subsequent pass, got: {skip_stdout}"
     );
 
     // 5. Hard-cap teardown MUST refresh the checkpoint even after an earlier `pre_720m_hard_cap`

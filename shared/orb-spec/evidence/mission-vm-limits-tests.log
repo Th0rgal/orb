@@ -1,4 +1,4 @@
-    Finished `test` profile [unoptimized] target(s) in 0.13s
+    Finished `test` profile [unoptimized] target(s) in 0.12s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-d791927b4d2534f0)
 
 running 1 test
@@ -140,7 +140,7 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 55.52s
+    Finished `test` profile [unoptimized] target(s) in 50.82s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 2 tests
