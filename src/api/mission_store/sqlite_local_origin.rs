@@ -13,7 +13,14 @@ pub(super) async fn sync(store: &SqliteMissionStore, snapshot: Snapshot) -> Resu
   let o=&snapshot.origin;let id=o.id.to_string();let run=o.run_id.to_string();let now=now_string();let origin=serde_json::to_string(o).map_err(err)?;
   let old:Option<(String,u64,bool)>=tx.query_row("SELECT origin,sequence,terminal FROM local_origins WHERE mission_id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(err)?;
   if let Some((previous,sequence,terminal))=old {
-   if previous!=origin{return Err("Local mission identity already belongs to another origin".into());}
+   let same_origin = previous == origin
+    || serde_json::from_str::<crate::local_origin::Origin>(&previous)
+     .map(|prev| prev == *o)
+     .unwrap_or(false);
+   if !same_origin{return Err("Local mission identity already belongs to another origin".into());}
+   if previous != origin {
+    tx.execute("UPDATE local_origins SET origin=?2 WHERE mission_id=?1",params![id,origin]).map_err(err)?;
+   }
    if snapshot.sequence<=sequence{
     if !terminal{
      let updated=tx.execute("UPDATE mission_runs SET heartbeat_at=?2 WHERE run_id=?1 AND execution_state<>'terminal' AND generation=1",params![run,now]).map_err(err)?;
@@ -240,5 +247,32 @@ mod tests {
                 .as_deref(),
             Some("medium")
         );
+    }
+    #[tokio::test]
+    async fn local_origin_accepts_pre_upgrade_stored_json_without_folder_field() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(temp.path().to_path_buf(), "origin-upgrade")
+            .await
+            .unwrap();
+        let mut s = snapshot();
+        let id = s.origin.id;
+        sync(&store, s.clone()).await.unwrap();
+        // Simulate pre-upgrade row in `local_origins.origin` that omitted `"folder"`.
+        {
+            let conn = store.conn.lock().await;
+            let mut raw: serde_json::Value = serde_json::to_value(&s.origin).unwrap();
+            raw.as_object_mut().unwrap().remove("folder");
+            conn.execute(
+                "UPDATE local_origins SET origin = ?2 WHERE mission_id = ?1",
+                params![id.to_string(), serde_json::to_string(&raw).unwrap()],
+            )
+            .unwrap();
+        }
+        s.sequence = 2;
+        s.status = "awaiting_user".into();
+        s.text = "Post-upgrade output".into();
+        sync(&store, s).await.unwrap();
+        let m = store.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(m.history[1].content, "Post-upgrade output");
     }
 }

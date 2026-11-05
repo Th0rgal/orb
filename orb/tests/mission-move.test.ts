@@ -249,3 +249,26 @@ it("replays incident 9f559751: co-located archived root + fork leader + /btw + c
   expect(withHierarchy(stalePollRoot)).toMatchObject({ project: "default", folder: "crons", placement_revision: 2 });
   expect(withHierarchy(stalePollWorker)).toMatchObject({ project: "default", folder: "", placement_revision: 2 });
 });
+
+it("preserves folders on legacy title-based ` · fork` versions across stickHierarchy and payload-free placement events", () => {
+  const LEGACY_FORK = "legacy-fork-7777";
+  const observed = stickHierarchy({
+    id: LEGACY_FORK,
+    parent_mission_id: P,
+    title: "Audit plan · fork",
+    project: "verity",
+    folder: "Specs/Formal",
+    placement_revision: 1,
+    status: "completed",
+  });
+  expect(observed.folder).toBe("Specs/Formal");
+
+  commitAuthoritativePlacements([
+    { mission_id: LEGACY_FORK, project: "verity", folder: "Specs/Verified", placement_revision: 2 },
+  ]);
+  expect(withHierarchy({ id: LEGACY_FORK })).toMatchObject({
+    project: "verity",
+    folder: "Specs/Verified",
+    placement_revision: 2,
+  });
+});

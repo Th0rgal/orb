@@ -1132,13 +1132,14 @@ impl SqliteMissionStore {
             "SELECT id, parent_mission_id, title, COALESCE(folder, ''), tags \
              FROM missions WHERE tags LIKE '%\"orb-folder:%'",
         ) {
-            let candidates: Vec<(
+            type LegacyOrbFolderRow = (
                 String,
                 Option<String>,
                 Option<String>,
                 String,
                 Option<String>,
-            )> = stmt
+            );
+            let candidates: Vec<LegacyOrbFolderRow> = stmt
                 .query_map([], |row| {
                     Ok((
                         row.get(0)?,

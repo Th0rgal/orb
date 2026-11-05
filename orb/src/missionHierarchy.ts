@@ -16,6 +16,7 @@
  *  - `reparentMission` is the only way to change or clear a remembered link.
  */
 import { createSignal } from "solid-js";
+import { forkSource } from "./missionTree";
 import { orbHierarchyMergeStep, orbPlacementMergeStep, type PlacementSourceKind } from "./orbKernel";
 import { shallowEqual } from "./poll";
 
@@ -81,8 +82,10 @@ const normalizeProject = (project?: string | null): string | null => {
 
 const hasNestedParent = (id: string, m?: HierarchyFields): boolean => {
   const link = links.get(id);
-  const fork = (m?.tags ?? link?.tags)?.find(t => t.startsWith("fork-of:"))?.slice(8);
   const p = nonEmpty(m?.parent_mission_id) ?? link?.parent;
+  const title = m?.title !== undefined && m.title !== null ? m.title : seen.get(id)?.title;
+  const tags = m?.tags ?? link?.tags;
+  const fork = forkSource({ parent_mission_id: p, title, tags });
   if (p && p !== fork) return true;
   if (nonEmpty(m?.callback_parent_mission_id) ?? link?.callback) return true;
   if ((m?.tags ?? []).some(isDirectBtwTag) || link?.tags.some(isDirectBtwTag)) return true;
@@ -308,9 +311,10 @@ export function observeMission(m: HierarchyFields | null | undefined, isPartial 
     for (const tag of tags) if (!link.tags.includes(tag)) link.tags.push(tag);
     links.set(m.id, link);
   }
-  const authPlace = mergeIncomingPlacement(m, isPartial);
   const s = seen.get(m.id) ?? {};
   if (m.title !== undefined && m.title !== null) s.title = m.title;
+  seen.set(m.id, s);
+  const authPlace = mergeIncomingPlacement(m, isPartial);
   if (authPlace) {
     s.project = authPlace.project;
     s.folder = authPlace.folder;
