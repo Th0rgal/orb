@@ -10860,12 +10860,28 @@ async fn reset_provider_usage(
 ///
 /// Returns `Some(account_label)` when a reset was redeemed and the account's
 /// cooldown was cleared so the mission can resume immediately.
+pub(crate) fn auto_reset_idempotency_key(
+    provider_id: uuid::Uuid,
+    mission_id: uuid::Uuid,
+    event_key: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"orb-auto-sub-reset:v1:");
+    hasher.update(provider_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(mission_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(event_key.as_bytes());
+    let hex = hex::encode(hasher.finalize());
+    format!("auto-{}", &hex[..40])
+}
+
 pub(crate) async fn try_auto_reset_subscription_on_limit(
     working_dir: &Path,
     state_opt: Option<&Arc<super::routes::AppState>>,
     backend: &str,
     mission_id: uuid::Uuid,
-    attempt: u32,
+    event_key: &str,
 ) -> Option<String> {
     let target_type = match backend {
         "claudecode" => ProviderType::Anthropic,
@@ -10941,12 +10957,7 @@ pub(crate) async fn try_auto_reset_subscription_on_limit(
             }
         }
 
-        let req_id = format!(
-            "auto-{}-{}-{}",
-            provider.id.simple(),
-            mission_id.simple(),
-            attempt
-        );
+        let req_id = auto_reset_idempotency_key(provider.id, mission_id, event_key);
 
         let outcome = match target_type {
             ProviderType::Anthropic => {

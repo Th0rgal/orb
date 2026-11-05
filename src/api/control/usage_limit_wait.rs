@@ -278,12 +278,19 @@ pub(crate) async fn plan_in(
         Zone::system(),
     )?;
     if let Some(dir) = working_dir {
+        let event_key = mission_store
+            .get_latest_mission_run(mission_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|run| format!("run:{}", run.id))
+            .unwrap_or_else(|| format!("turn:{}", Uuid::new_v4()));
         if let Some(account) = crate::api::ai_providers::try_auto_reset_subscription_on_limit(
             dir,
             state_opt,
             &mission.backend,
             mission_id,
-            0,
+            &event_key,
         )
         .await
         {
@@ -422,8 +429,19 @@ pub(crate) async fn wake_for_provider(
     let now = Utc::now();
     let mut woken = 0usize;
 
-    if let Ok(missions) = mission_store.list_missions(200, 0).await {
-        for mission in missions {
+    const PAGE: usize = 200;
+    let filter = crate::api::mission_store::MissionFilter {
+        status: Some("pending".to_string()),
+        ..Default::default()
+    };
+    let mut waiting_missions = Vec::new();
+    let mut offset = 0usize;
+    while let Ok(page) = mission_store
+        .list_missions_filtered(&filter, PAGE, offset)
+        .await
+    {
+        let page_len = page.len();
+        for mission in page {
             if !is_waiting(&mission) {
                 continue;
             }
@@ -439,26 +457,34 @@ pub(crate) async fn wake_for_provider(
             if due_already {
                 continue;
             }
-            let mut scheduling = mission.scheduling.clone();
-            scheduling.not_before = Some(now.to_rfc3339());
-            if mission_store
-                .set_mission_scheduling(mission.id, &scheduling)
-                .await
-                .is_ok()
-            {
-                woken += 1;
-                let _ = events_tx.send(AgentEvent::MissionStatusChanged {
-                    completion: None,
-                    execution: mission_store
-                        .get_latest_mission_run(mission.id)
-                        .await
-                        .ok()
-                        .flatten(),
-                    mission_id: mission.id,
-                    status: MissionStatus::Pending,
-                    summary: Some("Subscription reset redeemed; resuming now".to_string()),
-                });
-            }
+            waiting_missions.push(mission);
+        }
+        if page_len < PAGE {
+            break;
+        }
+        offset += page_len;
+    }
+
+    for mission in waiting_missions {
+        let mut scheduling = mission.scheduling.clone();
+        scheduling.not_before = Some(now.to_rfc3339());
+        if mission_store
+            .set_mission_scheduling(mission.id, &scheduling)
+            .await
+            .is_ok()
+        {
+            woken += 1;
+            let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                completion: None,
+                execution: mission_store
+                    .get_latest_mission_run(mission.id)
+                    .await
+                    .ok()
+                    .flatten(),
+                mission_id: mission.id,
+                status: MissionStatus::Pending,
+                summary: Some("Subscription reset redeemed; resuming now".to_string()),
+            });
         }
     }
 
@@ -1118,12 +1144,13 @@ pub(crate) async fn plan_remote_with_state(
             && replays < MAX_REMOTE_REPLAYS
             && account_limits::is_usage_limit_message(failure)
         {
+            let event_key = format!("job:{job_id}");
             if let Some(account) = crate::api::ai_providers::try_auto_reset_subscription_on_limit(
                 working_dir,
                 state_opt,
                 &mission.backend,
                 mission_id,
-                replays,
+                &event_key,
             )
             .await
             {
@@ -2746,7 +2773,21 @@ CLI error: {"data":{"message":"Failed to execute statement"},"name":"UnknownErro
 
         crate::api::ai_providers::set_test_subscription_reset_bases(None);
 
-        // Also verify `wake_for_provider` lifts a parked multi-day local wait to now.
+        // Auto-reset idempotency keys stay <= 64 chars (never truncated by
+        // `sanitize_reset_request_id`), remain stable on retries of the same
+        // turn/job, and differ across subsequent turns/jobs of the same mission.
+        let key_turn_1 =
+            crate::api::ai_providers::auto_reset_idempotency_key(acct.id, mission.id, "run:1");
+        let key_turn_1_retry =
+            crate::api::ai_providers::auto_reset_idempotency_key(acct.id, mission.id, "run:1");
+        let key_turn_2 =
+            crate::api::ai_providers::auto_reset_idempotency_key(acct.id, mission.id, "run:2");
+        assert!(key_turn_1.len() <= 64);
+        assert_eq!(key_turn_1, key_turn_1_retry);
+        assert_ne!(key_turn_1, key_turn_2);
+
+        // Also verify `wake_for_provider` lifts a parked multi-day local wait to now,
+        // even when buried behind >200 newer completed missions.
         let parked_mission = active_mission(&store, "claudecode").await;
         let (tx, _rx) = tokio::sync::broadcast::channel(16);
         let long_wait = UsageLimitWait {
@@ -2755,6 +2796,24 @@ CLI error: {"data":{"message":"Failed to execute statement"},"name":"UnknownErro
             announced: true,
         };
         assert!(park(&store, &tx, &parked_mission, &long_wait, "finish PR").await);
+        for _ in 0..210 {
+            let m = store
+                .create_mission(
+                    Some("newer"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("claudecode"),
+                    None,
+                )
+                .await
+                .unwrap();
+            store
+                .update_mission_status(m.id, MissionStatus::Completed)
+                .await
+                .unwrap();
+        }
         let woken = wake_for_provider(&store, dir.path(), &tx, "anthropic").await;
         assert_eq!(woken, 1);
         let reloaded = store.get_mission(parked_mission.id).await.unwrap().unwrap();
