@@ -81,6 +81,33 @@ export interface RestoreBackupResponse {
   errors: string[];
 }
 
+export function interpretRestoreResponse(res: Partial<RestoreBackupResponse> | null | undefined): {
+  ok: boolean;
+  message: string;
+} {
+  const success = res?.success === true;
+  const restored = Array.isArray(res?.restored_files)
+    ? res!.restored_files.filter((f): f is string => typeof f === "string" && f.length > 0)
+    : [];
+  const errors = Array.isArray(res?.errors)
+    ? res!.errors.filter((e): e is string => typeof e === "string" && e.length > 0)
+    : [];
+  const rawMessage = typeof res?.message === "string" ? res.message.trim() : "";
+  if (!success) {
+    const base = rawMessage || "No files were restored. The backup may be empty or invalid.";
+    return {
+      ok: false,
+      message: errors.length ? `${base} (${errors.join("; ")})` : base,
+    };
+  }
+  return {
+    ok: true,
+    message:
+      rawMessage ||
+      (restored.length ? `Restored ${restored.length} files (${restored.join(", ")}).` : "Backup restored."),
+  };
+}
+
 function sanitizeMultipartFileName(raw: string): string {
   const clean = raw.replace(/[\r\n"\\/]/g, "_").trim();
   return clean || "backup.zip";

@@ -372,8 +372,10 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
         }
     }
 
-    LaunchedEffect(endpoint) {
+    LaunchedEffect(endpoint, signedInToken) {
         backendVersion = null
+        cleanupLoaded = false
+        cleanupDirty = false
         if (endpoint.isBlank()) return@LaunchedEffect
         val health = try {
             core.request("/api/health", allowAuthRetry = false)
@@ -531,6 +533,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                     Text("Automatic mission workspace GC", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
                     Switch(
                         checked = cleanupEnabled,
+                        enabled = cleanupLoaded && !cleanupSaving,
                         onCheckedChange = {
                             cleanupEnabled = it
                             cleanupDirty = true
@@ -545,6 +548,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                         cleanupDirty = true
                         cleanupNotice = null
                     },
+                    enabled = cleanupLoaded && !cleanupSaving,
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     label = { Text("Completed retention (days)") },
@@ -557,6 +561,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                         cleanupDirty = true
                         cleanupNotice = null
                     },
+                    enabled = cleanupLoaded && !cleanupSaving,
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     label = { Text("Stopped / failed retention (days)") },
@@ -570,6 +575,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                     Text("Clean orphaned directories", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
                     Switch(
                         checked = cleanupOrphans,
+                        enabled = cleanupLoaded && !cleanupSaving,
                         onCheckedChange = {
                             cleanupOrphans = it
                             cleanupDirty = true
@@ -852,13 +858,13 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                                     )
                                 )
                                 pendingRestore = null
-                                val restored = OrbJSON.strList(res, "restored")
-                                backupNotice = if (restored.isEmpty()) {
-                                    "Backup restored."
+                                val (ok, msg) = OrbBackupArchive.interpretRestoreResponse(res)
+                                if (ok) {
+                                    backupNotice = msg
+                                    loadCleanupSettings()
                                 } else {
-                                    "Restored ${restored.size} items (${restored.joinToString(", ")})."
+                                    backupError = msg
                                 }
-                                loadCleanupSettings()
                             } catch (_: OrbApprovalKey.Cancelled) {
                             } catch (e: CancellationException) {
                                 throw e

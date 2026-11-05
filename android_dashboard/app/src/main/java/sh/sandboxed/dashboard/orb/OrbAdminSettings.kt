@@ -126,6 +126,9 @@ object OrbAdminFormatting {
     fun isUnconfiguredError(e: Throwable): Boolean =
         (e as? OrbError)?.status == 503
 
+    fun libraryRemoteUpdateError(res: OrbDict?): String? =
+        OrbJSON.str(res, "library_error")?.takeIf { it.isNotEmpty() }
+
     fun hermesRuntime(runtime: OrbDict?): List<Pair<String, String>> {
         if (runtime == null) return listOf("Status" to "Unavailable")
         val rows = mutableListOf<Pair<String, String>>()
@@ -1097,11 +1100,18 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
         repoBusy = true
         repoError = null
         try {
-            core.request(
-                "/api/settings/library-remote",
-                "PUT",
-                body = mapOf("library_remote" to remote)
+            val res = OrbJSON.dict(
+                core.request(
+                    "/api/settings/library-remote",
+                    "PUT",
+                    body = mapOf("library_remote" to remote)
+                )
             )
+            val libErr = OrbAdminFormatting.libraryRemoteUpdateError(res)
+            if (libErr != null) {
+                repoError = libErr
+                return
+            }
             repoDialogOpen = false
             load()
         } catch (e: CancellationException) {

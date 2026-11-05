@@ -72,6 +72,33 @@ final class OrbClientParityTests: XCTestCase {
         if case .success = OrbBackupArchive.parseCleanupDays("366") {
             XCTFail("Expected 366 days to fail validation")
         }
+
+        let emptyArchive = OrbBackupArchive.interpretRestoreResponse(.object([
+            "success": .bool(false),
+            "message": .string("No recognized files in backup archive"),
+            "restored_files": .array([]),
+            "errors": .array([])
+        ]))
+        XCTAssertFalse(emptyArchive.ok)
+        XCTAssertEqual(emptyArchive.message, "No recognized files in backup archive")
+
+        let okArchive = OrbBackupArchive.interpretRestoreResponse(.object([
+            "success": .bool(true),
+            "message": .string(""),
+            "restored_files": .array([.string("settings.json"), .string("providers.json")]),
+            "errors": .array([])
+        ]))
+        XCTAssertTrue(okArchive.ok)
+        XCTAssertEqual(okArchive.message, "Restored 2 files (settings.json, providers.json).")
+
+        XCTAssertNil(OrbSkillsSettings.libraryRemoteUpdateError(.object(["library_reinitialized": .bool(true)])))
+        XCTAssertEqual(
+            OrbSkillsSettings.libraryRemoteUpdateError(.object([
+                "library_reinitialized": .bool(false),
+                "library_error": .string("Failed to clone git@github.com:org/private.git")
+            ])),
+            "Failed to clone git@github.com:org/private.git"
+        )
     }
 
     func testControllerModelScheduleTimelineAndGrantNormalization() {
@@ -117,5 +144,21 @@ final class OrbClientParityTests: XCTestCase {
         XCTAssertEqual(OrbControllerModel.parseProjectLimit("4"), .success(4))
         XCTAssertNil(OrbControllerModel.projectLimitOf(.object(["parallel_missions": .number(0)])))
         XCTAssertEqual(OrbControllerModel.projectLimitOf(.object(["parallel_missions": .number(3)])), 3)
+
+        // Legacy singular `skill` fallback vs explicit `skills` array.
+        XCTAssertEqual(
+            OrbControllerModel.skillsOf(
+                settings: .object(["skill": .string("project-notes")]),
+                job: .null
+            ),
+            ["project-notes"]
+        )
+        XCTAssertEqual(
+            OrbControllerModel.skillsOf(
+                settings: .object(["skills": .array([]), "skill": .string("stale-skill")]),
+                job: .null
+            ),
+            []
+        )
     }
 }

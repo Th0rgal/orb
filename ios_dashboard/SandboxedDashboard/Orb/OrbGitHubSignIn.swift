@@ -236,6 +236,26 @@ enum OrbBackupArchive {
         }
         return .success(n)
     }
+
+    static func interpretRestoreResponse(_ res: OrbJSON) -> (ok: Bool, message: String) {
+        let success = res["success"].flag
+        let restored = res["restored_files"].items.map(\.text).filter { !$0.isEmpty }
+        let errors = res["errors"].items.map(\.text).filter { !$0.isEmpty }
+        let rawMessage = res["message"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !success {
+            let base = rawMessage.isEmpty
+                ? "No files were restored. The backup may be empty or invalid."
+                : rawMessage
+            return (
+                ok: false,
+                message: errors.isEmpty ? base : "\(base) (\(errors.joined(separator: "; ")))"
+            )
+        }
+        let summary = !rawMessage.isEmpty
+            ? rawMessage
+            : (restored.isEmpty ? "Backup restored." : "Restored \(restored.count) files (\(restored.joined(separator: ", "))).")
+        return (ok: true, message: summary)
+    }
 }
 
 /// Single-tenant server password rotation (`GET /api/auth/status`, `POST /api/auth/change-password`).
@@ -355,7 +375,7 @@ struct OrbGitHubIntegrationSection: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
-                        .disabled(busy || status?["oauth_configured"].flag == false)
+                        .disabled(busy || (status?["configured"] != .null && status?["configured"].flag == false))
                     }
                 }
 
@@ -416,7 +436,7 @@ struct OrbGitHubIntegrationSection: View {
     private var titleText: String {
         guard let status else { return "Checking GitHub status…" }
         if status["connected"].flag {
-            let name = status["user"]["login"].text
+            let name = status["login"].text.isEmpty ? status["user"]["login"].text : status["login"].text
             return name.isEmpty ? "Connected to GitHub" : "Connected as @\(name)"
         }
         return "GitHub account"
@@ -425,10 +445,11 @@ struct OrbGitHubIntegrationSection: View {
     private var subtitleText: String {
         guard let status else { return "Credentials for git push and gh inside mission workspaces." }
         if status["connected"].flag {
-            let scopes = status["scopes"].text
+            let scopeList = status["scopes"].items.map(\.text).filter { !$0.isEmpty }
+            let scopes = scopeList.isEmpty ? status["scopes"].text : scopeList.joined(separator: ", ")
             return scopes.isEmpty ? "Available to mission workspaces." : "Scopes: \(scopes)"
         }
-        if !status["oauth_configured"].flag {
+        if status["configured"] != .null && !status["configured"].flag {
             return "Configure GITHUB_OAUTH_CLIENT_ID on Core to connect."
         }
         return "Authorize git push and gh inside mission workspaces via GitHub device flow."
@@ -438,7 +459,11 @@ struct OrbGitHubIntegrationSection: View {
         do {
             let s = try await OrbCore.shared.call("/api/integrations/github/status")
             status = s
-            if s["connected"].flag { authorizeState = nil }
+            if s["connected"].flag {
+                authorizeState = nil
+            } else if s["pending"].flag && !s["user_code"].text.isEmpty && authorizeState == nil {
+                authorizeState = s
+            }
         } catch is CancellationError {} catch {
             // Optional on older servers; surface errors only on explicit user action.
         }

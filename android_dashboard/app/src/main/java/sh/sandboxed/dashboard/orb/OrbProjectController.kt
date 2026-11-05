@@ -122,6 +122,19 @@ object OrbControllerModel {
         return false
     }
 
+    /** Normalizes `skills` array or legacy singular `skill` string from `settings` then `job` (`orb/src/cronSchema.ts`). */
+    fun skillsOf(settings: OrbDict?, job: OrbDict?): List<String> {
+        for (source in listOfNotNull(settings, job)) {
+            val rawSkills = source["skills"]
+            if (rawSkills is List<*>) {
+                return rawSkills.mapNotNull { (it as? String)?.trim()?.takeIf { s -> s.isNotEmpty() } }
+            }
+            val single = OrbJSON.str(source, "skill")
+            if (!single.isNullOrEmpty()) return listOf(single)
+        }
+        return emptyList()
+    }
+
     /** Translates `continuity` into Hermes `context_from` without dropping sibling context refs. */
     fun hermesPatch(patch: Map<String, Any?>, existingJob: OrbDict? = null): Map<String, Any?> {
         val out = LinkedHashMap<String, Any?>(patch)
@@ -501,21 +514,25 @@ fun OrbProjectAutomationPage(
             )
             when (tab) {
                 OrbAutomationTab.Controller -> {
-                    Box(
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clip(CircleShape)
-                            .background(OrbStyle.surface)
-                            .border(1.dp, OrbStyle.border, CircleShape)
-                            .orbPressClickable { editingController = true },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = if (controllerJob == null) Icons.Default.Add else Icons.Default.Tune,
-                            contentDescription = if (controllerJob == null) "Set up controller" else "Controller settings",
-                            tint = Color.White,
-                            modifier = Modifier.size(17.dp)
-                        )
+                    if (controllerJob != null) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(OrbStyle.surface)
+                                .border(1.dp, OrbStyle.border, CircleShape)
+                                .orbPressClickable { editingController = true },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Tune,
+                                contentDescription = "Controller settings",
+                                tint = Color.White,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.width(38.dp))
                     }
                 }
                 OrbAutomationTab.Crons -> {
@@ -669,9 +686,9 @@ fun OrbProjectAutomationPage(
                                         .padding(16.dp),
                                     verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Text("This project has no controller cron in Hermes yet.", color = OrbStyle.textMuted, fontSize = 13.sp)
-                                    TextButton(onClick = { editingController = true }) {
-                                        Text("Set up controller…")
+                                    Text("This project has no controller cron in Hermes.", color = OrbStyle.textMuted, fontSize = 13.sp)
+                                    TextButton(onClick = { creatingCron = true }) {
+                                        Text("New scheduled cron…")
                                     }
                                 }
                             }
@@ -1323,7 +1340,7 @@ private fun OrbCronEditorDialog(
         )
     }
     var skillsText by remember {
-        mutableStateOf(OrbJSON.strList(existingSettings, "skills").joinToString(", "))
+        mutableStateOf(OrbControllerModel.skillsOf(existingSettings, existingJob).joinToString(", "))
     }
     var model by remember {
         mutableStateOf(OrbJSON.str(existingSettings, "model").orEmpty())

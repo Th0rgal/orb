@@ -519,6 +519,11 @@ struct OrbSkillsSettings: View {
         return text.contains("503") && text.localizedCaseInsensitiveContains("library")
     }
 
+    static func libraryRemoteUpdateError(_ res: OrbJSON) -> String? {
+        let err = res["library_error"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return err.isEmpty ? nil : err
+    }
+
     /// Plain words for a failed delete (desktop: deleteMessage in SkillsSettings.tsx).
     static func deleteMessage(_ name: String, _ raw: String) -> String {
         let detail = raw.replacingOccurrences(of: #"^\d{3}\s+"#, with: "", options: .regularExpression)
@@ -713,11 +718,15 @@ struct OrbSkillsSettings: View {
         repoBusy = true; defer { repoBusy = false }
         repoError = ""
         do {
-            _ = try await client.call(
+            let res = try await client.call(
                 "/api/settings/library-remote",
                 method: "PUT",
                 body: .object(["library_remote": url.map(OrbJSON.string) ?? .null])
             )
+            if let err = Self.libraryRemoteUpdateError(res) {
+                repoError = err
+                return
+            }
             repoSheetOpen = false
             await load()
         } catch is CancellationError {} catch {
@@ -729,7 +738,7 @@ struct OrbSkillsSettings: View {
         divergedBusy = true; defer { divergedBusy = false }
         do {
             let path = forcePush ? "/api/library/force-push" : "/api/library/force-sync"
-            _ = try await client.call(path, method: "POST")
+            _ = try await client.callText(path, method: "POST")
             divergedMessage = nil
             await load()
         } catch is CancellationError {} catch {
@@ -900,18 +909,28 @@ private struct OrbSkillEditor: View {
         .alert("Library history diverged", isPresented: Binding(get: { divergedMessage != nil }, set: { if !$0 { divergedMessage = nil } })) {
             Button("Reset to remote", role: .destructive) {
                 Task {
-                    _ = try? await client.call("/api/library/force-sync", method: "POST")
-                    divergedMessage = nil
-                    await load()
+                    do {
+                        _ = try await client.callText("/api/library/force-sync", method: "POST")
+                        divergedMessage = nil
+                        await load()
+                    } catch is CancellationError {} catch {
+                        self.error = error.localizedDescription
+                        divergedMessage = nil
+                    }
                 }
             }
             Button("Overwrite remote", role: .destructive) {
                 Task {
-                    _ = try? await client.call("/api/library/force-push", method: "POST")
-                    divergedMessage = nil
-                    saved = true
-                    editing = false
-                    await load()
+                    do {
+                        _ = try await client.callText("/api/library/force-push", method: "POST")
+                        divergedMessage = nil
+                        saved = true
+                        editing = false
+                        await load()
+                    } catch is CancellationError {} catch {
+                        self.error = error.localizedDescription
+                        divergedMessage = nil
+                    }
                 }
             }
             Button("Cancel", role: .cancel) { divergedMessage = nil }

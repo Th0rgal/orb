@@ -3,7 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Machines } from "../src/Machines";
 import { Settings } from "../src/Settings";
 import { SkillsSettings } from "../src/SkillsSettings";
-import { buildRestoreMultipartBody, parseCleanupDays } from "../src/accountAdmin";
+import {
+  buildRestoreMultipartBody,
+  interpretRestoreResponse,
+  parseCleanupDays,
+} from "../src/accountAdmin";
 import { clearConnection, setConnection } from "../src/api";
 import {
   GITHUB_OAUTH_STATE_TTL_MS,
@@ -109,13 +113,108 @@ describe("Backup multipart & cleanup helpers", () => {
     expect(hashA).toBe(hashB);
   });
 
-  it("validates cleanup day bounds and diverged git errors", () => {
+  it("validates cleanup day bounds, restore outcomes, and diverged git errors", () => {
     expect(parseCleanupDays("14")).toBe(14);
     expect(parseCleanupDays("0")).toBeNull();
     expect(parseCleanupDays("366")).toBeNull();
     expect(parseCleanupDays("12.5")).toBeNull();
+
+    expect(
+      interpretRestoreResponse({
+        success: false,
+        message: "No recognized files in backup archive",
+        restored_files: [],
+        errors: [],
+      }),
+    ).toEqual({
+      ok: false,
+      message: "No recognized files in backup archive",
+    });
+
+    expect(
+      interpretRestoreResponse({
+        success: false,
+        message: "Partial restore failed",
+        restored_files: ["settings.json"],
+        errors: ["keys.json: permission denied"],
+      }),
+    ).toEqual({
+      ok: false,
+      message: "Partial restore failed (keys.json: permission denied)",
+    });
+
+    expect(
+      interpretRestoreResponse({
+        success: true,
+        message: "",
+        restored_files: ["settings.json", "providers.json"],
+        errors: [],
+      }),
+    ).toEqual({
+      ok: true,
+      message: "Restored 2 files (settings.json, providers.json).",
+    });
+
     expect(isDivergedLibraryError(new Error("409 DIVERGED_HISTORY: local 1 ahead, 2 behind"))).toBe(true);
     expect(isDivergedLibraryError(new Error("500 network timeout"))).toBe(false);
+  });
+
+  it("reloads WorkspaceCleanupCard on connection switch and disables inputs until loaded", async () => {
+    setConnection("http://core-a.test", "jwt-a");
+    let resolveSecondSettings: ((res: Response) => void) | undefined;
+    vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "http://core-a.test/api/settings") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              auto_cleanup_enabled: true,
+              auto_cleanup_days: 14,
+              auto_cleanup_stopped_days: 3,
+              auto_cleanup_orphans_enabled: true,
+            }),
+          ),
+        );
+      }
+      if (url === "http://core-b.test/api/settings") {
+        return new Promise<Response>((resolve) => {
+          resolveSecondSettings = resolve;
+        });
+      }
+      return Promise.resolve(new Response(JSON.stringify({})));
+    });
+
+    render(() => <Settings />);
+    const details = document.querySelector("details.settings-advanced") as HTMLDetailsElement;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+
+    const daysInput = (await screen.findByLabelText("Completed retention days")) as HTMLInputElement;
+    await waitFor(() => {
+      expect(daysInput.disabled).toBe(false);
+      expect(daysInput.value).toBe("14");
+    });
+
+    setConnection("http://core-b.test", "jwt-b");
+    await waitFor(() => {
+      expect(daysInput.disabled).toBe(true);
+    });
+
+    resolveSecondSettings?.(
+      new Response(
+        JSON.stringify({
+          auto_cleanup_enabled: false,
+          auto_cleanup_days: 30,
+          auto_cleanup_stopped_days: 5,
+          auto_cleanup_orphans_enabled: false,
+        }),
+      ),
+    );
+
+    await waitFor(() => {
+      expect(daysInput.disabled).toBe(false);
+      expect(daysInput.value).toBe("30");
+    });
   });
 });
 

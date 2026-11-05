@@ -49,6 +49,18 @@ enum OrbControllerModel {
         return ctx.items.contains { $0.text.lowercased() == "self" }
     }
 
+    /// Normalizes `skills` array or legacy singular `skill` string from `settings` then `job` (`orb/src/cronSchema.ts`).
+    static func skillsOf(settings: OrbJSON?, job: OrbJSON?) -> [String] {
+        for source in [settings, job].compactMap({ $0 }) {
+            if case .array(let arr) = source["skills"] {
+                return arr.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            }
+            let single = source["skill"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !single.isEmpty { return [single] }
+        }
+        return []
+    }
+
     /// Translates `continuity` into Hermes `context_from` without dropping sibling context refs.
     static func hermesPatch(_ patch: [String: OrbJSON], existingJob: OrbJSON? = nil) -> OrbJSON {
         var out = patch
@@ -260,10 +272,12 @@ struct OrbProjectAutomationView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 switch tab {
                 case .controller:
-                    Button { editingController = true } label: {
-                        Image(systemName: controllerJob == nil ? "plus" : "slider.horizontal.3")
+                    if controllerJob != nil {
+                        Button { editingController = true } label: {
+                            Image(systemName: "slider.horizontal.3")
+                        }
+                        .accessibilityLabel("Controller settings")
                     }
-                    .accessibilityLabel(controllerJob == nil ? "Set up controller" : "Controller settings")
                 case .crons:
                     Button { creatingCron = true } label: { Image(systemName: "plus") }
                         .accessibilityLabel("New scheduled cron")
@@ -406,10 +420,10 @@ struct OrbProjectAutomationView: View {
             )
         } else {
             Section("Controller") {
-                Text("This project has no controller cron in Hermes yet.")
+                Text("This project has no controller cron in Hermes.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                Button("Set up controller…") { editingController = true }
+                Button("New scheduled cron…") { creatingCron = true }
             }
             steerSection
         }
@@ -1013,7 +1027,7 @@ struct OrbCronEditorSheet: View {
         schedule = sched.isEmpty ? "every 30m" : sched
         prompt = s["prompt"].text
         deliver = s["deliver"].text.isEmpty ? j["deliver"].text : s["deliver"].text
-        skillsText = s["skills"].items.map(\.text).filter { !$0.isEmpty }.joined(separator: ", ")
+        skillsText = OrbControllerModel.skillsOf(settings: s, job: j).joined(separator: ", ")
         model = s["model"].text
         reasoningEffort = s["reasoning_effort"].text
         continuity = OrbControllerModel.continuityEnabled(settings: s, job: j)

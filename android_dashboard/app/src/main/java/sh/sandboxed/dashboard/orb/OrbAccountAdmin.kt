@@ -91,6 +91,23 @@ object OrbBackupArchive {
         }
         return Result.success(value)
     }
+
+    fun interpretRestoreResponse(res: OrbDict?): Pair<Boolean, String> {
+        val success = OrbJSON.bool(res, "success") == true
+        val restored = OrbJSON.strList(res, "restored_files")
+        val errors = OrbJSON.strList(res, "errors")
+        val rawMessage = OrbJSON.str(res, "message").orEmpty()
+        if (!success) {
+            val base = rawMessage.ifEmpty { "No files were restored. The backup may be empty or invalid." }
+            val full = if (errors.isEmpty()) base else "$base (${errors.joinToString("; ")})"
+            return false to full
+        }
+        val summary = rawMessage.ifEmpty {
+            if (restored.isEmpty()) "Backup restored."
+            else "Restored ${restored.size} files (${restored.joinToString(", ")})."
+        }
+        return true to summary
+    }
 }
 
 /** Single-tenant password rotation dialog (`GET /api/auth/status`, `POST /api/auth/change-password`). */
@@ -215,6 +232,8 @@ fun OrbGitHubIntegrationCard(core: OrbCore) {
             status = s
             if (OrbJSON.bool(s, "connected") == true) {
                 authorizeState = null
+            } else if (OrbJSON.bool(s, "pending") == true && !OrbJSON.str(s, "user_code").isNullOrEmpty() && authorizeState == null) {
+                authorizeState = s
             }
         }
     }
@@ -233,9 +252,12 @@ fun OrbGitHubIntegrationCard(core: OrbCore) {
     }
 
     val connected = OrbJSON.bool(status, "connected") == true
-    val oauthConfigured = status?.let { OrbJSON.bool(it, "oauth_configured") != false } ?: true
-    val login = OrbJSON.str(OrbJSON.dict(status?.get("user")), "login")
-    val scopes = OrbJSON.str(status, "scopes")
+    val oauthConfigured = status?.let {
+        if (it.containsKey("configured") && it["configured"] != null) OrbJSON.bool(it, "configured") != false else true
+    } ?: true
+    val login = OrbJSON.str(status, "login") ?: OrbJSON.str(OrbJSON.dict(status?.get("user")), "login")
+    val scopeList = OrbJSON.strList(status, "scopes")
+    val scopes = if (scopeList.isNotEmpty()) scopeList.joinToString(", ") else OrbJSON.str(status, "scopes")
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(

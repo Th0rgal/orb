@@ -30,6 +30,28 @@ class OrbClientParityTest {
         assertTrue(OrbBackupArchive.parseCleanupDays("0").isFailure)
         assertTrue(OrbBackupArchive.parseCleanupDays("366").isFailure)
         assertTrue(OrbBackupArchive.parseCleanupDays("abc").isFailure)
+
+        val emptyArchive = OrbBackupArchive.interpretRestoreResponse(
+            mapOf(
+                "success" to false,
+                "message" to "No recognized files in backup archive",
+                "restored_files" to emptyList<String>(),
+                "errors" to emptyList<String>()
+            )
+        )
+        assertFalse(emptyArchive.first)
+        assertEquals("No recognized files in backup archive", emptyArchive.second)
+
+        val okArchive = OrbBackupArchive.interpretRestoreResponse(
+            mapOf(
+                "success" to true,
+                "message" to "",
+                "restored_files" to listOf("settings.json", "providers.json"),
+                "errors" to emptyList<String>()
+            )
+        )
+        assertTrue(okArchive.first)
+        assertEquals("Restored 2 files (settings.json, providers.json).", okArchive.second)
     }
 
     @Test
@@ -78,6 +100,15 @@ class OrbClientParityTest {
         assertTrue(OrbControllerModel.parseProjectLimit("-1").isFailure)
         assertNull(OrbControllerModel.projectLimitOf(mapOf("parallel_missions" to 0)))
         assertEquals(3, OrbControllerModel.projectLimitOf(mapOf("parallel_missions" to 3)))
+
+        assertEquals(
+            listOf("project-notes"),
+            OrbControllerModel.skillsOf(mapOf("skill" to "project-notes"), null)
+        )
+        assertEquals(
+            emptyList<String>(),
+            OrbControllerModel.skillsOf(mapOf("skills" to emptyList<String>(), "skill" to "stale-skill"), null)
+        )
     }
 
     @Test
@@ -90,5 +121,15 @@ class OrbClientParityTest {
             )
         )
         assertFalse(OrbAdminFormatting.isDivergedError(OrbError("Conflict", status = 409, body = """{"error":"OTHER"}""")))
+        assertNull(OrbAdminFormatting.libraryRemoteUpdateError(mapOf("library_reinitialized" to true)))
+        assertEquals(
+            "Failed to clone git@github.com:org/private.git",
+            OrbAdminFormatting.libraryRemoteUpdateError(
+                mapOf(
+                    "library_reinitialized" to false,
+                    "library_error" to "Failed to clone git@github.com:org/private.git"
+                )
+            )
+        )
     }
 }

@@ -229,7 +229,9 @@ struct OrbDebugInfoView: View {
         } message: {
             Text("Restoring \(pendingRestore?.name ?? "this archive") overwrites server settings, provider credentials, and workspaces stored in the backup.")
         }
-        .task {
+        .task(id: "\(OrbCore.shared.endpoint)|\(OrbInboxAccount.current)") {
+            cleanupLoaded = false
+            cleanupDirty = false
             _ = try? await OrbCore.shared.checkHealth()
             await OrbNotificationCenter.shared.refreshAuthorizationStatus()
             notificationStatus = OrbNotificationCenter.shared.authorizationStatus
@@ -244,6 +246,7 @@ struct OrbDebugInfoView: View {
                 get: { cleanupEnabled },
                 set: { cleanupEnabled = $0; cleanupDirty = true; cleanupNotice = nil }
             ))
+            .disabled(!cleanupLoaded || cleanupSaving)
             HStack {
                 Text("Completed retention (days)")
                 Spacer()
@@ -254,6 +257,7 @@ struct OrbDebugInfoView: View {
                 .keyboardType(.numberPad)
                 .multilineTextAlignment(.trailing)
                 .frame(width: 64)
+                .disabled(!cleanupLoaded || cleanupSaving)
             }
             HStack {
                 Text("Stopped / failed retention (days)")
@@ -265,11 +269,13 @@ struct OrbDebugInfoView: View {
                 .keyboardType(.numberPad)
                 .multilineTextAlignment(.trailing)
                 .frame(width: 64)
+                .disabled(!cleanupLoaded || cleanupSaving)
             }
             Toggle("Clean orphaned directories", isOn: Binding(
                 get: { cleanupOrphans },
                 set: { cleanupOrphans = $0; cleanupDirty = true; cleanupNotice = nil }
             ))
+            .disabled(!cleanupLoaded || cleanupSaving)
             Button(cleanupSaving ? "Saving…" : "Save cleanup policy") {
                 Task { await saveCleanupSettings() }
             }
@@ -406,11 +412,13 @@ struct OrbDebugInfoView: View {
                 summary: "Restore settings backup"
             )
             pendingRestore = nil
-            let restored = res["restored"].items.map(\.text).filter { !$0.isEmpty }
-            backupNotice = restored.isEmpty
-                ? "Backup restored."
-                : "Restored \(restored.count) items (\(restored.joined(separator: ", ")))."
-            await loadCleanupSettings()
+            let outcome = OrbBackupArchive.interpretRestoreResponse(res)
+            if outcome.ok {
+                backupNotice = outcome.message
+                await loadCleanupSettings()
+            } else {
+                backupError = outcome.message
+            }
         } catch {
             if let msg = OrbBiometric.friendlyError(error) {
                 backupError = msg

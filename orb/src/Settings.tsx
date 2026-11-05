@@ -29,6 +29,7 @@ import {
   downloadSettingsBackup,
   getAuthStatus,
   getGitHubIntegrationStatus,
+  interpretRestoreResponse,
   parseCleanupDays,
   restoreSettingsBackup,
   type AuthStatusInfo,
@@ -196,9 +197,18 @@ function GitHubIntegrationCard() {
               fallback={
                 <Row
                   title="Mission git & gh credentials"
-                  desc="Authorize a GitHub account via device flow so server missions can push branches and open pull requests."
+                  desc={
+                    status()?.configured === false
+                      ? "Configure GITHUB_OAUTH_CLIENT_ID on Core to connect."
+                      : "Authorize a GitHub account via device flow so server missions can push branches and open pull requests."
+                  }
                 >
-                  <button type="button" class="s-btn" disabled={busy()} onClick={() => void startConnect()}>
+                  <button
+                    type="button"
+                    class="s-btn"
+                    disabled={busy() || status()?.configured === false}
+                    onClick={() => void startConnect()}
+                  >
                     {busy() ? "Starting…" : "Connect GitHub"}
                   </button>
                 </Row>
@@ -287,6 +297,7 @@ function BackgroundSyncCard() {
 }
 
 function WorkspaceCleanupCard() {
+  const [loaded, setLoaded] = createSignal(false);
   const [enabled, setEnabled] = createSignal(false);
   const [daysDraft, setDaysDraft] = createSignal("14");
   const [stoppedDaysDraft, setStoppedDaysDraft] = createSignal("7");
@@ -297,29 +308,41 @@ function WorkspaceCleanupCard() {
   const [notice, setNotice] = createSignal<string | null>(null);
 
   const load = async () => {
+    setLoaded(false);
+    setDirty(false);
+    setError(null);
+    setNotice(null);
     if (!isConnected()) return;
+    const version = connectionVersion();
     try {
       const s = await getGlobalSettings();
+      if (connectionVersion() !== version) return;
       setEnabled(Boolean(s.auto_cleanup_enabled));
       setDaysDraft(String(s.auto_cleanup_days ?? 14));
       setStoppedDaysDraft(String(s.auto_cleanup_stopped_days ?? 7));
       setOrphansEnabled(s.auto_cleanup_orphans_enabled ?? true);
       setDirty(false);
+      setLoaded(true);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (connectionVersion() === version) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     }
   };
 
-  onMount(() => { if (isConnected()) void load(); });
+  createEffect(on(connectionVersion, () => {
+    void load();
+  }));
 
   const save = async () => {
-    if (saving()) return;
+    if (saving() || !loaded()) return;
     const days = parseCleanupDays(daysDraft(), 1, 365);
     const stoppedDays = parseCleanupDays(stoppedDaysDraft(), 1, 365);
     if (days == null || stoppedDays == null) {
       setError("Retention days must be whole numbers between 1 and 365.");
       return;
     }
+    const version = connectionVersion();
     setSaving(true);
     setError(null);
     setNotice(null);
@@ -330,6 +353,7 @@ function WorkspaceCleanupCard() {
         auto_cleanup_stopped_days: stoppedDays,
         auto_cleanup_orphans_enabled: orphansEnabled(),
       });
+      if (connectionVersion() !== version) return;
       setEnabled(Boolean(updated.auto_cleanup_enabled));
       setDaysDraft(String(updated.auto_cleanup_days ?? days));
       setStoppedDaysDraft(String(updated.auto_cleanup_stopped_days ?? stoppedDays));
@@ -337,9 +361,13 @@ function WorkspaceCleanupCard() {
       setDirty(false);
       setNotice("Saved workspace cleanup policy.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (connectionVersion() === version) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setSaving(false);
+      if (connectionVersion() === version) {
+        setSaving(false);
+      }
     }
   };
 
@@ -350,8 +378,8 @@ function WorkspaceCleanupCard() {
           <Toggle
             on={enabled()}
             label="Automatic mission workspace GC"
-            disabled={saving()}
-            onClick={() => { setEnabled(!enabled()); setDirty(true); setNotice(null); }}
+            disabled={!loaded() || saving()}
+            onClick={() => { if (!loaded()) return; setEnabled(!enabled()); setDirty(true); setNotice(null); }}
           />
         </Row>
         <Row title="Completed retention (days)" desc="Days to keep workspaces for completed missions (1–365).">
@@ -360,7 +388,7 @@ function WorkspaceCleanupCard() {
             inputmode="numeric"
             aria-label="Completed retention days"
             value={daysDraft()}
-            disabled={saving()}
+            disabled={!loaded() || saving()}
             onInput={(e) => { setDaysDraft(e.currentTarget.value); setDirty(true); setNotice(null); }}
           />
         </Row>
@@ -370,7 +398,7 @@ function WorkspaceCleanupCard() {
             inputmode="numeric"
             aria-label="Stopped retention days"
             value={stoppedDaysDraft()}
-            disabled={saving()}
+            disabled={!loaded() || saving()}
             onInput={(e) => { setStoppedDaysDraft(e.currentTarget.value); setDirty(true); setNotice(null); }}
           />
         </Row>
@@ -378,19 +406,19 @@ function WorkspaceCleanupCard() {
           <Toggle
             on={orphansEnabled()}
             label="Clean orphaned directories"
-            disabled={saving()}
-            onClick={() => { setOrphansEnabled(!orphansEnabled()); setDirty(true); setNotice(null); }}
+            disabled={!loaded() || saving()}
+            onClick={() => { if (!loaded()) return; setOrphansEnabled(!orphansEnabled()); setDirty(true); setNotice(null); }}
           />
         </Row>
         <Row title="Policy changes" desc={notice() ?? "Changes apply on the next scheduled cleanup sweep."}>
-          <button type="button" class="s-btn primary" disabled={saving() || !dirty()} onClick={() => void save()}>
+          <button type="button" class="s-btn primary" disabled={!loaded() || saving() || !dirty()} onClick={() => void save()}>
             {saving() ? "Saving…" : "Save"}
           </button>
         </Row>
       </Card>
       <Show when={error()}>
         <ErrorNotice error={error()!} title="Couldn’t save workspace cleanup" onDismiss={() => setError(null)}>
-          <button type="button" class="s-btn" onClick={() => void save()}>Retry</button>
+          <button type="button" class="s-btn" onClick={() => void (loaded() ? save() : load())}>Retry</button>
         </ErrorNotice>
       </Show>
     </Show>
@@ -442,10 +470,11 @@ function BackupRestoreCard() {
     try {
       const res = await restoreSettingsBackup(item.bytes, item.name);
       setPendingArchive(null);
-      if (!res.success && res.errors.length) {
-        setError(`${res.message} (${res.errors.join("; ")})`);
+      const outcome = interpretRestoreResponse(res);
+      if (!outcome.ok) {
+        setError(outcome.message);
       } else {
-        setNotice(res.message);
+        setNotice(outcome.message);
       }
     } catch (e) {
       if (!(e instanceof ApprovalCancelled)) {
