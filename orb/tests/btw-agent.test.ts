@@ -1182,3 +1182,96 @@ it('recovers known btwSession by direct getMission lookup when omitted from the 
  const both=[...firstOnly,{id:'3d7b16e7-older:4',question:'and now?',answer:'Second status.',at:'2026-11-04T20:07:02Z'}];
  expect(doesTurnAnswerPending({question:'and now?',startedAt:'2026-11-04T20:07:00Z'},both,firstOnly)).toBe(true);
 });
+
+it('heals persisted sideQuestionStorage pending turn during background reconcile, avoids caching transient btwThreadChain failures, and walks superseded_by on direct session lookup',async()=>{
+ const streamMod=await import('../src/stream');
+ const muxSpy=vi.spyOn(streamMod,'isMultiplexSyncActive').mockReturnValue(true);
+ const {readSideQuestion,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ const {btwThreadChain,reconcileBtwServerHistory}=await import('../src/btwAgent');
+ const parentId='06203bdc-bg-heal';
+ try{
+  await writeSideQuestion(sideQuestionKey(parentId),{
+   history:[{id:'t1',question:'Turn 1',answer:'Answer 1',attachments:[{name:'note.txt',media_type:'text/plain',data_base64:'YWJj'}]}],
+   draft:'keep draft',
+   model:'opencode · builtin/smart',
+   open:false,
+   docked:true,
+   pending:{
+    question:'where are we now? Are we ready to commit and push and merge to master?',
+    answer:'',
+    error:'',
+    turnId:'f504e8ab-dcaf-4bef-9e61-f06226bb02b0',
+    startedAt:'2026-11-05T11:20:02Z',
+   },
+  });
+  localStorage.setItem(
+   'agent:'+sideQuestionKey(parentId),
+   JSON.stringify({
+    id:'old-superseded-side',
+    question:'where are we now? Are we ready to commit and push and merge to master?',
+    harness:'opencode',
+    model:'builtin/smart',
+    local:false,
+    active:true,
+    baseline:0,
+   }),
+  );
+
+  // 1) Transient failure in btwThreadChain must NOT be cached as a clean 1-element chain:
+  let failParentLookup=true;
+  vi.mocked(getMission).mockImplementation(async(id:string)=>{
+   if(id===parentId){
+    if(failParentLookup)throw new TypeError('Load failed');
+    return {id:parentId,status:'active',tags:['fork-of:earlier-parent'],history:[],title:'Main',created_at:'',updated_at:''} as any;
+   }
+   if(id==='earlier-parent'){
+    return {id:'earlier-parent',status:'completed',tags:[],history:[],title:'Earlier',created_at:'',updated_at:''} as any;
+   }
+   if(id==='old-superseded-side'){
+    return {id,status:'interrupted',tags:[`btw-parent:${parentId}`,'superseded','superseded_by:1013a4da-replacement'],history:[],title:null,created_at:'2026-11-05T11:19:00Z',updated_at:'2026-11-05T11:19:30Z'} as any;
+   }
+   if(id==='1013a4da-replacement'){
+    return {id,status:'completed',backend:'opencode',model_override:'builtin/smart',tags:[`btw-parent:${parentId}`],history:[],title:null,created_at:'2026-11-05T11:20:00Z',updated_at:'2026-11-05T11:20:54Z'} as any;
+   }
+   throw new ApiError(404,'Not found');
+  });
+  vi.mocked(api).mockImplementation(async()=>[] as any);
+  vi.mocked(streamMod.getMissionEvents).mockImplementation(async(id:string)=>{
+   if(id==='1013a4da-replacement'){
+    return [
+     {id:1,sequence:1,event_type:'user_message',content:'Turn 1',timestamp:'2026-11-05T11:10:00Z'},
+     {id:2,sequence:2,event_type:'assistant_message',content:'Answer 1',timestamp:'2026-11-05T11:10:20Z'},
+     {id:34,sequence:34,event_type:'user_message',event_id:'f504e8ab-dcaf-4bef-9e61-f06226bb02b0',content:'<main_conversation_update>\nctx\n</main_conversation_update>\n\nCurrent request:\nwhere are we now? Are we ready to commit and push and merge to master?',timestamp:'2026-11-05T11:20:02Z'},
+     {id:46,sequence:46,event_type:'assistant_message',content:'Yes — ready to commit, push, and merge once CI is green.',timestamp:'2026-11-05T11:20:54Z'},
+    ];
+   }
+   return [];
+  });
+
+  const degraded=await reconcileBtwServerHistory(parentId,[],undefined,{force:true});
+  expect(degraded.authoritative).toBe(false);
+
+  // Once connectivity recovers, btwThreadChain retries and discovers earlier-parent,
+  // direct lookup resolves old-superseded-side -> 1013a4da-replacement, and sideQuestionStorage is healed:
+  failParentLookup=false;
+  const chain=await btwThreadChain(parentId);
+  expect(chain).toEqual([parentId,'earlier-parent']);
+
+  const healedRes=await reconcileBtwServerHistory(parentId,[],undefined,{force:true});
+  expect(healedRes.authoritative).toBe(true);
+  expect(healedRes.history).toHaveLength(2);
+  expect(healedRes.history[1]?.answer).toBe('Yes — ready to commit, push, and merge once CI is green.');
+
+  await vi.waitFor(async()=>{
+   const stored=await readSideQuestion(sideQuestionKey(parentId));
+   expect(stored?.pending).toBeUndefined();
+   expect(stored?.draft).toBe('keep draft');
+   expect(stored?.history).toHaveLength(2);
+   expect(stored?.history[0]?.attachments).toHaveLength(1);
+   expect(stored?.history[1]?.answer).toBe('Yes — ready to commit, push, and merge once CI is green.');
+  });
+ }finally{
+  muxSpy.mockRestore();
+ }
+});
+
