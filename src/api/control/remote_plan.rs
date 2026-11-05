@@ -452,7 +452,16 @@ pub(crate) fn remote_opencode_config(model: &str, api_base_url: &str) -> serde_j
                 // A declared window lets OpenCode compact before the prompt outgrows the
                 // smallest member of a chain (mission 64619ac7 overflowed the Spark's 262k
                 // window with 32k output reserved and no limit known, then hung).
-                "models": { model: { "name": model, "limit": { "context": remote_opencode_context_limit(model), "output": REMOTE_OPENCODE_OUTPUT_LIMIT } } },
+                // Declaring image modalities prevents OpenCode's `Read` tool from rejecting
+                // screenshots on custom `@ai-sdk/openai-compatible` routes (`builtin/*`).
+                "models": {
+                    model: {
+                        "name": model,
+                        "attachment": true,
+                        "modalities": { "input": ["text", "image"], "output": ["text"] },
+                        "limit": { "context": remote_opencode_context_limit(model), "output": REMOTE_OPENCODE_OUTPUT_LIMIT }
+                    }
+                },
                 "options": {
                     "baseURL": format!("{}/v1", api_base_url.trim_end_matches('/')),
                     "apiKey": format!("{{env:{REMOTE_PROXY_KEY_ENV}}}")
