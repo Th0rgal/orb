@@ -7,6 +7,13 @@ struct OrbProviderLogin: Identifiable {
     let proxy: Bool
 }
 
+struct OrbResetPrompt: Identifiable {
+    let id: String
+    let provider: OrbJSON
+    let summary: OrbSubscriptionResetSummary
+    let idempotencyKey: String
+}
+
 struct OrbProviderLogo: View {
     let type: String
     var name: String = ""
@@ -76,6 +83,7 @@ struct OrbProvidersSettings: View {
     @State private var editKey: OrbJSON?
     @State private var keySheet = false
     @State private var login: OrbProviderLogin?
+    @State private var resetTarget: OrbResetPrompt?
     static let subscriptionTypes = ["anthropic", "openai", "google", "xai", "kimi"]
     var body: some View {
         List {
@@ -88,6 +96,33 @@ struct OrbProvidersSettings: View {
                     DisclosureGroup {
                         let detail = usage[provider["id"].text]
                         OrbProviderQuota(value: detail)
+                        if let reset = OrbSubscriptionResetSummary.from(detail) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(reset.badge).font(.caption.weight(.medium))
+                                if !reset.detail.isEmpty {
+                                    Text(reset.detail).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            Button("Use subscription reset…") {
+                                resetTarget = OrbResetPrompt(
+                                    id: provider["id"].text,
+                                    provider: provider,
+                                    summary: reset,
+                                    idempotencyKey: UUID().uuidString.lowercased()
+                                )
+                            }
+                            .disabled(!ready || busy || !reset.usableNow)
+                        }
+                        if Self.supportsSubscriptionReset(provider) {
+                            Toggle(
+                                "Auto-use reset on limit",
+                                isOn: Binding(
+                                    get: { provider["auto_reset_on_limit"].flag },
+                                    set: { next in Task { await setAutoReset(provider, enabled: next) } }
+                                )
+                            )
+                            .disabled(!ready || busy)
+                        }
                         if !detail["error"].text.isEmpty { Text(detail["error"].text).font(.caption).foregroundStyle(.orange) }
                         let unverified = detail["status"].text == "needs_verification"
                         if unverified {
@@ -155,6 +190,19 @@ struct OrbProvidersSettings: View {
             OrbProviderKeyEditor(provider: editKey, client: client) { Task { await load() } }
         }
         .sheet(item: $login) { spec in OrbProviderLoginView(spec: spec, client: client) { Task { await load() } } }
+        .alert(
+            "Use subscription reset?",
+            isPresented: Binding(get: { resetTarget != nil }, set: { if !$0 { resetTarget = nil } }),
+            presenting: resetTarget
+        ) { prompt in
+            Button("Cancel", role: .cancel) { resetTarget = nil }
+            Button("Use reset", role: .destructive) { Task { await redeemReset(prompt) } }
+        } message: { prompt in
+            let parsed = Self.splitDisplayName(prompt.provider)
+            let label = parsed.account.isEmpty ? parsed.title : parsed.account
+            let detail = prompt.summary.detail.isEmpty ? "" : "\(prompt.summary.detail). "
+            Text("Redeem 1 banked subscription reset on \(label)? \(detail)This immediately consumes a reset on your subscription and cannot be undone.")
+        }
     }
     /// Where the owner verifies an Antigravity account Google refuses: Google's
     /// validation page when the refusal carried one, else signing in to
@@ -172,6 +220,13 @@ struct OrbProvidersSettings: View {
     }
     static func canConnectOAuth(_ provider: OrbJSON) -> Bool {
         provider["uses_oauth"].flag && (provider["has_oauth"].flag || !provider["has_api_key"].flag)
+    }
+    /// Same as desktop `supportsSubscriptionReset`; spec: shared/orb-spec/fixtures/subscription-resets.json.
+    static func supportsSubscriptionReset(_ provider: OrbJSON) -> Bool {
+        guard provider["uses_oauth"].flag else { return false }
+        if provider["has_api_key"] == .bool(true) && provider["has_oauth"] == .bool(false) { return false }
+        let type = provider["provider_type"].text
+        return type == "anthropic" || type == "openai"
     }
     static func subscriptionLogin(_ type: String) -> OrbProviderLogin {
         OrbProviderLogin(id: type, name: type.capitalized, type: type, proxy: type != "google")
@@ -199,14 +254,23 @@ struct OrbProvidersSettings: View {
     private func status(_ p: OrbJSON, accountHint: String = "") -> String {
         let detail = usage[p["id"].text]
         let state: String
+        var showResetBadge = false
         if p["enabled"] == .bool(false) { state = "Disabled" }
         else if detail["status"].text == "needs_verification" { state = "Verification required" }
         else if p["status"]["type"].text == "needs_reauth" || detail["status"].text == "needs_reauth" { state = "Reconnect" }
         else if !detail["error"].text.isEmpty { state = "Usage unavailable" }
-        else if let quota = OrbProviderQuota.quotaStatus(OrbProviderQuota.windows(detail)) { state = quota.label }
-        else { state = p["status"]["type"].text.replacingOccurrences(of: "_", with: " ") }
+        else if let quota = OrbProviderQuota.quotaStatus(OrbProviderQuota.windows(detail)) {
+            state = quota.label
+            showResetBadge = true
+        } else {
+            state = p["status"]["type"].text.replacingOccurrences(of: "_", with: " ")
+            if detail["unified_status"].text.trimmingCharacters(in: .whitespaces).lowercased() == "rejected" {
+                showResetBadge = true
+            }
+        }
         let lead = accountHint.isEmpty ? p["provider_type"].text : accountHint
-        return [lead, state].filter { !$0.isEmpty }.joined(separator: " · ")
+        let resetBadge = showResetBadge ? (OrbSubscriptionResetSummary.from(detail)?.badge ?? "") : ""
+        return [lead, state, resetBadge].filter { !$0.isEmpty }.joined(separator: " · ")
     }
     /// Quota severity of the row (nil while below 80% or when another state wins).
     private func quotaStatus(_ p: OrbJSON) -> OrbQuotaStatus? {
@@ -276,6 +340,81 @@ struct OrbProvidersSettings: View {
             _ = try await client.call("/api/ai/providers/\(OrbCore.escape(provider["id"].text))", method: "PUT", body: .object(["enabled": .bool(provider["enabled"] == .bool(false))]))
             await load()
         } catch is CancellationError {} catch { self.error = error.localizedDescription }
+    }
+    private func setAutoReset(_ provider: OrbJSON, enabled: Bool) async {
+        guard !busy else { return }; busy = true; defer { busy = false }
+        do {
+            _ = try await client.call("/api/ai/providers/\(OrbCore.escape(provider["id"].text))", method: "PUT", body: .object(["auto_reset_on_limit": .bool(enabled)]))
+            await load()
+        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+    }
+    private func redeemReset(_ prompt: OrbResetPrompt) async {
+        guard !busy else { return }; busy = true; defer { busy = false }
+        resetTarget = nil
+        var payload: [String: OrbJSON] = ["idempotency_key": .string(prompt.idempotencyKey)]
+        if let grantID = prompt.summary.primaryGrantID {
+            payload["grant_id"] = .string(grantID)
+        }
+        do {
+            let updated = try await client.call("/api/ai/providers/\(OrbCore.escape(prompt.id))/reset-usage", method: "POST", body: .object(payload))
+            var entries: [String: OrbJSON] = { if case .object(let existing) = usage { return existing }; return [:] }()
+            entries[prompt.id] = updated
+            usage = .object(entries)
+            await load()
+        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+    }
+}
+
+/// Normalized summary of banked subscription usage-limit resets (`subscription_resets`).
+/// Spec: shared/orb-spec/fixtures/subscription-resets.json; mirrors desktop & Android.
+struct OrbSubscriptionResetSummary: Equatable {
+    let availableCount: Int
+    let usableNow: Bool
+    let badge: String
+    let detail: String
+    let primaryGrantID: String?
+
+    static func formatExpiry(_ expiresAt: Double, now: Double) -> String? {
+        let delta = expiresAt - now
+        guard delta.isFinite, delta > 0 else { return nil }
+        let mins = Int((delta / 60.0).rounded())
+        if mins < 60 { return "expires in \(max(1, mins))m" }
+        let hours = Int((Double(mins) / 60.0).rounded())
+        if hours < 48 { return "expires in \(hours)h" }
+        return "expires in \(Int((Double(hours) / 24.0).rounded()))d"
+    }
+
+    static func from(_ value: OrbJSON, now: Double = Date().timeIntervalSince1970) -> OrbSubscriptionResetSummary? {
+        let resets = value["subscription_resets"]
+        guard let rawCount = resets["available_count"].number, rawCount.isFinite, rawCount > 0 else { return nil }
+        let availableCount = Int(rawCount.rounded(.down))
+        guard availableCount > 0 else { return nil }
+        let usableNow = resets["usable_now"].flag
+        let grants = resets["grants"].items
+        let primary = grants.first(where: { $0["usable_now"].flag }) ?? grants.first
+        var parts: [String] = []
+        if let primary {
+            let clears = primary["clears"].items.map(\.text).filter { !$0.isEmpty }
+            if !clears.isEmpty {
+                parts.append("Clears \(OrbProviderQuota.joinNames(clears))")
+            }
+        }
+        let expiry = primary?["expires_at"].number ?? grants.compactMap { $0["expires_at"].number }.first(where: { $0 > now })
+        if let expiry, let expText = formatExpiry(expiry, now: now) {
+            parts.append(expText)
+        }
+        if !usableNow {
+            let reason = (!resets["unavailable_reason"].text.isEmpty ? resets["unavailable_reason"].text : (primary?["unavailable_reason"].text ?? "")).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !reason.isEmpty { parts.append(reason) }
+        }
+        let grantID = primary?["id"].text ?? ""
+        return OrbSubscriptionResetSummary(
+            availableCount: availableCount,
+            usableNow: usableNow,
+            badge: availableCount == 1 ? "1 reset available" : "\(availableCount) resets available",
+            detail: parts.joined(separator: " · "),
+            primaryGrantID: grantID.isEmpty ? nil : grantID
+        )
     }
 }
 

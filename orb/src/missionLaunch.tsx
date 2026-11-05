@@ -5,8 +5,10 @@ import { canForceSlot, isQueued, queueWaitLabel } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { remoteContinuation } from "./remoteContinuation";
 import { ErrorNotice, isNonResumableError } from "./ErrorNotice";
-import { Show } from "solid-js";
-import { ApiError, getApiUrl, type Mission, type RemoteLaunchCapability, type RemoteNodesResponse } from "./api";
+import { SubscriptionResetDialog } from "./SubscriptionResetDialog";
+import { Show, createSignal, onCleanup, onMount } from "solid-js";
+import { ApiError, getAllProviderUsage, getApiUrl, getProviderUsage, isConnected, listProviders, type AIProvider, type Mission, type ProviderUsage, type RemoteLaunchCapability, type RemoteNodesResponse } from "./api";
+import { supportsSubscriptionReset, usableSubscriptionReset } from "./providerUsage";
 import { goalObjective, GoalTag } from "./goal";
 import type { StreamItem } from "./Transcript";
 
@@ -303,6 +305,63 @@ export function phaseIsQuiet(phase: { label: string; failed?: boolean; moving?: 
   return !phase.moving && !phase.detail;
 }
 
+function QuotaResetAction(p: { mission: Mission; disabled?: boolean; onResetRedeemed?: () => void }) {
+  const [candidate, setCandidate] = createSignal<{ provider: AIProvider; usage: ProviderUsage } | null>(null);
+  const [open, setOpen] = createSignal(false);
+  let disposed = false;
+
+  const targetType = () => p.mission.backend === "claudecode" ? "anthropic"
+    : p.mission.backend === "codex" ? "openai" : null;
+
+  onMount(() => {
+    const wanted = targetType();
+    if (!wanted || !isConnected()) return;
+    void (async () => {
+      try {
+        const [providers, bulk] = await Promise.all([listProviders(), getAllProviderUsage()]);
+        if (disposed) return;
+        const eligible = providers.filter(a => a.enabled !== false && a.provider_type === wanted && supportsSubscriptionReset(a));
+        for (const a of eligible) {
+          let u: ProviderUsage | undefined = bulk[a.id];
+          if (!u) {
+            try { u = await getProviderUsage(a.id); } catch { /* ignore */ }
+            if (disposed) return;
+          }
+          if (usableSubscriptionReset(u)) {
+            setCandidate({ provider: a, usage: u! });
+            return;
+          }
+        }
+      } catch { /* banner stays clean if provider catalog fails */ }
+    })();
+  });
+  onCleanup(() => { disposed = true; });
+
+  return (
+    <Show when={candidate()}>
+      {c => (
+        <>
+          <button type="button" tabIndex={0} disabled={p.disabled} onClick={() => setOpen(true)}>
+            Use subscription reset…
+          </button>
+          <Show when={open()}>
+            <SubscriptionResetDialog
+              provider={c().provider}
+              usage={c().usage}
+              onClose={() => setOpen(false)}
+              onDone={() => {
+                setOpen(false);
+                setCandidate(null);
+                p.onResetRedeemed?.();
+              }}
+            />
+          </Show>
+        </>
+      )}
+    </Show>
+  );
+}
+
 /**
  * The status above a transcript. Renders nothing at all while a mission is
  * simply working — no text, no reserved space — so the prompt and the answer
@@ -310,13 +369,16 @@ export function phaseIsQuiet(phase: { label: string; failed?: boolean; moving?: 
  * assistive technology, and anything actionable or failed still draws a
  * compact banner here.
  */
-export function LaunchStatus(p: { destination: string; mission?: Mission | null; activity?: boolean; submitting?: boolean; goal?: string | null; failureInTranscript?: boolean; onResume?: () => void; onCancelRecovery?: () => void; recoveryPending?: boolean; onForceSlot?: () => void; forceSlotPending?: boolean }) {
+export function LaunchStatus(p: { destination: string; mission?: Mission | null; activity?: boolean; submitting?: boolean; goal?: string | null; failureInTranscript?: boolean; onResume?: () => void; onCancelRecovery?: () => void; onResetRedeemed?: () => void; recoveryPending?: boolean; onForceSlot?: () => void; forceSlotPending?: boolean }) {
   const phase = () => p.submitting ? {label:"Starting",moving:true,detail:"Submitting your request…",failed:false} : missionPhase(p.mission ?? null, !!p.activity);
   return <Show when={!phase().failed && !(phase().label === "Queued" && !p.mission?.remote_job && !p.mission?.remote_node_id) && (!phaseIsQuiet(phase()) || (!p.activity && !p.submitting && phase().label === "Starting")) && !(p.activity && phase().label === "Remote job accepted")}>
     <div class={`launch-status ${phase().failed ? "failed" : ""}`} role="status" aria-live="polite">
       <div><Show when={phase().moving}><span class="launch-pulse" aria-hidden="true" /></Show><Show when={p.goal}><GoalTag class="small" /></Show><span>{phase().label} on {p.destination}</span><Show when={p.onForceSlot && canForceSlot(p.mission)}><button type="button" class="force-slot-btn" disabled={p.forceSlotPending} title="Bypass the worker slot queue using the 1-extra operator slot" onClick={() => p.onForceSlot?.()}>{p.forceSlotPending ? "Starting…" : "Run now"}</button></Show></div>
       <Show when={phase().detail}><p>{phase().detail}</p></Show>
       <Show when={phase().label === "Recovery scheduled"}><div class="recovery-actions">
+        <Show when={p.mission && p.mission.recovery?.kind === "quota"}>
+          <QuotaResetAction mission={p.mission!} disabled={p.recoveryPending} onResetRedeemed={p.onResetRedeemed} />
+        </Show>
         <Show when={p.onResume}><button type="button" tabIndex={0} disabled={p.recoveryPending} onClick={() => p.onResume?.()}>Resume now</button></Show>
         <Show when={p.onCancelRecovery}><button type="button" tabIndex={0} disabled={p.recoveryPending} onClick={() => p.onCancelRecovery?.()}>Cancel recovery</button></Show>
       </div></Show>

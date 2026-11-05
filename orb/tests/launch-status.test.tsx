@@ -113,3 +113,35 @@ it('explains a provider response length limit without calling it a quota or conn
  expect(phase.detail).toContain('shorter responses');
  expect(phase.detail).not.toContain('connection');
 });
+
+it('offers Use subscription reset… when a quota-waiting mission has an eligible subscription reset', async () => {
+ const { vi } = await import('vitest');
+ const { screen, waitFor } = await import('@solidjs/testing-library');
+ const { clearConnection, setConnection } = await import('../src/api');
+ setConnection('http://core.test', 'test-token');
+ const onResetRedeemed = vi.fn();
+ vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+  if (url.endsWith('/api/ai/providers')) {
+   return new Response(JSON.stringify([{ id: 'codex-1', provider_type: 'openai', provider_type_name: 'OpenAI', name: 'OpenAI (dev@example.com)', account_email: 'dev@example.com', enabled: true, uses_oauth: true, status: { type: 'connected' } }]));
+  }
+  if (url.endsWith('/api/ai/providers/usage')) {
+   return new Response(JSON.stringify({ entries: { 'codex-1': { provider_type: 'openai', subscription_resets: { available_count: 1, usable_now: true, grants: [{ id: 'credit-1', label: 'Rate limit reset credit', clears: ['5h', 'Weekly'], resets_left: 1, usable_now: true, requires_limit: true }] } } } }));
+  }
+  if (url.endsWith('/api/ai/providers/codex-1/reset-usage') && init?.method === 'POST') {
+   return new Response(JSON.stringify({ provider_type: 'openai', reset_redeemed: true, subscription_resets: { available_count: 0, usable_now: false, grants: [] } }));
+  }
+  return new Response(JSON.stringify({}));
+ }));
+ try {
+  const mission = { id: 'codex-wait', backend: 'codex', status: 'interrupted', terminal_reason: 'usage_limit_wait', recovery: { kind: 'quota', reason: 'Weekly usage limit reached', resume_at: '2026-10-09T19:00:00Z', attempt: 1, max_attempts: 12 } } as Mission;
+  const ui = render(() => <LaunchStatus destination="Core" mission={mission} activity onResetRedeemed={onResetRedeemed} />);
+  await waitFor(() => expect(ui.getByRole('button', { name: 'Use subscription reset…' })).toBeTruthy());
+  ui.getByRole('button', { name: 'Use subscription reset…' }).click();
+  await waitFor(() => expect(screen.getByRole('dialog', { name: 'Use subscription reset' })).toBeTruthy());
+  screen.getByRole('button', { name: 'Use reset' }).click();
+  await waitFor(() => expect(onResetRedeemed).toHaveBeenCalledTimes(1));
+ } finally {
+  clearConnection();
+  vi.unstubAllGlobals();
+ }
+});

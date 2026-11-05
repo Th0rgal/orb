@@ -147,8 +147,27 @@ fn resume_time(wait: &UsageLimitWait) -> String {
     account_limits::format_reset(wait.resume_at, Zone::system())
 }
 
+const AUTO_RESET_PREFIX: &str = "Subscription reset redeemed on ";
+const AUTO_RESET_LOCAL_RESUME_SECS: i64 = 10;
+
+fn is_auto_reset(limit: &str) -> bool {
+    limit.starts_with(AUTO_RESET_PREFIX)
+}
+
+pub(crate) fn auto_reset_label(account: &str) -> String {
+    format!("{AUTO_RESET_PREFIX}{account}")
+}
+
 /// What the operator reads under the failed turn.
 pub(crate) fn annotate_output(output: &str, wait: &UsageLimitWait) -> String {
+    if is_auto_reset(&wait.limit) {
+        return format!(
+            "{}\n\n{}. This mission will resume automatically at {}.",
+            output.trim_end(),
+            wait.limit,
+            resume_time(wait),
+        );
+    }
     let basis = if wait.announced {
         "when the limit resets"
     } else {
@@ -165,6 +184,13 @@ pub(crate) fn annotate_output(output: &str, wait: &UsageLimitWait) -> String {
 
 /// One-line status for mission lists.
 pub(crate) fn status_summary(wait: &UsageLimitWait) -> String {
+    if is_auto_reset(&wait.limit) {
+        return format!(
+            "{}; resumes automatically at {}",
+            wait.limit,
+            resume_time(wait)
+        );
+    }
     format!(
         "Waiting for the {} to reset; resumes automatically at {}",
         wait.limit,
@@ -210,7 +236,18 @@ pub(crate) fn resume_prompt(mission: &Mission, wait: &UsageLimitWait, interrupte
 /// `None` keeps the previous outcome (the mission fails) when the store
 /// cannot hold a schedule, the mission is a task-board worker (the board owns
 /// its retries), or the mission is no longer the running one.
+#[cfg(test)]
 pub(crate) async fn plan(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    result: &AgentResult,
+) -> Option<(Mission, UsageLimitWait)> {
+    plan_in(None, None, mission_store, mission_id, result).await
+}
+
+pub(crate) async fn plan_in(
+    working_dir: Option<&std::path::Path>,
+    state_opt: Option<&Arc<crate::api::routes::AppState>>,
     mission_store: &Arc<dyn MissionStore>,
     mission_id: Uuid,
     result: &AgentResult,
@@ -233,13 +270,30 @@ pub(crate) async fn plan(
         Ok(None) => {}
         Ok(Some(_)) | Err(_) => return None,
     }
-    let wait = wait_for_result(
+    let mut wait = wait_for_result(
         &mission.backend,
         result,
         &account_limits::shared(),
         Utc::now(),
         Zone::system(),
     )?;
+    if let Some(dir) = working_dir {
+        if let Some(account) = crate::api::ai_providers::try_auto_reset_subscription_on_limit(
+            dir,
+            state_opt,
+            &mission.backend,
+            mission_id,
+            0,
+        )
+        .await
+        {
+            wait = UsageLimitWait {
+                limit: auto_reset_label(&account),
+                resume_at: Utc::now() + Duration::seconds(AUTO_RESET_LOCAL_RESUME_SECS),
+                announced: true,
+            };
+        }
+    }
     // Waiting past the deadline would only fail later with a less useful
     // reason.
     let past_deadline = mission
@@ -354,6 +408,98 @@ pub(crate) async fn release(
         .await?;
     mission_store.set_deferred_goal(mission.id, None).await?;
     Ok(prompt)
+}
+
+/// Wake missions parked on a usage-limit wait for `provider_id` (`"anthropic"`
+/// or `"openai"`) right after a subscription reset is redeemed so they do not
+/// stay parked until the old multi-day reset timestamp.
+pub(crate) async fn wake_for_provider(
+    mission_store: &Arc<dyn MissionStore>,
+    working_dir: &std::path::Path,
+    events_tx: &tokio::sync::broadcast::Sender<AgentEvent>,
+    provider_id: &str,
+) -> usize {
+    let now = Utc::now();
+    let mut woken = 0usize;
+
+    if let Ok(missions) = mission_store.list_missions(200, 0).await {
+        for mission in missions {
+            if !is_waiting(&mission) {
+                continue;
+            }
+            if accounts_of_backend(&mission.backend).is_none_or(|(prov, _)| prov != provider_id) {
+                continue;
+            }
+            let due_already = mission
+                .scheduling
+                .not_before
+                .as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .is_some_and(|dt| dt.with_timezone(&Utc) <= now);
+            if due_already {
+                continue;
+            }
+            let mut scheduling = mission.scheduling.clone();
+            scheduling.not_before = Some(now.to_rfc3339());
+            if mission_store
+                .set_mission_scheduling(mission.id, &scheduling)
+                .await
+                .is_ok()
+            {
+                woken += 1;
+                let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                    completion: None,
+                    execution: mission_store
+                        .get_latest_mission_run(mission.id)
+                        .await
+                        .ok()
+                        .flatten(),
+                    mission_id: mission.id,
+                    status: MissionStatus::Pending,
+                    summary: Some("Subscription reset redeemed; resuming now".to_string()),
+                });
+            }
+        }
+    }
+
+    let recoveries = remote_recoveries(working_dir).await;
+    for (mission_id, wait) in recoveries {
+        if wait.resume_at.is_none_or(|at| at <= now) {
+            continue;
+        }
+        let Some(mission) = mission_store.get_mission(mission_id).await.ok().flatten() else {
+            continue;
+        };
+        if mission.status != MissionStatus::Interrupted
+            || mission.terminal_reason.as_deref() != Some(USAGE_LIMIT_WAIT_REASON)
+        {
+            continue;
+        }
+        if accounts_of_backend(&mission.backend).is_none_or(|(prov, _)| prov != provider_id) {
+            continue;
+        }
+        update_remote_wait(working_dir, mission_id, |prev| {
+            prev.map(|mut w| {
+                w.resume_at = Some(now);
+                w
+            })
+        })
+        .await;
+        woken += 1;
+        let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+            completion: None,
+            execution: mission_store
+                .get_latest_mission_run(mission_id)
+                .await
+                .ok()
+                .flatten(),
+            mission_id,
+            status: MissionStatus::Interrupted,
+            summary: Some("Subscription reset redeemed; replaying now".to_string()),
+        });
+    }
+
+    woken
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -761,8 +907,33 @@ fn recovery_delay_secs(replays: u32, mission_id: Uuid) -> i64 {
 /// the wait. Recording is idempotent, so a finalization that is retried does
 /// not count twice. A job that did not fail on a usage limit clears the
 /// record, which resets the replay count.
+#[cfg(test)]
 pub(crate) async fn plan_remote(
     working_dir: &std::path::Path,
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    success: bool,
+    failure: &str,
+    job_id: Uuid,
+    sustained_progress: bool,
+) -> Option<UsageLimitWait> {
+    plan_remote_with_state(
+        working_dir,
+        None,
+        mission_store,
+        mission_id,
+        success,
+        failure,
+        job_id,
+        sustained_progress,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn plan_remote_with_state(
+    working_dir: &std::path::Path,
+    state_opt: Option<&Arc<crate::api::routes::AppState>>,
     mission_store: &Arc<dyn MissionStore>,
     mission_id: Uuid,
     success: bool,
@@ -942,11 +1113,32 @@ pub(crate) async fn plan_remote(
         }
         let (provider, _) = accounts_of_backend(&mission.backend)?;
         let limits = account_limits::shared();
+        let another_available = provider_has_available_account(working_dir, provider, &limits);
+        if (!another_available || replays > 0)
+            && replays < MAX_REMOTE_REPLAYS
+            && account_limits::is_usage_limit_message(failure)
+        {
+            if let Some(account) = crate::api::ai_providers::try_auto_reset_subscription_on_limit(
+                working_dir,
+                state_opt,
+                &mission.backend,
+                mission_id,
+                replays,
+            )
+            .await
+            {
+                return Some(UsageLimitWait {
+                    limit: auto_reset_label(&account),
+                    resume_at: now + Duration::seconds(IMMEDIATE_REPLAY_SECS),
+                    announced: true,
+                });
+            }
+        }
         remote_wait_for_failure(
             &mission.backend,
             failure,
             replays,
-            provider_has_available_account(working_dir, provider, &limits),
+            another_available,
             &limits,
             now,
             Zone::system(),
@@ -1023,6 +1215,14 @@ pub(crate) fn annotate_remote_output(output: &str, wait: &UsageLimitWait) -> Str
             resume_time(wait),
         );
     }
+    if is_auto_reset(&wait.limit) {
+        return format!(
+            "{}\n\n{}. This mission's job will be replayed on the node automatically at {}.",
+            output.trim_end(),
+            wait.limit,
+            resume_time(wait),
+        );
+    }
     if is_transient_wait(&wait.limit) {
         return format!(
             "{}\n\n{} detected. This mission is waiting and its conversation will be resumed \
@@ -1072,6 +1272,13 @@ pub(crate) fn remote_resume_prompt(limit: &str) -> String {
             "{RESUME_PROMPT_MARKER} Your previous turn stopped because the Google account's quota \
              ran out; you now run on another account. Resume your work where it stopped, and \
              check the state of anything you had started."
+        );
+    }
+    if is_auto_reset(limit) {
+        return format!(
+            "{RESUME_PROMPT_MARKER} Your previous turn stopped on a subscription usage limit, and \
+             a banked subscription reset was automatically redeemed ({limit}). Resume your work \
+             where it stopped, and check the state of anything you had started."
         );
     }
     if limit == STORAGE_EXHAUSTED_WAIT {
@@ -2457,5 +2664,103 @@ CLI error: {"data":{"message":"Failed to execute statement"},"name":"UnknownErro
         )
         .await
         .is_none());
+    }
+
+    #[tokio::test]
+    async fn auto_reset_on_limit_redeems_grant_and_wake_for_provider_lifts_waits() {
+        use axum::{
+            extract::Path,
+            routing::{get, post},
+            Json, Router,
+        };
+        use serde_json::{json, Value};
+
+        let app = Router::new()
+            .route(
+                "/api/oauth/usage",
+                get(|| async {
+                    Json(json!({
+                        "cedar_ember": {
+                            "eligible": true,
+                            "at_limit": true,
+                            "grants": [{
+                                "id": "grant_auto",
+                                "label": "Max reset",
+                                "resets_left": 1,
+                                "clears": ["five_hour", "seven_day"],
+                                "usable_now": true
+                            }]
+                        }
+                    }))
+                }),
+            )
+            .route(
+                "/api/organizations/:org/reset_rate_limits",
+                post(
+                    |Path(org): Path<String>, Json(body): Json<Value>| async move {
+                        assert_eq!(org, "org_test");
+                        assert_eq!(body["grant_id"], "grant_auto");
+                        Json(json!({ "result": "reset", "resets_left": 0 }))
+                    },
+                ),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        crate::api::ai_providers::set_test_subscription_reset_bases(Some((base.clone(), base)));
+
+        let (dir, store) = sqlite_store().await;
+        let mut acct = crate::ai_providers::AIProvider::new(
+            crate::ai_providers::ProviderType::Anthropic,
+            "Claude Max".to_string(),
+        );
+        acct.label = Some("Primary Max".to_string());
+        acct.organization_id = Some("org_test".to_string());
+        acct.auto_reset_on_limit = true;
+        acct.oauth = Some(crate::ai_providers::OAuthCredentials {
+            access_token: "tok_live".to_string(),
+            refresh_token: "ref_live".to_string(),
+            expires_at: (Utc::now() + Duration::hours(2)).timestamp_millis(),
+        });
+        let providers_path = dir.path().join(crate::util::AI_PROVIDERS_PATH);
+        std::fs::create_dir_all(providers_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &providers_path,
+            serde_json::to_vec_pretty(&vec![&acct]).unwrap(),
+        )
+        .unwrap();
+
+        let mission = active_mission(&store, "claudecode").await;
+        let hit = limited("You've hit your weekly limit · resets Nov 10, 4pm (UTC)");
+        let (_m, wait) = plan_in(Some(dir.path()), None, &store, mission.id, &hit)
+            .await
+            .expect("auto-reset schedules immediate resume");
+        assert!(wait
+            .limit
+            .contains("Subscription reset redeemed on Primary Max"));
+        assert!(wait.resume_at <= Utc::now() + Duration::seconds(30));
+
+        crate::api::ai_providers::set_test_subscription_reset_bases(None);
+
+        // Also verify `wake_for_provider` lifts a parked multi-day local wait to now.
+        let parked_mission = active_mission(&store, "claudecode").await;
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let long_wait = UsageLimitWait {
+            limit: "Claude weekly limit".to_string(),
+            resume_at: Utc::now() + Duration::days(3),
+            announced: true,
+        };
+        assert!(park(&store, &tx, &parked_mission, &long_wait, "finish PR").await);
+        let woken = wake_for_provider(&store, dir.path(), &tx, "anthropic").await;
+        assert_eq!(woken, 1);
+        let reloaded = store.get_mission(parked_mission.id).await.unwrap().unwrap();
+        let due = DateTime::parse_from_rfc3339(reloaded.scheduling.not_before.as_deref().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(due <= Utc::now() + Duration::seconds(5));
     }
 }

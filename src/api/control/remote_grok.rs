@@ -4302,6 +4302,7 @@ mod tests {
         let owner = RemoteMissionOwner {
             mission_store: store,
             events_tx: None,
+            admission_state: None,
         };
         let job_id = Uuid::new_v4();
         let mut observer = NativeGrokObserver::attach(&owner, "babylon", mission.id, job_id)
@@ -4406,6 +4407,7 @@ mod tests {
         let owner = RemoteMissionOwner {
             mission_store: store,
             events_tx: None,
+            admission_state: None,
         };
         let job_id = Uuid::new_v4();
         let mut observer = NativeGrokObserver::attach(&owner, "old-agent", mission.id, job_id)
@@ -4442,6 +4444,7 @@ mod tests {
         let owner = RemoteMissionOwner {
             mission_store: Arc::clone(&store),
             events_tx: None,
+            admission_state: None,
         };
         let job_id = Uuid::new_v4();
         let line = |i: u64| {
@@ -4484,6 +4487,7 @@ mod tests {
             &RemoteMissionOwner {
                 mission_store: Arc::clone(&store),
                 events_tx: None,
+                admission_state: None,
             },
             "node",
             mission.id,
@@ -4545,6 +4549,7 @@ mod tests {
             let owner = RemoteMissionOwner {
                 mission_store: store.clone(),
                 events_tx: None,
+                admission_state: None,
             };
             let mut observer = NativeGrokObserver::attach(&owner, "node", mission.id, job_id)
                 .await
@@ -4603,6 +4608,7 @@ mod tests {
         let owner = RemoteMissionOwner {
             mission_store: store,
             events_tx: None,
+            admission_state: None,
         };
         let job = Uuid::new_v4();
         let mut observer = NativeGrokObserver::attach(&owner, "node", mission.id, job)
@@ -4838,6 +4844,7 @@ mod tests {
         let owner = RemoteMissionOwner {
             mission_store: store.clone(),
             events_tx: Some(tx.clone()),
+            admission_state: None,
         };
         let job = Uuid::new_v4();
         let mut observer = NativeGrokObserver::attach(&owner, "old-agent", mission.id, job)
@@ -4941,6 +4948,7 @@ mod tests {
         let owner = RemoteMissionOwner {
             mission_store: store,
             events_tx: Some(tx),
+            admission_state: None,
         };
         let job = Uuid::new_v4();
         let mut observer = NativeGrokObserver::attach(&owner, "old-agent", mission.id, job)
@@ -4981,6 +4989,7 @@ mod tests {
         let owner = RemoteMissionOwner {
             mission_store: store,
             events_tx: None,
+            admission_state: None,
         };
         let job = Uuid::new_v4();
         let mut observer = NativeGrokObserver::attach(&owner, "sepolia", mission.id, job)
@@ -5018,6 +5027,7 @@ mod tests {
         let owner = RemoteMissionOwner {
             mission_store: store,
             events_tx: None,
+            admission_state: None,
         };
         let job = Uuid::new_v4();
         let mut observer = NativeGrokObserver::attach(&owner, "node", mission.id, job)
@@ -5060,6 +5070,7 @@ mod tests {
         let owner = RemoteMissionOwner {
             mission_store: store,
             events_tx: None,
+            admission_state: None,
         };
         let job = Uuid::new_v4();
         let mut observer = NativeGrokObserver::attach(&owner, "nimrud", mission.id, job)
@@ -5167,6 +5178,7 @@ mod tests {
         let owner = RemoteMissionOwner {
             mission_store: store.clone(),
             events_tx: Some(tx),
+            admission_state: None,
         };
         let job_id = Uuid::new_v4();
         let mut observer = NativeGrokObserver::attach(&owner, "spark", mission.id, job_id)
@@ -5688,6 +5700,7 @@ mod tests {
         let owner = RemoteMissionOwner {
             mission_store: store,
             events_tx: None,
+            admission_state: None,
         };
         // Missing receipts and actual native stop states must remain fail-closed.
         for (mode, goal_status, exit_code, ended, expected_success) in [
@@ -5778,6 +5791,7 @@ mod tests {
         let owner = RemoteMissionOwner {
             mission_store: store.clone(),
             events_tx: None,
+            admission_state: None,
         };
         let redacted_error_event = concat!(
             "{\"type\":\"step_start\",\"sessionID\":\"ses_e6cdbc328ffeq5GNkBQONlVXDN\",\"part\":{\"id\":\"prt_1\",\"type\":\"step-start\"}}\n",

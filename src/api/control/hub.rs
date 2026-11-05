@@ -388,6 +388,8 @@ pub struct ControlState {
     pub mission_search_cache: Arc<RwLock<HashMap<u64, MissionSearchCacheEntry>>>,
     /// Core working directory for durable job ledger / placement lookups.
     pub(crate) working_dir: PathBuf,
+    /// Shared Weak<AppState> bound once on startup.
+    pub(crate) admission_state: Arc<std::sync::OnceLock<std::sync::Weak<AppState>>>,
 }
 
 impl ControlState {
@@ -584,6 +586,32 @@ impl ControlHub {
 
     pub async fn all_sessions(&self) -> Vec<ControlState> {
         self.sessions.read().await.values().cloned().collect()
+    }
+
+    pub(crate) async fn wake_usage_limit_waits(&self, provider_id: &str) -> usize {
+        let sessions = self.all_sessions().await;
+        if sessions.is_empty() {
+            let store = self.get_mission_store().await;
+            let (tx, _) = broadcast::channel(1);
+            return usage_limit_wait::wake_for_provider(
+                &store,
+                &self.config.working_dir,
+                &tx,
+                provider_id,
+            )
+            .await;
+        }
+        let mut total = 0usize;
+        for session in sessions {
+            total += usage_limit_wait::wake_for_provider(
+                &session.mission_store,
+                &self.config.working_dir,
+                &session.events_tx,
+                provider_id,
+            )
+            .await;
+        }
+        total
     }
 
     /// Sessions with the user that owns each one.

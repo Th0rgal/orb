@@ -5,10 +5,12 @@ import { ErrorToast } from "./toast";
 import {CloudProviders} from './CloudProviders';
 import {ProviderUsageChip, ProviderUsageMeter} from './ProviderUsageMeter';
 import { Dynamic } from "solid-js/web";
-import { quotaStatus, usageChips, codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, sharedAnthropicOrganizations, usageLimitStatus, usageWindows, verificationUrl } from "./providerUsage";
+import { quotaStatus, usageChips, codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, sharedAnthropicOrganizations, subscriptionResetSummary, supportsSubscriptionReset, usageLimitStatus, usageWindows, verificationUrl } from "./providerUsage";
 import { Menu, MenuList, type MenuEntry } from "./Menu";
 import { ProviderLogo } from "./ProviderLogo";
 import { ErrorNotice } from "./ErrorNotice";
+import { SubscriptionResetDialog } from "./SubscriptionResetDialog";
+import { Toggle } from "./Toggle";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
@@ -26,6 +28,7 @@ import {
   isConnected,
   listProviders,
   setProviderEnabled,
+  setProviderAutoResetOnLimit,
   reorderProviders,
   openExternalUrl,
   startSubscriptionLogin,
@@ -211,6 +214,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
   const [removing, setRemoving] = createSignal<AIProvider | null>(null);
   const [removeBusy, setRemoveBusy] = createSignal(false);
   const [removeError, setRemoveError] = createSignal<string | null>(null);
+  const [resetting, setResetting] = createSignal<AIProvider | null>(null);
   const [openIds, setOpenIds] = createSignal<Set<string>>(new Set());
   const setRowOpen = (id: string, nextOpen: boolean) => setOpenIds(prev => {
     const next = new Set(prev);
@@ -269,6 +273,17 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
     setToggleError(null);
     void setProviderEnabled(a.id, enabled).then(p.onRefresh, () => setToggleError(`Could not ${enabled ? "enable" : "disable"} ${a.name}. Nothing changed.`));
   };
+  const toggleAutoReset = async (a: AIProvider, autoReset: boolean) => {
+    setToggleError(null);
+    try {
+      await setProviderAutoResetOnLimit(a.id, autoReset);
+      p.onRefresh();
+      return true;
+    } catch {
+      setToggleError(`Could not update auto-reset on ${a.name}. Nothing changed.`);
+      return false;
+    }
+  };
 
   let disposed = false;
   let fetching = false;
@@ -280,9 +295,11 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
       if (!disposed) setUsage(snapshot);
       // The bulk endpoint returns its cache before starting background probes.
       // Await subscription accounts so the first visit receives their result too.
-      await Promise.allSettled(p.list.filter(a => ["kimi", "minimax", "zai", "muse-code", "mistral"].includes(a.provider_type) || (a.uses_oauth && (a.provider_type === "openai" || a.provider_type === "xai"))).map(async a => {
+      await Promise.allSettled(p.list.filter(a => ["kimi", "minimax", "zai", "muse-code", "mistral"].includes(a.provider_type) || (a.uses_oauth && (a.provider_type === "openai" || a.provider_type === "xai" || (a.provider_type === "anthropic" && !snapshot[a.id])))).map(async a => {
         const value = await getProviderUsage(a.id);
-        if (!disposed) setUsage(previous => ({ ...previous, [a.id]: value }));
+        if (!disposed && value && !Array.isArray(value) && typeof value.provider_type === "string") {
+          setUsage(previous => ({ ...previous, [a.id]: value }));
+        }
       }));
     } finally { fetching = false; }
   };
@@ -330,7 +347,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         <Show when={loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
           <For each={oauth()}>
-            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} onUseReset={() => setResetting(a)} onToggleAutoReset={autoReset => toggleAutoReset(a, autoReset)} />}
           </For>
           <Show when={oauth().length === 0}>
             <div class="s-row"><div class="s-row-desc">No subscription accounts connected.</div></div>
@@ -439,6 +456,18 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         </Dialog>
       </Show>
       <Show when={removing()}>{account => <ConfirmDialog title={`Remove ${account().name}?`} description={!isKey(account()) ? "This deletes the subscription login and any independent API key saved on this provider. Running work may need another account." : "This deletes the provider and its saved API key. Running work may need another account."} action="Remove provider and credentials" destructive busy={removeBusy()} error={removeError()} onConfirm={() => void remove()} onClose={() => setRemoving(null)}/>}</Show>
+      <Show when={resetting()}>{account => (
+        <SubscriptionResetDialog
+          provider={account()}
+          usage={usage()[account().id]}
+          onClose={() => setResetting(null)}
+          onDone={updated => {
+            setUsage(previous => ({ ...previous, [account().id]: updated }));
+            setResetting(null);
+            p.onRefresh();
+          }}
+        />
+      )}</Show>
       <Show when={keyEditor()} keyed>{target => <ApiKeyDialog provider={target === "new" ? undefined : target} onClose={() => setKeyEditor(null)} onDone={() => { setKeyEditor(null); p.onRefresh(); }}/>}</Show>
       <Show when={reauth()}>
         {(a) => (
@@ -980,10 +1009,28 @@ function RankControls(p: { rank: AccountRank; name: string; title: string }) {
 
 const RANK_DRAG_TYPE = "application/x-orb-account-rank";
 
-function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boolean) => void; rank?: AccountRank; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
+function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boolean) => void; rank?: AccountRank; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void; onUseReset?: () => void; onToggleAutoReset?: (autoReset: boolean) => Promise<boolean> }) {
   const a = p.a;
   const status = () => effectiveProviderStatus(a, p.usage, p.health);
   const quota = () => p.usage ? quotaStatus(usageWindows(p.usage)) : null;
+  const resetSupported = () => supportsSubscriptionReset(a) && !!p.onToggleAutoReset;
+  const resetInfo = createMemo(() => subscriptionResetSummary(p.usage));
+  const [autoResetOverride, setAutoResetOverride] = createSignal<boolean | null>(null);
+  const [autoResetSaving, setAutoResetSaving] = createSignal(false);
+  createEffect(on(() => p.a.auto_reset_on_limit, () => setAutoResetOverride(null), { defer: true }));
+  const autoResetOn = () => autoResetOverride() ?? !!a.auto_reset_on_limit;
+  const flipAutoReset = async () => {
+    if (!p.onToggleAutoReset || autoResetSaving()) return;
+    const next = !autoResetOn();
+    setAutoResetSaving(true);
+    setAutoResetOverride(next);
+    try {
+      const ok = await p.onToggleAutoReset(next);
+      if (!ok) setAutoResetOverride(null);
+    } finally {
+      setAutoResetSaving(false);
+    }
+  };
   // Quota severity uses the shared level colors (warning 80-99%, danger exhausted).
   const stClass = () => status() === "connected" ? "connected" : ["quota_exhausted", "pool_exhausted", "out_of_credit"].includes(status()) ? "exhausted" : status() === "quota_warning" ? "warning" : ["needs_reauth", "needs_verification", "error", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
   const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Verification required", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
@@ -994,7 +1041,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
     : stLabel();
   const canReconnect = () => reconnectable(a);
   const mistralSubscription = () => a.provider_type === "mistral" && a.uses_oauth;
-  const expandable = () => !!p.rank || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
+  const expandable = () => !!p.rank || resetSupported() || !!resetInfo() || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
   const [localOpen, setLocalOpen] = createSignal(false);
   const open = () => p.open ?? localOpen();
   const setOpen = (nextOpen: boolean) => p.onOpenChange ? p.onOpenChange(nextOpen) : setLocalOpen(nextOpen);
@@ -1055,7 +1102,9 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
           <div class="s-row-desc">
             <Show when={status() !== "connected" || !plan()}><span class={`p-st ${stClass()}`} title={stLabel()}>{statusText()}</span></Show>
             <Show when={plan()}><span class="p-plan" title={plan()}><Show when={status() !== "connected"}><span class="p-dot">·</span></Show>{plan()}</span></Show>
-
+            <Show when={["quota_exhausted", "pool_exhausted", "quota_warning"].includes(status()) && resetInfo()}>
+              {r => <span class="p-plan" data-testid="subscription-reset-hint"><span class="p-dot">·</span>{r().badge}</span>}
+            </Show>
           </div>
         </div>
         <Show when={!open() && p.usage && !p.usage!.error}>
@@ -1099,6 +1148,44 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
                 Reconnect
               </button>
             </div>
+          </Show>
+          <Show when={resetSupported() || resetInfo()}>
+            <section class="p-native" aria-label="Subscription reset">
+              <Show when={resetInfo()}>
+                {r => (
+                  <div class="p-native-controls">
+                    <span class="s-row-desc">
+                      <span class="p-reset-badge">{r().badge}</span>
+                      <Show when={r().detail}>{d => <span> · {d()}</span>}</Show>
+                    </span>
+                    <Show when={p.onUseReset}>
+                      <button
+                        type="button"
+                        class="s-btn"
+                        disabled={!r().usableNow}
+                        title={!r().usableNow ? (r().detail || "Not currently eligible for reset") : undefined}
+                        onClick={() => p.onUseReset?.()}
+                      >
+                        Use reset…
+                      </button>
+                    </Show>
+                  </div>
+                )}
+              </Show>
+              <Show when={resetSupported()}>
+                <div class="p-native-row">
+                  <label class="p-native-managed" title="Automatically redeem a banked subscription reset when every enabled account reaches a usage limit.">
+                    <span>Auto-use reset on limit</span>
+                    <Toggle
+                      on={autoResetOn()}
+                      label={`Auto-use reset on limit for ${email() ?? a.name}`}
+                      disabled={autoResetSaving()}
+                      onClick={() => void flipAutoReset()}
+                    />
+                  </label>
+                </div>
+              </Show>
+            </section>
           </Show>
           <Show when={a.provider_type === "antigravity"}><AntigravityProvider /></Show>
         </div>

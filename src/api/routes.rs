@@ -159,6 +159,8 @@ pub struct AppState {
     /// an active probe on dashboard demand and by passive `model_cooldown`
     /// capture on the proxy path. See [`super::codex_usage`].
     pub codex_usage: Arc<super::codex_usage::CodexUsageStore>,
+    /// Throttled per-account Anthropic subscription reset grant cache.
+    pub anthropic_resets: Arc<super::subscription_usage::AnthropicResetStore>,
     /// Cached remote-runner-node statuses + recent dispatch outcomes, kept
     /// fresh by the background fleet monitor (see `remote_node::monitor`).
     pub fleet: Arc<crate::remote_node::FleetMonitor>,
@@ -585,6 +587,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         control_metrics: Arc::new(super::control_metrics::ControlMetrics::new()),
         provider_usage_cache: super::provider_usage_cache::ProviderUsageCache::new(),
         codex_usage: super::codex_usage::CodexUsageStore::new(),
+        anthropic_resets: super::subscription_usage::AnthropicResetStore::new(),
         fleet: Arc::new(crate::remote_node::FleetMonitor::new()),
         validation,
         projects,

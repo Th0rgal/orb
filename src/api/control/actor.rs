@@ -91,6 +91,7 @@ pub(super) fn spawn_control_session(
         mission_store: Arc::clone(&mission_store),
         mission_search_cache,
         working_dir: config.working_dir.clone(),
+        admission_state: Arc::clone(&control_hub.admission_state),
     };
 
     // Mission-status alerts are event-driven for low latency. The existing
@@ -5674,8 +5675,18 @@ pub(super) async fn control_actor_loop(
                                     // turn's message says so.
                                     let usage_limit_wait = match completed_mission_id {
                                         Some(mission_id) => {
-                                            usage_limit_wait::plan(&mission_store, mission_id, &agent_result)
-                                                .await
+                                            let state_ref = control_hub
+                                                .admission_state
+                                                .get()
+                                                .and_then(std::sync::Weak::upgrade);
+                                            usage_limit_wait::plan_in(
+                                                Some(&config.working_dir),
+                                                state_ref.as_ref(),
+                                                &mission_store,
+                                                mission_id,
+                                                &agent_result,
+                                            )
+                                            .await
                                         }
                                         None => None,
                                     };
@@ -6603,8 +6614,18 @@ pub(super) async fn control_actor_loop(
                                     maybe_recover_soft_llm_error(&mut result);
                                     // Same as the main runner: a usage limit on every
                                     // account makes the mission wait for the reset.
-                                    let usage_limit_wait =
-                                        usage_limit_wait::plan(&mission_store, *mission_id, &result).await;
+                                    let state_ref = control_hub
+                                        .admission_state
+                                        .get()
+                                        .and_then(std::sync::Weak::upgrade);
+                                    let usage_limit_wait = usage_limit_wait::plan_in(
+                                        Some(&config.working_dir),
+                                        state_ref.as_ref(),
+                                        &mission_store,
+                                        *mission_id,
+                                        &result,
+                                    )
+                                    .await;
                                     if let Some((_, wait)) = &usage_limit_wait {
                                         result.output =
                                             usage_limit_wait::annotate_output(&result.output, wait);
