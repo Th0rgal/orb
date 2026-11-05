@@ -2,11 +2,11 @@
 
 > **Note:** **Orb** (`orb.thomas.md`) is the new name of the project. `sandboxed.sh` (formerly Open Agent) is the former name and is now the Rust backend (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`) to the Orb clients.
 
-There are two ways to install the `sandboxed.sh` backend server, which powers **Orb Desktop** (`orb/`), **Orb iOS** (`ios_dashboard/`), and the **Web Admin Console** (`dashboard/`):
+There are two ways to install the `sandboxed.sh` backend server, which powers **Orb Desktop** (`orb/`), **Orb iOS** (`ios_dashboard/`), and **Orb Android** (`android_dashboard/`):
 
 ## 1. Docker (Recommended for Quick Start)
 
-One command starts the Rust backend, web console, Caddy proxy, and primary coding-agent CLIs on Linux, macOS, or Windows.
+One command starts the Rust backend, Caddy proxy, and primary coding-agent CLIs on Linux, macOS, or Windows.
 
 → **[Docker installation guide](docs/install-docker.md)**
 

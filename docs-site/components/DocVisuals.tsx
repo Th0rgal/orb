@@ -26,10 +26,10 @@ export function ArchitectureDiagram() {
           </div>
           <div className="orb-arch-node">
             <div className="orb-arch-node-title">
-              <span className="orb-arch-dot orb-arch-dot-muted" />
-              Web Admin Console
+              <span className="orb-arch-dot orb-arch-dot-blue" />
+              Orb Android
             </div>
-            <div className="orb-arch-node-meta">Next.js · Fleet &amp; Containers</div>
+            <div className="orb-arch-node-meta">Android · Jetpack Compose</div>
           </div>
           <div className="orb-arch-node">
             <div className="orb-arch-node-title">
