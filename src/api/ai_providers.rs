@@ -10820,12 +10820,46 @@ async fn reset_provider_usage(
     }
 }
 
-async fn reconcile_subscription_reset(
-    provider: &crate::ai_providers::AIProvider,
-    state_opt: Option<&Arc<super::routes::AppState>>,
-    was_already_redeemed: bool,
-    refresh_inline: bool,
-) -> Result<(serde_json::Value, usize), (StatusCode, String)> {
+fn already_redeemed_usage_is_usable(
+    provider_type: ProviderType,
+    refreshed: &serde_json::Value,
+) -> bool {
+    if refreshed.get("error").is_some()
+        || refreshed.get("status").and_then(|v| v.as_str()) == Some("needs_reauth")
+    {
+        return false;
+    }
+    match provider_type {
+        ProviderType::Anthropic => {
+            refreshed
+                .get("unified_status")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s != "rejected")
+                && refreshed.get("status_code").and_then(|v| v.as_u64()) != Some(429)
+        }
+        ProviderType::OpenAI => {
+            let has_codex_signal = refreshed.get("codex_limit_reached").is_some()
+                || refreshed.get("codex_primary_used_percent").is_some()
+                || refreshed.get("codex_secondary_used_percent").is_some();
+            has_codex_signal
+                && refreshed
+                    .get("codex_limit_reached")
+                    .and_then(|v| v.as_bool())
+                    != Some(true)
+                && !refreshed
+                    .get("codex_primary_used_percent")
+                    .and_then(|v| v.as_f64())
+                    .is_some_and(|pct| pct >= 100.0)
+                && !refreshed
+                    .get("codex_secondary_used_percent")
+                    .and_then(|v| v.as_f64())
+                    .is_some_and(|pct| pct >= 100.0)
+        }
+        _ => false,
+    }
+}
+
+fn clear_subscription_limit_records(provider: &crate::ai_providers::AIProvider) {
     let limits = crate::account_limits::shared();
     limits.clear(&crate::account_limits::account_key(provider.id));
     if let Some(sub_key) =
@@ -10833,6 +10867,14 @@ async fn reconcile_subscription_reset(
     {
         limits.clear(&crate::account_limits::subscription_key(&sub_key.0));
     }
+}
+
+async fn reconcile_subscription_reset(
+    provider: &crate::ai_providers::AIProvider,
+    state_opt: Option<&Arc<super::routes::AppState>>,
+    was_already_redeemed: bool,
+    refresh_inline: bool,
+) -> Result<(serde_json::Value, usize), (StatusCode, String)> {
     let key = provider.id.to_string();
     super::subscription_usage::AnthropicResetStore::shared()
         .invalidate(&key)
@@ -10848,39 +10890,52 @@ async fn reconcile_subscription_reset(
     };
 
     let Some(state) = state_opt else {
-        return Ok((fallback(), 0));
-    };
-
-    release_provider_limit(state, provider.id, true).await;
-    state.codex_usage.invalidate(&key).await;
-    state.provider_usage_cache.remove(&key).await;
-
-    let refreshed = if refresh_inline || was_already_redeemed {
-        live_fetch_and_cache(Arc::clone(state), key)
-            .await
-            .unwrap_or_else(|_| fallback())
-    } else {
-        let bg_state = Arc::clone(state);
-        tokio::spawn(async move {
-            let _ = live_fetch_and_cache(bg_state, key).await;
-        });
-        fallback()
-    };
-
-    if was_already_redeemed {
-        let still_capped = refreshed.get("unified_status").and_then(|v| v.as_str())
-            == Some("rejected")
-            || refreshed
-                .get("codex_limit_reached")
-                .and_then(|v| v.as_bool())
-                == Some(true);
-        if still_capped {
+        if was_already_redeemed {
             return Err((
                 StatusCode::CONFLICT,
                 "That subscription reset grant was already redeemed".to_string(),
             ));
         }
-    }
+        clear_subscription_limit_records(provider);
+        return Ok((fallback(), 0));
+    };
+
+    state.codex_usage.invalidate(&key).await;
+    state.provider_usage_cache.remove(&key).await;
+
+    let refreshed = if was_already_redeemed {
+        let fetched = live_fetch_and_cache(Arc::clone(state), key)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::CONFLICT,
+                    "That subscription reset grant was already redeemed".to_string(),
+                )
+            })?;
+        if !already_redeemed_usage_is_usable(provider.provider_type, &fetched) {
+            return Err((
+                StatusCode::CONFLICT,
+                "That subscription reset grant was already redeemed".to_string(),
+            ));
+        }
+        clear_subscription_limit_records(provider);
+        release_provider_limit(state, provider.id, true).await;
+        fetched
+    } else {
+        clear_subscription_limit_records(provider);
+        release_provider_limit(state, provider.id, true).await;
+        if refresh_inline {
+            live_fetch_and_cache(Arc::clone(state), key)
+                .await
+                .unwrap_or_else(|_| fallback())
+        } else {
+            let bg_state = Arc::clone(state);
+            tokio::spawn(async move {
+                let _ = live_fetch_and_cache(bg_state, key).await;
+            });
+            fallback()
+        }
+    };
 
     let woken = state
         .control

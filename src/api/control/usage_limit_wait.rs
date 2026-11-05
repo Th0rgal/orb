@@ -283,7 +283,7 @@ pub(crate) async fn plan_in(
             .await
             .ok()
             .flatten()
-            .map(|run| format!("run:{}", run.id))
+            .map(|run| format!("run:{}", run.run_id))
             .unwrap_or_else(|| format!("turn:{}", Uuid::new_v4()));
         if let Some(account) = crate::api::ai_providers::try_auto_reset_subscription_on_limit(
             dir,
@@ -2767,7 +2767,7 @@ CLI error: {"data":{"message":"Failed to execute statement"},"name":"UnknownErro
                     let consumes = Arc::clone(&codex_consumes_route);
                     async move {
                         consumes.fetch_add(1, Ordering::SeqCst);
-                        Json(json!({ "status": "consumed", "remaining_count": 0 }))
+                        Json(json!({ "outcome": "reset", "available_count": 0 }))
                     }
                 }),
             );
