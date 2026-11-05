@@ -21,7 +21,7 @@ import { makeCutMission, moveMissions, planMissionMoves, readCutMission } from "
 import { RunningWorkers, deleteDescendants, descendantsSentence, pausedMissionIds, requiresDescendantOptIn, runningWorkerIds } from "./deleteRunning";
 import { ForkMission } from "./ForkMission";
 import { ErrorNotice, ErrorDialog } from "./ErrorNotice";
-import { For, Show, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch, lazy } from "solid-js";
+import { For, Show, Suspense, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch, lazy } from "solid-js";
 import { mergeById, pollWhileVisible } from "./poll";
 import { createStore, reconcile } from "solid-js/store";
 import * as Ic from "./icons";
@@ -88,6 +88,7 @@ import { type TreeRow } from "./treeModel";
 import { deletingIds, setDeletingIds, createTreeSelection } from "./tree/selection";
 import { createArchivePager } from "./tree/archivePager";
 import { createMissionMoves, type ApprovalConfirmationPrompt } from "./tree/moves";
+const ApprovalTransferDialog = lazy(() => import("./ApprovalTransferDialog"));
 import { createProjectTree, missionFolder, missionIdFromTreeId, type Node, type RowData } from "./tree/TreeView";
 import { MachineBadge, missionMachine, missionCopyId, rowDetail, ROW_TIP_ID, launchedToggle as launchedToggleView, type RowTipContent } from "./tree/missionRow";
 import { FileSkeleton } from "./Skeleton";
@@ -2563,42 +2564,11 @@ export function LiveProjectsSection(p: {
         )}
       </Show>
       <Show when={approvalTransferPrompt()}>
-        {(prompt) => {
-          const err = () => prompt().error;
-          const secretNames = () => [...new Set([
-            ...err().grants.map(g => g.secret_name),
-            ...err().pendingRequests.map(r => r.secret_name),
-          ].filter(Boolean))];
-          const close = () => {
-            const cur = prompt();
-            setApprovalTransferPrompt(null);
-            cur.cancel();
-          };
-          const choose = (policy: "revoke" | "keep") => {
-            const cur = prompt();
-            setApprovalTransferPrompt(null);
-            cur.confirm(policy);
-          };
-          return (
-            <Dialog
-              size="compact"
-              title="Move with active secret approvals?"
-              description={`Moving to ${err().targetProject} affects ${err().grants.length} active secret ${err().grants.length === 1 ? "grant" : "grants"} and ${err().pendingRequests.length} pending ${err().pendingRequests.length === 1 ? "request" : "requests"}.`}
-              onClose={close}
-              footer={<>
-                <DialogButton onClick={close}>Cancel</DialogButton>
-                <DialogButton variant="secondary" onClick={() => choose("keep")}>Move &amp; keep approvals</DialogButton>
-                <DialogButton variant="primary" onClick={() => choose("revoke")}>Move &amp; revoke approvals</DialogButton>
-              </>}
-            >
-              <Show when={secretNames().length > 0}>
-                <p style={{ margin: "0", color: "var(--fg-2)", "font-size": "12px", "line-height": "1.5" }}>
-                  Affected secrets: <code>{secretNames().join(", ")}</code>
-                </p>
-              </Show>
-            </Dialog>
-          );
-        }}
+        {(prompt) => (
+          <Suspense>
+            <ApprovalTransferDialog prompt={prompt()} onDismiss={() => setApprovalTransferPrompt(null)} />
+          </Suspense>
+        )}
       </Show>
       <Show when={cronInfo()}>{(slug) => <Dialog title="Project crons" onClose={() => setCronInfo(null)} footer={<><DialogButton disabled={cronChecking()} onClick={async () => { if (!isConnected()) return; const version = connectionVersion(); setCronChecking(true); await loadCrons(slug(), true); if (!currentConnection(version)) return; setCronChecking(false); if (!cronUnsupported() && !cronErrors[slug()]) setCronInfo(null); }}>Check again</DialogButton></>}>
         <p>{cronUnsupported() ? "This backend does not support project crons yet. Update the connected backend, then choose Check again. Your canonical controller and existing project content remain available." : cronRetryable[slug()] ? "Project crons could not refresh. Previously loaded jobs are retained. Try again when the scheduler is available." : "The backend rejected this cron request. Check backend access and configuration, then check again. Previously loaded jobs are retained."}</p>

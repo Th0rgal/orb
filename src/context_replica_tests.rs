@@ -130,7 +130,13 @@ async fn context_file_folder_transitions_and_conflict_resolution() {
     );
     std::fs::remove_dir_all(core.root.join("item")).unwrap();
     std::fs::write(core.root.join("item"), "file again").unwrap();
-    assert!(a.tick().await.unwrap().error.is_none());
+    let switched = a.tick().await.unwrap();
+    assert!(switched.error.is_none(), "tick error: {:?}", switched.error);
+    assert!(
+        switched.conflicts.is_empty(),
+        "tick conflicts: {:?}",
+        switched.conflicts
+    );
     assert_eq!(
         std::fs::read_to_string(a.store.root.join("item")).unwrap(),
         "file again"

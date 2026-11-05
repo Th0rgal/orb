@@ -108,7 +108,9 @@ impl Replica {
         let mut state = self.status()?;
         let result = self.synchronize(&mut state).await;
         state.error = result.err();
-        self.save(&state)?;
+        let saved = self.save(&state);
+        drop(guard);
+        saved?;
         Ok(state)
     }
     async fn synchronize(&self, state: &mut ReplicaState) -> Result<()> {
