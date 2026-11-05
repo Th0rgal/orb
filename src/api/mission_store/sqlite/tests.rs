@@ -5304,8 +5304,99 @@ async fn typed_event_queries_seek_composite_index_and_preserve_sequence_order() 
     let full = store.get_mission(m.id).await.unwrap().unwrap();
     assert_eq!(full.history.len(), 4);
 
-    // Authoritative snapshots always serialize `folder: ""` at project root so clients
-    // polling after a folder -> root move (without SSE) clear cached folder state.
+    // Authoritative snapshots always serialize `project: null` and `folder: ""` when
+    // unassigned / at project root so clients polling after a missed SSE clear cached state.
     let json_val = serde_json::to_value(&meta).expect("serialize mission snapshot");
+    assert_eq!(json_val.get("project"), Some(&serde_json::Value::Null));
     assert_eq!(json_val.get("folder").and_then(|v| v.as_str()), Some(""));
+}
+
+#[tokio::test]
+async fn placement_updates_preserve_recency_while_surfacing_in_updated_since_sync() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "delta-user")
+        .await
+        .expect("sqlite store");
+
+    let m = store
+        .create_mission(Some("old-mission"), None, None, None, None, None, None)
+        .await
+        .unwrap();
+    let backdated = "2026-10-01T00:00:00+00:00";
+    {
+        let conn = store.conn.lock().await;
+        conn.execute(
+            "UPDATE missions SET updated_at = ?1, metadata_updated_at = ?1 WHERE id = ?2",
+            params![backdated, m.id.to_string()],
+        )
+        .unwrap();
+    }
+
+    let moved = store
+        .batch_set_mission_placement(&[(
+            m.id,
+            Some(Some("alpha".to_string())),
+            "Notes".to_string(),
+        )])
+        .await
+        .expect("batch move");
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].placement_revision, 1);
+
+    let after_move = store.get_mission_metadata(m.id).await.unwrap().unwrap();
+    assert_eq!(
+        after_move.updated_at, backdated,
+        "recency timestamp must stay untouched"
+    );
+    assert!(
+        after_move
+            .metadata_updated_at
+            .as_deref()
+            .is_some_and(|ts| ts > "2026-11-01T00:00:00+00:00"),
+        "metadata_updated_at must advance for incremental sync"
+    );
+
+    let delta = store
+        .list_missions_filtered(
+            &crate::api::mission_store::MissionFilter {
+                updated_since: Some("2026-11-01T00:00:00+00:00".to_string()),
+                ..Default::default()
+            },
+            50,
+            0,
+        )
+        .await
+        .expect("delta query");
+    assert_eq!(delta.iter().map(|r| r.id).collect::<Vec<_>>(), vec![m.id]);
+
+    {
+        let conn = store.conn.lock().await;
+        conn.execute(
+            "UPDATE missions SET metadata_updated_at = ?1 WHERE id = ?2",
+            params![backdated, m.id.to_string()],
+        )
+        .unwrap();
+    }
+    let cascaded = store
+        .cascade_rename_folder("alpha", "Notes", "Archive")
+        .await
+        .expect("cascade folder rename");
+    assert_eq!(cascaded.len(), 1);
+    assert_eq!(cascaded[0].placement_revision, 2);
+
+    let delta_after_cascade = store
+        .list_missions_filtered(
+            &crate::api::mission_store::MissionFilter {
+                updated_since: Some("2026-11-01T00:00:00+00:00".to_string()),
+                ..Default::default()
+            },
+            50,
+            0,
+        )
+        .await
+        .expect("delta query after cascade");
+    assert_eq!(
+        delta_after_cascade.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![m.id]
+    );
 }

@@ -327,6 +327,17 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(postMoveStaleChild.project, "default")
         XCTAssertEqual(postMoveStaleChild.placementRevision, 3)
 
+        // Authoritative snapshot unassigning `project: null` and `folder: ""` at `rev == 4` clears cached project and folder.
+        let unassignedSnapshot = OrbRow(.object([
+            "id": .string("9f559751"),
+            "project": .null,
+            "folder": .string(""),
+            "placement_revision": .number(4),
+        ]))
+        XCTAssertEqual(unassignedSnapshot.project, "")
+        XCTAssertEqual(unassignedSnapshot.folder, "")
+        XCTAssertEqual(unassignedSnapshot.placementRevision, 4)
+
         // Parse 409 approval transfer confirmation error.
         let errJSON = """
         {"code":"approval_transfer_confirmation_required","error":"Moving across projects affects active secret approvals","target_project":"ethereum","active_grants":[{"id":"g1","secret_name":"PROD_DB","source_project":"assistant"}],"pending_requests":[{"id":"r1","secret_name":"STRIPE_KEY","operation":"get"}]}

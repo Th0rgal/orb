@@ -341,6 +341,11 @@ class OrbMissionTreeTest {
         assertEquals("default", OrbMissionTree.projectSlug(stalePoll))
         assertEquals("Benchmarks", OrbMissionTree.folderPath(stalePoll))
 
+        // Snapshot with explicit `project: null` and `folder: ""` at higher revision clears cached project and folder
+        val unassignedPoll = m("9f559751", "project" to null, "folder" to "", "placement_revision" to 5L)
+        assertEquals("default", OrbMissionTree.projectSlug(unassignedPoll))
+        assertEquals(null, OrbMissionTree.folderPath(unassignedPoll))
+
         val err = OrbError(
             message = "Secret approvals affected",
             status = 409,

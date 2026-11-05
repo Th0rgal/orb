@@ -630,6 +630,7 @@ export interface Mission {
   tags?: string[];
   first_viewed_at?: string | null;
   last_output_at?: string | null;
+  metadata_updated_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1419,6 +1420,8 @@ export function recordMissionSyncCursor(rows: readonly Mission[], fullSync: bool
   for (const row of rows) {
     const ms = Date.parse(row.updated_at || row.created_at || "");
     if (Number.isFinite(ms) && ms > maxMs) maxMs = ms;
+    const metaMs = row.metadata_updated_at ? Date.parse(row.metadata_updated_at) : NaN;
+    if (Number.isFinite(metaMs) && metaMs > maxMs) maxMs = metaMs;
   }
   if (maxMs <= 0) return;
   const cursorIso = new Date(Math.max(0, maxMs - DELTA_CURSOR_OVERLAP_MS)).toISOString();

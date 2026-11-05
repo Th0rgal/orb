@@ -1717,6 +1717,7 @@ impl SqliteMissionStore {
                      tags = CASE WHEN ?9 THEN ?10 ELSE tags END,
                      desired_state = CASE WHEN ?11 THEN ?12 ELSE desired_state END,
                      next_check_at = CASE WHEN ?13 THEN ?14 ELSE next_check_at END,
+                     metadata_updated_at = ?15,
                      updated_at = CASE WHEN ?19 THEN updated_at ELSE ?15 END,
                      title = CASE WHEN ?17 THEN ?18 ELSE title END
                  WHERE id = ?16",
@@ -1760,6 +1761,7 @@ impl SqliteMissionStore {
             return Ok(Vec::new());
         }
         let conn = self.conn.clone();
+        let now = now_string();
         let updates: Vec<(Uuid, Option<Option<String>>, String)> = updates
             .iter()
             .map(|(id, proj, folder)| {
@@ -1789,8 +1791,9 @@ impl SqliteMissionStore {
                          SET project = ?1,
                              folder = ?2,
                              placement_revision = ?3,
-                             tags = ?4
-                         WHERE id = ?5",
+                             tags = ?4,
+                             metadata_updated_at = ?5
+                         WHERE id = ?6",
                     )
                     .map_err(|e| e.to_string())?;
 
@@ -1843,6 +1846,7 @@ impl SqliteMissionStore {
                             &next_folder,
                             next_rev as i64,
                             &cleaned_tags,
+                            &now,
                             &id_str
                         ])
                         .map_err(|e| e.to_string())?;
@@ -1873,6 +1877,7 @@ impl SqliteMissionStore {
             return Ok(Vec::new());
         }
         let conn = self.conn.clone();
+        let now = now_string();
         let project = project.to_string();
         tokio::task::spawn_blocking(move || {
             let mut conn = conn.blocking_lock();
@@ -1902,8 +1907,9 @@ impl SqliteMissionStore {
                     .prepare_cached(
                         "UPDATE missions
                          SET folder = ?1,
-                             placement_revision = ?2
-                         WHERE id = ?3",
+                             placement_revision = ?2,
+                             metadata_updated_at = ?3
+                         WHERE id = ?4",
                     )
                     .map_err(|e| e.to_string())?;
                 for (id_str, cur_folder, cur_rev) in rows {
@@ -1924,7 +1930,7 @@ impl SqliteMissionStore {
                     };
                     let next_rev = (cur_rev.max(0) as u64).saturating_add(1);
                     update_stmt
-                        .execute(params![&rewritten, next_rev as i64, &id_str])
+                        .execute(params![&rewritten, next_rev as i64, &now, &id_str])
                         .map_err(|e| e.to_string())?;
                     moved.push(crate::api::control::events::MissionPlacementItem {
                         mission_id: id,

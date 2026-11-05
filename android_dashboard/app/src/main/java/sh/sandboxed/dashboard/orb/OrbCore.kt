@@ -631,18 +631,18 @@ object OrbMissionTree {
         val isChild = payloadParent != null || knownParents.containsKey(id)
         if (hasDirectBtwTag(mission)) knownBtw.add(id)
         val rawTitle = mission.str("title")
-        val hasProjectKey = mission.raw.containsKey("project") && mission.raw["project"] is String
-        val rawProject = if (hasProjectKey) (mission.raw["project"] as String).trim() else null
+        val hasProjectKey = mission.raw.containsKey("project") && (mission.raw["project"] == null || mission.raw["project"] is String)
+        val rawProject = if (hasProjectKey) ((mission.raw["project"] as? String)?.trim() ?: "") else null
         val hasFolderKey = mission.raw.containsKey("folder") && mission.raw["folder"] is String
         val rawFolder = if (isChild) "" else if (hasFolderKey) normalizeFolder(mission.raw["folder"] as String) else null
         val incRev = maxOf(0L, (mission.raw["placement_revision"] as? Number)?.toLong() ?: 0L)
         val hasPlacementPayload = hasProjectKey || hasFolderKey || mission.raw.containsKey("placement_revision")
-        var resolvedProject = rawProject
+        var resolvedProject = rawProject?.takeIf { it.isNotEmpty() }
         if (hasPlacementPayload) {
             placements.compute(id) { _, prev ->
                 val curRev = prev?.revision ?: 0L
                 val pendingOp = prev?.pendingOpId ?: 0
-                val candProj = rawProject ?: prev?.project ?: seenFacts[id]?.project ?: ""
+                val candProj = if (hasProjectKey) (rawProject ?: "") else (prev?.project ?: seenFacts[id]?.project ?: "")
                 val candFolder = if (isChild) "" else (rawFolder ?: prev?.folder ?: "")
                 val matchesOpt = prev != null &&
                     pendingOp != 0 &&
@@ -1931,6 +1931,8 @@ class OrbCore private constructor(context: Context) {
         for (row in rows) {
             val epoch = OrbJSON.dateEpochMs(row.str("updated_at", "created_at")) ?: 0L
             if (epoch > maxEpoch) maxEpoch = epoch
+            val metaEpoch = OrbJSON.dateEpochMs(row.str("metadata_updated_at")) ?: 0L
+            if (metaEpoch > maxEpoch) maxEpoch = metaEpoch
         }
         if (maxEpoch > 0L) {
             missionDeltaCursor = Instant.ofEpochMilli(maxOf(0L, maxEpoch - 2_000L)).toString()
@@ -1964,7 +1966,10 @@ class OrbCore private constructor(context: Context) {
         if (delta.isNotEmpty()) {
             val byId = LinkedHashMap<String, OrbRow>()
             for (existing in missionDeltaCache) byId[existing.id] = existing
-            for (updated in delta) byId[updated.id] = updated
+            for (updated in delta) {
+                OrbMissionTree.observe(updated)
+                byId[updated.id] = updated
+            }
             val merged = byId.values.sortedByDescending {
                 OrbJSON.dateEpochMs(it.str("updated_at", "created_at")) ?: 0L
             }.take(limit)

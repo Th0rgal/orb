@@ -1118,6 +1118,12 @@ final class OrbCore {
                     maxDate = parsed
                 }
             }
+            let metaStamp = item["metadata_updated_at"].text
+            if !metaStamp.isEmpty, let parsedMeta = OrbDateCache.parse(metaStamp) {
+                if maxDate == nil || parsedMeta > maxDate! {
+                    maxDate = parsedMeta
+                }
+            }
         }
         if let maxDate {
             let overlapped = maxDate.addingTimeInterval(-2.0)
@@ -1160,7 +1166,10 @@ final class OrbCore {
             }
             for updated in delta.items {
                 let id = updated["id"].text
-                if !id.isEmpty { byId[id] = updated }
+                if !id.isEmpty {
+                    _ = OrbRow(updated)
+                    byId[id] = updated
+                }
             }
             let merged = byId.values.sorted { a, b in
                 let ta = a["updated_at"].text.isEmpty ? a["created_at"].text : a["updated_at"].text

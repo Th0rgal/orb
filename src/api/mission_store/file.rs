@@ -801,8 +801,10 @@ impl MissionStore for FileMissionStore {
         if let Some(next_check_at) = patch.next_check_at {
             mission.project.next_check_at = next_check_at;
         }
+        let now = now_string();
+        mission.metadata_updated_at = Some(now.clone());
         if !patch.preserve_updated_at {
-            mission.updated_at = now_string();
+            mission.updated_at = now;
         }
         let snapshot = MissionStoreSnapshot {
             missions: next.clone(),

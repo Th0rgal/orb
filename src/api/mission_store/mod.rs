@@ -483,8 +483,10 @@ impl MissionFilter {
 /// `[beal-research] BR-07 ...`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MissionProject {
-    /// Stable project identifier (e.g. "verity-core").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Stable project identifier (e.g. "verity-core"), or `null` when unassigned.
+    /// Always serialized so snapshots unassigning a mission at a higher
+    /// `placement_revision` unambiguously clear cached client projects.
+    #[serde(default)]
     pub project: Option<String>,
     /// Normalized folder path inside `project` (`""` for project root).
     /// Always serialized so snapshots moving a mission back to root (`""`) at a
