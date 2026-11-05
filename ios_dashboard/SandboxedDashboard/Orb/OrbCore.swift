@@ -202,6 +202,50 @@ struct OrbRow: Identifiable, Hashable, Sendable {
             raw = value
         }
     }
+    fileprivate func withPatchedPlacement(project nextProject: String, folder nextFolder: String, revision nextRevision: UInt64) -> Self {
+        var nextRaw = raw
+        if case var .object(dict) = nextRaw {
+            dict["project"] = nextProject.isEmpty ? .null : .string(nextProject)
+            dict["folder"] = .string(nextFolder)
+            dict["placement_revision"] = .number(Double(nextRevision))
+            nextRaw = .object(dict)
+        }
+        return Self(
+            id: id,
+            name: name,
+            state: state,
+            project: nextProject,
+            folder: nextFolder,
+            placementRevision: nextRevision,
+            backend: backend,
+            cloud: cloud,
+            updatedAt: updatedAt,
+            raw: nextRaw
+        )
+    }
+    fileprivate init(
+        id: String,
+        name: String,
+        state: String,
+        project: String,
+        folder: String,
+        placementRevision: UInt64,
+        backend: String,
+        cloud: Bool,
+        updatedAt: String,
+        raw: OrbJSON
+    ) {
+        self.id = id
+        self.name = name
+        self.state = state
+        self.project = project
+        self.folder = folder
+        self.placementRevision = placementRevision
+        self.backend = backend
+        self.cloud = cloud
+        self.updatedAt = updatedAt
+        self.raw = raw
+    }
     var isPlaceholder: Bool { raw["orb_placeholder"].flag }
     /// The conversation this one was forked from (a `fork-of:` tag, or an older fork stored as a child).
     var forkSource: String? {
@@ -549,11 +593,12 @@ enum OrbHierarchy {
             seen.project = normProj
             seen.folder = normFolder
             seenFacts[item.missionID] = seen
-            if var anc = ancestors[item.missionID], case var .object(dict) = anc.row.raw {
-                dict["project"] = normProj.isEmpty ? .null : .string(normProj)
-                dict["folder"] = .string(normFolder)
-                dict["placement_revision"] = .number(Double(item.placementRevision))
-                anc.row = OrbRow(.object(dict))
+            if var anc = ancestors[item.missionID] {
+                anc.row = anc.row.withPatchedPlacement(
+                    project: normProj,
+                    folder: normFolder,
+                    revision: item.placementRevision
+                )
                 ancestors[item.missionID] = anc
             }
             accepted.append(OrbPlacementCommitItem(

@@ -265,6 +265,7 @@ final class OrbContractTests: XCTestCase {
             "folder": .string(""),
             "placement_revision": .number(2),
         ]))
+        OrbHierarchy.storeAncestor(rootInit)
         let childInit = OrbRow(.object([
             "id": .string("06203bdc"),
             "project": .string("assistant"),
@@ -371,6 +372,9 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(remoteMove.count, 2)
         XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.project, "ethereum")
         XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.folder, "Specs/Consensus")
+        XCTAssertEqual(OrbHierarchy.cachedAncestor("9f559751")?.project, "ethereum")
+        XCTAssertEqual(OrbHierarchy.cachedAncestor("9f559751")?.folder, "Specs/Consensus")
+        XCTAssertEqual(OrbHierarchy.cachedAncestor("9f559751")?.placementRevision, 5)
         XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.project, "ethereum")
         XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.folder, "")
         XCTAssertEqual(notifiedMoves.count, 2)
