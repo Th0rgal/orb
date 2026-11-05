@@ -1,4 +1,5 @@
 import { For, Show, createSignal, onMount } from "solid-js";
+import { getApiUrl } from "./api";
 import {
   ApprovalCancelled,
   enrollThisDevice,
@@ -6,7 +7,6 @@ import {
   localApprovalKey,
   replaceLocalKey,
   signedApi,
-  thisDeviceEnrollment,
   type ApprovalDevice,
   type ApprovalDevices,
   type ApprovalMode,
@@ -31,10 +31,18 @@ export function ApprovalDevicesPanel(p: { onError: (message: string) => void }) 
 
   const load = async () => {
     try {
-      const s = await listApprovalDevices();
+      const [s, key] = await Promise.all([listApprovalDevices(), localApprovalKey()]);
       setState(s);
-      setMine(await thisDeviceEnrollment(s.devices));
-      setAvailable((await localApprovalKey()).available);
+      const match = key.public_key ? s.devices.find((d) => d.public_key === key.public_key) ?? null : null;
+      try {
+        const storageKey = `orb.approvalDevice.${getApiUrl()}`;
+        if (match) localStorage.setItem(storageKey, match.id);
+        else localStorage.removeItem(storageKey);
+      } catch {
+        // Storage can be unavailable; signing then falls back to unsigned.
+      }
+      setMine(match);
+      setAvailable(key.available);
     } catch (e) {
       p.onError(e instanceof Error ? e.message : String(e));
     }

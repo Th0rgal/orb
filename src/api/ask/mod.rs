@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -140,13 +140,15 @@ pub async fn run_ask_turn(turn: &AskTurn, user_content: &str) -> Result<String, 
         .await?;
 
     // Assemble the OpenAI message array: system + prior turns + this message.
-    let system = build_system_prompt(turn, user_content).await;
-    let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": system })];
-
     // Replay prior user/assistant turns for continuity (tool details are kept in
     // the store for the UI but not replayed to the model — the final answers
     // carry what matters). `prior` already includes the message just appended.
-    let prior = turn.ask_store.list_messages(turn.thread_id).await?;
+    let (system, prior) = tokio::join!(
+        build_system_prompt(turn, user_content),
+        turn.ask_store.list_messages(turn.thread_id),
+    );
+    let prior = prior?;
+    let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": system })];
     for m in &prior {
         match m.role.as_str() {
             "user" => messages.push(json!({ "role": "user", "content": m.content })),
@@ -283,12 +285,12 @@ pub enum AskStreamEvent {
 pub async fn run_ask_turn_streaming(
     turn: &AskTurn,
     user_content: &str,
-    tx: UnboundedSender<AskStreamEvent>,
+    tx: Sender<AskStreamEvent>,
 ) -> bool {
     match run_ask_turn_streaming_inner(turn, user_content, &tx).await {
         Ok(()) => true,
         Err(e) => {
-            let _ = tx.send(AskStreamEvent::Error { message: e });
+            let _ = tx.send(AskStreamEvent::Error { message: e }).await;
             false
         }
     }
@@ -297,15 +299,18 @@ pub async fn run_ask_turn_streaming(
 async fn run_ask_turn_streaming_inner(
     turn: &AskTurn,
     user_content: &str,
-    tx: &UnboundedSender<AskStreamEvent>,
+    tx: &Sender<AskStreamEvent>,
 ) -> Result<(), String> {
     turn.ask_store
         .append_message(turn.thread_id, "user", user_content, None, None, None)
         .await?;
 
-    let system = build_system_prompt(turn, user_content).await;
+    let (system, prior) = tokio::join!(
+        build_system_prompt(turn, user_content),
+        turn.ask_store.list_messages(turn.thread_id),
+    );
+    let prior = prior?;
     let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": system })];
-    let prior = turn.ask_store.list_messages(turn.thread_id).await?;
     for m in &prior {
         match m.role.as_str() {
             "user" => messages.push(json!({ "role": "user", "content": m.content })),
@@ -323,7 +328,7 @@ async fn run_ask_turn_streaming_inner(
         let completion = turn
             .llm
             .complete_stream(&messages, &tools, |frag| {
-                let _ = txc.send(AskStreamEvent::Delta {
+                let _ = txc.try_send(AskStreamEvent::Delta {
                     content: frag.to_string(),
                 });
             })
@@ -353,11 +358,13 @@ async fn run_ask_turn_streaming_inner(
         }));
 
         for tc in &completion.tool_calls {
-            let _ = tx.send(AskStreamEvent::ToolCall {
-                tool_call_id: tc.id.clone(),
-                name: tc.name.clone(),
-                args: tc.arguments.clone(),
-            });
+            let _ = tx
+                .send(AskStreamEvent::ToolCall {
+                    tool_call_id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    args: tc.arguments.clone(),
+                })
+                .await;
             turn.ask_store
                 .append_message(
                     turn.thread_id,
@@ -371,11 +378,13 @@ async fn run_ask_turn_streaming_inner(
 
             let result = execute_tool(turn, &tc.name, &tc.arguments).await;
             let result = truncate_tool_result(&result);
-            let _ = tx.send(AskStreamEvent::ToolResult {
-                tool_call_id: tc.id.clone(),
-                name: tc.name.clone(),
-                result: result.clone(),
-            });
+            let _ = tx
+                .send(AskStreamEvent::ToolResult {
+                    tool_call_id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    result: result.clone(),
+                })
+                .await;
             turn.ask_store
                 .append_message(
                     turn.thread_id,
@@ -417,9 +426,11 @@ async fn run_ask_turn_streaming_inner(
     // The synthesis pass was suppressed above; surface its cleaned text so the
     // operator sees an answer before `onDone` reconciles against the store.
     if synthesized {
-        let _ = tx.send(AskStreamEvent::Delta {
-            content: final_answer.clone(),
-        });
+        let _ = tx
+            .send(AskStreamEvent::Delta {
+                content: final_answer.clone(),
+            })
+            .await;
     }
 
     turn.ask_store
@@ -433,17 +444,24 @@ async fn run_ask_turn_streaming_inner(
         )
         .await?;
 
-    let _ = tx.send(AskStreamEvent::Done {
-        thread_id: turn.thread_id,
-        answer: final_answer,
-    });
+    let _ = tx
+        .send(AskStreamEvent::Done {
+            thread_id: turn.thread_id,
+            answer: final_answer,
+        })
+        .await;
     Ok(())
 }
 
 async fn build_system_prompt(turn: &AskTurn, user_content: &str) -> String {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let mut seed = String::new();
-    if let Ok(Some(mission)) = turn.mission_store.get_mission(turn.mission_id).await {
+    let (mission_res, events_res) = tokio::join!(
+        turn.mission_store.get_mission(turn.mission_id),
+        turn.mission_store
+            .get_latest_events(turn.mission_id, GOAL_SCAN_EVENT_COUNT),
+    );
+    if let Ok(Some(mission)) = mission_res {
         if let Some(title) = &mission.title {
             seed.push_str(&format!("Mission title: {title}\n"));
         }
@@ -458,11 +476,7 @@ async fn build_system_prompt(turn: &AskTurn, user_content: &str) -> String {
     }
 
     // One slightly deeper fetch serves both the goal-status scan and the seed.
-    if let Ok(events) = turn
-        .mission_store
-        .get_latest_events(turn.mission_id, GOAL_SCAN_EVENT_COUNT)
-        .await
-    {
+    if let Ok(events) = events_res {
         if let Some(goal) = events
             .iter()
             .rev()

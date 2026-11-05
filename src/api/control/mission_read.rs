@@ -72,10 +72,11 @@ pub async fn get_mission_with_query(
     match loaded.map_err(internal_error)? {
         Some(mut mission) => {
             if mission.backend.starts_with("cloud_") {
-                let execution = control
-                    .mission_store
-                    .cloud_executions()
-                    .await
+                let (executions_res, continuations_res) = tokio::join!(
+                    control.mission_store.cloud_executions(),
+                    continuations::summaries(&control.mission_store),
+                );
+                let execution = executions_res
                     .map_err(internal_error)?
                     .into_iter()
                     .find(|e| e.mission_id == id)
@@ -92,44 +93,76 @@ pub async fn get_mission_with_query(
                     &mut value,
                     state.config.automations_enabled && control.mission_store.is_persistent(),
                 );
-                value["continuation"] = continuations::summaries(&control.mission_store)
-                    .await
+                value["continuation"] = continuations_res
                     .map_err(internal_error)?
                     .remove(&id)
                     .unwrap_or(serde_json::Value::Null);
                 return Ok(Json(value));
             }
 
+            let mission_id = mission.id;
+            let workspace_id = mission.workspace_id;
+            let ids = [mission_id];
+            let run_info_fut = async {
+                let active_run = control
+                    .mission_store
+                    .get_active_mission_run(mission_id)
+                    .await
+                    .map_err(internal_error)?;
+                match active_run {
+                    Some(run) => {
+                        let wait_started_at =
+                            user_wait_tool_started_at(control.mission_store.as_ref(), &run).await;
+                        let placement_run = Some(run.clone());
+                        Ok::<_, (StatusCode, String)>((Some(run), wait_started_at, placement_run))
+                    }
+                    None => {
+                        let placement_run = control
+                            .mission_store
+                            .get_latest_mission_run(mission_id)
+                            .await
+                            .map_err(internal_error)?;
+                        Ok((None, None, placement_run))
+                    }
+                }
+            };
+            let (
+                workspace,
+                activity_inputs,
+                callback_parents,
+                run_info_res,
+                recovery,
+                continuations_res,
+                (handles, outcomes),
+                committed_transfer_res,
+            ) = tokio::join!(
+                state.workspaces.get(workspace_id),
+                load_activity_inputs(&control, &ids),
+                callback_parent::links(std::slice::from_ref(&mission), &control.mission_store),
+                run_info_fut,
+                usage_limit_wait::remote_wait(&state.config.working_dir, id),
+                continuations::summaries(&control.mission_store),
+                remote_job_projection_inputs(&state),
+                machine_transfer::committed(&control.mission_store, id),
+            );
+
             // Populate workspace_name + spark_offload from the workspace (P#7).
-            let workspace = state.workspaces.get(mission.workspace_id).await;
             if let Some(ws) = workspace.as_ref() {
                 mission.workspace_name = Some(ws.name.clone());
             }
             let mut one = [mission];
-            populate_activity(&control, &mut one).await;
+            apply_activity_inputs(&mut one, activity_inputs);
             let [mission] = one;
-            let callback_parents =
-                callback_parent::links(std::slice::from_ref(&mission), &control.mission_store)
-                    .await;
 
             // Serialize then attach the computed spark_offload block so Paloma
             // can route heavy builds without probing the host each time.
-            let active_run = control
-                .mission_store
-                .get_active_mission_run(mission.id)
-                .await
-                .map_err(internal_error)?;
-            let wait_started_at = match active_run.as_ref() {
-                Some(run) => user_wait_tool_started_at(control.mission_store.as_ref(), run).await,
-                None => None,
-            };
+            let (active_run, wait_started_at, placement_run) = run_info_res?;
             let mut value = attach_execution_to_mission_value(
                 serde_json::to_value(&mission).map_err(internal_error)?,
                 &mission,
                 active_run.as_ref(),
                 wait_started_at.as_deref(),
             );
-            let recovery = usage_limit_wait::remote_wait(&state.config.working_dir, id).await;
             usage_limit_wait::attach_recovery(&mut value, recovery.as_ref());
             if let Some(parent) = callback_parents.get(&id) {
                 value["callback_parent_mission_id"] = serde_json::json!(parent);
@@ -138,23 +171,13 @@ pub async fn get_mission_with_query(
                 &mut value,
                 state.config.automations_enabled && control.mission_store.is_persistent(),
             );
-            value["continuation"] = continuations::summaries(&control.mission_store)
-                .await
+            value["continuation"] = continuations_res
                 .map_err(internal_error)?
                 .remove(&id)
                 .unwrap_or(serde_json::Value::Null);
             // Remote placement must be visible on the read model: the row's
             // workspace/backend describe a local harness that a raw remote
             // mission never runs.
-            let placement_run = match active_run.clone() {
-                Some(run) => Some(run),
-                None => control
-                    .mission_store
-                    .get_latest_mission_run(mission.id)
-                    .await
-                    .map_err(internal_error)?,
-            };
-            let (handles, outcomes) = remote_job_projection_inputs(&state).await;
             value = attach_remote_job_to_mission_value(
                 value,
                 remote_job_projection(
@@ -165,10 +188,7 @@ pub async fn get_mission_with_query(
                     chrono::Utc::now(),
                 ),
             );
-            if let Some(t) = machine_transfer::committed(&control.mission_store, id)
-                .await
-                .map_err(internal_error)?
-            {
+            if let Some(t) = committed_transfer_res.map_err(internal_error)? {
                 machine_transfer::project(&mut value, &t);
             }
             let host_configured =
@@ -220,43 +240,71 @@ pub(super) async fn find_mission_projection_in_any_store(
     control_hub: &ControlHub,
     id: Uuid,
 ) -> Result<Option<serde_json::Value>, String> {
+    use futures::stream::{self, StreamExt};
+
     let inventory = control_hub.mission_store_inventory().await?;
-    for store in inventory.live {
-        if let Some(mission) = store.get_mission(id).await? {
-            return Ok(Some(cross_tenant_mission_projection(
-                &mission.id.to_string(),
-                &mission.status,
-                mission.title.as_deref(),
-                Some(&mission.workspace_id.to_string()),
-                Some(&mission.backend),
-                &mission.created_at,
-                &mission.updated_at,
-            )));
+    let live_results =
+        futures::future::try_join_all(inventory.live.iter().map(|store| store.get_mission(id)))
+            .await?;
+    if let Some(mission) = live_results.into_iter().flatten().next() {
+        return Ok(Some(cross_tenant_mission_projection(
+            &mission.id.to_string(),
+            &mission.status,
+            mission.title.as_deref(),
+            Some(&mission.workspace_id.to_string()),
+            Some(&mission.backend),
+            &mission.created_at,
+            &mission.updated_at,
+        )));
+    }
+
+    if !inventory.offline_file_users.is_empty() {
+        let base_dir = inventory.base_dir.clone();
+        let file_results: Vec<Result<Option<Mission>, String>> =
+            stream::iter(inventory.offline_file_users)
+                .map(|user| {
+                    let base_dir = base_dir.clone();
+                    async move {
+                        let store: Arc<dyn MissionStore> =
+                            Arc::new(mission_store::FileMissionStore::new(base_dir, &user).await?);
+                        store.get_mission(id).await
+                    }
+                })
+                .buffered(8)
+                .collect()
+                .await;
+        for res in file_results {
+            if let Some(mission) = res? {
+                return Ok(Some(cross_tenant_mission_projection(
+                    &mission.id.to_string(),
+                    &mission.status,
+                    mission.title.as_deref(),
+                    Some(&mission.workspace_id.to_string()),
+                    Some(&mission.backend),
+                    &mission.created_at,
+                    &mission.updated_at,
+                )));
+            }
         }
     }
-    for user in inventory.offline_file_users {
-        let store: Arc<dyn MissionStore> = Arc::new(
-            mission_store::FileMissionStore::new(inventory.base_dir.clone(), &user).await?,
-        );
-        if let Some(mission) = store.get_mission(id).await? {
-            return Ok(Some(cross_tenant_mission_projection(
-                &mission.id.to_string(),
-                &mission.status,
-                mission.title.as_deref(),
-                Some(&mission.workspace_id.to_string()),
-                Some(&mission.backend),
-                &mission.created_at,
-                &mission.updated_at,
-            )));
-        }
-    }
-    for path in inventory.offline_sqlite {
-        let found =
-            tokio::task::spawn_blocking(move || load_mission_projection_from_sqlite(&path, id))
-                .await
-                .map_err(|error| error.to_string())??;
-        if found.is_some() {
-            return Ok(found);
+
+    if !inventory.offline_sqlite.is_empty() {
+        let sqlite_results: Vec<Result<Option<serde_json::Value>, String>> =
+            stream::iter(inventory.offline_sqlite)
+                .map(|path| async move {
+                    tokio::task::spawn_blocking(move || {
+                        load_mission_projection_from_sqlite(&path, id)
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?
+                })
+                .buffered(8)
+                .collect()
+                .await;
+        for res in sqlite_results {
+            if let Some(found) = res? {
+                return Ok(Some(found));
+            }
         }
     }
     Ok(None)
@@ -569,12 +617,32 @@ pub async fn get_mission_digest(
     else {
         return Err((StatusCode::NOT_FOUND, format!("Mission {} not found", id)));
     };
-    if mission.workspace_name.is_none() {
-        mission.workspace_name = state
-            .workspaces
-            .get(mission.workspace_id)
+    let need_workspace = mission.workspace_name.is_none();
+    let workspace_id = mission.workspace_id;
+    let mission_id = mission.id;
+    let run_fut = async {
+        let latest_run = control
+            .mission_store
+            .get_latest_mission_run(mission_id)
             .await
-            .map(|ws| ws.name);
+            .map_err(internal_error)?;
+        let wait_started_at = match latest_run.as_ref() {
+            Some(run) => user_wait_tool_started_at(control.mission_store.as_ref(), run).await,
+            None => None,
+        };
+        Ok::<_, (StatusCode, String)>((latest_run, wait_started_at))
+    };
+    let workspace_fut = async {
+        if need_workspace {
+            state.workspaces.get(workspace_id).await.map(|ws| ws.name)
+        } else {
+            None
+        }
+    };
+    let (resolved_ws_name, run_res, capacity_guard) =
+        tokio::join!(workspace_fut, run_fut, control.dispatch_capacity.read(),);
+    if need_workspace {
+        mission.workspace_name = resolved_ws_name;
     }
 
     fn truncate_chars(s: &str, max: usize) -> String {
@@ -622,18 +690,10 @@ pub async fn get_mission_digest(
             }
         }
     }
-    let latest_run = control
-        .mission_store
-        .get_latest_mission_run(mission.id)
-        .await
-        .map_err(internal_error)?;
+    let (latest_run, wait_started_at) = run_res?;
     let waiting_for_user_tool = latest_run
         .as_ref()
         .is_some_and(|run| run.execution_state == MissionExecutionState::WaitingUser);
-    let wait_started_at = match latest_run.as_ref() {
-        Some(run) => user_wait_tool_started_at(control.mission_store.as_ref(), run).await,
-        None => None,
-    };
     let execution = latest_run
         .as_ref()
         .map(|run| mission_execution_projection(run, mission.status));
@@ -641,7 +701,7 @@ pub async fn get_mission_digest(
     let goal = mission_goal_digest(&mission);
     let queue_wait = super::dispatch_capacity::queue_wait_for(
         &mission,
-        control.dispatch_capacity.read().await.as_ref(),
+        capacity_guard.as_ref(),
         chrono::Utc::now(),
     );
     Ok(Json(serde_json::json!({
@@ -714,20 +774,23 @@ pub async fn missions_integrity(
     // waiting on capacity/not_before) vs orphaned (nothing will dispatch them).
     let mut orphaned_pending: Vec<serde_json::Value> = Vec::new();
     let mut scheduled_waiting: Vec<serde_json::Value> = Vec::new();
-    for m in missions
+    let aged_pending: Vec<&Mission> = missions
         .iter()
-        .filter(|m| m.status == MissionStatus::Pending)
-    {
-        if age_minutes(&m.created_at) < 15 {
-            continue; // freshly created; give the caller time to deliver a goal
-        }
-        let has_goal = control
-            .mission_store
-            .get_deferred_goal(m.id)
-            .await
-            .ok()
-            .flatten()
-            .is_some();
+        .filter(|m| m.status == MissionStatus::Pending && age_minutes(&m.created_at) >= 15)
+        .collect();
+    let pending_goals: Vec<bool> = {
+        use futures::stream::{self, StreamExt};
+        let store = &control.mission_store;
+        let goal_futs: Vec<_> = aged_pending
+            .iter()
+            .map(|m| {
+                let id = m.id;
+                async move { store.get_deferred_goal(id).await.ok().flatten().is_some() }
+            })
+            .collect();
+        stream::iter(goal_futs).buffered(8).collect().await
+    };
+    for (m, has_goal) in aged_pending.into_iter().zip(pending_goals) {
         if has_goal {
             scheduled_waiting.push(brief(m));
         } else {

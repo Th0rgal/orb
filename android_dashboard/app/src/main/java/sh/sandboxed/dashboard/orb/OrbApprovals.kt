@@ -66,6 +66,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -276,19 +279,39 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    suspend fun load() {
+    suspend fun load() = coroutineScope {
+        val needProjects = projects.isEmpty()
         // Mission access requests do not depend on Bitwarden being configured.
-        try {
-            access = OrbJSON.dictList(dictOf(core.request("/api/mission-access"))["requests"])
-        } catch (_: Throwable) {
-        }
-        try {
-            val privSnap = dictOf(core.request("/api/privilege-access"))
+        val accessTask = async { runCatching { OrbJSON.dictList(dictOf(core.request("/api/mission-access"))["requests"]) } }
+        val privTask = async { runCatching { dictOf(core.request("/api/privilege-access")) } }
+        val meshTask = async { runCatching { dictOf(core.request("/api/mesh/status")) } }
+        val queueTask = async { runCatching { OrbJSON.dictList(dictOf(core.request("/api/approvals/queue"))["items"]) } }
+        val devicesTask = async { runCatching { dictOf(core.request("/api/approvals/devices")) } }
+        val brokerTask = async { runCatching { dictOf(core.request("/api/bitwarden/broker")) } }
+        val projectsTask = if (needProjects) {
+            async {
+                runCatching {
+                    (core.request("/api/bitwarden/projects") as? List<*>).orEmpty()
+                        .mapNotNull { it as? Map<*, *> }
+                        .associate { (it["id"] as? String ?: "") to (it["name"] as? String ?: "") }
+                }
+            }
+        } else null
+
+        accessTask.await()
+            .onFailure { if (it is CancellationException) throw it }
+            .onSuccess { access = it }
+
+        val privRes = privTask.await()
+        val meshRes = meshTask.await()
+        privRes.onFailure { if (it is CancellationException) throw it }
+        meshRes.onFailure { if (it is CancellationException) throw it }
+        privRes.getOrNull()?.let { privSnap ->
             privilege = OrbJSON.dictList(privSnap["requests"])
             privilegeCommands = OrbJSON.dictList(privSnap["command_audit"])
             bunkerIncidents = OrbJSON.dictList(privSnap["bunker_incidents"])
             val snapBunker = (privSnap["bunker_state"] as? Number)?.toInt() ?: 0
-            val meshSnap = runCatching { dictOf(core.request("/api/mesh/status")) }.getOrNull()
+            val meshSnap = meshRes.getOrNull()
             if (meshSnap != null) {
                 val mBunker = (meshSnap["bunker_state"] as? Number)?.toInt() ?: 0
                 bunkerState = maxOf(snapBunker, mBunker)
@@ -297,46 +320,51 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             } else {
                 bunkerState = snapBunker
             }
-        } catch (_: Throwable) {
         }
+
+        val brokerRes = brokerTask.await()
+        brokerRes.onFailure { if (it is CancellationException) throw it }
+        val brokerDict = brokerRes.getOrNull()
+
         // A Core that predates /api/approvals answers 404: the per-kind lists
         // (loaded here anyway) then build the same items. Any other failure
         // keeps what is on screen.
         var queueMissing = false
-        try {
-            val next = OrbJSON.dictList(dictOf(core.request("/api/approvals/queue"))["items"])
-            queue = next
-        } catch (e: OrbError) {
-            queueMissing = e.status == 404 || e.status == 405
-        } catch (_: Throwable) {
-        }
-        if (queueMissing) {
-            val secrets = runCatching { OrbJSON.dictList(dictOf(core.request("/api/bitwarden/broker"))["requests"]) }.getOrDefault(emptyList())
-            val next = OrbApprovalQueue.legacyItems(privilege, secrets, access)
-            queue = next
-        }
-        try {
-            val d = dictOf(core.request("/api/approvals/devices"))
-            devices = OrbJSON.dictList(d["devices"])
-            mode = OrbJSON.str(d, "mode") ?: ""
-            val mine = OrbApprovalKey.publicKey()
-            val match = devices.firstOrNull { mine != null && it["public_key"] == mine }
-            activity?.let { OrbApprovalKey.setDeviceId(it, baseURL, match?.get("id") as? String) }
-            enrolledHere = match != null
-            error = null
-        } catch (e: Throwable) {
-            error = e.message
-        }
-        try {
-            val broker = dictOf(core.request("/api/bitwarden/broker"))
-            requests = OrbJSON.dictList(broker["requests"]).filter { it["status"] == "pending" }
-            grants = OrbJSON.dictList(broker["grants"])
-            if (projects.isEmpty()) {
-                projects = (core.request("/api/bitwarden/projects") as? List<*>).orEmpty()
-                    .mapNotNull { it as? Map<*, *> }
-                    .associate { (it["id"] as? String ?: "") to (it["name"] as? String ?: "") }
+        queueTask.await()
+            .onSuccess { queue = it }
+            .onFailure { e ->
+                if (e is CancellationException) throw e
+                if (e is OrbError) queueMissing = e.status == 404 || e.status == 405
             }
-        } catch (_: Throwable) {
+        if (queueMissing) {
+            val secrets = brokerDict?.let { OrbJSON.dictList(it["requests"]) }.orEmpty()
+            queue = OrbApprovalQueue.legacyItems(privilege, secrets, access)
+        }
+
+        devicesTask.await()
+            .onSuccess { d ->
+                devices = OrbJSON.dictList(d["devices"])
+                mode = OrbJSON.str(d, "mode") ?: ""
+                val mine = OrbApprovalKey.publicKey()
+                val match = devices.firstOrNull { mine != null && it["public_key"] == mine }
+                activity?.let { OrbApprovalKey.setDeviceId(it, baseURL, match?.get("id") as? String) }
+                enrolledHere = match != null
+                error = null
+            }
+            .onFailure { e ->
+                if (e is CancellationException) throw e
+                error = e.message
+            }
+
+        if (brokerDict != null) {
+            requests = OrbJSON.dictList(brokerDict["requests"]).filter { it["status"] == "pending" }
+            grants = OrbJSON.dictList(brokerDict["grants"])
+            projectsTask?.await()
+                ?.onFailure { if (it is CancellationException) throw it }
+                ?.getOrNull()
+                ?.let { if (projects.isEmpty()) projects = it }
+        } else {
+            projectsTask?.cancel()
         }
     }
 

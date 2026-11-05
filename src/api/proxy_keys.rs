@@ -6,8 +6,10 @@
 //! continues to work alongside user-generated keys.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -17,10 +19,16 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::routes::AppState;
+
+/// Sentinel timestamp value representing `None` in `AtomicI64`.
+const UNSET_TIMESTAMP_MS: i64 = i64::MIN;
+
+/// Minimum interval between disk writes for `last_used_at` updates on a single key.
+const TOUCH_PERSIST_INTERVAL_MS: i64 = 60_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -112,20 +120,71 @@ pub struct CleanupResponse {
 pub type SharedProxyApiKeyStore = Arc<ProxyApiKeyStore>;
 
 #[derive(Debug)]
+struct ProxyKeyEntry {
+    record: ProxyApiKey,
+    last_used_ms: AtomicI64,
+    persisted_ms: AtomicI64,
+}
+
+impl ProxyKeyEntry {
+    fn from_record(record: ProxyApiKey) -> Self {
+        let initial_ms = record
+            .last_used_at
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or(UNSET_TIMESTAMP_MS);
+        Self {
+            record,
+            last_used_ms: AtomicI64::new(initial_ms),
+            persisted_ms: AtomicI64::new(initial_ms),
+        }
+    }
+
+    fn current_last_used(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let ms = self.last_used_ms.load(Ordering::Relaxed);
+        if ms == UNSET_TIMESTAMP_MS {
+            None
+        } else {
+            chrono::DateTime::from_timestamp_millis(ms)
+        }
+    }
+
+    fn to_record(&self) -> ProxyApiKey {
+        let mut out = self.record.clone();
+        out.last_used_at = self.current_last_used();
+        out
+    }
+
+    fn to_summary(&self) -> KeySummary {
+        KeySummary {
+            id: self.record.id,
+            name: self.record.name.clone(),
+            key_prefix: self.record.key_prefix.clone(),
+            created_at: self.record.created_at,
+            last_used_at: self.current_last_used(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct ProxyApiKeyStore {
-    keys: RwLock<Vec<ProxyApiKey>>,
+    keys: ArcSwap<Vec<Arc<ProxyKeyEntry>>>,
+    writer: Mutex<()>,
     storage_path: PathBuf,
 }
 
 impl ProxyApiKeyStore {
     pub async fn new(storage_path: PathBuf) -> Self {
         let store = Self {
-            keys: RwLock::new(Vec::new()),
+            keys: ArcSwap::from_pointee(Vec::new()),
+            writer: Mutex::new(()),
             storage_path,
         };
         if let Ok(loaded) = store.load_from_disk() {
-            let mut keys = store.keys.write().await;
-            *keys = loaded;
+            let entries = loaded
+                .into_iter()
+                .map(|k| Arc::new(ProxyKeyEntry::from_record(k)))
+                .collect();
+            store.keys.store(Arc::new(entries));
         }
         store
     }
@@ -139,16 +198,14 @@ impl ProxyApiKeyStore {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
-    fn save_to_disk(&self, keys: &[ProxyApiKey]) -> Result<(), std::io::Error> {
-        if let Some(parent) = self.storage_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let contents = serde_json::to_string_pretty(keys)
+    async fn save_entries_async(
+        &self,
+        entries: &[Arc<ProxyKeyEntry>],
+    ) -> Result<(), std::io::Error> {
+        let records: Vec<ProxyApiKey> = entries.iter().map(|e| e.to_record()).collect();
+        let contents = serde_json::to_string_pretty(&records)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let tmp_path = self.storage_path.with_extension("tmp");
-        std::fs::write(&tmp_path, &contents)?;
-        std::fs::rename(&tmp_path, &self.storage_path)?;
-        Ok(())
+        crate::concurrency::write_atomic_async(&self.storage_path, contents.as_bytes(), None).await
     }
 
     /// Create a new API key. Returns the raw key value (only available once).
@@ -163,15 +220,18 @@ impl ProxyApiKeyStore {
             id,
             name: name.clone(),
             key_hash,
-            key_prefix: key_prefix.clone(),
+            key_prefix,
             created_at: now,
             last_used_at: None,
         };
 
-        let mut keys = self.keys.write().await;
-        keys.push(record);
-        self.save_to_disk(&keys)
+        let _guard = self.writer.lock().await;
+        let mut next: Vec<Arc<ProxyKeyEntry>> = (*self.keys.load_full()).clone();
+        next.push(Arc::new(ProxyKeyEntry::from_record(record)));
+        self.save_entries_async(&next)
+            .await
             .map_err(|e| format!("Failed to persist proxy API key: {}", e))?;
+        self.keys.store(Arc::new(next));
 
         Ok(CreateKeyResponse {
             id,
@@ -184,47 +244,78 @@ impl ProxyApiKeyStore {
     /// List all keys (metadata only, no raw values).
     pub async fn list(&self) -> Vec<KeySummary> {
         self.keys
-            .read()
-            .await
+            .load()
             .iter()
-            .map(KeySummary::from)
+            .map(|entry| entry.to_summary())
             .collect()
     }
 
     /// Delete a key by ID. Returns true if found and removed.
     pub async fn delete(&self, id: Uuid) -> Result<bool, String> {
-        let mut keys = self.keys.write().await;
-        let len_before = keys.len();
-        keys.retain(|k| k.id != id);
-        if keys.len() == len_before {
+        let _guard = self.writer.lock().await;
+        let current = self.keys.load_full();
+        let mut next: Vec<Arc<ProxyKeyEntry>> = current
+            .iter()
+            .filter(|e| e.record.id != id)
+            .cloned()
+            .collect();
+        if next.len() == current.len() {
             return Ok(false);
         }
-        self.save_to_disk(&keys)
+        next.shrink_to_fit();
+        self.save_entries_async(&next)
+            .await
             .map_err(|e| format!("Failed to persist proxy API key deletion: {}", e))?;
+        self.keys.store(Arc::new(next));
         Ok(true)
     }
 
     /// Check whether a bearer token matches any stored API key (constant-time).
     ///
-    /// On a match, records the key's `last_used_at` so unused keys can be
-    /// identified and cleaned up later.
+    /// On a match, records the key's `last_used_at` atomically with zero locks
+    /// on the hot `/v1` request path, persisting to disk at most once per minute
+    /// per key via `tokio::fs`.
     pub async fn verify(&self, token: &str) -> bool {
         let token_hash = hex_sha256(token);
-        let mut matched_ids: Vec<Uuid> = Vec::new();
-        {
-            let keys = self.keys.read().await;
-            // Compare against all key hashes to avoid timing leaks on which key
-            // matched. We still iterate all entries even after a match.
-            for key in keys.iter() {
-                if super::auth::constant_time_eq(&token_hash, &key.key_hash) {
-                    matched_ids.push(key.id);
-                }
+        let snapshot = self.keys.load();
+        let mut matched: Vec<Arc<ProxyKeyEntry>> = Vec::new();
+        // Compare against all key hashes to avoid timing leaks on which key
+        // matched. We still iterate all entries even after a match.
+        for entry in snapshot.iter() {
+            if super::auth::constant_time_eq(&token_hash, &entry.record.key_hash) {
+                matched.push(Arc::clone(entry));
             }
         }
-        if matched_ids.is_empty() {
+        drop(snapshot);
+
+        if matched.is_empty() {
             return false;
         }
-        self.touch(&matched_ids).await;
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut should_persist = false;
+        for entry in &matched {
+            entry.last_used_ms.store(now_ms, Ordering::Relaxed);
+            let prev_persisted = entry.persisted_ms.load(Ordering::Relaxed);
+            let due = prev_persisted == UNSET_TIMESTAMP_MS
+                || now_ms.saturating_sub(prev_persisted) >= TOUCH_PERSIST_INTERVAL_MS;
+            if due
+                && entry
+                    .persisted_ms
+                    .compare_exchange(prev_persisted, now_ms, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+            {
+                should_persist = true;
+            }
+        }
+
+        if should_persist {
+            let _guard = self.writer.lock().await;
+            let current = self.keys.load_full();
+            if let Err(e) = self.save_entries_async(&current).await {
+                tracing::warn!("Failed to persist proxy key usage timestamp: {}", e);
+            }
+        }
         true
     }
 
@@ -234,11 +325,11 @@ impl ProxyApiKeyStore {
     /// Hermes gateway env) to check it is still valid before reusing it.
     pub async fn find_by_token(&self, token: &str) -> Option<KeySummary> {
         let token_hash = hex_sha256(token);
-        let keys = self.keys.read().await;
+        let keys = self.keys.load();
         let mut found = None;
-        for key in keys.iter() {
-            if super::auth::constant_time_eq(&token_hash, &key.key_hash) {
-                found = Some(KeySummary::from(key));
+        for entry in keys.iter() {
+            if super::auth::constant_time_eq(&token_hash, &entry.record.key_hash) {
+                found = Some(entry.to_summary());
             }
         }
         found
@@ -253,43 +344,25 @@ impl ProxyApiKeyStore {
         prefix: &str,
         keep: Option<Uuid>,
     ) -> Result<Vec<KeySummary>, String> {
-        let doomed = |k: &ProxyApiKey| k.name.starts_with(prefix) && keep != Some(k.id);
-        let mut keys = self.keys.write().await;
-        let deleted: Vec<KeySummary> = keys
+        let doomed =
+            |e: &ProxyKeyEntry| e.record.name.starts_with(prefix) && keep != Some(e.record.id);
+        let _guard = self.writer.lock().await;
+        let current = self.keys.load_full();
+        let deleted: Vec<KeySummary> = current
             .iter()
-            .filter(|k| doomed(k))
-            .map(KeySummary::from)
+            .filter(|e| doomed(e))
+            .map(|e| e.to_summary())
             .collect();
         if deleted.is_empty() {
             return Ok(deleted);
         }
-        keys.retain(|k| !doomed(k));
-        self.save_to_disk(&keys)
+        let next: Vec<Arc<ProxyKeyEntry>> =
+            current.iter().filter(|e| !doomed(e)).cloned().collect();
+        self.save_entries_async(&next)
+            .await
             .map_err(|e| format!("Failed to persist proxy API key cleanup: {}", e))?;
+        self.keys.store(Arc::new(next));
         Ok(deleted)
-    }
-
-    /// Record usage for the given keys. Always updates in-memory; persists to
-    /// disk at most once per minute per key so the hot proxy path doesn't pay
-    /// a disk write on every request.
-    async fn touch(&self, ids: &[Uuid]) {
-        let now = chrono::Utc::now();
-        let mut keys = self.keys.write().await;
-        let mut persist = false;
-        for key in keys.iter_mut().filter(|k| ids.contains(&k.id)) {
-            if key
-                .last_used_at
-                .is_none_or(|t| now - t >= chrono::Duration::seconds(60))
-            {
-                persist = true;
-            }
-            key.last_used_at = Some(now);
-        }
-        if persist {
-            if let Err(e) = self.save_to_disk(&keys) {
-                tracing::warn!("Failed to persist proxy key usage timestamp: {}", e);
-            }
-        }
     }
 
     /// Find keys whose last activity is older than `cutoff`, optionally
@@ -301,20 +374,34 @@ impl ProxyApiKeyStore {
         cutoff: chrono::DateTime<chrono::Utc>,
         dry_run: bool,
     ) -> Result<Vec<KeySummary>, String> {
-        let is_stale =
-            |k: &ProxyApiKey| -> bool { k.last_used_at.unwrap_or(k.created_at) < cutoff };
-        let mut keys = self.keys.write().await;
-        let stale: Vec<KeySummary> = keys
+        let is_stale = |e: &ProxyKeyEntry| -> bool {
+            e.current_last_used().unwrap_or(e.record.created_at) < cutoff
+        };
+        if dry_run {
+            return Ok(self
+                .keys
+                .load()
+                .iter()
+                .filter(|e| is_stale(e))
+                .map(|e| e.to_summary())
+                .collect());
+        }
+        let _guard = self.writer.lock().await;
+        let current = self.keys.load_full();
+        let stale: Vec<KeySummary> = current
             .iter()
-            .filter(|k| is_stale(k))
-            .map(KeySummary::from)
+            .filter(|e| is_stale(e))
+            .map(|e| e.to_summary())
             .collect();
-        if dry_run || stale.is_empty() {
+        if stale.is_empty() {
             return Ok(stale);
         }
-        keys.retain(|k| !is_stale(k));
-        self.save_to_disk(&keys)
+        let next: Vec<Arc<ProxyKeyEntry>> =
+            current.iter().filter(|e| !is_stale(e)).cloned().collect();
+        self.save_entries_async(&next)
+            .await
             .map_err(|e| format!("Failed to persist proxy API key cleanup: {}", e))?;
+        self.keys.store(Arc::new(next));
         Ok(stale)
     }
 }
@@ -426,7 +513,11 @@ mod tests {
     async fn store_with(keys: Vec<ProxyApiKey>) -> (ProxyApiKeyStore, TempDir) {
         let tmp = TempDir::new().unwrap();
         let store = ProxyApiKeyStore::new(tmp.path().join("proxy_api_keys.json")).await;
-        *store.keys.write().await = keys;
+        let entries = keys
+            .into_iter()
+            .map(|k| Arc::new(ProxyKeyEntry::from_record(k)))
+            .collect();
+        store.keys.store(Arc::new(entries));
         (store, tmp)
     }
 

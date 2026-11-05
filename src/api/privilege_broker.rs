@@ -66,6 +66,21 @@ pub fn evaluate_auth_toctou_gate(
     observed_digest: u64,
     exec_digest: u64,
 ) -> crate::orb_spec::AuthToctouExecuteVerdict {
+    let input = crate::orb_spec::AuthToctouExecuteInput {
+        principal_kind,
+        bunker_state,
+        observed_target_id,
+        exec_target_id,
+        observed_lease_epoch,
+        live_lease_epoch,
+        now_tick,
+        expiry_tick,
+        observed_digest,
+        exec_digest,
+    };
+    // Authoritative Lean kernel decision (`orb_auth_toctou_execute_step`), with
+    // host sanity cross-check recorded in `auth_toctou_shadow_counter()`.
+    let lean_verdict = crate::orb_spec::auth_toctou_execute_step(input);
     let (host_admitted, host_reason_code) = if bunker_state != BunkerState::Normal {
         (false, 1u8)
     } else if !(1..=3).contains(&principal_kind) {
@@ -81,23 +96,13 @@ pub fn evaluate_auth_toctou_gate(
     } else {
         (true, 1u8)
     };
-    crate::orb_spec::observe_auth_toctou_shadow(
-        crate::orb_spec::AuthToctouExecuteInput {
-            principal_kind,
-            bunker_state,
-            observed_target_id,
-            exec_target_id,
-            observed_lease_epoch,
-            live_lease_epoch,
-            now_tick,
-            expiry_tick,
-            observed_digest,
-            exec_digest,
-        },
+    let _ = crate::orb_spec::observe_auth_toctou_shadow(
+        input,
         host_admitted,
         host_reason_code,
         auth_toctou_shadow_counter(),
-    )
+    );
+    lean_verdict
 }
 
 const OPS_READ_BINARIES: &[&str] = &[
@@ -159,14 +164,55 @@ pub fn unit_matches_deploy_service(allowed_unit: &str, target_service: &str) -> 
     is_prod_orb(a) && is_prod_orb(b)
 }
 
+fn ops_read_path_forbidden(arg: &str) -> bool {
+    let raw = arg.split_once('=').map_or(arg, |(_, rhs)| rhs).trim();
+    if raw.is_empty() {
+        return false;
+    }
+    let lower = raw.to_ascii_lowercase();
+    lower == "/etc/shadow"
+        || lower.starts_with("/etc/shadow-")
+        || lower == "/etc/gshadow"
+        || lower.starts_with("/etc/gshadow-")
+        || lower == "/etc/sudoers"
+        || lower.starts_with("/etc/sudoers.")
+        || lower.starts_with("/etc/security/")
+        || lower == "/etc/security"
+        || lower == "/proc/kcore"
+        || lower.starts_with("/root/.ssh")
+        || lower.contains("/.ssh/")
+        || lower.ends_with("/.ssh")
+        || lower.contains("/.gnupg/")
+        || lower.ends_with("/.gnupg")
+        || lower.contains(".sandboxed-sh")
+        || lower.contains("id_ed25519")
+        || lower.contains("id_rsa")
+        || lower.contains("id_ecdsa")
+        || lower.ends_with(".pem")
+        || lower.ends_with(".key")
+        || (lower.starts_with("/proc/")
+            && (lower.ends_with("/environ")
+                || lower.ends_with("/mem")
+                || lower.contains("/map_files")))
+}
+
+fn short_cluster_allowed(cluster: &str, allowed: &str) -> bool {
+    let chars = cluster.strip_prefix('-').unwrap_or("");
+    !chars.is_empty() && chars.chars().all(|ch| allowed.contains(ch))
+}
+
 fn read_only_option_allowed(prog: &str, arg: &str) -> bool {
-    if !arg.starts_with('-') {
-        return prog == "journalctl"
-            || arg.starts_with("/dev/")
-            || (!arg.is_empty()
-                && arg.chars().all(|c| {
-                    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ',' | '=' | '-')
-                }));
+    if ops_read_path_forbidden(arg) {
+        return false;
+    }
+    if !arg.starts_with('-') || arg == "-" {
+        if matches!(prog, "free" | "uptime" | "uname") {
+            return false;
+        }
+        if prog == "mdadm" {
+            return arg.starts_with("/dev/");
+        }
+        return !arg.contains('\0');
     }
     let flag = arg.split('=').next().unwrap_or(arg);
     match prog {
@@ -228,7 +274,188 @@ fn read_only_option_allowed(prog: &str, arg: &str) -> bool {
                 | "-j"
                 | "--json"
         ),
-        _ => true,
+        // Explicitly exclude `-K` / `--kill` / `-f` / `-F` on `ss`.
+        "ss" => {
+            matches!(
+                flag,
+                "--tcp"
+                    | "--udp"
+                    | "--listening"
+                    | "--all"
+                    | "--processes"
+                    | "--numeric"
+                    | "--Unix"
+                    | "--unix"
+                    | "--ipv4"
+                    | "--ipv6"
+                    | "--summary"
+                    | "--memory"
+                    | "--info"
+                    | "--extended"
+                    | "--options"
+                    | "--events"
+                    | "--no-header"
+            ) || (!flag.starts_with("--") && short_cluster_allowed(flag, "tulpna46smehioHOZ"))
+        }
+        "ps" => {
+            matches!(
+                flag,
+                "--forest"
+                    | "--no-headers"
+                    | "--sort"
+                    | "--pid"
+                    | "--ppid"
+                    | "--user"
+                    | "-o"
+                    | "-p"
+                    | "-u"
+                    | "-U"
+                    | "-C"
+            ) || (!flag.starts_with("--") && short_cluster_allowed(flag, "auxefwlLFTHM"))
+        }
+        "df" => {
+            matches!(
+                flag,
+                "--human-readable"
+                    | "--si"
+                    | "--inodes"
+                    | "--print-type"
+                    | "--local"
+                    | "--total"
+                    | "--output"
+                    | "-t"
+                    | "-x"
+                    | "-B"
+            ) || (!flag.starts_with("--") && short_cluster_allowed(flag, "hHiPTlkam"))
+        }
+        "du" => {
+            matches!(
+                flag,
+                "--human-readable"
+                    | "--summarize"
+                    | "--max-depth"
+                    | "--total"
+                    | "--apparent-size"
+                    | "--one-file-system"
+                    | "-d"
+            ) || (!flag.starts_with("--") && short_cluster_allowed(flag, "hsckmxLab"))
+        }
+        "free" => {
+            matches!(
+                flag,
+                "--bytes"
+                    | "--kibi"
+                    | "--mebi"
+                    | "--gibi"
+                    | "--human"
+                    | "--si"
+                    | "--wide"
+                    | "--total"
+            ) || (!flag.starts_with("--") && short_cluster_allowed(flag, "bkmghtw"))
+        }
+        "uptime" => {
+            matches!(flag, "--pretty" | "--since")
+                || (!flag.starts_with("--") && short_cluster_allowed(flag, "ps"))
+        }
+        "uname" => {
+            matches!(
+                flag,
+                "--all"
+                    | "--kernel-name"
+                    | "--nodename"
+                    | "--kernel-release"
+                    | "--kernel-version"
+                    | "--machine"
+                    | "--operating-system"
+            ) || (!flag.starts_with("--") && short_cluster_allowed(flag, "asnrvmpio"))
+        }
+        "cat" => {
+            matches!(
+                flag,
+                "--number"
+                    | "--number-nonblank"
+                    | "--show-ends"
+                    | "--show-tabs"
+                    | "--squeeze-blank"
+            ) || (!flag.starts_with("--") && short_cluster_allowed(flag, "AbeEnstTuv"))
+        }
+        "head" | "tail" => {
+            matches!(
+                flag,
+                "--lines" | "--bytes" | "--quiet" | "--verbose" | "-n" | "-c"
+            ) || (!flag.starts_with("--") && short_cluster_allowed(flag, "qv"))
+                || flag
+                    .strip_prefix('-')
+                    .is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+        }
+        "ls" => {
+            matches!(
+                flag,
+                "--all"
+                    | "--almost-all"
+                    | "--long"
+                    | "--human-readable"
+                    | "--directory"
+                    | "--inode"
+                    | "--reverse"
+                    | "--recursive"
+                    | "--color"
+                    | "--time-style"
+            ) || (!flag.starts_with("--") && short_cluster_allowed(flag, "laAhdtrRS1Fi"))
+        }
+        "stat" => {
+            matches!(
+                flag,
+                "--file-system" | "--format" | "--printf" | "--terse" | "-c"
+            ) || (!flag.starts_with("--") && short_cluster_allowed(flag, "ftL"))
+        }
+        // Explicitly exclude `-f` / `--file` on `grep` so arbitrary files cannot be read as patterns.
+        "grep" => {
+            matches!(
+                flag,
+                "--extended-regexp"
+                    | "--fixed-strings"
+                    | "--basic-regexp"
+                    | "--ignore-case"
+                    | "--invert-match"
+                    | "--word-regexp"
+                    | "--line-regexp"
+                    | "--count"
+                    | "--files-with-matches"
+                    | "--line-number"
+                    | "--no-filename"
+                    | "--with-filename"
+                    | "--only-matching"
+                    | "--quiet"
+                    | "--recursive"
+                    | "--max-count"
+                    | "--before-context"
+                    | "--after-context"
+                    | "--context"
+                    | "--color"
+                    | "-e"
+                    | "-m"
+                    | "-A"
+                    | "-B"
+                    | "-C"
+            ) || (!flag.starts_with("--") && short_cluster_allowed(flag, "EFGivwxcnHhoqrsI"))
+        }
+        "lsblk" => {
+            matches!(
+                flag,
+                "--all"
+                    | "--bytes"
+                    | "--fs"
+                    | "--json"
+                    | "--list"
+                    | "--noheadings"
+                    | "--output"
+                    | "--paths"
+                    | "--scsi"
+                    | "-o"
+            ) || (!flag.starts_with("--") && short_cluster_allowed(flag, "abdfJlnpS"))
+        }
+        _ => false,
     }
 }
 
@@ -356,8 +583,9 @@ pub fn evaluate_privd_command_confinement(
         )
         && tokens[1..].iter().all(|a| !a.starts_with('-'));
 
-    let is_ops_read_safe = OPS_READ_BINARIES.contains(&prog) && {
-        match prog {
+    let is_ops_read_safe = OPS_READ_BINARIES.contains(&prog)
+        && !tokens[1..].iter().any(|a| ops_read_path_forbidden(a))
+        && match prog {
             "systemctl" => {
                 tokens.len() >= 2
                     && matches!(
@@ -372,6 +600,23 @@ pub fn evaluate_privd_command_confinement(
                         tokens[1],
                         "ps" | "logs" | "inspect" | "stats" | "info" | "version"
                     )
+                    && tokens[2..].iter().all(|a| {
+                        !a.starts_with('-')
+                            || matches!(
+                                a.split('=').next().unwrap_or(a),
+                                "-a" | "--all"
+                                    | "-n"
+                                    | "--tail"
+                                    | "--since"
+                                    | "--until"
+                                    | "-t"
+                                    | "--timestamps"
+                                    | "--no-stream"
+                                    | "--format"
+                                    | "-q"
+                                    | "--quiet"
+                            )
+                    })
             }
             "nft" => tokens.get(1..) == Some(&["list", "ruleset"]),
             "mdadm" => {
@@ -384,21 +629,17 @@ pub fn evaluate_privd_command_confinement(
                     .iter()
                     .all(|a| read_only_option_allowed("mdadm", a))
             }
-            "journalctl" | "smartctl" => tokens[1..]
+            _ => tokens[1..]
                 .iter()
                 .all(|a| read_only_option_allowed(prog, a)),
-            _ => tokens[1..].iter().all(|a| !a.starts_with("--force")),
-        }
-    };
+        };
 
     let flag_bypass = (grant_scope == PrivilegeScope::ServiceDeploy
         && prog == "systemctl"
         && tokens[1..].iter().any(|a| a.starts_with('-')))
         || (grant_scope == PrivilegeScope::OpsRead
-            && matches!(prog, "journalctl" | "mdadm" | "smartctl")
-            && !tokens[1..]
-                .iter()
-                .all(|a| read_only_option_allowed(prog, a)));
+            && OPS_READ_BINARIES.contains(&prog)
+            && !is_ops_read_safe);
 
     let has_shell_metachar_or_flag_bypass = token_has_metachar || flag_bypass;
 
@@ -424,6 +665,19 @@ pub fn evaluate_privd_command_confinement(
         (PrivdCommandClass::UnknownOrForbidden, false)
     };
 
+    let input = PrivdCommandStepInput {
+        lease_valid,
+        grant_scope: PrivdGrantScope::from(grant_scope.to_rank() as u8),
+        command_class,
+        unit_matches_allowed,
+        has_shell_metachar_or_flag_bypass,
+        has_path_traversal_or_symlink,
+        has_unsafe_env_var,
+        require_force_cmd,
+    };
+    // Authoritative Lean kernel decision (`orb_privd_command_step`), with host
+    // cross-check recorded in `privd_command_shadow_counter()`.
+    let lean_verdict = crate::orb_spec::privd_command_step(input);
     let host_allow_exec = lease_valid
         && !has_shell_metachar_or_flag_bypass
         && !has_path_traversal_or_symlink
@@ -445,18 +699,8 @@ pub fn evaluate_privd_command_confinement(
                 grant_scope == PrivilegeScope::RootExec && !require_force_cmd
             }
         };
-
-    let input = PrivdCommandStepInput {
-        lease_valid,
-        grant_scope: PrivdGrantScope::from(grant_scope.to_rank() as u8),
-        command_class,
-        unit_matches_allowed,
-        has_shell_metachar_or_flag_bypass,
-        has_path_traversal_or_symlink,
-        has_unsafe_env_var,
-        require_force_cmd,
-    };
-    observe_privd_command_shadow(input, host_allow_exec, privd_command_shadow_counter())
+    let _ = observe_privd_command_shadow(input, host_allow_exec, privd_command_shadow_counter());
+    lean_verdict
 }
 
 /// Default ceiling for a `"session"`-scoped grant (reaped earlier when the
@@ -4032,6 +4276,84 @@ mod tests {
         let snap = privd_command_shadow_counter().snapshot("orb_privd_command_step");
         assert!(snap.total_events >= 10);
         assert_eq!(snap.total_divergences, 0);
+
+        // 8. Tightened OpsRead per-binary flag & sensitive-path confinement:
+        //    `ss -K` (socket kill), `cat /etc/shadow`, and `grep -f /etc/shadow` are rejected,
+        //    while `ss -tulpn` and `df -h` remain admitted.
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
+                mission_id: Some(mission_ro),
+                requester: None,
+                lease_token: ro_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::OpsRead),
+                command: "ss -K dst 10.88.0.1".into(),
+                argv: vec!["ss".into(), "-K".into(), "dst".into(), "10.88.0.1".into()],
+                cwd: Some("/var/log".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_err());
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
+                mission_id: Some(mission_ro),
+                requester: None,
+                lease_token: ro_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::OpsRead),
+                command: "cat /etc/shadow".into(),
+                argv: vec!["cat".into(), "/etc/shadow".into()],
+                cwd: Some("/var/log".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_err());
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
+                mission_id: Some(mission_ro),
+                requester: None,
+                lease_token: ro_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::OpsRead),
+                command: "ss -tulpn".into(),
+                argv: vec!["ss".into(), "-tulpn".into()],
+                cwd: Some("/var/log".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_ok());
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
+                mission_id: Some(mission_ro),
+                requester: None,
+                lease_token: ro_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::OpsRead),
+                command: "df -h".into(),
+                argv: vec!["df".into(), "-h".into()],
+                cwd: Some("/var/log".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_ok());
+        assert_eq!(
+            privd_command_shadow_counter()
+                .snapshot("orb_privd_command_step")
+                .total_divergences,
+            0
+        );
     }
 
     #[tokio::test]

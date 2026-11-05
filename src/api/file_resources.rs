@@ -239,6 +239,29 @@ pub async fn operate(
             }
         }
     }
+    for path in &req.operation.paths {
+        let has_nul = path.bytes().any(|b| b == 0);
+        let has_dot_dot = std::path::Path::new(path)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir));
+        let eff_len = path.len().max(1).min(u32::MAX as usize) as u32;
+        if crate::orb_spec::confinement_scan_step(
+            has_nul,
+            has_dot_dot,
+            false,
+            false,
+            false,
+            false,
+            eff_len,
+            4096,
+        ) != crate::orb_spec::ConfinementScanVerdict::Admit
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Path failed confinement scan".into(),
+            ));
+        }
+    }
     let mut value =
         tokio::task::spawn_blocking(move || crate::file_browser::execute(&root, &req.operation))
             .await

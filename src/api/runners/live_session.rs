@@ -52,13 +52,16 @@ pub(crate) fn deliver(mission_id: Uuid, content: String) -> Result<(), String> {
     slot.send(content)
 }
 
-static MIDTURN: LazyLock<Mutex<HashMap<Uuid, mpsc::UnboundedSender<String>>>> =
+const MIDTURN_CHANNEL_CAPACITY: usize = 64;
+const EFFORT_CHANNEL_CAPACITY: usize = 16;
+
+static MIDTURN: LazyLock<Mutex<HashMap<Uuid, mpsc::Sender<String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// User messages forced immediately ("Send now") into a live turn arrive here
 /// and are injected into the running harness without cancelling the turn.
-pub(crate) fn midturn_messages(mission_id: Uuid) -> mpsc::UnboundedReceiver<String> {
-    let (tx, rx) = mpsc::unbounded_channel();
+pub(crate) fn midturn_messages(mission_id: Uuid) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel(MIDTURN_CHANNEL_CAPACITY);
     MIDTURN.lock().unwrap().insert(mission_id, tx);
     rx
 }
@@ -71,7 +74,7 @@ pub(crate) fn can_deliver_now(mission_id: Uuid) -> bool {
             .lock()
             .unwrap()
             .get(&mission_id)
-            .is_some_and(|tx| !tx.is_closed())
+            .is_some_and(|tx| !tx.is_closed() && tx.capacity() > 0)
 }
 
 /// Deliver a user message immediately to a parked or live mid-turn session.
@@ -83,18 +86,20 @@ pub(crate) fn deliver_now(mission_id: Uuid, content: String) -> Result<(), Strin
     };
     let sender = MIDTURN.lock().unwrap().get(&mission_id).cloned();
     match sender {
-        Some(tx) => tx.send(content).map_err(|err| err.0),
+        Some(tx) => tx.try_send(content).map_err(|err| match err {
+            mpsc::error::TrySendError::Full(val) | mpsc::error::TrySendError::Closed(val) => val,
+        }),
         None => Err(content),
     }
 }
 
-static EFFORT: LazyLock<Mutex<HashMap<Uuid, mpsc::UnboundedSender<Option<String>>>>> =
+static EFFORT: LazyLock<Mutex<HashMap<Uuid, mpsc::Sender<Option<String>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Effort changes for a session that reads stream-json input arrive here and
 /// are applied to the running process.
-pub(crate) fn effort_changes(mission_id: Uuid) -> mpsc::UnboundedReceiver<Option<String>> {
-    let (tx, rx) = mpsc::unbounded_channel();
+pub(crate) fn effort_changes(mission_id: Uuid) -> mpsc::Receiver<Option<String>> {
+    let (tx, rx) = mpsc::channel(EFFORT_CHANNEL_CAPACITY);
     EFFORT.lock().unwrap().insert(mission_id, tx);
     rx
 }
@@ -106,7 +111,7 @@ pub(crate) fn set_effort(mission_id: Uuid, effort: Option<String>) -> bool {
         .lock()
         .unwrap()
         .get(&mission_id)
-        .is_some_and(|session| session.send(effort).is_ok())
+        .is_some_and(|session| session.try_send(effort).is_ok())
 }
 
 /// The control request that sets the effort of a running CLI. `None` returns

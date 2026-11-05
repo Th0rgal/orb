@@ -844,17 +844,25 @@ pub async fn search_mission_moments(
         .await
         .map_err(internal_error)?;
 
-    let mut results = Vec::with_capacity(search_res.hits.len());
-    for hit in search_res.hits {
-        let Some(mut mission) = control
-            .mission_store
-            .get_mission(hit.mission_id)
-            .await
-            .map_err(internal_error)?
-        else {
-            continue;
-        };
-        populate_workspace_names(&state, std::slice::from_mut(&mut mission)).await;
+    let loaded_missions = futures::future::try_join_all(
+        search_res
+            .hits
+            .iter()
+            .map(|hit| control.mission_store.get_mission(hit.mission_id)),
+    )
+    .await
+    .map_err(internal_error)?;
+    let paired: Vec<_> = search_res
+        .hits
+        .into_iter()
+        .zip(loaded_missions)
+        .filter_map(|(hit, mission)| mission.map(|m| (hit, m)))
+        .collect();
+    let mut missions_only: Vec<Mission> = paired.iter().map(|(_, m)| m.clone()).collect();
+    populate_workspace_names(&state, &mut missions_only).await;
+
+    let mut results = Vec::with_capacity(paired.len());
+    for ((hit, _), mission) in paired.into_iter().zip(missions_only) {
         if let Some(best) = best_mission_moment(&mission, query) {
             results.push(MissionMomentSearchResult {
                 mission,

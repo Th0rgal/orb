@@ -567,97 +567,100 @@ impl MonitoringState {
             }
         };
 
-        let mut results = Vec::new();
+        let ready_workspaces: Vec<_> = workspaces
+            .into_iter()
+            .filter(|ws| {
+                ws.workspace_type == WorkspaceType::Container && ws.status == WorkspaceStatus::Ready
+            })
+            .collect();
+
         let elapsed_ns = (elapsed_secs * 1_000_000_000.0) as u64;
+        let probed = futures::stream::iter(ready_workspaces)
+            .map(|ws| async move {
+                let ws_id = ws.id.to_string();
+                let machine_name = ws
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&ws.name);
+                let escaped_name = systemd_escape(machine_name);
+                let scope_name = format!("machine-{}.scope", escaped_name);
 
-        for ws in workspaces {
-            if ws.workspace_type != WorkspaceType::Container || ws.status != WorkspaceStatus::Ready
-            {
-                continue;
-            }
+                let is_active = tokio::process::Command::new("systemctl")
+                    .args(["is-active", "--quiet", &scope_name])
+                    .status()
+                    .await
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if !is_active {
+                    return None;
+                }
 
-            let ws_id = ws.id.to_string();
+                let output = match tokio::process::Command::new("systemctl")
+                    .args(["show", &scope_name])
+                    .output()
+                    .await
+                {
+                    Ok(o) if o.status.success() => o,
+                    _ => return None,
+                };
 
-            // Derive the machine name from the workspace path (last path component),
-            // matching how systemd-nspawn auto-derives it when no --machine flag is used.
-            let machine_name = ws
-                .path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&ws.name);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut memory_current: Option<u64> = None;
+                let mut memory_max: Option<u64> = None;
+                let mut cpu_usage_ns: Option<u64> = None;
 
-            // Escape the machine name for systemd unit naming. Hyphens within the
-            // name part must be escaped as `\x2d` because `-` is a path separator
-            // in systemd unit hierarchies. Without this, `systemctl show` and
-            // `is-active` silently return empty/inactive results for containers
-            // whose names contain hyphens (e.g., `dgx-spark`).
-            let escaped_name = systemd_escape(machine_name);
-            let scope_name = format!("machine-{}.scope", escaped_name);
-
-            // Check if the scope is actually active before querying properties.
-            // `systemctl show` returns exit 0 even for non-existent units (with
-            // `[not set]` for all values), so we need an explicit liveness check.
-            let is_active = tokio::process::Command::new("systemctl")
-                .args(["is-active", "--quiet", &scope_name])
-                .status()
-                .await
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !is_active {
-                continue;
-            }
-
-            let output = match tokio::process::Command::new("systemctl")
-                .args(["show", &scope_name])
-                .output()
-                .await
-            {
-                Ok(o) if o.status.success() => o,
-                _ => continue,
-            };
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut memory_current: Option<u64> = None;
-            let mut memory_max: Option<u64> = None;
-            let mut cpu_usage_ns: Option<u64> = None;
-
-            for line in stdout.lines() {
-                if let Some((key, value)) = line.split_once('=') {
-                    match key {
-                        "MemoryCurrent" => memory_current = value.parse::<u64>().ok(),
-                        "MemoryMax" => {
-                            if value == "infinity" {
-                                memory_max = Some(host_memory_total);
-                            } else {
-                                memory_max = value.parse::<u64>().ok();
+                for line in stdout.lines() {
+                    if let Some((key, value)) = line.split_once('=') {
+                        match key {
+                            "MemoryCurrent" => memory_current = value.parse::<u64>().ok(),
+                            "MemoryMax" => {
+                                if value == "infinity" {
+                                    memory_max = Some(host_memory_total);
+                                } else {
+                                    memory_max = value.parse::<u64>().ok();
+                                }
                             }
+                            "CPUUsageNSec" => cpu_usage_ns = value.parse::<u64>().ok(),
+                            _ => {}
                         }
-                        "CPUUsageNSec" => cpu_usage_ns = value.parse::<u64>().ok(),
-                        _ => {}
                     }
                 }
-            }
 
-            let mem_used = memory_current.unwrap_or(0);
-            // Use host total memory as fallback when cgroup limit is unlimited
-            let mem_total = match memory_max {
-                Some(v) if v < u64::MAX => v,
-                _ => host_memory_total,
-            };
-            let mem_percent = if mem_total > 0 {
-                (mem_used as f64 / mem_total as f64) * 100.0
-            } else {
-                0.0
-            };
+                let mem_used = memory_current.unwrap_or(0);
+                let mem_total = match memory_max {
+                    Some(v) if v < u64::MAX => v,
+                    _ => host_memory_total,
+                };
+                let mem_percent = if mem_total > 0 {
+                    (mem_used as f64 / mem_total as f64) * 100.0
+                } else {
+                    0.0
+                };
 
-            // Calculate CPU % from delta of cumulative CPUUsageNSec
+                Some((
+                    ws_id,
+                    ws.name,
+                    mem_used,
+                    mem_total,
+                    mem_percent,
+                    cpu_usage_ns,
+                ))
+            })
+            .buffered(8)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut results = Vec::new();
+        for (ws_id, ws_name, mem_used, mem_total, mem_percent, cpu_usage_ns) in
+            probed.into_iter().flatten()
+        {
             let cpu_pct = if let Some(current_ns) = cpu_usage_ns {
                 let prev = prev_cpu_ns.get(&ws_id).copied().unwrap_or(current_ns);
                 let delta_ns = current_ns.saturating_sub(prev);
                 prev_cpu_ns.insert(ws_id.clone(), current_ns);
 
                 if elapsed_ns > 0 {
-                    // CPU% relative to all cores: delta_ns / (elapsed_ns * num_cores) * 100
                     (delta_ns as f64 / (elapsed_ns as f64 * num_cpus)) * 100.0
                 } else {
                     0.0
@@ -668,7 +671,7 @@ impl MonitoringState {
 
             results.push(ContainerMetrics {
                 workspace_id: ws_id,
-                workspace_name: ws.name.clone(),
+                workspace_name: ws_name,
                 cpu_percent: cpu_pct,
                 memory_used: mem_used,
                 memory_total: mem_total,
@@ -798,8 +801,8 @@ async fn handle_monitoring_stream(socket: WebSocket) {
     // Subscribe to real-time updates
     let mut rx = monitoring.subscribe();
 
-    // Channel for control commands
-    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<ClientCommand>();
+    // Bounded channel for control commands (backpressure instead of unbounded growth)
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<ClientCommand>(256);
 
     // Spawn task to handle incoming messages
     let cmd_tx_clone = cmd_tx.clone();
@@ -808,7 +811,9 @@ async fn handle_monitoring_stream(socket: WebSocket) {
             match msg {
                 Message::Text(t) => {
                     if let Ok(cmd) = serde_json::from_str::<ClientCommand>(&t) {
-                        let _ = cmd_tx_clone.send(cmd);
+                        if cmd_tx_clone.send(cmd).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 Message::Close(_) => break,

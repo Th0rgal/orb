@@ -2841,4 +2841,306 @@ def wireTranscriptSliceStep
     transcriptFoldStep lastAppliedSeq incomingSeq entryCount
       thinkingOpen normalizedAction isReplayFromLog
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 12: LeanNative Option B+ Hot-Path Scanners, Pacer, Placement & Confinement
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Unboxed C-ABI Proxy SSE Frame & `<think>` Tag Scanner Stepper (`orb_proxy_sse_scan_step`):
+  Classifies one SSE line (`lineKind`: `0` = blank frame separator, `1` = comment `: ...`,
+  `2` = `data:` payload, `>= 3` = non-data header) and tracks `<think>`/`</think>` state:
+  - `bits 0..7`: `action` (`0` = flush boundary, `1` = ignore/comment, `2` = data frame, `3` = `[DONE]` EOF)
+  - `bit 8 (256)`: `emitDeltaBit` (`1` iff `lineKind == 2 && hasDoneToken == 0 && hasNonEmptyContent == 1`)
+  - `bit 9 (512)`: `nextInThinkBit` (`1` iff `<think>` remains open after this line).
+-/
+@[inline, export orb_proxy_sse_scan_step]
+def proxySseScanStep
+    (lineKind hasDoneToken inThinkTag nextStartsThink nextEndsThink hasNonEmptyContent : UInt8) : UInt32 :=
+  let prevThinkBit : UInt32 := if inThinkTag == 1 then 512 else 0
+  if lineKind == 0 then
+    prevThinkBit
+  else if !(lineKind == 2) then
+    (1 : UInt32) ||| prevThinkBit
+  else if hasDoneToken == 1 then
+    (3 : UInt32) ||| prevThinkBit
+  else
+    let nextThink : Bool :=
+      if nextEndsThink == 1 then false
+      else if nextStartsThink == 1 then true
+      else inThinkTag == 1
+    let thinkBit : UInt32 := if nextThink then 512 else 0
+    let emitBit : UInt32 := if hasNonEmptyContent == 1 then 256 else 0
+    (2 : UInt32) ||| emitBit ||| thinkBit
+
+/--
+  Unboxed C-ABI Bounded-Budget Stream Repetition Stepper (`orb_stream_repetition_step`):
+  Governs per-candidate non-overlapping occurrence progression in `stream_guard.rs` with
+  hard cancellation, hash-collision fail-open, and comparison budget enforcement:
+  - Returns `lo32 = action | repeatedBit(256) | resetFirstBit(512)`, `hi32 = nextCount : UInt32`,
+    where `action`: `0` = skip overlapping match (`startPos < prevEnd`),
+    `1` = recorded non-terminal occurrence, `2` = inconclusive/budget/collision, `3` = repeated threshold hit.
+-/
+@[inline, export orb_stream_repetition_step]
+def streamRepetitionStep
+    (cancelledOrExpired collisionDetected : UInt8)
+    (startPos prevEnd candidateLen prevCount requiredRepeats : UInt32)
+    (comparisons comparisonBudget : UInt64) : UInt64 :=
+  if cancelledOrExpired == 1 || collisionDetected == 1 ||
+     comparisonBudget < comparisons || candidateLen == 0 || requiredRepeats < 2 then
+    (2 : UInt64) ||| (prevCount.toUInt64 <<< 32)
+  else if startPos < prevEnd then
+    prevCount.toUInt64 <<< 32
+  else
+    let contiguous : Bool :=
+      startPos.toUInt64 ≤ prevEnd.toUInt64 + candidateLen.toUInt64
+    let nextCount : UInt32 :=
+      if contiguous then
+        (if prevCount < 0xFFFFFFFF then prevCount + 1 else 0xFFFFFFFF)
+      else 1
+    let resetBit : UInt32 := if contiguous then 0 else 512
+    let hit : Bool := requiredRepeats ≤ nextCount
+    let lo32 : UInt32 :=
+      (if hit then (259 : UInt32) else (1 : UInt32)) ||| resetBit
+    lo32.toUInt64 ||| (nextCount.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Upstream HTTP Rate-Limit & Cooldown Classifier (`orb_http_rate_limit_classify_step`):
+  Classifies upstream HTTP status (`429`, `402`, `401`, `403`, `529`, `503`, `500..599`) into
+  deterministic cooldown reason + clamped cooldown duration:
+  - `lo32`: `reasonCode` (`0` = none, `1` = rate_limit, `2` = billing_quota, `3` = auth_failure,
+    `4` = overloaded, `5` = server_error) `| admittedCooldownBit(256)` (`1` iff `reasonCode != 0`)
+    `| retryableBit(512)` (`1` iff `reasonCode` in `{1, 4, 5}`)
+  - `hi32`: clamped cooldown seconds (`UInt32`).
+-/
+@[inline, export orb_http_rate_limit_classify_step]
+def httpRateLimitClassifyStep
+    (httpStatus : UInt32)
+    (hasQuotaBodyHint hasAuthFailureHint : UInt8)
+    (retryAfterSecs maxCooldownSecs : UInt64) : UInt64 :=
+  let reason : UInt32 :=
+    if httpStatus == 429 then
+      (if hasQuotaBodyHint == 1 then 2 else 1)
+    else if httpStatus == 402 then 2
+    else if httpStatus == 401 || (httpStatus == 403 && hasAuthFailureHint == 1) then 3
+    else if httpStatus == 529 || httpStatus == 503 then 4
+    else if 500 ≤ httpStatus && httpStatus < 600 then 5
+    else 0
+  if reason == 0 then
+    0
+  else
+    let cap : UInt64 := if maxCooldownSecs == 0 then 3600 else maxCooldownSecs
+    let dflt : UInt64 := if reason == 2 then 300 else 15
+    let rawSecs : UInt64 := if retryAfterSecs == 0 then dflt else retryAfterSecs
+    let clamped64 : UInt64 := if rawSecs ≤ cap then rawSecs else cap
+    let clamped32 : UInt32 :=
+      if clamped64 ≤ 0xFFFFFFFF then clamped64.toUInt32 else 0xFFFFFFFF
+    let retryBit : UInt32 :=
+      if reason == 1 || reason == 4 || reason == 5 then 512 else 0
+    let lo32 : UInt32 := reason ||| 256 ||| retryBit
+    lo32.toUInt64 ||| (clamped32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Fleet Node Placement Strict-Weak-Order Tournament Step (`orb_fleet_place_argmin_step`):
+  Returns `1` iff candidate `a` strictly precedes candidate `b` under Orb's deterministic
+  integer-only placement priority (`!queued`, `!specialized`, rational `load / max(1, cap)`
+  via 64-bit cross-multiplication, `!softDiskPressure`, higher `memAvail`, higher `diskHeadroomGib`,
+  and lexicographic `node_id` tie-breaker `idLexLt == 1`).
+-/
+@[inline, export orb_fleet_place_argmin_step]
+def fleetPlaceArgminStep
+    (aQueued aSpec aSoftDisk bQueued bSpec bSoftDisk idLexLt : UInt8)
+    (aLoad aCap aDiskGib bLoad bCap bDiskGib : UInt32)
+    (aMemAvail bMemAvail : UInt64) : UInt8 :=
+  let aq : UInt8 := if aQueued == 0 then 0 else 1
+  let bq : UInt8 := if bQueued == 0 then 0 else 1
+  if aq < bq then 1
+  else if bq < aq then 0
+  else
+    let as_ : UInt8 := if aSpec == 0 then 0 else 1
+    let bs_ : UInt8 := if bSpec == 0 then 0 else 1
+    if as_ < bs_ then 1
+    else if bs_ < as_ then 0
+    else
+      let ac : UInt64 := if aCap == 0 then 1 else aCap.toUInt64
+      let bc : UInt64 := if bCap == 0 then 1 else bCap.toUInt64
+      let lhs : UInt64 := aLoad.toUInt64 * bc
+      let rhs : UInt64 := bLoad.toUInt64 * ac
+      if lhs < rhs then 1
+      else if rhs < lhs then 0
+      else
+        let ad : UInt8 := if aSoftDisk == 0 then 0 else 1
+        let bd : UInt8 := if bSoftDisk == 0 then 0 else 1
+        if ad < bd then 1
+        else if bd < ad then 0
+        else if bMemAvail < aMemAvail then 1
+        else if aMemAvail < bMemAvail then 0
+        else if bDiskGib < aDiskGib then 1
+        else if aDiskGib < bDiskGib then 0
+        else if idLexLt == 1 then 1
+        else 0
+
+/--
+  Unboxed C-ABI Integer Token-Ms Bandwidth Pool Pacer Stepper (`orb_pool_pacer_step`):
+  Tracks token debt in exact `token_ms` units (`1 token = 60,000 token_ms`, so `elapsedMs`
+  at `rateTokensPerMin` drains `elapsedMs * rateTokensPerMin` with zero floating-point drift):
+  - Caps `rateTokensPerMin` at `10^11`, `elapsedMs` at `120,000` (2 minutes drains 100% of cap),
+    and accumulated debt at `2 minutes` (`tpm * 120,000`).
+  - When `mode == 0`, returns `nextDebtTokenMs : UInt64`.
+  - When `mode != 0`, returns `pacedDelayMs = min(maxDelayMs, ceil(nextDebtTokenMs / tpm)) : UInt64`.
+-/
+@[inline, export orb_pool_pacer_step]
+def poolPacerStep
+    (mode : UInt8)
+    (prevDebtTokenMs elapsedMs rateTokensPerMin addedTokens maxDelayMs : UInt64) : UInt64 :=
+  if rateTokensPerMin == 0 then
+    0
+  else
+    let tpm : UInt64 :=
+      if rateTokensPerMin ≤ 100000000000 then rateTokensPerMin else 100000000000
+    let maxDebt : UInt64 := tpm * 120000
+    let boundedPrev : UInt64 := if prevDebtTokenMs ≤ maxDebt then prevDebtTokenMs else maxDebt
+    let dt : UInt64 := if elapsedMs ≤ 120000 then elapsedMs else 120000
+    let drained : UInt64 := dt * tpm
+    let afterDrain : UInt64 :=
+      if drained ≤ boundedPrev then boundedPrev - drained else 0
+    let boundedAdded : UInt64 :=
+      if addedTokens ≤ 200000000000 then addedTokens else 200000000000
+    let addUnits : UInt64 := boundedAdded * 60000
+    let room : UInt64 := maxDebt - afterDrain
+    let nextDebt : UInt64 :=
+      if addUnits ≤ room then afterDrain + addUnits else maxDebt
+    if mode == 0 then
+      nextDebt
+    else if nextDebt == 0 then
+      0
+    else
+      let rawDelayMs : UInt64 := (nextDebt + (tpm - 1)) / tpm
+      if rawDelayMs ≤ maxDelayMs then rawDelayMs else maxDelayMs
+
+/--
+  Unboxed C-ABI Fail-Closed Path & Environment Confinement Gate (`orb_confinement_scan_step`):
+  Admits (`256`, `action = 0 | admittedBit(256)`) iff the path is non-empty and within `maxPathLen`,
+  contains zero NUL bytes or `..` traversal segments, remains inside the workspace/sandbox root
+  without symlink escape, carries zero unsafe loader/credential environment overrides, and
+  does not target a protected control-plane file. Otherwise returns the primary violation reason `1..7`.
+-/
+@[inline, export orb_confinement_scan_step]
+def confinementScanStep
+    (hasNullByte hasDotDotSegment escapesRoot hasUnsafeEnvKey touchesSensitivePath isSymlinkEscape : UInt8)
+    (pathLen maxPathLen : UInt32) : UInt32 :=
+  if maxPathLen == 0 || pathLen == 0 || maxPathLen < pathLen then 1
+  else if !(hasNullByte == 0) then 2
+  else if !(hasDotDotSegment == 0) then 3
+  else if !(escapesRoot == 0) then 4
+  else if !(isSymlinkEscape == 0) then 5
+  else if !(hasUnsafeEnvKey == 0) then 6
+  else if !(touchesSensitivePath == 0) then 7
+  else 256
+
+/--
+  Unboxed C-ABI Constant-Time 256-Bit Job Identity Deduplication Gate (`orb_job_identity_eq256_step`):
+  Compares two 256-bit job identity digests across all four 64-bit limbs without early exit:
+  - Rejects all-zero identity digests (`3`, `admittedBit = 0`).
+  - When `a == b` and `hasTerminalReceipt == 1`, returns `2` (`ReplayTerminalReceipt`).
+  - When `a == b` and `hasActiveMatch == 1`, returns `1` (`JoinActiveExecution`).
+  - Otherwise returns `256` (`AdmitFreshDispatch`, `admittedBit = 256`).
+-/
+@[inline, export orb_job_identity_eq256_step]
+def jobIdentityEq256Step
+    (a0 a1 a2 a3 b0 b1 b2 b3 : UInt64)
+    (hasActiveMatch hasTerminalReceipt : UInt8) : UInt32 :=
+  let nonZero : Bool := !((a0 ||| a1 ||| a2 ||| a3) == 0)
+  let diff : UInt64 := (a0 ^^^ b0) ||| (a1 ^^^ b1) ||| (a2 ^^^ b2) ||| (a3 ^^^ b3)
+  if !nonZero then 3
+  else if diff == 0 && hasTerminalReceipt == 1 then 2
+  else if diff == 0 && hasActiveMatch == 1 then 1
+  else 256
+
+/--
+  Unboxed C-ABI Validation Campaign DAG Gate Stepper (`orb_validation_dag_step`):
+  Determines whether a validation gate in a pinned candidate DAG is ready to claim (`257`),
+  waiting on dependencies or an active claim (`1`), blocked by a failed dependency (`2`),
+  already satisfied (`3`), stale for the candidate (`4`), or rejected for inconsistent counts (`0`).
+-/
+@[inline, export orb_validation_dag_step]
+def validationDagStep
+    (totalDeps passedDeps failedDeps : UInt32)
+    (alreadyClaimed alreadyPassed candidateExactMatch : UInt8) : UInt32 :=
+  if totalDeps.toUInt64 < passedDeps.toUInt64 + failedDeps.toUInt64 then 0
+  else if !(candidateExactMatch == 1) then 4
+  else if !(alreadyPassed == 0) then 3
+  else if 0 < failedDeps then 2
+  else if !(alreadyClaimed == 0) || passedDeps < totalDeps then 1
+  else 257
+
+/--
+  Unboxed C-ABI Total FTS5 Query Sanitizer Lexer Step (`orb_fts5_lexer_step`):
+  Total state-machine transition over (`state`: `0` = space, `1` = bare word, `2` = quoted phrase;
+  `charClass`: `0` = delimiter, `1` = word char, `2` = quote `"`, `3` = prefix `*`):
+  - Enforces `emittedTokens ≤ maxTokens` and `maxTokens > 0`.
+  - Returns `lo32 = emitAction | admittedBit(256) | (nextState <<< 16)`, `hi32 = nextEmittedTokens : UInt32`,
+    where `emitAction`: `0` = skip, `1` = append word char, `2` = close bare token,
+    `3` = close prefix `word*` token, `4` = open phrase `"`, `5` = close phrase `"`.
+-/
+@[inline, export orb_fts5_lexer_step]
+def fts5LexerStep
+    (state charClass tokenLen maxTokens emittedTokens : UInt32) : UInt64 :=
+  if maxTokens == 0 || maxTokens ≤ emittedTokens || 2 < state || 3 < charClass then
+    emittedTokens.toUInt64 <<< 32
+  else if state == 0 then
+    if charClass == 1 then
+      (65793 : UInt64) ||| (emittedTokens.toUInt64 <<< 32)
+    else if charClass == 2 then
+      (131332 : UInt64) ||| (emittedTokens.toUInt64 <<< 32)
+    else
+      (256 : UInt64) ||| (emittedTokens.toUInt64 <<< 32)
+  else if state == 1 then
+    if charClass == 1 then
+      (65793 : UInt64) ||| (emittedTokens.toUInt64 <<< 32)
+    else if charClass == 3 && 2 ≤ tokenLen then
+      let nextEmit : UInt32 := emittedTokens + 1
+      (259 : UInt64) ||| (nextEmit.toUInt64 <<< 32)
+    else
+      let nextEmit : UInt32 := emittedTokens + 1
+      let nextSt : UInt32 := if charClass == 2 && nextEmit < maxTokens then 2 else 0
+      let act : UInt32 := if nextSt == 2 then 262 else 258
+      (act ||| (nextSt <<< 16)).toUInt64 ||| (nextEmit.toUInt64 <<< 32)
+  else
+    if charClass == 2 then
+      let nextEmit : UInt32 := if 0 < tokenLen then emittedTokens + 1 else emittedTokens
+      let act : UInt32 := if 0 < tokenLen then 261 else 256
+      act.toUInt64 ||| (nextEmit.toUInt64 <<< 32)
+    else if charClass == 1 || (0 < tokenLen && charClass == 0) then
+      (131329 : UInt64) ||| (emittedTokens.toUInt64 <<< 32)
+    else
+      (131328 : UInt64) ||| (emittedTokens.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI UTF-8 Character Boundary & UTF-16 Window Budget Stepper (`orb_utf8_utf16_window_step`):
+  Validates the UTF-8 lead byte `leadByte` at `byteIdx < byteLen` and advances only when both the
+  full UTF-8 scalar sequence (`1..4` bytes) fits in `byteLen` AND its exact UTF-16 code-unit width
+  (`1` for BMP, `2` for supplementary `0xF0..0xF4` astral code points) fits in `maxUtf16Units`,
+  preventing split UTF-8 sequences and split UTF-16 surrogate pairs in search excerpts:
+  - Returns `lo32 = seqBytes | admittedBit(256) | (u16Cost <<< 16)`, `hi32 = nextUtf16Units : UInt32`
+    when admitted, or `lo32 = 0, hi32 = utf16Units` when the window is full or `leadByte` is not a valid lead byte.
+-/
+@[inline, export orb_utf8_utf16_window_step]
+def utf8Utf16WindowStep
+    (byteIdx byteLen leadByte utf16Units maxUtf16Units : UInt32) : UInt64 :=
+  let seqBytes : UInt32 :=
+    if leadByte ≤ 0x7F then 1
+    else if 0xC2 ≤ leadByte && leadByte ≤ 0xDF then 2
+    else if 0xE0 ≤ leadByte && leadByte ≤ 0xEF then 3
+    else if 0xF0 ≤ leadByte && leadByte ≤ 0xF4 then 4
+    else 0
+  let u16Cost : UInt32 := if seqBytes == 4 then 2 else 1
+  if seqBytes == 0 ||
+     byteLen.toUInt64 < byteIdx.toUInt64 + seqBytes.toUInt64 ||
+     maxUtf16Units.toUInt64 < utf16Units.toUInt64 + u16Cost.toUInt64 then
+    utf16Units.toUInt64 <<< 32
+  else
+    let nextU16 : UInt32 := utf16Units + u16Cost
+    let lo32 : UInt32 := seqBytes ||| (256 : UInt32) ||| (u16Cost <<< 16)
+    lo32.toUInt64 ||| (nextU16.toUInt64 <<< 32)
+
 end Orb.Kernel

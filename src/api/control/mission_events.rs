@@ -1225,58 +1225,72 @@ pub async fn get_mission_snapshot(
             .map_err(internal_error)?
             .remove(&mission_id)
             .ok_or((StatusCode::NOT_FOUND, "Mission not found".to_string()))?;
-        let revision = control
-            .mission_store
-            .max_event_sequence(mission_id)
-            .await
-            .map_err(internal_error)?;
-        // Explicitly fetch the last answer: queued prompts may follow it.
-        let mut events = control
-            .mission_store
-            .get_events_before(
-                mission_id,
-                revision.saturating_add(1),
-                Some(&["assistant_message", "assistant_message_canonical"]),
-                Some(1),
-            )
-            .await
-            .map_err(internal_error)?;
-        let tail = control
-            .mission_store
-            .get_events_before(
-                mission_id,
-                revision.saturating_add(1),
-                Some(&[
-                    "user_message",
-                    "assistant_message",
-                    "assistant_message_canonical",
-                    "mission_activity",
-                    "phase",
-                    "mission_status_changed",
-                ]),
-                Some(3),
-            )
-            .await
-            .map_err(internal_error)?;
-        events.extend(tail);
-        events.sort_by_key(|event| event.sequence);
-        events.dedup_by_key(|event| event.sequence);
+        let is_active = mission.status == "active";
+        let events_fut = async {
+            let revision = control
+                .mission_store
+                .max_event_sequence(mission_id)
+                .await
+                .map_err(internal_error)?;
+            // Explicitly fetch the last answer: queued prompts may follow it.
+            let (mut events, tail) = tokio::try_join!(
+                async {
+                    control
+                        .mission_store
+                        .get_events_before(
+                            mission_id,
+                            revision.saturating_add(1),
+                            Some(&["assistant_message", "assistant_message_canonical"]),
+                            Some(1),
+                        )
+                        .await
+                        .map_err(internal_error)
+                },
+                async {
+                    control
+                        .mission_store
+                        .get_events_before(
+                            mission_id,
+                            revision.saturating_add(1),
+                            Some(&[
+                                "user_message",
+                                "assistant_message",
+                                "assistant_message_canonical",
+                                "mission_activity",
+                                "phase",
+                                "mission_status_changed",
+                            ]),
+                            Some(3),
+                        )
+                        .await
+                        .map_err(internal_error)
+                },
+            )?;
+            events.extend(tail);
+            events.sort_by_key(|event| event.sequence);
+            events.dedup_by_key(|event| event.sequence);
+            Ok::<_, (StatusCode, String)>((revision, events))
+        };
         // The actor owns live labels. Bound this optional enrichment so a busy
         // runner cannot delay the durable answer indefinitely.
-        let activity = if mission.status == "active" {
-            tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                get_running_missions(&control),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .and_then(|rows| rows.into_iter().find(|row| row.mission_id == mission_id))
-            .and_then(|row| row.current_activity)
-            .map(|label| label.chars().take(160).collect::<String>())
-        } else {
-            None
+        let activity_fut = async {
+            if is_active {
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    get_running_missions(&control),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|rows| rows.into_iter().find(|row| row.mission_id == mission_id))
+                .and_then(|row| row.current_activity)
+                .map(|label| label.chars().take(160).collect::<String>())
+            } else {
+                None
+            }
         };
+        let (events_res, activity) = tokio::join!(events_fut, activity_fut);
+        let (revision, events) = events_res?;
         return Ok(Json(serde_json::json!({
             "profile": "presentation", "mission_id": mission_id,
             "mission": mission, "revision": revision, "events": events,
@@ -1290,9 +1304,11 @@ pub async fn get_mission_snapshot(
         .map_err(internal_error)?
         .ok_or((StatusCode::NOT_FOUND, "Mission not found".to_string()))?;
 
-    if let Some(workspace) = state.workspaces.get(mission.workspace_id).await {
-        mission.workspace_name = Some(workspace.name);
-    }
+    let workspace_id = mission.workspace_id;
+    let mission_status = mission.status;
+    let summarize = should_summarize_events(&mission);
+    let conv_profile = conversation_profile_enabled(query.profile.as_deref());
+    let trace_tail = query.trace_tail.unwrap_or(CONVERSATION_PROFILE_TRACE_TAIL);
 
     // Conversation-anchored snapshot tail: load everything from the
     // Nth-most-recent conversation message to the head, so the recent
@@ -1300,97 +1316,126 @@ pub async fn get_mission_snapshot(
     // raw event stream. Falls back to a plain recent-events tail when the
     // mission has fewer than N conversation messages, or (degenerate) when
     // the anchored span would exceed the hard cap.
-    let anchor_seq = control
-        .mission_store
-        .nth_recent_event_sequence(
-            mission_id,
-            SNAPSHOT_ANCHOR_TYPES,
-            SNAPSHOT_CONVERSATIONAL_MESSAGES,
-        )
-        .await
-        .map_err(internal_error)?;
-    let events = match anchor_seq {
-        Some(anchor) => {
-            // `get_events_since` is `sequence > since`, so subtract one to
-            // include the anchor itself. Fetch one past the cap to detect
-            // overflow without a separate count query.
-            let anchored = control
-                .mission_store
-                .get_events_since(
-                    mission_id,
-                    anchor.saturating_sub(1),
-                    Some(HISTORY_EVENT_TYPES),
-                    Some(SNAPSHOT_MAX_EVENTS + 1),
-                )
-                .await
-                .map_err(internal_error)?;
-            if anchored.len() > SNAPSHOT_MAX_EVENTS {
-                // The recent conversation spans more than the cap of tool
-                // calls. `get_events_since` returned the OLDEST events after
-                // the anchor (ASC), which would miss the newest — so fall
-                // back to the most-recent capped tail instead.
-                control
-                    .mission_store
-                    .get_events_before(
-                        mission_id,
-                        i64::MAX,
-                        Some(HISTORY_EVENT_TYPES),
-                        Some(SNAPSHOT_MAX_EVENTS),
-                    )
-                    .await
-                    .map_err(internal_error)?
-            } else {
-                anchored
-            }
-        }
-        None => control
+    let summary_fut = async {
+        let anchor_seq = control
             .mission_store
-            .get_events_before(
+            .nth_recent_event_sequence(
                 mission_id,
-                i64::MAX,
-                Some(HISTORY_EVENT_TYPES),
-                Some(SNAPSHOT_MAX_EVENTS),
+                SNAPSHOT_ANCHOR_TYPES,
+                SNAPSHOT_CONVERSATIONAL_MESSAGES,
             )
-            .await
-            .map_err(internal_error)?,
-    };
-    let mut summary = if should_summarize_events(&mission) {
-        summarize_inactive_stream_events(events)
-    } else {
-        EventSummary::unchanged(events)
-    };
-    if conversation_profile_enabled(query.profile.as_deref()) {
-        let keep_full_tool_call_ids: HashSet<String> = control
-            .mission_store
-            .get_recent_tool_call_ids(
-                mission_id,
-                query.trace_tail.unwrap_or(CONVERSATION_PROFILE_TRACE_TAIL),
-            )
-            .await
-            .map_err(internal_error)?
-            .into_iter()
-            .collect();
-        let tool_call_ids = summary
-            .events
-            .iter()
-            .filter_map(|event| event.tool_call_id.clone())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let tool_summaries = control
-            .mission_store
-            .get_tool_call_summaries(mission_id, &tool_call_ids)
             .await
             .map_err(internal_error)?;
-        summary.events =
-            project_conversation_events(summary.events, &keep_full_tool_call_ids, &tool_summaries);
-        summary.summarized_count = summary.events.len();
+        let events = match anchor_seq {
+            Some(anchor) => {
+                // `get_events_since` is `sequence > since`, so subtract one to
+                // include the anchor itself. Fetch one past the cap to detect
+                // overflow without a separate count query.
+                let anchored = control
+                    .mission_store
+                    .get_events_since(
+                        mission_id,
+                        anchor.saturating_sub(1),
+                        Some(HISTORY_EVENT_TYPES),
+                        Some(SNAPSHOT_MAX_EVENTS + 1),
+                    )
+                    .await
+                    .map_err(internal_error)?;
+                if anchored.len() > SNAPSHOT_MAX_EVENTS {
+                    // The recent conversation spans more than the cap of tool
+                    // calls. `get_events_since` returned the OLDEST events after
+                    // the anchor (ASC), which would miss the newest — so fall
+                    // back to the most-recent capped tail instead.
+                    control
+                        .mission_store
+                        .get_events_before(
+                            mission_id,
+                            i64::MAX,
+                            Some(HISTORY_EVENT_TYPES),
+                            Some(SNAPSHOT_MAX_EVENTS),
+                        )
+                        .await
+                        .map_err(internal_error)?
+                } else {
+                    anchored
+                }
+            }
+            None => control
+                .mission_store
+                .get_events_before(
+                    mission_id,
+                    i64::MAX,
+                    Some(HISTORY_EVENT_TYPES),
+                    Some(SNAPSHOT_MAX_EVENTS),
+                )
+                .await
+                .map_err(internal_error)?,
+        };
+        let mut summary = if summarize {
+            summarize_inactive_stream_events(events)
+        } else {
+            EventSummary::unchanged(events)
+        };
+        if conv_profile {
+            let tool_call_ids = summary
+                .events
+                .iter()
+                .filter_map(|event| event.tool_call_id.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let (recent_ids, tool_summaries) = tokio::try_join!(
+                async {
+                    control
+                        .mission_store
+                        .get_recent_tool_call_ids(mission_id, trace_tail)
+                        .await
+                        .map_err(internal_error)
+                },
+                async {
+                    control
+                        .mission_store
+                        .get_tool_call_summaries(mission_id, &tool_call_ids)
+                        .await
+                        .map_err(internal_error)
+                },
+            )?;
+            let keep_full_tool_call_ids: HashSet<String> = recent_ids.into_iter().collect();
+            summary.events = project_conversation_events(
+                summary.events,
+                &keep_full_tool_call_ids,
+                &tool_summaries,
+            );
+            summary.summarized_count = summary.events.len();
+        }
+        Ok::<_, (StatusCode, String)>(summary)
+    };
+
+    let (
+        workspace,
+        summary_res,
+        event_counts_res,
+        latest_sequence_res,
+        child_missions_res,
+        running_res,
+        latest_run_res,
+    ) = tokio::join!(
+        state.workspaces.get(workspace_id),
+        summary_fut,
+        control
+            .mission_store
+            .count_events_by_type(mission_id, Some(HISTORY_EVENT_TYPES)),
+        control.mission_store.max_event_sequence(mission_id),
+        control.mission_store.get_child_missions(mission_id),
+        get_running_missions(&control),
+        control.mission_store.get_latest_mission_run(mission_id),
+    );
+
+    if let Some(workspace) = workspace {
+        mission.workspace_name = Some(workspace.name);
     }
-    let event_counts = control
-        .mission_store
-        .count_events_by_type(mission_id, Some(HISTORY_EVENT_TYPES))
-        .await
-        .map_err(internal_error)?;
+    let summary = summary_res?;
+    let event_counts = event_counts_res.map_err(internal_error)?;
     let total = event_counts.values().copied().sum();
     let mut visibility_counts: HashMap<String, usize> = HashMap::new();
     for (event_type, count) in &event_counts {
@@ -1398,27 +1443,15 @@ pub async fn get_mission_snapshot(
             .entry(event_visibility(event_type).to_string())
             .or_insert(0) += *count;
     }
-    let latest_sequence = control
-        .mission_store
-        .max_event_sequence(mission_id)
-        .await
-        .map_err(internal_error)?;
-    let child_missions = control
-        .mission_store
-        .get_child_missions(mission_id)
-        .await
-        .unwrap_or_default();
-    let running = get_running_missions(&control)
-        .await?
+    let latest_sequence = latest_sequence_res.map_err(internal_error)?;
+    let child_missions = child_missions_res.unwrap_or_default();
+    let running = running_res?
         .into_iter()
         .find(|info| info.mission_id == mission_id);
-    let execution = control
-        .mission_store
-        .get_latest_mission_run(mission_id)
-        .await
+    let execution = latest_run_res
         .map_err(internal_error)?
         .as_ref()
-        .map(|run| mission_execution_projection(run, mission.status));
+        .map(|run| mission_execution_projection(run, mission_status));
 
     Ok(Json(
         serde_json::to_value(MissionSnapshotResponse {

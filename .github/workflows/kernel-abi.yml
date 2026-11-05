@@ -88,6 +88,11 @@ jobs:
           diff <(printf '%s\n' "$out") shared/orb-spec/fixtures/stream-cost.json
       - name: Vendored C matches Lean (Orb.Kernel + pinned lean-sys)
         run: python3 scripts/gen_orb_kernel_unboxed.py --check
+      - name: Committed LeanNative textual LLVM IR matches sources, symbol hygiene, and stock C
+        run: |
+          set -euo pipefail
+          python3 scripts/gen_orb_kernel_leannative_ll.py --check
+          python3 -m unittest -v scripts/test_leannative_ll.py
       - name: Generated bindings are up to date
         run: python3 scripts/gen_kernel_bindings.py --check
       - name: Scalar shared WASM validates its complete ABI and has no imports
@@ -116,7 +121,10 @@ jobs:
       - name: Native object and archive symbol checks with negative injections
         env:
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: cargo test --locked -j 1 -p orb-spec --test artifact_symbols
+        run: |
+          set -euo pipefail
+          ORB_KERNEL_BACKEND=stock-c cargo test --locked -j 1 -p orb-spec --test artifact_symbols
+          ORB_KERNEL_BACKEND=leannative cargo test --locked -j 1 -p orb-spec --test artifact_symbols
       - name: Partial coverage evidence stays source-bound and incomplete
         run: |
           python3 scripts/gen_coverage_registry.py --check

@@ -146,12 +146,15 @@ struct OrbSettingsHome: View {
     }
 
     private func loadAttention() async {
-        await OrbPrivilegeAccessMonitor.shared.refresh()
-        if let d = try? await client.call("/api/approvals/devices") {
+        async let privRefresh = OrbPrivilegeAccessMonitor.shared.refresh()
+        async let devicesReq = client.call("/api/approvals/devices")
+        async let usageReq = client.call("/api/ai/providers/usage")
+        _ = await privRefresh
+        if let d = try? await devicesReq {
             let mine = OrbApprovalKey.publicKey
             deviceEnrolled = !SecureEnclave.isAvailable || d["devices"].items.contains { mine != nil && $0["public_key"].text == mine }
         }
-        if let usage = try? await client.call("/api/ai/providers/usage")["entries"], case .object(let entries) = usage {
+        if let usage = (try? await usageReq)?["entries"], case .object(let entries) = usage {
             quotaExhausted = entries.values.contains { OrbProviderQuota.quotaStatus(OrbProviderQuota.windows($0))?.level == .exhausted }
         }
     }

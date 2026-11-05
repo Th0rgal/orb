@@ -324,6 +324,20 @@ final class OrbStreamTextTests: XCTestCase {
         live.reconcileStored(staleEvents, working: true, streamAdvanced: true)
         live.flush()
         XCTAssertEqual(live.text, acc, "stale stored text_delta_latest never truncates newer SSE text")
+
+        let liveSuffix = OrbLiveText()
+        liveSuffix.frame = .seconds(3600)
+        var suffixAcc = ""
+        for i in 0..<50 {
+            let prevLen = suffixAcc.unicodeScalars.count
+            let chunk = "step 😀 \(i)\n"
+            suffixAcc += chunk
+            liveSuffix.applyTextOp(["bubble_id": "text_delta_latest", "ops": [["type": "insert", "pos": prevLen, "text": prevLen == 0 ? suffixAcc : chunk]]])
+        }
+        XCTAssertEqual(liveSuffix.received, suffixAcc)
+        liveSuffix.flush()
+        XCTAssertEqual(liveSuffix.text, suffixAcc)
+        XCTAssertEqual(liveSuffix.renders, 1, "50 incremental suffix text_op insert frames render once")
     }
 
     static func chunks(_ doc: String) -> [Substring] {

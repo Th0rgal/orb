@@ -94,26 +94,15 @@ fn context_block(a: &Transfer, operation: &Operation) -> Result<Option<Value>, E
 type Error = (StatusCode, String);
 /// Serialize workspace mutations with movement of that workspace. Weak entries
 /// disappear when callers leave; this does not create another durable ledger.
-pub(crate) async fn workspace_mutation_lock(id: Uuid) -> tokio::sync::OwnedMutexGuard<()> {
-    static LOCKS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<Uuid, std::sync::Weak<tokio::sync::Mutex<()>>>>,
-    > = std::sync::OnceLock::new();
-    let lock = {
-        let mut locks = LOCKS
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        match locks.get(&id).and_then(std::sync::Weak::upgrade) {
-            Some(lock) => lock,
-            None => {
-                let lock = Arc::new(tokio::sync::Mutex::new(()));
-                locks.insert(id, Arc::downgrade(&lock));
-                lock
-            }
-        }
-    };
-    lock.lock_owned().await
+pub(crate) async fn workspace_mutation_lock(
+    id: Uuid,
+) -> crate::concurrency::KeyedAsyncGuard<'static, Uuid> {
+    static LOCKS: std::sync::OnceLock<crate::concurrency::KeyedAsyncLocks<Uuid>> =
+        std::sync::OnceLock::new();
+    LOCKS
+        .get_or_init(crate::concurrency::KeyedAsyncLocks::new)
+        .lock(id)
+        .await
 }
 fn conflict(e: impl std::fmt::Display) -> Error {
     (StatusCode::CONFLICT, e.to_string())
@@ -517,15 +506,16 @@ async fn core_vibe_ready(state: &AppState) -> bool {
 }
 
 async fn capabilities(state: &AppState) -> Vec<Value> {
-    let mut harnesses: Vec<_> = state
-        .backend_registry
-        .read()
-        .await
-        .list()
-        .into_iter()
-        .map(|b| b.id)
-        .collect();
-    let ready = if let Some(workspace) = state.workspaces.get(Uuid::nil()).await {
+    let (registry_guard, default_workspace, vibe_ready, vibe_auth, answers) = tokio::join!(
+        state.backend_registry.read(),
+        state.workspaces.get(Uuid::nil()),
+        core_vibe_ready(state),
+        crate::backend::vibe::core_auth_configured(&state.config.working_dir),
+        listed_node_capabilities(state),
+    );
+    let mut harnesses: Vec<_> = registry_guard.list().into_iter().map(|b| b.id).collect();
+    drop(registry_guard);
+    let ready = if let Some(workspace) = default_workspace {
         let cli =
             super::super::mission_runner::get_backend_string_setting("antigravity", "cli_path")
                 .unwrap_or_else(|| "agy".into());
@@ -540,14 +530,12 @@ async fn capabilities(state: &AppState) -> Vec<Value> {
     if !ready {
         harnesses.retain(|id| id != "antigravity");
     }
-    if !core_vibe_ready(state).await {
+    if !vibe_ready {
         harnesses.retain(|id| id != "vibe");
     }
     let mut rows = vec![
         json!({"machine":{"kind":"core"},"label":"Core","available":true,"harnesses":harnesses}),
     ];
-    let vibe_auth = crate::backend::vibe::core_auth_configured(&state.config.working_dir).await;
-    let answers = listed_node_capabilities(state).await;
     for (node, result) in state.config.remote_nodes.nodes.iter().zip(answers) {
         rows.push(match result {
             Ok(mut capabilities) => {
@@ -602,17 +590,22 @@ pub async fn inspect(
 ) -> Result<Json<Value>, Error> {
     let control = control_for_user(&state, &user).await;
     let m = mission(&control, id).await?;
-    let raw_actions = control
-        .mission_store
-        .machine_transfers(id)
-        .await
-        .map_err(internal_error)?;
-    let source = inspect_source(&state, &control, &m, &raw_actions).await?;
+    let source_fut = async {
+        let raw_actions = control
+            .mission_store
+            .machine_transfers(id)
+            .await
+            .map_err(internal_error)?;
+        let source = inspect_source(&state, &control, &m, &raw_actions).await?;
+        Ok::<_, Error>((raw_actions, source))
+    };
+    let (source_res, destinations) = tokio::join!(source_fut, capabilities(&state));
+    let (raw_actions, source) = source_res?;
     // Clients poll this view. The archived conversation of a transfer can be
     // megabytes and is read through the file operations, never from here.
     let actions: Vec<Value> = raw_actions.iter().map(listed_action).collect();
     Ok(Json(
-        json!({"version":1,"source":source,"features":["links","selection","light",crate::machine_transfer_archive::FEATURE],"actions":actions,"destinations":capabilities(&state).await}),
+        json!({"version":1,"source":source,"features":["links","selection","light",crate::machine_transfer_archive::FEATURE],"actions":actions,"destinations":destinations}),
     ))
 }
 

@@ -5320,17 +5320,36 @@ pub fn build_search_excerpt_utf16(
     };
 
     let slice_start = char_indices[start_char].0;
-    let slice_end = if end_char < total_chars {
+    let raw_slice_end = if end_char < total_chars {
         char_indices[end_char].0
     } else {
         collapsed.len()
     };
+    let candidate_bytes = &collapsed.as_bytes()[slice_start..raw_slice_end];
+    let max_utf16_units = window_chars.saturating_mul(2).min(u32::MAX as usize) as u32;
+    let mut rel_idx = 0usize;
+    let mut utf16_units = 0u32;
+    while rel_idx < candidate_bytes.len() {
+        let step = crate::orb_spec::utf8_utf16_window_step(
+            rel_idx.min(u32::MAX as usize) as u32,
+            candidate_bytes.len().min(u32::MAX as usize) as u32,
+            candidate_bytes[rel_idx],
+            utf16_units,
+            max_utf16_units,
+        );
+        if !step.admitted || step.seq_bytes == 0 {
+            break;
+        }
+        rel_idx += step.seq_bytes as usize;
+        utf16_units = step.next_utf16_units;
+    }
+    let slice_end = slice_start + rel_idx;
     let mut excerpt = String::new();
     if start_char > 0 {
         excerpt.push('…');
     }
     excerpt.push_str(collapsed[slice_start..slice_end].trim());
-    if end_char < total_chars {
+    if slice_end < collapsed.len() {
         excerpt.push('…');
     }
 

@@ -1919,9 +1919,10 @@ impl ManagedManager {
             .read()
             .map(|m| m.values().cloned().collect())
             .unwrap_or_default();
-        for p in providers {
+        futures::future::join_all(providers.into_iter().map(|p| async move {
             let _ = p.refresh_availability().await;
-        }
+        }))
+        .await;
     }
 
     #[cfg(test)]
@@ -2907,17 +2908,23 @@ impl ManagedManager {
     async fn persist(&self) {
         let machines = self.machines.lock().await.clone();
         let secrets = self.secrets.lock().await.clone();
-        let _ = std::fs::create_dir_all(&self.dir);
-        write_atomic(
-            &self.machines_path(),
-            &serde_json::to_vec_pretty(&Persisted { machines }).unwrap_or_default(),
-            false,
-        );
-        write_atomic(
-            &self.secrets_path(),
-            &serde_json::to_vec(&secrets).unwrap_or_default(),
-            true,
-        );
+        let dir = self.dir.clone();
+        let machines_path = self.machines_path();
+        let secrets_path = self.secrets_path();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = std::fs::create_dir_all(&dir);
+            write_atomic(
+                &machines_path,
+                &serde_json::to_vec_pretty(&Persisted { machines }).unwrap_or_default(),
+                false,
+            );
+            write_atomic(
+                &secrets_path,
+                &serde_json::to_vec(&secrets).unwrap_or_default(),
+                true,
+            );
+        })
+        .await;
     }
 
     fn ledger(&self, event: &str, machine: &ManagedMachine) {
@@ -5930,12 +5937,17 @@ impl ManagedManager {
 
     async fn persist_budgets(&self) {
         let budgets = self.budgets.lock().await.clone();
-        let _ = std::fs::create_dir_all(&self.dir);
-        write_atomic(
-            &self.budgets_path(),
-            &serde_json::to_vec_pretty(&budgets).unwrap_or_default(),
-            false,
-        );
+        let dir = self.dir.clone();
+        let budgets_path = self.budgets_path();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = std::fs::create_dir_all(&dir);
+            write_atomic(
+                &budgets_path,
+                &serde_json::to_vec_pretty(&budgets).unwrap_or_default(),
+                false,
+            );
+        })
+        .await;
     }
 
     pub async fn budget_pools(&self) -> HashMap<String, budget::BudgetPool> {

@@ -59,8 +59,10 @@ export function OrbHero() {
 
     async function boot() {
       try {
-        await loadScriptOnce("/orb_assets.js");
-        await loadScriptOnce("/orb_shader.js");
+        await Promise.all([
+          loadScriptOnce("/orb_assets.js"),
+          loadScriptOnce("/orb_shader.js"),
+        ]);
         if (cancelled || !canvasRef.current || !window.initOrbShaderCanvas) return;
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
         const size = Math.round(256 * dpr);

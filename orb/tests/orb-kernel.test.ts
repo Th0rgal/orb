@@ -12,6 +12,10 @@ import {
   orbUsageLimitBadge, orbWireApplyPatchStep, orbWireDecodeSlice,
   orbWireEncodeSliceInto, orbWireMachineStep, orbWireScrollSliceStep,
   orbWireStreamSliceStep, orbWireTranscriptSliceStep, orbWireVerifySliceIo,
+  orbConnectionIssueClassify, orbFileRefLineSpan, orbMachineActionAdmitted,
+  orbMissionFlags, orbMissionInboxSection, orbMissionSortRank, orbMissionStateClassify,
+  orbNumericCellScan, orbSendFlowStep, orbTurnOutcomeStep, orbUtf8Utf16WindowStep,
+  orbWorkedDurationBucket,
 } from "../src/orbKernel";
 import { mergeMission, reparentMission, resetMissionHierarchy } from "../src/missionHierarchy";
 import { normalizeLoosePipeTables } from "../src/pipeTables";
@@ -625,5 +629,60 @@ describe("orb kernel gates mirror lean-sys", () => {
       nextCheckpoint: 2_101_248 - 16_384,
     });
     expect(cappedScratch.memory.buffer.byteLength).toBeLessThanOrEqual(maxExpectedBytes);
+  });
+
+  it("evaluates cross-client projection and UTF-8/UTF-16 window steppers via WASM", () => {
+    expect(orbMissionStateClassify(0)).toBeGreaterThanOrEqual(0);
+    expect(orbMissionSortRank(0)).toBeGreaterThanOrEqual(0);
+    expect(typeof orbMissionFlags(1).isActive).toBe("boolean");
+    expect(orbMissionInboxSection(0)).toBeGreaterThanOrEqual(0);
+    expect(
+      orbConnectionIssueClassify({
+        isUnreachable: true,
+        isUsingDefault: false,
+        isPrivateAddr: true,
+        defaultReachable: true,
+        hasExternalProxy: false,
+      }),
+    ).toBeGreaterThan(0);
+    expect(orbWorkedDurationBucket(125).unit).toBeGreaterThanOrEqual(0);
+    expect(
+      orbTurnOutcomeStep({
+        prevOutcome: 0,
+        prevFailed: false,
+        eventKind: 1,
+        isNarration: false,
+        isSuccessFalse: false,
+        isTextNonEmpty: true,
+      }).failed,
+    ).toBe(false);
+    expect(
+      orbNumericCellScan({
+        nonEmpty: true,
+        hasLeadingDigitOrSign: true,
+        hasDigit: true,
+        allAllowedChars: true,
+      }),
+    ).toBe(true);
+    expect(orbFileRefLineSpan(5, 12, 100)).toEqual({ valid: true, count: 8 });
+    expect(orbMachineActionAdmitted(1, false, false)).toBeGreaterThanOrEqual(0);
+    expect(
+      orbSendFlowStep({
+        isBusy: false,
+        hasNonEmptyText: true,
+        canQueue: true,
+        awaitingAck: false,
+        isDraining: false,
+        pendingCount: 0,
+        httpStatus: 200,
+      }).tapAction,
+    ).toBeGreaterThanOrEqual(0);
+    expect(orbUtf8Utf16WindowStep(0, 10, 0xf0, 5, 6).admitted).toBe(false);
+    expect(orbUtf8Utf16WindowStep(0, 10, 0xf0, 5, 7)).toEqual({
+      admitted: true,
+      seqBytes: 4,
+      utf16Cost: 2,
+      nextUtf16Units: 7,
+    });
   });
 });

@@ -126,24 +126,32 @@ async fn resolve_via_doh(host: &str) -> Vec<IpAddr> {
     // Query Cloudflare (1.1.1.1) and Google (8.8.8.8) directly by IP literal so
     // resolution succeeds even when local mDNSResponder / MagicDNS is wedged.
     for base in ["https://1.1.1.1/dns-query", "https://8.8.8.8/resolve"] {
-        let mut combined = Vec::new();
-        for qtype in ["A", "AAAA"] {
-            let res = client
-                .get(base)
-                .query(&[("name", clean), ("type", qtype)])
-                .header("Accept", "application/dns-json")
-                .send()
-                .await;
-            if let Ok(resp) = res {
-                if resp.status().is_success() {
-                    if let Ok(bytes) = resp.bytes().await {
-                        for ip in parse_doh_json_ips(&bytes) {
-                            if !combined.contains(&ip) {
-                                combined.push(ip);
-                            }
-                        }
-                    }
+        let query_type = |qtype: &'static str| {
+            let client = &client;
+            async move {
+                let resp = client
+                    .get(base)
+                    .query(&[("name", clean), ("type", qtype)])
+                    .header("Accept", "application/dns-json")
+                    .send()
+                    .await
+                    .ok()?;
+                if !resp.status().is_success() {
+                    return None;
                 }
+                let bytes = resp.bytes().await.ok()?;
+                Some(parse_doh_json_ips(&bytes))
+            }
+        };
+        let (a_ips, aaaa_ips) = tokio::join!(query_type("A"), query_type("AAAA"));
+        let mut combined = Vec::new();
+        for ip in a_ips
+            .into_iter()
+            .flatten()
+            .chain(aaaa_ips.into_iter().flatten())
+        {
+            if !combined.contains(&ip) {
+                combined.push(ip);
             }
         }
         if !combined.is_empty() {

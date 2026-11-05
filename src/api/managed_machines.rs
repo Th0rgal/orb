@@ -103,15 +103,17 @@ async fn list(
 ) -> Response {
     match manager() {
         Ok(m) => {
-            let mut view = m
-                .list(q.history_hours.unwrap_or(24).clamp(0, 24 * 30))
-                .await;
+            let history_hours = q.history_hours.unwrap_or(24).clamp(0, 24 * 30);
+            let (mut view, budget, visible) = tokio::join!(
+                m.list(history_hours),
+                m.visible_budget(&user.id),
+                visible_machines(&m, &user.id),
+            );
             view.machines.retain(|machine| {
                 machine.provisioning_mode.is_worker()
                     || machine.owner_user_id.as_deref() == Some(user.id.as_str())
             });
-            view.budget = m.visible_budget(&user.id).await;
-            let visible = visible_machines(&m, &user.id).await;
+            view.budget = budget;
             view.daily_spend = crate::managed::daily_spend(
                 &visible,
                 crate::managed::SPEND_DAYS,
@@ -202,22 +204,30 @@ pub(crate) async fn spawn_for_inner(
                 status: 404,
             });
         };
-        req.budget_pool_id = crate::api::mission_budget::pool_for(&store, mission, &user.id).await;
-        req.cap_lineage = crate::api::mission_budget::lineage(&store, mission).await;
+        let parent_mission_id = mission_row.parent_mission_id;
+        let (budget_pool_id, cap_lineage, root) = tokio::join!(
+            crate::api::mission_budget::pool_for(&store, mission, &user.id),
+            crate::api::mission_budget::lineage(&store, mission),
+            async {
+                // Walk parent lineage (bounded) to record `root_mission_id`.
+                let mut root = mission;
+                let mut cur = parent_mission_id;
+                for _ in 0..16 {
+                    let Some(pid) = cur else { break };
+                    root = pid;
+                    cur = store
+                        .get_mission(pid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|m| m.parent_mission_id);
+                }
+                root
+            },
+        );
+        req.budget_pool_id = budget_pool_id;
+        req.cap_lineage = cap_lineage;
         req.snapshot_project = mission_row.project.project.clone().or(project_fallback);
-        // Walk parent lineage (bounded) to record `root_mission_id`.
-        let mut root = mission;
-        let mut cur = mission_row.parent_mission_id;
-        for _ in 0..16 {
-            let Some(pid) = cur else { break };
-            root = pid;
-            cur = store
-                .get_mission(pid)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|m| m.parent_mission_id);
-        }
         req.root_mission_id = Some(root.to_string());
     } else if req.snapshot_project.is_none() {
         req.snapshot_project = project_fallback;

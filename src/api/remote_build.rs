@@ -612,10 +612,21 @@ fn handle_needs_reservation(
         .is_none_or(|accepted_at| heartbeat_cannot_reflect(accepted_at, heartbeat_started_at))
 }
 
-/// Resolve the target node: explicit id or capacity-aware auto placement.
-/// All misses map to `503` so the wrapper can fall back to a local build —
-/// except an explicitly named unknown node, which is a caller bug (`400`).
-async fn resolve_node(
+enum ResolveNodeOutcome {
+    Placed(RemoteNodeConfig),
+    NeedsReprobe {
+        retry_nodes: Vec<RemoteNodeConfig>,
+        initial_err: String,
+    },
+}
+
+/// Resolve the target node from cached heartbeat/reservation state without
+/// issuing any network I/O (safe to call while `placement_lock` is held).
+/// When auto-placement misses and retryable nodes exist, returns
+/// `ResolveNodeOutcome::NeedsReprobe` so the caller can drop `placement_lock`
+/// before probing nodes over HTTP.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_node_cached(
     state: &AppState,
     node_id: &str,
     requirements: &[String],
@@ -623,7 +634,8 @@ async fn resolve_node(
     min_disk_bytes: u64,
     min_protocol_version: u32,
     source: Option<crate::remote_node::protocol::SourceBundleRequirement>,
-) -> Result<RemoteNodeConfig, (StatusCode, String)> {
+    allow_reprobe: bool,
+) -> Result<ResolveNodeOutcome, (StatusCode, String)> {
     let settings = &state.config.remote_nodes;
     if !settings.enabled || settings.nodes.is_empty() {
         return Err((
@@ -648,12 +660,14 @@ async fn resolve_node(
         let picked = match first {
             Ok(picked) => picked,
             Err(initial_err) => {
+                if !allow_reprobe {
+                    return Err((StatusCode::SERVICE_UNAVAILABLE, initial_err.to_string()));
+                }
                 // The monitor can be disabled, its initial tick can race this
                 // request, or a node can have recovered since a cached miss.
-                // Re-probe every configured node, including cached Online
-                // nodes whose load/resource figures may now be stale, then
-                // retry placement once.
-                let retry_nodes: Vec<_> = settings
+                // Collect retryable nodes so the caller can drop `placement_lock`
+                // before running live HTTP probes.
+                let retry_nodes: Vec<RemoteNodeConfig> = settings
                     .nodes
                     .iter()
                     .filter(|node| {
@@ -662,39 +676,22 @@ async fn resolve_node(
                             cached.as_ref().map(|cached| &cached.status),
                         )
                     })
+                    .cloned()
                     .collect();
                 if retry_nodes.is_empty() {
                     return Err((StatusCode::SERVICE_UNAVAILABLE, initial_err.to_string()));
                 }
-                let client = RemoteNodeClient::default();
-                futures::future::join_all(
-                    retry_nodes
-                        .into_iter()
-                        .map(|node| crate::remote_node::probe_node(&state.fleet, &client, node)),
-                )
-                .await;
-                let reservations = core_side_reservations(state)
-                    .await
-                    .map_err(|message| (StatusCode::SERVICE_UNAVAILABLE, message))?;
-                state
-                    .fleet
-                    .place_auto_with_estimated_disk_and_source(
-                        settings,
-                        requirements,
-                        estimated_disk_bytes,
-                        min_disk_bytes,
-                        min_protocol_version,
-                        source,
-                        &reservations.jobs,
-                        &reservations.disk_bytes,
-                    )
-                    .map_err(|err| (StatusCode::SERVICE_UNAVAILABLE, err.to_string()))?
+                return Ok(ResolveNodeOutcome::NeedsReprobe {
+                    retry_nodes,
+                    initial_err: initial_err.to_string(),
+                });
             }
         };
-        return settings.node(&picked).cloned().ok_or((
+        let cfg = settings.node(&picked).cloned().ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             format!("placed node '{picked}' vanished from configuration"),
-        ));
+        ))?;
+        return Ok(ResolveNodeOutcome::Placed(cfg));
     }
     let node = settings.node(node_id).cloned().ok_or((
         StatusCode::BAD_REQUEST,
@@ -730,7 +727,7 @@ async fn resolve_node(
                 format!("remote node '{}': {reason}", node.id),
             )
         })?;
-    Ok(node)
+    Ok(ResolveNodeOutcome::Placed(node))
 }
 
 fn check_node_source_capacity(
@@ -1282,6 +1279,20 @@ async fn submit_remote_build(
         Ok(source) => source,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
+    if let Some(bundle) = req.source_bundle.as_ref() {
+        for file in &bundle.files {
+            if !crate::node::lean::verify_cas_hex_path_well_formed(&file.sha256, &file.path) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "source_bundle entry '{}' failed CAS 256-bit digest or relative-path confinement",
+                        file.path
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    }
     let min_disk_bytes = required_node_disk_bytes(req.estimated_disk_bytes);
     let min_protocol_version = if req.source_archive.is_some() {
         crate::remote_node::protocol::NODE_PROTOCOL_VERSION
@@ -1311,8 +1322,9 @@ async fn submit_remote_build(
     }
     // Serialize the authoritative second identity check, placement, and
     // tentative-handle persistence. No network probe runs while this mutex is
-    // held, so a slow explicit runner cannot block unrelated auto placement.
-    let placement_guard = placement_lock().lock().await;
+    // held: if cached auto-placement misses, we drop `placement_guard` during
+    // the fallback HTTP re-probe and re-verify identity + placement on re-entry.
+    let mut placement_guard = placement_lock().lock().await;
     if req.source_archive.is_none() {
         if let Some(response) =
             equivalent_remote_validation_response(&state, &req, &identity, !req.force_new).await
@@ -1320,7 +1332,7 @@ async fn submit_remote_build(
             return response;
         }
     }
-    let node = match resolve_node(
+    let node = match resolve_node_cached(
         &state,
         &req.node_id,
         &requirements,
@@ -1328,12 +1340,51 @@ async fn submit_remote_build(
         min_disk_bytes,
         min_protocol_version,
         source,
+        true,
     )
     .await
     {
-        Ok(node) => node,
+        Ok(ResolveNodeOutcome::Placed(node)) => node,
+        Ok(ResolveNodeOutcome::NeedsReprobe { retry_nodes, .. }) => {
+            drop(placement_guard);
+            let client = RemoteNodeClient::default();
+            futures::future::join_all(
+                retry_nodes
+                    .iter()
+                    .map(|node| crate::remote_node::probe_node(&state.fleet, &client, node)),
+            )
+            .await;
+            placement_guard = placement_lock().lock().await;
+            if req.source_archive.is_none() {
+                if let Some(response) =
+                    equivalent_remote_validation_response(&state, &req, &identity, !req.force_new)
+                        .await
+                {
+                    return response;
+                }
+            }
+            match resolve_node_cached(
+                &state,
+                &req.node_id,
+                &requirements,
+                req.estimated_disk_bytes,
+                min_disk_bytes,
+                min_protocol_version,
+                source,
+                false,
+            )
+            .await
+            {
+                Ok(ResolveNodeOutcome::Placed(node)) => node,
+                Ok(ResolveNodeOutcome::NeedsReprobe { initial_err, .. }) => {
+                    return (StatusCode::SERVICE_UNAVAILABLE, initial_err).into_response();
+                }
+                Err((status, message)) => return (status, message).into_response(),
+            }
+        }
         Err((status, message)) => return (status, message).into_response(),
     };
+    let _ = &placement_guard;
     let shared_token = match node_shared_token(&node) {
         Ok(token) => token,
         Err((status, message)) => return (status, message).into_response(),

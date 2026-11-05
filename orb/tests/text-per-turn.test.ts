@@ -58,6 +58,16 @@ it("the replay right after the interrupt shows the cut turn's text once", () => 
     { type: "text_delta", eventId: "text_delta_latest", sequence: 20, data: { content: STEPS } },
     { type: "mission_status_changed", sequence: 21, data: { status: "interrupted" } },
   ];
+  // Live: held ops may be either cumulative replace frames or incremental suffix inserts.
+  const liveSuffix: StreamEvent[] = [
+    op([{ type: "insert", pos: 0, text: "step 1 done" }]),
+    op([{ type: "insert", pos: 11, text: STEPS.slice(11) }]),
+    receipt,
+  ];
+  const itemsSuffix = applyStreamEvents(buildTranscript(history), heldAfterHistory(history, liveSuffix));
+  expect(texts(itemsSuffix)).toEqual([STEPS]);
+  expect(itemsSuffix.map(i => i.kind)).toEqual(["user", "text", "user"]);
+
   const live: StreamEvent[] = [
     op([{ type: "insert", pos: 0, text: "step 1 done" }]),
     op([{ type: "replace", range: [0, 11], text: STEPS }]),

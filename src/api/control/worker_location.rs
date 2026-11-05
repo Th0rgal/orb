@@ -4,20 +4,11 @@ use crate::api::mission_store::{now_string, BoardOutboxItem};
 
 /// Only competing retries of the same dispatch wait for one another.
 pub fn dispatch_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
-    use std::sync::{Mutex, OnceLock, Weak};
-    static LOCKS: OnceLock<Mutex<std::collections::HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
-        OnceLock::new();
-    let mut locks = LOCKS
-        .get_or_init(Default::default)
-        .lock()
-        .expect("dispatch locks");
-    locks.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
-        return lock;
-    }
-    let lock = Arc::new(tokio::sync::Mutex::new(()));
-    locks.insert(key.into(), Arc::downgrade(&lock));
-    lock
+    static LOCKS: std::sync::OnceLock<crate::concurrency::KeyedAsyncLocks<String>> =
+        std::sync::OnceLock::new();
+    LOCKS
+        .get_or_init(crate::concurrency::KeyedAsyncLocks::new)
+        .get(key.to_string())
 }
 
 pub fn initial_delivery_id(mission: Uuid) -> Uuid {

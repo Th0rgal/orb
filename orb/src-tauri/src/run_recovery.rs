@@ -156,7 +156,7 @@ fn child_git_repo_process_does_not_block_parent_workspace_recovery() {
 }
 
 fn workspace_quiet(cwd: &str) -> Result<(), String> {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let root = std::fs::canonicalize(cwd).map_err(|e| e.to_string())?;
     let mut system = System::new();
     system.refresh_processes_specifics(
@@ -164,11 +164,26 @@ fn workspace_quiet(cwd: &str) -> Result<(), String> {
         true,
         ProcessRefreshKind::new()
             .with_cwd(UpdateKind::Always)
-            .with_exe(UpdateKind::Always),
+            .with_exe(UpdateKind::Always)
+            .with_user(UpdateKind::OnlyIfNotSet),
     );
     let self_pid = std::process::id();
+    let self_uid = system
+        .process(Pid::from_u32(self_pid))
+        .and_then(|p| p.user_id().cloned());
     for (pid, process) in system.processes() {
         if pid.as_u32() == self_pid {
+            continue;
+        }
+        if process.cwd().is_none()
+            && self_uid
+                .as_ref()
+                .is_some_and(|my_uid| process.user_id() != Some(my_uid))
+        {
+            // On multi-user Unix hosts, /proc/<pid>/cwd is unreadable (None) for
+            // daemons owned by root or other users (e.g. a system `opencode serve`).
+            // Only treat unknown-cwd harness processes owned by the current user
+            // (or when UID lookup is unavailable) as blocking this workspace.
             continue;
         }
         let name = process.name().to_string_lossy().to_lowercase();

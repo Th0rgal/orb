@@ -16,8 +16,7 @@ export function startClientDelegations(missions: () => Mission[]) {
     if (!valid() || busy) return;
     busy = true;
     try {
-      const clientId = await machineIdentity();
-      await restoreLocalBindings();
+      const [clientId] = await Promise.all([machineIdentity(), restoreLocalBindings()]);
       const anchor = missions().find(mission => mission.tags?.includes('placement:client') &&
         (mission.tags.includes(`worker-client:${clientId}`) || !!localBinding(mission.id)));
       if (!anchor || !valid()) return;
@@ -36,12 +35,13 @@ export function startClientDelegations(missions: () => Mission[]) {
           let binding = localBinding(id);
           if (!binding) {
             if (!mission.working_directory || !mission.backend) throw new Error('Worker needs a working directory and harness before it can start.');
-            const rows = await refreshLocalAgents();
+            const [rows, cwd] = await Promise.all([
+              refreshLocalAgents(),
+              localDirectory(mission.working_directory),
+            ]);
             const harness = rows.find(row => row.id === mission.backend && row.installed && row.path);
             if (!valid()) return;
             if (!harness?.path) throw new Error(`Install ${mission.backend} on this computer to start this worker.`);
-            const cwd = await localDirectory(mission.working_directory);
-            if (!valid()) return;
             binding = {cwd,harness:mission.backend,bin:harness.path,model:mission.model_override??undefined};
             await rememberBinding(id,binding);
             if (!valid()) return;

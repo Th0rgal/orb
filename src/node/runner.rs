@@ -9,13 +9,14 @@
 //! cgroup when systemd scopes are available, with process-group cleanup as a
 //! fallback, so daemonized children cannot escape queue accounting.
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
+use dashmap::{DashMap, DashSet};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -303,12 +304,7 @@ struct BackgroundGuard {
 
 impl BackgroundGuard {
     fn new(runner: &Arc<JobRunner>, workspace: Uuid) -> Self {
-        *runner
-            .background
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(workspace)
-            .or_insert(0) += 1;
+        *runner.background.entry(workspace).or_insert(0) += 1;
         Self {
             runner: Arc::clone(runner),
             workspace,
@@ -318,17 +314,12 @@ impl BackgroundGuard {
 
 impl Drop for BackgroundGuard {
     fn drop(&mut self) {
-        let mut background = self
-            .runner
+        self.runner
             .background
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(count) = background.get_mut(&self.workspace) {
-            *count -= 1;
-            if *count == 0 {
-                background.remove(&self.workspace);
-            }
-        }
+            .remove_if_mut(&self.workspace, |_, count| {
+                *count = count.saturating_sub(1);
+                *count == 0
+            });
     }
 }
 
@@ -371,6 +362,16 @@ fn persisted_payload_json(payload: &JobPayload) -> anyhow::Result<String> {
     Ok(serde_json::to_string(&persisted_payload)?)
 }
 
+/// Wait-free snapshot of node scheduler queue/lane counters served to `/status`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NodeStatusSnapshot {
+    pub queued_jobs: u32,
+    pub active_jobs: u32,
+    pub side_jobs: u32,
+    pub forced_jobs: u32,
+    pub priority_jobs: u32,
+}
+
 /// Shared job runner; construct with [`JobRunner::spawn`].
 pub struct JobRunner {
     store: JobStore,
@@ -378,20 +379,21 @@ pub struct JobRunner {
     /// Live-resizable main and side-question admission pools.
     capacity: super::capacity::NodeCapacity,
     max_job_secs: u64,
-    tx: mpsc::UnboundedSender<QueuedJob>,
+    tx: mpsc::Sender<QueuedJob>,
     /// Explicit `SANDBOXED_NODE_MAX_QUEUED`; otherwise four times the live
     /// capacity.
     max_queued_override: Option<u32>,
-    cancels: Mutex<HashMap<Uuid, CancellationToken>>,
-    side_jobs: Mutex<HashSet<Uuid>>,
-    forced_jobs: Mutex<HashSet<Uuid>>,
-    priority_jobs: Mutex<HashSet<Uuid>>,
-    force_waiters: Mutex<HashMap<Uuid, ForceWakeSender>>,
+    cancels: DashMap<Uuid, CancellationToken>,
+    side_jobs: DashSet<Uuid>,
+    forced_jobs: DashSet<Uuid>,
+    priority_jobs: DashSet<Uuid>,
+    force_waiters: DashMap<Uuid, ForceWakeSender>,
     /// Queued or running ordinary jobs per workspace mission. A companion
     /// turn is eligible only while its workspace has an entry here.
-    background: Mutex<HashMap<Uuid, u32>>,
+    background: DashMap<Uuid, u32>,
     queued: AtomicU32,
     active: AtomicU32,
+    status_snapshot: ArcSwap<NodeStatusSnapshot>,
     /// External slot provider (`SANDBOXED_NODE_SLOT_PROVIDER`); `None` means
     /// the node admits on its own.
     slot_provider: Option<Arc<super::slot::SlotProvider>>,
@@ -399,9 +401,9 @@ pub struct JobRunner {
     /// (`SANDBOXED_NODE_GROK_HOME`, ...). See `super::managed_auth`.
     managed_auth: super::managed_auth::ManagedAuth,
     /// Jobs whose supervisor is inside `run_one`, with their process probe.
-    tracked: Mutex<HashMap<Uuid, TrackedJob>>,
+    tracked: DashMap<Uuid, TrackedJob>,
     /// First observation of a `running` job without any live process.
-    dead_since: Mutex<HashMap<Uuid, Instant>>,
+    dead_since: DashMap<Uuid, Instant>,
 }
 
 impl JobRunner {
@@ -458,7 +460,10 @@ impl JobRunner {
         let admission = Arc::clone(&capacity.main);
         let side_admission = Arc::clone(&capacity.side);
         let coordinator_admission = Arc::clone(&capacity.coordinator);
-        let (tx, mut rx) = mpsc::unbounded_channel::<QueuedJob>();
+        let channel_bound = max_queued_override
+            .map(|n| n.max(1) as usize)
+            .unwrap_or_else(|| (capacity.capacity().saturating_mul(4) as usize).max(1024));
+        let (tx, rx) = mpsc::channel::<QueuedJob>(channel_bound);
         let runner = Arc::new(Self {
             store,
             work_root,
@@ -466,14 +471,15 @@ impl JobRunner {
             max_job_secs: max_job_secs.max(1),
             tx,
             max_queued_override,
-            cancels: Mutex::new(HashMap::new()),
-            side_jobs: Mutex::new(HashSet::new()),
-            forced_jobs: Mutex::new(HashSet::new()),
-            priority_jobs: Mutex::new(HashSet::new()),
-            force_waiters: Mutex::new(HashMap::new()),
-            background: Mutex::new(HashMap::new()),
+            cancels: DashMap::new(),
+            side_jobs: DashSet::new(),
+            forced_jobs: DashSet::new(),
+            priority_jobs: DashSet::new(),
+            force_waiters: DashMap::new(),
+            background: DashMap::new(),
             queued: AtomicU32::new(0),
             active: AtomicU32::new(0),
+            status_snapshot: ArcSwap::from_pointee(NodeStatusSnapshot::default()),
             slot_provider: match super::slot::SlotProvider::from_env() {
                 Ok(provider) => provider.map(Arc::new),
                 Err(error) => {
@@ -482,316 +488,37 @@ impl JobRunner {
                 }
             },
             managed_auth,
-            tracked: Mutex::new(HashMap::new()),
-            dead_since: Mutex::new(HashMap::new()),
+            tracked: DashMap::new(),
+            dead_since: DashMap::new(),
         });
         runner.spawn_liveness_sweep();
-        // Side questions must be able to inspect a busy main mission. They
-        // share a small bounded pool (SANDBOXED_NODE_SIDE_CAPACITY, default
-        // 2), never an unbounded bypass of node admission. One slow /btw on
-        // one mission must not block every other mission's side question.
-        // Root/mid-level coordinators, `schedule_wakeup` resumes, and companion
-        // turns share the bounded `coordinator` priority lane
-        // (`SANDBOXED_NODE_COORDINATOR_CAPACITY`, default 2) governed by
-        // `orb_node_lane_step`: uncongested turns prefer `main` first so
-        // emergency coordinator slots stay idle, while saturated worker pools
-        // never starve coordinator wakeups.
-        #[derive(Clone, Copy)]
-        enum LanePlan {
-            SideOnly,
-            MainOnly,
-            CompanionFirst,
-            MainThenCoordinator,
-        }
-        let dispatcher = Arc::clone(&runner);
-        tokio::spawn(async move {
-            while let Some(job) = rx.recv().await {
-                let runner = Arc::clone(&dispatcher);
-                let main_admission = Arc::clone(&admission);
-                let side_pool = Arc::clone(&side_admission);
-                let coord_pool = Arc::clone(&coordinator_admission);
-
-                let (
-                    is_side_question,
-                    is_coordinator_priority,
-                    has_workspace_bg,
-                    is_child_worker,
-                    is_long_running,
-                    track_bg,
-                ) = match &job.payload {
-                    JobPayload::RawCommand {
-                        side_question,
-                        companion_of,
-                        coordinator_priority,
-                        is_child_worker,
-                        native_goal,
-                        ..
-                    } => {
-                        let ws_bg = companion_of
-                            .map(|ws| runner.has_background(ws))
-                            .unwrap_or(false);
-                        let track = !*side_question && companion_of.is_none();
-                        (
-                            *side_question,
-                            *coordinator_priority,
-                            ws_bg,
-                            *is_child_worker,
-                            *native_goal,
-                            track,
-                        )
-                    }
-                    JobPayload::LeanBuild { .. } => (false, false, false, false, false, true),
-                };
-
-                let main_max = runner.capacity.capacity();
-                let main_running = if main_admission.available_permits() > 0 {
-                    u32::try_from(main_admission.in_use())
-                        .unwrap_or(0)
-                        .min(main_max.saturating_sub(1))
-                } else {
-                    main_max
-                };
-                let side_max = u32::try_from(side_pool.capacity()).unwrap_or(1);
-                let side_running = if side_pool.available_permits() > 0 {
-                    u32::try_from(side_pool.in_use())
-                        .unwrap_or(0)
-                        .min(side_max.saturating_sub(1))
-                } else {
-                    side_max
-                };
-                let coord_max = u32::try_from(coord_pool.capacity()).unwrap_or(1);
-                let coord_running = if coord_pool.available_permits() > 0 {
-                    u32::try_from(coord_pool.in_use())
-                        .unwrap_or(0)
-                        .min(coord_max.saturating_sub(1))
-                } else {
-                    coord_max
-                };
-
-                let lane = crate::orb_spec::node_lane_step(crate::orb_spec::NodeLaneInput {
-                    is_side_question,
-                    is_coordinator_priority,
-                    has_workspace_bg,
-                    is_child_worker,
-                    is_long_running,
-                    main_running,
-                    main_max,
-                    side_running,
-                    side_max,
-                    coord_running,
-                    coord_max,
-                });
-
-                let (plan, allow_force) = match lane.decision {
-                    crate::orb_spec::NodeLaneDecision::AdmitSide
-                    | crate::orb_spec::NodeLaneDecision::WaitSideOnly => {
-                        (LanePlan::SideOnly, false)
-                    }
-                    crate::orb_spec::NodeLaneDecision::AdmitCompanion => {
-                        (LanePlan::CompanionFirst, false)
-                    }
-                    crate::orb_spec::NodeLaneDecision::AdmitCoordinator
-                    | crate::orb_spec::NodeLaneDecision::WaitMainOrCoordinator => {
-                        (LanePlan::MainThenCoordinator, true)
-                    }
-                    crate::orb_spec::NodeLaneDecision::AdmitMain => {
-                        if is_coordinator_priority && !is_child_worker && !is_long_running {
-                            (LanePlan::MainThenCoordinator, true)
-                        } else {
-                            (LanePlan::MainOnly, true)
-                        }
-                    }
-                    crate::orb_spec::NodeLaneDecision::WaitMainOnly => (LanePlan::MainOnly, true),
-                };
-                let background = track_bg.then(|| BackgroundGuard::new(&runner, job.mission_id));
-                let force_rx = if allow_force {
-                    let (force_tx, force_rx) = tokio::sync::oneshot::channel();
-                    dispatcher
-                        .force_waiters
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(job.id, force_tx);
-                    Some(force_rx)
-                } else {
-                    None
-                };
-                tokio::spawn(async move {
-                    let _background = background;
-                    let acquire_lane = || async {
-                        match plan {
-                            LanePlan::SideOnly => side_pool
-                                .acquire_owned()
-                                .await
-                                .map(|permit| (permit, false)),
-                            LanePlan::MainOnly => main_admission
-                                .acquire_owned()
-                                .await
-                                .map(|permit| (permit, false)),
-                            LanePlan::CompanionFirst => {
-                                if let Ok(permit) = coord_pool.try_acquire_owned() {
-                                    Ok((permit, true))
-                                } else {
-                                    tokio::select! {
-                                        biased;
-                                        coord = coord_pool.acquire_owned() => coord.map(|p| (p, true)),
-                                        main = main_admission.acquire_owned() => main.map(|p| (p, false)),
-                                    }
-                                }
-                            }
-                            LanePlan::MainThenCoordinator => {
-                                // Uncongested preference (`coordinator_prefers_main_when_uncongested`):
-                                // take an idle `main` slot first so emergency coordinator permits remain free.
-                                if let Ok(permit) = main_admission.try_acquire_owned() {
-                                    Ok((permit, false))
-                                } else if let Ok(permit) = coord_pool.try_acquire_owned() {
-                                    Ok((permit, true))
-                                } else {
-                                    tokio::select! {
-                                        biased;
-                                        coord = coord_pool.acquire_owned() => coord.map(|p| (p, true)),
-                                        main = main_admission.acquire_owned() => main.map(|p| (p, false)),
-                                    }
-                                }
-                            }
-                        }
-                    };
-
-                    let (permit, is_priority, forced_ack) = if let Some(force_rx) = force_rx {
-                        tokio::select! {
-                            biased;
-                            forced = force_rx => match forced {
-                                Ok((permit, ack_tx)) => (permit, false, Some(ack_tx)),
-                                Err(_) => match acquire_lane().await {
-                                    Ok((permit, is_priority)) => (permit, is_priority, None),
-                                    Err(_) => {
-                                        runner.queued.fetch_sub(1, Ordering::AcqRel);
-                                        runner.drop_cancel_token(job.id);
-                                        return;
-                                    }
-                                },
-                            },
-                            acquired = acquire_lane() => {
-                                runner
-                                    .force_waiters
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .remove(&job.id);
-                                match acquired {
-                                    Ok((permit, is_priority)) => (permit, is_priority, None),
-                                    Err(_) => {
-                                        runner.queued.fetch_sub(1, Ordering::AcqRel);
-                                        runner.drop_cancel_token(job.id);
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        match acquire_lane().await {
-                            Ok((permit, is_priority)) => (permit, is_priority, None),
-                            Err(_) => {
-                                runner.queued.fetch_sub(1, Ordering::AcqRel);
-                                runner.drop_cancel_token(job.id);
-                                return;
-                            }
-                        }
-                    };
-                    let is_forced = forced_ack.is_some();
-                    if is_forced {
-                        runner
-                            .forced_jobs
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(job.id);
-                    }
-                    if is_priority {
-                        runner
-                            .priority_jobs
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(job.id);
-                    }
-                    let claimed = match runner.store.mark_running_if_queued(job.id).await {
-                        Ok(claimed) => claimed,
-                        Err(err) => {
-                            if is_forced {
-                                runner
-                                    .forced_jobs
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .remove(&job.id);
-                            }
-                            if is_priority {
-                                runner
-                                    .priority_jobs
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .remove(&job.id);
-                            }
-                            if let Some(ack_tx) = forced_ack {
-                                let _ = ack_tx.send(false);
-                            }
-                            runner.queued.fetch_sub(1, Ordering::AcqRel);
-                            runner.drop_cancel_token(job.id);
-                            tracing::warn!(job_id = %job.id, "failed to claim queued job: {err}");
-                            return;
-                        }
-                    };
-                    if !claimed {
-                        if is_forced {
-                            runner
-                                .forced_jobs
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .remove(&job.id);
-                        }
-                        if is_priority {
-                            runner
-                                .priority_jobs
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .remove(&job.id);
-                        }
-                        if let Some(ack_tx) = forced_ack {
-                            let _ = ack_tx.send(false);
-                        }
-                        runner.drop_cancel_token(job.id);
-                        return;
-                    }
-                    runner.queued.fetch_sub(1, Ordering::AcqRel);
-                    runner.active.fetch_add(1, Ordering::AcqRel);
-                    if let Some(ack_tx) = forced_ack {
-                        let _ = ack_tx.send(true);
-                    }
-                    let job_id = job.id;
-                    runner.run_one(job).await;
-                    runner.active.fetch_sub(1, Ordering::AcqRel);
-                    if is_forced {
-                        runner
-                            .forced_jobs
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .remove(&job_id);
-                    }
-                    if is_priority {
-                        runner
-                            .priority_jobs
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .remove(&job_id);
-                    }
-                    drop(permit);
-                });
-            }
-        });
+        tokio::spawn(run_node_scheduler_actor(
+            Arc::clone(&runner),
+            rx,
+            admission,
+            side_admission,
+            coordinator_admission,
+        ));
         runner
     }
 
+    fn refresh_status_snapshot(&self) {
+        self.status_snapshot.store(Arc::new(NodeStatusSnapshot {
+            queued_jobs: self.queued.load(Ordering::Acquire),
+            active_jobs: self.active.load(Ordering::Acquire),
+            side_jobs: self.side_jobs.len() as u32,
+            forced_jobs: self.forced_jobs.len() as u32,
+            priority_jobs: self.priority_jobs.len() as u32,
+        }));
+    }
+
+    /// Wait-free snapshot of node scheduler counters.
+    pub fn status_snapshot(&self) -> NodeStatusSnapshot {
+        **self.status_snapshot.load()
+    }
+
     fn has_background(&self, workspace: Uuid) -> bool {
-        self.background
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&workspace)
+        self.background.contains_key(&workspace)
     }
 
     /// Live admission pools (resized by the env-file reload).
@@ -805,39 +532,27 @@ impl JobRunner {
     }
 
     pub fn queued_count(&self) -> u32 {
-        self.queued.load(Ordering::Acquire)
+        self.status_snapshot.load().queued_jobs
     }
 
     pub fn side_job_count(&self) -> u32 {
-        self.side_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len() as u32
+        self.status_snapshot.load().side_jobs
     }
 
     pub fn forced_job_count(&self) -> u32 {
-        self.forced_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len() as u32
+        self.status_snapshot.load().forced_jobs
     }
 
     pub fn priority_job_count(&self) -> u32 {
-        self.priority_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len() as u32
+        self.status_snapshot.load().priority_jobs
     }
 
     pub fn is_forced_job(&self, job_id: Uuid) -> bool {
-        self.forced_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&job_id)
+        self.forced_jobs.contains(&job_id)
     }
 
     pub fn active_count(&self) -> u32 {
-        self.active.load(Ordering::Acquire)
+        self.status_snapshot.load().active_jobs
     }
 
     /// Operator force-start for a queued job (`POST /jobs/:id/force`).
@@ -884,11 +599,7 @@ impl JobRunner {
         // dispatcher loop has not yet registered the waiter channel.
         let mut waiter = None;
         for attempt in 0..20 {
-            waiter = self
-                .force_waiters
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&job_id);
+            waiter = self.force_waiters.remove(&job_id).map(|(_, tx)| tx);
             if waiter.is_some() {
                 break;
             }
@@ -981,9 +692,9 @@ impl JobRunner {
         // so never retain commit-pack source bytes in jobs.db.
         let payload_json = persisted_payload_json(&payload)?;
         let max_queued = self.max_queued();
-        // The dispatcher drains the mpsc channel into semaphore waiters so a
-        // cancelled queued job releases its channel slot immediately. Keep an
-        // explicit atomic bound across both locations.
+        // The dispatcher drains the bounded mpsc channel into semaphore waiters
+        // so a cancelled queued job releases its channel slot immediately. Keep
+        // both `try_reserve()` channel backpressure and the explicit atomic bound.
         self.queued
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
                 (queued < max_queued).then_some(queued + 1)
@@ -991,6 +702,22 @@ impl JobRunner {
             .map_err(|_| NodeQueueFull {
                 max_queued: max_queued as usize,
             })?;
+        let tx_permit = match self.tx.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                self.queued.fetch_sub(1, Ordering::AcqRel);
+                self.refresh_status_snapshot();
+                return Err(NodeQueueFull {
+                    max_queued: max_queued as usize,
+                }
+                .into());
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                self.queued.fetch_sub(1, Ordering::AcqRel);
+                self.refresh_status_snapshot();
+                anyhow::bail!("node dispatcher stopped before enqueue");
+            }
+        };
         let log_path = self.log_path(job_id);
         if let Err(error) = self
             .store
@@ -1003,6 +730,7 @@ impl JobRunner {
             .await
         {
             self.queued.fetch_sub(1, Ordering::AcqRel);
+            self.refresh_status_snapshot();
             return Err(error);
         }
         if matches!(
@@ -1012,36 +740,15 @@ impl JobRunner {
                 ..
             }
         ) {
-            self.side_jobs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(job_id);
+            self.side_jobs.insert(job_id);
         }
-        self.cancels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(job_id, CancellationToken::new());
-        if self
-            .tx
-            .send(QueuedJob {
-                id: job_id,
-                mission_id,
-                payload,
-            })
-            .is_err()
-        {
-            self.queued.fetch_sub(1, Ordering::AcqRel);
-            self.drop_cancel_token(job_id);
-            self.store
-                .finish(
-                    job_id,
-                    JobState::Lost,
-                    None,
-                    Some("node dispatcher stopped before enqueue".to_string()),
-                )
-                .await?;
-            anyhow::bail!("node dispatcher stopped before enqueue");
-        }
+        self.cancels.insert(job_id, CancellationToken::new());
+        self.refresh_status_snapshot();
+        tx_permit.send(QueuedJob {
+            id: job_id,
+            mission_id,
+            payload,
+        });
         Ok(())
     }
 
@@ -1065,12 +772,7 @@ impl JobRunner {
         self.store
             .record_cancellation(job_id, actor, reason)
             .await?;
-        let token = self
-            .cancels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&job_id)
-            .cloned();
+        let token = self.cancels.get(&job_id).map(|entry| entry.value().clone());
         let Some(token) = token else {
             if let Some(record) = self.store.get(job_id).await? {
                 if record.state == JobState::Lost {
@@ -1107,14 +809,9 @@ impl JobRunner {
         token.cancel();
         if self.store.cancel_if_queued(job_id).await? {
             self.queued.fetch_sub(1, Ordering::AcqRel);
-            self.force_waiters
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&job_id);
-            self.side_jobs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&job_id);
+            self.force_waiters.remove(&job_id);
+            self.side_jobs.remove(&job_id);
+            self.refresh_status_snapshot();
         } else {
             // A supervisor whose process is already gone may never observe
             // the token (e.g. stuck in cleanup). Finalize now.
@@ -1127,37 +824,22 @@ impl JobRunner {
     }
 
     fn is_tracked(&self, job_id: Uuid) -> bool {
-        self.tracked
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&job_id)
+        self.tracked.contains_key(&job_id)
     }
 
     /// Liveness of a job's backing process, as far as this node can tell.
     pub async fn liveness(&self, job_id: Uuid) -> JobLiveness {
-        let probe = self
-            .tracked
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&job_id)
-            .map(|tracked| {
-                tracked
-                    .probe
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone()
-            });
+        let probe = self.tracked.get(&job_id).map(|tracked| {
+            tracked
+                .probe
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        });
         match probe {
             Some(probe) => probe_liveness(probe).await,
             // Claimed but not yet inside `run_one`: it still owns its token.
-            None if self
-                .cancels
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains_key(&job_id) =>
-            {
-                JobLiveness::Unknown
-            }
+            None if self.cancels.contains_key(&job_id) => JobLiveness::Unknown,
             // A `running` row nobody supervises (a lost outcome write, a
             // dropped task): no process can be behind it.
             None => JobLiveness::Dead {
@@ -1192,12 +874,7 @@ impl JobRunner {
             self.clear_dead_since(job_id);
             return Ok(false);
         }
-        let first = *self
-            .dead_since
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(job_id)
-            .or_insert_with(Instant::now);
+        let first = *self.dead_since.entry(job_id).or_insert_with(Instant::now);
         if first.elapsed() < grace {
             return Ok(false);
         }
@@ -1205,10 +882,7 @@ impl JobRunner {
     }
 
     fn clear_dead_since(&self, job_id: Uuid) {
-        self.dead_since
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&job_id);
+        self.dead_since.remove(&job_id);
     }
 
     /// Persist the terminal outcome of a job whose process is gone and stop
@@ -1254,12 +928,7 @@ impl JobRunner {
             .await?;
         if finalized {
             tracing::warn!(%job_id, state = state.as_str(), %error, "finalized node job without a live process");
-            if let Some(tracked) = self
-                .tracked
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&job_id)
-            {
+            if let Some(tracked) = self.tracked.get(&job_id) {
                 tracked.reaped.cancel();
             }
         }
@@ -1293,10 +962,7 @@ impl JobRunner {
 
     async fn sweep_running_jobs(&self) -> anyhow::Result<()> {
         let running = self.store.running_ids().await?;
-        self.dead_since
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|id, _| running.contains(id));
+        self.dead_since.retain(|id, _| running.contains(id));
         for job_id in running {
             if let Err(error) = self.reconcile_job(job_id).await {
                 tracing::warn!(%job_id, %error, "node job liveness check failed");
@@ -1307,42 +973,31 @@ impl JobRunner {
 
     fn take_cancel_token(&self, job_id: Uuid) -> CancellationToken {
         self.cancels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
             .get(&job_id)
-            .cloned()
+            .map(|entry| entry.value().clone())
             .unwrap_or_default()
     }
 
     fn drop_cancel_token(&self, job_id: Uuid) {
-        self.force_waiters
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&job_id);
-        self.side_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&job_id);
-        self.cancels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&job_id);
+        self.force_waiters.remove(&job_id);
+        let removed_side = self.side_jobs.remove(&job_id).is_some();
+        self.cancels.remove(&job_id);
+        if removed_side {
+            self.refresh_status_snapshot();
+        }
     }
 
     async fn run_one(&self, job: QueuedJob) {
         let token = self.take_cancel_token(job.id);
         let probe = Arc::new(Mutex::new(ProcessProbe::default()));
         let reaped = CancellationToken::new();
-        self.tracked
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                job.id,
-                TrackedJob {
-                    probe: Arc::clone(&probe),
-                    reaped: reaped.clone(),
-                },
-            );
+        self.tracked.insert(
+            job.id,
+            TrackedJob {
+                probe: Arc::clone(&probe),
+                reaped: reaped.clone(),
+            },
+        );
         let outcome = if token.is_cancelled() {
             Some((
                 JobState::Cancelled,
@@ -1387,10 +1042,7 @@ impl JobRunner {
                 }
             }
         }
-        self.tracked
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&job.id);
+        self.tracked.remove(&job.id);
         self.clear_dead_since(job.id);
         if let JobPayload::RawCommand { command, .. } = &job.payload {
             crate::uploads::cleanup_prompt_uploads(&self.work_root.join("uploads"), command);
@@ -2698,10 +2350,282 @@ pub async fn read_log_chunk(
     .flatten()
 }
 
+/// Bounded scheduler actor draining `QueuedJob`s into lane-governed admission
+/// tasks while maintaining wait-free `NodeStatusSnapshot` counters.
+///
+/// Side questions share a small bounded pool (`SANDBOXED_NODE_SIDE_CAPACITY`,
+/// default 2), never an unbounded bypass of node admission. Root/mid-level
+/// coordinators, `schedule_wakeup` resumes, and companion turns share the
+/// bounded `coordinator` priority lane (`SANDBOXED_NODE_COORDINATOR_CAPACITY`,
+/// default 2) governed by `orb_node_lane_step`: uncongested turns prefer `main`
+/// first so emergency coordinator slots stay idle, while saturated worker pools
+/// never starve coordinator wakeups.
+async fn run_node_scheduler_actor(
+    dispatcher: Arc<JobRunner>,
+    mut rx: mpsc::Receiver<QueuedJob>,
+    admission: Arc<super::capacity::Admission>,
+    side_admission: Arc<super::capacity::Admission>,
+    coordinator_admission: Arc<super::capacity::Admission>,
+) {
+    #[derive(Clone, Copy)]
+    enum LanePlan {
+        SideOnly,
+        MainOnly,
+        CompanionFirst,
+        MainThenCoordinator,
+    }
+
+    while let Some(job) = rx.recv().await {
+        let runner = Arc::clone(&dispatcher);
+        let main_admission = Arc::clone(&admission);
+        let side_pool = Arc::clone(&side_admission);
+        let coord_pool = Arc::clone(&coordinator_admission);
+
+        let (
+            is_side_question,
+            is_coordinator_priority,
+            has_workspace_bg,
+            is_child_worker,
+            is_long_running,
+            track_bg,
+        ) = match &job.payload {
+            JobPayload::RawCommand {
+                side_question,
+                companion_of,
+                coordinator_priority,
+                is_child_worker,
+                native_goal,
+                ..
+            } => {
+                let ws_bg = companion_of
+                    .map(|ws| runner.has_background(ws))
+                    .unwrap_or(false);
+                let track = !*side_question && companion_of.is_none();
+                (
+                    *side_question,
+                    *coordinator_priority,
+                    ws_bg,
+                    *is_child_worker,
+                    *native_goal,
+                    track,
+                )
+            }
+            JobPayload::LeanBuild { .. } => (false, false, false, false, false, true),
+        };
+
+        let main_max = runner.capacity.capacity();
+        let main_running = if main_admission.available_permits() > 0 {
+            u32::try_from(main_admission.in_use())
+                .unwrap_or(0)
+                .min(main_max.saturating_sub(1))
+        } else {
+            main_max
+        };
+        let side_max = u32::try_from(side_pool.capacity()).unwrap_or(1);
+        let side_running = if side_pool.available_permits() > 0 {
+            u32::try_from(side_pool.in_use())
+                .unwrap_or(0)
+                .min(side_max.saturating_sub(1))
+        } else {
+            side_max
+        };
+        let coord_max = u32::try_from(coord_pool.capacity()).unwrap_or(1);
+        let coord_running = if coord_pool.available_permits() > 0 {
+            u32::try_from(coord_pool.in_use())
+                .unwrap_or(0)
+                .min(coord_max.saturating_sub(1))
+        } else {
+            coord_max
+        };
+
+        let lane = crate::orb_spec::node_lane_step(crate::orb_spec::NodeLaneInput {
+            is_side_question,
+            is_coordinator_priority,
+            has_workspace_bg,
+            is_child_worker,
+            is_long_running,
+            main_running,
+            main_max,
+            side_running,
+            side_max,
+            coord_running,
+            coord_max,
+        });
+
+        let (plan, allow_force) = match lane.decision {
+            crate::orb_spec::NodeLaneDecision::AdmitSide
+            | crate::orb_spec::NodeLaneDecision::WaitSideOnly => (LanePlan::SideOnly, false),
+            crate::orb_spec::NodeLaneDecision::AdmitCompanion => (LanePlan::CompanionFirst, false),
+            crate::orb_spec::NodeLaneDecision::AdmitCoordinator
+            | crate::orb_spec::NodeLaneDecision::WaitMainOrCoordinator => {
+                (LanePlan::MainThenCoordinator, true)
+            }
+            crate::orb_spec::NodeLaneDecision::AdmitMain => {
+                if is_coordinator_priority && !is_child_worker && !is_long_running {
+                    (LanePlan::MainThenCoordinator, true)
+                } else {
+                    (LanePlan::MainOnly, true)
+                }
+            }
+            crate::orb_spec::NodeLaneDecision::WaitMainOnly => (LanePlan::MainOnly, true),
+        };
+        let background = track_bg.then(|| BackgroundGuard::new(&runner, job.mission_id));
+        let force_rx = if allow_force {
+            let (force_tx, force_rx) = tokio::sync::oneshot::channel();
+            dispatcher.force_waiters.insert(job.id, force_tx);
+            Some(force_rx)
+        } else {
+            None
+        };
+        tokio::spawn(async move {
+            let _background = background;
+            let acquire_lane = || async {
+                match plan {
+                    LanePlan::SideOnly => side_pool
+                        .acquire_owned()
+                        .await
+                        .map(|permit| (permit, false)),
+                    LanePlan::MainOnly => main_admission
+                        .acquire_owned()
+                        .await
+                        .map(|permit| (permit, false)),
+                    LanePlan::CompanionFirst => {
+                        if let Ok(permit) = coord_pool.try_acquire_owned() {
+                            Ok((permit, true))
+                        } else {
+                            tokio::select! {
+                                biased;
+                                coord = coord_pool.acquire_owned() => coord.map(|p| (p, true)),
+                                main = main_admission.acquire_owned() => main.map(|p| (p, false)),
+                            }
+                        }
+                    }
+                    LanePlan::MainThenCoordinator => {
+                        // Uncongested preference (`coordinator_prefers_main_when_uncongested`):
+                        // take an idle `main` slot first so emergency coordinator permits remain free.
+                        if let Ok(permit) = main_admission.try_acquire_owned() {
+                            Ok((permit, false))
+                        } else if let Ok(permit) = coord_pool.try_acquire_owned() {
+                            Ok((permit, true))
+                        } else {
+                            tokio::select! {
+                                biased;
+                                coord = coord_pool.acquire_owned() => coord.map(|p| (p, true)),
+                                main = main_admission.acquire_owned() => main.map(|p| (p, false)),
+                            }
+                        }
+                    }
+                }
+            };
+
+            let (permit, is_priority, forced_ack) = if let Some(force_rx) = force_rx {
+                tokio::select! {
+                    biased;
+                    forced = force_rx => match forced {
+                        Ok((permit, ack_tx)) => (permit, false, Some(ack_tx)),
+                        Err(_) => match acquire_lane().await {
+                            Ok((permit, is_priority)) => (permit, is_priority, None),
+                            Err(_) => {
+                                runner.queued.fetch_sub(1, Ordering::AcqRel);
+                                runner.drop_cancel_token(job.id);
+                                runner.refresh_status_snapshot();
+                                return;
+                            }
+                        },
+                    },
+                    acquired = acquire_lane() => {
+                        runner.force_waiters.remove(&job.id);
+                        match acquired {
+                            Ok((permit, is_priority)) => (permit, is_priority, None),
+                            Err(_) => {
+                                runner.queued.fetch_sub(1, Ordering::AcqRel);
+                                runner.drop_cancel_token(job.id);
+                                runner.refresh_status_snapshot();
+                                return;
+                            }
+                        }
+                    }
+                }
+            } else {
+                match acquire_lane().await {
+                    Ok((permit, is_priority)) => (permit, is_priority, None),
+                    Err(_) => {
+                        runner.queued.fetch_sub(1, Ordering::AcqRel);
+                        runner.drop_cancel_token(job.id);
+                        runner.refresh_status_snapshot();
+                        return;
+                    }
+                }
+            };
+            let is_forced = forced_ack.is_some();
+            if is_forced {
+                runner.forced_jobs.insert(job.id);
+            }
+            if is_priority {
+                runner.priority_jobs.insert(job.id);
+            }
+            if is_forced || is_priority {
+                runner.refresh_status_snapshot();
+            }
+            let claimed = match runner.store.mark_running_if_queued(job.id).await {
+                Ok(claimed) => claimed,
+                Err(err) => {
+                    if is_forced {
+                        runner.forced_jobs.remove(&job.id);
+                    }
+                    if is_priority {
+                        runner.priority_jobs.remove(&job.id);
+                    }
+                    if let Some(ack_tx) = forced_ack {
+                        let _ = ack_tx.send(false);
+                    }
+                    runner.queued.fetch_sub(1, Ordering::AcqRel);
+                    runner.drop_cancel_token(job.id);
+                    runner.refresh_status_snapshot();
+                    tracing::warn!(job_id = %job.id, "failed to claim queued job: {err}");
+                    return;
+                }
+            };
+            if !claimed {
+                if is_forced {
+                    runner.forced_jobs.remove(&job.id);
+                }
+                if is_priority {
+                    runner.priority_jobs.remove(&job.id);
+                }
+                if let Some(ack_tx) = forced_ack {
+                    let _ = ack_tx.send(false);
+                }
+                runner.drop_cancel_token(job.id);
+                runner.refresh_status_snapshot();
+                return;
+            }
+            runner.queued.fetch_sub(1, Ordering::AcqRel);
+            runner.active.fetch_add(1, Ordering::AcqRel);
+            runner.refresh_status_snapshot();
+            if let Some(ack_tx) = forced_ack {
+                let _ = ack_tx.send(true);
+            }
+            let job_id = job.id;
+            runner.run_one(job).await;
+            runner.active.fetch_sub(1, Ordering::AcqRel);
+            if is_forced {
+                runner.forced_jobs.remove(&job_id);
+            }
+            if is_priority {
+                runner.priority_jobs.remove(&job_id);
+            }
+            runner.refresh_status_snapshot();
+            drop(permit);
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::remote_node::{JobSource, SourceArchive};
+    use std::collections::HashMap;
 
     #[test]
     fn persisted_lean_payload_redacts_source_archive_bytes() {
@@ -3063,7 +2987,7 @@ mod tests {
         let pid = child.id();
         let status = child.wait().await.unwrap();
         let reaped = CancellationToken::new();
-        runner.tracked.lock().unwrap().insert(
+        runner.tracked.insert(
             id,
             TrackedJob {
                 probe: Arc::new(Mutex::new(ProcessProbe {
@@ -3717,7 +3641,7 @@ mod tests {
                 .unwrap();
         }
         tokio::time::timeout(Duration::from_secs(5), async {
-            while runner.force_waiters.lock().unwrap().len() < 3 {
+            while runner.force_waiters.len() < 3 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })

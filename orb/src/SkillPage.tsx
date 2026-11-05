@@ -94,6 +94,12 @@ export function SkillPage(p: { name: string; initialView?: "edit" | "history"; o
   const [newFile, setNewFile] = createSignal<string | null>(null);
 
   const load = async () => {
+    void listProjects().then(async (list) => {
+      setProjects(list.map((x) => ({ slug: x.slug, title: x.title ?? undefined })));
+      const pairs = await Promise.all(list.map(async (x) => [x.slug, (await getProjectSkills(x.slug).catch(() => ({ skills: [] as string[] }))).skills] as const));
+      const mine = pairs.filter(([, names]) => names.includes(p.name)).map(([slug]) => slug).sort();
+      setProjectsOriginal(mine); setProjectDraft(mine);
+    }).catch(() => {});
     try {
       const s = await fetchLibrarySkill(p.name);
       setSkill(s);
@@ -101,12 +107,6 @@ export function SkillPage(p: { name: string; initialView?: "edit" | "history"; o
       setDrafts({ [SKILL_MD]: s.content });
       setLoadError(null);
     } catch (e) { setLoadError(errorText(e)); }
-    void listProjects().then(async (list) => {
-      setProjects(list.map((x) => ({ slug: x.slug, title: x.title ?? undefined })));
-      const pairs = await Promise.all(list.map(async (x) => [x.slug, (await getProjectSkills(x.slug).catch(() => ({ skills: [] as string[] }))).skills] as const));
-      const mine = pairs.filter(([, names]) => names.includes(p.name)).map(([slug]) => slug).sort();
-      setProjectsOriginal(mine); setProjectDraft(mine);
-    }).catch(() => {});
   };
   void load();
 
@@ -147,11 +147,18 @@ export function SkillPage(p: { name: string; initialView?: "edit" | "history"; o
         else await putSkillFile(p.name, rel, drafts()[rel]);
       }
       if (projectsDirty()) {
-        for (const slug of projects().map((x) => x.slug)) {
-          if (projectsOriginal().includes(slug) === projectDraft().includes(slug)) continue;
-          const current = (await getProjectSkills(slug)).skills;
-          await putProjectSkills(slug, projectDraft().includes(slug) ? [...current, p.name] : current.filter((n) => n !== p.name));
-        }
+        const changedSlugs = projects()
+          .map((x) => x.slug)
+          .filter((slug) => projectsOriginal().includes(slug) !== projectDraft().includes(slug));
+        await Promise.all(
+          changedSlugs.map(async (slug) => {
+            const current = (await getProjectSkills(slug)).skills;
+            await putProjectSkills(
+              slug,
+              projectDraft().includes(slug) ? [...current, p.name] : current.filter((n) => n !== p.name),
+            );
+          }),
+        );
       }
       await commitAndPush(message);
       setOriginals({ ...originals(), ...drafts() }); setProjectsOriginal(projectDraft());

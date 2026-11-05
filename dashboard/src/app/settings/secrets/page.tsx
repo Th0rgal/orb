@@ -292,10 +292,11 @@ export default function SecretsPage() {
       setNewSecretValue('');
       setNewSecretRegistry('');
       setNewSecretType('generic');
-      await mutateSecrets();
-      if (selectedRegistry === newSecretRegistry) {
-        await loadSecrets(selectedRegistry);
-      } else {
+      await Promise.all([
+        mutateSecrets(),
+        ...(selectedRegistry === newSecretRegistry ? [loadSecrets(selectedRegistry)] : []),
+      ]);
+      if (selectedRegistry !== newSecretRegistry) {
         setSelectedRegistry(newSecretRegistry);
       }
     } catch (err) {
@@ -309,10 +310,10 @@ export default function SecretsPage() {
     if (!confirm(`Delete secret "${key}"?`)) return;
     try {
       await deleteSecret(registry, key);
-      await mutateSecrets();
-      if (selectedRegistry === registry) {
-        await loadSecrets(registry);
-      }
+      await Promise.all([
+        mutateSecrets(),
+        ...(selectedRegistry === registry ? [loadSecrets(registry)] : []),
+      ]);
     } catch (err) {
       showError(err instanceof Error ? err.message : 'Failed to delete secret');
     }

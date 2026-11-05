@@ -202,12 +202,17 @@ impl ManagedManager {
 
     async fn persist_snapshots(&self) {
         let list = self.snapshots.lock().await.clone();
-        let _ = std::fs::create_dir_all(&self.dir);
-        write_atomic(
-            &self.snapshots_path(),
-            &serde_json::to_vec_pretty(&list).unwrap_or_default(),
-            false,
-        );
+        let dir = self.dir.clone();
+        let snapshots_path = self.snapshots_path();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = std::fs::create_dir_all(&dir);
+            write_atomic(
+                &snapshots_path,
+                &serde_json::to_vec_pretty(&list).unwrap_or_default(),
+                false,
+            );
+        })
+        .await;
     }
 
     /// Snapshots visible to a tenant/project, with storage prices.
@@ -663,24 +668,28 @@ impl ManagedManager {
             tracing::info!(snapshots = ?plan, "managed snapshot cleanup (dry-run) would delete");
             return plan;
         }
-        let mut deleted = Vec::new();
-        for name in plan {
-            let snap_prov = snaps
-                .iter()
-                .find(|s| s.name == name)
-                .and_then(|s| s.provider.as_deref())
-                .unwrap_or("boat");
-            let snap_provider = self
-                .provider_for(snap_prov)
-                .or_else(|| self.default_provider());
-            let ok = match &snap_provider {
-                Some(p) => p.delete_snapshot(&name).await.is_ok(),
-                None => true,
-            };
-            if ok {
-                deleted.push(name);
-            }
-        }
+        use futures::stream::{self, StreamExt};
+        let snaps_ref = &snaps;
+        let deleted: Vec<String> = stream::iter(plan)
+            .map(|name| async move {
+                let snap_prov = snaps_ref
+                    .iter()
+                    .find(|s| s.name == name)
+                    .and_then(|s| s.provider.as_deref())
+                    .unwrap_or("boat");
+                let snap_provider = self
+                    .provider_for(snap_prov)
+                    .or_else(|| self.default_provider());
+                let ok = match &snap_provider {
+                    Some(p) => p.delete_snapshot(&name).await.is_ok(),
+                    None => true,
+                };
+                ok.then_some(name)
+            })
+            .buffered(8)
+            .filter_map(std::future::ready)
+            .collect()
+            .await;
         self.snapshots
             .lock()
             .await

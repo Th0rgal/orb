@@ -1566,13 +1566,17 @@ async fn get_workspace_memory(
 async fn get_all_workspaces_memory(
     State(state): State<Arc<super::routes::AppState>>,
 ) -> Json<Vec<WorkspaceMemoryStats>> {
-    let workspaces = state.workspaces.list().await;
-    let mut all_stats = Vec::new();
+    use futures::stream::{self, StreamExt};
 
-    for workspace in workspaces {
-        let stats = get_container_memory_stats(&workspace).await;
-        all_stats.push(stats);
-    }
+    let workspaces = state.workspaces.list().await;
+    let stat_futs: Vec<_> = workspaces
+        .into_iter()
+        .map(|workspace| async move { get_container_memory_stats(&workspace).await })
+        .collect();
+    let all_stats = stream::iter(stat_futs)
+        .buffered(8)
+        .collect::<Vec<_>>()
+        .await;
 
     Json(all_stats)
 }
@@ -1656,16 +1660,28 @@ async fn get_container_memory_stats(workspace: &Workspace) -> WorkspaceMemorySta
     let mut read_ok = false;
     let mut last_error: Option<String> = None;
 
-    for unit in &units {
-        let output = tokio::process::Command::new("systemctl")
-            .args([
-                "show",
-                unit,
-                "-p",
-                "MemoryCurrent,MemoryPeak,MemoryMax,MemoryAvailable",
-            ])
-            .output()
-            .await;
+    use futures::StreamExt;
+    let output_futs: Vec<_> = units
+        .iter()
+        .map(|unit| async move {
+            let output = tokio::process::Command::new("systemctl")
+                .args([
+                    "show",
+                    unit,
+                    "-p",
+                    "MemoryCurrent,MemoryPeak,MemoryMax,MemoryAvailable",
+                ])
+                .output()
+                .await;
+            (unit, output)
+        })
+        .collect();
+    let outputs = futures::stream::iter(output_futs)
+        .buffered(8)
+        .collect::<Vec<_>>()
+        .await;
+
+    for (unit, output) in outputs {
         match &output {
             Ok(o) if !o.status.success() => {
                 last_error = Some(format!(
@@ -2003,33 +2019,46 @@ async fn update_workspace_resources(
                 Vec::new()
             }
         };
-        for unit in units {
-            let mut cmd = tokio::process::Command::new("systemctl");
-            cmd.args(["set-property", "--runtime", &unit]);
-            cmd.arg(format!(
-                "MemoryMax={}",
-                caps.max.as_deref().unwrap_or("infinity")
-            ));
-            cmd.arg(format!(
-                "MemoryHigh={}",
-                caps.high.as_deref().unwrap_or("infinity")
-            ));
-            cmd.arg(format!(
-                "MemorySwapMax={}",
-                caps.swap_max.as_deref().unwrap_or("infinity")
-            ));
-            // CPUWeight defaults back to systemd's 100 when cleared; CPUQuota
-            // is reset with an empty value ("infinity" is not a valid
-            // set-property argument for it).
-            cmd.arg(format!(
-                "CPUWeight={}",
-                caps.cpu_weight.as_deref().unwrap_or("100")
-            ));
-            cmd.arg(format!(
-                "CPUQuota={}",
-                caps.cpu_quota.as_deref().unwrap_or("")
-            ));
-            match cmd.output().await {
+        use futures::StreamExt;
+        let caps_ref = &caps;
+        let set_prop_futs: Vec<_> = units
+            .into_iter()
+            .map(|unit| async move {
+                let mut cmd = tokio::process::Command::new("systemctl");
+                cmd.args(["set-property", "--runtime", &unit]);
+                cmd.arg(format!(
+                    "MemoryMax={}",
+                    caps_ref.max.as_deref().unwrap_or("infinity")
+                ));
+                cmd.arg(format!(
+                    "MemoryHigh={}",
+                    caps_ref.high.as_deref().unwrap_or("infinity")
+                ));
+                cmd.arg(format!(
+                    "MemorySwapMax={}",
+                    caps_ref.swap_max.as_deref().unwrap_or("infinity")
+                ));
+                // CPUWeight defaults back to systemd's 100 when cleared; CPUQuota
+                // is reset with an empty value ("infinity" is not a valid
+                // set-property argument for it).
+                cmd.arg(format!(
+                    "CPUWeight={}",
+                    caps_ref.cpu_weight.as_deref().unwrap_or("100")
+                ));
+                cmd.arg(format!(
+                    "CPUQuota={}",
+                    caps_ref.cpu_quota.as_deref().unwrap_or("")
+                ));
+                (unit, cmd.output().await)
+            })
+            .collect();
+        let results = futures::stream::iter(set_prop_futs)
+            .buffered(8)
+            .collect::<Vec<_>>()
+            .await;
+
+        for (unit, output) in results {
+            match output {
                 Ok(out) if out.status.success() => applied_units.push(unit),
                 Ok(out) => {
                     let stderr = String::from_utf8_lossy(&out.stderr);

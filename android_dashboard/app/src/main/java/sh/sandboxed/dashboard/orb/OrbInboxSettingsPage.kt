@@ -16,6 +16,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 
 /** Same transition as desktop/iOS; an empty choice disables without forgetting. */
 object OrbInboxSummaryChoice {
@@ -48,8 +50,11 @@ fun OrbInboxSummariesSettingsPage(onBack: () -> Unit, modifier: Modifier = Modif
         suspend fun read(path: String): Any? = try { OrbCore.shared.request(path) }
             catch (e: CancellationException) { throw e }
             catch (_: Exception) { null }
-        val chains = OrbJSON.dictList(read("/api/model-routing/chains"))
-        val providers = OrbJSON.dictList(OrbJSON.dict(read("/api/providers?include_all=true&include_unverified=true"))?.get("providers"))
+        val (chains, providers) = coroutineScope {
+            val chainsTask = async { OrbJSON.dictList(read("/api/model-routing/chains")) }
+            val providersTask = async { OrbJSON.dictList(OrbJSON.dict(read("/api/providers?include_all=true&include_unverified=true"))?.get("providers")) }
+            chainsTask.await() to providersTask.await()
+        }
         choices = chains.mapNotNull { it["id"] as? String } + providers.flatMap { provider ->
             val id = provider["id"] as? String ?: return@flatMap emptyList()
             OrbJSON.dictList(provider["models"]).mapNotNull { model -> (model["id"] as? String)?.let { "$id/$it" } }

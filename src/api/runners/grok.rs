@@ -1541,18 +1541,15 @@ async fn run_grok_acp_turn(
     // --no-auto-update). cwd comes from spawn_streaming's working dir and
     // the session/new params.
     let args = vec!["agent".to_string(), "stdio".to_string()];
-    let child = workspace_exec
-        .spawn_streaming(
-            &crate::workspace::configured_project_dir(workspace, work_dir),
-            &cli_path,
-            &args,
-            env,
-        )
-        .await
-        .map_err(|e| format!("failed to spawn grok agent stdio: {e}"))?;
+    let project_dir = crate::workspace::configured_project_dir(workspace, work_dir);
+    let opencode_cfg_path = work_dir.join("opencode.json");
+    let (child_res, config_bytes) = tokio::join!(
+        workspace_exec.spawn_streaming(&project_dir, &cli_path, &args, env),
+        tokio::fs::read(opencode_cfg_path),
+    );
+    let child = child_res.map_err(|e| format!("failed to spawn grok agent stdio: {e}"))?;
 
-    let config = tokio::fs::read(work_dir.join("opencode.json"))
-        .await
+    let config = config_bytes
         .ok()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
         .unwrap_or_default();

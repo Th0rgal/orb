@@ -2,11 +2,13 @@
 //!
 //! Manages inference providers that OpenCode can use (Anthropic, OpenAI, etc.).
 
+use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -487,24 +489,25 @@ impl AIProvider {
 /// In-memory store for AI providers.
 #[derive(Debug, Clone)]
 pub struct AIProviderStore {
-    providers: Arc<RwLock<HashMap<Uuid, AIProvider>>>,
+    providers: Arc<ArcSwap<HashMap<Uuid, AIProvider>>>,
+    writer: Arc<Mutex<()>>,
     /// Pending OAuth authorizations (keyed by provider ID)
-    pending_oauth: Arc<RwLock<HashMap<Uuid, PendingOAuth>>>,
+    pending_oauth: Arc<DashMap<Uuid, PendingOAuth>>,
     storage_path: PathBuf,
 }
 
 impl AIProviderStore {
     pub async fn new(storage_path: PathBuf) -> Self {
         let store = Self {
-            providers: Arc::new(RwLock::new(HashMap::new())),
-            pending_oauth: Arc::new(RwLock::new(HashMap::new())),
+            providers: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            writer: Arc::new(Mutex::new(())),
+            pending_oauth: Arc::new(DashMap::new()),
             storage_path,
         };
 
         // Load existing providers
         if let Ok(loaded) = store.load_from_disk() {
-            let mut providers = store.providers.write().await;
-            *providers = loaded;
+            store.providers.store(Arc::new(loaded));
         }
 
         store
@@ -523,50 +526,20 @@ impl AIProviderStore {
         Ok(providers.into_iter().map(|p| (p.id, p)).collect())
     }
 
-    /// Save providers to disk.
-    async fn save_to_disk(&self) -> Result<(), std::io::Error> {
-        let providers = self.providers.read().await;
+    /// Save a provider map snapshot atomically to disk (`0o600` on Unix) via `tokio::fs`
+    /// without blocking readers.
+    async fn save_snapshot(
+        &self,
+        providers: &HashMap<Uuid, AIProvider>,
+    ) -> Result<(), std::io::Error> {
         let providers_vec: Vec<&AIProvider> = providers.values().collect();
-
-        // Ensure parent directory exists
-        if let Some(parent) = self.storage_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let contents = serde_json::to_string_pretty(&providers_vec)
+        let contents = serde_json::to_vec_pretty(&providers_vec)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        self.write_private_snapshot(contents.as_bytes())
-    }
-
-    fn write_private_snapshot(&self, contents: &[u8]) -> std::io::Result<()> {
-        use std::io::Write;
-        #[cfg(unix)]
-        use std::os::unix::fs::OpenOptionsExt;
-        if let Some(parent) = self.storage_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let temporary = self
-            .storage_path
-            .with_extension(format!("{}.tmp", Uuid::new_v4()));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let result = (|| {
-            let mut file = options.open(&temporary)?;
-            file.write_all(contents)?;
-            file.sync_all()?;
-            std::fs::rename(&temporary, &self.storage_path)
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        result
+        crate::concurrency::write_atomic_async(&self.storage_path, &contents, Some(0o600)).await
     }
 
     pub async fn list(&self) -> Vec<AIProvider> {
-        let providers = self.providers.read().await;
+        let providers = self.providers.load();
         let mut list: Vec<_> = providers.values().cloned().collect();
         // Sort by name
         list.sort_by(|a, b| a.name.cmp(&b.name));
@@ -574,13 +547,12 @@ impl AIProviderStore {
     }
 
     pub async fn get(&self, id: Uuid) -> Option<AIProvider> {
-        let providers = self.providers.read().await;
-        providers.get(&id).cloned()
+        self.providers.load().get(&id).cloned()
     }
 
     /// Get the default provider (first enabled default, or highest-priority enabled).
     pub async fn get_default(&self) -> Option<AIProvider> {
-        let providers = self.providers.read().await;
+        let providers = self.providers.load();
         // Find the one marked as default
         if let Some(provider) = providers.values().find(|p| p.is_default && p.enabled) {
             return Some(provider.clone());
@@ -599,7 +571,7 @@ impl AIProviderStore {
     /// with the lowest `priority` value (i.e. highest priority).  Ties are
     /// broken by UUID for deterministic ordering.
     pub async fn get_by_type(&self, provider_type: ProviderType) -> Option<AIProvider> {
-        let providers = self.providers.read().await;
+        let providers = self.providers.load();
         providers
             .values()
             .filter(|p| p.provider_type == provider_type && p.enabled)
@@ -610,7 +582,7 @@ impl AIProviderStore {
     /// Get all providers of a given type, sorted by priority (lower = higher priority).
     /// Ties are broken by UUID for deterministic ordering.
     pub async fn get_all_by_type(&self, provider_type: ProviderType) -> Vec<AIProvider> {
-        let providers = self.providers.read().await;
+        let providers = self.providers.load();
         let mut matched: Vec<AIProvider> = providers
             .values()
             .filter(|p| p.provider_type == provider_type && p.enabled)
@@ -626,8 +598,8 @@ impl AIProviderStore {
         mut provider: AIProvider,
         reconnect: bool,
     ) -> std::io::Result<()> {
-        let mut providers = self.providers.write().await;
-        let mut updated = providers.clone();
+        let _guard = self.writer.lock().await;
+        let mut updated = (**self.providers.load()).clone();
         if reconnect {
             let latest = updated.get_mut(&provider.id).ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "Account was removed")
@@ -648,29 +620,27 @@ impl AIProviderStore {
             }
             updated.insert(provider.id, provider);
         }
-        let values: Vec<_> = updated.values().collect();
-        let contents = serde_json::to_vec_pretty(&values).map_err(std::io::Error::other)?;
-        self.write_private_snapshot(&contents)?;
-        *providers = updated;
+        self.save_snapshot(&updated).await?;
+        self.providers.store(Arc::new(updated));
         Ok(())
     }
 
     pub async fn add(&self, provider: AIProvider) -> Uuid {
         let id = provider.id;
-        {
-            let mut providers = self.providers.write().await;
+        let _guard = self.writer.lock().await;
+        let mut updated = (**self.providers.load()).clone();
 
-            // If this is the first provider, make it default
-            let is_first = providers.is_empty();
-            let mut prov = provider;
-            if is_first {
-                prov.is_default = true;
-            }
-
-            providers.insert(id, prov);
+        // If this is the first provider, make it default
+        let is_first = updated.is_empty();
+        let mut prov = provider;
+        if is_first {
+            prov.is_default = true;
         }
 
-        if let Err(e) = self.save_to_disk().await {
+        updated.insert(id, prov);
+        self.providers.store(Arc::new(updated.clone()));
+
+        if let Err(e) = self.save_snapshot(&updated).await {
             tracing::error!("Failed to save AI providers to disk: {}", e);
         }
 
@@ -680,32 +650,32 @@ impl AIProviderStore {
     pub async fn update(&self, id: Uuid, mut provider: AIProvider) -> Option<AIProvider> {
         provider.updated_at = chrono::Utc::now();
 
-        {
-            let mut providers = self.providers.write().await;
-            let existing = providers.get(&id)?;
-            let existing_refresh = existing
-                .oauth
-                .as_ref()
-                .map(|oauth| oauth.refresh_token.as_str());
-            let replacement_refresh = provider
-                .oauth
-                .as_ref()
-                .map(|oauth| oauth.refresh_token.as_str());
-            if existing_refresh != replacement_refresh {
-                provider.rejected_oauth_refresh_fingerprint = None;
-            }
-            // If setting as default, unset others
-            if provider.is_default {
-                for p in providers.values_mut() {
-                    if p.id != id {
-                        p.is_default = false;
-                    }
+        let _guard = self.writer.lock().await;
+        let mut updated = (**self.providers.load()).clone();
+        let existing = updated.get(&id)?;
+        let existing_refresh = existing
+            .oauth
+            .as_ref()
+            .map(|oauth| oauth.refresh_token.as_str());
+        let replacement_refresh = provider
+            .oauth
+            .as_ref()
+            .map(|oauth| oauth.refresh_token.as_str());
+        if existing_refresh != replacement_refresh {
+            provider.rejected_oauth_refresh_fingerprint = None;
+        }
+        // If setting as default, unset others
+        if provider.is_default {
+            for p in updated.values_mut() {
+                if p.id != id {
+                    p.is_default = false;
                 }
             }
-            providers.insert(id, provider.clone());
         }
+        updated.insert(id, provider.clone());
+        self.providers.store(Arc::new(updated.clone()));
 
-        if let Err(e) = self.save_to_disk().await {
+        if let Err(e) = self.save_snapshot(&updated).await {
             tracing::error!("Failed to save AI providers to disk: {}", e);
         }
 
@@ -716,59 +686,60 @@ impl AIProviderStore {
     /// first. Every id must exist and share one provider type. Accounts of
     /// that type left out keep their relative order after the listed ones.
     pub async fn reorder(&self, ids: &[Uuid]) -> Result<Vec<AIProvider>, String> {
-        let ordered = {
-            let mut providers = self.providers.write().await;
-            let mut kind = None;
-            if ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
-                return Err("An account is listed twice".into());
+        let _guard = self.writer.lock().await;
+        let mut updated = (**self.providers.load()).clone();
+        let mut kind = None;
+        if ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
+            return Err("An account is listed twice".into());
+        }
+        for id in ids {
+            let p = updated
+                .get(id)
+                .ok_or_else(|| format!("Unknown account {id}"))?;
+            if *kind.get_or_insert(p.provider_type) != p.provider_type {
+                return Err("Accounts belong to different providers".into());
             }
-            for id in ids {
-                let p = providers
-                    .get(id)
-                    .ok_or_else(|| format!("Unknown account {id}"))?;
-                if *kind.get_or_insert(p.provider_type) != p.provider_type {
-                    return Err("Accounts belong to different providers".into());
-                }
-            }
-            let Some(kind) = kind else {
-                return Ok(vec![]);
-            };
-            let mut rest: Vec<&AIProvider> = providers
+        }
+        let Some(kind) = kind else {
+            return Ok(vec![]);
+        };
+        let mut rest: Vec<Uuid> = {
+            let mut r: Vec<&AIProvider> = updated
                 .values()
                 .filter(|p| p.provider_type == kind && !ids.contains(&p.id))
                 .collect();
-            rest.sort_by_key(|p| (p.priority, p.id));
-            let order: Vec<Uuid> = ids
-                .iter()
-                .copied()
-                .chain(rest.iter().map(|p| p.id))
-                .collect();
-            let now = chrono::Utc::now();
-            order
-                .iter()
-                .enumerate()
-                .filter_map(|(rank, id)| {
-                    let p = providers.get_mut(id)?;
-                    p.priority = rank as u32;
-                    p.updated_at = now;
-                    Some(p.clone())
-                })
-                .collect()
+            r.sort_by_key(|p| (p.priority, p.id));
+            r.into_iter().map(|p| p.id).collect()
         };
-        if let Err(e) = self.save_to_disk().await {
+        let mut order: Vec<Uuid> = Vec::with_capacity(ids.len() + rest.len());
+        order.extend_from_slice(ids);
+        order.append(&mut rest);
+        let now = chrono::Utc::now();
+        let ordered: Vec<AIProvider> = order
+            .iter()
+            .enumerate()
+            .filter_map(|(rank, id)| {
+                let p = updated.get_mut(id)?;
+                p.priority = rank as u32;
+                p.updated_at = now;
+                Some(p.clone())
+            })
+            .collect();
+        self.providers.store(Arc::new(updated.clone()));
+        if let Err(e) = self.save_snapshot(&updated).await {
             tracing::error!("Failed to save AI providers to disk: {}", e);
         }
         Ok(ordered)
     }
 
     pub async fn delete(&self, id: Uuid) -> bool {
-        let existed = {
-            let mut providers = self.providers.write().await;
-            providers.remove(&id).is_some()
-        };
+        let _guard = self.writer.lock().await;
+        let mut updated = (**self.providers.load()).clone();
+        let existed = updated.remove(&id).is_some();
 
         if existed {
-            if let Err(e) = self.save_to_disk().await {
+            self.providers.store(Arc::new(updated.clone()));
+            if let Err(e) = self.save_snapshot(&updated).await {
                 tracing::error!("Failed to save AI providers to disk: {}", e);
             }
         }
@@ -778,19 +749,20 @@ impl AIProviderStore {
 
     /// Set a provider as the default.
     pub async fn set_default(&self, id: Uuid) -> bool {
-        let mut providers = self.providers.write().await;
+        let _guard = self.writer.lock().await;
+        let mut updated = (**self.providers.load()).clone();
 
-        if !providers.contains_key(&id) {
+        if !updated.contains_key(&id) {
             return false;
         }
 
-        for p in providers.values_mut() {
+        for p in updated.values_mut() {
             p.is_default = p.id == id;
         }
 
-        drop(providers);
+        self.providers.store(Arc::new(updated.clone()));
 
-        if let Err(e) = self.save_to_disk().await {
+        if let Err(e) = self.save_snapshot(&updated).await {
             tracing::error!("Failed to save AI providers to disk: {}", e);
         }
 
@@ -799,14 +771,12 @@ impl AIProviderStore {
 
     /// Store a pending OAuth authorization.
     pub async fn set_pending_oauth(&self, id: Uuid, pending: PendingOAuth) {
-        let mut pending_oauth = self.pending_oauth.write().await;
-        pending_oauth.insert(id, pending);
+        self.pending_oauth.insert(id, pending);
     }
 
     /// Get and remove a pending OAuth authorization.
     pub async fn take_pending_oauth(&self, id: Uuid) -> Option<PendingOAuth> {
-        let mut pending_oauth = self.pending_oauth.write().await;
-        pending_oauth.remove(&id)
+        self.pending_oauth.remove(&id).map(|(_, v)| v)
     }
 
     /// Update a provider with OAuth credentials.
@@ -815,17 +785,18 @@ impl AIProviderStore {
         id: Uuid,
         credentials: OAuthCredentials,
     ) -> Option<AIProvider> {
-        let mut providers = self.providers.write().await;
+        let _guard = self.writer.lock().await;
+        let mut updated_map = (**self.providers.load()).clone();
 
-        if let Some(provider) = providers.get_mut(&id) {
+        if let Some(provider) = updated_map.get_mut(&id) {
             provider.oauth = Some(credentials);
             provider.rejected_oauth_refresh_fingerprint = None;
             provider.status = ProviderStatus::Connected;
             provider.updated_at = chrono::Utc::now();
             let updated = provider.clone();
-            drop(providers);
+            self.providers.store(Arc::new(updated_map.clone()));
 
-            if let Err(e) = self.save_to_disk().await {
+            if let Err(e) = self.save_snapshot(&updated_map).await {
                 tracing::error!("Failed to save AI providers to disk: {}", e);
             }
 
@@ -842,14 +813,15 @@ impl AIProviderStore {
         id: Uuid,
         fingerprint: Option<String>,
     ) -> Option<AIProvider> {
-        let mut providers = self.providers.write().await;
-        let provider = providers.get_mut(&id)?;
+        let _guard = self.writer.lock().await;
+        let mut updated_map = (**self.providers.load()).clone();
+        let provider = updated_map.get_mut(&id)?;
         provider.rejected_oauth_refresh_fingerprint = fingerprint;
         provider.updated_at = chrono::Utc::now();
         let updated = provider.clone();
-        drop(providers);
+        self.providers.store(Arc::new(updated_map.clone()));
 
-        if let Err(e) = self.save_to_disk().await {
+        if let Err(e) = self.save_snapshot(&updated_map).await {
             tracing::error!("Failed to save AI providers to disk: {}", e);
         }
 
@@ -867,18 +839,24 @@ impl AIProviderStore {
         id: Uuid,
         organization_id: String,
     ) -> Option<AIProvider> {
-        let mut providers = self.providers.write().await;
+        if let Some(existing) = self.providers.load().get(&id) {
+            if existing.organization_id.as_deref() == Some(organization_id.as_str()) {
+                return Some(existing.clone());
+            }
+        }
+        let _guard = self.writer.lock().await;
+        let mut updated_map = (**self.providers.load()).clone();
 
-        if let Some(provider) = providers.get_mut(&id) {
+        if let Some(provider) = updated_map.get_mut(&id) {
             if provider.organization_id.as_deref() == Some(organization_id.as_str()) {
                 return Some(provider.clone());
             }
             provider.organization_id = Some(organization_id);
             provider.updated_at = chrono::Utc::now();
             let updated = provider.clone();
-            drop(providers);
+            self.providers.store(Arc::new(updated_map.clone()));
 
-            if let Err(e) = self.save_to_disk().await {
+            if let Err(e) = self.save_snapshot(&updated_map).await {
                 tracing::error!("Failed to save AI providers to disk: {}", e);
             }
 
@@ -894,13 +872,14 @@ impl AIProviderStore {
         id: Uuid,
         session: Option<String>,
     ) -> Option<AIProvider> {
-        let mut providers = self.providers.write().await;
-        let provider = providers.get_mut(&id)?;
+        let _guard = self.writer.lock().await;
+        let mut updated_map = (**self.providers.load()).clone();
+        let provider = updated_map.get_mut(&id)?;
         provider.mistral_usage_session = session;
         provider.updated_at = chrono::Utc::now();
         let updated = provider.clone();
-        drop(providers);
-        if let Err(e) = self.save_to_disk().await {
+        self.providers.store(Arc::new(updated_map.clone()));
+        if let Err(e) = self.save_snapshot(&updated_map).await {
             tracing::error!("Failed to save AI providers to disk: {}", e);
         }
         Some(updated)
@@ -908,16 +887,17 @@ impl AIProviderStore {
 
     /// Update a provider with an API key.
     pub async fn set_api_key(&self, id: Uuid, api_key: String) -> Option<AIProvider> {
-        let mut providers = self.providers.write().await;
+        let _guard = self.writer.lock().await;
+        let mut updated_map = (**self.providers.load()).clone();
 
-        if let Some(provider) = providers.get_mut(&id) {
+        if let Some(provider) = updated_map.get_mut(&id) {
             provider.api_key = Some(api_key);
             provider.status = ProviderStatus::Connected;
             provider.updated_at = chrono::Utc::now();
             let updated = provider.clone();
-            drop(providers);
+            self.providers.store(Arc::new(updated_map.clone()));
 
-            if let Err(e) = self.save_to_disk().await {
+            if let Err(e) = self.save_snapshot(&updated_map).await {
                 tracing::error!("Failed to save AI providers to disk: {}", e);
             }
 
@@ -929,15 +909,16 @@ impl AIProviderStore {
 
     /// Set provider status (e.g., to NeedsReauth when OAuth token is invalid)
     pub async fn set_status(&self, id: Uuid, status: ProviderStatus) -> Option<AIProvider> {
-        let mut providers = self.providers.write().await;
+        let _guard = self.writer.lock().await;
+        let mut updated_map = (**self.providers.load()).clone();
 
-        if let Some(provider) = providers.get_mut(&id) {
+        if let Some(provider) = updated_map.get_mut(&id) {
             provider.status = status;
             provider.updated_at = chrono::Utc::now();
             let updated = provider.clone();
-            drop(providers);
+            self.providers.store(Arc::new(updated_map.clone()));
 
-            if let Err(e) = self.save_to_disk().await {
+            if let Err(e) = self.save_snapshot(&updated_map).await {
                 tracing::error!("Failed to save AI providers to disk: {}", e);
             }
 

@@ -184,13 +184,20 @@ pub(crate) async fn user_wait_starts_for_runs_checked(
     store: &dyn MissionStore,
     runs: impl IntoIterator<Item = &MissionRun>,
 ) -> (HashMap<Uuid, Option<String>>, bool) {
-    let mut waits = HashMap::new();
+    let waiting_runs: Vec<&MissionRun> = runs
+        .into_iter()
+        .filter(|run| run.execution_state == MissionExecutionState::WaitingUser)
+        .collect();
+    let results = futures::future::join_all(
+        waiting_runs
+            .iter()
+            .map(|run| user_wait_tool_started_at_checked(store, run)),
+    )
+    .await;
+    let mut waits = HashMap::with_capacity(waiting_runs.len());
     let mut complete = true;
-    for run in runs {
-        if run.execution_state != MissionExecutionState::WaitingUser {
-            continue;
-        }
-        let started = match user_wait_tool_started_at_checked(store, run).await {
+    for (run, result) in waiting_runs.into_iter().zip(results) {
+        let started = match result {
             Ok(started) => started,
             Err(error) => {
                 tracing::warn!(
@@ -665,24 +672,37 @@ pub async fn list_missions(
         matched.into_iter().skip(offset).take(limit).collect()
     };
 
-    populate_activity(&control, &mut missions).await;
-    let callback_parents = callback_parent::links(&missions, &control.mission_store).await;
-    let active_runs: HashMap<Uuid, MissionRun> = control
-        .mission_store
-        .list_active_mission_runs()
-        .await
+    let mission_ids: Vec<Uuid> = missions.iter().map(|m| m.id).collect();
+    let (
+        activity_inputs,
+        callback_parents,
+        active_runs_res,
+        (remote_handles, remote_outcomes),
+        continuation_summaries_res,
+        recoveries,
+        committed_transfers_res,
+    ) = tokio::join!(
+        load_activity_inputs(&control, &mission_ids),
+        callback_parent::links(&missions, &control.mission_store),
+        control.mission_store.list_active_mission_runs(),
+        remote_job_projection_inputs(&state),
+        continuations::summaries(&control.mission_store),
+        usage_limit_wait::remote_recoveries(&state.config.working_dir),
+        control
+            .mission_store
+            .committed_machine_transfers(&mission_ids),
+    );
+    apply_activity_inputs(&mut missions, activity_inputs);
+    let active_runs: HashMap<Uuid, MissionRun> = active_runs_res
         .map_err(internal_error)?
         .into_iter()
         .map(|run| (run.mission_id, run))
         .collect();
     let wait_starts =
         user_wait_starts_for_runs(control.mission_store.as_ref(), active_runs.values()).await;
-    let (remote_handles, remote_outcomes) = remote_job_projection_inputs(&state).await;
     let now = chrono::Utc::now();
-    let continuation_summaries = continuations::summaries(&control.mission_store)
-        .await
-        .map_err(internal_error)?;
-    let recoveries = usage_limit_wait::remote_recoveries(&state.config.working_dir).await;
+    let continuation_summaries = continuation_summaries_res.map_err(internal_error)?;
+    let committed_transfers = committed_transfers_res.map_err(internal_error)?;
     let mut values: Vec<serde_json::Value> = missions
         .into_iter()
         .map(|mission| {
@@ -708,15 +728,6 @@ pub async fn list_missions(
             )
         })
         .collect();
-    let mission_ids: Vec<Uuid> = values
-        .iter()
-        .filter_map(|v| v["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()))
-        .collect();
-    let committed_transfers = control
-        .mission_store
-        .committed_machine_transfers(&mission_ids)
-        .await
-        .map_err(internal_error)?;
     for value in &mut values {
         if let Some(id) = value["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()) {
             usage_limit_wait::attach_recovery(value, recoveries.get(&id));
@@ -864,25 +875,28 @@ pub async fn fleet_health(
     let control = control_for_user(&state, &user).await;
 
     // Probe the control actor; a wedged scheduler surfaces as a failed probe.
-    let running = get_running_missions(&control).await.map(|r| r.len());
-    let (tx, rx) = oneshot::channel();
-    let queue_depth = if control
-        .cmd_tx
-        .send(ControlCommand::GetQueue { respond: tx })
-        .await
-        .is_ok()
-    {
-        rx.await.ok().map(|q| q.len())
-    } else {
-        None
+    let queue_probe = async {
+        let (tx, rx) = oneshot::channel();
+        if control
+            .cmd_tx
+            .send(ControlCommand::GetQueue { respond: tx })
+            .await
+            .is_ok()
+        {
+            rx.await.ok().map(|q| q.len())
+        } else {
+            None
+        }
     };
+    let (running, queue_depth, missions_res) = tokio::join!(
+        get_running_missions(&control),
+        queue_probe,
+        control.mission_store.count_missions_by_status(),
+    );
+    let running = running.map(|r| r.len());
     let control_responsive = running.is_ok() && queue_depth.is_some();
 
-    let missions = control
-        .mission_store
-        .count_missions_by_status()
-        .await
-        .map_err(internal_error)?;
+    let missions = missions_res.map_err(internal_error)?;
 
     let cfg = &state.config;
     let workspace_root = crate::workspace::configured_mission_workspace_root(&cfg.working_dir);
@@ -1045,27 +1059,43 @@ pub async fn list_tracks(
 
     // Projection of the situation builder: the same derived state every
     // other surface renders, looked up once per project.
-    let mut situations: std::collections::HashMap<
-        String,
-        std::collections::HashMap<String, String>,
-    > = std::collections::HashMap::new();
+    let mut unique_projects: Vec<String> = Vec::new();
+    let mut seen_projects: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for summary in &tracks {
+        if let (Some(project), Some(_)) = (summary.project.as_deref(), summary.track.as_deref()) {
+            if seen_projects.insert(project.to_string()) {
+                unique_projects.push(project.to_string());
+            }
+        }
+    }
+    let loaded_situations: Vec<(String, std::collections::HashMap<String, String>)> = {
+        use futures::stream::{self, StreamExt};
+        stream::iter(unique_projects)
+            .map(|project| {
+                let state = Arc::clone(&state);
+                async move {
+                    let situation =
+                        crate::api::projects_overview::load_project_situation(&state, &project)
+                            .await;
+                    let item_states = situation
+                        .items
+                        .into_iter()
+                        .map(|item| (item.key, item.derived_state.as_str().to_string()))
+                        .collect();
+                    (project, item_states)
+                }
+            })
+            .buffer_unordered(8)
+            .collect()
+            .await
+    };
+    let situations: std::collections::HashMap<String, std::collections::HashMap<String, String>> =
+        loaded_situations.into_iter().collect();
     for summary in &mut tracks {
         let (Some(project), Some(track)) = (summary.project.as_deref(), summary.track.as_deref())
         else {
             continue;
         };
-        if !situations.contains_key(project) {
-            let situation =
-                crate::api::projects_overview::load_project_situation(&state, project).await;
-            situations.insert(
-                project.to_string(),
-                situation
-                    .items
-                    .into_iter()
-                    .map(|item| (item.key, item.derived_state.as_str().to_string()))
-                    .collect(),
-            );
-        }
         summary.derived_state = situations
             .get(project)
             .and_then(|states| states.get(track))
@@ -1074,24 +1104,36 @@ pub async fn list_tracks(
     Ok(Json(tracks))
 }
 
-/// Enrich missions with computed activity timestamps (P#5): the most recent
-/// event and assistant output from the event log, plus a `last_activity_at`
-/// convenience = max(updated_at, last_agent_event_at). Best-effort: a store
-/// without an event log (or a failed query) leaves the computed fields unset.
-pub(super) async fn populate_activity(control: &ControlState, missions: &mut [Mission]) {
-    if missions.is_empty() {
-        return;
+pub(super) type ActivityInputs = (
+    HashMap<Uuid, (Option<String>, Option<String>)>,
+    Option<super::dispatch_capacity::DispatchCapacity>,
+);
+
+pub(super) async fn load_activity_inputs(
+    control: &ControlState,
+    ids: &[Uuid],
+) -> Option<ActivityInputs> {
+    if ids.is_empty() {
+        return None;
     }
-    let ids: Vec<Uuid> = missions.iter().map(|m| m.id).collect();
-    let activity = match control.mission_store.get_mission_activity(&ids).await {
-        Ok(map) => map,
+    let (activity_res, capacity_guard) = tokio::join!(
+        control.mission_store.get_mission_activity(ids),
+        control.dispatch_capacity.read(),
+    );
+    match activity_res {
+        Ok(map) => Some((map, capacity_guard.clone())),
         Err(e) => {
             tracing::warn!("Failed to load mission activity: {}", e);
-            return;
+            None
         }
+    }
+}
+
+pub(super) fn apply_activity_inputs(missions: &mut [Mission], inputs: Option<ActivityInputs>) {
+    let Some((activity, capacity)) = inputs else {
+        return;
     };
     let now = chrono::Utc::now();
-    let capacity = control.dispatch_capacity.read().await.clone();
     for mission in missions.iter_mut() {
         if let Some((last_event, last_output)) = activity.get(&mission.id) {
             mission.activity.last_agent_event_at = last_event.clone();
@@ -1126,6 +1168,19 @@ pub(super) async fn populate_activity(control: &ControlState, missions: &mut [Mi
             })
             .map(str::to_string);
     }
+}
+
+/// Enrich missions with computed activity timestamps (P#5): the most recent
+/// event and assistant output from the event log, plus a `last_activity_at`
+/// convenience = max(updated_at, last_agent_event_at). Best-effort: a store
+/// without an event log (or a failed query) leaves the computed fields unset.
+pub(super) async fn populate_activity(control: &ControlState, missions: &mut [Mission]) {
+    if missions.is_empty() {
+        return;
+    }
+    let ids: Vec<Uuid> = missions.iter().map(|m| m.id).collect();
+    let inputs = load_activity_inputs(control, &ids).await;
+    apply_activity_inputs(missions, inputs);
 }
 
 /// `mission_health_verdict`, except a mission waiting for a parallel slot
@@ -1218,9 +1273,25 @@ pub(crate) fn mission_health_verdict(
 }
 
 pub(super) async fn populate_workspace_names(state: &Arc<AppState>, missions: &mut [Mission]) {
+    if missions.is_empty() {
+        return;
+    }
+    let mut unique_ids: Vec<Uuid> = Vec::new();
+    let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for mission in missions.iter() {
+        if seen.insert(mission.workspace_id) {
+            unique_ids.push(mission.workspace_id);
+        }
+    }
+    let resolved =
+        futures::future::join_all(unique_ids.into_iter().map(|ws_id| async move {
+            state.workspaces.get(ws_id).await.map(|ws| (ws_id, ws.name))
+        }))
+        .await;
+    let names: HashMap<Uuid, String> = resolved.into_iter().flatten().collect();
     for mission in missions {
-        if let Some(workspace) = state.workspaces.get(mission.workspace_id).await {
-            mission.workspace_name = Some(workspace.name);
+        if let Some(name) = names.get(&mission.workspace_id) {
+            mission.workspace_name = Some(name.clone());
         }
     }
 }

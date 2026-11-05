@@ -45,10 +45,13 @@ enum ClientMsg {
     Resize { c: u16, r: u16 },
 }
 
+/// Bounded channel capacity for incoming PTY input/resize frames per session.
+const PTY_INPUT_CHANNEL_CAPACITY: usize = 256;
+
 /// A pooled console session that can be reused across WebSocket reconnections.
 struct PooledSession {
-    /// Channel to send input/resize commands to the PTY.
-    to_pty_tx: mpsc::UnboundedSender<ClientMsg>,
+    /// Bounded channel to send input/resize commands to the PTY.
+    to_pty_tx: mpsc::Sender<ClientMsg>,
     /// When this session was last disconnected (None if currently in use).
     disconnected_at: Option<Instant>,
     /// Active WebSocket connections attached to this session.
@@ -217,7 +220,9 @@ async fn handle_existing_session(
         match msg {
             Message::Text(t) => {
                 if let Ok(parsed) = serde_json::from_str::<ClientMsg>(&t) {
-                    let _ = to_pty_tx.send(parsed);
+                    if to_pty_tx.send(parsed).await.is_err() {
+                        break;
+                    }
                 }
             }
             Message::Binary(_) => {}
@@ -311,7 +316,7 @@ async fn handle_new_session(mut socket: WebSocket, state: Arc<AppState>, session
         }
     };
 
-    let (to_pty_tx, mut to_pty_rx) = mpsc::unbounded_channel::<ClientMsg>();
+    let (to_pty_tx, mut to_pty_rx) = mpsc::channel::<ClientMsg>(PTY_INPUT_CHANNEL_CAPACITY);
     let (from_pty_tx, _from_pty_rx) = broadcast::channel::<String>(1024);
 
     // Writer/resizer thread.
@@ -437,7 +442,9 @@ async fn handle_new_session(mut socket: WebSocket, state: Arc<AppState>, session
         match msg {
             Message::Text(t) => {
                 if let Ok(parsed) = serde_json::from_str::<ClientMsg>(&t) {
-                    let _ = to_pty_tx.send(parsed);
+                    if to_pty_tx.send(parsed).await.is_err() {
+                        break;
+                    }
                 }
             }
             Message::Binary(_) => {}
@@ -812,7 +819,7 @@ async fn handle_new_workspace_shell(
         }
     };
 
-    let (to_pty_tx, mut to_pty_rx) = mpsc::unbounded_channel::<ClientMsg>();
+    let (to_pty_tx, mut to_pty_rx) = mpsc::channel::<ClientMsg>(PTY_INPUT_CHANNEL_CAPACITY);
     let (from_pty_tx, _from_pty_rx) = broadcast::channel::<String>(1024);
 
     let master_for_writer = pair.master;
@@ -933,7 +940,9 @@ async fn handle_new_workspace_shell(
         match msg {
             Message::Text(t) => {
                 if let Ok(parsed) = serde_json::from_str::<ClientMsg>(&t) {
-                    let _ = to_pty_tx.send(parsed);
+                    if to_pty_tx.send(parsed).await.is_err() {
+                        break;
+                    }
                 }
             }
             Message::Binary(_) => {}

@@ -201,8 +201,10 @@ fn mask_token_hint(token: &str) -> String {
 /// Core is the only holder of the token: missions get secrets through the
 /// broker (`secret_broker.rs`), never the token itself.
 async fn resolve_access_token(state: &Arc<AppState>) -> Option<(String, &'static str)> {
-    let bw = state.settings.get_bitwarden().await;
-    let crypto_key = load_encryption_key(&state.config.working_dir).await;
+    let (bw, crypto_key) = tokio::join!(
+        state.settings.get_bitwarden(),
+        load_encryption_key(&state.config.working_dir),
+    );
 
     if let Some(enc) = bw.encrypted_access_token.as_deref() {
         let trimmed = enc.trim();
@@ -341,9 +343,13 @@ async fn run_bws(
 
 /// GET /api/bitwarden/status
 async fn get_status(State(state): State<Arc<AppState>>) -> Json<BitwardenStatusResponse> {
-    let bw = state.settings.get_bitwarden().await;
-    let resolved = resolve_access_token(&state).await;
-    let bws_version = detect_bws_version().await;
+    let secret_broker = super::secret_broker::broker(&state);
+    let (bw, resolved, bws_version, pending_requests) = tokio::join!(
+        state.settings.get_bitwarden(),
+        resolve_access_token(&state),
+        detect_bws_version(),
+        secret_broker.pending_count(),
+    );
     let (default_project_id, project_bindings) = effective_bindings(&bw);
 
     Json(BitwardenStatusResponse {
@@ -356,7 +362,7 @@ async fn get_status(State(state): State<Arc<AppState>>) -> Json<BitwardenStatusR
         default_project_id,
         project_bindings,
         default_access: bw.default_access,
-        pending_requests: super::secret_broker::broker(&state).pending_count().await,
+        pending_requests,
     })
 }
 
@@ -786,15 +792,14 @@ pub struct SecretWithProject {
 async fn list_every_secret(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<SecretWithProject>>, ApiError> {
-    let names: BTreeMap<String, String> = list_projects_raw(&state)
-        .await?
-        .into_iter()
-        .map(|p| (p.id, p.name))
-        .collect();
-    let secrets = super::secret_broker::broker(&state)
-        .list_all(&state, true)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+    let secret_broker = super::secret_broker::broker(&state);
+    let (projects_res, secrets_res) = tokio::join!(
+        list_projects_raw(&state),
+        secret_broker.list_all(&state, true),
+    );
+    let names: BTreeMap<String, String> =
+        projects_res?.into_iter().map(|p| (p.id, p.name)).collect();
+    let secrets = secrets_res.map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
     Ok(Json(
         secrets
             .into_iter()

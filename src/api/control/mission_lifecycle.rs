@@ -994,14 +994,16 @@ pub async fn delete_mission(
     // Deleting a boss cascades to its board records. Preserve those receipts
     // too. Board-local keys are scoped by the action issuer, not compared
     // across boards (common keys such as "build" are unrelated).
+    let board_task_lists = futures::future::try_join_all(
+        ids_to_delete
+            .iter()
+            .map(|id| control.mission_store.list_board_tasks(*id)),
+    )
+    .await
+    .map_err(internal_error)?;
     let mut board_task_ids = HashSet::new();
-    for id in &ids_to_delete {
-        for task in control
-            .mission_store
-            .list_board_tasks(*id)
-            .await
-            .map_err(internal_error)?
-        {
+    for tasks in board_task_lists {
+        for task in tasks {
             board_task_ids.insert(task.id.to_string());
         }
     }
@@ -1015,10 +1017,13 @@ pub async fn delete_mission(
         )
         .map_err(|e| (StatusCode::CONFLICT, e))?
     };
-    for (action_id, prior_id) in replacements {
-        let lineage = mission_create::replacement_parent_lineage(&control.mission_store, prior_id)
-            .await
-            .map_err(|e| (StatusCode::CONFLICT, e))?;
+    let replacement_lineages =
+        futures::future::join_all(replacements.iter().map(|(_, prior_id)| {
+            mission_create::replacement_parent_lineage(&control.mission_store, *prior_id)
+        }))
+        .await;
+    for ((action_id, _), lineage_res) in replacements.into_iter().zip(replacement_lineages) {
+        let lineage = lineage_res.map_err(|e| (StatusCode::CONFLICT, e))?;
         if lineage.iter().any(|id| ids_to_delete.contains(id)) {
             return Err((StatusCode::CONFLICT, format!("Accepted MCP action {action_id} inherits this replacement parent; settle it before deleting")));
         }
@@ -1041,10 +1046,20 @@ pub async fn delete_mission(
     ordered_ids.push(mission_id);
     ordered_ids.extend(final_child_ids.iter().copied());
 
-    for id in &ordered_ids {
-        machine_transfer::guard_active_transfer(&control.mission_store, *id)
-            .await
-            .map_err(|e| (StatusCode::CONFLICT, e))?;
+    let per_id_checks = futures::future::join_all(ordered_ids.iter().map(|id| {
+        let store = &control.mission_store;
+        let working_dir = &state.config.working_dir;
+        let id = *id;
+        async move {
+            tokio::join!(
+                machine_transfer::guard_active_transfer(store, id),
+                usage_limit_wait::remote_wait(working_dir, id),
+            )
+        }
+    }))
+    .await;
+    for (id, (transfer_res, remote_wait_opt)) in ordered_ids.iter().zip(per_id_checks) {
+        transfer_res.map_err(|e| (StatusCode::CONFLICT, e))?;
         workspace_purge::require_history_deletable_locked(&state, *id)
             .map_err(|e| (StatusCode::CONFLICT, e))?;
         if state
@@ -1060,10 +1075,7 @@ pub async fn delete_mission(
                 ),
             ));
         }
-        if usage_limit_wait::remote_wait(&state.config.working_dir, *id)
-            .await
-            .is_some_and(|w| w.resume_at.is_some())
-        {
+        if remote_wait_opt.is_some_and(|w| w.resume_at.is_some()) {
             return Err((
                 StatusCode::CONFLICT,
                 format!("Mission ({id}) has a scheduled remote replay; cancel it before deleting."),
@@ -1071,19 +1083,24 @@ pub async fn delete_mission(
         }
     }
     // Durable jobs may outlive runners; fail closed before filesystem/history mutation.
-    if crate::api::durable_jobs::has_unsettled_missions_jobs(&state, &user, &ids_to_delete)
-        .await
-        .map_err(|error| (StatusCode::CONFLICT, error))?
-    {
+    // The actor also takes DISPATCH_ADMISSION. Never RPC into it while
+    // holding that mutex: persisted runs, accepted queues and assignment owners
+    // provide the authoritative final check under the same admission fence.
+    let (unsettled_jobs_res, metadata_res, cloud_execs_res, ownership_res) = tokio::join!(
+        crate::api::durable_jobs::has_unsettled_missions_jobs(&state, &user, &ids_to_delete),
+        control
+            .mission_store
+            .get_missions_metadata_by_ids(&ordered_ids),
+        control.mission_store.cloud_executions(),
+        execution_ownership::snapshot_for_ids(&state.control, &ids_to_delete),
+    );
+    if unsettled_jobs_res.map_err(|error| (StatusCode::CONFLICT, error))? {
         return Err((
             StatusCode::CONFLICT,
             "Workspace jobs are still running or uncertain; settle them before deleting".into(),
         ));
     }
-    let missions_by_id: HashMap<Uuid, Mission> = control
-        .mission_store
-        .get_missions_metadata_by_ids(&ordered_ids)
-        .await
+    let missions_by_id: HashMap<Uuid, Mission> = metadata_res
         .map_err(internal_error)?
         .into_iter()
         .map(|m| (m.id, m))
@@ -1091,36 +1108,24 @@ pub async fn delete_mission(
     if !missions_by_id.contains_key(&mission_id) {
         return Err((StatusCode::NOT_FOUND, "Mission not found".to_string()));
     }
-    if control
-        .mission_store
-        .cloud_executions()
-        .await
-        .map_err(internal_error)?
-        .iter()
-        .any(|e| {
-            ids_to_delete.contains(&e.mission_id)
-                && e.turns.iter().any(|t| {
-                    !t.phase.terminal()
-                        && t.phase != crate::api::cloud_agents::Phase::Incompatible
-                        && (matches!(
-                            t.phase,
-                            crate::api::cloud_agents::Phase::Queued
-                                | crate::api::cloud_agents::Phase::Submitting
-                                | crate::api::cloud_agents::Phase::Running
-                                | crate::api::cloud_agents::Phase::CancelRequested
-                        ) || missions_by_id.get(&e.mission_id).map(|m| m.status)
-                            != Some(MissionStatus::Acknowledged))
-                })
-        })
-    {
+    if cloud_execs_res.map_err(internal_error)?.iter().any(|e| {
+        ids_to_delete.contains(&e.mission_id)
+            && e.turns.iter().any(|t| {
+                !t.phase.terminal()
+                    && t.phase != crate::api::cloud_agents::Phase::Incompatible
+                    && (matches!(
+                        t.phase,
+                        crate::api::cloud_agents::Phase::Queued
+                            | crate::api::cloud_agents::Phase::Submitting
+                            | crate::api::cloud_agents::Phase::Running
+                            | crate::api::cloud_agents::Phase::CancelRequested
+                    ) || missions_by_id.get(&e.mission_id).map(|m| m.status)
+                        != Some(MissionStatus::Acknowledged))
+            })
+    }) {
         return Err((StatusCode::CONFLICT, "Cloud work is still active or unconfirmed; archive the conversation or confirm cancellation before deleting its receipts".into()));
     }
-    // The actor also takes DISPATCH_ADMISSION. Never RPC into it while
-    // holding that mutex: persisted runs, accepted queues and assignment owners
-    // provide the authoritative final check under the same admission fence.
-    let ownership = execution_ownership::snapshot_for_ids(&state.control, &ids_to_delete)
-        .await
-        .map_err(internal_error)?;
+    let ownership = ownership_res.map_err(internal_error)?;
     for id in &ordered_ids {
         match ownership.delete_blocker(*id) {
             execution_ownership::DeleteBlocker::None => {}

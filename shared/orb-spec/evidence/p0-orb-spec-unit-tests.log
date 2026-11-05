@@ -1,8 +1,7 @@
-   Compiling orb-spec v1.3.0 (/var/lib/sandboxed-node/work/8c1be306-e36e-4bf0-a1c0-4014c6cb8dcd/worktrees/orb-slice2/crates/orb-spec)
-    Finished `test` profile [unoptimized] target(s) in 2.20s
-     Running unittests src/lib.rs (/tmp/orb-r4-target/debug/deps/orb_spec-8374b4127ccc7fbc)
+    Finished `test` profile [unoptimized] target(s) in 0.23s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-d791927b4d2534f0)
 
-running 40 tests
+running 41 tests
 test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
 test privilege_bunker_deploy_tests::deploy_gate_allows_dev_zero_touch_and_requires_session_grant_on_prod ... ok
 test privilege_bunker_deploy_tests::privilege_step_enforces_biometric_session_clock_and_bunker_fence ... ok
@@ -24,6 +23,7 @@ test stateful_tests::r4_scroll_policy_and_zero_copy_slice_steppers_verified ... 
 test stateful_tests::slot_bypass_step_enforces_operator_force_bounds_and_regular_independence ... ok
 test stateful_tests::stream_simd_isa_gated_scanner_matches_scalar_across_1024_differential_inputs ... ok
 test stateful_tests::vm_cap_admit_pool_override_and_zero_provider_caps_verified ... ok
+test stateful_tests::wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts ... ok
 test stats_settle_tests::settle_adds_once_ignores_replays_and_saturates ... ok
 test tests::approval_gate_needs_every_condition_and_confirms_critical ... ok
 test tests::attribution_step_rejects_forged_hints_and_never_returns_empty ... ok
@@ -44,5 +44,5 @@ test tests::wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gate
 test tests::wave12_node_disk_pressure_and_placement_kernels_match_specs ... ok
 test tests::writer_reuse_gate_enforces_continuation_and_retag_rules ... ok
 
-test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
 

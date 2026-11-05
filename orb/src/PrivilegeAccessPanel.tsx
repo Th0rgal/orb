@@ -46,8 +46,10 @@ export function PrivilegeAccessPanel(p: { onError: (message: string) => void; in
   const now = useNow(1000);
   const load = async () => {
     if (p.initial) return;
-    try { setSnap(await getPrivilegeAccess()); } catch { /* the page reports connection errors */ }
-    try { setMesh(await getMeshStatus()); } catch { /* mesh status is optional */ }
+    await Promise.all([
+      getPrivilegeAccess().then(setSnap).catch(() => { /* the page reports connection errors */ }),
+      getMeshStatus().then(setMesh).catch(() => { /* mesh status is optional */ }),
+    ]);
   };
   onMount(() => {
     void load();

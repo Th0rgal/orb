@@ -180,30 +180,30 @@ pub async fn ask_send(
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "Mission not found".to_string()))?;
 
-    // Resolve the assistant model/config (Settings override → env → default).
-    let model_override = state.settings.get().await.ask_assistant_model;
-    let cfg = crate::api::metadata_llm::build_assistant_llm_config(
-        &state.ai_providers,
-        &state.chain_store,
-        model_override,
-    )
-    .await
-    .ok_or((
+    // Resolve the assistant model/config, Ask store, and live workspace concurrently
+    // now that mission ownership is verified.
+    let (cfg_opt, ask_store_res, workspace) = tokio::join!(
+        async {
+            let model_override = state.settings.get().await.ask_assistant_model;
+            crate::api::metadata_llm::build_assistant_llm_config(
+                &state.ai_providers,
+                &state.chain_store,
+                model_override,
+            )
+            .await
+        },
+        super::ask_store(&state.config),
+        crate::workspace::resolve_workspace(
+            &state.workspaces,
+            &state.config,
+            Some(mission.workspace_id),
+        ),
+    );
+    let cfg = cfg_opt.ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "No assistant LLM configured (set a Cerebras key or ASK_ASSISTANT_MODEL)".to_string(),
     ))?;
-
-    let ask_store = super::ask_store(&state.config).await.map_err(internal)?;
-
-    // Resolve the live workspace + working directory before mutating ask_store
-    // so unavailable/remote mission workspaces reject cleanly with 409 without
-    // leaving an empty orphan thread or triggering ambiguous 500 reconciliation.
-    let workspace = crate::workspace::resolve_workspace(
-        &state.workspaces,
-        &state.config,
-        Some(mission.workspace_id),
-    )
-    .await;
+    let ask_store = ask_store_res.map_err(internal)?;
     let nspawn_container = workspace.workspace_type == crate::workspace::WorkspaceType::Container
         && crate::workspace::use_nspawn_for_workspace(&workspace);
     let base_work_dir = resolve_base_work_dir(
@@ -333,25 +333,27 @@ pub async fn ask_send_stream(
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "Mission not found".to_string()))?;
 
-    let cfg = crate::api::metadata_llm::build_assistant_llm_config(
-        &state.ai_providers,
-        &state.chain_store,
-        state.settings.get().await.ask_assistant_model,
-    )
-    .await
-    .ok_or((
+    let (cfg_opt, ask_store_res, workspace) = tokio::join!(
+        async {
+            crate::api::metadata_llm::build_assistant_llm_config(
+                &state.ai_providers,
+                &state.chain_store,
+                state.settings.get().await.ask_assistant_model,
+            )
+            .await
+        },
+        super::ask_store(&state.config),
+        crate::workspace::resolve_workspace(
+            &state.workspaces,
+            &state.config,
+            Some(mission.workspace_id),
+        ),
+    );
+    let cfg = cfg_opt.ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "No assistant LLM configured (set a Cerebras key or ASK_ASSISTANT_MODEL)".to_string(),
     ))?;
-
-    let ask_store = super::ask_store(&state.config).await.map_err(internal)?;
-
-    let workspace = crate::workspace::resolve_workspace(
-        &state.workspaces,
-        &state.config,
-        Some(mission.workspace_id),
-    )
-    .await;
+    let ask_store = ask_store_res.map_err(internal)?;
     let nspawn_container = workspace.workspace_type == crate::workspace::WorkspaceType::Container
         && crate::workspace::use_nspawn_for_workspace(&workspace);
     let base_work_dir = resolve_base_work_dir(
@@ -442,7 +444,7 @@ pub async fn ask_send_stream(
     let title_store = Arc::clone(&ask_store);
     let cleanup_base = base_work_dir.clone();
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<super::AskStreamEvent>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<super::AskStreamEvent>(128);
     tokio::spawn(async move {
         let ok = run_ask_turn_streaming(&turn, &content, tx).await;
         // Only title a new thread if the turn actually produced an answer
@@ -508,13 +510,15 @@ pub async fn get_ask_thread(
         .ok_or((StatusCode::NOT_FOUND, "Mission not found".to_string()))?;
 
     let ask_store = super::ask_store(&state.config).await.map_err(internal)?;
-    let thread = ask_store
-        .get_thread(thread_id)
-        .await
+    let (thread_res, messages_res) = tokio::join!(
+        ask_store.get_thread(thread_id),
+        ask_store.list_messages(thread_id),
+    );
+    let thread = thread_res
         .map_err(internal)?
         .filter(|t| t.mission_id == mission_id)
         .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
-    let messages = ask_store.list_messages(thread_id).await.map_err(internal)?;
+    let messages = messages_res.map_err(internal)?;
     Ok(Json(AskThreadDetail { thread, messages }))
 }
 

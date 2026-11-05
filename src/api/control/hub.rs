@@ -34,92 +34,95 @@ pub struct DesktopSessionInfo {
 
 // MissionStore trait and implementations are in mission_store module
 
+#[derive(Debug)]
+enum ToolResolutionSlot {
+    Waiting(oneshot::Sender<serde_json::Value>),
+    Early {
+        value: serde_json::Value,
+        inserted_at: std::time::Instant,
+        ack_tx: Option<oneshot::Sender<()>>,
+    },
+}
+
+const EARLY_RESULT_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const MAX_EARLY_RESULTS: usize = 256;
+const REGISTER_GRACE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Shared tool hub used to await frontend tool results.
 ///
-/// Supports both orderings:
+/// Supports both orderings with 0ms lock-free slot handoff:
 /// - register-then-resolve (normal flow)
 /// - resolve-then-register (frontend submits answer before backend registers)
 #[derive(Debug)]
 pub struct FrontendToolHub {
-    pub(super) pending: Mutex<HashMap<String, oneshot::Sender<serde_json::Value>>>,
-    pub(super) early_results: Mutex<HashMap<String, serde_json::Value>>,
+    slots: dashmap::DashMap<String, ToolResolutionSlot>,
     /// Missions currently blocked awaiting a human-provided frontend tool
     /// result (e.g. `AskUserQuestion`). Ref-counted so a mission with more
     /// than one concurrent frontend tool call is only cleared once its last
     /// wait ends. The stuck-mission watchdog consults this so a mission that
     /// is legitimately waiting for the user is never auto-interrupted for
     /// "inactivity" — humans routinely take longer than the stall threshold
-    /// to answer. A `std::sync::Mutex` (not tokio) so `WaitingGuard::drop`
-    /// can release the slot synchronously on the cancellation path.
-    pub(super) waiting_missions: std::sync::Mutex<HashMap<Uuid, usize>>,
+    /// to answer.
+    pub(super) waiting_missions: dashmap::DashMap<Uuid, usize>,
 }
 
 impl FrontendToolHub {
     pub fn new() -> Self {
         Self {
-            pending: Mutex::new(HashMap::new()),
-            early_results: Mutex::new(HashMap::new()),
-            waiting_missions: std::sync::Mutex::new(HashMap::new()),
+            slots: dashmap::DashMap::new(),
+            waiting_missions: dashmap::DashMap::new(),
         }
     }
 
     /// Register a tool call that expects a frontend-provided result.
     /// If the result was already submitted (resolve-before-register), it is
-    /// delivered immediately.
+    /// delivered immediately in 0ms and wakes any grace-waiting `resolve` caller.
     pub async fn register(&self, tool_call_id: String) -> oneshot::Receiver<serde_json::Value> {
         let (tx, rx) = oneshot::channel();
 
-        {
-            let mut early = self.early_results.lock().await;
-            if let Some(result) = early.remove(&tool_call_id) {
-                let _ = tx.send(result);
-                return rx;
+        match self.slots.entry(tool_call_id) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                if matches!(entry.get(), ToolResolutionSlot::Early { .. }) {
+                    let (_, slot) = entry.remove_entry();
+                    if let ToolResolutionSlot::Early { value, ack_tx, .. } = slot {
+                        let _ = tx.send(value);
+                        if let Some(ack) = ack_tx {
+                            let _ = ack.send(());
+                        }
+                    }
+                } else {
+                    entry.insert(ToolResolutionSlot::Waiting(tx));
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(ToolResolutionSlot::Waiting(tx));
             }
         }
 
-        let mut pending = self.pending.lock().await;
-        pending.insert(tool_call_id, tx);
         rx
     }
 
     pub async fn unregister(&self, tool_call_id: &str) {
-        self.pending.lock().await.remove(tool_call_id);
+        let _ = self.slots.remove_if(tool_call_id, |_, slot| {
+            matches!(slot, ToolResolutionSlot::Waiting(_))
+        });
     }
 
     /// Resolve a pending tool call by id.
     ///
     /// Returns `true` if a live waiter received the result (the running mission
     /// is consuming it). Returns `false` only when no waiter ever appears and
-    /// the result had to be cached in `early_results` — which, for a
+    /// the result had to be cached in an `Early` slot — which, for a
     /// human-answered question, means the mission is no longer running and the
     /// answer was dropped on the floor.
-    ///
-    /// The harnesses broadcast the `ToolCall` to the frontend *before*
-    /// [`register`](Self::register) runs (there are a couple of `.await`
-    /// points in between), so a fast `tool_result` can race ahead of the
-    /// matching `register`. To avoid misreporting such a delivery as dropped,
-    /// we briefly wait for the imminent registration before falling back to the
-    /// cache. The wait is only ever paid when no waiter is present yet — the
-    /// common case (waiter already parked) returns immediately, and a mission
-    /// that has truly ended simply waits out the short grace window before we
-    /// correctly report the answer as undelivered.
     pub async fn resolve(&self, tool_call_id: &str, result: serde_json::Value) -> bool {
-        // Total grace window ~250ms (10 × 25ms), only incurred when the waiter
-        // has not registered yet. Bounded so a genuinely dead mission still
-        // reports `delivered: false` promptly.
-        const REGISTER_GRACE_ATTEMPTS: u32 = 10;
-        const REGISTER_GRACE_STEP: std::time::Duration = std::time::Duration::from_millis(25);
-
-        for attempt in 0..=REGISTER_GRACE_ATTEMPTS {
-            {
-                let mut pending = self.pending.lock().await;
-                if let Some(tx) = pending.remove(tool_call_id) {
-                    return tx.send(result).is_ok();
-                }
-            }
-            if attempt < REGISTER_GRACE_ATTEMPTS {
-                tokio::time::sleep(REGISTER_GRACE_STEP).await;
-            }
+        // Fast path: waiter already parked — atomic 0ms handoff.
+        if let Some((_, ToolResolutionSlot::Waiting(tx))) =
+            self.slots.remove_if(tool_call_id, |_, slot| {
+                matches!(slot, ToolResolutionSlot::Waiting(_))
+            })
+        {
+            return tx.send(result).is_ok();
         }
 
         // Native requests are registered before publication. Never replay an
@@ -127,19 +130,65 @@ impl FrontendToolHub {
         if tool_call_id.starts_with("native-") {
             return false;
         }
-        let mut early = self.early_results.lock().await;
-        const MAX_EARLY_RESULTS: usize = 256;
-        if early.len() >= MAX_EARLY_RESULTS {
-            tracing::warn!(
-                "FrontendToolHub: early_results cache full ({} entries), dropping an entry",
-                early.len()
-            );
-            if let Some(key) = early.keys().next().cloned() {
-                early.remove(&key);
+
+        // Bound early cache size by sweeping expired or excess Early slots only.
+        if self.slots.len() >= MAX_EARLY_RESULTS {
+            let now = std::time::Instant::now();
+            self.slots.retain(|_, slot| match slot {
+                ToolResolutionSlot::Waiting(_) => true,
+                ToolResolutionSlot::Early { inserted_at, .. } => {
+                    now.duration_since(*inserted_at) < EARLY_RESULT_TTL
+                }
+            });
+            if self.slots.len() >= MAX_EARLY_RESULTS {
+                let early_key = self.slots.iter().find_map(|entry| {
+                    matches!(entry.value(), ToolResolutionSlot::Early { .. })
+                        .then(|| entry.key().clone())
+                });
+                if let Some(key) = early_key {
+                    tracing::warn!(
+                        "FrontendToolHub: early_results cache full ({} entries), dropping an entry",
+                        self.slots.len()
+                    );
+                    let _ = self
+                        .slots
+                        .remove_if(&key, |_, s| matches!(s, ToolResolutionSlot::Early { .. }));
+                }
             }
         }
-        early.insert(tool_call_id.to_string(), result);
-        false
+
+        // Race path: `resolve` arrived slightly ahead of `register`. Park an
+        // `Early` slot with a rendezvous `ack_tx` so an imminent `register`
+        // wakes us in 0ms instead of sleep-polling.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        match self.slots.entry(tool_call_id.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                if matches!(entry.get(), ToolResolutionSlot::Waiting(_)) {
+                    let (_, slot) = entry.remove_entry();
+                    if let ToolResolutionSlot::Waiting(tx) = slot {
+                        return tx.send(result).is_ok();
+                    }
+                    return false;
+                }
+                entry.insert(ToolResolutionSlot::Early {
+                    value: result,
+                    inserted_at: std::time::Instant::now(),
+                    ack_tx: Some(ack_tx),
+                });
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(ToolResolutionSlot::Early {
+                    value: result,
+                    inserted_at: std::time::Instant::now(),
+                    ack_tx: Some(ack_tx),
+                });
+            }
+        }
+
+        matches!(
+            tokio::time::timeout(REGISTER_GRACE_TIMEOUT, ack_rx).await,
+            Ok(Ok(()))
+        )
     }
 
     /// Mark `mission_id` as blocked on user input. The returned guard clears
@@ -147,10 +196,7 @@ impl FrontendToolHub {
     /// task proceeds and drops the guard) and the cancelled path (the task
     /// returns early and the guard drops during unwind).
     pub fn begin_waiting(hub: &Arc<Self>, mission_id: Uuid) -> WaitingGuard {
-        {
-            let mut waiting = hub.waiting_missions.lock().unwrap();
-            *waiting.entry(mission_id).or_insert(0) += 1;
-        }
+        *hub.waiting_missions.entry(mission_id).or_insert(0) += 1;
         WaitingGuard {
             hub: Arc::clone(hub),
             mission_id,
@@ -160,8 +206,6 @@ impl FrontendToolHub {
     /// True while a mission is parked awaiting a human-provided tool result.
     pub fn is_waiting_for_input(&self, mission_id: Uuid) -> bool {
         self.waiting_missions
-            .lock()
-            .unwrap()
             .get(&mission_id)
             .is_some_and(|count| *count > 0)
     }
@@ -183,13 +227,133 @@ pub struct WaitingGuard {
 
 impl Drop for WaitingGuard {
     fn drop(&mut self) {
-        let mut waiting = self.hub.waiting_missions.lock().unwrap();
-        if let Some(count) = waiting.get_mut(&self.mission_id) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                waiting.remove(&self.mission_id);
+        if let dashmap::mapref::entry::Entry::Occupied(mut entry) =
+            self.hub.waiting_missions.entry(self.mission_id)
+        {
+            let next = entry.get().saturating_sub(1);
+            if next == 0 {
+                entry.remove();
+            } else {
+                *entry.get_mut() = next;
             }
         }
+    }
+}
+
+/// Per-mission broadcast channel ring capacity. Lagging subscribers replay missed
+/// events from the SQLite cursor, so 1,024 slots bounds memory to ~1/8th of the
+/// global ring while self-evicting idle missions when subscribers disconnect.
+pub const MISSION_CHANNEL_CAPACITY: usize = 1024;
+
+/// Sharded, self-evicting per-mission broadcast channel registry.
+///
+/// Eliminates the global `RwLock` on fan-out and frees per-mission ring buffers
+/// as soon as `receiver_count() == 0`.
+#[derive(Default)]
+pub struct MissionChannelMap {
+    channels: dashmap::DashMap<Uuid, broadcast::Sender<AgentEvent>>,
+}
+
+impl MissionChannelMap {
+    pub fn new() -> Self {
+        Self {
+            channels: dashmap::DashMap::new(),
+        }
+    }
+
+    /// Subscribe to `mission_id`'s dedicated 1,024-slot broadcast channel.
+    pub fn subscribe(&self, mission_id: Uuid) -> broadcast::Receiver<AgentEvent> {
+        if self.channels.len() > 32 {
+            self.prune_dead();
+        }
+        match self.channels.entry(mission_id) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().subscribe(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let (tx, rx) = broadcast::channel::<AgentEvent>(MISSION_CHANNEL_CAPACITY);
+                entry.insert(tx);
+                rx
+            }
+        }
+    }
+
+    /// Fan out an event to `mission_id` without any global lock, pruning idle
+    /// entries whose last subscriber has disconnected.
+    pub fn send(&self, mission_id: Uuid, event: AgentEvent) {
+        let should_prune = match self.channels.get(&mission_id) {
+            Some(entry) => {
+                if entry.value().receiver_count() == 0 {
+                    true
+                } else {
+                    let _ = entry.value().send(event);
+                    false
+                }
+            }
+            None => false,
+        };
+        if should_prune {
+            let _ = self
+                .channels
+                .remove_if(&mission_id, |_, tx| tx.receiver_count() == 0);
+        }
+    }
+
+    /// Evict all mission channels with zero active subscribers.
+    pub fn prune_dead(&self) {
+        self.channels.retain(|_, tx| tx.receiver_count() > 0);
+    }
+
+    pub fn len(&self) -> usize {
+        self.channels.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.channels.is_empty()
+    }
+
+    /// Compatibility adapter for `control.mission_channels.write().await.entry(mid).or_insert_with(...)`.
+    pub async fn write(&self) -> MissionChannelWriteCompat<'_> {
+        if self.channels.len() > 32 {
+            self.prune_dead();
+        }
+        MissionChannelWriteCompat { map: self }
+    }
+}
+
+pub struct MissionChannelWriteCompat<'a> {
+    map: &'a MissionChannelMap,
+}
+
+impl<'a> MissionChannelWriteCompat<'a> {
+    pub fn entry(&mut self, mission_id: Uuid) -> MissionChannelEntryCompat<'a> {
+        MissionChannelEntryCompat {
+            map: self.map,
+            mission_id,
+        }
+    }
+}
+
+pub struct MissionChannelEntryCompat<'a> {
+    map: &'a MissionChannelMap,
+    mission_id: Uuid,
+}
+
+impl MissionChannelEntryCompat<'_> {
+    pub fn or_insert_with<F>(self, _default: F) -> MissionChannelSubscriberHandle
+    where
+        F: FnOnce() -> broadcast::Sender<AgentEvent>,
+    {
+        let rx = self.map.subscribe(self.mission_id);
+        MissionChannelSubscriberHandle { rx: Some(rx) }
+    }
+}
+
+pub struct MissionChannelSubscriberHandle {
+    rx: Option<broadcast::Receiver<AgentEvent>>,
+}
+
+impl MissionChannelSubscriberHandle {
+    pub fn subscribe(mut self) -> broadcast::Receiver<AgentEvent> {
+        self.rx.take().expect("single subscribe on entry handle")
     }
 }
 
@@ -198,17 +362,8 @@ impl Drop for WaitingGuard {
 pub struct ControlState {
     pub cmd_tx: mpsc::Sender<ControlCommand>,
     pub events_tx: broadcast::Sender<AgentEvent>,
-    /// P3-#20: per-mission broadcast channels. A fan-out task subscribed
-    /// to `events_tx` mirrors each `AgentEvent` with a non-empty
-    /// `mission_id()` into the matching per-mission channel here.
-    /// SSE/WS clients with a mission filter subscribe directly to the
-    /// per-mission channel and avoid receiving — and filtering out —
-    /// events for missions they don't care about. The HashMap entry is
-    /// created lazily on first subscribe and never garbage-collected
-    /// because a long-running mission may have intermittent subscribers
-    /// over its lifetime; the cost per entry is one Sender<Arc<…>>.
-    pub mission_channels:
-        Arc<RwLock<std::collections::HashMap<Uuid, broadcast::Sender<AgentEvent>>>>,
+    /// Sharded, self-evicting per-mission broadcast channels (1,024-slot rings).
+    pub mission_channels: Arc<MissionChannelMap>,
     pub tool_hub: Arc<FrontendToolHub>,
     pub status: Arc<RwLock<ControlStatus>>,
     /// Current mission ID (if any) - primary mission in the old sequential model
@@ -233,13 +388,21 @@ pub struct ControlState {
     pub mission_search_cache: Arc<RwLock<HashMap<u64, MissionSearchCacheEntry>>>,
 }
 
+impl ControlState {
+    /// Subscribe to events for a specific mission on a self-evicting 1,024-slot channel.
+    pub fn subscribe_mission(&self, mission_id: Uuid) -> broadcast::Receiver<AgentEvent> {
+        self.mission_channels.subscribe(mission_id)
+    }
+}
+
 /// Control session manager for per-user sessions.
 #[derive(Clone)]
 pub struct ControlHub {
     pub(super) admission_state: Arc<std::sync::OnceLock<std::sync::Weak<AppState>>>,
     pub(super) admission_ready: Arc<tokio::sync::Notify>,
-    pub(super) sessions: Arc<RwLock<HashMap<String, ControlState>>>,
-    pub(super) identities: Arc<RwLock<HashMap<String, AuthUser>>>,
+    pub(super) sessions: Arc<crate::concurrency::ArcSwapStore<HashMap<String, ControlState>>>,
+    pub(super) identities: Arc<crate::concurrency::ArcSwapStore<HashMap<String, AuthUser>>>,
+    session_spawn_locks: Arc<crate::concurrency::KeyedAsyncLocks<String>>,
     pub(super) config: Config,
     pub(super) root_agent: AgentRef,
     pub(super) mcp: Arc<McpRegistry>,
@@ -268,8 +431,9 @@ impl ControlHub {
         Self {
             admission_state: Arc::new(std::sync::OnceLock::new()),
             admission_ready: Arc::new(tokio::sync::Notify::new()),
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            identities: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(crate::concurrency::ArcSwapStore::new(HashMap::new())),
+            identities: Arc::new(crate::concurrency::ArcSwapStore::new(HashMap::new())),
+            session_spawn_locks: Arc::new(crate::concurrency::KeyedAsyncLocks::new()),
             config,
             root_agent,
             mcp,
@@ -308,34 +472,45 @@ impl ControlHub {
     ) -> Option<AuthUser> {
         let owner = self
             .sessions
-            .read()
-            .await
+            .load()
             .iter()
             .find(|(_, state)| Arc::ptr_eq(&state.mission_store, store))
             .map(|(owner, _)| owner.clone())?;
-        self.identities.read().await.get(&owner).cloned()
+        self.identities.load().get(&owner).cloned()
     }
 
     /// The mission store of an already-loaded session for `user_id`, without
     /// spawning one. `None` when that tenant's session is not loaded.
     pub async fn loaded_mission_store(&self, user_id: &str) -> Option<Arc<dyn MissionStore>> {
         self.sessions
-            .read()
-            .await
+            .load()
             .get(user_id)
             .map(|s| Arc::clone(&s.mission_store))
     }
 
     pub async fn get_or_spawn(&self, user: &AuthUser) -> ControlState {
-        self.identities
-            .write()
-            .await
-            .insert(user.id.clone(), user.clone());
-        if let Some(existing) = self.sessions.read().await.get(&user.id).cloned() {
-            return existing;
+        // Wait-free ArcSwap fast path: zero locks when user identity & session exist.
+        let identity_same = self
+            .identities
+            .load()
+            .get(&user.id)
+            .is_some_and(|existing| existing.id == user.id && existing.username == user.username);
+        if identity_same {
+            if let Some(existing) = self.sessions.load().get(&user.id).cloned() {
+                return existing;
+            }
+        } else {
+            self.identities
+                .write()
+                .await
+                .insert(user.id.clone(), user.clone());
+            if let Some(existing) = self.sessions.load().get(&user.id).cloned() {
+                return existing;
+            }
         }
-        let mut sessions = self.sessions.write().await;
-        if let Some(existing) = sessions.get(&user.id).cloned() {
+
+        let _user_spawn_guard = self.session_spawn_locks.lock(user.id.clone()).await;
+        if let Some(existing) = self.sessions.load().get(&user.id).cloned() {
             return existing;
         }
 
@@ -379,11 +554,13 @@ impl ControlHub {
             self.config.clone(),
             user.id.clone(),
         );
-        sessions.insert(user.id.clone(), state.clone());
+        self.sessions
+            .write()
+            .await
+            .insert(user.id.clone(), state.clone());
 
-        // Drop the write lock before performing async I/O so concurrent
-        // callers of get_or_spawn / all_sessions are not blocked.
-        drop(sessions);
+        // Drop the per-user spawn lock before performing async Telegram boot I/O.
+        drop(_user_spawn_guard);
 
         // Boot Telegram channels for this user's missions — ensures channels
         // are registered before we start serving requests.

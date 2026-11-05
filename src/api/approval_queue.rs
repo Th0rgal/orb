@@ -320,11 +320,15 @@ pub async fn pending(state: &Arc<AppState>, owner: &str) -> Vec<ApprovalItem> {
     let missions = state.control.get_or_spawn(&user).await.mission_store;
     let access = super::mission_access::store(state);
     access.expire_stale_for_store(&missions, owner).await;
-    let mut items = super::privilege_broker::store(state)
-        .pending_items(owner)
-        .await;
-    items.extend(access.pending_items(owner).await);
-    items.extend(super::secret_broker::broker(state).pending_items().await);
+    let privilege_store = super::privilege_broker::store(state);
+    let secret_broker = super::secret_broker::broker(state);
+    let (mut items, access_items, secret_items) = tokio::join!(
+        privilege_store.pending_items(owner),
+        access.pending_items(owner),
+        secret_broker.pending_items(),
+    );
+    items.extend(access_items);
+    items.extend(secret_items);
     items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
     items
 }
@@ -476,36 +480,48 @@ pub async fn approve_all(
     // Check everything before changing anything.
     let current = pending(&state, &user.id).await;
     let now = Utc::now();
+    let mut session_ids = Vec::new();
     for want in &body.items {
         let c = current
             .iter()
             .find(|c| c.kind == want.kind && c.id == want.id);
         admit(c, want, body.confirm_critical).map_err(conflict)?;
         if let Some(session_id) = c.and_then(|item| item.requester_subject.session_id()) {
-            crate::control_mcp::gateway::external_session_approval_bounds(&state, session_id, now)
-                .await
-                .map_err(conflict)?;
+            session_ids.push(session_id);
         }
+    }
+    if !session_ids.is_empty() {
+        futures::future::try_join_all(session_ids.into_iter().map(|session_id| {
+            crate::control_mcp::gateway::external_session_approval_bounds(&state, session_id, now)
+        }))
+        .await
+        .map_err(conflict)?;
     }
     let mission_refs = body.of(ApprovalKind::MissionAccess);
     if !mission_refs.is_empty() {
         let access = super::mission_access::store(&state);
         let missions = state.control.get_or_spawn(&user).await.mission_store;
-        for want in &mission_refs {
-            let target = access
-                .get(&user.id, want.id)
-                .await
-                .map(|r| r.target_mission_id);
-            let owned = match target {
-                Some(t) => matches!(missions.get_mission(t).await, Ok(Some(_))),
-                None => false,
-            };
-            if !owned {
-                return Err((
-                    StatusCode::FORBIDDEN,
-                    "You do not own the target mission".into(),
-                ));
+        let ownership = futures::future::join_all(mission_refs.iter().map(|want| {
+            let access = &access;
+            let missions = &missions;
+            let owner = &user.id;
+            async move {
+                let target = access
+                    .get(owner, want.id)
+                    .await
+                    .map(|r| r.target_mission_id);
+                match target {
+                    Some(t) => matches!(missions.get_mission(t).await, Ok(Some(_))),
+                    None => false,
+                }
             }
+        }))
+        .await;
+        if ownership.into_iter().any(|owned| !owned) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "You do not own the target mission".into(),
+            ));
         }
     }
     let privileges = super::privilege_broker::store(&state)
@@ -517,16 +533,22 @@ pub async fn approve_all(
         )
         .await
         .map_err(conflict)?;
-    for r in &privileges {
-        super::privilege_broker::notify_requester(&state, r).await;
-    }
+    futures::future::join_all(
+        privileges
+            .iter()
+            .map(|r| super::privilege_broker::notify_requester(&state, r)),
+    )
+    .await;
     let accesses = super::mission_access::store(&state)
         .approve_batch_with_state(&state, &user.id, &mission_refs, body.confirm_critical)
         .await
         .map_err(conflict)?;
-    for r in &accesses {
-        super::mission_access::notify_requester(&state, r).await;
-    }
+    futures::future::join_all(
+        accesses
+            .iter()
+            .map(|r| super::mission_access::notify_requester(&state, r)),
+    )
+    .await;
     let secrets = super::secret_broker::broker(&state)
         .approve_batch(
             &state,

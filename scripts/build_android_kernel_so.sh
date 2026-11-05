@@ -11,6 +11,8 @@ cd "$(dirname "$0")/.."
 
 JNILIBS=android_dashboard/app/src/main/jniLibs
 SOURCES=(shared/orb-spec/cabi/orb_kernel.h shared/orb-spec/cabi/orb_kernel_unboxed.c
+         shared/orb-spec/cabi/orb_kernel_leannative_aarch64.ll
+         shared/orb-spec/cabi/orb_kernel_leannative_x86_64.ll
          android_dashboard/app/src/main/jni/orb_kernel_jni.c)
 ABIS=(arm64-v8a:aarch64-linux-android24 x86_64:x86_64-linux-android24)
 
@@ -93,11 +95,14 @@ for pair in "${ABIS[@]}"; do
   arch_flags=()
   if [ "$abi" = "arm64-v8a" ]; then
     arch_flags=(-march=armv8.2-a+lse+dotprod+fp16)
+    kernel_src=shared/orb-spec/cabi/orb_kernel_leannative_aarch64.ll
+  else
+    kernel_src=shared/orb-spec/cabi/orb_kernel_leannative_x86_64.ll
   fi
   "$BIN/clang" --target="$target" ${arch_flags[@]+"${arch_flags[@]}"} ${FREESTANDING_FLAGS[@]+"${FREESTANDING_FLAGS[@]}"} \
-    -ffreestanding -nostdlib -O2 -fPIC -shared \
+    -Wno-override-module -ffreestanding -nostdlib -O3 -fPIC -shared \
     -Wl,-z,max-page-size=16384 -Wl,--no-undefined -Wl,-s -Wl,--build-id=none \
-    -Iandroid_dashboard/app/src shared/orb-spec/cabi/orb_kernel_unboxed.c \
+    -Iandroid_dashboard/app/src "$kernel_src" \
     android_dashboard/app/src/main/jni/orb_kernel_jni.c -o "$out/$abi/liborb_kernel.so"
   check_page_align_16k "$out/$abi/liborb_kernel.so"
   if $check; then

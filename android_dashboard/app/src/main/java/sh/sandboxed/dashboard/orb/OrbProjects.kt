@@ -82,8 +82,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
@@ -165,26 +167,34 @@ fun OrbAppRoot(
     var approvalQueueCount by remember(baseURL) { mutableStateOf<Int?>(null) }
     val enrollPrefs = remember { homeContext.getSharedPreferences("orb.approval.prompt", android.content.Context.MODE_PRIVATE) }
     var enrollDismissedMode by remember(baseURL) { mutableStateOf(enrollPrefs.getString("dismissed.$baseURL", null)) }
-    suspend fun refreshFleetPosture() {
-        runCatching {
-            val snap = OrbJSON.dict(core.request("/api/privilege-access")) ?: emptyMap()
-            val mesh = runCatching { OrbJSON.dict(core.request("/api/mesh/status")) ?: emptyMap() }.getOrDefault(emptyMap())
+    suspend fun refreshFleetPosture() = coroutineScope {
+        val privTask = async { runCatching { OrbJSON.dict(core.request("/api/privilege-access")) ?: emptyMap() } }
+        val meshTask = async { runCatching { OrbJSON.dict(core.request("/api/mesh/status")) ?: emptyMap() } }
+        val devicesTask = async { runCatching { OrbJSON.dict(core.request("/api/approvals/devices")) ?: emptyMap() } }
+        val queueTask = async { runCatching { OrbJSON.dictList(OrbJSON.dict(core.request("/api/approvals/queue"))?.get("items")) } }
+
+        val privRes = privTask.await()
+        val meshRes = meshTask.await()
+        privRes.onFailure { if (it is CancellationException) throw it }
+        meshRes.onFailure { if (it is CancellationException) throw it }
+        privRes.onSuccess { snap ->
+            val mesh = meshRes.getOrDefault(emptyMap())
             bunkerState = maxOf((snap["bunker_state"] as? Number)?.toInt() ?: 0, (mesh["bunker_state"] as? Number)?.toInt() ?: 0)
             bunkerReason = OrbPrivilegeAccess.latestIncidentReason(OrbJSON.dictList(snap["bunker_incidents"]))
             if (bunkerState <= 0) bunkerDismissedLevel = 0
         }
-        runCatching {
-            val d = OrbJSON.dict(core.request("/api/approvals/devices")) ?: emptyMap()
-            approvalMode = OrbJSON.str(d, "mode") ?: ""
-            approvalEnrolled = OrbPrivilegeAccess.isEnrolled(OrbApprovalKey.publicKey(), OrbJSON.dictList(d["devices"]))
-        }
-        try {
-            val items = OrbJSON.dictList(OrbJSON.dict(core.request("/api/approvals/queue"))?.get("items"))
-            approvalQueueCount = items.size
-        } catch (e: OrbError) {
-            if (e.status == 404 || e.status == 405) approvalQueueCount = null
-        } catch (_: Throwable) {
-        }
+        devicesTask.await()
+            .onFailure { if (it is CancellationException) throw it }
+            .onSuccess { d ->
+                approvalMode = OrbJSON.str(d, "mode") ?: ""
+                approvalEnrolled = OrbPrivilegeAccess.isEnrolled(OrbApprovalKey.publicKey(), OrbJSON.dictList(d["devices"]))
+            }
+        queueTask.await()
+            .onSuccess { items -> approvalQueueCount = items.size }
+            .onFailure { e ->
+                if (e is CancellationException) throw e
+                if (e is OrbError && (e.status == 404 || e.status == 405)) approvalQueueCount = null
+            }
     }
 
     LaunchedEffect(baseURL, lifecycleOwner) {
@@ -1277,16 +1287,20 @@ fun OrbProjectPage(
                 }
                 // Prefetch top 5 missions' events in background
                 launch(kotlinx.coroutines.Dispatchers.IO) {
-                    for (m in mobile.take(5)) {
-                        val evKey = "mission_events_${m.id}"
-                        if (OrbReadCache.loadRowsAsync(evKey).isEmpty()) {
-                            val evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
-                                core.fetchRows("/api/control/missions/${core.encodeComponent(m.id)}/events?limit=150", "events")
-                            }.getOrDefault(emptyList())
-                            if (evs.isNotEmpty()) {
-                                OrbReadCache.saveRows(evKey, evs)
+                    coroutineScope {
+                        mobile.take(5).map { m ->
+                            async {
+                                val evKey = "mission_events_${m.id}"
+                                if (OrbReadCache.loadRowsAsync(evKey).isEmpty()) {
+                                    val evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                                        core.fetchRows("/api/control/missions/${core.encodeComponent(m.id)}/events?limit=150", "events")
+                                    }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
+                                    if (evs.isNotEmpty()) {
+                                        OrbReadCache.saveRows(evKey, evs)
+                                    }
+                                }
                             }
-                        }
+                        }.awaitAll()
                     }
                 }
             }
@@ -1306,10 +1320,14 @@ fun OrbProjectPage(
     }
 
     LaunchedEffect(projectSlug) {
-        val cached = OrbReadCache.loadRowsAsync("project_missions_$projectSlug")
+        val needManifest = manifestFolders.isEmpty()
+        val (cached, cachedManifest) = coroutineScope {
+            val rowsTask = async { OrbReadCache.loadRowsAsync("project_missions_$projectSlug") }
+            val manifestTask = if (needManifest) async { OrbReadCache.loadDictAsync("project_manifest_$projectSlug") } else null
+            rowsTask.await() to manifestTask?.await()
+        }
         if (fetchedProjectMissions.isEmpty() && cached.isNotEmpty()) fetchedProjectMissions = cached
         if (manifestFolders.isEmpty()) {
-            val cachedManifest = OrbReadCache.loadDictAsync("project_manifest_$projectSlug")
             val entries = OrbJSON.dict(cachedManifest?.get("entries"))
             if (entries != null) {
                 manifestFolders = entries.mapNotNull { (k, v) ->
