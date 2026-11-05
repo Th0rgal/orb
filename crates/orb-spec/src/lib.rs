@@ -11175,6 +11175,23 @@ mod stateful_tests {
         assert!(earlier_ack.evict_other_projects);
         assert_eq!(earlier_ack.next_rev32, 1);
 
+        // Poll-before-ack on overlapping moves (`source_kind = 0, inc_rev = 1 > cur_rev = 0` while `op 2`
+        // is still running): admits the intermediate confirmed base without clearing `pending_op_id = 2`.
+        let intermediate_poll = placement_merge_step(PlacementMergeInput {
+            cur_rev: 0,
+            inc_rev: 1,
+            pending_op_id: 2,
+            ack_op_id: 0,
+            source_kind: 0,
+            has_placement: true,
+            matches_optimistic: false,
+        });
+        assert!(intermediate_poll.admitted);
+        assert_eq!(intermediate_poll.status, 1);
+        assert!(!intermediate_poll.clear_pending);
+        assert!(intermediate_poll.evict_other_projects);
+        assert_eq!(intermediate_poll.next_rev32, 1);
+
         // Older revision is rejected even without a pending op.
         let older = placement_merge_step(PlacementMergeInput {
             cur_rev: 7,

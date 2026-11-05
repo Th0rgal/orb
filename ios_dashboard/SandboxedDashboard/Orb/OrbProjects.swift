@@ -2193,8 +2193,8 @@ final class OrbMoveClipboard {
             clear()
             return true
         } catch let confirmation as OrbApprovalTransferConfirmationError {
-            _ = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: allIDs, opID: opID)
-            let rollbackItems = allIDs.compactMap { mid -> OrbPlacementCommitItem? in
+            let rolledBack = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: allIDs, opID: opID)
+            let rollbackItems = rolledBack.compactMap { mid -> OrbPlacementCommitItem? in
                 guard let snap = OrbHierarchy.placement(of: mid) else { return nil }
                 return OrbPlacementCommitItem(
                     missionID: mid,
@@ -2221,8 +2221,8 @@ final class OrbMoveClipboard {
             )
             return false
         } catch {
-            _ = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: allIDs, opID: opID)
-            let rollbackItems = allIDs.compactMap { mid -> OrbPlacementCommitItem? in
+            let rolledBack = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: allIDs, opID: opID)
+            let rollbackItems = rolledBack.compactMap { mid -> OrbPlacementCommitItem? in
                 guard let snap = OrbHierarchy.placement(of: mid) else { return nil }
                 return OrbPlacementCommitItem(
                     missionID: mid,

@@ -549,7 +549,39 @@ object OrbMissionTree {
                     matchesOptimistic = matchesOpt
                 )
                 if (!verdict.admitted) {
-                    prev
+                    if (ackOpId != 0 && prev != null && pendingOp == ackOpId && item.placementRevision < curRev) {
+                        val rbVerdict = OrbKernel.placementMergeStep(
+                            curRev = curRev,
+                            incRev = curRev,
+                            pendingOpId = pendingOp,
+                            ackOpId = ackOpId,
+                            sourceKind = 3,
+                            hasPlacement = false,
+                            matchesOptimistic = false
+                        )
+                        if (rbVerdict.admitted) {
+                            val settledFolder = if (isChild) "" else prev.folder
+                            val resolved = OrbPlacementCommitItem(
+                                missionId = item.missionId,
+                                project = prev.project.takeIf { it.isNotEmpty() },
+                                folder = settledFolder,
+                                placementRevision = curRev,
+                                explicitProject = true
+                            )
+                            committedItem = resolved
+                            accepted.add(resolved)
+                            prev.copy(
+                                folder = settledFolder,
+                                pendingOpId = 0,
+                                optimisticProject = null,
+                                optimisticFolder = null
+                            )
+                        } else {
+                            prev
+                        }
+                    } else {
+                        prev
+                    }
                 } else {
                     val effProj = if (item.explicitProject) incProj else incProj.ifEmpty { prev?.project ?: seenFacts[item.missionId]?.project ?: "" }
                     val nextRev = maxOf(curRev, item.placementRevision, verdict.nextRev32)
@@ -736,16 +768,21 @@ object OrbMissionTree {
                         clearSeenProject = false
                         prev
                     } else {
-                        resolvedProject = candProj.takeIf { it.isNotEmpty() }
-                        clearSeenProject = hasProjectKey && resolvedProject == null
                         val nextRev = maxOf(curRev, incRev, verdict.nextRev32)
+                        val nextPending = if (verdict.clearPending) 0 else pendingOp
+                        val nextOptProj = if (verdict.clearPending) null else prev.optimisticProject
+                        val nextOptFolder = if (verdict.clearPending) null else prev.optimisticFolder
+                        val effSeenProj = nextOptProj ?: candProj
+                        resolvedProject = effSeenProj.takeIf { it.isNotEmpty() }
+                        clearSeenProject = (nextOptProj != null && nextOptProj.isEmpty()) ||
+                            (nextOptProj == null && hasProjectKey && resolvedProject == null)
                         PlacementState(
                             project = candProj,
                             folder = candFolder,
                             revision = nextRev,
-                            pendingOpId = if (verdict.clearPending) 0 else pendingOp,
-                            optimisticProject = if (verdict.clearPending) null else prev.optimisticProject,
-                            optimisticFolder = if (verdict.clearPending) null else prev.optimisticFolder
+                            pendingOpId = nextPending,
+                            optimisticProject = nextOptProj,
+                            optimisticFolder = nextOptFolder
                         )
                     }
                 }

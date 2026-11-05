@@ -2877,7 +2877,7 @@ def placementMergeLo32
   else if !(hasPlacement == 1) then 3
   else if pendingOpId != 0 then
     if incRev > curRev then
-      if sourceKind == 1 && ackOpId != 0 && ackOpId < pendingOpId then
+      if sourceKind == 0 || (sourceKind == 1 && ackOpId != 0 && ackOpId < pendingOpId) then
         if matchesOptimistic == 1 then 1793 else 1281
       else 1793
     else if sourceKind == 1 && ackOpId == pendingOpId && incRev ≥ curRev then 1793

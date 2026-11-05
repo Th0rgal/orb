@@ -150,10 +150,26 @@ function mergeIncomingPlacement(m: HierarchyFields, isPartial = false): Placemen
     matchesOptimistic,
   });
   if (!verdict.admitted) return cur;
+  const nextRev = Math.max(cur.rev, incRev, verdict.nextRev32);
+  if (!verdict.clearPending && cur.pendingOpId !== 0) {
+    const nextState: PlacementState = {
+      project: cur.project,
+      folder: hasParent ? "" : cur.folder,
+      rev: nextRev,
+      pendingOpId: cur.pendingOpId,
+      rollback: {
+        project: m.project !== undefined ? incProject : (cur.rollback?.project ?? cur.project),
+        folder: hasParent ? "" : (m.folder !== undefined ? incFolder : (cur.rollback?.folder ?? cur.folder)),
+        rev: nextRev,
+      },
+    };
+    placements.set(m.id, nextState);
+    return nextState;
+  }
   const nextState: PlacementState = {
     project: effectiveProject,
     folder: effectiveFolder,
-    rev: Math.max(cur.rev, incRev, verdict.nextRev32),
+    rev: nextRev,
     pendingOpId: verdict.clearPending ? 0 : cur.pendingOpId,
     rollback: verdict.clearPending ? undefined : cur.rollback,
   };
@@ -246,7 +262,20 @@ export function commitAuthoritativePlacements(items: readonly PlacementCommitInp
       hasPlacement: true,
       matchesOptimistic,
     });
-    if (!verdict.admitted) continue;
+    if (!verdict.admitted) {
+      if (ackOpId !== 0 && cur && cur.pendingOpId === ackOpId && incRev < cur.rev && rollbackOptimisticPlacement(id, ackOpId)) {
+        const settled = placements.get(id);
+        if (settled) {
+          accepted.push({
+            mission_id: id,
+            project: settled.project,
+            folder: settled.folder,
+            placement_revision: settled.rev,
+          });
+        }
+      }
+      continue;
+    }
     const nextPendingOpId = verdict.clearPending ? 0 : (cur?.pendingOpId ?? 0);
     if (!verdict.clearPending && nextPendingOpId !== 0 && cur) {
       placements.set(id, {

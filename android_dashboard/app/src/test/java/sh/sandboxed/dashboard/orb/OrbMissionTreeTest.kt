@@ -428,6 +428,38 @@ class OrbMissionTreeTest {
         assertEquals("FolderA", revertedB.first().folder)
         assertEquals(1L, revertedB.first().placementRevision)
         assertEquals("FolderA", OrbMissionTree.folderPath(pollAt1))
+
+        // Poll-before-ack on overlapping moves (`opC -> FolderX`, `opD -> default/FolderY`, then rev-2 poll
+        // for `FolderX` arrives before `opC`'s HTTP/SSE ack): preserves `default/FolderY` (`opD`) and records
+        // `assistant/FolderX` at rev 2 as the confirmed rollback base.
+        val opC = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opC, "assistant", "FolderX")
+        val opD = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opD, "default", "FolderY")
+
+        val pollBeforeAck = m("rapid-kt", "project" to "assistant", "folder" to "FolderX", "placement_revision" to 2L)
+        assertEquals("default", OrbMissionTree.projectSlug(pollBeforeAck))
+        assertEquals("FolderY", OrbMissionTree.folderPath(pollBeforeAck))
+        assertEquals(opD, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+        assertEquals(2L, OrbMissionTree.placementOf("rapid-kt")?.revision)
+        assertEquals("assistant", OrbMissionTree.placementOf("rapid-kt")?.project)
+        assertEquals("FolderX", OrbMissionTree.placementOf("rapid-kt")?.folder)
+        assertEquals("default", OrbMissionTree.seen("rapid-kt")?.project)
+
+        val lateAckC = OrbMissionTree.commitAuthoritativePlacements(
+            listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderX", 2L, explicitProject = true)),
+            ackOpId = opC
+        )
+        assertEquals(0, lateAckC.size)
+        assertEquals(opD, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+
+        val revertedD = OrbMissionTree.rollbackOptimisticPlacement(opD)
+        assertEquals(1, revertedD.size)
+        assertEquals("assistant", revertedD.first().project)
+        assertEquals("FolderX", revertedD.first().folder)
+        assertEquals(2L, revertedD.first().placementRevision)
+        assertEquals("assistant", OrbMissionTree.projectSlug(pollBeforeAck))
+        assertEquals("FolderX", OrbMissionTree.folderPath(pollBeforeAck))
         OrbMissionTree.resetHierarchy()
     }
 }

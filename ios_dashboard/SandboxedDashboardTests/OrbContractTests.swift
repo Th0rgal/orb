@@ -927,6 +927,36 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.project, "assistant")
         XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderA")
         XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 1)
+
+        // Poll-before-ack on overlapping moves (`op4 -> FolderX`, `op5 -> FolderY`, then rev-2 poll for `FolderX`
+        // arrives before `op4`'s HTTP/SSE ack): preserves `FolderY` (`op5`) while recording `FolderX` at rev 2 as rollback base.
+        let op4 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderX", opID: op4)
+        let op5 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "default", toFolder: "FolderY", opID: op5)
+        let pollBeforeAck = OrbRow(.object([
+            "id": .string("rapid-ios"),
+            "project": .string("assistant"),
+            "folder": .string("FolderX"),
+            "placement_revision": .number(2),
+            "status": .string("active")
+        ]))
+        XCTAssertEqual(pollBeforeAck.project, "default")
+        XCTAssertEqual(pollBeforeAck.folder, "FolderY")
+        XCTAssertTrue(pollBeforeAck.raw["orb_projected_move"].flag)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op5)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 2)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.rollbackProject, "assistant")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.rollbackFolder, "FolderX")
+        XCTAssertTrue(OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "rapid-ios", project: "assistant", folder: "FolderX", placementRevision: 2)
+        ], ackOpID: op4).isEmpty)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op5)
+        XCTAssertTrue(OrbHierarchy.rollbackOptimisticPlacement(id: "rapid-ios", ackOpID: op5))
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.project, "assistant")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderX")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 2)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, 0)
         OrbHierarchy.reset()
     }
 }

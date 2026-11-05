@@ -413,20 +413,39 @@ enum OrbHierarchy {
                 )
                 if verdict.admitted {
                     let nextRev = max(cur.revision, rawRev, UInt64(verdict.nextRev32))
-                    let nextState = PlacementState(
-                        project: effProj,
-                        folder: effFolder,
-                        revision: nextRev,
-                        pendingOpID: verdict.clearPending ? 0 : cur.pendingOpID,
-                        rollbackProject: verdict.clearPending ? nil : cur.rollbackProject,
-                        rollbackFolder: verdict.clearPending ? nil : cur.rollbackFolder,
-                        rollbackRevision: verdict.clearPending ? nil : cur.rollbackRevision
-                    )
-                    placements[id] = nextState
-                    resolvedProject = nextState.project
-                    resolvedFolder = nextState.folder
-                    resolvedRev = nextState.revision
-                    isProjected = nextState.pendingOpID != 0
+                    if !verdict.clearPending && cur.pendingOpID != 0 {
+                        let rbProj = hasProjectField ? rawProject : (cur.rollbackProject ?? cur.project)
+                        let rbFolder = isNested ? "" : (hasFolderField ? rawFolder : (cur.rollbackFolder ?? cur.folder))
+                        let nextState = PlacementState(
+                            project: cur.project,
+                            folder: isNested ? "" : cur.folder,
+                            revision: nextRev,
+                            pendingOpID: cur.pendingOpID,
+                            rollbackProject: rbProj,
+                            rollbackFolder: rbFolder,
+                            rollbackRevision: nextRev
+                        )
+                        placements[id] = nextState
+                        resolvedProject = nextState.project
+                        resolvedFolder = nextState.folder
+                        resolvedRev = nextState.revision
+                        isProjected = true
+                    } else {
+                        let nextState = PlacementState(
+                            project: effProj,
+                            folder: effFolder,
+                            revision: nextRev,
+                            pendingOpID: verdict.clearPending ? 0 : cur.pendingOpID,
+                            rollbackProject: verdict.clearPending ? nil : cur.rollbackProject,
+                            rollbackFolder: verdict.clearPending ? nil : cur.rollbackFolder,
+                            rollbackRevision: verdict.clearPending ? nil : cur.rollbackRevision
+                        )
+                        placements[id] = nextState
+                        resolvedProject = nextState.project
+                        resolvedFolder = nextState.folder
+                        resolvedRev = nextState.revision
+                        isProjected = nextState.pendingOpID != 0
+                    }
                 } else {
                     resolvedProject = cur.project
                     resolvedFolder = isNested ? "" : cur.folder
@@ -613,7 +632,49 @@ enum OrbHierarchy {
                 hasPlacement: true,
                 matchesOptimistic: matchesOpt
             )
-            guard verdict.admitted else { continue }
+            if !verdict.admitted {
+                if ackOpID != 0, let cur, cur.pendingOpID == ackOpID, item.placementRevision < cur.revision {
+                    let rbVerdict = OrbKernel.placementMergeStep(
+                        curRev: cur.revision,
+                        incRev: cur.revision,
+                        pendingOpId: cur.pendingOpID,
+                        ackOpId: ackOpID,
+                        sourceKind: 3,
+                        hasPlacement: false,
+                        matchesOptimistic: false
+                    )
+                    if rbVerdict.admitted {
+                        let settledProj = cur.rollbackProject ?? cur.project
+                        let settledFolder = isNested ? "" : (cur.rollbackFolder ?? cur.folder)
+                        let settledRev = cur.rollbackRevision ?? cur.revision
+                        placements[item.missionID] = PlacementState(
+                            project: settledProj,
+                            folder: settledFolder,
+                            revision: settledRev,
+                            pendingOpID: 0
+                        )
+                        var seen = seenFacts[item.missionID] ?? Seen()
+                        seen.project = settledProj
+                        seen.folder = settledFolder
+                        seenFacts[item.missionID] = seen
+                        if var anc = ancestors[item.missionID] {
+                            anc.row = anc.row.withPatchedPlacement(
+                                project: settledProj,
+                                folder: settledFolder,
+                                revision: settledRev
+                            )
+                            ancestors[item.missionID] = anc
+                        }
+                        accepted.append(OrbPlacementCommitItem(
+                            missionID: item.missionID,
+                            project: settledProj.isEmpty ? nil : settledProj,
+                            folder: settledFolder,
+                            placementRevision: settledRev
+                        ))
+                    }
+                }
+                continue
+            }
             let nextPending: UInt32 = verdict.clearPending ? 0 : (cur?.pendingOpID ?? 0)
             if !verdict.clearPending, nextPending != 0, let cur {
                 placements[item.missionID] = PlacementState(

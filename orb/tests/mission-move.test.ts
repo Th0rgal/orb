@@ -374,3 +374,83 @@ it("preserves newer optimistic move when an earlier overlapping move acknowledge
     pendingOpId: 0,
   });
 });
+
+it("preserves newer optimistic move when an intermediate poll arrives before the first move's ack", () => {
+  const POLL_FIRST_ID = "poll-before-ack-1000";
+  stickHierarchy({
+    id: POLL_FIRST_ID,
+    project: "assistant",
+    folder: "",
+    placement_revision: 0,
+    status: "active",
+  });
+  const op1 = allocatePlacementOpId();
+  stageOptimisticPlacement(POLL_FIRST_ID, "assistant", "FolderA", op1);
+  const op2 = allocatePlacementOpId();
+  stageOptimisticPlacement(POLL_FIRST_ID, "assistant", "FolderB", op2);
+
+  // Poll observes Move 1 (`FolderA`, `placement_revision: 1`) BEFORE Move 1's HTTP/SSE ack arrives:
+  const pollBeforeAck = stickHierarchy({
+    id: POLL_FIRST_ID,
+    project: "assistant",
+    folder: "FolderA",
+    placement_revision: 1,
+    status: "active",
+  });
+  expect(pollBeforeAck).toMatchObject({
+    project: "assistant",
+    folder: "FolderB",
+    placement_revision: 1,
+  });
+  expect(authoritativePlacement(POLL_FIRST_ID)).toMatchObject({
+    project: "assistant",
+    folder: "FolderB",
+    rev: 1,
+    pendingOpId: op2,
+    rollback: { project: "assistant", folder: "FolderA", rev: 1 },
+  });
+
+  // Move 1's HTTP ack arrives afterwards at `placement_revision: 1` and remains fenced:
+  expect(
+    commitAuthoritativePlacements(
+      [{ mission_id: POLL_FIRST_ID, project: "assistant", folder: "FolderA", placement_revision: 1 }],
+      op1,
+    ),
+  ).toEqual([]);
+  expect(authoritativePlacement(POLL_FIRST_ID)?.pendingOpId).toBe(op2);
+
+  // Rolling back `op2` restores the intermediate snapshot (`FolderA`, `rev: 1`):
+  expect(rollbackOptimisticPlacement(POLL_FIRST_ID, op2)).toBe(true);
+  expect(authoritativePlacement(POLL_FIRST_ID)).toMatchObject({
+    project: "assistant",
+    folder: "FolderA",
+    rev: 1,
+    pendingOpId: 0,
+  });
+
+  // Also verify superseded local ack: if a poll observes a newer remote move (`FolderC`, `rev: 3`)
+  // before `op3`'s `rev: 2` HTTP ack arrives, `op3`'s late ack settles cleanly onto `FolderC` (`rev: 3`).
+  const op3 = allocatePlacementOpId();
+  stageOptimisticPlacement(POLL_FIRST_ID, "assistant", "FolderB", op3);
+  const remotePoll = stickHierarchy({
+    id: POLL_FIRST_ID,
+    project: "default",
+    folder: "FolderC",
+    placement_revision: 3,
+    status: "active",
+  });
+  expect(remotePoll.folder).toBe("FolderB");
+  const settledFromSupersededAck = commitAuthoritativePlacements(
+    [{ mission_id: POLL_FIRST_ID, project: "assistant", folder: "FolderB", placement_revision: 2 }],
+    op3,
+  );
+  expect(settledFromSupersededAck).toEqual([
+    { mission_id: POLL_FIRST_ID, project: "default", folder: "FolderC", placement_revision: 3 },
+  ]);
+  expect(authoritativePlacement(POLL_FIRST_ID)).toMatchObject({
+    project: "default",
+    folder: "FolderC",
+    rev: 3,
+    pendingOpId: 0,
+  });
+});

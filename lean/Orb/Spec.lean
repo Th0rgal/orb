@@ -8158,12 +8158,14 @@ theorem placementMerge_admit_eq (p : PlacementMergeCheck) :
           · simp only [hpend, ite_true]
             by_cases hgt : p.curRev < p.incRev
             · simp only [hgt, decide_true, ite_true, Bool.true_or]
-              cases hsk1 : (p.sourceKind == 1) <;>
+              cases hsk0 : (p.sourceKind == 0) <;>
+                cases hsk1 : (p.sourceKind == 1) <;>
                 cases hack0 : (p.ackOpId != 0) <;>
                 by_cases hlt_op : p.ackOpId < p.pendingOpId <;>
                 cases hmo : (p.matchesOptimistic == 1) <;>
-                (simp only [hsk1, hack0, hlt_op, decide_true, decide_false, hmo,
-                  Bool.true_and, Bool.false_and, Bool.false_eq_true, ite_true, ite_false];
+                (simp only [hsk0, hsk1, hack0, hlt_op, decide_true, decide_false, hmo,
+                  Bool.true_and, Bool.false_and, Bool.true_or, Bool.false_or,
+                  Bool.false_eq_true, ite_true, ite_false];
                  decide)
             · simp only [hgt, decide_false, Bool.false_eq_true, ite_false, Bool.false_or]
               cases hsk1 : (p.sourceKind == 1) <;>
@@ -8312,9 +8314,13 @@ def placementMergeMetaStepSpec :
        at `incRev ≤ curRev` is rejected (`lo32 = 5`, `admittedBit = 0`), preventing snap-back.
     2. **Monotone settled revision (`status = 4`)**: Once settled (`pendingOpId = 0`), any poll or
        SSE frame with `incRev < curRev` is rejected (`lo32 = 4`, `admittedBit = 0`).
-    3. **Authoritative ack clears fence & evicts stale buckets (`lo32 = 1793`)**: An ack or SSE
-       frame with `incRev > curRev` while `pendingOpId != 0` admits (`256`), clears the pending
-       op (`512`), and signals cross-project eviction (`1024`). -/
+    3. **Authoritative ack clears fence & evicts stale buckets (`lo32 = 1793`)**: A matching ack or
+       remote SSE frame with `incRev > curRev` while `pendingOpId != 0` admits (`256`), clears the
+       pending op (`512`), and signals cross-project eviction (`1024`).
+    4. **Intermediate poll preserves newer pending op (`lo32 = 1281`)**: A poll (`sourceKind = 0`)
+       observing an intermediate revision (`incRev > curRev`) with `matchesOptimistic = 0` while a
+       newer `pendingOpId != 0` is still running admits (`256`) and updates the confirmed rollback
+       baseline without clearing the pending op (`clearPendingBit = 0`). -/
 theorem placement_merge_fences_stale_polls_and_advances_monotonically
     (curRev incRev : UInt64) (pendingOpId : UInt32)
     (h_pend : pendingOpId != 0)
@@ -8323,17 +8329,21 @@ theorem placement_merge_fences_stale_polls_and_advances_monotonically
     (incRev < curRev →
       (placementMergeStep curRev incRev 0 0 0 1 0 &&& 0xFFFFFFFF) = 4) ∧
     (curRev < curRev + 1 →
-      (placementMergeStep curRev (curRev + 1) pendingOpId pendingOpId 1 1 1 &&& 0xFFFFFFFF) = 1793) := by
+      (placementMergeStep curRev (curRev + 1) pendingOpId pendingOpId 1 1 1 &&& 0xFFFFFFFF) = 1793) ∧
+    (curRev < curRev + 1 →
+      (placementMergeStep curRev (curRev + 1) pendingOpId 0 0 1 0 &&& 0xFFFFFFFF) = 1281) := by
   have h_not_gt : ¬ (curRev < incRev) := UInt64.not_lt.mpr h_le
   have hsk0_3 : ((0 : UInt8) ≤ 3) := by decide
   have hsk1_3 : ((1 : UInt8) ≤ 3) := by decide
+  have h0_eq0 : ((0 : UInt8) == 0) = true := by decide
   have h0_eq2 : ((0 : UInt8) == 2) = false := by decide
   have h0_eq3 : ((0 : UInt8) == 3) = false := by decide
   have h0_eq1 : ((0 : UInt8) == 1) = false := by decide
+  have h1_eq0 : ((1 : UInt8) == 0) = false := by decide
   have h1_eq2 : ((1 : UInt8) == 2) = false := by decide
   have h1_eq3 : ((1 : UInt8) == 3) = false := by decide
   have h1_eq1 : ((1 : UInt8) == 1) = true := by decide
-  refine ⟨?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_⟩
   · unfold placementMergeStep placementMergeLo32
     rw [pack32_lo]
     dsimp only [GT.gt, GE.ge]
@@ -8355,8 +8365,15 @@ theorem placement_merge_fences_stale_polls_and_advances_monotonically
     rw [pack32_lo]
     dsimp only [GT.gt, GE.ge]
     simp only [hsk1_3, h_ovf, h_not_lt_op, decide_true, decide_false, Bool.not_true,
-      Bool.false_eq_true, ite_false, h1_eq2, h1_eq3, h1_eq1, h_pend, ite_true,
-      Bool.and_false]
+      Bool.false_eq_true, ite_false, h1_eq0, h1_eq2, h1_eq3, h1_eq1, h_pend, ite_true,
+      Bool.false_or, Bool.and_false]
+    decide
+  · intro h_ovf
+    unfold placementMergeStep placementMergeLo32
+    rw [pack32_lo]
+    dsimp only [GT.gt, GE.ge]
+    simp only [hsk0_3, h_ovf, decide_true, Bool.not_true, Bool.false_eq_true,
+      ite_false, h0_eq0, h0_eq2, h0_eq3, h1_eq1, h0_eq1, h_pend, ite_true, Bool.true_or]
     decide
 
 end Orb.Spec
