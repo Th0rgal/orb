@@ -707,8 +707,15 @@ struct OrbManagedMachinesSection: View {
     }
 
     private func loadTitles() async {
-        for id in missionIds where titles[id] == nil {
-            if let title = await OrbMissionTitles.load(id) { titles[id] = title }
+        let missing = missionIds.filter { titles[$0] == nil }
+        guard !missing.isEmpty else { return }
+        await withTaskGroup(of: (String, String?).self) { group in
+            for id in missing {
+                group.addTask { (id, await OrbMissionTitles.load(id)) }
+            }
+            for await (id, title) in group {
+                if let title { titles[id] = title }
+            }
         }
     }
 }

@@ -29,6 +29,7 @@ class OrbTurnText {
     data class Bubble(
         val id: String,
         var text: String,
+        var scalarCount: Int = text.codePointCount(0, text.length),
         var revision: Int = -1,
         var finalized: Boolean = false
     )
@@ -186,16 +187,27 @@ class OrbTurnText {
                     val rev = intValue(op["revision"]) ?: return
                     if (rev <= bubble.revision) return
                     bubble.revision = rev
-                    bubble.text = op["text"] as? String ?: ""
+                    val piece = op["text"] as? String ?: ""
+                    bubble.text = piece
+                    bubble.scalarCount = piece.codePointCount(0, piece.length)
                     bubble.finalized = false
                 }
                 "insert" -> {
                     val piece = op["text"] as? String ?: ""
                     val pos = intValue(op["pos"])
-                    bubble.text = if (bubbleId == "text_delta_latest" && pos == 0) {
-                        piece
-                    } else {
-                        spliceScalars(bubble.text, pos, pos, piece)
+                    when {
+                        bubbleId == "text_delta_latest" && pos == 0 -> {
+                            bubble.text = piece
+                            bubble.scalarCount = piece.codePointCount(0, piece.length)
+                        }
+                        pos == null || pos >= bubble.scalarCount -> {
+                            bubble.text += piece
+                            bubble.scalarCount += piece.codePointCount(0, piece.length)
+                        }
+                        else -> {
+                            bubble.text = spliceScalars(bubble.text, pos, pos, piece)
+                            bubble.scalarCount = bubble.text.codePointCount(0, bubble.text.length)
+                        }
                     }
                     bubble.finalized = false
                 }
@@ -207,6 +219,7 @@ class OrbTurnText {
                         range != null && range.size >= 2 -> spliceScalars(bubble.text, range[0], range[1], piece)
                         else -> piece
                     }
+                    bubble.scalarCount = bubble.text.codePointCount(0, bubble.text.length)
                     bubble.finalized = false
                 }
                 "finalize" -> bubble.finalized = true
@@ -218,13 +231,20 @@ class OrbTurnText {
     private fun appendBubble(id: String, delta: String) {
         if (delta.isEmpty()) return
         val existing = bubbles.firstOrNull { it.id == id }
-        val bubble = existing?.copy(text = existing.text + delta, finalized = false) ?: Bubble(id = id, text = delta)
+        val deltaScalars = delta.codePointCount(0, delta.length)
+        val bubble = existing?.copy(
+            text = existing.text + delta,
+            scalarCount = existing.scalarCount + deltaScalars,
+            finalized = false
+        ) ?: Bubble(id = id, text = delta, scalarCount = deltaScalars)
         upsertBubble(bubble)
     }
 
     private fun setBubble(id: String, text: String) {
         val existing = bubbles.firstOrNull { it.id == id }
-        val bubble = existing?.copy(text = text, finalized = false) ?: Bubble(id = id, text = text)
+        val scalars = text.codePointCount(0, text.length)
+        val bubble = existing?.copy(text = text, scalarCount = scalars, finalized = false)
+            ?: Bubble(id = id, text = text, scalarCount = scalars)
         upsertBubble(bubble)
     }
 

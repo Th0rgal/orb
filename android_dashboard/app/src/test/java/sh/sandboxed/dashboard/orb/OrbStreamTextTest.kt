@@ -182,6 +182,24 @@ class OrbStreamTextTest {
         live.reconcileStored(staleEvents, working = true, streamAdvanced = true)
         live.flush()
         assertEquals(full, live.text)
+
+        val liveSuffix = OrbLiveText(
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined),
+            frameMs = 3_600_000L,
+            frameDispatcher = kotlinx.coroutines.Dispatchers.Unconfined
+        )
+        val suffixAcc = StringBuilder()
+        var prevScalars = 0
+        for (i in 0 until 50) {
+            val chunk = "step 😀 $i\n"
+            suffixAcc.append(chunk)
+            val piece = if (prevScalars == 0) suffixAcc.toString() else chunk
+            liveSuffix.applyTextOp(mapOf("bubble_id" to "text_delta_latest", "ops" to listOf(mapOf("type" to "insert", "pos" to prevScalars, "text" to piece))))
+            prevScalars += chunk.codePointCount(0, chunk.length)
+        }
+        assertEquals(suffixAcc.toString(), liveSuffix.received)
+        liveSuffix.flush()
+        assertEquals(suffixAcc.toString(), liveSuffix.text)
     }
 
     private fun longReply(sections: Int): String = buildString {

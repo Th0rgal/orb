@@ -683,7 +683,17 @@ pub(super) fn partition_restored_control_messages(
         }
     }
     let acked = consumed.len().min(u32::MAX as usize) as u32;
-    let _ = evaluate_outbox_crash_reconcile_gate(total, acked, acked, 0, 1, 1, 1);
+    let verdict = evaluate_outbox_crash_reconcile_gate(total, acked, acked, 0, 1, 1, 1);
+    if verdict.action_code == 0 {
+        tracing::warn!(
+            total,
+            acked,
+            "Outbox crash reconcile rejected corrupt restored snapshot (acked > total)"
+        );
+        pending.clear();
+    } else if pending.len() > verdict.unacked_depth as usize {
+        pending.truncate(verdict.unacked_depth as usize);
+    }
     (pending, consumed)
 }
 
@@ -762,7 +772,18 @@ pub(super) fn serialize_queue_snapshot(
         .filter(|r| r.inflight_message().is_some())
         .count()
         .min(u32::MAX as usize) as u32;
-    let _ = evaluate_outbox_crash_reconcile_gate(total, acked, inflight, 1, 1, 1, 1);
+    let verdict = evaluate_outbox_crash_reconcile_gate(total, acked, inflight, 1, 1, 1, 1);
+    if verdict.action_code == 0 {
+        tracing::warn!(
+            total,
+            acked,
+            inflight,
+            "Outbox crash reconcile detected WAL acked > total invariant violation during snapshot"
+        );
+        for item in &mut items {
+            item.inflight = false;
+        }
+    }
     serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
 }
 

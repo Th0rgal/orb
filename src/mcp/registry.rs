@@ -11,9 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, RwLock};
+use dashmap::{DashMap, DashSet};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::config::McpConfigStore;
@@ -112,11 +114,249 @@ fn reconcile_workspace_mcp_env_trust(config: &mut McpServerConfig, working_dir: 
     config.workspace_env_allowlist.len() != original_len
 }
 
-/// Handle for a stdio MCP process
-struct StdioProcess {
-    child: Child,
-    stdin: tokio::process::ChildStdin,
-    stdout_lines: Arc<Mutex<BufReader<tokio::process::ChildStdout>>>,
+const MCP_STDIO_CHANNEL_CAPACITY: usize = 64;
+const MCP_STDIO_STDERR_LINE_CAP: usize = 4096;
+
+enum McpStdioCommand {
+    Request {
+        id: u64,
+        payload: String,
+        resp_tx: oneshot::Sender<anyhow::Result<serde_json::Value>>,
+    },
+    Notify {
+        payload: String,
+    },
+}
+
+/// Lock-free handle to a per-server [`McpStdioActor`].
+#[derive(Clone)]
+struct McpStdioHandle {
+    cmd_tx: mpsc::Sender<McpStdioCommand>,
+    cancel_token: CancellationToken,
+}
+
+impl McpStdioHandle {
+    async fn request(&self, id: u64, payload: String) -> anyhow::Result<serde_json::Value> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        tokio::time::timeout(
+            MCP_REQUEST_TIMEOUT,
+            self.cmd_tx.send(McpStdioCommand::Request {
+                id,
+                payload,
+                resp_tx,
+            }),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Timeout queueing MCP request"))?
+        .map_err(|_| anyhow::anyhow!("MCP stdio actor closed"))?;
+
+        match tokio::time::timeout(MCP_REQUEST_TIMEOUT, resp_rx).await {
+            Ok(Ok(res)) => res,
+            Ok(Err(_)) => anyhow::bail!("MCP process closed before responding"),
+            Err(_) => anyhow::bail!("Timeout waiting for MCP response"),
+        }
+    }
+
+    async fn notify(&self, payload: String) -> anyhow::Result<()> {
+        self.cmd_tx
+            .send(McpStdioCommand::Notify { payload })
+            .await
+            .map_err(|_| anyhow::anyhow!("MCP stdio actor closed"))
+    }
+
+    /// Trigger immediate actor cancellation and process kill in nanoseconds
+    /// without waiting on any in-flight tool calls.
+    #[inline]
+    fn kill(&self) {
+        self.cancel_token.cancel();
+    }
+}
+
+/// Drain an MCP server's stderr pipe with a bounded line buffer so even multi-MB
+/// diagnostic output (>64 KB OS pipe buffer) can never deadlock the child process.
+async fn drain_mcp_stderr(
+    mut stderr: ChildStderr,
+    server_label: String,
+    cancel: CancellationToken,
+) {
+    let mut chunk = [0u8; 4096];
+    let mut line_buf: Vec<u8> = Vec::with_capacity(512);
+    loop {
+        let read_res = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            res = stderr.read(&mut chunk) => res,
+        };
+        match read_res {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                for &b in &chunk[..n] {
+                    if b == b'\n' {
+                        let line = String::from_utf8_lossy(&line_buf);
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            tracing::debug!(mcp = %server_label, stderr = %trimmed, "MCP stdio stderr");
+                        }
+                        line_buf.clear();
+                    } else if line_buf.len() < MCP_STDIO_STDERR_LINE_CAP {
+                        line_buf.push(b);
+                    } else if line_buf.len() == MCP_STDIO_STDERR_LINE_CAP {
+                        let line = String::from_utf8_lossy(&line_buf);
+                        tracing::debug!(
+                            mcp = %server_label,
+                            stderr = %line,
+                            "MCP stdio stderr (truncated chunk)"
+                        );
+                        line_buf.clear();
+                    }
+                }
+            }
+        }
+    }
+    if !line_buf.is_empty() {
+        let line = String::from_utf8_lossy(&line_buf);
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            tracing::debug!(mcp = %server_label, stderr = %trimmed, "MCP stdio stderr");
+        }
+    }
+}
+
+fn extract_jsonrpc_id(value: &serde_json::Value) -> Option<u64> {
+    value
+        .get("id")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse::<u64>().ok()))
+}
+
+/// Per-server actor owning `Child`, `ChildStdin`, and `BufReader<ChildStdout>`.
+/// Multiplexes JSON-RPC responses by `"id"` while ignoring server notifications.
+async fn run_mcp_stdio_actor(
+    mut child: Child,
+    mut stdin: ChildStdin,
+    stdout: ChildStdout,
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
+    mut cmd_rx: mpsc::Receiver<McpStdioCommand>,
+    cancel_token: CancellationToken,
+) {
+    let mut stdout_reader = BufReader::new(stdout);
+    let mut line = String::new();
+    let mut pending: HashMap<u64, oneshot::Sender<anyhow::Result<serde_json::Value>>> =
+        HashMap::new();
+
+    let exit_reason: &'static str = loop {
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                break "MCP server killed";
+            }
+            read_res = stdout_reader.read_line(&mut line) => {
+                match read_res {
+                    Ok(0) => break "MCP process closed stdout",
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            match serde_json::from_str::<serde_json::Value>(trimmed) {
+                                Ok(val) => {
+                                    // Server notifications or server-initiated requests carry
+                                    // a `method` field or lack a matching request `id`.
+                                    let is_server_method = val.get("method").is_some();
+                                    if !is_server_method {
+                                        if let Some(req_id) = extract_jsonrpc_id(&val) {
+                                            if let Some(resp_tx) = pending.remove(&req_id) {
+                                                let outcome = if let Some(err_val) =
+                                                    val.get("error").filter(|v| !v.is_null())
+                                                {
+                                                    if let Ok(err) = serde_json::from_value::<JsonRpcError>(err_val.clone()) {
+                                                        Err(anyhow::anyhow!(
+                                                            "JSON-RPC error {}: {}",
+                                                            err.code,
+                                                            err.message
+                                                        ))
+                                                    } else {
+                                                        Err(anyhow::anyhow!("JSON-RPC error: {}", err_val))
+                                                    }
+                                                } else if let Some(result) = val.get("result") {
+                                                    Ok(result.clone())
+                                                } else {
+                                                    Err(anyhow::anyhow!("No result in response"))
+                                                };
+                                                let _ = resp_tx.send(outcome);
+                                            } else {
+                                                tracing::debug!(
+                                                    id = req_id,
+                                                    "Ignoring MCP stdio response for unknown or expired id"
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        tracing::debug!("Ignoring server-initiated MCP stdio message");
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::debug!(
+                                        error = %err,
+                                        "Ignoring non-JSON line on MCP stdio stdout"
+                                    );
+                                }
+                            }
+                        }
+                        line.clear();
+                    }
+                    Err(err) => {
+                        for (_, tx) in pending.drain() {
+                            let _ = tx.send(Err(anyhow::anyhow!("Read error: {}", err)));
+                        }
+                        break "MCP stdout read error";
+                    }
+                }
+            }
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(McpStdioCommand::Request { id, payload, resp_tx }) => {
+                        if pending.len() >= 64 {
+                            pending.retain(|_, tx| !tx.is_closed());
+                        }
+                        if let Err(err) = async {
+                            stdin.write_all(payload.as_bytes()).await?;
+                            stdin.write_all(b"\n").await?;
+                            stdin.flush().await
+                        }
+                        .await
+                        {
+                            let _ = resp_tx.send(Err(anyhow::anyhow!("Stdin write error: {}", err)));
+                            break "MCP stdin write error";
+                        }
+                        pending.insert(id, resp_tx);
+                    }
+                    Some(McpStdioCommand::Notify { payload }) => {
+                        if let Err(err) = async {
+                            stdin.write_all(payload.as_bytes()).await?;
+                            stdin.write_all(b"\n").await?;
+                            stdin.flush().await
+                        }
+                        .await
+                        {
+                            tracing::debug!(error = %err, "MCP stdio notification write failed");
+                            break "MCP stdin write error";
+                        }
+                    }
+                    None => {
+                        break "MCP stdio handle dropped";
+                    }
+                }
+            }
+        }
+    };
+
+    cancel_token.cancel();
+    for (_, tx) in pending.drain() {
+        let _ = tx.send(Err(anyhow::anyhow!("{}", exit_reason)));
+    }
+    let _ = child.start_kill();
+    let _ = child.kill().await;
+    if let Some(task) = stderr_task {
+        task.abort();
+    }
 }
 
 /// Runtime registry for MCP servers.
@@ -124,13 +364,13 @@ pub struct McpRegistry {
     /// Persistent configuration store
     config_store: Arc<McpConfigStore>,
     /// Runtime state for each MCP (keyed by ID)
-    states: RwLock<HashMap<Uuid, McpServerState>>,
+    states: DashMap<Uuid, McpServerState>,
     /// HTTP client for HTTP MCP requests
     http_client: reqwest::Client,
-    /// Stdio processes for stdio MCPs (keyed by ID)
-    stdio_processes: RwLock<HashMap<Uuid, Arc<Mutex<StdioProcess>>>>,
+    /// Stdio actor handles for stdio MCPs (keyed by ID)
+    stdio_processes: DashMap<Uuid, McpStdioHandle>,
     /// Disabled tools (by name)
-    disabled_tools: RwLock<std::collections::HashSet<String>>,
+    disabled_tools: DashSet<String>,
     /// Request ID counter for JSON-RPC
     request_id: AtomicU64,
 }
@@ -146,7 +386,7 @@ impl McpRegistry {
         // Initialize states from configs
         let mut configs = config_store.list().await;
         configs = Self::ensure_defaults(&config_store, configs, working_dir).await;
-        let mut states = HashMap::new();
+        let states = DashMap::new();
         for config in configs {
             states.insert(config.id, McpServerState::from_config(config));
         }
@@ -160,10 +400,10 @@ impl McpRegistry {
 
         Self {
             config_store,
-            states: RwLock::new(states),
+            states,
             http_client,
-            stdio_processes: RwLock::new(HashMap::new()),
-            disabled_tools: RwLock::new(std::collections::HashSet::new()),
+            stdio_processes: DashMap::new(),
+            disabled_tools: DashSet::new(),
             request_id: AtomicU64::new(1),
         }
     }
@@ -614,61 +854,32 @@ impl McpRegistry {
             .ok_or_else(|| anyhow::anyhow!("No result in response"))
     }
 
-    /// Send a JSON-RPC request via stdio
+    /// Send a JSON-RPC request via stdio actor without holding any process mutex.
     async fn send_jsonrpc_stdio(
         &self,
-        process: &Arc<Mutex<StdioProcess>>,
+        process: &McpStdioHandle,
         method: &str,
         params: Option<serde_json::Value>,
     ) -> anyhow::Result<serde_json::Value> {
-        let request = JsonRpcRequest::new(self.next_request_id(), method, params);
+        let id = self.next_request_id();
+        let request = JsonRpcRequest::new(id, method, params);
         let request_json = serde_json::to_string(&request)?;
-
-        let mut proc = process.lock().await;
-
-        // Write request to stdin
-        proc.stdin.write_all(request_json.as_bytes()).await?;
-        proc.stdin.write_all(b"\n").await?;
-        proc.stdin.flush().await?;
-
-        // Read response from stdout
-        let mut stdout = proc.stdout_lines.lock().await;
-        let mut line = String::new();
-
-        // Read with timeout
-        let read_result =
-            tokio::time::timeout(MCP_REQUEST_TIMEOUT, stdout.read_line(&mut line)).await;
-
-        match read_result {
-            Ok(Ok(0)) => anyhow::bail!("MCP process closed stdout"),
-            Ok(Ok(_)) => {
-                let json_response: JsonRpcResponse = serde_json::from_str(&line)?;
-
-                if let Some(error) = json_response.error {
-                    anyhow::bail!("JSON-RPC error {}: {}", error.code, error.message);
-                }
-
-                json_response
-                    .result
-                    .ok_or_else(|| anyhow::anyhow!("No result in response"))
-            }
-            Ok(Err(e)) => anyhow::bail!("Read error: {}", e),
-            Err(_) => anyhow::bail!("Timeout waiting for MCP response"),
-        }
+        process.request(id, request_json).await
     }
 
-    /// Spawn a stdio MCP process
+    /// Spawn a stdio MCP process managed by a bounded per-server [`McpStdioActor`].
     async fn spawn_stdio_process(
         &self,
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
-    ) -> anyhow::Result<StdioProcess> {
+    ) -> anyhow::Result<McpStdioHandle> {
         let mut cmd = Command::new(command);
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
         // Add environment variables
         for (key, value) in env {
@@ -685,13 +896,28 @@ impl McpRegistry {
             .stdout
             .take()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout"))?;
+        let stderr = child.stderr.take();
 
-        let stdout_lines = Arc::new(Mutex::new(BufReader::new(stdout)));
+        let cancel_token = CancellationToken::new();
+        let server_label = command.to_string();
+        let stderr_cancel = cancel_token.clone();
+        let stderr_task = stderr
+            .map(|err_pipe| tokio::spawn(drain_mcp_stderr(err_pipe, server_label, stderr_cancel)));
 
-        Ok(StdioProcess {
+        let (cmd_tx, cmd_rx) = mpsc::channel(MCP_STDIO_CHANNEL_CAPACITY);
+        let actor_cancel = cancel_token.clone();
+        tokio::spawn(run_mcp_stdio_actor(
             child,
             stdin,
-            stdout_lines,
+            stdout,
+            stderr_task,
+            cmd_rx,
+            actor_cancel,
+        ));
+
+        Ok(McpStdioHandle {
+            cmd_tx,
+            cancel_token,
         })
     }
 
@@ -745,7 +971,7 @@ impl McpRegistry {
     /// Initialize connection with an MCP server (stdio)
     async fn initialize_mcp_stdio(
         &self,
-        process: &Arc<Mutex<StdioProcess>>,
+        process: &McpStdioHandle,
     ) -> anyhow::Result<InitializeResult> {
         let params = InitializeParams {
             protocol_version: MCP_PROTOCOL_VERSION.to_string(),
@@ -768,23 +994,22 @@ impl McpRegistry {
             "method": "notifications/initialized"
         });
         let notification_json = serde_json::to_string(&notification)?;
-
-        let mut proc = process.lock().await;
-        let _ = proc.stdin.write_all(notification_json.as_bytes()).await;
-        let _ = proc.stdin.write_all(b"\n").await;
-        let _ = proc.stdin.flush().await;
+        let _ = process.notify(notification_json).await;
 
         Ok(init_result)
     }
 
     /// List all MCP servers with their current state.
     pub async fn list(&self) -> Vec<McpServerState> {
-        self.states.read().await.values().cloned().collect()
+        self.states
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
     /// Get a specific MCP server state.
     pub async fn get(&self, id: Uuid) -> Option<McpServerState> {
-        self.states.read().await.get(&id).cloned()
+        self.states.get(&id).map(|entry| entry.value().clone())
     }
 
     /// Add a new MCP server.
@@ -818,10 +1043,7 @@ impl McpRegistry {
         let state = McpServerState::from_config(config.clone());
 
         // Add to states
-        {
-            let mut states = self.states.write().await;
-            states.insert(id, state.clone());
-        }
+        self.states.insert(id, state.clone());
 
         // Return immediately - user should call refresh() to connect
         Ok(state)
@@ -829,20 +1051,16 @@ impl McpRegistry {
 
     /// Remove an MCP server.
     pub async fn remove(&self, id: Uuid) -> anyhow::Result<()> {
-        // Kill stdio process if running
-        {
-            let mut processes = self.stdio_processes.write().await;
-            if let Some(process) = processes.remove(&id) {
-                let mut proc = process.lock().await;
-                let _ = proc.child.kill().await;
-            }
+        // Kill stdio process immediately without blocking on in-flight tool calls
+        if let Some((_, handle)) = self.stdio_processes.remove(&id) {
+            handle.kill();
         }
 
         // Remove from persistent store
         self.config_store.remove(id).await?;
 
         // Remove from states
-        self.states.write().await.remove(&id);
+        self.states.remove(&id);
 
         Ok(())
     }
@@ -854,13 +1072,10 @@ impl McpRegistry {
         let config = self.config_store.enable(id).await?;
 
         // Update runtime state
-        {
-            let mut states = self.states.write().await;
-            if let Some(state) = states.get_mut(&id) {
-                state.config = config;
-                state.status = McpStatus::Disconnected;
-                state.error = None;
-            }
+        if let Some(mut state) = self.states.get_mut(&id) {
+            state.config = config;
+            state.status = McpStatus::Disconnected;
+            state.error = None;
         }
 
         self.get(id)
@@ -870,26 +1085,19 @@ impl McpRegistry {
 
     /// Disable an MCP server.
     pub async fn disable(&self, id: Uuid) -> anyhow::Result<McpServerState> {
-        // Kill stdio process if running
-        {
-            let mut processes = self.stdio_processes.write().await;
-            if let Some(process) = processes.remove(&id) {
-                let mut proc = process.lock().await;
-                let _ = proc.child.kill().await;
-            }
+        // Kill stdio process immediately without blocking on in-flight tool calls
+        if let Some((_, handle)) = self.stdio_processes.remove(&id) {
+            handle.kill();
         }
 
         // Update persistent config
         let config = self.config_store.disable(id).await?;
 
         // Update runtime state
-        {
-            let mut states = self.states.write().await;
-            if let Some(state) = states.get_mut(&id) {
-                state.config = config;
-                state.status = McpStatus::Disabled;
-                state.error = None;
-            }
+        if let Some(mut state) = self.states.get_mut(&id) {
+            state.config = config;
+            state.status = McpStatus::Disabled;
+            state.error = None;
         }
 
         self.get(id)
@@ -906,10 +1114,8 @@ impl McpRegistry {
     ) -> anyhow::Result<McpServerState> {
         // Kill existing stdio process if transport might change
         if req.transport.is_some() {
-            let mut processes = self.stdio_processes.write().await;
-            if let Some(process) = processes.remove(&id) {
-                let mut proc = process.lock().await;
-                let _ = proc.child.kill().await;
+            if let Some((_, handle)) = self.stdio_processes.remove(&id) {
+                handle.kill();
             }
         }
 
@@ -942,19 +1148,16 @@ impl McpRegistry {
             .await?;
 
         // Update runtime state
-        {
-            let mut states = self.states.write().await;
-            if let Some(state) = states.get_mut(&id) {
-                state.config = config;
-                // Reset status if transport changed
-                if req.transport.is_some() {
-                    state.status = if state.config.enabled {
-                        McpStatus::Disconnected
-                    } else {
-                        McpStatus::Disabled
-                    };
-                    state.error = None;
-                }
+        if let Some(mut state) = self.states.get_mut(&id) {
+            state.config = config;
+            // Reset status if transport changed
+            if req.transport.is_some() {
+                state.status = if state.config.enabled {
+                    McpStatus::Disconnected
+                } else {
+                    McpStatus::Disabled
+                };
+                state.error = None;
             }
         }
 
@@ -963,27 +1166,15 @@ impl McpRegistry {
             .ok_or_else(|| anyhow::anyhow!("MCP not found"))
     }
 
-    /// Helper to update state with error - retries a few times to handle lock contention
+    /// Helper to update state with error
     async fn update_state_error(&self, id: Uuid, error_msg: String) {
-        // Try up to 5 times with small delays to handle temporary lock contention
-        for attempt in 0..5 {
-            if let Ok(mut states) = self.states.try_write() {
-                if let Some(state) = states.get_mut(&id) {
-                    state.status = McpStatus::Error;
-                    state.error = Some(error_msg);
-                }
-                return;
-            }
-            // Small delay before retry (10ms, 20ms, 40ms, 80ms, 160ms)
-            if attempt < 4 {
-                tokio::time::sleep(Duration::from_millis(10 << attempt)).await;
-            }
+        if let Some(mut state) = self.states.get_mut(&id) {
+            state.status = McpStatus::Error;
+            state.error = Some(error_msg);
         }
-        // If still can't get lock after retries, log warning
-        tracing::warn!("Failed to update MCP {} error state after retries", id);
     }
 
-    /// Helper to update state with success - retries a few times to handle lock contention
+    /// Helper to update state with success
     async fn update_state_success(
         &self,
         id: Uuid,
@@ -991,27 +1182,14 @@ impl McpRegistry {
         server_version: Option<String>,
     ) {
         let tool_names: Vec<String> = tool_descriptors.iter().map(|t| t.name.clone()).collect();
-
-        // Try up to 5 times with small delays to handle temporary lock contention
-        for attempt in 0..5 {
-            if let Ok(mut states) = self.states.try_write() {
-                if let Some(state) = states.get_mut(&id) {
-                    state.config.tools = tool_names.clone();
-                    state.config.tool_descriptors = tool_descriptors.clone();
-                    state.config.version = server_version.clone();
-                    state.config.last_connected_at = Some(chrono::Utc::now());
-                    state.status = McpStatus::Connected;
-                    state.error = None;
-                }
-                return;
-            }
-            // Small delay before retry
-            if attempt < 4 {
-                tokio::time::sleep(Duration::from_millis(10 << attempt)).await;
-            }
+        if let Some(mut state) = self.states.get_mut(&id) {
+            state.config.tools = tool_names;
+            state.config.tool_descriptors = tool_descriptors;
+            state.config.version = server_version;
+            state.config.last_connected_at = Some(chrono::Utc::now());
+            state.status = McpStatus::Connected;
+            state.error = None;
         }
-        // If still can't get lock after retries, log warning
-        tracing::warn!("Failed to update MCP {} success state after retries", id);
     }
 
     /// Refresh an MCP server - reconnect and discover tools.
@@ -1117,18 +1295,14 @@ impl McpRegistry {
         args: Vec<String>,
         env: HashMap<String, String>,
     ) -> anyhow::Result<McpServerState> {
-        // Kill existing process if any
-        {
-            let mut processes = self.stdio_processes.write().await;
-            if let Some(process) = processes.remove(&id) {
-                let mut proc = process.lock().await;
-                let _ = proc.child.kill().await;
-            }
+        // Kill existing process immediately without waiting on in-flight requests
+        if let Some((_, handle)) = self.stdio_processes.remove(&id) {
+            handle.kill();
         }
 
-        // Spawn new process
+        // Spawn new process actor
         let process = match self.spawn_stdio_process(&command, &args, &env).await {
-            Ok(p) => Arc::new(Mutex::new(p)),
+            Ok(p) => p,
             Err(e) => {
                 self.update_state_error(id, format!("Failed to spawn process: {}", e))
                     .await;
@@ -1140,10 +1314,7 @@ impl McpRegistry {
         };
 
         // Store process handle
-        {
-            let mut processes = self.stdio_processes.write().await;
-            processes.insert(id, Arc::clone(&process));
-        }
+        self.stdio_processes.insert(id, process.clone());
 
         // Step 1: Initialize the MCP connection
         let init_result = match self.initialize_mcp_stdio(&process).await {
@@ -1151,11 +1322,8 @@ impl McpRegistry {
             Err(e) => {
                 self.update_state_error(id, format!("Initialize failed: {}", e))
                     .await;
-                // Clean up process
-                let mut processes = self.stdio_processes.write().await;
-                if let Some(process) = processes.remove(&id) {
-                    let mut proc = process.lock().await;
-                    let _ = proc.child.kill().await;
+                if let Some((_, handle)) = self.stdio_processes.remove(&id) {
+                    handle.kill();
                 }
                 return self
                     .get(id)
@@ -1215,13 +1383,12 @@ impl McpRegistry {
     /// When `skip_workspace` is true, workspace-scoped MCPs (e.g. orchestrator)
     /// are skipped because they require per-mission context unavailable at startup.
     pub async fn refresh_all(&self, skip_workspace: bool) {
-        let states = self.states.read().await;
-        let ids: Vec<Uuid> = states
+        let ids: Vec<Uuid> = self
+            .states
             .iter()
-            .filter(|(_, state)| !skip_workspace || state.config.scope != McpScope::Workspace)
-            .map(|(id, _)| *id)
+            .filter(|entry| !skip_workspace || entry.value().config.scope != McpScope::Workspace)
+            .map(|entry| *entry.key())
             .collect();
-        drop(states);
 
         // Refresh all MCPs concurrently using join_all
         let futures: Vec<_> = ids.iter().map(|id| self.refresh(*id)).collect();
@@ -1236,7 +1403,7 @@ impl McpRegistry {
         arguments: serde_json::Value,
     ) -> anyhow::Result<String> {
         // Check if tool is disabled
-        if self.disabled_tools.read().await.contains(tool_name) {
+        if self.disabled_tools.contains(tool_name) {
             anyhow::bail!("Tool {} is disabled", tool_name);
         }
 
@@ -1265,11 +1432,14 @@ impl McpRegistry {
                     .await
             }
             McpTransport::Stdio { .. } => {
-                let processes = self.stdio_processes.read().await;
-                let process = processes
+                // Clone the lightweight actor handle and drop the DashMap guard
+                // immediately so zero locks are held across the 600s tool call.
+                let process = self
+                    .stdio_processes
                     .get(&mcp_id)
+                    .map(|entry| entry.value().clone())
                     .ok_or_else(|| anyhow::anyhow!("No stdio process for MCP {}", mcp_id))?;
-                self.send_jsonrpc_stdio(process, "tools/call", Some(params))
+                self.send_jsonrpc_stdio(&process, "tools/call", Some(params))
                     .await
             }
         };
@@ -1279,14 +1449,11 @@ impl McpRegistry {
                 let response: McpCallToolResponse = serde_json::from_value(result)?;
 
                 // Increment counters
-                {
-                    let mut states = self.states.write().await;
-                    if let Some(state) = states.get_mut(&mcp_id) {
-                        if response.is_error {
-                            state.tool_errors += 1;
-                        } else {
-                            state.tool_calls += 1;
-                        }
+                if let Some(mut state) = self.states.get_mut(&mcp_id) {
+                    if response.is_error {
+                        state.tool_errors += 1;
+                    } else {
+                        state.tool_calls += 1;
                     }
                 }
 
@@ -1312,8 +1479,7 @@ impl McpRegistry {
             }
             Err(e) => {
                 // Increment error counter
-                let mut states = self.states.write().await;
-                if let Some(state) = states.get_mut(&mcp_id) {
+                if let Some(mut state) = self.states.get_mut(&mcp_id) {
                     state.tool_errors += 1;
                 }
                 anyhow::bail!("Tool call failed: {}", e);
@@ -1326,11 +1492,9 @@ impl McpRegistry {
     /// Tool names are prefixed with the MCP server name to avoid conflicts
     /// with built-in tools (e.g., `filesystem_read_file` instead of `read_file`).
     pub async fn list_tools(&self) -> Vec<McpTool> {
-        let states = self.states.read().await;
-        let disabled = self.disabled_tools.read().await;
-
         let mut tools = Vec::new();
-        for state in states.values() {
+        for entry in self.states.iter() {
+            let state = entry.value();
             if state.config.enabled && state.status == McpStatus::Connected {
                 // Derive prefix from MCP server name (sanitized for function names)
                 let prefix = sanitize_mcp_prefix(&state.config.name);
@@ -1346,8 +1510,8 @@ impl McpRegistry {
                         description: prefixed_description,
                         parameters_schema: descriptor.input_schema.clone(),
                         mcp_id: state.config.id,
-                        enabled: !disabled.contains(&descriptor.name)
-                            && !disabled.contains(&prefixed_name),
+                        enabled: !self.disabled_tools.contains(&descriptor.name)
+                            && !self.disabled_tools.contains(&prefixed_name),
                     });
                 }
             }
@@ -1357,27 +1521,25 @@ impl McpRegistry {
 
     /// Enable a tool.
     pub async fn enable_tool(&self, name: &str) {
-        self.disabled_tools.write().await.remove(name);
+        self.disabled_tools.remove(name);
     }
 
     /// Disable a tool.
     pub async fn disable_tool(&self, name: &str) {
-        self.disabled_tools.write().await.insert(name.to_string());
+        self.disabled_tools.insert(name.to_string());
     }
 
     /// Check if a tool is enabled.
     pub async fn is_tool_enabled(&self, name: &str) -> bool {
-        !self.disabled_tools.read().await.contains(name)
+        !self.disabled_tools.contains(name)
     }
 
     /// Find a tool by name (prefixed) and return its MCP ID if found.
     ///
     /// Tool names should be in prefixed format (e.g., `filesystem_read_file`).
     pub async fn find_tool(&self, name: &str) -> Option<McpTool> {
-        let states = self.states.read().await;
-        let disabled = self.disabled_tools.read().await;
-
-        for state in states.values() {
+        for entry in self.states.iter() {
+            let state = entry.value();
             if state.config.enabled && state.status == McpStatus::Connected {
                 let prefix = sanitize_mcp_prefix(&state.config.name);
 
@@ -1385,8 +1547,8 @@ impl McpRegistry {
                     let prefixed_name = format!("{}_{}", prefix, descriptor.name);
 
                     if prefixed_name == name
-                        && !disabled.contains(&descriptor.name)
-                        && !disabled.contains(&prefixed_name)
+                        && !self.disabled_tools.contains(&descriptor.name)
+                        && !self.disabled_tools.contains(&prefixed_name)
                     {
                         return Some(McpTool {
                             name: prefixed_name,
@@ -1478,5 +1640,69 @@ mod tests {
             Path::new("/srv/sandboxed")
         ));
         assert!(config.workspace_env_allowlist.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stdio_actor_drains_large_stderr_multiplexes_ids_and_kills_instantly() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = McpRegistry::new(dir.path()).await;
+        // Python one-liner MCP mock: floods 256 KB to stderr, emits a notification,
+        // replies out-of-order for id=10 and id=11, and hangs on id=99 until killed.
+        let script = r#"
+import sys, json
+sys.stderr.write("E" * (256 * 1024) + "\n")
+sys.stderr.flush()
+req1 = json.loads(sys.stdin.readline())
+req2 = json.loads(sys.stdin.readline())
+sys.stdout.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/message", "params": {"ok": True}}) + "\n")
+sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": req2["id"], "result": {"echo": req2["method"]}}) + "\n")
+sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": req1["id"], "result": {"echo": req1["method"]}}) + "\n")
+sys.stdout.flush()
+for line in sys.stdin:
+    pass
+"#;
+        let handle = registry
+            .spawn_stdio_process(
+                "python3",
+                &["-u".to_string(), "-c".to_string(), script.to_string()],
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let h1 = handle.clone();
+        let h2 = handle.clone();
+        let (r1, r2) = tokio::join!(
+            h1.request(
+                10,
+                serde_json::json!({"jsonrpc":"2.0","id":10,"method":"first"}).to_string()
+            ),
+            h2.request(
+                11,
+                serde_json::json!({"jsonrpc":"2.0","id":11,"method":"second"}).to_string()
+            ),
+        );
+        assert_eq!(r1.unwrap()["echo"], "first");
+        assert_eq!(r2.unwrap()["echo"], "second");
+
+        // Start an in-flight request that never receives a response, then kill() handle.
+        let h_hang = handle.clone();
+        let inflight = tokio::spawn(async move {
+            h_hang
+                .request(
+                    99,
+                    serde_json::json!({"jsonrpc":"2.0","id":99,"method":"hang"}).to_string(),
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let started = std::time::Instant::now();
+        handle.kill();
+        assert!(started.elapsed() < Duration::from_millis(50));
+        let aborted = tokio::time::timeout(Duration::from_secs(2), inflight)
+            .await
+            .expect("inflight resolves promptly on kill")
+            .unwrap();
+        assert!(aborted.is_err());
     }
 }

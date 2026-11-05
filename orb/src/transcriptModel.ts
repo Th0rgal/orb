@@ -56,6 +56,8 @@ export class TranscriptReducer {
   private carried: string | undefined;
   /** Prefix of a closed turn that Core's live text buffer still prepends. */
   private glued = new Map<string, string>();
+  /** Suppressed replayed live text accumulated against lastFinal across suffix inserts. */
+  private suppressedFinalPrefix = "";
   private identity:string|undefined;
   private key(kind: string) { return this.identity ? `${kind}:${this.identity}:${++this.nextForEvent}` : `${kind}-${++this.next}`; }
   private nextForEvent=0;
@@ -105,7 +107,10 @@ export class TranscriptReducer {
         else if (position > index) map.set(key, position - 1);
       }
     }
-    if (this.lastFinal != null) this.lastFinal = this.lastFinal === index ? undefined : this.lastFinal > index ? this.lastFinal - 1 : this.lastFinal;
+    if (this.lastFinal != null) {
+      if (this.lastFinal === index) { this.lastFinal = undefined; this.suppressedFinalPrefix = ""; }
+      else if (this.lastFinal > index) this.lastFinal--;
+    }
     if (this.lastUser > index) this.lastUser--;
     else if (this.lastUser === index) this.lastUser = this.items.reduce((last, item, i) => item.kind === "user" && !item.queued ? i : last, -1);
   }
@@ -204,7 +209,7 @@ export class TranscriptReducer {
           }
           return;
         }
-        this.close(); this.lastFinal = undefined;
+        this.close(); this.lastFinal = undefined; this.suppressedFinalPrefix = "";
         // A queued row may precede text that arrived while it was waiting.
         // Delivery places it after that response without changing its identity.
         this.items.splice(index, 1);
@@ -217,7 +222,7 @@ export class TranscriptReducer {
         this.items.push({ ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, queued: false, receipt: d.receipt === true, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), at: typeof d.at === "string" ? d.at : undefined });
         return;
       }
-      if (!queued) { this.close(); this.lastFinal = undefined; }
+      if (!queued) { this.close(); this.lastFinal = undefined; this.suppressedFinalPrefix = ""; }
       if (messageId) this.users.set(messageId, this.items.length);
       if (!queued) this.lastUser = this.items.length;
       this.items.push({ kind: "user", key: messageId ? `user:${messageId}` : this.key("user"), text: str(d.content), messageId, eventId: messageId, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), source, queued, attached: d.attached === true, receipt: d.receipt === true, ...(!queued && typeof d.at === "string" ? { at: d.at } : {}) });
@@ -277,6 +282,8 @@ export class TranscriptReducer {
         let live = previous?.kind === "text" ? previous.live : true;
         let snapshot: string | undefined;
         let replacedLength: number | undefined;
+        const hadSuppressedPrefix = index == null && bubble === "text_delta_latest" && this.lastFinal != null && this.suppressedFinalPrefix.length > 0;
+        if (hadSuppressedPrefix && text === "") text = this.suppressedFinalPrefix;
         if (ev.type === "text_delta") {
           const next = str(d.content);
           if (d.mode === "delta") {
@@ -330,12 +337,15 @@ export class TranscriptReducer {
         }
         if (index == null && bubble === "text_delta_latest" && this.lastFinal != null) {
           const finalized = this.items[this.lastFinal];
-          if (finalized?.kind === "text" && !finalized.live && snapshot != null && finalized.text.startsWith(snapshot)) {
-            // Recovery may replay an unsequenced live prefix after its durable
-            // final. A delivered user turn resets lastFinal, so new replies
-            // with identical text remain independent.
+          const candidate = snapshot ?? (hadSuppressedPrefix ? text : undefined);
+          if (finalized?.kind === "text" && !finalized.live && candidate != null && finalized.text.startsWith(candidate)) {
+            // Recovery may replay an unsequenced live prefix (or incremental
+            // suffix inserts) after its durable final. A delivered user turn
+            // resets lastFinal, so new replies with identical text remain independent.
+            this.suppressedFinalPrefix = live ? candidate : "";
             return;
           }
+          this.suppressedFinalPrefix = "";
         }
         if (index == null) {
           if (!text) return;
@@ -405,8 +415,8 @@ export class TranscriptReducer {
         }
         const at={...(typeof d.at==="string"?{at:d.at}:{}),...(id?{eventId:id}:{}),...(ev.sequence!=null?{sequence:ev.sequence}:{})};
         if(!isNativeReceipt){
-          if(previous?.kind === "text" && index != null){this.put(index,{...previous,text:text||previous.text,live:false,...at});this.lastFinal=index;}
-          else if(text){this.lastFinal=this.items.length;this.items.push({kind:"text",key:this.key("text"),text,live:false,...at});}
+          if(previous?.kind === "text" && index != null){this.put(index,{...previous,text:text||previous.text,live:false,...at});this.lastFinal=index;this.suppressedFinalPrefix="";}
+          else if(text){this.lastFinal=this.items.length;this.suppressedFinalPrefix="";this.items.push({kind:"text",key:this.key("text"),text,live:false,...at});}
         }else if(d.at){const row=nativeLast==null?undefined:this.items[nativeLast];if(row?.kind==="text")this.put(nativeLast!,{...row,...(typeof d.at==="string"?{at:d.at}:{})});}
         // Settle the turn's shape only after the final text is in place.
         this.hoistTrailingThoughts();

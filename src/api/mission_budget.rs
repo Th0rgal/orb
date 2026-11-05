@@ -133,25 +133,39 @@ pub(crate) async fn reparent_subtree(store: &Arc<dyn MissionStore>, user_id: &st
         manager.reparent_pool(&plan.0, plan.1).await;
     }
 
-    let pools = manager.budget_pools().await;
-    for m in manager.machines_snapshot().await {
-        if !(m.state.is_live() || m.state == crate::managed::MachineState::Stopped) {
-            continue;
+    let (pools, machines) = tokio::join!(manager.budget_pools(), manager.machines_snapshot());
+    let eligible: Vec<(crate::managed::ManagedMachine, Uuid)> = machines
+        .into_iter()
+        .filter(|m| {
+            (m.state.is_live() || m.state == crate::managed::MachineState::Stopped)
+                && m.owner_user_id.as_deref() == Some(user_id)
+        })
+        .filter_map(|m| {
+            let owner_str = m
+                .owner_mission_id
+                .as_deref()
+                .or(m.requested_by_mission_id.as_deref())?;
+            let owner_uuid = Uuid::parse_str(owner_str).ok()?;
+            Some((m, owner_uuid))
+        })
+        .collect();
+    let mut unique_owners = Vec::new();
+    let mut seen_owners = std::collections::HashSet::new();
+    for (_, owner_uuid) in &eligible {
+        if seen_owners.insert(*owner_uuid) {
+            unique_owners.push(*owner_uuid);
         }
-        if m.owner_user_id.as_deref() != Some(user_id) {
-            continue;
-        }
-        let Some(owner_str) = m
-            .owner_mission_id
-            .as_deref()
-            .or(m.requested_by_mission_id.as_deref())
-        else {
+    }
+    use futures::stream::{self, StreamExt};
+    let chains: std::collections::HashMap<Uuid, Vec<String>> = stream::iter(unique_owners)
+        .map(|owner_uuid| async move { (owner_uuid, lineage(store, owner_uuid).await) })
+        .buffered(8)
+        .collect()
+        .await;
+    for (m, owner_uuid) in eligible {
+        let Some(chain) = chains.get(&owner_uuid) else {
             continue;
         };
-        let Ok(owner_uuid) = Uuid::parse_str(owner_str) else {
-            continue;
-        };
-        let chain = lineage(store, owner_uuid).await;
         if !chain.iter().any(|a| a == &changed_str) {
             continue;
         }
@@ -187,25 +201,39 @@ pub(crate) async fn reparent_cap_subtree(
         manager.reparent_cap_pool(&plan.0, plan.1).await;
     }
 
-    let pools = manager.budget_pools().await;
-    for m in manager.machines_snapshot().await {
-        if !(m.state.is_live() || m.state == crate::managed::MachineState::Stopped) {
-            continue;
+    let (pools, machines) = tokio::join!(manager.budget_pools(), manager.machines_snapshot());
+    let eligible: Vec<(crate::managed::ManagedMachine, Uuid)> = machines
+        .into_iter()
+        .filter(|m| {
+            (m.state.is_live() || m.state == crate::managed::MachineState::Stopped)
+                && m.owner_user_id.as_deref() == Some(user_id)
+        })
+        .filter_map(|m| {
+            let owner_str = m
+                .owner_mission_id
+                .as_deref()
+                .or(m.requested_by_mission_id.as_deref())?;
+            let owner_uuid = Uuid::parse_str(owner_str).ok()?;
+            Some((m, owner_uuid))
+        })
+        .collect();
+    let mut unique_owners = Vec::new();
+    let mut seen_owners = std::collections::HashSet::new();
+    for (_, owner_uuid) in &eligible {
+        if seen_owners.insert(*owner_uuid) {
+            unique_owners.push(*owner_uuid);
         }
-        if m.owner_user_id.as_deref() != Some(user_id) {
-            continue;
-        }
-        let Some(owner_str) = m
-            .owner_mission_id
-            .as_deref()
-            .or(m.requested_by_mission_id.as_deref())
-        else {
+    }
+    use futures::stream::{self, StreamExt};
+    let chains: std::collections::HashMap<Uuid, Vec<String>> = stream::iter(unique_owners)
+        .map(|owner_uuid| async move { (owner_uuid, lineage(store, owner_uuid).await) })
+        .buffered(8)
+        .collect()
+        .await;
+    for (m, owner_uuid) in eligible {
+        let Some(chain) = chains.get(&owner_uuid) else {
             continue;
         };
-        let Ok(owner_uuid) = Uuid::parse_str(owner_str) else {
-            continue;
-        };
-        let chain = lineage(store, owner_uuid).await;
         if !chain.iter().any(|a| a == &changed_str) {
             continue;
         }
@@ -231,15 +259,28 @@ where
     F: Fn(&str) -> Fut,
     Fut: std::future::Future<Output = Option<Vec<String>>>,
 {
+    use futures::stream::{self, StreamExt};
+    let candidate_ids: Vec<&String> = pools
+        .iter()
+        .filter(|(id, pool)| {
+            pool.budget_usd.is_some()
+                && pool.owner_user_id.as_deref() == Some(user_id)
+                && id.as_str() != changed
+        })
+        .map(|(id, _)| id)
+        .collect();
+    let chains: Vec<Option<Vec<String>>> = stream::iter(
+        candidate_ids
+            .iter()
+            .map(|id| lineage_of(id.as_str()))
+            .collect::<Vec<_>>(),
+    )
+    .buffered(8)
+    .collect()
+    .await;
     let mut out = Vec::new();
-    for (id, pool) in pools {
-        if pool.budget_usd.is_none()
-            || pool.owner_user_id.as_deref() != Some(user_id)
-            || id == changed
-        {
-            continue;
-        }
-        let Some(chain) = lineage_of(id).await else {
+    for (id, chain_opt) in candidate_ids.into_iter().zip(chains) {
+        let Some(chain) = chain_opt else {
             continue;
         };
         // Only pools below the changed mission can change parent.
@@ -267,15 +308,28 @@ where
     F: Fn(&str) -> Fut,
     Fut: std::future::Future<Output = Option<Vec<String>>>,
 {
+    use futures::stream::{self, StreamExt};
+    let candidate_ids: Vec<&String> = pools
+        .iter()
+        .filter(|(id, pool)| {
+            pool.vm_limits.is_some()
+                && pool.owner_user_id.as_deref() == Some(user_id)
+                && id.as_str() != changed
+        })
+        .map(|(id, _)| id)
+        .collect();
+    let chains: Vec<Option<Vec<String>>> = stream::iter(
+        candidate_ids
+            .iter()
+            .map(|id| lineage_of(id.as_str()))
+            .collect::<Vec<_>>(),
+    )
+    .buffered(8)
+    .collect()
+    .await;
     let mut out = Vec::new();
-    for (id, pool) in pools {
-        if pool.vm_limits.is_none()
-            || pool.owner_user_id.as_deref() != Some(user_id)
-            || id == changed
-        {
-            continue;
-        }
-        let Some(chain) = lineage_of(id).await else {
+    for (id, chain_opt) in candidate_ids.into_iter().zip(chains) {
+        let Some(chain) = chain_opt else {
             continue;
         };
         if !chain.iter().skip(1).any(|a| a == changed) {
@@ -317,25 +371,39 @@ pub(crate) async fn reparent_bandwidth_subtree(
         manager.reparent_bandwidth_pool(&plan.0, plan.1).await;
     }
 
-    let pools = manager.budget_pools().await;
-    for m in manager.machines_snapshot().await {
-        if !(m.state.is_live() || m.state == crate::managed::MachineState::Stopped) {
-            continue;
+    let (pools, machines) = tokio::join!(manager.budget_pools(), manager.machines_snapshot());
+    let eligible: Vec<(crate::managed::ManagedMachine, Uuid)> = machines
+        .into_iter()
+        .filter(|m| {
+            (m.state.is_live() || m.state == crate::managed::MachineState::Stopped)
+                && m.owner_user_id.as_deref() == Some(user_id)
+        })
+        .filter_map(|m| {
+            let owner_str = m
+                .owner_mission_id
+                .as_deref()
+                .or(m.requested_by_mission_id.as_deref())?;
+            let owner_uuid = Uuid::parse_str(owner_str).ok()?;
+            Some((m, owner_uuid))
+        })
+        .collect();
+    let mut unique_owners = Vec::new();
+    let mut seen_owners = std::collections::HashSet::new();
+    for (_, owner_uuid) in &eligible {
+        if seen_owners.insert(*owner_uuid) {
+            unique_owners.push(*owner_uuid);
         }
-        if m.owner_user_id.as_deref() != Some(user_id) {
-            continue;
-        }
-        let Some(owner_str) = m
-            .owner_mission_id
-            .as_deref()
-            .or(m.requested_by_mission_id.as_deref())
-        else {
+    }
+    use futures::stream::{self, StreamExt};
+    let chains: std::collections::HashMap<Uuid, Vec<String>> = stream::iter(unique_owners)
+        .map(|owner_uuid| async move { (owner_uuid, lineage(store, owner_uuid).await) })
+        .buffered(8)
+        .collect()
+        .await;
+    for (m, owner_uuid) in eligible {
+        let Some(chain) = chains.get(&owner_uuid) else {
             continue;
         };
-        let Ok(owner_uuid) = Uuid::parse_str(owner_str) else {
-            continue;
-        };
-        let chain = lineage(store, owner_uuid).await;
         if !chain.iter().any(|a| a == &changed_str) {
             continue;
         }
@@ -359,15 +427,28 @@ where
     F: Fn(&str) -> Fut,
     Fut: std::future::Future<Output = Option<Vec<String>>>,
 {
+    use futures::stream::{self, StreamExt};
+    let candidate_ids: Vec<&String> = pools
+        .iter()
+        .filter(|(id, pool)| {
+            pool.bandwidth_limits.is_some()
+                && pool.owner_user_id.as_deref() == Some(user_id)
+                && id.as_str() != changed
+        })
+        .map(|(id, _)| id)
+        .collect();
+    let chains: Vec<Option<Vec<String>>> = stream::iter(
+        candidate_ids
+            .iter()
+            .map(|id| lineage_of(id.as_str()))
+            .collect::<Vec<_>>(),
+    )
+    .buffered(8)
+    .collect()
+    .await;
     let mut out = Vec::new();
-    for (id, pool) in pools {
-        if pool.bandwidth_limits.is_none()
-            || pool.owner_user_id.as_deref() != Some(user_id)
-            || id == changed
-        {
-            continue;
-        }
-        let Some(chain) = lineage_of(id).await else {
+    for (id, chain_opt) in candidate_ids.into_iter().zip(chains) {
+        let Some(chain) = chain_opt else {
             continue;
         };
         if !chain.iter().skip(1).any(|a| a == changed) {
@@ -421,10 +502,8 @@ pub(crate) async fn view(
             "Managed machines are not initialised",
         )
     })?;
-    let chain = lineage(store, id).await;
-    let children: Vec<String> = store
-        .get_child_missions(id)
-        .await
+    let (chain, children_res) = tokio::join!(lineage(store, id), store.get_child_missions(id));
+    let children: Vec<String> = children_res
         .unwrap_or_default()
         .iter()
         .map(|m| m.id.to_string())
@@ -519,8 +598,7 @@ pub(crate) async fn set_budget(
         message: "Managed machines are not initialised".into(),
         status: 503,
     })?;
-    let chain = lineage(store, id).await;
-    let pools = manager.budget_pools().await;
+    let (chain, pools) = tokio::join!(lineage(store, id), manager.budget_pools());
     let parent = crate::managed::budget::nearest_pool(
         chain.iter().skip(1).map(String::as_str),
         &pools,
@@ -545,8 +623,7 @@ pub(crate) async fn set_vm_limits(
         message: "Managed machines are not initialised".into(),
         status: 503,
     })?;
-    let chain = lineage(store, id).await;
-    let pools = manager.budget_pools().await;
+    let (chain, pools) = tokio::join!(lineage(store, id), manager.budget_pools());
     let parent_cap = crate::managed::budget::nearest_cap_pool(
         chain.iter().skip(1).map(String::as_str),
         &pools,
@@ -577,8 +654,7 @@ pub(crate) async fn set_bandwidth_limits(
         message: "Managed machines are not initialised".into(),
         status: 503,
     })?;
-    let chain = lineage(store, id).await;
-    let pools = manager.budget_pools().await;
+    let (chain, pools) = tokio::join!(lineage(store, id), manager.budget_pools());
     let parent_bw = crate::managed::budget::nearest_bandwidth_pool(
         chain.iter().skip(1).map(String::as_str),
         &pools,

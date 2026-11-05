@@ -84,9 +84,41 @@ fn verify_lean_sources_if_requested(root: &Path, out_dir: &Path) {
 fn kernel_backend() -> String {
     println!("cargo:rerun-if-env-changed=ORB_KERNEL_BACKEND");
     match env::var("ORB_KERNEL_BACKEND").as_deref() {
+        Ok("auto") | Err(_) => "auto".to_string(),
         Ok("leannative") => "leannative".to_string(),
-        Ok("stock-c") | Err(_) => "stock-c".to_string(),
-        Ok(other) => panic!("ORB_KERNEL_BACKEND must be stock-c or leannative, got {other}"),
+        Ok("stock-c") => "stock-c".to_string(),
+        Ok(other) => panic!("ORB_KERNEL_BACKEND must be auto, stock-c, or leannative, got {other}"),
+    }
+}
+
+fn target_leannative_ll(cabi_dir: &Path) -> Option<PathBuf> {
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| env::consts::ARCH.to_string());
+    let filename = match arch.as_str() {
+        "x86_64" => "orb_kernel_leannative_x86_64.ll",
+        "aarch64" => "orb_kernel_leannative_aarch64.ll",
+        _ => return None,
+    };
+    let ll = cabi_dir.join(filename);
+    ll.is_file().then_some(ll)
+}
+
+fn try_compile_leannative_ll(ll_path: &Path, obj_path: &Path) -> bool {
+    let mut cmd = Command::new("clang");
+    if let (Ok(target), Ok(host)) = (env::var("TARGET"), env::var("HOST")) {
+        if !target.is_empty() && target != host {
+            cmd.arg(format!("--target={target}"));
+        }
+    }
+    let _ = fs::remove_file(obj_path);
+    match cmd
+        .args(["-Wno-override-module", "-O3", "-fPIC", "-c"])
+        .arg(ll_path)
+        .arg("-o")
+        .arg(obj_path)
+        .status()
+    {
+        Ok(st) => st.success() && obj_path.is_file(),
+        Err(_) => false,
     }
 }
 
@@ -193,8 +225,13 @@ fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
     let cabi_dir = root.join("shared/orb-spec/cabi");
     let unboxed_c = cabi_dir.join("orb_kernel_unboxed.c");
     let header_h = cabi_dir.join("orb_kernel.h");
+    let ll_x86 = cabi_dir.join("orb_kernel_leannative_x86_64.ll");
+    let ll_arm = cabi_dir.join("orb_kernel_leannative_aarch64.ll");
     println!("cargo:rerun-if-changed={}", unboxed_c.display());
     println!("cargo:rerun-if-changed={}", header_h.display());
+    println!("cargo:rerun-if-changed={}", ll_x86.display());
+    println!("cargo:rerun-if-changed={}", ll_arm.display());
+    println!("cargo:rerun-if-env-changed=ORB_LEANNATIVE_ARCHIVE");
     println!(
         "cargo:rerun-if-changed={}",
         root.join("shared/orb-spec/kernel_abi.json").display()
@@ -205,23 +242,45 @@ fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
     let obj_path = out_dir.join("orb_kernel_unboxed.o");
     let lib_path = out_dir.join("liborb_spec_cabi.a");
     let macos = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
-    if kernel_backend() == "leannative" {
-        let archive = env::var_os("ORB_LEANNATIVE_ARCHIVE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                panic!("ORB_LEANNATIVE_ARCHIVE is required for ORB_KERNEL_BACKEND=leannative")
-            });
-        let native = build_leannative_object(root, out_dir, &archive);
-        fs::copy(&native, &obj_path)
-            .unwrap_or_else(|e| panic!("failed to stage LeanNative object: {e}"));
-        artifact_symbols::verify_artifact(&obj_path, macos)
-            .unwrap_or_else(|e| panic!("LeanNative object symbol verification failed: {e}"));
-        archive_object(&obj_path, &lib_path);
-        artifact_symbols::verify_artifact(&lib_path, macos)
-            .unwrap_or_else(|e| panic!("LeanNative archive symbol verification failed: {e}"));
-        println!("cargo:rustc-link-search=native={}", out_dir.display());
-        println!("cargo:rustc-link-lib=static=orb_spec_cabi");
-        return;
+    let backend = kernel_backend();
+    if backend == "leannative" || backend == "auto" {
+        if let Some(archive) = env::var_os("ORB_LEANNATIVE_ARCHIVE").map(PathBuf::from) {
+            let native = build_leannative_object(root, out_dir, &archive);
+            fs::copy(&native, &obj_path)
+                .unwrap_or_else(|e| panic!("failed to stage LeanNative object: {e}"));
+            artifact_symbols::verify_artifact(&obj_path, macos)
+                .unwrap_or_else(|e| panic!("LeanNative object symbol verification failed: {e}"));
+            archive_object(&obj_path, &lib_path);
+            artifact_symbols::verify_artifact(&lib_path, macos)
+                .unwrap_or_else(|e| panic!("LeanNative archive symbol verification failed: {e}"));
+            println!("cargo:rustc-link-search=native={}", out_dir.display());
+            println!("cargo:rustc-link-lib=static=orb_spec_cabi");
+            return;
+        }
+        if let Some(ll_path) = target_leannative_ll(&cabi_dir) {
+            if try_compile_leannative_ll(&ll_path, &obj_path) {
+                artifact_symbols::verify_artifact(&obj_path, macos).unwrap_or_else(|e| {
+                    panic!("LeanNative LLVM IR object symbol verification failed: {e}")
+                });
+                archive_object(&obj_path, &lib_path);
+                artifact_symbols::verify_artifact(&lib_path, macos).unwrap_or_else(|e| {
+                    panic!("LeanNative LLVM IR archive symbol verification failed: {e}")
+                });
+                println!("cargo:rustc-link-search=native={}", out_dir.display());
+                println!("cargo:rustc-link-lib=static=orb_spec_cabi");
+                return;
+            }
+            if backend == "leannative" {
+                panic!(
+                    "ORB_KERNEL_BACKEND=leannative failed to compile {} with clang",
+                    ll_path.display()
+                );
+            }
+        } else if backend == "leannative" {
+            panic!(
+                "ORB_KERNEL_BACKEND=leannative requires ORB_LEANNATIVE_ARCHIVE or committed LeanNative .ll for target arch"
+            );
+        }
     }
 
     let mut compiled = false;

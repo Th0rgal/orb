@@ -1590,23 +1590,33 @@ pub fn run_claudecode_turn<'a>(
                     resolve_command_path_in_workspace(&workspace_exec, work_dir, &program).await
                 {
                     let force_bun = env_var_bool("SANDBOXED_SH_CLAUDECODE_FORCE_BUN", false);
-                    let prefers_bun = force_bun
-                        || claude_cli_shebang_contains(
-                            &workspace_exec,
-                            work_dir,
-                            &claude_path,
-                            "bun",
-                        )
-                        .await
-                        .unwrap_or(false);
-                    let shebang_is_node = claude_cli_shebang_contains(
-                        &workspace_exec,
-                        work_dir,
-                        &claude_path,
-                        "node",
-                    )
-                    .await
-                    .unwrap_or(false);
+                    let (shebang_is_bun, shebang_is_node) = tokio::join!(
+                        async {
+                            if force_bun {
+                                true
+                            } else {
+                                claude_cli_shebang_contains(
+                                    &workspace_exec,
+                                    work_dir,
+                                    &claude_path,
+                                    "bun",
+                                )
+                                .await
+                                .unwrap_or(false)
+                            }
+                        },
+                        async {
+                            claude_cli_shebang_contains(
+                                &workspace_exec,
+                                work_dir,
+                                &claude_path,
+                                "node",
+                            )
+                            .await
+                            .unwrap_or(false)
+                        },
+                    );
+                    let prefers_bun = force_bun || shebang_is_bun;
 
                     if prefers_bun && !shebang_is_node {
                         program = "bun".to_string();

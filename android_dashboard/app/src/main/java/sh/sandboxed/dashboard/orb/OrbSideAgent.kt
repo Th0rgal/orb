@@ -49,6 +49,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -799,54 +802,77 @@ fun OrbSideAgentSheet(
         boundMission = target
         boundId = target.id
 
+        data class ThreadFetchOutcome(
+            val tid: String,
+            val isLive: Boolean,
+            val stamp: String,
+            val cachedHit: Boolean,
+            val events: List<OrbRow>? = null,
+            val parsed: OrbSideAgent.ParsedThread? = null,
+            val failed: Boolean = false
+        )
+        val cachedSnapshot = cachedThreads.toMap()
+        val cachedEventsSnapshot = cachedEventsByThread.toMap()
+        val outcomes = coroutineScope {
+            matching.map { thread ->
+                val row = if (thread.id == latest.id) target else thread
+                val tid = row.id
+                val tStatus = row.str("status").orEmpty().lowercase()
+                val isLive = tid == target.id && tStatus in OrbSideAgent.liveStatuses
+                val stamp = OrbSideAgent.activityStamp(row)
+                val cached = cachedSnapshot[tid]
+                val priorEvents = cachedEventsSnapshot[tid]
+                async {
+                    if (!isLive && cached != null && cached.first == stamp) {
+                        ThreadFetchOutcome(tid = tid, isLive = isLive, stamp = stamp, cachedHit = true, parsed = cached.second)
+                    } else {
+                        try {
+                            val sinceSeq = priorEvents?.let { OrbSideAgent.maxEventSeq(it) }?.takeIf { it > 0L }
+                            val evs = if (priorEvents != null && sinceSeq != null) {
+                                val delta = OrbSideAgent.loadThreadEventsDelta(core, tid, sinceSeq)
+                                OrbSideAgent.mergeThreadEvents(priorEvents, delta)
+                                    ?: OrbSideAgent.loadThreadEvents(core, tid)
+                            } else {
+                                OrbSideAgent.loadThreadEvents(core, tid)
+                            }
+                            val historyRows = row.rows("history").ifEmpty {
+                                if (evs.none { (it.str("event_type", "type", "kind") ?: "").equals("user_message", ignoreCase = true) }) {
+                                    runCatching {
+                                        OrbRow(tid, core.fetchDict("/api/control/missions/${core.encodeComponent(tid)}")).rows("history")
+                                    }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
+                                } else emptyList()
+                            }
+                            val next = OrbSideAgent.parseTurns(
+                                missionId = tid,
+                                events = evs,
+                                active = isLive,
+                                history = historyRows,
+                                previous = cached?.second
+                            )
+                            ThreadFetchOutcome(tid = tid, isLive = isLive, stamp = stamp, cachedHit = false, events = evs, parsed = next)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Throwable) {
+                            // Preserve already-rendered thread turns and open progress on transient errors.
+                            val fallback = cached?.second?.let { prev -> if (isLive) prev else prev.copy(open = null) }
+                            ThreadFetchOutcome(tid = tid, isLive = isLive, stamp = stamp, cachedHit = false, parsed = fallback, failed = true)
+                        }
+                    }
+                }
+            }.awaitAll()
+        }
         val perThread = mutableListOf<List<OrbSideAgent.Turn>>()
         var latestOpen: OrbSideAgent.OpenTurn? = null
         var latestDelivered = emptySet<String>()
-        for (thread in matching) {
-            val row = if (thread.id == latest.id) target else thread
-            val tid = row.id
-            val tStatus = row.str("status").orEmpty().lowercase()
-            val isLive = tid == target.id && tStatus in OrbSideAgent.liveStatuses
-            val stamp = OrbSideAgent.activityStamp(row)
-            val cached = cachedThreads[tid]
-            val parsed = if (!isLive && cached != null && cached.first == stamp) {
-                cached.second
-            } else {
-                try {
-                    val priorEvents = cachedEventsByThread[tid]
-                    val sinceSeq = priorEvents?.let { OrbSideAgent.maxEventSeq(it) }?.takeIf { it > 0L }
-                    val evs = if (priorEvents != null && sinceSeq != null) {
-                        val delta = OrbSideAgent.loadThreadEventsDelta(core, tid, sinceSeq)
-                        OrbSideAgent.mergeThreadEvents(priorEvents, delta)
-                            ?: OrbSideAgent.loadThreadEvents(core, tid)
-                    } else {
-                        OrbSideAgent.loadThreadEvents(core, tid)
-                    }
-                    cachedEventsByThread[tid] = evs
-                    val historyRows = row.rows("history").ifEmpty {
-                        if (evs.none { (it.str("event_type", "type", "kind") ?: "").equals("user_message", ignoreCase = true) }) {
-                            runCatching {
-                                OrbRow(tid, core.fetchDict("/api/control/missions/${core.encodeComponent(tid)}")).rows("history")
-                            }.getOrDefault(emptyList())
-                        } else emptyList()
-                    }
-                    val next = OrbSideAgent.parseTurns(
-                        missionId = tid,
-                        events = evs,
-                        active = isLive,
-                        history = historyRows,
-                        previous = cached?.second
-                    )
-                    cachedThreads[tid] = stamp to next
-                    next
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Throwable) {
-                    hadReadFailure = true
-                    // Preserve already-rendered thread turns and open progress on transient errors.
-                    cached?.second?.let { prev -> if (isLive) prev else prev.copy(open = null) }
-                }
+        for (outcome in outcomes) {
+            val tid = outcome.tid
+            val isLive = outcome.isLive
+            if (outcome.failed) hadReadFailure = true
+            if (!outcome.cachedHit && outcome.events != null && outcome.parsed != null) {
+                cachedEventsByThread[tid] = outcome.events
+                cachedThreads[tid] = outcome.stamp to outcome.parsed
             }
+            val parsed = outcome.parsed
             if (parsed != null) {
                 perThread.add(parsed.turns)
                 if (tid == target.id) {

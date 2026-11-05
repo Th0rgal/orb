@@ -95,6 +95,17 @@ export function createFileClient(scope: FileScope) {
   const artifacts = new Map<string, string>();
 
   async function roots() {
+    const controllerPromise = project
+      ? (scope.controller
+          ? getProjectCron(project, scope.controller)
+          : getProjectController(project, 1)
+        ).catch(() => null)
+      : Promise.resolve(null);
+    const eventsPromise = scope.mission
+      ? api<unknown>(
+          `/api/control/missions/${scope.mission.id}/events?limit=4000&types=assistant_message&include_counts=false&exclude_content=true`,
+        ).catch(() => null)
+      : Promise.resolve(null);
     try {
       sources = (await server("", { action: "roots" })).sources ?? [];
     } catch (e) {
@@ -125,28 +136,17 @@ export function createFileClient(scope: FileScope) {
         available: true,
         local: true,
       });
-    if (project) {
-      try {
-        const c = scope.controller
-          ? await getProjectCron(project, scope.controller)
-          : await getProjectController(project, 1);
-        if (c.settings?.prompt) {
-          controllerText = c.settings.prompt;
-          sources.push({
-            id: "controller",
-            label: "Controller · current",
-            available: true,
-          });
-        }
-      } catch {
-        /* No explicitly associated controller. */
-      }
+    const [c, rows] = await Promise.all([controllerPromise, eventsPromise]);
+    if (c?.settings?.prompt) {
+      controllerText = c.settings.prompt;
+      sources.push({
+        id: "controller",
+        label: "Controller · current",
+        available: true,
+      });
     }
-    if (scope.mission) {
+    if (rows) {
       try {
-        const rows = await api<unknown>(
-          `/api/control/missions/${scope.mission.id}/events?limit=4000&types=assistant_message&include_counts=false&exclude_content=true`,
-        );
         const events = Array.isArray(rows)
           ? rows
           : ((rows as { events?: unknown[] }).events ?? []);

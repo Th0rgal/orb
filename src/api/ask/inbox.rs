@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 use uuid::Uuid;
@@ -267,18 +266,10 @@ fn recently_generated(generated_at: &str, now: chrono::DateTime<chrono::Utc>) ->
 }
 
 fn flight(key: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
-    let mut locks = LOCKS
-        .get_or_init(Mutex::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    locks.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
-        return lock;
-    }
-    let lock = Arc::new(tokio::sync::Mutex::new(()));
-    locks.insert(key.into(), Arc::downgrade(&lock));
-    lock
+    static LOCKS: OnceLock<crate::concurrency::KeyedAsyncLocks<String>> = OnceLock::new();
+    LOCKS
+        .get_or_init(crate::concurrency::KeyedAsyncLocks::new)
+        .get(key.to_string())
 }
 
 fn conversation_turn_is_syncing(mission: &Mission, events: &[StoredEvent]) -> bool {
@@ -335,7 +326,11 @@ async fn recorded_snapshot(
             StatusCode::NOT_FOUND,
             "Mission is not synced to Core".into(),
         ))?;
-    if let Some(initial) = store.get_initial_user_message(id).await.map_err(|_| {
+    let (initial_res, events_res) = tokio::join!(
+        store.get_initial_user_message(id),
+        store.get_latest_events(id, 250),
+    );
+    if let Some(initial) = initial_res.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not load initial objective".into(),
@@ -353,7 +348,7 @@ async fn recorded_snapshot(
             );
         }
     }
-    let events = store.get_latest_events(id, 250).await.map_err(|_| {
+    let events = events_res.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not load conversation".into(),

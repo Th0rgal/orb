@@ -79,6 +79,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -111,21 +114,26 @@ fun OrbMachinesSettingsPage(
         }
     }
 
-    suspend fun loadMachines() {
+    suspend fun loadMachines() = coroutineScope {
         managedReloadKey += 1
         // Computers are independent of the fleet: one failing never hides the other.
-        try {
-            computers = loadClientComputers(core)
-            computersReady = true
-        } catch (_: Throwable) {
-        }
-        try {
-            val remoteObj = core.fetchDict("/api/remote-nodes")
-            nodes = OrbJSON.dictList(remoteObj["nodes"]).map { OrbRow(it) }
-            errorBanner = null
-        } catch (e: Throwable) {
-            errorBanner = "Fleet unavailable. ${e.message ?: ""}"
-        }
+        val computersTask = async { runCatching { loadClientComputers(core) } }
+        val remoteTask = async { runCatching { core.fetchDict("/api/remote-nodes") } }
+        computersTask.await()
+            .onFailure { if (it is CancellationException) throw it }
+            .onSuccess {
+                computers = it
+                computersReady = true
+            }
+        remoteTask.await()
+            .onSuccess { remoteObj ->
+                nodes = OrbJSON.dictList(remoteObj["nodes"]).map { OrbRow(it) }
+                errorBanner = null
+            }
+            .onFailure { e ->
+                if (e is CancellationException) throw e
+                errorBanner = "Fleet unavailable. ${e.message ?: ""}"
+            }
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current

@@ -16,8 +16,11 @@
 //! prefix stays stable between turns. The mission id comes from the
 //! router's authenticated attribution, never from a raw client header.
 
+use arc_swap::ArcSwapOption;
+use dashmap::DashMap;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -155,13 +158,17 @@ struct InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        let mut map = REGISTRY.inflight.lock().unwrap_or_else(|e| e.into_inner());
         for key in &self.keys {
-            if let Some(v) = map.get_mut(key) {
-                *v -= 1;
-                if *v <= 0 {
-                    map.remove(key);
+            let mut should_remove = false;
+            if let Some(counter) = REGISTRY.inflight.get(key) {
+                if counter.fetch_sub(1, Ordering::AcqRel) <= 1 {
+                    should_remove = true;
                 }
+            }
+            if should_remove {
+                let _ = REGISTRY
+                    .inflight
+                    .remove_if(key, |_, v| v.load(Ordering::Acquire) <= 0);
             }
         }
     }
@@ -170,8 +177,11 @@ impl Drop for InflightGuard {
 /// Active upstream requests currently open against `(provider, account_id)`.
 pub fn inflight_for_account(provider: &str, account_id: uuid::Uuid) -> usize {
     let key = format!("account:{provider}:{account_id}");
-    let map = REGISTRY.inflight.lock().unwrap_or_else(|e| e.into_inner());
-    map.get(&key).copied().unwrap_or(0).max(0) as usize
+    REGISTRY
+        .inflight
+        .get(&key)
+        .map(|v| v.load(Ordering::Acquire).max(0) as usize)
+        .unwrap_or(0)
 }
 
 struct CellState {
@@ -182,14 +192,27 @@ struct CellState {
     body_finished: bool,
     cancelled: bool,
     upstream_failed: Option<&'static str>,
-    /// A stall the client wrapper has not looked at yet.
-    pending_stall: bool,
-    last_upstream: Option<tokio::time::Instant>,
 }
 
 /// Mutable timing state of one request. Emits on drop.
+///
+/// Hot streaming callbacks (`upstream_activity`, `note_mission_liveness`,
+/// `upstream_idle`, `client_gap`, `take_stall`) operate strictly on lock-free
+/// atomics and a pre-bound `Arc<MissionProxyLiveness>` so per-SSE-chunk paths
+/// perform zero mutex locks and zero map lookups.
 pub struct TimingCell {
     started: Instant,
+    tokio_origin: tokio::time::Instant,
+    mission_liveness: ArcSwapOption<crate::api::proxy_liveness::MissionProxyLiveness>,
+    last_upstream_nanos: AtomicU64,
+    has_active_attempt: AtomicBool,
+    cur_upstream_chunks: AtomicU64,
+    cur_max_upstream_gap_ms: AtomicU64,
+    cur_upstream_gaps_over_10s: AtomicU32,
+    cur_upstream_gaps_over_30s: AtomicU32,
+    max_client_gap_ms: AtomicU64,
+    keepalives: AtomicU32,
+    pending_stall: AtomicBool,
     state: Mutex<CellState>,
 }
 
@@ -197,6 +220,17 @@ impl TimingCell {
     pub fn new(chain: &str, stream: bool) -> Arc<Self> {
         Arc::new(Self {
             started: Instant::now(),
+            tokio_origin: tokio::time::Instant::now(),
+            mission_liveness: ArcSwapOption::empty(),
+            last_upstream_nanos: AtomicU64::new(0),
+            has_active_attempt: AtomicBool::new(false),
+            cur_upstream_chunks: AtomicU64::new(0),
+            cur_max_upstream_gap_ms: AtomicU64::new(0),
+            cur_upstream_gaps_over_10s: AtomicU32::new(0),
+            cur_upstream_gaps_over_30s: AtomicU32::new(0),
+            max_client_gap_ms: AtomicU64::new(0),
+            keepalives: AtomicU32::new(0),
+            pending_stall: AtomicBool::new(false),
             state: Mutex::new(CellState {
                 record: TimingRecord {
                     chain: log_safe(chain),
@@ -209,8 +243,6 @@ impl TimingCell {
                 body_finished: false,
                 cancelled: false,
                 upstream_failed: None,
-                pending_stall: false,
-                last_upstream: None,
             }),
         })
     }
@@ -224,6 +256,54 @@ impl TimingCell {
         self.started.elapsed().as_millis() as u64
     }
 
+    #[inline]
+    fn tokio_now_nanos(&self) -> u64 {
+        let elapsed = tokio::time::Instant::now()
+            .saturating_duration_since(self.tokio_origin)
+            .as_nanos();
+        (elapsed.min((u64::MAX - 1) as u128) as u64) + 1
+    }
+
+    /// Fold lock-free per-chunk counters into the active `Attempt` row before
+    /// switching attempts or snapshotting/emitting the final record.
+    fn sync_hot_counters_locked(&self, s: &mut CellState, reset_attempt_counters: bool) {
+        s.record.max_client_gap_ms = s
+            .record
+            .max_client_gap_ms
+            .max(self.max_client_gap_ms.load(Ordering::Relaxed));
+        s.record.keepalives = self.keepalives.load(Ordering::Relaxed);
+
+        let chunks = if reset_attempt_counters {
+            self.cur_upstream_chunks.swap(0, Ordering::AcqRel)
+        } else {
+            self.cur_upstream_chunks.load(Ordering::Acquire)
+        };
+        let max_gap = if reset_attempt_counters {
+            self.cur_max_upstream_gap_ms.swap(0, Ordering::AcqRel)
+        } else {
+            self.cur_max_upstream_gap_ms.load(Ordering::Acquire)
+        };
+        let over_10s = if reset_attempt_counters {
+            self.cur_upstream_gaps_over_10s.swap(0, Ordering::AcqRel)
+        } else {
+            self.cur_upstream_gaps_over_10s.load(Ordering::Acquire)
+        };
+        let over_30s = if reset_attempt_counters {
+            self.cur_upstream_gaps_over_30s.swap(0, Ordering::AcqRel)
+        } else {
+            self.cur_upstream_gaps_over_30s.load(Ordering::Acquire)
+        };
+
+        if let Some(a) = s.current_attempt.and_then(|i| s.record.attempts.get_mut(i)) {
+            if reset_attempt_counters {
+                a.upstream_chunks += chunks;
+                a.max_upstream_gap_ms = a.max_upstream_gap_ms.max(max_gap);
+                a.upstream_gaps_over_10s += over_10s;
+                a.upstream_gaps_over_30s += over_30s;
+            }
+        }
+    }
+
     pub fn set_request(
         &self,
         chain: &str,
@@ -231,6 +311,8 @@ impl TimingCell {
         caller: Option<String>,
         shape: RequestShape,
     ) {
+        self.mission_liveness
+            .store(mission_id.map(crate::api::proxy_liveness::liveness_for));
         self.with(|s| {
             s.record.chain = log_safe(chain);
             s.record.mission_id = mission_id;
@@ -246,6 +328,11 @@ impl TimingCell {
             (None, crate::api::usage_attribution::CallerKind::Unknown) => None,
             (None, _) => Some("internal".to_string()),
         };
+        self.mission_liveness.store(
+            attribution
+                .mission_id
+                .map(crate::api::proxy_liveness::liveness_for),
+        );
         self.with(|s| {
             s.record.mission_id = attribution.mission_id;
             s.record.caller = caller;
@@ -255,41 +342,49 @@ impl TimingCell {
     }
 
     /// Raw upstream bytes arrived for the current attempt.
+    ///
+    /// Lock-free: zero mutexes and zero map lookups per SSE/byte chunk.
     pub fn upstream_activity(&self) {
-        let now = tokio::time::Instant::now();
+        let now_nanos = self.tokio_now_nanos();
         self.note_mission_liveness();
-        self.with(|s| {
-            let gap = s
-                .last_upstream
-                .map(|t| now.duration_since(t).as_millis() as u64);
-            s.last_upstream = Some(now);
-            if let Some(a) = s.current_attempt.and_then(|i| s.record.attempts.get_mut(i)) {
-                a.upstream_chunks += 1;
-                if let Some(gap) = gap {
-                    a.max_upstream_gap_ms = a.max_upstream_gap_ms.max(gap);
-                    if gap > 10_000 {
-                        a.upstream_gaps_over_10s += 1;
-                    }
-                    if gap > 30_000 {
-                        a.upstream_gaps_over_30s += 1;
-                    }
+        let prev = self.last_upstream_nanos.swap(now_nanos, Ordering::AcqRel);
+        if self.has_active_attempt.load(Ordering::Acquire) {
+            self.cur_upstream_chunks.fetch_add(1, Ordering::Relaxed);
+            if prev != 0 {
+                let gap_ms =
+                    Duration::from_nanos(now_nanos.saturating_sub(prev)).as_millis() as u64;
+                self.cur_max_upstream_gap_ms
+                    .fetch_max(gap_ms, Ordering::Relaxed);
+                if gap_ms > 10_000 {
+                    self.cur_upstream_gaps_over_10s
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                if gap_ms > 30_000 {
+                    self.cur_upstream_gaps_over_30s
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
-        });
+        }
     }
 
     /// The router is still legitimately waiting on this request: keep the
     /// mission's proxy liveness fresh so harness idle watchdogs agree with
     /// the router's own idle limit. Authenticated attribution only.
+    #[inline]
     pub fn note_mission_liveness(&self) {
-        if let Some(mission) = self.with(|s| s.record.mission_id) {
-            crate::api::proxy_liveness::note_activity(mission);
+        if let Some(liveness) = self.mission_liveness.load().as_ref() {
+            liveness.record_chunk();
         }
     }
 
     /// Time since the current attempt last received upstream bytes.
     pub fn upstream_idle(&self) -> Option<Duration> {
-        self.with(|s| s.last_upstream.map(|t| t.elapsed()))
+        let last = self.last_upstream_nanos.load(Ordering::Acquire);
+        if last == 0 {
+            return None;
+        }
+        let now = self.tokio_now_nanos();
+        Some(Duration::from_nanos(now.saturating_sub(last)))
     }
 
     /// Provider, model and account of the attempt in progress.
@@ -305,18 +400,15 @@ impl TimingCell {
     pub fn client_gap(&self, gap: Duration, keepalive: bool) {
         if keepalive {
             self.note_mission_liveness();
+            self.keepalives.fetch_add(1, Ordering::Relaxed);
         }
-        self.with(|s| {
-            s.record.max_client_gap_ms = s.record.max_client_gap_ms.max(gap.as_millis() as u64);
-            if keepalive {
-                s.record.keepalives += 1;
-            }
-        });
+        self.max_client_gap_ms
+            .fetch_max(gap.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// Consume a stall signalled by the upstream stream wrapper.
     pub fn take_stall(&self) -> bool {
-        self.with(|s| std::mem::take(&mut s.pending_stall))
+        self.pending_stall.swap(false, Ordering::AcqRel)
     }
 
     /// A stalled stream is being replaced transparently.
@@ -358,18 +450,24 @@ impl TimingCell {
             format!("provider:{provider}"),
             format!("account:{provider}:{account}"),
         ];
-        let (inflight_provider, inflight_account) = {
-            let mut map = REGISTRY.inflight.lock().unwrap_or_else(|e| e.into_inner());
-            let p = map.entry(keys[0].clone()).or_insert(0);
-            let before_p = *p;
-            *p += 1;
-            let a = map.entry(keys[1].clone()).or_insert(0);
-            let before_a = *a;
-            *a += 1;
-            (before_p, before_a)
+        let bump_inflight = |key: &str| -> i64 {
+            if let Some(counter) = REGISTRY.inflight.get(key) {
+                return counter.fetch_add(1, Ordering::AcqRel).max(0);
+            }
+            REGISTRY
+                .inflight
+                .entry(key.to_string())
+                .or_insert_with(|| AtomicI64::new(0))
+                .fetch_add(1, Ordering::AcqRel)
+                .max(0)
         };
+        let inflight_provider = bump_inflight(&keys[0]);
+        let inflight_account = bump_inflight(&keys[1]);
         let start_ms = self.elapsed_ms();
         self.with(|s| {
+            // Flush any chunks accumulated on the prior attempt before switching/folding.
+            self.sync_hot_counters_locked(s, true);
+            self.last_upstream_nanos.store(0, Ordering::Release);
             // Same entry again (pre-first-byte retry): keep one attempt row.
             let same = s
                 .current_attempt
@@ -380,7 +478,7 @@ impl TimingCell {
             // Replacing the guard first releases the previous attempt.
             s.inflight = Some(InflightGuard { keys });
             s.attempt_started = Some(Instant::now());
-            s.last_upstream = None;
+            self.has_active_attempt.store(true, Ordering::Release);
             if same {
                 return;
             }
@@ -465,10 +563,10 @@ impl TimingCell {
 
     /// The upstream stream stalled or errored after content started.
     pub fn mark_upstream_stream_failed(&self, reason: &'static str) {
+        if reason == "stalled" {
+            self.pending_stall.store(true, Ordering::Release);
+        }
         self.with(|s| {
-            if reason == "stalled" {
-                s.pending_stall = true;
-            }
             s.upstream_failed = Some(reason);
             if let Some(a) = s.current_attempt.and_then(|i| s.record.attempts.get_mut(i)) {
                 a.failures.push(reason.to_string());
@@ -492,6 +590,18 @@ impl TimingCell {
         self.with(|s| {
             s.inflight = None;
             let mut record = s.record.clone();
+            record.max_client_gap_ms = record
+                .max_client_gap_ms
+                .max(self.max_client_gap_ms.load(Ordering::Acquire));
+            record.keepalives = self.keepalives.load(Ordering::Acquire);
+            if let Some(a) = s.current_attempt.and_then(|i| record.attempts.get_mut(i)) {
+                a.upstream_chunks += self.cur_upstream_chunks.load(Ordering::Acquire);
+                a.max_upstream_gap_ms = a
+                    .max_upstream_gap_ms
+                    .max(self.cur_max_upstream_gap_ms.load(Ordering::Acquire));
+                a.upstream_gaps_over_10s += self.cur_upstream_gaps_over_10s.load(Ordering::Acquire);
+                a.upstream_gaps_over_30s += self.cur_upstream_gaps_over_30s.load(Ordering::Acquire);
+            }
             record.total_ms = total_ms;
             let success = record.http_status.is_some_and(|c| (200..300).contains(&c));
             record.outcome = if s.cancelled {
@@ -590,12 +700,12 @@ fn emit(record: &TimingRecord) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct Registry {
-    inflight: Mutex<HashMap<String, i64>>,
+    inflight: DashMap<String, AtomicI64>,
     ring: Mutex<VecDeque<(Instant, TimingRecord)>>,
 }
 
 static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
-    inflight: Mutex::new(HashMap::new()),
+    inflight: DashMap::new(),
     ring: Mutex::new(VecDeque::with_capacity(RING_CAPACITY)),
 });
 
@@ -613,9 +723,12 @@ impl Registry {
 pub fn inflight_snapshot() -> HashMap<String, i64> {
     REGISTRY
         .inflight
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
+        .iter()
+        .filter_map(|entry| {
+            let v = entry.value().load(Ordering::Acquire);
+            (v > 0).then(|| (entry.key().clone(), v))
+        })
+        .collect()
 }
 
 /// Recent successful first-content latencies (ms) of streams answered by

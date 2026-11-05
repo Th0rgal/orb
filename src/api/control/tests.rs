@@ -1954,7 +1954,7 @@ fn test_resolve_agent_finished_target_mission_does_not_switch_when_not_completed
 }
 
 #[test]
-fn text_op_stream_transform_converts_cumulative_delta_to_insert_then_replace() {
+fn text_op_stream_transform_converts_cumulative_delta_to_insert_then_suffix_insert() {
     let mission_id = Uuid::new_v4();
     let mut buffers = HashMap::new();
 
@@ -2003,9 +2003,9 @@ fn text_op_stream_transform_converts_cumulative_delta_to_insert_then_replace() {
             assert_eq!(bubble_id, "text_delta_latest");
             assert_eq!(
                 ops,
-                &vec![TextOp::Replace {
-                    range: (0, 5),
-                    text: "hello world".to_string(),
+                &vec![TextOp::Insert {
+                    pos: 5,
+                    text: " world".to_string(),
                 }]
             );
         }
@@ -2067,7 +2067,9 @@ fn text_op_stream_buffer_resets_across_a_cut_turn_so_send_now_reply_is_not_glued
     };
     let _ = text_op_events_for_stream(user(true), &mut buffers);
     assert_eq!(
-        buffers.get(&mission_id).map(String::as_str),
+        buffers
+            .get(&mission_id)
+            .map(streaming::StreamTextState::as_str),
         Some("step 1 done")
     );
     let _ = text_op_events_for_stream(user(false), &mut buffers);
@@ -2105,9 +2107,9 @@ fn text_op_stream_transform_merges_incremental_delta_fragments() {
         AgentEvent::TextOp { ops, .. } => {
             assert_eq!(
                 ops,
-                &vec![TextOp::Replace {
-                    range: (0, 36),
-                    text: "No, it is not actually enforced yet.\n\nCurrent state:".to_string(),
+                &vec![TextOp::Insert {
+                    pos: 36,
+                    text: "\n\nCurrent state:".to_string(),
                 }]
             );
         }
@@ -2136,18 +2138,13 @@ fn text_op_stream_transform_ignores_replayed_shorter_prefixes() {
         &mut buffers,
     );
 
-    match &second[0] {
-        AgentEvent::TextOp { ops, .. } => {
-            assert_eq!(
-                ops,
-                &vec![TextOp::Replace {
-                    range: (0, 47),
-                    text: "The docs are accurate about this current state.".to_string(),
-                }]
-            );
-        }
-        other => panic!("expected text_op, got {other:?}"),
-    }
+    assert!(second.is_empty());
+    assert_eq!(
+        buffers
+            .get(&mission_id)
+            .map(streaming::StreamTextState::as_str),
+        Some("The docs are accurate about this current state.")
+    );
 }
 
 #[test]

@@ -105,13 +105,18 @@ pub struct Approvals {
     challenges: Mutex<HashMap<Uuid, Challenge>>,
 }
 
-static APPROVALS: OnceLock<Arc<Approvals>> = OnceLock::new();
+static APPROVALS: OnceLock<dashmap::DashMap<PathBuf, Arc<Approvals>>> = OnceLock::new();
 
 pub fn approvals(state: &AppState) -> Arc<Approvals> {
-    APPROVALS
-        .get_or_init(|| {
-            let dir = state.config.working_dir.join(".sandboxed-sh");
-            let path = dir.join("approval_devices.json");
+    let dir = state.config.working_dir.join(".sandboxed-sh");
+    let path = dir.join("approval_devices.json");
+    let stores = APPROVALS.get_or_init(dashmap::DashMap::new);
+    if let Some(existing) = stores.get(&path) {
+        return Arc::clone(existing.value());
+    }
+    stores
+        .entry(path.clone())
+        .or_insert_with(|| {
             // Fail closed: an unreadable or corrupt device file means enforce
             // (with no devices) rather than silently falling back to warn.
             let data = match std::fs::read_to_string(&path) {
@@ -138,6 +143,7 @@ pub fn approvals(state: &AppState) -> Arc<Approvals> {
                 challenges: Mutex::new(HashMap::new()),
             })
         })
+        .value()
         .clone()
 }
 

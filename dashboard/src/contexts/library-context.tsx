@@ -225,9 +225,8 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
 
   const saveSkill = useCallback(async (name: string, content: string) => {
     await saveLibrarySkill(name, content);
-    const skillsData = await listLibrarySkills();
+    const [skillsData] = await Promise.all([listLibrarySkills(), refreshStatus()]);
     setSkills(skillsData);
-    await refreshStatus();
   }, [refreshStatus]);
 
   const removeSkill = useCallback(async (name: string) => {

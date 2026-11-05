@@ -933,7 +933,7 @@ impl SqliteMissionStore {
         &self,
         id: Uuid,
     ) -> Result<Option<TelegramChannel>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let id_str = id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -954,7 +954,7 @@ impl SqliteMissionStore {
         &self,
         mission_id: Uuid,
     ) -> Result<Vec<TelegramChannel>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mission_id_str = mission_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -978,7 +978,7 @@ impl SqliteMissionStore {
     pub(super) async fn list_all_active_telegram_channels(
         &self,
     ) -> Result<Vec<TelegramChannel>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -1058,7 +1058,7 @@ impl SqliteMissionStore {
     }
 
     pub(super) async fn list_all_telegram_channels(&self) -> Result<Vec<TelegramChannel>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -1117,7 +1117,7 @@ impl SqliteMissionStore {
         &self,
         telegram_user_id: i64,
     ) -> Result<Option<TelegramUser>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.query_row(
@@ -1331,7 +1331,7 @@ impl SqliteMissionStore {
         &self,
         telegram_user_id: i64,
     ) -> Result<Vec<TelegramMissionSubscription>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -1394,7 +1394,7 @@ impl SqliteMissionStore {
         &self,
         telegram_user_id: i64,
     ) -> Result<Vec<TelegramAlertPreference>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -1460,7 +1460,7 @@ impl SqliteMissionStore {
         telegram_user_id: i64,
         limit: usize,
     ) -> Result<Vec<TelegramAlert>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -1491,7 +1491,7 @@ impl SqliteMissionStore {
         if mission_ids.is_empty() {
             return Ok(vec![]);
         }
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let id_strings: Vec<String> = mission_ids.iter().map(|id| id.to_string()).collect();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -1546,7 +1546,7 @@ impl SqliteMissionStore {
         telegram_user_id: i64,
         telegram_message_id: i64,
     ) -> Result<Option<TelegramAlert>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -1823,7 +1823,7 @@ impl SqliteMissionStore {
         channel_id: Uuid,
         chat_id: i64,
     ) -> Result<Option<TelegramChatMission>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let channel_id_str = channel_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -1907,7 +1907,7 @@ impl SqliteMissionStore {
         &self,
         mission_id: Uuid,
     ) -> Result<Option<TelegramChatMission>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mission_id_str = mission_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -1940,7 +1940,7 @@ impl SqliteMissionStore {
         &self,
         channel_id: Uuid,
     ) -> Result<Vec<TelegramChatMission>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let channel_id_str = channel_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -2018,7 +2018,7 @@ impl SqliteMissionStore {
         send_at: &str,
         limit: usize,
     ) -> Result<Vec<TelegramScheduledMessage>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let channel_id_str = channel_id.to_string();
         let send_at = send_at.to_string();
         tokio::task::spawn_blocking(move || {
@@ -2055,7 +2055,7 @@ impl SqliteMissionStore {
         chat_id: Option<i64>,
         limit: usize,
     ) -> Result<Vec<TelegramScheduledMessage>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let channel_id_str = channel_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -2374,7 +2374,7 @@ impl SqliteMissionStore {
         subject_user_id: Option<i64>,
         limit: usize,
     ) -> Result<Vec<TelegramStructuredMemoryEntry>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let channel_id_str = channel_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -2432,7 +2432,7 @@ impl SqliteMissionStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<TelegramStructuredMemoryEntry>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let channel_id_str = channel_id.to_string();
         let query = query.trim().to_lowercase();
         tokio::task::spawn_blocking(move || {
@@ -2492,7 +2492,7 @@ impl SqliteMissionStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<TelegramStructuredMemorySearchHit>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let channel_id_str = channel_id.to_string();
         let normalized_query = normalize_search_text(query.trim());
         let query_tokens = tokenize_search_text(query);
@@ -2718,7 +2718,7 @@ impl SqliteMissionStore {
         subject_user_id: Option<i64>,
         limit: usize,
     ) -> Result<Vec<TelegramStructuredMemoryEntry>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let channel_id_str = channel_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -2766,7 +2766,7 @@ impl SqliteMissionStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<TelegramStructuredMemoryEntry>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let channel_id_str = channel_id.to_string();
         let query = query.trim().to_lowercase();
         tokio::task::spawn_blocking(move || {
@@ -2873,7 +2873,7 @@ impl SqliteMissionStore {
         chat_id: Option<i64>,
         limit: usize,
     ) -> Result<Vec<TelegramActionExecution>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let channel_id_str = channel_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -3013,7 +3013,7 @@ impl SqliteMissionStore {
         channel_id: Uuid,
         chat_id: i64,
     ) -> Result<Option<TelegramConversation>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -3039,7 +3039,7 @@ impl SqliteMissionStore {
         channel_id: Uuid,
         limit: usize,
     ) -> Result<Vec<TelegramConversation>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -3117,7 +3117,7 @@ impl SqliteMissionStore {
         conversation_id: Uuid,
         limit: usize,
     ) -> Result<Vec<TelegramConversationMessage>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -3324,7 +3324,7 @@ impl SqliteMissionStore {
         channel_id: Uuid,
         limit: usize,
     ) -> Result<Vec<TelegramWorkflow>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -3357,7 +3357,7 @@ impl SqliteMissionStore {
         channel_id: Uuid,
         target_chat_id: i64,
     ) -> Result<Option<TelegramWorkflow>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -3392,7 +3392,7 @@ impl SqliteMissionStore {
         target_chat_id: i64,
         request_message_id: i64,
     ) -> Result<Option<TelegramWorkflow>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -3455,7 +3455,7 @@ impl SqliteMissionStore {
         workflow_id: Uuid,
         limit: usize,
     ) -> Result<Vec<TelegramWorkflowEvent>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn

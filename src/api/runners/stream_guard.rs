@@ -119,20 +119,42 @@ fn detect_budgeted(
     }
     let mut comparisons = 0;
     let mut candidates = 0;
+    let table_cap = eligible.len().saturating_mul(2).next_power_of_two().max(16);
+    let table_mask = table_cap - 1;
+    let mut seen_slots: Vec<Option<(u64, Occurrences)>> = vec![None; table_cap];
     for len in min_len..=max_len {
-        let mut seen: HashMap<u64, Occurrences> = HashMap::with_capacity(eligible.len());
+        seen_slots.fill(None);
         for &start in &eligible {
             if start + len > n {
                 break;
             }
             candidates += 1;
-            if candidates % 128 == 0 && (cancel.is_cancelled() || started.elapsed() >= time_budget)
-            {
+            let timed_out = candidates % 128 == 0
+                && (cancel.is_cancelled() || started.elapsed() >= time_budget);
+            if timed_out {
+                let _ = crate::orb_spec::stream_repetition_step(
+                    true,
+                    false,
+                    start as u32,
+                    0,
+                    len as u32,
+                    0,
+                    repeats as u32,
+                    comparisons as u64,
+                    comparison_budget as u64,
+                );
                 return Verdict::Inconclusive;
             }
             let hash = prefix[start + len].wrapping_sub(prefix[start].wrapping_mul(powers[len]));
-            let Some(previous) = seen.get_mut(&hash) else {
-                seen.insert(
+            let mut slot_idx = (hash.wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize) & table_mask;
+            while let Some((existing_hash, _)) = seen_slots[slot_idx] {
+                if existing_hash == hash {
+                    break;
+                }
+                slot_idx = (slot_idx + 1) & table_mask;
+            }
+            let Some((_, previous)) = seen_slots[slot_idx].as_mut() else {
+                seen_slots[slot_idx] = Some((
                     hash,
                     Occurrences {
                         exemplar: start,
@@ -141,47 +163,89 @@ fn detect_budgeted(
                         count: 1,
                         noise: false,
                     },
-                );
+                ));
                 continue;
             };
             if previous.noise {
                 continue;
             }
+            let mut hash_collision = false;
             for offset in 0..len {
                 comparisons += 1;
                 if comparisons > comparison_budget {
-                    return Verdict::Inconclusive;
-                }
-                if chars[previous.exemplar + offset] != chars[start + offset] {
-                    // Collision: fail open rather than guess or build an unbounded bucket.
-                    debug_assert_eq!(
-                        crate::orb_spec::stream_loop_step(
-                            false,
-                            true,
-                            n as u32,
-                            len as u32,
-                            repeats as u32,
-                            previous.count as u32,
-                            2,
-                            comparisons as u64,
-                            comparison_budget as u64,
-                        ),
-                        crate::orb_spec::StreamLoopVerdict::Inconclusive
+                    let _ = crate::orb_spec::stream_repetition_step(
+                        false,
+                        false,
+                        start as u32,
+                        previous.end as u32,
+                        len as u32,
+                        previous.count as u32,
+                        repeats as u32,
+                        comparisons as u64,
+                        comparison_budget as u64,
                     );
                     return Verdict::Inconclusive;
                 }
+                if chars[previous.exemplar + offset] != chars[start + offset] {
+                    hash_collision = true;
+                    break;
+                }
+            }
+            if hash_collision {
+                // Collision: fail open rather than guess or build an unbounded bucket.
+                let rep_verdict = crate::orb_spec::stream_repetition_step(
+                    false,
+                    true,
+                    start as u32,
+                    previous.end as u32,
+                    len as u32,
+                    previous.count as u32,
+                    repeats as u32,
+                    comparisons as u64,
+                    comparison_budget as u64,
+                );
+                debug_assert!(matches!(
+                    rep_verdict,
+                    crate::orb_spec::StreamRepetitionVerdict::Inconclusive(_)
+                ));
+                return Verdict::Inconclusive;
             }
             if start < previous.end {
                 continue;
             } // Count whole, non-overlapping occurrences.
-            if start <= previous.end.saturating_add(len) {
-                previous.count += 1;
-            } else {
-                previous.count = 1;
-                previous.first = start;
-            }
+            let prev_end = previous.end;
+            let rep_verdict = crate::orb_spec::stream_repetition_step(
+                false,
+                false,
+                start as u32,
+                prev_end as u32,
+                len as u32,
+                previous.count as u32,
+                repeats as u32,
+                comparisons as u64,
+                comparison_budget as u64,
+            );
+            let reached_repeats = match rep_verdict {
+                crate::orb_spec::StreamRepetitionVerdict::Inconclusive(_) => {
+                    return Verdict::Inconclusive;
+                }
+                crate::orb_spec::StreamRepetitionVerdict::AbortRepetition(next_count) => {
+                    if start > prev_end.saturating_add(len) {
+                        previous.first = start;
+                    }
+                    previous.count = next_count as usize;
+                    true
+                }
+                crate::orb_spec::StreamRepetitionVerdict::Continue(next_count) => {
+                    if start > prev_end.saturating_add(len) {
+                        previous.first = start;
+                    }
+                    previous.count = next_count as usize;
+                    previous.count >= repeats
+                }
+            };
             previous.end = start + len;
-            if previous.count >= repeats {
+            if reached_repeats {
                 let needle: String = chars[start..start + len].iter().collect();
                 let words: std::collections::HashSet<_> = needle
                     .split(|c: char| !c.is_alphanumeric())

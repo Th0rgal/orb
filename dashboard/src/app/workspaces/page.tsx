@@ -188,22 +188,19 @@ export default function WorkspacesPage() {
 
     const fetchBuildInfo = async () => {
       try {
-        const [debug, log] = await Promise.all([
+        const [debug, log, updated] = await Promise.all([
           getWorkspaceDebug(selectedWorkspaceId).catch(() => null),
           getWorkspaceInitLog(selectedWorkspaceId).catch(() => null),
+          // Only poll for status updates when building (not when already in error state)
+          isBuilding ? getWorkspace(selectedWorkspaceId) : Promise.resolve(null),
         ]);
         if (cancelled) return;
         if (debug) setBuildDebug(debug);
         if (log) setBuildLog(log);
 
-        // Only poll for status updates when building (not when already in error state)
-        if (isBuilding) {
-          const updated = await getWorkspace(selectedWorkspaceId);
-          if (cancelled) return;
-          if (updated.status !== selectedWorkspaceStatus) {
-            setSelectedWorkspace(updated);
-            await mutateWorkspaces();
-          }
+        if (updated && updated.status !== selectedWorkspaceStatus) {
+          setSelectedWorkspace(updated);
+          await mutateWorkspaces();
         }
       } catch {
         // Ignore errors during polling
@@ -318,9 +315,11 @@ export default function WorkspacesPage() {
     } catch (err) {
       showError(err instanceof Error ? err.message : 'Failed to build workspace');
       // Refresh to get latest status
-      await mutateWorkspaces();
-      if (selectedWorkspace) {
-        const refreshed = await getWorkspace(selectedWorkspace.id);
+      const [, refreshed] = await Promise.all([
+        mutateWorkspaces(),
+        selectedWorkspace ? getWorkspace(selectedWorkspace.id) : Promise.resolve(null),
+      ]);
+      if (refreshed) {
         setSelectedWorkspace(refreshed);
       }
     } finally {

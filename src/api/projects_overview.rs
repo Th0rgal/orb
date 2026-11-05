@@ -115,26 +115,27 @@ pub fn spawn_state_ingestor(state: Arc<AppState>) {
 /// Roster slugs that currently have an executing writer. Used so ingest can
 /// refuse a lease-writer headline while work is live.
 async fn live_writer_project_slugs(state: &super::routes::AppState) -> HashSet<String> {
+    use futures::stream::{self, StreamExt};
+
     let Ok(projects) = state.projects.list_projects() else {
         return HashSet::new();
     };
-    let mut live = HashSet::new();
-    for project in projects {
-        let Ok(missions) = state
-            .control
-            .collect_attention_missions_for_project(&project.slug)
-            .await
-        else {
-            continue;
-        };
-        if missions
-            .iter()
-            .any(|mission| super::controller_honesty::is_live_writer_status(mission.status))
-        {
-            live.insert(project.slug);
-        }
-    }
-    live
+    stream::iter(projects)
+        .map(|project| async move {
+            let missions = state
+                .control
+                .collect_attention_missions_for_project(&project.slug)
+                .await
+                .ok()?;
+            missions
+                .iter()
+                .any(|mission| super::controller_honesty::is_live_writer_status(mission.status))
+                .then_some(project.slug)
+        })
+        .buffer_unordered(8)
+        .filter_map(std::future::ready)
+        .collect()
+        .await
 }
 
 /// Marker prefix for state descriptors the ingestor synthesizes for CTRL-only
@@ -666,7 +667,10 @@ pub async fn get_project(
         .binding_for_canonical(&slug, &project_tag_keys(&slug))
         .map_err(store_err)?
         .map(follow_live_conversation);
-    let situation = load_project_situation(&state, &slug).await;
+    let (situation, (waiting_user_waits, waits_complete)) = tokio::join!(
+        load_project_situation(&state, &slug),
+        state.control.collect_waiting_user_waits(),
+    );
     let reconciliation = state
         .projects
         .latest_unacked_reconcile(&slug)
@@ -686,7 +690,6 @@ pub async fn get_project(
     ) {
         project.next_action = Some(derived);
     }
-    let (waiting_user_waits, waits_complete) = state.control.collect_waiting_user_waits().await;
     let effective_missions = if missions_available && waits_complete {
         Some(missions.as_slice())
     } else {
@@ -2631,16 +2634,17 @@ pub async fn projects_overview(
         .map(read_overrides)
         .unwrap_or_default();
 
-    let missions = state
-        .control
-        .collect_project_missions(chrono::Duration::hours(TERMINAL_MISSION_HORIZON_HOURS))
-        .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    // The mission scan above is fail-closed; the wait scan is best-effort.
+    // The mission scan below is fail-closed; the wait scan is best-effort.
     // When it is incomplete, an Active mission parked in AskUserQuestion may
     // look like ordinary live work, so rows must not derive mode from
     // mission evidence (same rule as the detail projection).
-    let (waiting_user_waits, waits_complete) = state.control.collect_waiting_user_waits().await;
+    let (missions_res, (waiting_user_waits, waits_complete)) = tokio::join!(
+        state
+            .control
+            .collect_project_missions(chrono::Duration::hours(TERMINAL_MISSION_HORIZON_HOURS)),
+        state.control.collect_waiting_user_waits(),
+    );
+    let missions = missions_res.map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
     // Delivery-derived facts come from the projects store, which the
     // background ingestor keeps current — the overview never scans the Hermes

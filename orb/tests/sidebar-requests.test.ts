@@ -22,3 +22,14 @@ it('does not cache failures and isolates pending reads across connection changes
  await cache.read('p',async()=>'new');finish('old');await old;
  expect(await cache.read('p',async()=>'wrong')).toBe('new');
 });
+it('starts a fresh read when force=true arrives after an older read is already in flight',async()=>{
+ const cache=createSidebarRequests();
+ let finishStale!:(v:string)=>void;
+ const stale=cache.read('p',()=>new Promise<string>(resolve=>finishStale=resolve));
+ await Promise.resolve();
+ const fresh=cache.read('p',async()=>'renamed.md',true);
+ finishStale('context.md');
+ expect(await stale).toBe('context.md');
+ expect(await fresh).toBe('renamed.md');
+ expect(await cache.read('p',async()=>'wrong')).toBe('renamed.md');
+});

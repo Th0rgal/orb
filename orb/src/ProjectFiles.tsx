@@ -1,4 +1,4 @@
-import { deleteFileOptimistically, fileMoveKey, isFilePathPending, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, withMovedMissions } from "./moves";
+import { deleteFileOptimistically, fileMoveKey, isFilePathPending, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, waitForFilePathSettled, withMovedMissions } from "./moves";
 import { renameOptimistically } from "./renames";
 import { isArchivable, isReopenable, isRunning, isLive, isWorking, presentedStatus } from "./missionStatus";
 import { swallow } from "./log";
@@ -349,15 +349,12 @@ export function LiveProjectsSection(p: {
     await Promise.all(ids.map(wid => cancelMission(wid)));
   };
   const acknowledgeMissions = async (ids: readonly string[], version: number) => {
-    for (const pausedId of ids) {
-      await api(`/api/control/missions/${encodeURIComponent(pausedId)}/status`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "acknowledged" }),
-      });
-      if (version !== connectionVersion()) return false;
-    }
-    return true;
+    await Promise.all(ids.map(pausedId => api(`/api/control/missions/${encodeURIComponent(pausedId)}/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "acknowledged" }),
+    })));
+    return version === connectionVersion();
   };
   /** DELETE `id`; with `stop`, a 409 naming a running worker cancels it and retries. */
   const deleteMissionStopping = async (id: string, stop: boolean, version: number) => {
@@ -445,7 +442,8 @@ export function LiveProjectsSection(p: {
           }
           if (version !== connectionVersion()) break;
           const serverDeleted = new Set(result?.deleted_ids ?? []);
-          for (const extraId of subtree.map(m => m.id)) {
+          await Promise.all(subtree.map(async m => {
+            const extraId = m.id;
             if (extraId !== id && !serverDeleted.has(extraId)) {
               const child = knownById.get(extraId);
               if (child && !child.parent_mission_id && child.callback_parent_mission_id) {
@@ -459,7 +457,7 @@ export function LiveProjectsSection(p: {
                 await api(`/api/control/missions/${extraId}`, {method: "DELETE"}).catch(swallow("projectFiles.deleteChild", { mission: extraId }));
               }
             }
-          }
+          }));
           const removed = [...new Set([id, ...covered, ...serverDeleted, ...subtree.map(m => m.id)])];
           void import("./localOrigins").then(m => m.confirmDeletedLocalOrigins(removed));
           for (const rid of removed) {
@@ -592,8 +590,10 @@ export function LiveProjectsSection(p: {
     setFileAction({ slug, path, kind, directory });
   };
   const refreshFileParents = async (slug: string, path: string, destination?: string) => {
-    await loadDir(slug, fileParent(path), true);
-    if (destination && fileParent(destination) !== fileParent(path)) await loadDir(slug, fileParent(destination), true);
+    await Promise.all([
+      loadDir(slug, fileParent(path), true),
+      ...(destination && fileParent(destination) !== fileParent(path) ? [loadDir(slug, fileParent(destination), true)] : []),
+    ]);
   };
   const applyOptimisticFolderMove = (slug: string, path: string, destination: string, project = slug) => {
     batch(() => {
@@ -724,8 +724,11 @@ export function LiveProjectsSection(p: {
         return;
       }
       openMovedSelection(target.slug, target.path, destination, false);
-      await refreshFileParents(target.slug, target.path, destination);
-      settleMove(moveKey);
+      try {
+        await refreshFileParents(target.slug, target.path, destination);
+      } finally {
+        settleMove(moveKey);
+      }
     } catch (e) {
       if (version === connectionVersion()) setActionError(e instanceof Error ? e.message : String(e));
     }
@@ -738,12 +741,16 @@ export function LiveProjectsSection(p: {
   };
   const pasteFile = async (slug: string, path: string, text: string) => {
     const item = readFileReference(text), version = connectionVersion();
-    if (!item || fileBusy() || isFilePathPending(item.slug, item.path) || isFilePathPending(slug, path) || text === consumedFileClipboard || isClipboardReferenceRetired(text)) return;
+    if (!item || fileBusy() || text === consumedFileClipboard || isClipboardReferenceRetired(text)) return;
     setFileBusy(true); setActionMenu(null); setActionError(null);
     try {
       const other = item.slug !== slug;
       const destination = other ? [path, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, path, false);
-      if (!item.copy && isFilePathPending(slug, destination)) return;
+      if (isFilePathPending(item.slug, item.path) || isFilePathPending(slug, path) || (!item.copy && isFilePathPending(slug, destination))) {
+        await Promise.all([waitForFilePathSettled(item.slug, item.path), waitForFilePathSettled(slug, path), ...(!item.copy ? [waitForFilePathSettled(slug, destination)] : [])]);
+        const parent = dirs[`${item.slug}:${fileParent(item.path)}`];
+        if (version !== connectionVersion() || text === consumedFileClipboard || isClipboardReferenceRetired(text) || (parent && !parent.some(e => e.name === fileBaseName(item.path) && e.kind === (item.directory ? "dir" : "file")))) return;
+      }
       // Agents and crons belong to their project: only documents cross over.
       const transfer = async () => {
         if (other && item.directory && !item.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
@@ -1064,14 +1071,17 @@ export function LiveProjectsSection(p: {
     prevActivityByProject = nextSignatures;
   }));
 
+  const dirGenerations = new Map<string, number>();
   const loadDir = (slug: string, path: string, force = false) => {
     if (!isConnected()) return Promise.resolve();
     const version = connectionVersion();
     const key = `${slug}:${path}`;
+    const gen = (dirGenerations.get(key) ?? 0) + (force ? 1 : 0);
+    if (force) dirGenerations.set(key, gen);
     setDirErrors(key, null);
     return requests.read(`files:${version}:${key}`, () => listProjectFiles(slug, path), force)
-      .then((entries) => { if (currentConnection(version)) setDirs(key, reconcile(entries, {key: "name"})); })
-      .catch((e) => { if (currentConnection(version)) setDirErrors(key, e instanceof Error ? e.message : String(e)); });
+      .then((entries) => { if (currentConnection(version) && (dirGenerations.get(key) ?? 0) === gen) setDirs(key, reconcile(entries, {key: "name"})); })
+      .catch((e) => { if (currentConnection(version) && (dirGenerations.get(key) ?? 0) === gen) setDirErrors(key, e instanceof Error ? e.message : String(e)); });
   };
 
   const warmupOne = async (slug: string) => {
@@ -1435,26 +1445,31 @@ export function LiveProjectsSection(p: {
           await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(targetSlug, targetPath, true)]);
         } catch (err) { failures.push(`${fileBaseName(item.path)}: ${err instanceof Error ? err.message : String(err)}`); }
       }
-      for (const item of fileItems) {
-        if (version !== connectionVersion()) break;
-        if (underMovedFolder(item.slug, fileParent(item.path))) continue;
+      const dirsToReload = new Map<string, { slug: string; path: string }>();
+      await Promise.all(fileItems.map(async item => {
+        if (version !== connectionVersion()) return;
+        if (underMovedFolder(item.slug, fileParent(item.path))) return;
         try {
           const other = item.slug !== targetSlug;
           const destination = other ? [targetPath, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, targetPath, false);
           await moveFile(item, destination, () => transferProjectFile(item.slug, item.path, destination, bundle.copy, targetSlug));
-          await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(targetSlug, targetPath, true)]);
+          dirsToReload.set(`${item.slug}:${fileParent(item.path)}`, { slug: item.slug, path: fileParent(item.path) });
+          dirsToReload.set(`${targetSlug}:${targetPath}`, { slug: targetSlug, path: targetPath });
           if (!bundle.copy && p.selected() === `pf:${item.slug}:${item.path}`) p.open(`pf:${targetSlug}:${destination}`);
         } catch (err) { failures.push(`${fileBaseName(item.path)}: ${err instanceof Error ? err.message : String(err)}`); }
+      }));
+      if (dirsToReload.size && version === connectionVersion()) {
+        await Promise.all([...dirsToReload.values()].map(d => loadDir(d.slug, d.path, true)));
       }
       if (!bundle.copy) {
-        for (const item of cronItems) {
-          if (version !== connectionVersion()) break;
+        await Promise.all(cronItems.map(async item => {
+          if (version !== connectionVersion()) return;
           const parentMove = item.folder ? underMovedFolder(item.slug, item.folder) : null;
-          if (parentMove && parentMove.destSlug === item.slug) continue;
+          if (parentMove && parentMove.destSlug === item.slug) return;
           try {
             await performMoveCron(item.slug, item.id, targetSlug, parentMove ? parentMove.destPath : targetPath);
           } catch (err) { failures.push(`${item.name}: ${err instanceof Error ? err.message : String(err)}`); }
-        }
+        }));
         // Missions (with the missions they launched) move together and in parallel.
         const byFolder = new Map<string, string[]>();
         for (const item of missionItems) {
@@ -1608,15 +1623,23 @@ export function LiveProjectsSection(p: {
         const failures: string[] = [];
         const remaining: Array<{ slug: string; id: string; name: string }> = [];
         const deletedTreeIds = new Set<string>();
-        for (const item of target.items) {
-          if (version !== connectionVersion()) break;
+        const outcomes = await Promise.all(target.items.map(async item => {
+          if (version !== connectionVersion()) return { item, ok: false as const, error: undefined };
           try {
             try {
               await deleteProjectCron(item.slug, item.id);
             } catch (err) {
               if (!(err instanceof ApiError && err.status === 404)) throw err;
             }
-            if (version !== connectionVersion()) break;
+            return { item, ok: true as const };
+          } catch (err) {
+            return { item, ok: false as const, error: `${item.name}: ${err instanceof Error ? err.message : String(err)}` };
+          }
+        }));
+        if (version !== connectionVersion()) return;
+        for (const outcome of outcomes) {
+          const { item } = outcome;
+          if (outcome.ok) {
             cachePut(`c:${item.slug}:${item.id}`, { slug: item.slug, job: null, runs: [] });
             setCrons(item.slug, (list) => (list ?? []).filter((j) => j.id !== item.id));
             if (cutCron()?.id === item.id) setCutCron(null);
@@ -1625,9 +1648,9 @@ export function LiveProjectsSection(p: {
             if (p.selected() === `pc:${item.slug}:${item.id}`) p.open(null);
             deletedTreeIds.add(`pc:${item.slug}:${item.id}`);
             window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: item.slug, id: item.id, deleted: true } }));
-          } catch (err) {
+          } else if (outcome.error) {
             remaining.push(item);
-            failures.push(`${item.name}: ${err instanceof Error ? err.message : String(err)}`);
+            failures.push(outcome.error);
           }
         }
         if (version !== connectionVersion()) return;
@@ -1775,14 +1798,14 @@ export function LiveProjectsSection(p: {
     const failures:string[]=[];
     setBatchBusy(true);
     try {
-      for (const selected of ids) {
-        if (!currentConnection(version)) break;
+      await Promise.all(ids.map(async selected => {
+        if (!currentConnection(version)) return;
         const row = Object.values(missions).flat().find(m => m.id === selected) ?? archivedMissions().find(m => m.id === selected);
-        if (!row || isArchived(row)) continue;
+        if (!row || isArchived(row)) return;
         const subtree = missionSubtree(allKnownMissions(), [row.id]);
-        if (isWorking(row.status) || subtree.some(m => isWorking(m.status))) { failures.push(`${selected.slice(0,8)}: stop or finish this agent first`); continue; }
+        if (isWorking(row.status) || subtree.some(m => isWorking(m.status))) { failures.push(`${selected.slice(0,8)}: stop or finish this agent first`); return; }
         if (!await archiveConversation(row)) failures.push(`${selected.slice(0,8)}: ${actionError() ?? "archive failed"}`);
-      }
+      }));
       if (currentConnection(version) && failures.length) setActionError(failures.join("; "));
     } finally { setBatchBusy(false); }
   };

@@ -1353,26 +1353,37 @@ impl OrchestratorMcp {
         let mut cancelled = Vec::new();
         let mut errors = Vec::new();
 
-        for worker in &workers {
-            let status = worker["status"].as_str().unwrap_or("");
-            if status == "completed"
-                || status == "failed"
-                || status == "interrupted"
-                || status == "not_feasible"
-            {
-                continue;
-            }
-            let id = worker["id"].as_str().unwrap_or("");
-            if id.is_empty() {
-                continue;
-            }
-            match self
-                .cancel_worker(CancelWorkerParams {
-                    mission_id: id.to_string(),
-                })
-                .await
-            {
-                Ok(_) => cancelled.push(id.to_string()),
+        let active_ids: Vec<String> = workers
+            .iter()
+            .filter_map(|worker| {
+                let status = worker["status"].as_str().unwrap_or("");
+                if status == "completed"
+                    || status == "failed"
+                    || status == "interrupted"
+                    || status == "not_feasible"
+                {
+                    return None;
+                }
+                let id = worker["id"].as_str().unwrap_or("");
+                (!id.is_empty()).then(|| id.to_string())
+            })
+            .collect();
+        use futures::stream::{self, StreamExt};
+        let outcomes: Vec<(String, Result<Value, String>)> = stream::iter(active_ids)
+            .map(|id| async move {
+                let res = self
+                    .cancel_worker(CancelWorkerParams {
+                        mission_id: id.clone(),
+                    })
+                    .await;
+                (id, res)
+            })
+            .buffered(8)
+            .collect()
+            .await;
+        for (id, res) in outcomes {
+            match res {
+                Ok(_) => cancelled.push(id),
                 Err(e) => errors.push(format!("{}: {}", id, e)),
             }
         }
@@ -2175,57 +2186,79 @@ impl OrchestratorMcp {
         let mut last_statuses: std::collections::HashMap<Uuid, Value> =
             std::collections::HashMap::new();
 
-        loop {
-            for id in &ids {
-                let response = self.api_get(&format!("/api/control/missions/{}", id)).await;
-                let errors = error_counts.get_mut(id).unwrap();
+        enum PollResult {
+            Mission(Value),
+            InvalidJson(reqwest::Error),
+            HttpStatus(reqwest::StatusCode),
+            RequestErr(String),
+        }
 
-                match response {
-                    Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
-                        Ok(mission) => {
-                            *errors = 0;
-                            let status = mission["status"].as_str().unwrap_or("");
-                            last_statuses.insert(
-                                *id,
-                                json!({
-                                    "mission_id": id.to_string(),
-                                    "status": status,
-                                    "title": mission["title"].as_str().unwrap_or(""),
-                                }),
-                            );
-                            if target_statuses.iter().any(|s| s == status) {
-                                return Ok(json!({
-                                    "reached_target": true,
-                                    "internal_timeout": false,
-                                    "mission_id": id.to_string(),
-                                    "status": status,
-                                    "elapsed_seconds": start.elapsed().as_secs(),
-                                    "mission": mission,
-                                }));
+        loop {
+            use futures::stream::{self, StreamExt};
+            let fetched: Vec<(Uuid, PollResult)> = stream::iter(ids.iter().copied())
+                .map(|id| async move {
+                    let result = match self.api_get(&format!("/api/control/missions/{}", id)).await
+                    {
+                        Ok(resp) if resp.status().is_success() => {
+                            match resp.json::<Value>().await {
+                                Ok(mission) => PollResult::Mission(mission),
+                                Err(e) => PollResult::InvalidJson(e),
                             }
                         }
-                        Err(e) => {
-                            *errors += 1;
-                            if *errors >= 3 {
-                                return Err(format!(
-                                    "Mission {} returned invalid JSON: {} ({} consecutive errors)",
-                                    id, e, errors
-                                ));
-                            }
+                        Ok(resp) => PollResult::HttpStatus(resp.status()),
+                        Err(e) => PollResult::RequestErr(e),
+                    };
+                    (id, result)
+                })
+                .buffered(8)
+                .collect()
+                .await;
+
+            for (id, result) in fetched {
+                let errors = error_counts.get_mut(&id).unwrap();
+
+                match result {
+                    PollResult::Mission(mission) => {
+                        *errors = 0;
+                        let status = mission["status"].as_str().unwrap_or("");
+                        last_statuses.insert(
+                            id,
+                            json!({
+                                "mission_id": id.to_string(),
+                                "status": status,
+                                "title": mission["title"].as_str().unwrap_or(""),
+                            }),
+                        );
+                        if target_statuses.iter().any(|s| s == status) {
+                            return Ok(json!({
+                                "reached_target": true,
+                                "internal_timeout": false,
+                                "mission_id": id.to_string(),
+                                "status": status,
+                                "elapsed_seconds": start.elapsed().as_secs(),
+                                "mission": mission,
+                            }));
                         }
-                    },
-                    Ok(resp) => {
+                    }
+                    PollResult::InvalidJson(e) => {
+                        *errors += 1;
+                        if *errors >= 3 {
+                            return Err(format!(
+                                "Mission {} returned invalid JSON: {} ({} consecutive errors)",
+                                id, e, errors
+                            ));
+                        }
+                    }
+                    PollResult::HttpStatus(status) => {
                         *errors += 1;
                         if *errors >= 3 {
                             return Err(format!(
                                 "Mission {} returned HTTP {} ({} consecutive errors)",
-                                id,
-                                resp.status(),
-                                errors
+                                id, status, errors
                             ));
                         }
                     }
-                    Err(e) => {
+                    PollResult::RequestErr(e) => {
                         *errors += 1;
                         if *errors >= 3 {
                             return Err(format!(

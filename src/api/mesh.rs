@@ -166,7 +166,7 @@ pub struct MeshStore {
     inner: Mutex<PersistedMeshState>,
 }
 
-static MESH_STORE: OnceLock<Arc<MeshStore>> = OnceLock::new();
+static MESH_STORES: OnceLock<dashmap::DashMap<PathBuf, Arc<MeshStore>>> = OnceLock::new();
 
 fn unix_now() -> u64 {
     Utc::now().timestamp().max(1) as u64
@@ -427,8 +427,15 @@ impl MeshStore {
 }
 
 pub fn store(app_state: &AppState) -> Arc<MeshStore> {
-    MESH_STORE
-        .get_or_init(|| MeshStore::open(app_state.config.working_dir.clone()))
+    let dir = app_state.config.working_dir.clone();
+    let stores = MESH_STORES.get_or_init(dashmap::DashMap::new);
+    if let Some(existing) = stores.get(&dir) {
+        return Arc::clone(existing.value());
+    }
+    stores
+        .entry(dir.clone())
+        .or_insert_with(|| MeshStore::open(dir))
+        .value()
         .clone()
 }
 

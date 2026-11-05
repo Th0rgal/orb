@@ -3282,18 +3282,16 @@ impl AssistantMcp {
                 if mission_ids.len() > 10 {
                     return Err("mission_ids accepts at most 10 missions per call".into());
                 }
-                let mut results = Vec::with_capacity(mission_ids.len());
-                let mut all_done = true;
-                for raw in &mission_ids {
-                    if raw.trim().is_empty() {
-                        return Err("mission_ids entries must not be empty".into());
-                    }
-                    let entry = self.single_consult_result(raw).await?;
-                    if entry["done"].as_bool() != Some(true) {
-                        all_done = false;
-                    }
-                    results.push(entry);
+                if mission_ids.iter().any(|raw| raw.trim().is_empty()) {
+                    return Err("mission_ids entries must not be empty".into());
                 }
+                let results = futures::future::try_join_all(
+                    mission_ids.iter().map(|raw| self.single_consult_result(raw)),
+                )
+                .await?;
+                let all_done = results
+                    .iter()
+                    .all(|entry| entry["done"].as_bool() == Some(true));
                 let mut out = json!({
                     "all_done": all_done,
                     "results": results,

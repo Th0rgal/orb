@@ -76,26 +76,55 @@ pub(super) fn parse_uuid_or_nil(raw: &str) -> Uuid {
     })
 }
 
-pub(super) fn apply_text_ops(buffer: &mut String, ops: &[TextOp]) {
+pub(super) fn apply_text_ops_tracked(buffer: &mut String, char_len: &mut usize, ops: &[TextOp]) {
     for op in ops {
         match op {
             TextOp::Insert { pos, text } => {
-                let mut chars: Vec<char> = buffer.chars().collect();
-                let pos = (*pos).min(chars.len());
-                chars.splice(pos..pos, text.chars());
-                *buffer = chars.into_iter().collect();
+                if *pos == 0 && buffer.is_empty() {
+                    *char_len = text.chars().count();
+                    buffer.push_str(text);
+                } else if *pos >= *char_len {
+                    *char_len += text.chars().count();
+                    buffer.push_str(text);
+                } else if *pos == 0 {
+                    let delta = text.chars().count();
+                    buffer.insert_str(0, text);
+                    *char_len += delta;
+                } else {
+                    let mut chars: Vec<char> = buffer.chars().collect();
+                    let p = (*pos).min(chars.len());
+                    chars.splice(p..p, text.chars());
+                    *char_len = chars.len();
+                    *buffer = chars.into_iter().collect();
+                }
             }
             TextOp::Replace { range, text } => {
-                let mut chars: Vec<char> = buffer.chars().collect();
-                let start = range.0.min(chars.len());
-                let end = range.1.min(chars.len()).max(start);
-                chars.splice(start..end, text.chars());
-                *buffer = chars.into_iter().collect();
+                if range.0 == 0 && range.1 >= *char_len {
+                    *char_len = text.chars().count();
+                    buffer.clear();
+                    buffer.push_str(text);
+                } else {
+                    let mut chars: Vec<char> = buffer.chars().collect();
+                    let start = range.0.min(chars.len());
+                    let end = range.1.min(chars.len()).max(start);
+                    chars.splice(start..end, text.chars());
+                    *char_len = chars.len();
+                    *buffer = chars.into_iter().collect();
+                }
             }
-            TextOp::Snapshot { text, .. } => *buffer = text.clone(),
+            TextOp::Snapshot { text, .. } => {
+                *char_len = text.chars().count();
+                *buffer = text.clone();
+            }
             TextOp::Finalize => {}
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn apply_text_ops(buffer: &mut String, ops: &[TextOp]) {
+    let mut char_len = buffer.chars().count();
+    apply_text_ops_tracked(buffer, &mut char_len, ops);
 }
 
 /// Synchronous body of `log_event`, so callers can run it inside a larger
@@ -151,11 +180,12 @@ pub(in crate::api::mission_store) fn log_event_sync(
                 drop(stmt);
 
                 let mut content = String::new();
+                let mut content_chars = 0usize;
                 for row in rows {
                     let row_ops: Vec<TextOp> = serde_json::from_str(&row).unwrap_or_default();
-                    apply_text_ops(&mut content, &row_ops);
+                    apply_text_ops_tracked(&mut content, &mut content_chars, &row_ops);
                 }
-                apply_text_ops(&mut content, &ops);
+                apply_text_ops_tracked(&mut content, &mut content_chars, &ops);
 
                 conn.execute(
                     "DELETE FROM mission_events
@@ -600,15 +630,10 @@ impl SqliteMissionStore {
         mission_id: Uuid,
         event: &AgentEvent,
     ) -> Result<(), String> {
-        let conn = self.conn.clone();
         let content_dir = self.content_dir.clone();
         let event = event.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            log_event_sync(&conn, &content_dir, mission_id, &event)
-        })
-        .await
-        .map_err(|e| e.to_string())?
+        self.write_grouped(move |conn| log_event_sync(conn, &content_dir, mission_id, &event))
+            .await
     }
 
     pub(super) async fn log_events(
@@ -621,7 +646,7 @@ impl SqliteMissionStore {
         let outcome = tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             // One commit (one fsync) for the whole batch. A failing event only
-            // rolls back its own statement; the others are still committed.
+            // rolls back its own statement via SAVEPOINT; the others still commit.
             if let Err(e) = conn.execute_batch("BEGIN IMMEDIATE") {
                 return events
                     .iter()
@@ -631,10 +656,26 @@ impl SqliteMissionStore {
                     .map(|r| r.map_err(|inner| format!("{inner} (no batch transaction: {e})")))
                     .collect();
             }
-            let results: Vec<Result<(), String>> = events
-                .iter()
-                .map(|(mid, ev)| log_event_sync(&conn, &content_dir, *mid, ev))
-                .collect();
+            let mut results = Vec::with_capacity(events.len());
+            for (idx, (mid, ev)) in events.iter().enumerate() {
+                let sp = format!("ev_sp_{idx}");
+                if let Err(e) = conn.execute_batch(&format!("SAVEPOINT {sp}")) {
+                    results.push(Err(e.to_string()));
+                    continue;
+                }
+                match log_event_sync(&conn, &content_dir, *mid, ev) {
+                    Ok(()) => {
+                        results.push(
+                            conn.execute_batch(&format!("RELEASE {sp}"))
+                                .map_err(|e| e.to_string()),
+                        );
+                    }
+                    Err(err) => {
+                        let _ = conn.execute_batch(&format!("ROLLBACK TO {sp}; RELEASE {sp}"));
+                        results.push(Err(err));
+                    }
+                }
+            }
             match conn.execute_batch("COMMIT") {
                 Ok(()) => results,
                 Err(e) => {

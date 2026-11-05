@@ -16,8 +16,17 @@ struct OrbTurnText: Equatable {
     struct Bubble: Equatable {
         var id: String
         var text: String
+        var scalarCount: Int = 0
         var revision: Int = -1
         var finalized: Bool = false
+
+        init(id: String, text: String, revision: Int = -1, finalized: Bool = false) {
+            self.id = id
+            self.text = text
+            self.scalarCount = text.unicodeScalars.count
+            self.revision = revision
+            self.finalized = finalized
+        }
     }
 
     struct StoredRow {
@@ -178,15 +187,22 @@ struct OrbTurnText: Equatable {
             case "snapshot":
                 guard let rev = Self.intValue(op["revision"]), rev > bubble.revision else { return }
                 bubble.revision = rev
-                bubble.text = (op["text"] as? String) ?? ""
+                let piece = (op["text"] as? String) ?? ""
+                bubble.text = piece
+                bubble.scalarCount = piece.unicodeScalars.count
                 bubble.finalized = false
             case "insert":
                 let piece = (op["text"] as? String) ?? ""
                 let pos = Self.intValue(op["pos"])
                 if bubbleID == "text_delta_latest" && pos == 0 {
                     bubble.text = piece
+                    bubble.scalarCount = piece.unicodeScalars.count
+                } else if pos == nil || pos! >= bubble.scalarCount {
+                    bubble.text += piece
+                    bubble.scalarCount += piece.unicodeScalars.count
                 } else {
                     bubble.text = Self.spliceScalars(bubble.text, start: pos, end: pos, replacement: piece)
+                    bubble.scalarCount = bubble.text.unicodeScalars.count
                 }
                 bubble.finalized = false
             case "replace":
@@ -194,10 +210,13 @@ struct OrbTurnText: Equatable {
                 let range = Self.intList(op["range"])
                 if bubbleID == "text_delta_latest" && (range?.first ?? 0) == 0 {
                     bubble.text = piece
+                    bubble.scalarCount = piece.unicodeScalars.count
                 } else if let range, range.count >= 2 {
                     bubble.text = Self.spliceScalars(bubble.text, start: range[0], end: range[1], replacement: piece)
+                    bubble.scalarCount = bubble.text.unicodeScalars.count
                 } else {
                     bubble.text = piece
+                    bubble.scalarCount = piece.unicodeScalars.count
                 }
                 bubble.finalized = false
             case "finalize":
@@ -213,6 +232,7 @@ struct OrbTurnText: Equatable {
         guard !delta.isEmpty else { return }
         var bubble = bubbles.first(where: { $0.id == id }) ?? Bubble(id: id, text: "")
         bubble.text += delta
+        bubble.scalarCount += delta.unicodeScalars.count
         bubble.finalized = false
         upsertBubble(bubble)
     }
@@ -220,6 +240,7 @@ struct OrbTurnText: Equatable {
     private mutating func setBubble(id: String, text: String) {
         var bubble = bubbles.first(where: { $0.id == id }) ?? Bubble(id: id, text: "")
         bubble.text = text
+        bubble.scalarCount = text.unicodeScalars.count
         bubble.finalized = false
         upsertBubble(bubble)
     }

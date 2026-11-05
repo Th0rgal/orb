@@ -171,9 +171,12 @@ pub async fn options(
         .await
         .map_err(bad)?;
     h.capabilities().await.map_err(bad)?;
-    let models = h.get("/v1/models").await.map_err(bad)?;
-    let chains = state.chain_store.list().await;
-    let direct_models = crate::api::proxy::collect_routable_catalog_models(&state).await;
+    let (models_res, chains, direct_models) = tokio::join!(
+        h.get("/v1/models"),
+        state.chain_store.list(),
+        crate::api::proxy::collect_routable_catalog_models(&state),
+    );
+    let models = models_res.map_err(bad)?;
     Ok(Json(hermes_model_options_with_catalog(
         &chains,
         &models,
@@ -1022,16 +1025,31 @@ pub async fn update_settings(
 }
 
 async fn build_hermes_settings_payload(state: &Arc<AppState>, user_id: &str) -> Value {
-    let runtime = system::build_hermes_runtime_summary(state).await;
     let runtime_name = system::assistant_runtime_name(&state.config);
-    let sessions = system::read_hermes_session_rollup(runtime_name).await;
     let home_dir = format!("/var/lib/{runtime_name}");
     let config_path = format!("{home_dir}/config.yaml");
     let soul_path = format!("{home_dir}/SOUL.md");
 
-    let raw_yaml = tokio::fs::read_to_string(&config_path)
-        .await
-        .unwrap_or_default();
+    let (runtime, sessions, raw_yaml_res, soul_res, hermes_probe, chains, direct_models) = tokio::join!(
+        system::build_hermes_runtime_summary(state),
+        system::read_hermes_session_rollup(runtime_name),
+        tokio::fs::read_to_string(&config_path),
+        tokio::fs::read_to_string(&soul_path),
+        async {
+            match Hermes::connect(&state.config, user_id).await {
+                Ok(h) => Some(tokio::join!(
+                    h.get("/v1/capabilities"),
+                    h.get("/v1/models"),
+                    h.get("/api/jobs?include_disabled=true"),
+                )),
+                Err(_) => None,
+            }
+        },
+        state.chain_store.list(),
+        crate::api::proxy::collect_routable_catalog_models(state),
+    );
+
+    let raw_yaml = raw_yaml_res.unwrap_or_default();
     let yaml_val: serde_yaml::Value =
         serde_yaml::from_str(&raw_yaml).unwrap_or(serde_yaml::Value::Null);
 
@@ -1139,22 +1157,20 @@ async fn build_hermes_settings_payload(state: &Arc<AppState>, user_id: &str) -> 
         .map(|seq| seq.len())
         .unwrap_or(0);
 
-    let soul_markdown = tokio::fs::read_to_string(&soul_path)
-        .await
-        .unwrap_or_default();
+    let soul_markdown = soul_res.unwrap_or_default();
 
     let mut capabilities = Value::Null;
     let mut jobs_total = 0usize;
     let mut jobs_enabled = 0usize;
     let mut hermes_models = json!({"data": []});
-    if let Ok(h) = Hermes::connect(&state.config, user_id).await {
-        if let Ok(c) = h.get("/v1/capabilities").await {
+    if let Some((cap_res, models_res, jobs_res)) = hermes_probe {
+        if let Ok(c) = cap_res {
             capabilities = c;
         }
-        if let Ok(m) = h.get("/v1/models").await {
+        if let Ok(m) = models_res {
             hermes_models = m;
         }
-        if let Ok(j) = h.get("/api/jobs?include_disabled=true").await {
+        if let Ok(j) = jobs_res {
             if let Some(arr) = j["jobs"].as_array() {
                 jobs_total = arr.len();
                 jobs_enabled = arr
@@ -1164,8 +1180,6 @@ async fn build_hermes_settings_payload(state: &Arc<AppState>, user_id: &str) -> 
             }
         }
     }
-    let chains = state.chain_store.list().await;
-    let direct_models = crate::api::proxy::collect_routable_catalog_models(state).await;
     let options_val = hermes_model_options_with_catalog(&chains, &hermes_models, &direct_models);
     let models = options_val["models"]["items"]
         .as_array()
@@ -1245,27 +1259,40 @@ pub async fn children(
         .into_iter()
         .chain(e.turns.into_iter().filter_map(|t| t.session_id))
         .collect();
+    use futures::stream::{self, StreamExt};
+    let store_ref = &store;
+    let per_session: Vec<Result<Vec<(Uuid, Value)>, Error>> = stream::iter(sessions)
+        .map(|session| async move {
+            let filter = crate::api::mission_store::MissionFilter {
+                origin_session_id: Some(session),
+                ..Default::default()
+            };
+            // Paginate so long-lived conversations do not lose their older attempts.
+            let mut offset = 0;
+            let mut entries = Vec::new();
+            loop {
+                let rows = store_ref
+                    .list_missions_filtered(&filter, 100, offset)
+                    .await
+                    .map_err(bad)?;
+                let count = rows.len();
+                for m in rows {
+                    entries.push((m.id, json!({"id":m.id,"title":m.title,"status":m.status})));
+                }
+                if count < 100 {
+                    break;
+                }
+                offset += count;
+            }
+            Ok(entries)
+        })
+        .buffered(8)
+        .collect()
+        .await;
     let mut children = std::collections::BTreeMap::new();
-    for session in sessions {
-        let filter = crate::api::mission_store::MissionFilter {
-            origin_session_id: Some(session),
-            ..Default::default()
-        };
-        // Paginate so long-lived conversations do not lose their older attempts.
-        let mut offset = 0;
-        loop {
-            let rows = store
-                .list_missions_filtered(&filter, 100, offset)
-                .await
-                .map_err(bad)?;
-            let count = rows.len();
-            for m in rows {
-                children.insert(m.id, json!({"id":m.id,"title":m.title,"status":m.status}));
-            }
-            if count < 100 {
-                break;
-            }
-            offset += count;
+    for session_entries in per_session {
+        for (mid, val) in session_entries? {
+            children.insert(mid, val);
         }
     }
     Ok(Json(

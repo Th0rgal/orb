@@ -17,6 +17,8 @@ notify = "8"
 tempfile = "3"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+arc-swap = "1"
+dashmap = "6"
 
 # Web framework
 axum = { version = "0.7", features = ["ws", "multipart"] }

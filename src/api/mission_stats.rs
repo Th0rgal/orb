@@ -302,23 +302,50 @@ pub(crate) async fn subtree(
     store: &Arc<dyn MissionStore>,
     root: Uuid,
 ) -> Vec<(Uuid, Option<Uuid>, Option<String>)> {
+    use futures::stream::{self, StreamExt};
+
     let mut out = Vec::new();
-    let mut queue = vec![(root, None::<Uuid>)];
+    let mut frontier = vec![(root, None::<Uuid>)];
     let mut seen = HashSet::new();
-    while let Some((id, parent)) = queue.pop() {
-        if !seen.insert(id) || out.len() >= 2000 {
-            continue;
+    while !frontier.is_empty() && out.len() < 2000 {
+        let remaining = 2000 - out.len();
+        let mut batch = Vec::new();
+        for (id, parent) in frontier {
+            if batch.len() >= remaining {
+                break;
+            }
+            if seen.insert(id) {
+                batch.push((id, parent));
+            }
         }
-        let title = store
-            .get_mission(id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|m| m.title);
-        out.push((id, parent, title));
-        for child in store.get_child_missions(id).await.unwrap_or_default() {
-            queue.push((child.id, Some(id)));
+        if batch.is_empty() {
+            break;
         }
+        type FetchedMissionNode = (
+            Uuid,
+            Option<Uuid>,
+            Option<String>,
+            Vec<crate::api::mission_store::Mission>,
+        );
+        let fetched: Vec<FetchedMissionNode> = stream::iter(batch)
+            .map(|(id, parent)| async move {
+                let (mission_res, children_res) =
+                    tokio::join!(store.get_mission(id), store.get_child_missions(id));
+                let title = mission_res.ok().flatten().and_then(|m| m.title);
+                let children = children_res.unwrap_or_default();
+                (id, parent, title, children)
+            })
+            .buffered(8)
+            .collect()
+            .await;
+        let mut next_frontier = Vec::new();
+        for (id, parent, title, children) in fetched {
+            out.push((id, parent, title));
+            for child in children {
+                next_frontier.push((child.id, Some(id)));
+            }
+        }
+        frontier = next_frontier;
     }
     out
 }
@@ -437,20 +464,25 @@ async fn get_stats(
         ),
     };
     let since_str = since.map(|s| s.to_rfc3339());
-    let records = match store.get_usage_records(since_str.as_deref()).await {
+    let (records_res, tree, machines) = tokio::join!(
+        store.get_usage_records(since_str.as_deref()),
+        subtree(&store, id),
+        async {
+            match crate::managed::global() {
+                Some(m) => m.machines_snapshot().await,
+                None => Vec::new(),
+            }
+        },
+    );
+    let records = match records_res {
         Ok(r) => r,
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, "usage_unavailable", e),
     };
-    let tree = subtree(&store, id).await;
     let ids: HashSet<String> = tree.iter().map(|(i, _, _)| i.to_string()).collect();
     let records: Vec<UsageRecord> = records
         .into_iter()
         .filter(|r| r.mission_id.as_ref().is_some_and(|m| ids.contains(m)))
         .collect();
-    let machines = match crate::managed::global() {
-        Some(m) => m.machines_snapshot().await,
-        None => Vec::new(),
-    };
     let vm = vm_cents_by_mission(&machines, since, now);
     let table = ShadowPrices::load(&state.config.working_dir);
     Json(compute(id, &tree, &records, &vm, &table, period, since)).into_response()

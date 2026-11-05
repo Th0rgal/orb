@@ -139,10 +139,10 @@ async fn handle_desktop_stream(socket: WebSocket, params: StreamParams, working_
         "Starting Wayland app stream"
     );
 
-    // Channels for client commands
-    let (control_tx, mut control_rx) = mpsc::unbounded_channel::<ClientCommand>();
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<ClientCommand>();
-    let (input_err_tx, mut input_err_rx) = mpsc::unbounded_channel::<anyhow::Error>();
+    // Bounded channels for client commands (prevents OOM under rapid mouse bursts)
+    let (control_tx, mut control_rx) = mpsc::channel::<ClientCommand>(64);
+    let (input_tx, mut input_rx) = mpsc::channel::<ClientCommand>(256);
+    let (input_err_tx, mut input_err_rx) = mpsc::channel::<anyhow::Error>(64);
 
     // Split the socket
     let (mut ws_sender, mut ws_receiver) = socket.split();
@@ -160,10 +160,16 @@ async fn handle_desktop_stream(socket: WebSocket, params: StreamParams, working_
                             | ClientCommand::Resume
                             | ClientCommand::SetFps { .. }
                             | ClientCommand::SetQuality { .. } => {
-                                let _ = control_tx_clone.send(cmd);
+                                if control_tx_clone.try_send(cmd).is_err() {
+                                    tracing::debug!("Desktop stream control channel full; dropping control frame");
+                                }
                             }
                             _ => {
-                                let _ = input_tx_clone.send(cmd);
+                                if input_tx_clone.try_send(cmd).is_err() {
+                                    tracing::debug!(
+                                        "Desktop stream input channel full; dropping input event"
+                                    );
+                                }
                             }
                         }
                     }
@@ -183,9 +189,35 @@ async fn handle_desktop_stream(socket: WebSocket, params: StreamParams, working_
     let mut input_task = tokio::spawn(async move {
         let mut scroll_acc_x: i32 = 0;
         let mut scroll_acc_y: i32 = 0;
-        while let Some(cmd) = input_rx.recv().await {
+        let mut barrier_cmd: Option<ClientCommand> = None;
+        loop {
+            let cmd = match barrier_cmd.take() {
+                Some(pending) => pending,
+                None => match input_rx.recv().await {
+                    Some(next) => next,
+                    None => break,
+                },
+            };
+
             let result = match cmd {
-                ClientCommand::MouseMove { x, y } => run_wlrctl_mouse_move(&input_env, x, y).await,
+                ClientCommand::MouseMove { mut x, mut y } => {
+                    // Coalesce contiguous MouseMove bursts up to the first non-move
+                    // barrier event (MouseDown/MouseUp/Click/Key/etc.) so causal input
+                    // ordering is strictly preserved.
+                    while let Ok(next) = input_rx.try_recv() {
+                        match next {
+                            ClientCommand::MouseMove { x: nx, y: ny } => {
+                                x = nx;
+                                y = ny;
+                            }
+                            non_move => {
+                                barrier_cmd = Some(non_move);
+                                break;
+                            }
+                        }
+                    }
+                    run_wlrctl_mouse_move(&input_env, x, y).await
+                }
                 ClientCommand::MouseDown { x, y, button } => {
                     let button = resolve_button(button);
                     run_wlrctl_mouse_button(&input_env, x, y, button, true).await
@@ -253,7 +285,7 @@ async fn handle_desktop_stream(socket: WebSocket, params: StreamParams, working_
             };
 
             if let Err(err) = result {
-                let _ = input_err_tx.send(err);
+                let _ = input_err_tx.try_send(err);
             }
         }
     });

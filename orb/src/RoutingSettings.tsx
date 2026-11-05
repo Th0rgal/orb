@@ -339,13 +339,18 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
   async function inspect(id: string, test: boolean) {
     const epoch = generation;
     await action(async () => {
-      if (!test) {
-        try { const rows = await listProviders(); if (epoch === generation) setAccounts(rows); } catch { /* Resolution still works with account IDs. */ }
+      if (test) {
+        const value = { id, test: await R.testChain(id) };
+        if (epoch === generation) setResult(value);
+        return;
       }
-      const value = test
-        ? { id, test: await R.testChain(id) }
-        : { id, resolved: await R.resolveChain(id) };
-      if (epoch === generation) setResult(value);
+      const [, resolved] = await Promise.all([
+        listProviders()
+          .then((rows) => { if (epoch === generation) setAccounts(rows); })
+          .catch(() => { /* Resolution still works with account IDs. */ }),
+        R.resolveChain(id),
+      ]);
+      if (epoch === generation) setResult({ id, resolved });
     });
   }
   const ChainTools = (props: { chain: R.ModelChain }) => {

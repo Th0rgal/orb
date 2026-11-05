@@ -13,10 +13,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
+use arc_swap::ArcSwapOption;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 use uuid::Uuid;
 
 /// File name of the persisted registry, inside `.sandboxed-sh/`.
@@ -511,11 +515,22 @@ pub fn credential_key(secret: &str) -> String {
 
 /// Accounts parked until their usage limit resets, keyed by
 /// [`account_key`], [`subscription_key`] or [`credential_key`].
+///
+/// Reads (`active`, `is_cooling`, `remaining`, `all_active_at`) use sharded
+/// [`DashMap`] lookups and never contend on disk persistence. Persistence
+/// serializes snapshots outside all shard guards and writes off-thread via
+/// coalesced `tokio::fs` atomic replacement whenever a Tokio runtime is active.
 #[derive(Debug, Default)]
 pub struct AccountCooldowns {
-    path: Mutex<Option<PathBuf>>,
-    entries: Mutex<HashMap<String, LimitCooldown>>,
-    transient: Mutex<HashMap<String, TransientCooldown>>,
+    path: ArcSwapOption<PathBuf>,
+    entries: DashMap<String, LimitCooldown>,
+    transient: DashMap<String, TransientCooldown>,
+    dirty_seq: AtomicU64,
+    flushed_seq: AtomicU64,
+    persist_notify: Arc<Notify>,
+    flushed_notify: Notify,
+    writer_started: AtomicBool,
+    persist_lock: AsyncMutex<()>,
 }
 
 impl AccountCooldowns {
@@ -526,58 +541,95 @@ impl AccountCooldowns {
 
     /// A registry backed by `path`, loaded from it when it exists.
     pub fn load(path: PathBuf) -> Arc<Self> {
-        let registry = Self::default();
-        registry.attach(path);
-        Arc::new(registry)
+        let registry = Arc::new(Self::default());
+        registry.attach_arc(path);
+        registry
     }
 
     /// Back the registry with `path`: entries stored there that have not
     /// expired are loaded (an entry already in memory wins), and every later
     /// change is written back.
-    pub fn attach(&self, path: PathBuf) {
+    pub fn attach(self: &Arc<Self>, path: PathBuf) {
+        self.attach_arc(path);
+    }
+
+    fn attach_arc(self: &Arc<Self>, path: PathBuf) {
         let loaded = read_cooldowns(&path);
         let now = Utc::now();
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let stored = loaded.len();
         for (key, cooldown) in loaded {
             if cooldown.until > now && !legacy_account_wide_pool_limit(&key, &cooldown) {
-                entries.entry(key).or_insert(cooldown);
+                self.entries.entry(key).or_insert(cooldown);
             }
         }
         tracing::info!(
             path = %path.display(),
             stored,
-            active = entries.len(),
+            active = self.entries.len(),
             "Loaded account usage-limit cooldowns"
         );
-        *self.path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
-        let transient = self.transient.lock().unwrap_or_else(|e| e.into_inner());
+        self.path.store(Some(Arc::new(path)));
+        self.ensure_background_writer();
         // Always rewrite on attach so any stale `transient_cooldowns` from a
         // previous process lifetime are cleared on disk.
-        self.persist(&entries, &transient);
+        self.schedule_persist();
+    }
+
+    fn ensure_background_writer(self: &Arc<Self>) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        if self
+            .writer_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                loop {
+                    let Some(this) = weak.upgrade() else {
+                        break;
+                    };
+                    if this.flushed_seq.load(Ordering::Acquire)
+                        >= this.dirty_seq.load(Ordering::Acquire)
+                    {
+                        let notify = Arc::clone(&this.persist_notify);
+                        drop(this);
+                        notify.notified().await;
+                        // Coalesce bursty transient 429 updates into a single write.
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                        continue;
+                    }
+                    let _ = this.flush_now_async().await;
+                }
+            });
+        }
     }
 
     /// Park `key` until `cooldown.until`. A newer announcement replaces the
     /// previous one, since it is what the provider says now.
     pub fn set(&self, key: &str, cooldown: LimitCooldown) {
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        if entries.get(key) == Some(&cooldown) {
+        if self
+            .entries
+            .get(key)
+            .is_some_and(|existing| *existing == cooldown)
+        {
             return;
         }
-        entries.insert(key.to_string(), cooldown);
-        let transient = self.transient.lock().unwrap_or_else(|e| e.into_inner());
-        self.persist(&entries, &transient);
+        self.entries.insert(key.to_string(), cooldown);
+        self.schedule_persist();
     }
 
     /// Forget the cooldown of `key`. Returns whether one was recorded.
     pub fn clear(&self, key: &str) -> bool {
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let mut transient = self.transient.lock().unwrap_or_else(|e| e.into_inner());
-        let removed_entry = entries.remove(key).is_some();
-        let removed_transient = transient.remove(key).is_some();
+        let removed_entry = self.entries.remove(key).is_some();
+        let removed_transient = self.transient.remove(key).is_some();
         let removed = removed_entry || removed_transient;
         if removed {
-            self.persist(&entries, &transient);
+            self.schedule_persist();
         }
         removed
     }
@@ -585,40 +637,33 @@ impl AccountCooldowns {
     /// Mirror an in-memory proxy cooldown into `account_cooldowns.json` under
     /// `transient_cooldowns` so operators and scripts can inspect its expiry.
     pub fn set_transient(&self, key: &str, cooldown: TransientCooldown) {
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let mut transient = self.transient.lock().unwrap_or_else(|e| e.into_inner());
-        transient.insert(key.to_string(), cooldown);
-        self.persist(&entries, &transient);
+        self.transient.insert(key.to_string(), cooldown);
+        self.schedule_persist();
     }
 
     /// Remove a mirrored transient cooldown when the account recovers or is reset.
     pub fn clear_transient(&self, key: &str) -> bool {
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let mut transient = self.transient.lock().unwrap_or_else(|e| e.into_inner());
-        let removed = transient.remove(key).is_some();
+        let removed = self.transient.remove(key).is_some();
         if removed {
-            self.persist(&entries, &transient);
+            self.schedule_persist();
         }
         removed
     }
 
     /// Clear all mirrored transient cooldowns.
     pub fn clear_all_transient(&self) {
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let mut transient = self.transient.lock().unwrap_or_else(|e| e.into_inner());
-        if !transient.is_empty() {
-            transient.clear();
-            self.persist(&entries, &transient);
+        if !self.transient.is_empty() {
+            self.transient.clear();
+            self.schedule_persist();
         }
     }
 
     /// The cooldown of `key`, when it has not expired at `now`.
     pub fn active_at(&self, key: &str, now: DateTime<Utc>) -> Option<LimitCooldown> {
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        entries
+        self.entries
             .get(key)
             .filter(|cooldown| cooldown.until > now)
-            .cloned()
+            .map(|entry| entry.value().clone())
     }
 
     pub fn active(&self, key: &str) -> Option<LimitCooldown> {
@@ -638,44 +683,96 @@ impl AccountCooldowns {
 
     /// Every cooldown still running at `now`.
     pub fn all_active_at(&self, now: DateTime<Utc>) -> Vec<(String, LimitCooldown)> {
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        entries
+        self.entries
             .iter()
-            .filter(|(_, cooldown)| cooldown.until > now)
-            .map(|(key, cooldown)| (key.clone(), cooldown.clone()))
+            .filter(|entry| entry.value().until > now)
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect()
     }
 
-    /// Write the registry, without the entries that have expired. The file is
-    /// replaced atomically so a crash cannot leave it half written.
-    fn persist(
-        &self,
-        entries: &HashMap<String, LimitCooldown>,
-        transient: &HashMap<String, TransientCooldown>,
-    ) {
-        let Some(path) = self.path.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+    /// Build a point-in-time `CooldownsFile` snapshot without holding any global lock.
+    fn build_snapshot(&self) -> CooldownsFile {
+        let now = Utc::now();
+        let cooldowns: HashMap<String, LimitCooldown> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.value().until > now)
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        let transient_cooldowns: HashMap<String, TransientCooldown> = self
+            .transient
+            .iter()
+            .filter(|entry| entry.value().until > now)
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        CooldownsFile {
+            version: 1,
+            cooldowns,
+            transient_cooldowns,
+        }
+    }
+
+    /// Flush any pending cooldown mutations asynchronously via `tokio::fs`
+    /// while holding zero `DashMap` shard guards.
+    pub async fn flush(&self) {
+        if self.flushed_seq.load(Ordering::Acquire) >= self.dirty_seq.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = self.flush_now_async().await;
+    }
+
+    async fn flush_now_async(&self) -> std::io::Result<()> {
+        let Some(path) = self.path.load_full() else {
+            let target = self.dirty_seq.load(Ordering::Acquire);
+            self.flushed_seq.fetch_max(target, Ordering::AcqRel);
+            self.flushed_notify.notify_waiters();
+            return Ok(());
+        };
+        let _guard = self.persist_lock.lock().await;
+        loop {
+            let target = self.dirty_seq.load(Ordering::Acquire);
+            if self.flushed_seq.load(Ordering::Acquire) >= target {
+                break;
+            }
+            let file = self.build_snapshot();
+            let bytes = serde_json::to_vec_pretty(&file).map_err(std::io::Error::other)?;
+            if let Err(error) = crate::concurrency::write_atomic_async(&path, &bytes, None).await {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "Could not persist account usage-limit cooldowns"
+                );
+                return Err(error);
+            }
+            self.flushed_seq.store(target, Ordering::Release);
+            self.flushed_notify.notify_waiters();
+        }
+        Ok(())
+    }
+
+    /// Schedule persistence without holding any lock. Under Tokio, wakes the
+    /// coalesced `tokio::fs` background writer; in synchronous unit tests with
+    /// no Tokio runtime, writes off-lock on a short-lived OS helper thread.
+    fn schedule_persist(&self) {
+        let Some(path) = self.path.load_full() else {
             return;
         };
-        let now = Utc::now();
-        let file = CooldownsFile {
-            version: 1,
-            cooldowns: entries
-                .iter()
-                .filter(|(_, cooldown)| cooldown.until > now)
-                .map(|(key, cooldown)| (key.clone(), cooldown.clone()))
-                .collect(),
-            transient_cooldowns: transient
-                .iter()
-                .filter(|(_, cooldown)| cooldown.until > now)
-                .map(|(key, cooldown)| (key.clone(), cooldown.clone()))
-                .collect(),
-        };
+        let seq = self.dirty_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        if tokio::runtime::Handle::try_current().is_ok() {
+            self.persist_notify.notify_one();
+            return;
+        }
+        // Non-Tokio synchronous unit tests: snapshot outside all locks and write
+        // atomically without holding any guard.
+        let file = self.build_snapshot();
         if let Err(error) = write_cooldowns(&path, &file) {
             tracing::warn!(
                 path = %path.display(),
                 error = %error,
                 "Could not persist account usage-limit cooldowns"
             );
+        } else {
+            self.flushed_seq.fetch_max(seq, Ordering::AcqRel);
         }
     }
 }
@@ -742,7 +839,7 @@ const QUOTA_STEP_PERCENT: f64 = 10.0;
 /// reads it, it never calls a provider.
 #[derive(Debug, Default)]
 pub struct QuotaHints {
-    entries: Mutex<HashMap<String, (f64, std::time::Instant)>>,
+    entries: DashMap<String, (f64, std::time::Instant)>,
 }
 
 impl QuotaHints {
@@ -760,22 +857,20 @@ impl QuotaHints {
         if !remaining_percent.is_finite() {
             return;
         }
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        entries.insert(key.to_string(), (remaining_percent.clamp(0.0, 100.0), at));
+        self.entries
+            .insert(key.to_string(), (remaining_percent.clamp(0.0, 100.0), at));
     }
 
     /// Remaining quota of `key`, when it was reported recently enough.
     pub fn remaining(&self, key: &str) -> Option<f64> {
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        entries
+        self.entries
             .get(key)
-            .filter(|(_, at)| at.elapsed() < QUOTA_MAX_AGE)
-            .map(|(remaining, _)| *remaining)
+            .filter(|entry| entry.value().1.elapsed() < QUOTA_MAX_AGE)
+            .map(|entry| entry.value().0)
     }
 
     pub fn forget(&self, key: &str) {
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        entries.remove(key);
+        self.entries.remove(key);
     }
 }
 

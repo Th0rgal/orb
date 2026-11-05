@@ -79,10 +79,13 @@ export async function snapshotTransfer(action: TransferAction): Promise<Transfer
   if (action.source.kind !== "client") return transferFiles(action, "source", { op: "snapshot" });
   const binding = localBinding(action.mission_id);
   if (!binding) throw new Error("The source workspace is unavailable on this computer.");
-  const manifest = await transferFiles<Manifest>(action, "source", { op: "snapshot" });
+  const [manifest, clientId] = await Promise.all([
+    transferFiles<Manifest>(action, "source", { op: "snapshot" }),
+    machineIdentity(),
+  ]);
   // A backend that predates links would record the files and silently drop the links.
   if (manifest.links?.length && !(await inspectTransfer(action.mission_id)).features?.includes("links")) throw new Error("Update the connected backend to move a workspace containing links. The conversation has not moved.");
-  return transferRequest(action.mission_id, { op: "client_snapshot", transfer_id: action.id, client_id: await machineIdentity(), root: binding.cwd, manifest });
+  return transferRequest(action.mission_id, { op: "client_snapshot", transfer_id: action.id, client_id: clientId, root: binding.cwd, manifest });
 }
 const TRANSFER_BLOCK = 1024 * 1024;
 const TRANSFER_WORKERS = 8;
@@ -150,8 +153,11 @@ export async function copyTransfer(action: TransferAction, progress: (done: numb
 export async function verifyTransfer(action: TransferAction): Promise<TransferAction> {
   if (action.phase === "verified" || action.phase === "activated") return action;
   if (action.destination.kind !== "client") return transferFiles(action, "destination", { op: "verify" });
-  const receipt = await transferFiles(action, "destination", { op: "verify" });
-  return transferRequest(action.mission_id, { op: "client_verified", transfer_id: action.id, client_id: await machineIdentity(), receipt });
+  const [receipt, clientId] = await Promise.all([
+    transferFiles(action, "destination", { op: "verify" }),
+    machineIdentity(),
+  ]);
+  return transferRequest(action.mission_id, { op: "client_verified", transfer_id: action.id, client_id: clientId, receipt });
 }
 export async function adoptTransferredWorkspace(action: TransferAction) {
   if (action.phase !== "activated" || action.destination.kind !== "client") return;
@@ -159,17 +165,21 @@ export async function adoptTransferredWorkspace(action: TransferAction) {
   if (!action.destination_root) throw new Error("Destination receipt has no workspace.");
   const old = localBinding(action.mission_id);
   if (old?.cwd === action.destination_root && (!["antigravity", "vibe"].includes(action.backend) || old.transferId === action.id)) return; // retain the new native session on subsequent reads
+  const missionPromise = action.backend === "vibe" ? getMission(action.mission_id) : undefined;
+  missionPromise?.catch(() => {});
   const rows = await refreshLocalAgents();
   const cli = rows.find(r => r.id === action.backend && r.installed && r.path);
   if (!cli?.path) throw new Error("Install the selected harness on this computer before continuing.");
-  const planMode = action.backend === "vibe" && (await getMission(action.mission_id)).agent === "plan";
+  const planMode = missionPromise ? (await missionPromise).agent === "plan" : false;
   await rememberBinding(action.mission_id, { harness: action.backend, bin: cli.path, cwd: action.destination_root, model: action.model ?? undefined, transferId: action.id, planMode });
 }
 export async function activateTransfer(action: TransferAction): Promise<Mission> {
   let clientSourceVerified: string | undefined;
   if (action.source.kind === "client" && !action.light) {
-    await transferFiles(action, "source", { op: "check_source" });
-    clientSourceVerified = await machineIdentity();
+    [, clientSourceVerified] = await Promise.all([
+      transferFiles(action, "source", { op: "check_source" }),
+      machineIdentity(),
+    ]);
   }
   const receipt = await transferRequest(action.mission_id, { op: "activate", transfer_id: action.id, client_source_verified: clientSourceVerified });
   await adoptTransferredWorkspace(receipt);

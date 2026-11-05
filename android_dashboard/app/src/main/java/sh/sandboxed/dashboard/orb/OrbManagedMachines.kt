@@ -62,6 +62,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -209,14 +213,23 @@ fun OrbManagedMachinesBlock(
     // Mission titles for owner chips, fetched once per id.
     val missionIds = (d.machines.mapNotNull { it.ownerMissionId } + d.dailySpend.orEmpty().flatMap { day -> day.missions.mapNotNull { it.first } }).toSet()
     LaunchedEffect(missionIds) {
-        for (id in missionIds) {
-            if (ManagedMissionTitles.cache.containsKey(id)) continue
-            ManagedMissionTitles.cache[id] = try {
-                OrbManagedMachines.missionTitle(core.fetchDict("/api/control/missions/${core.encodeComponent(id)}?include_history=false"))
-            } catch (e: Throwable) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                null
-            }
+        val missing = missionIds.filterNot { ManagedMissionTitles.cache.containsKey(it) }
+        if (missing.isEmpty()) return@LaunchedEffect
+        val loaded = coroutineScope {
+            missing.map { id ->
+                async {
+                    id to try {
+                        OrbManagedMachines.missionTitle(core.fetchDict("/api/control/missions/${core.encodeComponent(id)}?include_history=false"))
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Throwable) {
+                        null
+                    }
+                }
+            }.awaitAll()
+        }
+        for ((id, title) in loaded) {
+            ManagedMissionTitles.cache[id] = title
         }
     }
 

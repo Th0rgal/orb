@@ -43,33 +43,33 @@ pub(super) fn spawn_control_session(
     let max_parallel =
         crate::settings::max_parallel_missions_cached_or(config.max_parallel_missions);
 
-    let mission_channels: Arc<
-        RwLock<std::collections::HashMap<Uuid, broadcast::Sender<AgentEvent>>>,
-    > = Arc::new(RwLock::new(std::collections::HashMap::new()));
+    let mission_channels = Arc::new(MissionChannelMap::new());
 
     // P3-#20 fan-out task: subscribe to the global channel and mirror
-    // every event into its per-mission channel. Lives for the process
-    // lifetime; closes cleanly when the channel ends. Keeps the cost
-    // out of every send-site so existing `events_tx.send()` calls
-    // don't need to know about the per-mission split.
+    // every event into its per-mission channel without any global RwLock,
+    // periodically sweeping idle per-mission rings whose subscribers left.
     {
         let mut rx = events_tx.subscribe();
         let mission_channels = Arc::clone(&mission_channels);
         tokio::spawn(async move {
+            let mut prune_tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            prune_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                match rx.recv().await {
-                    Ok(ev) => {
-                        let Some(mid) = ev.mission_id() else { continue };
-                        let sender = {
-                            let map = mission_channels.read().await;
-                            map.get(&mid).cloned()
-                        };
-                        if let Some(sender) = sender {
-                            let _ = sender.send(ev);
+                tokio::select! {
+                    biased;
+                    recv = rx.recv() => {
+                        match recv {
+                            Ok(ev) => {
+                                let Some(mid) = ev.mission_id() else { continue };
+                                mission_channels.send(mid, ev);
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    _ = prune_tick.tick() => {
+                        mission_channels.prune_dead();
+                    }
                 }
             }
         });

@@ -30,7 +30,6 @@ pub(crate) use config::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::RwLock;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -565,7 +564,7 @@ impl Workspace {
 
 /// Persistent store for workspaces with JSON file backing.
 pub struct WorkspaceStore {
-    workspaces: RwLock<HashMap<Uuid, Workspace>>,
+    workspaces: crate::concurrency::ArcSwapStore<HashMap<Uuid, Workspace>>,
     storage_path: PathBuf,
     working_dir: PathBuf,
 }
@@ -578,7 +577,7 @@ impl WorkspaceStore {
         let storage_path = working_dir.join(".sandboxed-sh/workspaces.json");
 
         let store = Self {
-            workspaces: RwLock::new(HashMap::new()),
+            workspaces: crate::concurrency::ArcSwapStore::new(HashMap::new()),
             storage_path,
             working_dir: working_dir.clone(),
         };
@@ -629,10 +628,7 @@ impl WorkspaceStore {
         }
 
         // Store workspaces
-        {
-            let mut guard = store.workspaces.write().await;
-            *guard = workspaces;
-        }
+        store.workspaces.store(Arc::new(workspaces));
 
         // Save to disk to persist any recovered workspaces
         if let Err(e) = store.save_to_disk().await {
@@ -657,19 +653,14 @@ impl WorkspaceStore {
 
     /// Save workspaces to disk.
     async fn save_to_disk(&self) -> Result<(), std::io::Error> {
-        let workspaces = self.workspaces.read().await;
-        let workspaces_vec: Vec<&Workspace> = workspaces.values().collect();
+        let contents = {
+            let workspaces = self.workspaces.load();
+            let workspaces_vec: Vec<&Workspace> = workspaces.values().collect();
+            serde_json::to_string_pretty(&workspaces_vec)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+        };
 
-        // Ensure parent directory exists
-        if let Some(parent) = self.storage_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let contents = serde_json::to_string_pretty(&workspaces_vec)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        std::fs::write(&self.storage_path, contents)?;
-        Ok(())
+        crate::concurrency::write_atomic_async(&self.storage_path, contents.as_bytes(), None).await
     }
 
     /// Scan for container directories that exist on disk but aren't in the store.
@@ -772,7 +763,7 @@ impl WorkspaceStore {
 
     /// List all workspaces.
     pub async fn list(&self) -> Vec<Workspace> {
-        let guard = self.workspaces.read().await;
+        let guard = self.workspaces.load();
         let mut list: Vec<_> = guard.values().cloned().collect();
         list.sort_by(|a, b| a.name.cmp(&b.name));
         list
@@ -780,8 +771,7 @@ impl WorkspaceStore {
 
     /// Get a workspace by ID.
     pub async fn get(&self, id: Uuid) -> Option<Workspace> {
-        let guard = self.workspaces.read().await;
-        guard.get(&id).cloned()
+        self.workspaces.load().get(&id).cloned()
     }
 
     /// Get the default host workspace.
@@ -845,7 +835,7 @@ impl WorkspaceStore {
         if let Some(workspace) = removed {
             let registry = mission_workspace_roots_path(&workspace);
             if registry.exists() {
-                if let Err(error) = std::fs::remove_file(&registry) {
+                if let Err(error) = tokio::fs::remove_file(&registry).await {
                     tracing::warn!(
                         workspace = %id,
                         path = %registry.display(),
@@ -3105,10 +3095,20 @@ async fn collect_skill_contents(
     context_name: &str,
     library: &LibraryStore,
 ) -> Vec<SkillContent> {
-    let mut skills_to_write: Vec<SkillContent> = Vec::new();
+    use futures::stream::{self, StreamExt};
 
-    for skill_name in skill_names {
-        match library.get_skill(skill_name).await {
+    let skill_futs: Vec<_> = skill_names
+        .iter()
+        .map(|skill_name| async move { (skill_name, library.get_skill(skill_name).await) })
+        .collect();
+    let loaded = stream::iter(skill_futs)
+        .buffered(8)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut skills_to_write: Vec<SkillContent> = Vec::with_capacity(loaded.len());
+    for (skill_name, res) in loaded {
+        match res {
             Ok(skill) => {
                 skills_to_write.push(SkillContent {
                     name: skill.name,

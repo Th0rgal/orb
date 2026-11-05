@@ -1444,19 +1444,59 @@ fn compile_fts_query(raw: &str) -> Option<CompiledSearchQuery> {
 }
 
 fn tokenize_unicode61(input: &str) -> Vec<String> {
+    const MAX_FTS_TOKEN_CHARS: u32 = 256;
+    const MAX_FTS_QUERY_TOKENS: u32 = 128;
     let mut out = Vec::new();
     let mut cur = String::new();
+    let mut cur_chars: u32 = 0;
+    let mut state: u32 = 0;
     for ch in input.chars() {
-        if ch.is_alphanumeric() {
-            for lc in ch.to_lowercase() {
-                cur.push(lc);
+        let step = crate::orb_spec::fts5_lexer_step(
+            state,
+            u32::from(ch.is_alphanumeric()),
+            cur_chars,
+            MAX_FTS_QUERY_TOKENS,
+            out.len().min(u32::MAX as usize) as u32,
+        );
+        if !step.admitted {
+            cur.clear();
+            break;
+        }
+        state = step.next_state;
+        match step.action {
+            crate::orb_spec::Fts5LexAction::AppendWordChar => {
+                if cur_chars < MAX_FTS_TOKEN_CHARS {
+                    for lc in ch.to_lowercase() {
+                        cur.push(lc);
+                    }
+                    cur_chars += 1;
+                }
             }
-        } else if !cur.is_empty() {
-            out.push(std::mem::take(&mut cur));
+            crate::orb_spec::Fts5LexAction::CloseBareToken
+            | crate::orb_spec::Fts5LexAction::ClosePrefixToken
+            | crate::orb_spec::Fts5LexAction::ClosePhrase
+            | crate::orb_spec::Fts5LexAction::CloseBareAndOpenPhrase => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+                cur_chars = 0;
+            }
+            crate::orb_spec::Fts5LexAction::OpenPhrase
+            | crate::orb_spec::Fts5LexAction::Skip
+            | crate::orb_spec::Fts5LexAction::TokenBudgetFull => {}
         }
     }
     if !cur.is_empty() {
-        out.push(cur);
+        let tail_step = crate::orb_spec::fts5_lexer_step(
+            state,
+            0,
+            cur_chars,
+            MAX_FTS_QUERY_TOKENS,
+            out.len().min(u32::MAX as usize) as u32,
+        );
+        if tail_step.admitted {
+            out.push(cur);
+        }
     }
     out
 }

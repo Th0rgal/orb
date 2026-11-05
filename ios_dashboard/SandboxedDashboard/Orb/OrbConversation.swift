@@ -284,9 +284,12 @@ struct OrbConversation: View {
                         }
                     }
                     if let id {
-                        mission = await OrbReadCache.readAsync("mission:\(id)") ?? .null
-                        execution = await OrbReadCache.readAsync("cloud:\(id)") ?? .null
-                        let cachedEvents = await OrbReadCache.readEventsAsync(id)
+                        async let cachedMission = OrbReadCache.readAsync("mission:\(id)")
+                        async let cachedExecution = OrbReadCache.readAsync("cloud:\(id)")
+                        async let cachedEventsTask = OrbReadCache.readEventsAsync(id)
+                        mission = await cachedMission ?? .null
+                        execution = await cachedExecution ?? .null
+                        let cachedEvents = await cachedEventsTask
                         guard !Task.isCancelled, id == self.id else { return }
                         if !cachedEvents.isEmpty {
                             events = cachedEvents

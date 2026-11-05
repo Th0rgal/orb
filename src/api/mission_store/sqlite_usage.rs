@@ -75,38 +75,42 @@ pub(super) async fn record(
     store: &SqliteMissionStore,
     record: &ProxyUsageRecord,
 ) -> Result<(), String> {
-    let conn = store.conn.lock().await;
-    conn.execute(
-        "INSERT INTO proxy_usage (timestamp, model, input_tokens, output_tokens,
-            cache_creation_tokens, cache_read_tokens, cost_cents,
-            provider, account_id, api_key_id, api_key_name, mission_id,
-            caller_kind, purpose, reasoning_tokens, account_bound)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-        params![
-            record
-                .observed_at
-                .clone()
-                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
-            record.model,
-            record.input_tokens as i64,
-            record.output_tokens as i64,
-            record.cache_creation_tokens as i64,
-            record.cache_read_tokens as i64,
-            record.cost_cents as i64,
-            record.provider,
-            record.account_id.map(|id| id.to_string()),
-            record.api_key_id.map(|id| id.to_string()),
-            record.api_key_name,
-            record.mission_id.map(|id| id.to_string()),
-            record.caller_kind,
-            record.purpose,
-            record.reasoning_tokens as i64,
-            record.account_bound,
-        ],
-    )
-    .map_err(err)?;
-    crate::api::mission_store::sqlite::resources::on_router_usage_sync(&conn, record);
-    Ok(())
+    let record = record.clone();
+    store
+        .write_grouped(move |conn| {
+            conn.execute(
+                "INSERT INTO proxy_usage (timestamp, model, input_tokens, output_tokens,
+                    cache_creation_tokens, cache_read_tokens, cost_cents,
+                    provider, account_id, api_key_id, api_key_name, mission_id,
+                    caller_kind, purpose, reasoning_tokens, account_bound)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                params![
+                    record
+                        .observed_at
+                        .clone()
+                        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+                    record.model,
+                    record.input_tokens as i64,
+                    record.output_tokens as i64,
+                    record.cache_creation_tokens as i64,
+                    record.cache_read_tokens as i64,
+                    record.cost_cents as i64,
+                    record.provider,
+                    record.account_id.map(|id| id.to_string()),
+                    record.api_key_id.map(|id| id.to_string()),
+                    record.api_key_name,
+                    record.mission_id.map(|id| id.to_string()),
+                    record.caller_kind,
+                    record.purpose,
+                    record.reasoning_tokens as i64,
+                    record.account_bound,
+                ],
+            )
+            .map_err(err)?;
+            crate::api::mission_store::sqlite::resources::on_router_usage_sync(conn, &record);
+            Ok(())
+        })
+        .await
 }
 
 fn non_negative(value: i64) -> u64 {

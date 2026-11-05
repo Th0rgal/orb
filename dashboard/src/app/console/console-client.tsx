@@ -426,8 +426,9 @@ async function uploadFiles(
   onProgress?: (done: number, total: number) => void
 ) {
   let done = 0;
-  for (const f of files) {
-    await new Promise<void>((resolve, reject) => {
+  let nextIndex = 0;
+  const uploadOne = (f: File) =>
+    new Promise<void>((resolve, reject) => {
       const API_BASE = getRuntimeApiBase();
       const form = new FormData();
       form.append("file", f, f.name);
@@ -449,9 +450,17 @@ async function uploadFiles(
       xhr.onerror = () => reject(new Error("Upload failed (network error)"));
       xhr.send(form);
     });
-    done += 1;
-    onProgress?.(done, files.length);
-  }
+  const worker = async () => {
+    while (nextIndex < files.length) {
+      const file = files[nextIndex++];
+      await uploadOne(file);
+      done += 1;
+      onProgress?.(done, files.length);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(4, files.length) }, () => worker())
+  );
 }
 
 // Generate unique IDs

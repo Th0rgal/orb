@@ -66,6 +66,21 @@ pub fn evaluate_auth_toctou_gate(
     observed_digest: u64,
     exec_digest: u64,
 ) -> crate::orb_spec::AuthToctouExecuteVerdict {
+    let input = crate::orb_spec::AuthToctouExecuteInput {
+        principal_kind,
+        bunker_state,
+        observed_target_id,
+        exec_target_id,
+        observed_lease_epoch,
+        live_lease_epoch,
+        now_tick,
+        expiry_tick,
+        observed_digest,
+        exec_digest,
+    };
+    // Authoritative Lean kernel decision (`orb_auth_toctou_execute_step`), with
+    // host sanity cross-check recorded in `auth_toctou_shadow_counter()`.
+    let lean_verdict = crate::orb_spec::auth_toctou_execute_step(input);
     let (host_admitted, host_reason_code) = if bunker_state != BunkerState::Normal {
         (false, 1u8)
     } else if !(1..=3).contains(&principal_kind) {
@@ -81,23 +96,13 @@ pub fn evaluate_auth_toctou_gate(
     } else {
         (true, 1u8)
     };
-    crate::orb_spec::observe_auth_toctou_shadow(
-        crate::orb_spec::AuthToctouExecuteInput {
-            principal_kind,
-            bunker_state,
-            observed_target_id,
-            exec_target_id,
-            observed_lease_epoch,
-            live_lease_epoch,
-            now_tick,
-            expiry_tick,
-            observed_digest,
-            exec_digest,
-        },
+    let _ = crate::orb_spec::observe_auth_toctou_shadow(
+        input,
         host_admitted,
         host_reason_code,
         auth_toctou_shadow_counter(),
-    )
+    );
+    lean_verdict
 }
 
 const OPS_READ_BINARIES: &[&str] = &[
@@ -645,6 +650,19 @@ pub fn evaluate_privd_command_confinement(
         (PrivdCommandClass::UnknownOrForbidden, false)
     };
 
+    let input = PrivdCommandStepInput {
+        lease_valid,
+        grant_scope: PrivdGrantScope::from(grant_scope.to_rank() as u8),
+        command_class,
+        unit_matches_allowed,
+        has_shell_metachar_or_flag_bypass,
+        has_path_traversal_or_symlink,
+        has_unsafe_env_var,
+        require_force_cmd,
+    };
+    // Authoritative Lean kernel decision (`orb_privd_command_step`), with host
+    // cross-check recorded in `privd_command_shadow_counter()`.
+    let lean_verdict = crate::orb_spec::privd_command_step(input);
     let host_allow_exec = lease_valid
         && !has_shell_metachar_or_flag_bypass
         && !has_path_traversal_or_symlink
@@ -666,18 +684,8 @@ pub fn evaluate_privd_command_confinement(
                 grant_scope == PrivilegeScope::RootExec && !require_force_cmd
             }
         };
-
-    let input = PrivdCommandStepInput {
-        lease_valid,
-        grant_scope: PrivdGrantScope::from(grant_scope.to_rank() as u8),
-        command_class,
-        unit_matches_allowed,
-        has_shell_metachar_or_flag_bypass,
-        has_path_traversal_or_symlink,
-        has_unsafe_env_var,
-        require_force_cmd,
-    };
-    observe_privd_command_shadow(input, host_allow_exec, privd_command_shadow_counter())
+    let _ = observe_privd_command_shadow(input, host_allow_exec, privd_command_shadow_counter());
+    lean_verdict
 }
 
 /// Default ceiling for a `"session"`-scoped grant (reaped earlier when the
@@ -1056,29 +1064,36 @@ pub struct PrivilegeBroker {
     changed: tokio::sync::Notify,
 }
 
-static BROKER: OnceLock<Arc<PrivilegeBroker>> = OnceLock::new();
+static BROKERS: OnceLock<dashmap::DashMap<PathBuf, Arc<PrivilegeBroker>>> = OnceLock::new();
 
 pub fn store(state: &AppState) -> Arc<PrivilegeBroker> {
-    BROKER
-        .get_or_init(|| {
-            Arc::new(PrivilegeBroker::open(
-                state
-                    .config
-                    .working_dir
-                    .join(".sandboxed-sh")
-                    .join("privilege_access.json"),
-            ))
-        })
+    let path = state
+        .config
+        .working_dir
+        .join(".sandboxed-sh")
+        .join("privilege_access.json");
+    let brokers = BROKERS.get_or_init(dashmap::DashMap::new);
+    if let Some(existing) = brokers.get(&path) {
+        return Arc::clone(existing.value());
+    }
+    brokers
+        .entry(path.clone())
+        .or_insert_with(|| Arc::new(PrivilegeBroker::open(path)))
+        .value()
         .clone()
 }
 
 /// Reap session-scoped grants when the broker has been initialized in this process.
 pub async fn reap_if_initialized(mission_id: Uuid, reason: &str) -> usize {
-    if let Some(broker) = BROKER.get() {
-        broker.reap_mission_grants(mission_id, reason).await
-    } else {
-        0
+    let Some(brokers) = BROKERS.get() else {
+        return 0;
+    };
+    let active: Vec<Arc<PrivilegeBroker>> = brokers.iter().map(|e| Arc::clone(e.value())).collect();
+    let mut total = 0;
+    for broker in active {
+        total += broker.reap_mission_grants(mission_id, reason).await;
     }
+    total
 }
 
 #[derive(Debug, Clone)]
@@ -4262,6 +4277,84 @@ mod tests {
         let snap = privd_command_shadow_counter().snapshot("orb_privd_command_step");
         assert!(snap.total_events >= 10);
         assert_eq!(snap.total_divergences, 0);
+
+        // 8. Tightened OpsRead per-binary flag & sensitive-path confinement:
+        //    `ss -K` (socket kill) and `cat /etc/shadow` are rejected,
+        //    while `ss -lntu` and `df -h` remain admitted.
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
+                mission_id: Some(mission_ro),
+                requester: None,
+                lease_token: ro_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::OpsRead),
+                command: "ss -K dst 10.88.0.1".into(),
+                argv: vec!["ss".into(), "-K".into(), "dst".into(), "10.88.0.1".into()],
+                cwd: Some("/var/log".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_err());
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
+                mission_id: Some(mission_ro),
+                requester: None,
+                lease_token: ro_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::OpsRead),
+                command: "cat /etc/shadow".into(),
+                argv: vec!["cat".into(), "/etc/shadow".into()],
+                cwd: Some("/var/log".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_err());
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
+                mission_id: Some(mission_ro),
+                requester: None,
+                lease_token: ro_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::OpsRead),
+                command: "ss -lntu".into(),
+                argv: vec!["ss".into(), "-lntu".into()],
+                cwd: Some("/var/log".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_ok());
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
+                mission_id: Some(mission_ro),
+                requester: None,
+                lease_token: ro_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::OpsRead),
+                command: "df -h".into(),
+                argv: vec!["df".into(), "-h".into()],
+                cwd: Some("/var/log".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_ok());
+        assert_eq!(
+            privd_command_shadow_counter()
+                .snapshot("orb_privd_command_step")
+                .total_divergences,
+            0
+        );
     }
 
     #[tokio::test]

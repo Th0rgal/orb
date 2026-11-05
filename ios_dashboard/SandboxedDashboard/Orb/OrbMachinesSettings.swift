@@ -146,12 +146,15 @@ struct OrbMachinesSettings: View {
         guard !loading, client.current else { return }; loading = true
         defer { loading = false }
         // Computers are independent of the fleet: one failing never hides the other.
-        if let value = try? await client.call("/api/control/client-computers") {
+        async let computersReq = client.call("/api/control/client-computers")
+        async let managedLoad: Void = loadManaged()
+        async let nodesReq = client.call("/api/remote-nodes")
+        if let value = try? await computersReq {
             computers = value["computers"].items; computersReady = true
         }
-        await loadManaged()
+        await managedLoad
         do {
-            let value = try await client.call("/api/remote-nodes")
+            let value = try await nodesReq
             nodes = value["nodes"].items; fleetReady = true; fleetError = ""
             softwareReloadToken &+= 1
         } catch is CancellationError { return }

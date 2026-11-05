@@ -146,17 +146,27 @@ pub(crate) fn schedule_mission_scope_teardown(
                 tracing::info!(%mission_id, reaped, "reaped session-scoped privilege grants");
             }
         }
-        for unit in list_exec_scope_units().await {
-            if !crate::workspace_exec::exec_unit_belongs_to_mission(&unit, mission_id) {
-                continue;
-            }
-            let host = machine_name_from_exec_unit(&unit).as_deref()
-                == Some(crate::workspace_exec::HOST_MACHINE);
-            if host && keep_host {
-                continue;
-            }
-            stop_unit(&unit, &reason).await;
-        }
+        let units: Vec<String> = list_exec_scope_units()
+            .await
+            .into_iter()
+            .filter(|unit| {
+                if !crate::workspace_exec::exec_unit_belongs_to_mission(unit, mission_id) {
+                    return false;
+                }
+                let host = machine_name_from_exec_unit(unit).as_deref()
+                    == Some(crate::workspace_exec::HOST_MACHINE);
+                !(host && keep_host)
+            })
+            .collect();
+        use futures::stream::{self, StreamExt};
+        stream::iter(units)
+            .for_each_concurrent(8, |unit| {
+                let reason = &reason;
+                async move {
+                    stop_unit(&unit, reason).await;
+                }
+            })
+            .await;
     });
 }
 
@@ -301,15 +311,19 @@ pub(crate) async fn stop_unit(unit: &str, reason: &str) -> bool {
 /// number of scopes stopped. No-op when the host has no systemd scopes
 /// (caps disabled) — the unit list is simply empty.
 pub async fn stop_mission_exec_scopes(mission_id: Uuid, reason: &str) -> usize {
-    let mut stopped = 0;
-    for unit in list_exec_scope_units().await {
-        if crate::workspace_exec::exec_unit_belongs_to_mission(&unit, mission_id)
-            && stop_unit(&unit, reason).await
-        {
-            stopped += 1;
-        }
-    }
-    stopped
+    use futures::stream::{self, StreamExt};
+
+    let units: Vec<String> = list_exec_scope_units()
+        .await
+        .into_iter()
+        .filter(|unit| crate::workspace_exec::exec_unit_belongs_to_mission(unit, mission_id))
+        .collect();
+    stream::iter(units)
+        .map(|unit| async move { stop_unit(&unit, reason).await })
+        .buffer_unordered(8)
+        .filter(|stopped| std::future::ready(*stopped))
+        .count()
+        .await
 }
 
 /// Event-driven teardown: stop a mission's scopes as soon as its status
@@ -343,20 +357,22 @@ pub fn spawn_status_listener(
 /// the host uptime. Monotonic avoids parsing locale/timezone-formatted
 /// wall-clock strings and is immune to clock adjustments.
 async fn unit_age(unit: &str) -> Option<Duration> {
-    let output = Command::new("systemctl")
-        .args([
-            "show",
-            "-p",
-            "ActiveEnterTimestampMonotonic",
-            "--value",
-            unit,
-        ])
-        .output()
-        .await
-        .ok()?;
+    let (output_res, uptime_res) = tokio::join!(
+        Command::new("systemctl")
+            .args([
+                "show",
+                "-p",
+                "ActiveEnterTimestampMonotonic",
+                "--value",
+                unit,
+            ])
+            .output(),
+        tokio::fs::read_to_string("/proc/uptime"),
+    );
+    let output = output_res.ok()?;
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let entered_us: u64 = raw.parse().ok().filter(|v| *v > 0)?;
-    let uptime = tokio::fs::read_to_string("/proc/uptime").await.ok()?;
+    let uptime = uptime_res.ok()?;
     let uptime_secs: f64 = uptime.split_whitespace().next()?.parse().ok()?;
     let uptime_us = (uptime_secs * 1_000_000.0) as u64;
     Some(Duration::from_micros(uptime_us.saturating_sub(entered_us)))
@@ -400,7 +416,8 @@ async fn run_once(state: &Arc<AppState>) -> ReaperReport {
     if units.is_empty() {
         return report;
     }
-    let index_full = build_mission_index(state).await;
+    let (index_full, workspaces) =
+        tokio::join!(build_mission_index(state), state.workspaces.list());
     let index = &index_full.by_short;
     // Two token sets over this instance's workspaces (machine-name tokens,
     // cf. `WorkspaceExec::mission_scope_match_token`):
@@ -414,7 +431,6 @@ async fn run_once(state: &Arc<AppState>) -> ReaperReport {
     let mut workspace_ids_by_token: std::collections::HashMap<String, Uuid> =
         std::collections::HashMap::new();
     let mut live_workspace_tokens: HashSet<String> = HashSet::new();
-    let workspaces = state.workspaces.list().await;
     let live_workspace_ids: HashSet<Uuid> = index
         .values()
         .flatten()
@@ -431,79 +447,104 @@ async fn run_once(state: &Arc<AppState>) -> ReaperReport {
     }
     let max_age = zombie_max_age();
 
-    for unit in units {
-        report.scanned += 1;
-        let unit_machine = machine_name_from_exec_unit(&unit);
-        let unit_workspace_id = unit_machine
-            .as_ref()
-            .and_then(|machine| workspace_ids_by_token.get(machine))
-            .copied();
-        let Some(unit_workspace_id) = unit_workspace_id else {
-            tracing::debug!(unit, "reaper: kept (scope not owned by this instance)");
-            report.kept += 1;
-            continue;
-        };
-        match mission_short_id_from_exec_unit(&unit) {
-            Some(short) => match index
-                .get(&short)
-                .and_then(|entries| entry_for_workspace(entries, unit_workspace_id))
-            {
-                Some(entry) if status_keeps_scopes(&entry.status) => {
-                    report.kept += 1;
-                }
-                Some(entry) => {
-                    let reason = format!("reaper: mission {short} status {:?}", entry.status);
-                    if stop_unit(&unit, &reason).await {
-                        report.stopped += 1;
-                    } else {
-                        report.errors += 1;
-                    }
-                }
-                None => {
-                    let age = unit_age(&unit).await;
-                    if !unknown_tagged_scope_is_reapable(index_full.complete, age, max_age) {
-                        tracing::debug!(
-                            unit,
-                            ?age,
-                            "reaper: kept (mission unknown without stale-age evidence)"
-                        );
-                        report.kept += 1;
-                    } else if stop_unit(&unit, "reaper: mission unknown to any store").await {
-                        report.stopped += 1;
-                    } else {
-                        report.errors += 1;
-                    }
-                }
-            },
-            None => {
-                // Legacy naming (or task-tagged): stop only when old enough
-                // AND the owning workspace has no scope-keeping mission. An
-                // incomplete cross-store index cannot prove that absence, so
-                // fail closed just like the mission-tagged branch above.
-                let age = unit_age(&unit).await;
-                let owned_by_live_ws = unit_machine
+    enum UnitOutcome {
+        Kept,
+        Stopped,
+        Error,
+    }
+    use futures::stream::{self, StreamExt};
+    report.scanned = units.len();
+    let outcomes: Vec<UnitOutcome> = stream::iter(units)
+        .map(|unit| {
+            let workspace_ids_by_token = &workspace_ids_by_token;
+            let live_workspace_tokens = &live_workspace_tokens;
+            let index_complete = index_full.complete;
+            async move {
+                let unit_machine = machine_name_from_exec_unit(&unit);
+                let unit_workspace_id = unit_machine
                     .as_ref()
-                    .is_some_and(|machine| live_workspace_tokens.contains(machine));
-                if !legacy_scope_is_reapable(index_full.complete, age, max_age, owned_by_live_ws) {
-                    if !index_full.complete {
-                        tracing::debug!(
-                            unit,
-                            "reaper: kept (legacy scope but mission index incomplete)"
+                    .and_then(|machine| workspace_ids_by_token.get(machine))
+                    .copied();
+                let Some(unit_workspace_id) = unit_workspace_id else {
+                    tracing::debug!(unit, "reaper: kept (scope not owned by this instance)");
+                    return UnitOutcome::Kept;
+                };
+                match mission_short_id_from_exec_unit(&unit) {
+                    Some(short) => match index
+                        .get(&short)
+                        .and_then(|entries| entry_for_workspace(entries, unit_workspace_id))
+                    {
+                        Some(entry) if status_keeps_scopes(&entry.status) => UnitOutcome::Kept,
+                        Some(entry) => {
+                            let reason =
+                                format!("reaper: mission {short} status {:?}", entry.status);
+                            if stop_unit(&unit, &reason).await {
+                                UnitOutcome::Stopped
+                            } else {
+                                UnitOutcome::Error
+                            }
+                        }
+                        None => {
+                            let age = unit_age(&unit).await;
+                            if !unknown_tagged_scope_is_reapable(index_complete, age, max_age) {
+                                tracing::debug!(
+                                    unit,
+                                    ?age,
+                                    "reaper: kept (mission unknown without stale-age evidence)"
+                                );
+                                UnitOutcome::Kept
+                            } else if stop_unit(&unit, "reaper: mission unknown to any store").await
+                            {
+                                UnitOutcome::Stopped
+                            } else {
+                                UnitOutcome::Error
+                            }
+                        }
+                    },
+                    None => {
+                        // Legacy naming (or task-tagged): stop only when old enough
+                        // AND the owning workspace has no scope-keeping mission. An
+                        // incomplete cross-store index cannot prove that absence, so
+                        // fail closed just like the mission-tagged branch above.
+                        let age = unit_age(&unit).await;
+                        let owned_by_live_ws = unit_machine
+                            .as_ref()
+                            .is_some_and(|machine| live_workspace_tokens.contains(machine));
+                        if !legacy_scope_is_reapable(
+                            index_complete,
+                            age,
+                            max_age,
+                            owned_by_live_ws,
+                        ) {
+                            if !index_complete {
+                                tracing::debug!(
+                                    unit,
+                                    "reaper: kept (legacy scope but mission index incomplete)"
+                                );
+                            }
+                            return UnitOutcome::Kept;
+                        }
+                        let reason = format!(
+                            "reaper: legacy-named scope older than {}h in workspace with no live mission",
+                            max_age.as_secs() / 3600
                         );
+                        if stop_unit(&unit, &reason).await {
+                            UnitOutcome::Stopped
+                        } else {
+                            UnitOutcome::Error
+                        }
                     }
-                    report.kept += 1;
-                    continue;
-                }
-                let reason = format!(
-                    "reaper: legacy-named scope older than {}h in workspace with no live mission",
-                    max_age.as_secs() / 3600
-                );
-                if stop_unit(&unit, &reason).await {
-                    report.stopped += 1;
-                } else {
-                    report.errors += 1;
                 }
             }
+        })
+        .buffered(8)
+        .collect()
+        .await;
+    for outcome in outcomes {
+        match outcome {
+            UnitOutcome::Kept => report.kept += 1,
+            UnitOutcome::Stopped => report.stopped += 1,
+            UnitOutcome::Error => report.errors += 1,
         }
     }
     report

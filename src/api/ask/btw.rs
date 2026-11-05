@@ -250,11 +250,17 @@ pub async fn send(
         cfg,
         crate::api::usage_attribution::CorePurpose::Btw,
     );
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(128);
     tokio::spawn(async move {
-        let _ = tx.send(json!({"type":"start","model":model}));
+        if tx
+            .send(json!({"type":"start","model":model}))
+            .await
+            .is_err()
+        {
+            return;
+        }
         let query = client.complete_stream(&messages, &[], |text| {
-            let _ = tx.send(json!({"type":"delta","text":text}));
+            let _ = tx.try_send(json!({"type":"delta","text":text}));
         });
         let result = tokio::select! { _=tx.closed()=>return, result=query=>result };
         let event = match result {
@@ -274,7 +280,7 @@ pub async fn send(
                 json!({"type":"error","message":"The side question failed. Your working agent was not interrupted."})
             }
         };
-        let _ = tx.send(event);
+        let _ = tx.send(event).await;
     });
     let stream = async_stream::stream! { while let Some(value)=rx.recv().await { yield Ok(Event::default().event("btw").data(value.to_string())); } };
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))

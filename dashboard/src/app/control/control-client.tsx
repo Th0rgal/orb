@@ -4421,9 +4421,7 @@ export default function ControlClient() {
     event: React.ChangeEvent<HTMLInputElement>,
   ) => {
     const files = Array.from(event.target.files || []);
-    for (const file of files) {
-      await handleFileUpload(file);
-    }
+    await Promise.all(files.map((file) => handleFileUpload(file)));
     // Reset input
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -5772,17 +5770,15 @@ export default function ControlClient() {
   const handleExitGoal = useCallback(
     async (missionId: string, running: boolean) => {
       try {
-        const automations = await listMissionAutomations(missionId).catch(
-          () => [],
-        );
+        const [automations] = await Promise.all([
+          listMissionAutomations(missionId).catch(() => []),
+          // Mid-turn: cancellation lets native harnesses clear their goal
+          // state first (Codex: thread/goal/clear), then interrupts the turn.
+          running ? cancelMission(missionId) : Promise.resolve(),
+        ]);
         const goalRow = automations.find(
           (a) => a.active && a.command_source?.type === "native_loop",
         );
-        if (running) {
-          // Mid-turn: cancellation lets native harnesses clear their goal
-          // state first (Codex: thread/goal/clear), then interrupts the turn.
-          await cancelMission(missionId);
-        }
         // Idle (or belt-and-braces while running): deactivate the loop row so
         // the next agent_finished hook doesn't re-fire the continuation. No
         // cancelMission here when idle — an idle mission shouldn't get marked
@@ -7404,27 +7400,50 @@ export default function ControlClient() {
           let content = existing?.content ?? "";
           let finalized = false;
 
+          let chars: string[] | undefined;
+          const scalarLen = () => {
+            chars ??= Array.from(content);
+            return chars.length;
+          };
+          const spliceScalars = (start: number, end: number, replacement: string) => {
+            chars ??= Array.from(content);
+            const s = Math.max(0, Math.min(start, chars.length));
+            const e = Math.max(s, Math.min(end, chars.length));
+            chars.splice(s, e - s, replacement);
+            content = chars.join("");
+            chars = undefined;
+          };
           for (const op of rawOps) {
             if (!isRecord(op)) continue;
-            if (op["type"] === "insert") {
-              const pos =
-                typeof op["pos"] === "number"
-                  ? Math.max(0, Math.min(op["pos"], content.length))
-                  : content.length;
+            if (op["type"] === "snapshot") {
+              content = String(op["text"] ?? "");
+              chars = undefined;
+            } else if (op["type"] === "insert") {
               const text = String(op["text"] ?? "");
-              content = content.slice(0, pos) + text + content.slice(pos);
+              if (bubbleId === "text_delta_latest" && op["pos"] === 0) {
+                content = text;
+                chars = undefined;
+              } else if (
+                typeof op["pos"] !== "number" ||
+                op["pos"] >= content.length ||
+                op["pos"] >= scalarLen()
+              ) {
+                content += text;
+                chars = undefined;
+              } else {
+                spliceScalars(op["pos"], op["pos"], text);
+              }
             } else if (op["type"] === "replace") {
               const range = Array.isArray(op["range"]) ? op["range"] : [];
-              const start =
-                typeof range[0] === "number"
-                  ? Math.max(0, Math.min(range[0], content.length))
-                  : 0;
-              const end =
-                typeof range[1] === "number"
-                  ? Math.max(start, Math.min(range[1], content.length))
-                  : content.length;
+              const start = typeof range[0] === "number" ? range[0] : 0;
+              const end = typeof range[1] === "number" ? range[1] : scalarLen();
               const text = String(op["text"] ?? "");
-              content = content.slice(0, start) + text + content.slice(end);
+              if (bubbleId === "text_delta_latest" && start === 0) {
+                content = text;
+                chars = undefined;
+              } else {
+                spliceScalars(start, end, text);
+              }
             } else if (op["type"] === "finalize") {
               finalized = true;
             }

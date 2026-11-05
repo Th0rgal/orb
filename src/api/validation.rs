@@ -209,6 +209,27 @@ impl ValidationMatrix {
             }
         }
         detect_cycle(&self.gates)?;
+        let total = self.gates.len().min(u32::MAX as usize) as u32;
+        let initial_ready = self
+            .gates
+            .iter()
+            .filter(|gate| {
+                let dep_count = gate.dependencies.len().min(u32::MAX as usize) as u32;
+                crate::orb_spec::validation_dag_step(dep_count, 0, 0, false, false, true)
+                    == crate::orb_spec::ValidationDagVerdict::ReadyToClaim
+            })
+            .count()
+            .min(u32::MAX as usize) as u32;
+        if !crate::orb_spec::lean_sys_cabi::verify_dag_wave_step(
+            0,
+            u64::from(initial_ready),
+            0,
+            u64::from(total),
+            1,
+            u64::from(total.max(1)),
+        ) {
+            return Err("validation matrix has no executable root wave".to_string());
+        }
         Ok(())
     }
 }
@@ -871,9 +892,9 @@ async fn create_campaign(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateCampaignRequest>,
 ) -> Result<(StatusCode, Json<CampaignView>), ApiError> {
-    state
-        .validation
-        .create(request)
+    tokio::task::spawn_blocking(move || state.validation.create(request))
+        .await
+        .map_err(internal)?
         .map(|campaign| (StatusCode::CREATED, Json(campaign)))
         .map_err(bad_request)
 }
@@ -912,13 +933,14 @@ async fn create_from_workspace(
         .map_err(|error| bad_request(format!("read {}: {error}", path.display())))?;
     let matrix = toml::from_str::<ValidationMatrix>(&raw)
         .map_err(|error| bad_request(format!("parse {}: {error}", path.display())))?;
-    state
-        .validation
-        .create(CreateCampaignRequest {
-            candidate: request.candidate,
-            matrix,
-            workspace_id: Some(request.workspace_id),
-        })
+    let create_req = CreateCampaignRequest {
+        candidate: request.candidate,
+        matrix,
+        workspace_id: Some(request.workspace_id),
+    };
+    tokio::task::spawn_blocking(move || state.validation.create(create_req))
+        .await
+        .map_err(internal)?
         .map(|campaign| (StatusCode::CREATED, Json(campaign)))
         .map_err(bad_request)
 }
@@ -927,45 +949,67 @@ async fn get_campaign(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<Uuid>,
 ) -> Result<Json<CampaignView>, ApiError> {
-    state.validation.get(id).map(Json).map_err(not_found)
+    tokio::task::spawn_blocking(move || state.validation.get(id))
+        .await
+        .map_err(internal)?
+        .map(Json)
+        .map_err(not_found)
 }
 
 async fn list_campaigns(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<CampaignView>>, ApiError> {
-    let connection = state.validation.lock().map_err(internal)?;
-    let mut statement = connection
-        .prepare("SELECT id FROM validation_campaigns ORDER BY created_at DESC LIMIT 100")
-        .map_err(internal)?;
-    let ids = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(internal)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(internal)?;
-    let campaigns = ids
-        .into_iter()
-        .filter_map(|id| Uuid::parse_str(&id).ok())
-        .filter_map(|id| load_campaign(&connection, id).transpose())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(internal)?;
-    Ok(Json(campaigns))
+    tokio::task::spawn_blocking(move || -> Result<Vec<CampaignView>, ApiError> {
+        let connection = state.validation.lock().map_err(internal)?;
+        let mut statement = connection
+            .prepare("SELECT id FROM validation_campaigns ORDER BY created_at DESC LIMIT 100")
+            .map_err(internal)?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?;
+        ids.into_iter()
+            .filter_map(|id| Uuid::parse_str(&id).ok())
+            .filter_map(|id| load_campaign(&connection, id).transpose())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)
+    })
+    .await
+    .map_err(internal)?
+    .map(Json)
 }
 
 async fn get_ready_gates(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<Uuid>,
 ) -> Result<Json<Vec<GateView>>, ApiError> {
-    let campaign = state.validation.get(id).map_err(not_found)?;
+    let campaign = tokio::task::spawn_blocking(move || state.validation.get(id))
+        .await
+        .map_err(internal)?
+        .map_err(not_found)?;
     // Stale gates stay claimable (see `ValidationStore::claim`), so workers
     // dispatching from this listing must see them or exact-head retries of
     // stale evidence would never be scheduled.
-    Ok(Json(
-        campaign
-            .gates
-            .into_iter()
-            .filter(|gate| gate.status == "ready" || gate.status == "stale")
-            .collect(),
-    ))
+    if campaign.status == "cancelled" {
+        return Ok(Json(Vec::new()));
+    }
+    let ready: Vec<GateView> = campaign
+        .gates
+        .into_iter()
+        .filter(|gate| {
+            if gate.status == "stale" {
+                return true;
+            }
+            if gate.status != "ready" {
+                return false;
+            }
+            let dep_count = gate.spec.dependencies.len().min(u32::MAX as usize) as u32;
+            crate::orb_spec::validation_dag_step(dep_count, dep_count, 0, false, false, true)
+                == crate::orb_spec::ValidationDagVerdict::ReadyToClaim
+        })
+        .collect();
+    Ok(Json(ready))
 }
 
 async fn claim_gate(
@@ -973,10 +1017,14 @@ async fn claim_gate(
     AxumPath((campaign_id, gate_id)): AxumPath<(Uuid, String)>,
     Json(request): Json<ClaimGateRequest>,
 ) -> Result<Json<GateView>, ApiError> {
-    state
-        .validation
-        .claim(campaign_id, &gate_id, &request.execution)
-        .map(Json)
+    tokio::task::spawn_blocking(move || {
+        state
+            .validation
+            .claim(campaign_id, &gate_id, &request.execution)
+    })
+    .await
+    .map_err(internal)?
+    .map(Json)
 }
 
 async fn record_receipt(
@@ -984,96 +1032,103 @@ async fn record_receipt(
     AxumPath((campaign_id, gate_id)): AxumPath<(Uuid, String)>,
     Json(request): Json<RecordReceiptRequest>,
 ) -> Result<Json<CampaignView>, ApiError> {
-    state.validation.record(campaign_id, &gate_id, request)?;
-    state
-        .validation
-        .get(campaign_id)
-        .map(Json)
-        .map_err(internal)
+    tokio::task::spawn_blocking(move || -> Result<CampaignView, ApiError> {
+        state.validation.record(campaign_id, &gate_id, request)?;
+        state.validation.get(campaign_id).map_err(internal)
+    })
+    .await
+    .map_err(internal)?
+    .map(Json)
 }
 
 async fn mark_merged(
     State(state): State<Arc<AppState>>,
     AxumPath(campaign_id): AxumPath<Uuid>,
 ) -> Result<Json<CampaignView>, ApiError> {
-    let mut connection = state.validation.lock().map_err(internal)?;
-    let transaction = connection.transaction().map_err(internal)?;
-    let (status, certifying): (String, bool) = transaction
-        .query_row(
-            "SELECT status, certifying FROM validation_campaigns WHERE id=?1",
-            params![campaign_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(internal)?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                "validation campaign not found".to_string(),
+    tokio::task::spawn_blocking(move || -> Result<CampaignView, ApiError> {
+        let mut connection = state.validation.lock().map_err(internal)?;
+        let transaction = connection.transaction().map_err(internal)?;
+        let (status, certifying): (String, bool) = transaction
+            .query_row(
+                "SELECT status, certifying FROM validation_campaigns WHERE id=?1",
+                params![campaign_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-        })?;
-    if status != "completed" || !certifying {
-        return Err((
-            StatusCode::CONFLICT,
-            "only a completed exact-head campaign with a required clean gate may be merged"
-                .to_string(),
-        ));
-    }
-    transaction
-        .execute(
-            "UPDATE validation_campaigns SET status='merged', updated_at=?2 WHERE id=?1",
-            params![campaign_id.to_string(), Utc::now().to_rfc3339()],
+            .optional()
+            .map_err(internal)?
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    "validation campaign not found".to_string(),
+                )
+            })?;
+        if status != "completed" || !certifying {
+            return Err((
+                StatusCode::CONFLICT,
+                "only a completed exact-head campaign with a required clean gate may be merged"
+                    .to_string(),
+            ));
+        }
+        transaction
+            .execute(
+                "UPDATE validation_campaigns SET status='merged', updated_at=?2 WHERE id=?1",
+                params![campaign_id.to_string(), Utc::now().to_rfc3339()],
+            )
+            .map_err(internal)?;
+        insert_outbox(
+            &transaction,
+            campaign_id,
+            "merged",
+            "merged",
+            serde_json::json!({"campaign_id": campaign_id, "status": "merged"}),
         )
         .map_err(internal)?;
-    insert_outbox(
-        &transaction,
-        campaign_id,
-        "merged",
-        "merged",
-        serde_json::json!({"campaign_id": campaign_id, "status": "merged"}),
-    )
-    .map_err(internal)?;
-    transaction.commit().map_err(internal)?;
-    drop(connection);
-    state
-        .validation
-        .get(campaign_id)
-        .map(Json)
-        .map_err(internal)
+        transaction.commit().map_err(internal)?;
+        drop(connection);
+        state.validation.get(campaign_id).map_err(internal)
+    })
+    .await
+    .map_err(internal)?
+    .map(Json)
 }
 
 async fn list_outbox(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<OutboxEvent>>, ApiError> {
-    let connection = state.validation.lock().map_err(internal)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT id, campaign_id, event_type, fingerprint, payload_json,
-                    created_at, attempts, next_attempt_at
-             FROM validation_outbox WHERE delivered_at IS NULL
-               AND dead_lettered_at IS NULL ORDER BY created_at LIMIT 200",
-        )
-        .map_err(internal)?;
-    let events = statement
-        .query_map([], |row| {
-            Ok(OutboxEvent {
-                id: parse_uuid_sql(row.get::<_, String>(0)?)?,
-                campaign_id: parse_uuid_sql(row.get::<_, String>(1)?)?,
-                event_type: row.get(2)?,
-                fingerprint: row.get(3)?,
-                payload: parse_json_sql(row.get::<_, String>(4)?)?,
-                created_at: parse_time_sql(row.get::<_, String>(5)?)?,
-                attempts: row.get(6)?,
-                next_attempt_at: row
-                    .get::<_, Option<String>>(7)?
-                    .map(parse_time_sql)
-                    .transpose()?,
+    tokio::task::spawn_blocking(move || -> Result<Vec<OutboxEvent>, ApiError> {
+        let connection = state.validation.lock().map_err(internal)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, campaign_id, event_type, fingerprint, payload_json,
+                        created_at, attempts, next_attempt_at
+                 FROM validation_outbox WHERE delivered_at IS NULL
+                   AND dead_lettered_at IS NULL ORDER BY created_at LIMIT 200",
+            )
+            .map_err(internal)?;
+        let events = statement
+            .query_map([], |row| {
+                Ok(OutboxEvent {
+                    id: parse_uuid_sql(row.get::<_, String>(0)?)?,
+                    campaign_id: parse_uuid_sql(row.get::<_, String>(1)?)?,
+                    event_type: row.get(2)?,
+                    fingerprint: row.get(3)?,
+                    payload: parse_json_sql(row.get::<_, String>(4)?)?,
+                    created_at: parse_time_sql(row.get::<_, String>(5)?)?,
+                    attempts: row.get(6)?,
+                    next_attempt_at: row
+                        .get::<_, Option<String>>(7)?
+                        .map(parse_time_sql)
+                        .transpose()?,
+                })
             })
-        })
-        .map_err(internal)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(internal)?;
-    Ok(Json(events))
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?;
+        Ok(events)
+    })
+    .await
+    .map_err(internal)?
+    .map(Json)
 }
 
 /// Deliver semantic validation events from a durable outbox. The event id is
