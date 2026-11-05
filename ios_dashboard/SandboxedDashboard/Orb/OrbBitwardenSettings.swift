@@ -1071,6 +1071,92 @@ enum OrbApprovalKey {
         return try await performSignedCall(path, method: method, rawBody: raw, summary: summary, allowReenroll: true)
     }
 
+    static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Send a protected binary download request, signed when this phone is enrolled.
+    @MainActor
+    static func signedCallData(_ path: String, method: String = "GET", summary: String) async throws -> Data {
+        _ = await ensureEnrolled()
+        return try await performSignedCallData(path, method: method, summary: summary, allowReenroll: true)
+    }
+
+    /// Send a protected binary/multipart upload request whose exact `body_sha256` is bound to the challenge.
+    @MainActor
+    static func signedCallRaw(_ path: String, method: String, rawBody: Data, contentType: String, summary: String) async throws -> OrbJSON {
+        _ = await ensureEnrolled()
+        return try await performSignedCallRaw(path, method: method, rawBody: rawBody, contentType: contentType, summary: summary, allowReenroll: true)
+    }
+
+    @MainActor
+    private static func performSignedCallData(_ path: String, method: String, summary: String, allowReenroll: Bool) async throws -> Data {
+        var headers: [String: String] = [:]
+        if let device = deviceId, !device.isEmpty, publicKey != nil {
+            let challenge = try await OrbCore.shared.call(
+                "/api/approvals/challenge",
+                method: "POST",
+                body: .object([
+                    "method": .string(method),
+                    "path": .string(path),
+                    "body": .string(""),
+                    "summary": .string(summary)
+                ])
+            )
+            let signature = try await sign(challenge["payload"].text, reason: summary)
+            headers["X-Paloma-Approval"] = "\(challenge["challenge_id"].text).\(device).\(signature)"
+        }
+        do {
+            return try await OrbCore.shared.callData(path, method: method, headers: headers)
+        } catch let err as OrbHTTPError where allowReenroll && err.status == 403 {
+            if await ensureEnrolled(forceRefresh: true) {
+                return try await performSignedCallData(path, method: method, summary: summary, allowReenroll: false)
+            }
+            throw err
+        }
+    }
+
+    @MainActor
+    private static func performSignedCallRaw(
+        _ path: String,
+        method: String,
+        rawBody: Data,
+        contentType: String,
+        summary: String,
+        allowReenroll: Bool
+    ) async throws -> OrbJSON {
+        var headers: [String: String] = ["Content-Type": contentType]
+        if let device = deviceId, !device.isEmpty, publicKey != nil {
+            let challenge = try await OrbCore.shared.call(
+                "/api/approvals/challenge",
+                method: "POST",
+                body: .object([
+                    "method": .string(method),
+                    "path": .string(path),
+                    "body_sha256": .string(sha256Hex(rawBody)),
+                    "summary": .string(summary)
+                ])
+            )
+            let signature = try await sign(challenge["payload"].text, reason: summary)
+            headers["X-Paloma-Approval"] = "\(challenge["challenge_id"].text).\(device).\(signature)"
+        }
+        do {
+            return try await OrbCore.shared.call(path, method: method, rawBody: rawBody, headers: headers)
+        } catch let err as OrbHTTPError where allowReenroll && err.status == 403 {
+            if await ensureEnrolled(forceRefresh: true) {
+                return try await performSignedCallRaw(
+                    path,
+                    method: method,
+                    rawBody: rawBody,
+                    contentType: contentType,
+                    summary: summary,
+                    allowReenroll: false
+                )
+            }
+            throw err
+        }
+    }
+
     @MainActor
     private static func performSignedCall(_ path: String, method: String, rawBody: Data?, summary: String, allowReenroll: Bool) async throws -> OrbJSON {
         var headers: [String: String] = [:]

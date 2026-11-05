@@ -497,6 +497,27 @@ struct OrbSkillsSettings: View {
     @State private var deleteTarget: String?
     @State private var deleteError = ""
     @State private var deleting = false
+    @State private var repoSheetOpen = false
+    @State private var repoDraft = ""
+    @State private var repoBusy = false
+    @State private var repoError = ""
+    @State private var unconfigured = false
+    @State private var divergedMessage: String?
+    @State private var divergedBusy = false
+
+    static func isDivergedError(_ error: Error) -> Bool {
+        if let http = error as? OrbHTTPError, http.status == 409 && http.detail.localizedCaseInsensitiveContains("DIVERGED") {
+            return true
+        }
+        let text = error.localizedDescription
+        return text.localizedCaseInsensitiveContains("DIVERGED_HISTORY") || (text.contains("409") && text.localizedCaseInsensitiveContains("diverged"))
+    }
+
+    static func isUnconfiguredError(_ error: Error) -> Bool {
+        if let http = error as? OrbHTTPError, http.status == 503 { return true }
+        let text = error.localizedDescription
+        return text.contains("503") && text.localizedCaseInsensitiveContains("library")
+    }
 
     /// Plain words for a failed delete (desktop: deleteMessage in SkillsSettings.tsx).
     static func deleteMessage(_ name: String, _ raw: String) -> String {
@@ -525,6 +546,19 @@ struct OrbSkillsSettings: View {
     var body: some View {
         List {
             OrbSettingsError(message: error)
+            if unconfigured {
+                Section("Library repository") {
+                    Text("Connect a Git repository to sync shared skills across missions and workspaces.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("Configure repository…") {
+                        repoDraft = repo?["remote"].text ?? ""
+                        repoError = ""
+                        repoSheetOpen = true
+                    }
+                    .accessibilityIdentifier("skills.configure-repo")
+                }
+            }
             Section {
                 ForEach(filtered, id: \.skillName) { skill in
                     // A skill behaves like a file: tap opens it, long-press or swipe for the rest.
@@ -548,8 +582,67 @@ struct OrbSkillsSettings: View {
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle("Skills").navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    repoDraft = repo?["remote"].text ?? ""
+                    repoError = ""
+                    repoSheetOpen = true
+                } label: { Image(systemName: "link") }
+                    .accessibilityLabel("Library repository")
+            }
             ToolbarItem(placement: .topBarTrailing) { Button { Task { await pull() } } label: { Image(systemName: "arrow.clockwise") }.accessibilityLabel("Pull from the repo").disabled(pulling) }
             ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { Image(systemName: "plus") }.accessibilityLabel("New skill") }
+        }
+        .sheet(isPresented: $repoSheetOpen) {
+            NavigationStack {
+                Form {
+                    if !repoError.isEmpty {
+                        Section { Text(repoError).font(.footnote).foregroundStyle(OrbStyle.error) }
+                    }
+                    Section {
+                        TextField("git@github.com:org/library.git", text: $repoDraft)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                    } header: {
+                        Text("Git remote URL")
+                    } footer: {
+                        Text("Leave empty or tap Disconnect to detach the Library remote.")
+                    }
+                    if !(repo?["remote"].text ?? "").isEmpty {
+                        Section {
+                            Button("Disconnect repository", role: .destructive) {
+                                Task { await saveRepoRemote(nil) }
+                            }
+                            .disabled(repoBusy)
+                        }
+                    }
+                }
+                .scrollContentBackground(.hidden)
+                .background(OrbStyle.background)
+                .navigationTitle("Library repository")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { repoSheetOpen = false }.disabled(repoBusy)
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button(repoBusy ? "Saving…" : "Save") {
+                            let trimmed = repoDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                            Task { await saveRepoRemote(trimmed.isEmpty ? nil : trimmed) }
+                        }
+                        .disabled(repoBusy)
+                    }
+                }
+            }
+            .presentationDetents([.medium])
+        }
+        .alert("Library history diverged", isPresented: Binding(get: { divergedMessage != nil }, set: { if !$0 && !divergedBusy { divergedMessage = nil } })) {
+            Button("Reset to remote", role: .destructive) { Task { await resolveDiverged(forcePush: false) } }
+            Button("Overwrite remote", role: .destructive) { Task { await resolveDiverged(forcePush: true) } }
+            Button("Cancel", role: .cancel) { divergedMessage = nil }
+        } message: {
+            Text(divergedMessage ?? "Local and remote Library commits have diverged. Choose whether to reset Core to the remote branch or force-push Core's commits.")
         }
         .alert("New Library skill", isPresented: $creating) {
             TextField("skill-name", text: $newName).textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -590,14 +683,59 @@ struct OrbSkillsSettings: View {
             repo = try? await client.call("/api/library/status")
             let raw = (try? await client.call("/api/projects")) ?? .null
             projects = raw.items.isEmpty ? raw["projects"].items : raw.items
+            unconfigured = false
             error = ""
-        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+        } catch is CancellationError {} catch {
+            if Self.isUnconfiguredError(error) {
+                skills = []
+                repo = try? await client.call("/api/library/status")
+                unconfigured = true
+                self.error = ""
+            } else {
+                self.error = error.localizedDescription
+            }
+        }
     }
 
     private func pull() async {
         pulling = true; defer { pulling = false }
         do { _ = try await client.callText("/api/library/sync", method: "POST"); await load() }
-        catch is CancellationError {} catch { self.error = "Couldn’t pull the Library: \(error.localizedDescription)" }
+        catch is CancellationError {} catch {
+            if Self.isDivergedError(error) {
+                divergedMessage = "Local and remote Library commits have diverged. Reset Core's copy to the remote branch, or overwrite the remote branch with Core's commits."
+            } else {
+                self.error = "Couldn’t pull the Library: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func saveRepoRemote(_ url: String?) async {
+        repoBusy = true; defer { repoBusy = false }
+        repoError = ""
+        do {
+            _ = try await client.call(
+                "/api/settings/library-remote",
+                method: "PUT",
+                body: .object(["library_remote": url.map(OrbJSON.string) ?? .null])
+            )
+            repoSheetOpen = false
+            await load()
+        } catch is CancellationError {} catch {
+            repoError = error.localizedDescription
+        }
+    }
+
+    private func resolveDiverged(forcePush: Bool) async {
+        divergedBusy = true; defer { divergedBusy = false }
+        do {
+            let path = forcePush ? "/api/library/force-push" : "/api/library/force-sync"
+            _ = try await client.call(path, method: "POST")
+            divergedMessage = nil
+            await load()
+        } catch is CancellationError {} catch {
+            self.error = error.localizedDescription
+            divergedMessage = nil
+        }
     }
 
     static func normalizeSkillName(_ raw: String) -> String {
@@ -629,7 +767,13 @@ struct OrbSkillsSettings: View {
             _ = try await client.callText("/api/library/skill/\(OrbCore.escape(name))", method: "PUT", body: .object(["content": .string(template)]))
             try await OrbSkillEditor.commitAndPush("skill: create \(name)", client: client)
             await load()
-        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+        } catch is CancellationError {} catch {
+            if Self.isDivergedError(error) {
+                divergedMessage = "Skill saved on Core, but local and remote Library commits have diverged. Reset to remote or overwrite remote."
+            } else {
+                self.error = error.localizedDescription
+            }
+        }
     }
 }
 
@@ -680,6 +824,7 @@ private struct OrbSkillEditor: View {
     @State private var history: [OrbJSON]?
     @State private var confirmDelete = false
     @State private var deleteError = ""
+    @State private var divergedMessage: String?
     @Environment(\.dismiss) private var dismiss
 
     /// Save lands in the Library repo (desktop: commitAndPush in skillsApi.ts).
@@ -752,6 +897,25 @@ private struct OrbSkillEditor: View {
             Button(deleteError.isEmpty ? "Delete" : "Retry", role: .destructive) { Task { await delete() } }
             Button("Cancel", role: .cancel) {}
         } message: { Text(deleteError.isEmpty ? "It leaves the Library and every agent." : deleteError) }
+        .alert("Library history diverged", isPresented: Binding(get: { divergedMessage != nil }, set: { if !$0 { divergedMessage = nil } })) {
+            Button("Reset to remote", role: .destructive) {
+                Task {
+                    _ = try? await client.call("/api/library/force-sync", method: "POST")
+                    divergedMessage = nil
+                    await load()
+                }
+            }
+            Button("Overwrite remote", role: .destructive) {
+                Task {
+                    _ = try? await client.call("/api/library/force-push", method: "POST")
+                    divergedMessage = nil
+                    saved = true
+                    editing = false
+                    await load()
+                }
+            }
+            Button("Cancel", role: .cancel) { divergedMessage = nil }
+        } message: { Text(divergedMessage ?? "Local and remote Library commits have diverged.") }
         .task { await load(); if startOnHistory { withAnimation { proxy.scrollTo("history", anchor: .top) } } }
         }
     }
@@ -785,7 +949,13 @@ private struct OrbSkillEditor: View {
             try await Self.commitAndPush(message, client: client)
             content = text; original = text; error = ""; saved = true; editing = false
             history = (try? await client.call("/api/library/skill/\(OrbCore.escape(name))/history").items) ?? history
-        } catch is CancellationError {} catch { self.error = "Couldn’t save to the repo: \(error.localizedDescription)" }
+        } catch is CancellationError {} catch {
+            if OrbSkillsSettings.isDivergedError(error) {
+                divergedMessage = "Your edit was committed on Core, but pushing failed because local and remote Library history diverged."
+            } else {
+                self.error = "Couldn’t save to the repo: \(error.localizedDescription)"
+            }
+        }
     }
     private func restore(_ rev: String) async {
         do {

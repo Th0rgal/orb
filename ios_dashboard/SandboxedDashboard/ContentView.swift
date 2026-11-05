@@ -49,8 +49,15 @@ struct ContentView: View {
         .task {
             await checkAuth()
         }
-        // Registered on the root, which exists from launch; OrbHome consumes it when ready.
-        .onOpenURL { OrbDeepLinks.shared.receive($0) }
+        // Registered on the root, which exists from launch; GitHub OAuth callbacks are
+        // verified here even before authentication, while other links go to OrbHome.
+        .onOpenURL { url in
+            if OrbGitHubSignIn.isCallbackURL(url) {
+                Task { await handleGitHubCallback(url) }
+            } else {
+                OrbDeepLinks.shared.receive(url)
+            }
+        }
         .sheet(isPresented: $showSetupSheet) {
             SetupSheet(onComplete: {
                 showSetupSheet = false
@@ -104,6 +111,53 @@ struct ContentView: View {
 
         isCheckingAuth = false
     }
+
+    private func handleGitHubCallback(_ url: URL) async {
+        let signIn = OrbGitHubSignIn()
+        let parsed = OrbGitHubSignIn.parseCallback(url)
+        var echoes = true
+        if (try? await api.checkHealth()) != nil {
+            echoes = api.githubOAuthClientState
+        }
+        switch signIn.onCallback(
+            currentEndpoint: api.baseURL,
+            token: parsed.token,
+            error: parsed.error,
+            state: parsed.state,
+            serverEchoesState: echoes
+        ) {
+        case .reject(let reason):
+            NotificationCenter.default.post(
+                name: Notification.Name("OrbGitHubSignInFailed"),
+                object: nil,
+                userInfo: ["reason": reason]
+            )
+        case .accept(let endpoint, let token):
+            guard OrbGitHubSignIn.normalize(api.baseURL) == endpoint else { return }
+            let valid = await OrbGitHubSignIn.validateIssuedToken(endpoint: api.baseURL, token: token)
+            guard valid, OrbGitHubSignIn.normalize(api.baseURL) == endpoint else {
+                NotificationCenter.default.post(
+                    name: Notification.Name("OrbGitHubSignInFailed"),
+                    object: nil,
+                    userInfo: ["reason": "Core rejected the issued GitHub token."]
+                )
+                return
+            }
+            do {
+                try api.acceptIssuedToken(token)
+                isAuthenticated = true
+                showSetupSheet = false
+                OrbHaptics.success()
+                NotificationCenter.default.post(name: Notification.Name("OrbGitHubSignInCompleted"), object: nil)
+            } catch {
+                NotificationCenter.default.post(
+                    name: Notification.Name("OrbGitHubSignInFailed"),
+                    object: nil,
+                    userInfo: ["reason": error.localizedDescription]
+                )
+            }
+        }
+    }
 }
 
 struct ReconnectView: View {
@@ -134,6 +188,9 @@ struct SetupSheet: View {
     @State private var password = ""
     @State private var username = UserDefaults.standard.string(forKey: "last_username") ?? ""
     @State private var errorMessage: String?
+    @State private var noticeMessage: String?
+    @State private var gitHubPending = false
+    @State private var showChangePassword = false
 
     private let api = OrbCore.shared
     private let backgroundSync = OrbBackgroundSyncMonitor.shared
@@ -244,13 +301,74 @@ struct SetupSheet: View {
                             .accessibilityIdentifier("server-password")
                     }.padding(14)
                         .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
+
+                    Button {
+                        Task { await startGitHubSignIn() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "person.badge.key.fill")
+                            Text(gitHubPending ? "Waiting for GitHub…" : "Sign in with GitHub")
+                                .fontWeight(.semibold)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isTestingConnection || serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier("account.github-sign-in")
+
+                    if gitHubPending {
+                        Text("Finish signing in in Safari. Orb accepts the callback for this server for 10 minutes.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if isConnectedSession && api.authRequired && api.authMode == .singleTenant {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Server password").font(.subheadline).foregroundStyle(.secondary)
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Single-tenant password").font(.subheadline.weight(.medium))
+                                Text("Rotate the password stored on Core.").font(.footnote).foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 8)
+                            Button("Change…") { showChangePassword = true }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .accessibilityIdentifier("account.change-password")
+                        }
+                        .padding(14)
+                        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
+                    }
+                }
+                if isConnectedSession {
+                    OrbGitHubIntegrationSection()
                 }
                 if embedded {
                     backgroundSyncSection
                 }
+                if let noticeMessage { Text(noticeMessage).font(.subheadline).foregroundStyle(OrbStyle.success) }
                 if let errorMessage { Text(errorMessage).font(.subheadline).foregroundStyle(.red) }
             }.padding(20)
         }.background(OrbStyle.background)
+            .sheet(isPresented: $showChangePassword) {
+                OrbChangePasswordSheet { msg in
+                    noticeMessage = msg
+                    errorMessage = nil
+                }
+                .presentationDetents([.medium, .large])
+            }
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OrbGitHubSignInCompleted"))) { _ in
+                gitHubPending = false
+                errorMessage = nil
+                onComplete()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OrbGitHubSignInFailed"))) { note in
+                gitHubPending = false
+                if let reason = note.userInfo?["reason"] as? String {
+                    errorMessage = "GitHub sign-in failed: \(reason)"
+                }
+            }
             .scrollDismissesKeyboard(.interactively)
             .navigationTitle(embedded ? "Backend" : allowsDismissal ? "Server" : "Connect to Orb")
             .navigationBarTitleDisplayMode(.inline)
@@ -311,6 +429,21 @@ struct SetupSheet: View {
         }
 
         isTestingConnection = false
+    }
+
+    private func startGitHubSignIn() async {
+        let trimmedURL = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedURL.isEmpty else { return }
+        errorMessage = nil
+        noticeMessage = nil
+        api.baseURL = trimmedURL
+        let state = OrbGitHubSignIn().begin(endpoint: trimmedURL)
+        guard let url = OrbGitHubSignIn.authorizeURL(baseURL: trimmedURL, state: state) else {
+            errorMessage = "Enter a valid http:// or https:// server URL first."
+            return
+        }
+        gitHubPending = true
+        await UIApplication.shared.open(url)
     }
 }
 
@@ -466,9 +599,30 @@ struct LoginView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(isLoading || password.isEmpty || (api.authMode == .multiUser && username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+
+                            Button {
+                                startGitHubLogin()
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "person.badge.key.fill")
+                                    Text("Sign in with GitHub").fontWeight(.semibold)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 6)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(isLoading || serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
                     }
                     .padding(.horizontal, 24)
+                    .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OrbGitHubSignInCompleted"))) { _ in
+                        onLogin()
+                    }
+                    .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OrbGitHubSignInFailed"))) { note in
+                        if let reason = note.userInfo?["reason"] as? String {
+                            errorMessage = "GitHub sign-in failed: \(reason)"
+                        }
+                    }
                     .onAppear {
                         if api.authMode == .multiUser {
                             isUsernameFocused = true
@@ -523,6 +677,19 @@ struct LoginView: View {
             }
             isLoading = false
         }
+    }
+
+    private func startGitHubLogin() {
+        let trimmed = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        errorMessage = nil
+        api.baseURL = trimmed
+        let state = OrbGitHubSignIn().begin(endpoint: trimmed)
+        guard let url = OrbGitHubSignIn.authorizeURL(baseURL: trimmed, state: state) else {
+            errorMessage = "Enter a valid http:// or https:// server URL first."
+            return
+        }
+        Task { await UIApplication.shared.open(url) }
     }
 }
 

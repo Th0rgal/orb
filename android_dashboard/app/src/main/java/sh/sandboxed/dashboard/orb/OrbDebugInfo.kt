@@ -3,11 +3,14 @@ package sh.sandboxed.dashboard.orb
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.provider.OpenableColumns
 import android.os.Handler
 import android.os.HandlerThread
 import android.view.FrameMetrics
 import android.view.Window
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -23,15 +26,20 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -39,6 +47,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,11 +59,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import sh.sandboxed.dashboard.BuildConfig
 import java.time.Instant
+import java.time.LocalDate
 
 /**
  * Lightweight frame-stall and slow-request telemetry matching desktop `orb/src/diagnostics.ts`.
@@ -265,21 +279,113 @@ object OrbDiagnostics {
 @Composable
 fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val endpoint by core.baseURLFlow.collectAsState()
+    val signedInToken by core.tokenFlow.collectAsState()
     val lastRefresh by core.lastRefreshAtMs.collectAsState()
     val errors by OrbLog.ring.collectAsState()
     val perf by OrbPerfMonitor.snapshot.collectAsState()
     var backendVersion by remember { mutableStateOf<String?>(null) }
+    var authRequired by remember { mutableStateOf(true) }
+
+    var cleanupLoaded by remember { mutableStateOf(false) }
+    var cleanupEnabled by remember { mutableStateOf(false) }
+    var cleanupDays by remember { mutableStateOf("7") }
+    var cleanupStoppedDays by remember { mutableStateOf("1") }
+    var cleanupOrphans by remember { mutableStateOf(false) }
+    var cleanupDirty by remember { mutableStateOf(false) }
+    var cleanupSaving by remember { mutableStateOf(false) }
+    var cleanupNotice by remember { mutableStateOf<String?>(null) }
+    var cleanupError by remember { mutableStateOf<String?>(null) }
+
+    var backupBusy by remember { mutableStateOf(false) }
+    var backupNotice by remember { mutableStateOf<String?>(null) }
+    var backupError by remember { mutableStateOf<String?>(null) }
+    var pendingDownloadBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var pendingRestore by remember { mutableStateOf<Pair<String, ByteArray>?>(null) }
+
+    suspend fun loadCleanupSettings() {
+        if (!core.isConfigured) return
+        try {
+            val s = core.fetchDict("/api/settings")
+            if (!cleanupDirty) {
+                cleanupEnabled = OrbJSON.bool(s, "auto_cleanup_enabled") == true
+                cleanupDays = (OrbJSON.int(s, "auto_cleanup_days") ?: 7).toString()
+                cleanupStoppedDays = (OrbJSON.int(s, "auto_cleanup_stopped_days") ?: 1).toString()
+                cleanupOrphans = OrbJSON.bool(s, "auto_cleanup_orphans_enabled") == true
+            }
+            cleanupLoaded = true
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Throwable) {
+        }
+    }
+
+    val saveBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        val bytes = pendingDownloadBytes
+        pendingDownloadBytes = null
+        if (uri == null || bytes == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    context.contentResolver.openOutputStream(uri)?.use { out -> out.write(bytes) }
+                        ?: error("Could not open destination file")
+                }
+            }.onSuccess {
+                backupNotice = "Saved backup archive."
+                backupError = null
+            }.onFailure { err ->
+                backupError = err.message ?: "Failed to save backup archive"
+            }
+        }
+    }
+
+    val openBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    var displayName = "orb-backup.zip"
+                    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            if (idx >= 0) {
+                                cursor.getString(idx)?.takeIf { it.isNotBlank() }?.let { displayName = it }
+                            }
+                        }
+                    }
+                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: error("Could not read backup archive")
+                    if (bytes.isEmpty()) error("Selected archive is empty.")
+                    displayName to bytes
+                }
+            }.onSuccess { loaded ->
+                pendingRestore = loaded
+                backupError = null
+            }.onFailure { err ->
+                backupError = err.message ?: "Failed to read backup archive"
+            }
+        }
+    }
+
     LaunchedEffect(endpoint) {
         backendVersion = null
         if (endpoint.isBlank()) return@LaunchedEffect
-        backendVersion = try {
-            OrbDiagnostics.backendVersion(core.request("/api/health", allowAuthRetry = false))
-        } catch (c: kotlinx.coroutines.CancellationException) {
+        val health = try {
+            core.request("/api/health", allowAuthRetry = false)
+        } catch (c: CancellationException) {
             throw c
-        } catch (t: Throwable) {
+        } catch (_: Throwable) {
             null
         }
+        backendVersion = OrbDiagnostics.backendVersion(health)
+        val healthDict = OrbJSON.dict(health)
+        authRequired = OrbJSON.bool(healthDict, "auth_required") ?: true
+        loadCleanupSettings()
     }
     val rows = OrbDiagnostics.build(context, endpoint, core.token, lastRefresh, errors, backendVersion, perf)
     val channelRows = rows.filter { it.first.startsWith("Channel ") }
@@ -399,6 +505,192 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
             contentAlignment = Alignment.Center
         ) {
             Text("Copy diagnostics", color = Color.Black, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        }
+
+        if (core.isConfigured && (!signedInToken.isNullOrEmpty() || !authRequired)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(OrbStyle.surface)
+                    .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Workspace cleanup", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Reclaims disk and container /tmp scratch from finished missions (1–365 days).",
+                    color = OrbStyle.textMuted,
+                    fontSize = 12.sp
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Automatic mission workspace GC", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = cleanupEnabled,
+                        onCheckedChange = {
+                            cleanupEnabled = it
+                            cleanupDirty = true
+                            cleanupNotice = null
+                        }
+                    )
+                }
+                OutlinedTextField(
+                    value = cleanupDays,
+                    onValueChange = {
+                        cleanupDays = it
+                        cleanupDirty = true
+                        cleanupNotice = null
+                    },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    label = { Text("Completed retention (days)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = cleanupStoppedDays,
+                    onValueChange = {
+                        cleanupStoppedDays = it
+                        cleanupDirty = true
+                        cleanupNotice = null
+                    },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    label = { Text("Stopped / failed retention (days)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Clean orphaned directories", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = cleanupOrphans,
+                        onCheckedChange = {
+                            cleanupOrphans = it
+                            cleanupDirty = true
+                            cleanupNotice = null
+                        }
+                    )
+                }
+                TextButton(
+                    enabled = cleanupLoaded && !cleanupSaving && cleanupDirty,
+                    onClick = {
+                        val days = OrbBackupArchive.parseCleanupDays(cleanupDays).getOrElse { err ->
+                            cleanupError = err.message
+                            return@TextButton
+                        }
+                        val stoppedDays = OrbBackupArchive.parseCleanupDays(cleanupStoppedDays).getOrElse { err ->
+                            cleanupError = err.message
+                            return@TextButton
+                        }
+                        cleanupSaving = true
+                        cleanupError = null
+                        cleanupNotice = null
+                        scope.launch {
+                            try {
+                                val updated = OrbJSON.dict(
+                                    core.request(
+                                        "/api/settings",
+                                        "PUT",
+                                        body = mapOf(
+                                            "auto_cleanup_enabled" to cleanupEnabled,
+                                            "auto_cleanup_days" to days,
+                                            "auto_cleanup_stopped_days" to stoppedDays,
+                                            "auto_cleanup_orphans_enabled" to cleanupOrphans
+                                        )
+                                    )
+                                )
+                                cleanupEnabled = OrbJSON.bool(updated, "auto_cleanup_enabled") ?: cleanupEnabled
+                                cleanupDays = (OrbJSON.int(updated, "auto_cleanup_days") ?: days).toString()
+                                cleanupStoppedDays = (OrbJSON.int(updated, "auto_cleanup_stopped_days") ?: stoppedDays).toString()
+                                cleanupOrphans = OrbJSON.bool(updated, "auto_cleanup_orphans_enabled") ?: cleanupOrphans
+                                cleanupDirty = false
+                                cleanupNotice = "Saved workspace cleanup policy."
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                cleanupError = e.message ?: "Failed to save cleanup policy"
+                            } finally {
+                                cleanupSaving = false
+                            }
+                        }
+                    }
+                ) {
+                    Text(if (cleanupSaving) "Saving…" else "Save cleanup policy")
+                }
+                cleanupNotice?.let { Text(it, color = OrbStyle.success, fontSize = 12.sp) }
+                cleanupError?.let { Text(it, color = OrbStyle.error, fontSize = 12.sp) }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(OrbStyle.surface)
+                    .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("Backup & restore", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Exports or restores server configuration, credentials, and workspace metadata. Requires device approval when enforced.",
+                    color = OrbStyle.textMuted,
+                    fontSize = 12.sp
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    TextButton(
+                        enabled = !backupBusy,
+                        onClick = {
+                            backupBusy = true
+                            backupError = null
+                            backupNotice = null
+                            scope.launch {
+                                try {
+                                    val bytes = OrbApprovalKey.signedRequestBytes(
+                                        core = core,
+                                        activity = context.fragmentActivity(),
+                                        method = "GET",
+                                        path = "/api/settings/backup",
+                                        summary = "Download settings backup"
+                                    )
+                                    if (bytes.isEmpty()) {
+                                        backupError = "Core returned an empty backup archive."
+                                    } else {
+                                        pendingDownloadBytes = bytes
+                                        saveBackupLauncher.launch("orb-backup-${LocalDate.now()}.zip")
+                                    }
+                                } catch (_: OrbApprovalKey.Cancelled) {
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Throwable) {
+                                    backupError = e.message ?: "Failed to download backup"
+                                } finally {
+                                    backupBusy = false
+                                }
+                            }
+                        }
+                    ) {
+                        Text(if (backupBusy) "Working…" else "Download backup (.zip)")
+                    }
+                    TextButton(
+                        enabled = !backupBusy,
+                        onClick = {
+                            backupError = null
+                            backupNotice = null
+                            openBackupLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
+                        }
+                    ) {
+                        Text("Restore from backup…", color = OrbStyle.error)
+                    }
+                }
+                backupNotice?.let { Text(it, color = OrbStyle.success, fontSize = 12.sp) }
+                backupError?.let { Text(it, color = OrbStyle.error, fontSize = 12.sp) }
+            }
         }
 
         if (perf.slowRequests.isNotEmpty()) {
@@ -522,6 +814,67 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
             },
             dismissButton = {
                 TextButton(onClick = { selectedError = null }) { Text("Close") }
+            }
+        )
+    }
+
+    pendingRestore?.let { (name, bytes) ->
+        AlertDialog(
+            onDismissRequest = { if (!backupBusy) pendingRestore = null },
+            containerColor = OrbStyle.elevated,
+            title = { Text("Restore backup archive?", color = Color.White, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "Restoring $name overwrites server settings, provider credentials, and workspaces stored in the backup.",
+                    color = OrbStyle.textSecondary,
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !backupBusy,
+                    onClick = {
+                        backupBusy = true
+                        backupError = null
+                        backupNotice = null
+                        scope.launch {
+                            try {
+                                val payload = OrbBackupArchive.buildRestoreMultipart(bytes, name)
+                                val res = OrbJSON.dict(
+                                    OrbApprovalKey.signedMultipartRequest(
+                                        core = core,
+                                        activity = context.fragmentActivity(),
+                                        method = "POST",
+                                        path = "/api/settings/restore",
+                                        rawBytes = payload.body,
+                                        contentType = payload.contentType,
+                                        summary = "Restore settings backup"
+                                    )
+                                )
+                                pendingRestore = null
+                                val restored = OrbJSON.strList(res, "restored")
+                                backupNotice = if (restored.isEmpty()) {
+                                    "Backup restored."
+                                } else {
+                                    "Restored ${restored.size} items (${restored.joinToString(", ")})."
+                                }
+                                loadCleanupSettings()
+                            } catch (_: OrbApprovalKey.Cancelled) {
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                backupError = e.message ?: "Failed to restore backup"
+                            } finally {
+                                backupBusy = false
+                            }
+                        }
+                    }
+                ) {
+                    Text(if (backupBusy) "Restoring…" else "Restore", color = OrbStyle.error)
+                }
+            },
+            dismissButton = {
+                TextButton(enabled = !backupBusy, onClick = { pendingRestore = null }) { Text("Cancel") }
             }
         )
     }

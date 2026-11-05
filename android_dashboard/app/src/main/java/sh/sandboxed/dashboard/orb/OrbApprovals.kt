@@ -231,6 +231,79 @@ object OrbApprovalKey {
         }
         return core.request(path, method, headers = headers, rawBody = body?.let { text })
     }
+
+    fun sha256Hex(bytes: ByteArray): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+
+    suspend fun signedRequestBytes(
+        core: OrbCore,
+        activity: FragmentActivity?,
+        method: String,
+        path: String,
+        summary: String
+    ): ByteArray {
+        val context = activity ?: return core.requestBytes(path = path, method = method)
+        val device = deviceId(context, core.baseURLFlow.value)
+        val headers = mutableMapOf<String, String>()
+        if (device != null && publicKey() != null) {
+            val challenge = dictOf(
+                core.request(
+                    "/api/approvals/challenge",
+                    "POST",
+                    body = mapOf("method" to method, "path" to path, "body" to "", "summary" to summary)
+                )
+            )
+            val id = OrbJSON.str(challenge, "challenge_id") ?: error("No challenge")
+            val payload = OrbJSON.str(challenge, "payload") ?: error("No challenge payload")
+            val signed = sign(context, payload, summary)
+            headers["X-Paloma-Approval"] = "$id.$device.$signed"
+        }
+        return core.requestBytes(path = path, method = method, headers = headers)
+    }
+
+    suspend fun signedMultipartRequest(
+        core: OrbCore,
+        activity: FragmentActivity?,
+        method: String,
+        path: String,
+        rawBytes: ByteArray,
+        contentType: String,
+        summary: String
+    ): Any? {
+        val context = activity
+        val headers = mutableMapOf<String, String>()
+        if (context != null) {
+            val device = deviceId(context, core.baseURLFlow.value)
+            if (device != null && publicKey() != null) {
+                val challenge = dictOf(
+                    core.request(
+                        "/api/approvals/challenge",
+                        "POST",
+                        body = mapOf(
+                            "method" to method,
+                            "path" to path,
+                            "body_sha256" to sha256Hex(rawBytes),
+                            "summary" to summary
+                        )
+                    )
+                )
+                val id = OrbJSON.str(challenge, "challenge_id") ?: error("No challenge")
+                val payload = OrbJSON.str(challenge, "payload") ?: error("No challenge payload")
+                val signed = sign(context, payload, summary)
+                headers["X-Paloma-Approval"] = "$id.$device.$signed"
+            }
+        }
+        val respBytes = core.requestBytes(
+            path = path,
+            method = method,
+            headers = headers,
+            rawBytes = rawBytes,
+            contentType = contentType
+        )
+        return if (respBytes.isEmpty()) emptyMap<String, Any?>() else OrbJSON.parse(respBytes)
+    }
 }
 
 internal fun Context.fragmentActivity(): FragmentActivity? {

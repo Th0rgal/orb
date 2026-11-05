@@ -1,15 +1,44 @@
 import ActivityKit
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 @preconcurrency import UserNotifications
 
-/// Settings → Debug info: what to paste into a bug report.
+struct OrbZipBackupDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.zip] }
+    var data: Data
+    init(data: Data = Data()) { self.data = data }
+    init(configuration: ReadConfiguration) throws {
+        self.data = configuration.file.regularFileContents ?? Data()
+    }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
+
+/// Settings → Debug info: what to paste into a bug report, plus server workspace GC & backup/restore.
 struct OrbDebugInfoView: View {
     @State private var ring = ErrorRing.shared
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var copied = false
     @State private var cleared = false
     @State private var selectedError: OrbActivityDetailItem?
+    @State private var cleanupLoaded = false
+    @State private var cleanupEnabled = false
+    @State private var cleanupDays = "7"
+    @State private var cleanupStoppedDays = "1"
+    @State private var cleanupOrphans = false
+    @State private var cleanupDirty = false
+    @State private var cleanupSaving = false
+    @State private var cleanupNotice: String?
+    @State private var cleanupError: String?
+    @State private var backupBusy = false
+    @State private var exportDoc: OrbZipBackupDocument?
+    @State private var showExporter = false
+    @State private var showImporter = false
+    @State private var pendingRestore: (name: String, data: Data)?
+    @State private var backupNotice: String?
+    @State private var backupError: String?
 
     static var version: String {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -93,6 +122,10 @@ struct OrbDebugInfoView: View {
                 }
                 .accessibilityIdentifier("debug.clear-caches")
             }
+            if OrbCore.shared.isConfigured && (OrbCore.shared.isAuthenticated || !OrbCore.shared.authRequired) {
+                workspaceCleanupSection
+                backupRestoreSection
+            }
             Section {
                 let coalesced = OrbActivityCompaction.coalesceErrors(
                     ring.entries.reversed().map { entry in
@@ -160,10 +193,228 @@ struct OrbDebugInfoView: View {
         .sheet(item: $selectedError) { item in
             OrbActivityDetailSheet(item: item)
         }
+        .fileExporter(
+            isPresented: $showExporter,
+            document: exportDoc,
+            contentType: .zip,
+            defaultFilename: "orb-backup-\(ISO8601DateFormatter().string(from: Date()).prefix(10)).zip"
+        ) { result in
+            if case .failure(let err) = result {
+                backupError = err.localizedDescription
+            } else {
+                backupNotice = "Saved backup archive."
+            }
+        }
+        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.zip]) { result in
+            switch result {
+            case .success(let url):
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                do {
+                    let data = try Data(contentsOf: url)
+                    pendingRestore = (name: url.lastPathComponent, data: data)
+                } catch {
+                    backupError = error.localizedDescription
+                }
+            case .failure(let err):
+                backupError = err.localizedDescription
+            }
+        }
+        .alert(
+            "Restore backup archive?",
+            isPresented: Binding(get: { pendingRestore != nil }, set: { if !$0 && !backupBusy { pendingRestore = nil } })
+        ) {
+            Button("Restore", role: .destructive) { Task { await confirmRestore() } }
+            Button("Cancel", role: .cancel) { pendingRestore = nil }
+        } message: {
+            Text("Restoring \(pendingRestore?.name ?? "this archive") overwrites server settings, provider credentials, and workspaces stored in the backup.")
+        }
         .task {
             _ = try? await OrbCore.shared.checkHealth()
             await OrbNotificationCenter.shared.refreshAuthorizationStatus()
             notificationStatus = OrbNotificationCenter.shared.authorizationStatus
+            await loadCleanupSettings()
+        }
+    }
+
+    @ViewBuilder
+    private var workspaceCleanupSection: some View {
+        Section {
+            Toggle("Automatic mission workspace GC", isOn: Binding(
+                get: { cleanupEnabled },
+                set: { cleanupEnabled = $0; cleanupDirty = true; cleanupNotice = nil }
+            ))
+            HStack {
+                Text("Completed retention (days)")
+                Spacer()
+                TextField("7", text: Binding(
+                    get: { cleanupDays },
+                    set: { cleanupDays = $0; cleanupDirty = true; cleanupNotice = nil }
+                ))
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 64)
+            }
+            HStack {
+                Text("Stopped / failed retention (days)")
+                Spacer()
+                TextField("1", text: Binding(
+                    get: { cleanupStoppedDays },
+                    set: { cleanupStoppedDays = $0; cleanupDirty = true; cleanupNotice = nil }
+                ))
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 64)
+            }
+            Toggle("Clean orphaned directories", isOn: Binding(
+                get: { cleanupOrphans },
+                set: { cleanupOrphans = $0; cleanupDirty = true; cleanupNotice = nil }
+            ))
+            Button(cleanupSaving ? "Saving…" : "Save cleanup policy") {
+                Task { await saveCleanupSettings() }
+            }
+            .disabled(!cleanupLoaded || cleanupSaving || !cleanupDirty)
+            if let cleanupNotice {
+                Text(cleanupNotice).font(.footnote).foregroundStyle(OrbStyle.success)
+            }
+            if let cleanupError {
+                Text(cleanupError).font(.footnote).foregroundStyle(OrbStyle.error)
+            }
+        } header: {
+            Text("Workspace cleanup")
+        } footer: {
+            Text("Reclaims disk and container /tmp scratch from finished missions (1–365 days).")
+        }
+    }
+
+    @ViewBuilder
+    private var backupRestoreSection: some View {
+        Section {
+            Button(backupBusy ? "Working…" : "Download backup (.zip)") {
+                Task { await downloadBackup() }
+            }
+            .disabled(backupBusy)
+            .accessibilityIdentifier("debug.backup-download")
+
+            Button("Restore from backup…", role: .destructive) {
+                backupError = nil
+                backupNotice = nil
+                showImporter = true
+            }
+            .disabled(backupBusy)
+            .accessibilityIdentifier("debug.backup-restore")
+
+            if let backupNotice {
+                Text(backupNotice).font(.footnote).foregroundStyle(OrbStyle.success)
+            }
+            if let backupError {
+                Text(backupError).font(.footnote).foregroundStyle(OrbStyle.error)
+            }
+        } header: {
+            Text("Backup & restore")
+        } footer: {
+            Text("Exports or restores server configuration, credentials, and workspace metadata. Requires device approval when enforced.")
+        }
+    }
+
+    private func loadCleanupSettings() async {
+        guard OrbCore.shared.isConfigured else { return }
+        do {
+            let s = try await OrbCore.shared.call("/api/settings")
+            if !cleanupDirty {
+                cleanupEnabled = s["auto_cleanup_enabled"].flag
+                cleanupDays = String(Int(s["auto_cleanup_days"].number ?? 7))
+                cleanupStoppedDays = String(Int(s["auto_cleanup_stopped_days"].number ?? 1))
+                cleanupOrphans = s["auto_cleanup_orphans_enabled"].flag
+            }
+            cleanupLoaded = true
+        } catch is CancellationError {} catch {}
+    }
+
+    private func saveCleanupSettings() async {
+        let daysResult = OrbBackupArchive.parseCleanupDays(cleanupDays)
+        let stoppedResult = OrbBackupArchive.parseCleanupDays(cleanupStoppedDays)
+        let days: Int
+        let stoppedDays: Int
+        switch (daysResult, stoppedResult) {
+        case (.success(let d), .success(let s)):
+            days = d
+            stoppedDays = s
+        case (.failure(let err), _), (_, .failure(let err)):
+            cleanupError = err.localizedDescription
+            return
+        }
+        cleanupSaving = true
+        cleanupError = nil
+        cleanupNotice = nil
+        defer { cleanupSaving = false }
+        do {
+            let updated = try await OrbCore.shared.call(
+                "/api/settings",
+                method: "PUT",
+                body: .object([
+                    "auto_cleanup_enabled": .bool(cleanupEnabled),
+                    "auto_cleanup_days": .number(Double(days)),
+                    "auto_cleanup_stopped_days": .number(Double(stoppedDays)),
+                    "auto_cleanup_orphans_enabled": .bool(cleanupOrphans)
+                ])
+            )
+            cleanupEnabled = updated["auto_cleanup_enabled"].flag
+            cleanupDays = String(Int(updated["auto_cleanup_days"].number ?? Double(days)))
+            cleanupStoppedDays = String(Int(updated["auto_cleanup_stopped_days"].number ?? Double(stoppedDays)))
+            cleanupOrphans = updated["auto_cleanup_orphans_enabled"].flag
+            cleanupDirty = false
+            cleanupNotice = "Saved workspace cleanup policy."
+        } catch {
+            cleanupError = error.localizedDescription
+        }
+    }
+
+    private func downloadBackup() async {
+        backupBusy = true
+        backupError = nil
+        backupNotice = nil
+        defer { backupBusy = false }
+        do {
+            let bytes = try await OrbApprovalKey.signedCallData("/api/settings/backup", summary: "Download settings backup")
+            guard !bytes.isEmpty else {
+                backupError = "Core returned an empty backup archive."
+                return
+            }
+            exportDoc = OrbZipBackupDocument(data: bytes)
+            showExporter = true
+        } catch {
+            if let msg = OrbBiometric.friendlyError(error) {
+                backupError = msg
+            }
+        }
+    }
+
+    private func confirmRestore() async {
+        guard let target = pendingRestore else { return }
+        backupBusy = true
+        backupError = nil
+        backupNotice = nil
+        defer { backupBusy = false }
+        do {
+            let payload = OrbBackupArchive.buildRestoreMultipart(zipData: target.data, filename: target.name)
+            let res = try await OrbApprovalKey.signedCallRaw(
+                "/api/settings/restore",
+                method: "POST",
+                rawBody: payload.body,
+                contentType: payload.contentType,
+                summary: "Restore settings backup"
+            )
+            pendingRestore = nil
+            let restored = res["restored"].items.map(\.text).filter { !$0.isEmpty }
+            backupNotice = restored.isEmpty
+                ? "Backup restored."
+                : "Restored \(restored.count) items (\(restored.joined(separator: ", ")))."
+            await loadCleanupSettings()
+        } catch {
+            if let msg = OrbBiometric.friendlyError(error) {
+                backupError = msg
+            }
         }
     }
 }

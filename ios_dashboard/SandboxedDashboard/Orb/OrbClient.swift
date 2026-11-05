@@ -174,6 +174,8 @@ final class OrbCore {
     
     var authRequired: Bool = false
     var authMode: AuthMode = .singleTenant
+    var githubEnabled: Bool = false
+    var githubOAuthClientState: Bool = false
     var authSessionExpired: Bool = false
     var authRefreshing = false
     /// Core version from the last `/api/health` (nil until probed or when the server omits it).
@@ -245,6 +247,29 @@ final class OrbCore {
         authSessionExpired = false
         return true
     }
+
+    /// Saves a server-validated OAuth session token for `baseURL` without retaining an old password login.
+    func acceptIssuedToken(_ token: String) throws {
+        let clean = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else {
+            throw OrbHTTPError(status: 0, detail: "Missing authentication token")
+        }
+        let currentEndpoint = baseURL
+        loginAttempt = UUID()
+        guard OrbKeychain.save(clean, for: currentEndpoint) else {
+            throw NSError(
+                domain: "OrbKeychain",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Could not securely save your login. Please unlock your device and try again."]
+            )
+        }
+        OrbKeychain.saveCredentials(nil, for: currentEndpoint)
+        cachedTokenEndpoint = currentEndpoint
+        cachedJwtToken = clean
+        UserDefaults.standard.removeObject(forKey: "jwt_token")
+        authSessionExpired = false
+        connectionGeneration += 1
+    }
     
     func logout() {
         loginAttempt = UUID()
@@ -283,17 +308,23 @@ final class OrbCore {
             let status: String
             let authRequired: Bool
             let authMode: String?
+            let githubEnabled: Bool?
+            let githubOAuthClientState: Bool?
             let version: String?
 
             enum CodingKeys: String, CodingKey {
                 case status, version
                 case authRequired = "auth_required"
                 case authMode = "auth_mode"
+                case githubEnabled = "github_enabled"
+                case githubOAuthClientState = "github_oauth_client_state"
             }
         }
         
         let response: HealthResponse = try await get("/api/health", authenticated: false)
         authRequired = response.authRequired
+        githubEnabled = response.githubEnabled == true
+        githubOAuthClientState = response.githubOAuthClientState == true
         backendVersion = response.version
         if let modeRaw = response.authMode, let mode = AuthMode(rawValue: modeRaw) {
             authMode = mode
@@ -937,6 +968,19 @@ final class OrbCore {
         if let body { request.httpBody = try JSONEncoder().encode(body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let (data, _) = try await send(request, session: .shared, label: "\(method) \(path)", failure: "Request failed")
         return String(decoding: data, as: UTF8.self)
+    }
+
+    /// For endpoints that answer binary payloads (such as `.zip` settings backups).
+    func callData(_ path: String, method: String = "GET", rawBody: Data? = nil, headers: [String: String] = [:]) async throws -> Data {
+        guard let url = URL(string: endpoint + path) else { throw OrbHTTPError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = 90
+        request.setValue("Bearer \(authToken ?? "")", forHTTPHeaderField: "Authorization")
+        if let rawBody { request.httpBody = rawBody }
+        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+        let (data, _) = try await send(request, session: .shared, label: "\(method) \(path)", failure: "Request failed")
+        return data
     }
 
     func transcribe(_ wav: Data, language: String) async throws -> String {

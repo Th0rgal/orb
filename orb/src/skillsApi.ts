@@ -108,6 +108,29 @@ export interface LibraryStatus {
 export const getLibraryStatus = () => api<LibraryStatus>("/api/library/status");
 /** Pull from the remote. */
 export const syncLibrary = () => apiText("/api/library/sync", { method: "POST" });
+/** Reset local Library checkout to match the remote branch (`POST /api/library/force-sync`). */
+export const forceSyncLibrary = () => apiText("/api/library/force-sync", { method: "POST" });
+/** Force-push local Library commits over a diverged remote branch (`POST /api/library/force-push`). */
+export const forcePushLibrary = () => apiText("/api/library/force-push", { method: "POST" });
+
+export interface UpdateLibraryRemoteResult {
+  library_remote: string | null;
+  library_reinitialized: boolean;
+  library_error?: string;
+}
+
+export function updateLibraryRemote(libraryRemote: string | null): Promise<UpdateLibraryRemoteResult> {
+  return api<UpdateLibraryRemoteResult>("/api/settings/library-remote", {
+    method: "PUT",
+    ...json({ library_remote: libraryRemote }),
+  });
+}
+
+export function isDivergedLibraryError(err: unknown): boolean {
+  if (err instanceof ApiError && err.status === 409) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("DIVERGED_HISTORY") || /\bdiverged\b/i.test(msg);
+}
 
 /** Commit the Library and push it, so a save lands in the repo. */
 export async function commitAndPush(message: string): Promise<void> {

@@ -288,11 +288,33 @@ export function clearConnection() {
   bumpConnectionVersion(v => v + 1);
 }
 
-export async function login(password: string): Promise<void> {
+export interface ServerHealthInfo {
+  status?: string;
+  version?: string;
+  dev_mode?: boolean;
+  auth_required?: boolean;
+  auth_mode?: "disabled" | "single_tenant" | "multi_user" | string;
+  github_enabled?: boolean;
+  github_oauth_client_state?: boolean;
+}
+
+export async function probeHealth(baseUrl?: string, signal?: AbortSignal): Promise<ServerHealthInfo> {
+  const res = await transportFetch(
+    "/api/health",
+    { method: "GET", signal: signal ?? AbortSignal.timeout(8_000) },
+    baseUrl,
+  );
+  if (!res.ok) throw new Error(`Health check failed (${res.status})`);
+  return (await res.json()) as ServerHealthInfo;
+}
+
+export async function login(password: string, username?: string): Promise<void> {
+  const cleanUser = username?.trim();
+  const payload = cleanUser ? { password, username: cleanUser } : { password };
   const res = await transportFetch("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) {
     const text = (await res.text().catch(() => "")).trim();
@@ -723,6 +745,16 @@ export async function updateRemoteNodeCapacity(name: string, capacity: number): 
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ capacity }),
+  });
+}
+
+/** Cordon or uncordon a static remote runner node (`POST /api/nodes/:name/{cordon,uncordon}`). */
+export async function setRemoteNodeCordoned(
+  name: string,
+  cordoned: boolean,
+): Promise<{ node: string; cordoned: boolean; changed: boolean }> {
+  return api(`/api/nodes/${encodeURIComponent(name)}/${cordoned ? "cordon" : "uncordon"}`, {
+    method: "POST",
   });
 }
 
@@ -1846,11 +1878,16 @@ export async function setProjectLimit(slug: string, parallel_missions: number): 
 
 /** Backend-global execution settings (`GET|PUT /api/settings`). */
 export interface GlobalSettings {
+  library_remote?: string | null;
   /** Backend-wide mission concurrency. Distinct from a project's grant cap. */
   max_parallel_missions?: number | null;
   max_concurrent_tasks?: number | null;
   /** Live per-account OrbRouter concurrency cap for Google & Antigravity accounts (1–128). */
   google_max_concurrency?: number | null;
+  auto_cleanup_enabled?: boolean | null;
+  auto_cleanup_days?: number | null;
+  auto_cleanup_stopped_days?: number | null;
+  auto_cleanup_orphans_enabled?: boolean | null;
 }
 
 export async function getGlobalSettings(): Promise<GlobalSettings> {

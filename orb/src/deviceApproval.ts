@@ -1,6 +1,7 @@
 import { nativeInvoke } from "./native";
 import { createSignal } from "solid-js";
-import { api, ApiError, getApiUrl } from "./api";
+import { api, ApiError, clearConnection, connectionVersion, getApiUrl, getJwt, REQUEST_TIMEOUT_MS, transportFetch } from "./api";
+import { invalidateReads } from "./sharedReads";
 import { usageTelemetry, type ApprovalDecision, type ApprovalKind, type ApprovalMethod } from "./usageTelemetry";
 
 /**
@@ -170,6 +171,84 @@ async function signedApiInner<T>(method: string, path: string, body: unknown, su
     }
     throw e;
   }
+}
+
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const buf = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buf).set(bytes);
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Send a raw/binary request protected by a device signature (e.g. `.zip` backup
+ * download or multipart restore). Binds exact `body_sha256` in the challenge.
+ */
+export async function signedRawRequest(
+  method: string,
+  path: string,
+  summary: string,
+  options?: { body?: Uint8Array; contentType?: string },
+): Promise<Response> {
+  const version = connectionVersion();
+  const jwt = getJwt();
+  const headers: Record<string, string> = {
+    ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+    ...(options?.contentType ? { "Content-Type": options.contentType } : {}),
+  };
+  const device = enrolledDeviceId();
+  const call = invoke();
+  if (device && call) {
+    const bodyHash = options?.body ? await sha256Hex(options.body) : undefined;
+    const challenge = await api<{ challenge_id: string; payload: string }>("/api/approvals/challenge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        method,
+        path,
+        ...(bodyHash ? { body_sha256: bodyHash } : { body: "" }),
+        summary,
+      }),
+    });
+    let signature: string;
+    try {
+      await call("set_approval_grace", { secs: approvalGraceSecs() }).catch(() => undefined);
+      signature = (await call("approval_sign", { payload: challenge.payload, reason: summary })) as string;
+    } catch (e) {
+      void refreshGrace(call);
+      if (String(e).includes("cancelled")) throw new ApprovalCancelled();
+      throw e instanceof Error ? e : new Error(String(e));
+    }
+    void refreshGrace(call);
+    headers["X-Paloma-Approval"] = `${challenge.challenge_id}.${device}.${signature}`;
+  }
+
+  let bodyInit: BodyInit | undefined;
+  if (options?.body) {
+    const copy = new ArrayBuffer(options.body.byteLength);
+    new Uint8Array(copy).set(options.body);
+    bodyInit = copy;
+  }
+
+  if (method.toUpperCase() !== "GET") invalidateReads();
+  const res = await transportFetch(path, {
+    method,
+    headers,
+    ...(bodyInit !== undefined ? { body: bodyInit } : {}),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (res.status === 401) {
+    if (connectionVersion() === version) clearConnection();
+    throw new Error("401 Unauthorized — reconnect in Settings → Account");
+  }
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).trim();
+    if (res.status === 403 && detail.includes("device_approval_required")) {
+      throw new Error("Core requires an enrolled device for this. Enroll this Mac in Settings → Security → Approval devices.");
+    }
+    throw new ApiError(res.status, detail || res.statusText);
+  }
+  return res;
 }
 
 const GRACE_KEY = "orb.approvalGraceSecs";

@@ -1,0 +1,121 @@
+import CryptoKit
+import XCTest
+@testable import sandboxed_sh
+
+@MainActor
+final class OrbClientParityTests: XCTestCase {
+    func testGitHubSignInAcceptsMatchingCallbackOnceAndEnforcesState() {
+        var now: Int64 = 1_000_000
+        let store = OrbGitHubSignIn.MemoryStore()
+        let signIn = OrbGitHubSignIn(store: store, clock: { now })
+
+        let state = signIn.begin(endpoint: "https://Core.example/")
+        XCTAssertTrue((16...128).contains(state.count))
+        XCTAssertTrue(signIn.isPending(endpoint: "https://core.example"))
+
+        now += 30_000
+        XCTAssertEqual(
+            signIn.onCallback(
+                currentEndpoint: "https://core.example",
+                token: " jwt-123 ",
+                error: nil,
+                state: state,
+                serverEchoesState: true
+            ),
+            .accept(endpoint: "https://core.example", token: "jwt-123")
+        )
+        // Single-use: replay is rejected.
+        if case .accept = signIn.onCallback(currentEndpoint: "https://core.example", token: "jwt-123", error: nil, state: state, serverEchoesState: true) {
+            XCTFail("Expected second callback to be rejected")
+        }
+
+        // Forged state is rejected even when serverEchoesState is false.
+        _ = signIn.begin(endpoint: "https://core.example")
+        if case .accept = signIn.onCallback(currentEndpoint: "https://core.example", token: "jwt", error: nil, state: "forged-state-value", serverEchoesState: false) {
+            XCTFail("Expected forged state to be rejected")
+        }
+
+        // Expired attempt is rejected.
+        _ = signIn.begin(endpoint: "https://core.example")
+        now += OrbGitHubSignIn.maxAgeMs + 1
+        if case .accept = signIn.onCallback(currentEndpoint: "https://core.example", token: "jwt", error: nil) {
+            XCTFail("Expected expired attempt to be rejected")
+        }
+    }
+
+    func testGitHubCallbackURLParsingAndAuthorizeURL() throws {
+        let cb = try XCTUnwrap(URL(string: "sandboxed://auth/callback?token=tok_abc&state=st_1"))
+        XCTAssertTrue(OrbGitHubSignIn.isCallbackURL(cb))
+        XCTAssertEqual(OrbGitHubSignIn.parseCallback(cb), .init(token: "tok_abc", error: nil, state: "st_1"))
+
+        let inboxURL = try XCTUnwrap(URL(string: "sandboxed://inbox"))
+        XCTAssertFalse(OrbGitHubSignIn.isCallbackURL(inboxURL))
+
+        let authURL = try XCTUnwrap(OrbGitHubSignIn.authorizeURL(baseURL: "https://core.example/", state: "st_1234567890123456"))
+        XCTAssertTrue(authURL.absoluteString.hasPrefix("https://core.example/api/auth/github/start?"))
+        XCTAssertTrue(authURL.absoluteString.contains("state=st_1234567890123456"))
+    }
+
+    func testBackupMultipartSha256MatchesExactBodyBytes() {
+        let zip = Data([0x50, 0x4B, 0x03, 0x04, 0xAA, 0xBB])
+        let payload = OrbBackupArchive.buildRestoreMultipart(zipData: zip, filename: "backup.zip", boundary: "OrbTestBoundary")
+        XCTAssertEqual(payload.contentType, "multipart/form-data; boundary=OrbTestBoundary")
+        let expectedSha = SHA256.hash(data: payload.body).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(payload.sha256Hex, expectedSha)
+        let text = String(decoding: payload.body, as: UTF8.self)
+        XCTAssertTrue(text.contains("name=\"backup\"; filename=\"backup.zip\""))
+
+        XCTAssertEqual(OrbBackupArchive.parseCleanupDays("14"), .success(14))
+        if case .success = OrbBackupArchive.parseCleanupDays("0") {
+            XCTFail("Expected 0 days to fail validation")
+        }
+        if case .success = OrbBackupArchive.parseCleanupDays("366") {
+            XCTFail("Expected 366 days to fail validation")
+        }
+    }
+
+    func testControllerModelScheduleTimelineAndGrantNormalization() {
+        XCTAssertEqual(OrbControllerModel.scheduleExpression(.string("0 9 * * *")), "0 9 * * *")
+        XCTAssertEqual(
+            OrbControllerModel.scheduleExpression(.object(["kind": .string("interval"), "minutes": .number(120)])),
+            "every 2h"
+        )
+        XCTAssertEqual(
+            OrbControllerModel.scheduleExpression(.object(["kind": .string("cron"), "expr": .string("*/15 * * * *")])),
+            "*/15 * * * *"
+        )
+
+        let patched = OrbControllerModel.hermesPatch(
+            ["name": .string("nightly"), "continuity": .bool(true)],
+            existingJob: .object(["context_from": .array([.string("other-job"), .string("self")])])
+        )
+        XCTAssertEqual(patched["context_from"].items.map(\.text), ["other-job", "self"])
+
+        let now = Date(timeIntervalSince1970: 1_762_000_000)
+        let iso = ISO8601DateFormatter()
+        let runs: [OrbJSON] = [
+            .object(["id": .string("r4"), "at": .string(iso.string(from: now.addingTimeInterval(-60))), "silent": .bool(true)]),
+            .object(["id": .string("r3"), "at": .string(iso.string(from: now.addingTimeInterval(-120))), "silent": .bool(true)]),
+            .object(["id": .string("r2"), "at": .string(iso.string(from: now.addingTimeInterval(-180))), "status": .string("failed"), "error": .string("boom")]),
+            .object(["id": .string("r1"), "at": .string(iso.string(from: now.addingTimeInterval(-240))), "status": .string("failed"), "error": .string("boom")])
+        ]
+        let entries = OrbControllerModel.buildEntries(runs: runs, now: now)
+        XCTAssertEqual(entries.count, 3) // Today header + 2 folded silent + 2 folded failed
+        if case .silent(_, let silentRuns) = entries[1] {
+            XCTAssertEqual(silentRuns.count, 2)
+        } else {
+            XCTFail("Expected folded silent entry")
+        }
+        if case .failed(_, let failedRuns, let err) = entries[2] {
+            XCTAssertEqual(failedRuns.count, 2)
+            XCTAssertEqual(err, "boom")
+        } else {
+            XCTFail("Expected folded failed entry")
+        }
+
+        XCTAssertEqual(OrbControllerModel.parseProjectLimit(""), .success(0))
+        XCTAssertEqual(OrbControllerModel.parseProjectLimit("4"), .success(4))
+        XCTAssertNil(OrbControllerModel.projectLimitOf(.object(["parallel_missions": .number(0)])))
+        XCTAssertEqual(OrbControllerModel.projectLimitOf(.object(["parallel_missions": .number(3)])), 3)
+    }
+}
