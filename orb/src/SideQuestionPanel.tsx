@@ -278,8 +278,25 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    void launching.then(()=>{
     if(stale||key()!==current)return;
     const launched=btwSession(missionId);
-    if(launched?.active)watchActive(launched);
-    else{setBusy(false);setStartedAt(undefined);setError(interruptedError);}
+    if(launched?.active){
+     watchActive(launched);
+     return;
+    }
+    let launchErr:{error:string;notSent:boolean}|undefined;
+    try{
+     if('btwLastLaunchError' in btwMod&&typeof btwMod.btwLastLaunchError==='function'){
+      launchErr=btwMod.btwLastLaunchError(missionId);
+     }
+    }catch{}
+    if(launchErr?.notSent){
+     setBusy(false);setStartedAt(undefined);setRunStatus('');setNotSent(true);setError(launchErr.error);
+    }else if(hasReconcile){
+     awaitingServerPending=true;
+     setBusy(true);setRunStatus('Reconnecting…');
+     resync?.();
+    }else{
+     setBusy(false);setStartedAt(undefined);setRunStatus('');setError(launchErr?.error||interruptedError);
+    }
    });
   }else if(agent&&(agent.active||emptyReply)){
    watchActive(agent);
@@ -303,7 +320,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    // The live stream can sit on a dead cursor (sleep, proxy, reconnect):
    // re-read Core periodically when SSE is used or a turn is busy; skip idle HTTP
    // polling when the heartbeat-monitored multiplex WebSocket is active.
-   const poll=setInterval(()=>{if(!stale&&inFlight===0&&document.visibilityState!=='hidden'&&(!isMultiplexSyncActive()||busy()))sync(history(),true);},15000);
+   const poll=setInterval(()=>{if(!stale&&inFlight===0&&document.visibilityState!=='hidden'&&(!isMultiplexSyncActive()||busy()||awaitingServerPending))sync(history(),true);},15000);
    onCleanup(()=>{stopFollow?.();clearTimeout(again);clearInterval(poll);});
    const follow=(id:string|undefined)=>{
     if(!id||id===following||stale)return;
