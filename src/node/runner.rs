@@ -1690,6 +1690,12 @@ impl JobRunner {
                             monitor_antigravity_thoughts(&home, &log, stop).await;
                         })
                     });
+                let opencode_log_dir = mission_dir.clone();
+                let opencode_log_before = tokio::task::spawn_blocking(move || {
+                    super::lean::capture_opencode_log_snapshot(&opencode_log_dir)
+                })
+                .await
+                .unwrap_or_default();
                 let outcome = run_logged_command_with_deadline(
                     cmd,
                     CommandEnvironment::Clear,
@@ -1702,16 +1708,42 @@ impl JobRunner {
                 if let Some(monitor) = thought_monitor {
                     let _ = monitor.await;
                 }
-                let (state, exit_code, error) = outcome?.into_job_result();
+                let (state, exit_code, mut error) = outcome?.into_job_result();
                 let cleanup_dir = mission_dir.clone();
-                let _ = tokio::task::spawn_blocking(move || {
+                let failed = state == JobState::Failed;
+                let detected_log_err = tokio::task::spawn_blocking(move || {
+                    let detected = failed
+                        .then(|| {
+                            super::lean::detect_opencode_log_storage_error(
+                                &cleanup_dir,
+                                &opencode_log_before,
+                            )
+                        })
+                        .flatten();
+                    let now = std::time::SystemTime::now();
                     super::lean::prune_opencode_tool_outputs_in_mission_dir(
                         &cleanup_dir,
                         Duration::from_secs(60 * 60),
-                        std::time::SystemTime::now(),
+                        now,
                     );
+                    super::lean::prune_opencode_logs_in_mission_dir(
+                        &cleanup_dir,
+                        super::lean::OPENCODE_LOG_MIN_MAX_AGE,
+                        now,
+                    );
+                    detected
                 })
-                .await;
+                .await
+                .ok()
+                .flatten();
+                if let Some(reason) = detected_log_err {
+                    error = Some(match error {
+                        Some(existing) if !existing.trim().is_empty() => {
+                            format!("{existing}; opencode server log: {reason}")
+                        }
+                        _ => format!("opencode server log: {reason}"),
+                    });
+                }
                 Ok((state, exit_code, error, None))
             }
             JobPayload::LeanBuild { .. } => {

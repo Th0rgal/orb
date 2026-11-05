@@ -279,6 +279,17 @@ impl JobStore {
         }).await
     }
 
+    pub async fn live_mission_ids(&self) -> anyhow::Result<std::collections::HashSet<Uuid>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT mission_id FROM jobs WHERE state IN ('queued', 'running')",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            Ok(rows.filter_map(|r| r.ok()?.parse().ok()).collect())
+        })
+        .await
+    }
+
     /// Most recently created jobs, newest first.
     pub async fn recent(&self, limit: usize) -> anyhow::Result<Vec<JobRecord>> {
         self.with_conn(move |conn| {
