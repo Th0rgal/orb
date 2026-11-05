@@ -25,6 +25,7 @@ import {
   rollbackOptimisticPlacement,
   stageOptimisticPlacement,
   stickHierarchy,
+  withHierarchy,
   type PlacementCommitItem,
 } from "./missionHierarchy";
 export {
@@ -1220,9 +1221,9 @@ export function applyAncestorCachePlacements(moves: readonly PlacementCommitItem
 
 async function fetchAncestor(id: string): Promise<Mission | null> {
   const cached = ancestorCache.get(id);
-  if (cached && Date.now() - cached.at < ANCESTOR_TTL_MS) return stickHierarchy(cached.row);
+  if (cached && Date.now() - cached.at < ANCESTOR_TTL_MS) return withHierarchy(cached.row);
   try { const row = await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}?include_history=false`); ancestorCache.set(id, {row, at: Date.now()}); return row; }
-  catch (error) { if (error instanceof ApiError && error.status === 404) { ancestorCache.delete(id); return null; } return cached ? stickHierarchy(cached.row) : null; }
+  catch (error) { if (error instanceof ApiError && error.status === 404) { ancestorCache.delete(id); return null; } return cached ? withHierarchy(cached.row) : null; }
 }
 // The sidebar's parent resolver: null only when Core says the parent is gone.
 configureParentResolver(async id => {

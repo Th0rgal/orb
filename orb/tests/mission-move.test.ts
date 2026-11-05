@@ -3,6 +3,7 @@ import {
   allocatePlacementOpId,
   authoritativePlacement,
   commitAuthoritativePlacements,
+  mergeMission,
   normalizeMissionFolder,
   resetMissionHierarchy,
   rollbackOptimisticPlacement,
@@ -32,7 +33,7 @@ vi.mock("../src/api", async (importOriginal) => {
 import { moveMissionsBatch } from "../src/api";
 import { deleteDescendants, descendantsSentence, pausedMissionIds, requiresDescendantOptIn, runningWorkerIds } from "../src/deleteRunning";
 import { moveMission, moveMissions, planMissionMoves, readCutMission } from "../src/missionMove";
-import { pendingMoves, resetMoves } from "../src/moves";
+import { movedMission, pendingMoves, previewMove, resetMoves, missionMoveKey } from "../src/moves";
 import { missionIdFromTreeId, missionTreeId } from "../src/tree/TreeView";
 
 const id = "524754fe-3acc-42c1-ba7f-89ee2d296bcb";
@@ -270,5 +271,53 @@ it("preserves folders on legacy title-based ` · fork` versions across stickHier
     project: "verity",
     folder: "Specs/Verified",
     placement_revision: 2,
+  });
+});
+
+it("keeps pendingOpId and rollback intact when merging projected rows for the currently open conversation", () => {
+  const OPEN_ID = "open-mission-8888";
+  const listed = stickHierarchy({
+    id: OPEN_ID,
+    project: "assistant",
+    folder: "OldFolder",
+    placement_revision: 3,
+    status: "active",
+  });
+  const opId = allocatePlacementOpId();
+  stageOptimisticPlacement(OPEN_ID, "assistant", "NewFolder", opId, {
+    project: "assistant",
+    folder: "OldFolder",
+    placement_revision: 3,
+  });
+  previewMove(missionMoveKey(OPEN_ID), {
+    kind: "mission",
+    fromProject: "assistant",
+    toProject: "assistant",
+    path: "NewFolder",
+    opId,
+  });
+
+  // Replay `ProjectFiles.tsx` `visibleMissions`: `withHierarchy(movedMission(listed))` merged with unchanged `currentMission`.
+  const projectedListed = withHierarchy(movedMission(listed));
+  const unchangedOpenDetail = {
+    id: OPEN_ID,
+    project: "assistant",
+    folder: "OldFolder",
+    placement_revision: 3,
+    status: "running",
+  };
+  const merged = mergeMission(projectedListed, unchangedOpenDetail, "partial");
+
+  expect(merged.folder).toBe("NewFolder");
+  expect(merged.status).toBe("running");
+  expect(authoritativePlacement(OPEN_ID)?.pendingOpId).toBe(opId);
+
+  // Subsequent rollback on HTTP failure MUST succeed and restore `OldFolder`:
+  expect(rollbackOptimisticPlacement(OPEN_ID, opId)).toBe(true);
+  expect(authoritativePlacement(OPEN_ID)).toMatchObject({
+    project: "assistant",
+    folder: "OldFolder",
+    rev: 3,
+    pendingOpId: 0,
   });
 });

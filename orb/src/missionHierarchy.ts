@@ -112,6 +112,9 @@ function syncParentRowPlacement(id: string, project: string | null, folder: stri
 
 /** Apply `orbPlacementMergeStep` for a list/read row (`sourceKind = 0`) and return authoritative `(project, folder, placement_revision)`. */
 function mergeIncomingPlacement(m: HierarchyFields, isPartial = false): PlacementState | undefined {
+  if ((m as Record<symbol, unknown>)[Symbol.for("orb.projectedMove")]) {
+    return placements.get(m.id);
+  }
   const hasPlacement = m.project !== undefined || m.folder !== undefined || m.placement_revision !== undefined;
   if (!hasPlacement) {
     return placements.get(m.id);
@@ -298,14 +301,13 @@ const isSupersededTag = (tag: string) =>
   tag === "superseded" || tag.startsWith("superseded_by:") || tag.startsWith("superseded-by:");
 const nonEmpty = (v: string | null | undefined): string | undefined => (typeof v === "string" && v.trim() ? v : undefined);
 
-/** Remember the links (and display facts) a payload carries. Never forgets. */
-export function observeMission(m: HierarchyFields | null | undefined, isPartial = false): void {
+/** Remember hierarchy links and display facts from an existing local row without re-observing its placement as a fresh server snapshot. */
+function observeHierarchyFactsOnly(m: HierarchyFields | null | undefined): void {
   if (!m || typeof m.id !== "string") return;
   const parent = nonEmpty(m.parent_mission_id), callback = nonEmpty(m.callback_parent_mission_id);
   const tags = (m.tags ?? []).filter(isHierarchyTag);
   if (parent || callback || tags.length) {
     const link = links.get(m.id) ?? { tags: [] };
-    // A non-empty value from a payload is authoritative; an absent one is not.
     if (parent) link.parent = parent;
     if (callback) link.callback = callback;
     for (const tag of tags) if (!link.tags.includes(tag)) link.tags.push(tag);
@@ -313,8 +315,7 @@ export function observeMission(m: HierarchyFields | null | undefined, isPartial 
   }
   const s = seen.get(m.id) ?? {};
   if (m.title !== undefined && m.title !== null) s.title = m.title;
-  seen.set(m.id, s);
-  const authPlace = mergeIncomingPlacement(m, isPartial);
+  const authPlace = placements.get(m.id);
   if (authPlace) {
     s.project = authPlace.project;
     s.folder = authPlace.folder;
@@ -323,6 +324,19 @@ export function observeMission(m: HierarchyFields | null | undefined, isPartial 
   }
   if (typeof m.status === "string" && m.status !== "unknown") s.status = m.status;
   seen.set(m.id, s);
+}
+
+/** Remember the links (and display facts) a payload carries. Never forgets. */
+export function observeMission(m: HierarchyFields | null | undefined, isPartial = false): void {
+  if (!m || typeof m.id !== "string") return;
+  observeHierarchyFactsOnly(m);
+  const authPlace = mergeIncomingPlacement(m, isPartial);
+  if (authPlace) {
+    const s = seen.get(m.id) ?? {};
+    s.project = authPlace.project;
+    s.folder = authPlace.folder;
+    seen.set(m.id, s);
+  }
 }
 
 /** The payload with every remembered link and authoritative placement restored. Same object when nothing was missing. */
@@ -347,6 +361,9 @@ export function withHierarchy<M extends HierarchyFields>(m: M): M {
     const curFolder = normalizeMissionFolder(m.folder);
     if (m.folder === undefined ? place.folder.length > 0 : curFolder !== place.folder) set("folder", place.folder);
     if ((m.placement_revision ?? 0) < place.rev) set("placement_revision", place.rev);
+    if (out && place.pendingOpId !== 0) {
+      Object.defineProperty(out, Symbol.for("orb.projectedMove"), { value: true, enumerable: false });
+    }
   }
   return out ?? m;
 }
@@ -361,8 +378,13 @@ export function stickHierarchy<M extends HierarchyFields>(m: M): M { observeMiss
  * way the hierarchy links are never dropped.
  */
 export function mergeMission<M extends HierarchyFields>(prev: M | undefined, next: Partial<M> & { id: string }, mode: "full" | "partial" = "full"): M {
-  if (prev) observeMission(prev);
-  observeMission(next as HierarchyFields, mode === "partial");
+  if (prev) observeHierarchyFactsOnly(prev);
+  const nextIsProjected = Boolean((next as Record<symbol, unknown>)[Symbol.for("orb.projectedMove")]);
+  if (nextIsProjected) {
+    observeHierarchyFactsOnly(next as HierarchyFields);
+  } else {
+    observeMission(next as HierarchyFields, mode === "partial");
+  }
   const prevLink = links.get(next.id);
   const curParentOrd = internParentOrd(prevLink?.parent ?? nonEmpty(prev?.parent_mission_id));
   const incParent = nonEmpty(next.parent_mission_id);

@@ -56,6 +56,8 @@ function clearIf(key: string, entry: PendingMove) {
 export const pendingMove = (key: string) => pending().get(key);
 export const pendingMoves = () => pending();
 
+const PROJECTED_MOVE = Symbol.for("orb.projectedMove");
+
 type Placed = {
   id: string;
   project?: string | null;
@@ -64,6 +66,7 @@ type Placed = {
   parent_mission_id?: string | null;
   callback_parent_mission_id?: string | null;
   tags?: string[] | null;
+  [PROJECTED_MOVE]?: true;
 };
 
 /** `mission` at its pending destination, if it is being moved. */
@@ -72,10 +75,16 @@ export function movedMission<T extends Placed>(mission: T): T {
   const move = pending().get(key);
   if (!move) return mission;
   const targetFolder = normalizeMissionFolder(move.path);
-  if ((mission.project ?? null) === move.toProject && normalizeMissionFolder(mission.folder) === targetFolder) {
+  if (
+    (mission.project ?? null) === move.toProject
+    && normalizeMissionFolder(mission.folder) === targetFolder
+    && mission[PROJECTED_MOVE]
+  ) {
     return mission;
   }
-  return { ...mission, project: move.toProject, folder: targetFolder };
+  const out = { ...mission, project: move.toProject, folder: targetFolder };
+  Object.defineProperty(out, PROJECTED_MOVE, { value: true, enumerable: false });
+  return out;
 }
 
 /** `rows` with pending moves applied; unchanged rows (and the array) keep their identity. */
