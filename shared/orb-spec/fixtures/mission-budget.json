@@ -19,6 +19,25 @@
       "ancestor_max_concurrent": null,
       "provider_limits": []
     },
+    "own_bandwidth_limits": null,
+    "bandwidth_mode": "none",
+    "bandwidth_pool_id": null,
+    "effective_bandwidth": {
+      "source": "none",
+      "pool_id": null,
+      "tokens_per_min": null,
+      "compute_vcpu_per_min": null,
+      "compute_usd_per_hour": null,
+      "protect_root": false,
+      "current_tokens_per_min": 0,
+      "current_vcpu_per_min": 0,
+      "current_compute_usd_per_hour": 0.0,
+      "pacing_active": false,
+      "paced_delay_ms": 0,
+      "ancestor_tokens_per_min": null,
+      "ancestor_compute_vcpu_per_min": null,
+      "ancestor_compute_usd_per_hour": null
+    },
     "children": [
       {
         "mission_id": "90cbbeaf-0000-0000-0000-000000000001",
@@ -28,6 +47,7 @@
         "reserved_usd": 0.0,
         "has_vm_limits": false,
         "vm_max_concurrent": null,
+        "has_bandwidth_limits": false,
         "live_machines": 0
       },
       {
@@ -38,6 +58,7 @@
         "reserved_usd": 0.0,
         "has_vm_limits": false,
         "vm_max_concurrent": null,
+        "has_bandwidth_limits": false,
         "live_machines": 0
       }
     ]
@@ -87,6 +108,30 @@
         }
       ]
     },
+    "own_bandwidth_limits": {
+      "tokens_per_min": 120000,
+      "compute_vcpu_per_min": 32,
+      "compute_usd_per_hour": 2.5,
+      "protect_root": true
+    },
+    "bandwidth_mode": "own",
+    "bandwidth_pool_id": "35442f4c-99ff-49e8-a531-6686457b3f69",
+    "effective_bandwidth": {
+      "source": "mission",
+      "pool_id": "35442f4c-99ff-49e8-a531-6686457b3f69",
+      "tokens_per_min": 120000,
+      "compute_vcpu_per_min": 32,
+      "compute_usd_per_hour": 2.5,
+      "protect_root": true,
+      "current_tokens_per_min": 84000,
+      "current_vcpu_per_min": 24,
+      "current_compute_usd_per_hour": 1.95,
+      "pacing_active": false,
+      "paced_delay_ms": 0,
+      "ancestor_tokens_per_min": null,
+      "ancestor_compute_vcpu_per_min": null,
+      "ancestor_compute_usd_per_hour": null
+    },
     "children": [
       {
         "mission_id": "c1a00001-0000-0000-0000-000000000001",
@@ -96,6 +141,8 @@
         "reserved_usd": 0.45,
         "has_vm_limits": true,
         "vm_max_concurrent": 2,
+        "has_bandwidth_limits": true,
+        "tokens_per_min": 40000,
         "live_machines": 1
       },
       {
@@ -106,6 +153,7 @@
         "reserved_usd": 0.0,
         "has_vm_limits": false,
         "vm_max_concurrent": null,
+        "has_bandwidth_limits": false,
         "live_machines": 0
       }
     ]

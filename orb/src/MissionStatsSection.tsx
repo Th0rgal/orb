@@ -6,10 +6,10 @@ import { getMissionStats, modelLabel, subagentsUsd, tokens, usd, type MissionSta
 type ChildRow = MissionStats["children"][number];
 
 /**
- * Stats section of Mission settings, on the shared stats primitives
- * (`orb/docs/ui/stats.md`): total spend (own + subagents), spend by served
- * model, VM cost and subagent totals, for today or the mission's lifetime.
- * The previous data stays on screen while another period loads.
+ * Stats section of Mission settings, on the shared stats primitives:
+ * total spend (own + subagents), spend by served model, VM cost and subagent
+ * totals, for today or the mission's lifetime. The previous data stays on
+ * screen while another period loads.
  */
 export function MissionStatsSection(p: { missionId: string; titleOf?: (id: string) => string | undefined; load?: typeof getMissionStats }) {
   const [period, setPeriod] = createSignal<StatsPeriod>("lifetime");
@@ -31,9 +31,9 @@ export function MissionStatsSection(p: { missionId: string; titleOf?: (id: strin
     { header: "Subagent", width: "minmax(0, 1fr)", cell: c => c.title ?? p.titleOf?.(c.mission_id) ?? `Agent ${c.mission_id.slice(0, 8)}` },
     { header: "Spend (with its subagents)", width: "160px", align: "end", cell: c => usd(c.total_usd) },
   ];
-  return <section class="ms-section" aria-labelledby="ms-stats-title">
-    <div class="ms-head">
-      <h4 id="ms-stats-title">Stats</h4>
+  return <section class="s-sec ms-stats-sec" aria-labelledby="ms-stats-title">
+    <div class="ms-sec-head">
+      <h3 id="ms-stats-title">Stats</h3>
       <div class="ms-period" role="radiogroup" aria-label="Period">
         <For each={[["today", "Today"], ["lifetime", "Lifetime"]] as const}>{([value, label]) =>
           <button type="button" role="radio" aria-checked={period() === value} classList={{ on: period() === value }} onClick={() => setPeriod(value)}>{label}</button>}</For>

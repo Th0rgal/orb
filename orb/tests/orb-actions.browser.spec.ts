@@ -90,6 +90,9 @@ async function setup(page: Page, options: Options = {}) {
             })
           : []
       )
+      : path.endsWith("/budget") ? { mission_id: MISSION_ID, own_budget_usd: null, pool_id: null, mode: "none", pool: null, max_grant_usd: null, children: [] }
+      : path.endsWith("/stats") ? { mission_id: MISSION_ID, period: "lifetime", since: null, own: { vm_usd: 0, total_usd: 0, models: [] }, subtree_total_usd: 0, children: [] }
+      : path.startsWith("/api/resources/missions/") ? { as_of: "", mission: { id: MISSION_ID, title: "Lido SRv3 report", status: "active", started_at: "", elapsed_secs: 60, subagent_count: 0, track_count: 0 }, available_horizons: [], active_horizon: "6h", flow: { inputs: [], tracks: [], subagents: [], input_to_track: [], track_to_subagent: [] }, dag: { origin_unix_secs: 0, horizon_secs: 3600, now_offset_secs: 60, bars: [] }, timeline: { offsets_secs: [], observed_vcpu: [], projected_vcpu: [], observed_compute_usd_per_h: [], projected_compute_usd_per_h: [], observed_b_tok_per_h: [], projected_b_tok_per_h: [], observed_inference_usd_per_h: [], projected_inference_usd_per_h: [] } }
       : path.endsWith("/files") ? { entries: options.entries ?? [{ name: "reference", kind: "dir" }] }
       : path.endsWith("/crons") ? { jobs: [] }
       : { job: null, runs: [] };
@@ -120,7 +123,7 @@ test("right-click an agent row: Copy mission ID copies the raw UUID and changes 
   // Context selection highlights the row while its menu is open without opening its conversation.
   await expect(row).toHaveClass(/active/);
   // Identity actions only — no project/file creation leaking onto an agent row.
-  await expect(menu.getByRole("menuitem")).toHaveText(["Delete agent…", /^Transfer to another agent/, "Move", "Rename", "Copy mission ID", "Mission settings…"]);
+  await expect(menu.getByRole("menuitem")).toHaveText(["Delete agent…", /^Transfer to another agent/, "Move", "Rename", "Copy mission ID", "Mission settings"]);
 
   await menu.getByRole("menuitem", { name: "Copy mission ID" }).click();
   expect(await copied(page)).toEqual([MISSION_ID]);
@@ -132,16 +135,19 @@ test("right-click an agent row: Copy mission ID copies the raw UUID and changes 
   await expect(page.getByPlaceholder("Describe a task, / for commands, @ for context")).toBeVisible();
 });
 
-test("right-click an agent row: Mission settings… opens the settings sheet", async ({ page }) => {
+test("right-click an agent row: Mission settings opens a page in the main panel", async ({ page }) => {
   await setup(page);
   await expandProject(page);
   await page.getByRole("button", { name: /Lido SRv3 report/ }).click({ button: "right" });
-  await page.getByRole("menuitem", { name: "Mission settings…" }).click();
-  const dialog = page.getByRole("dialog", { name: "Mission settings" });
-  await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole("heading", { name: "Budget" })).toBeVisible();
-  await dialog.getByRole("button", { name: "Close" }).first().click();
-  await expect(dialog).not.toBeVisible();
+  await page.getByRole("menuitem", { name: "Mission settings" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const settingsPage = page.getByRole("region", { name: "Mission settings" });
+  await expect(settingsPage).toBeVisible();
+  await expect(page.locator(".tb-title")).toContainText("Settings");
+  await expect(settingsPage.getByRole("heading", { name: "Budget" })).toBeVisible();
+  await expect(settingsPage.getByRole("heading", { name: "Bandwidth & pacing" })).toBeVisible();
+  await settingsPage.getByRole("button", { name: "Conversation" }).click();
+  await expect(settingsPage).not.toBeVisible();
 });
 
 test("finished agent rows offer the same copy, and it is never an execution id", async ({ page }) => {

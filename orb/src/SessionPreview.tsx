@@ -27,7 +27,7 @@ export interface SessionPreviewData {
   effort?: string;
   context?: number | null;
 }
-export function SessionPreview(p: { data: SessionPreviewData; goal?: boolean; plan?: PlanProgressData }) {
+export function SessionPreview(p: { data: SessionPreviewData; goal?: boolean; plan?: PlanProgressData; onOpenSettings?: () => void }) {
   const tipId = createUniqueId();
   const [open, setOpen] = createSignal(false);
   const [git, setGit] = createSignal<{
@@ -160,6 +160,21 @@ export function SessionPreview(p: { data: SessionPreviewData; goal?: boolean; pl
             <Show when={p.data.project}>
               <div class="session-preview-project">
                 Project · {p.data.project}
+              </div>
+            </Show>
+            <Show when={p.onOpenSettings && !p.data.local}>
+              <div class="popover-foot">
+                <button
+                  type="button"
+                  class="s-btn sm"
+                  onClick={() => {
+                    close();
+                    p.onOpenSettings?.();
+                  }}
+                >
+                  <Ic.SlidersIcon />
+                  <span>Mission settings</span>
+                </button>
               </div>
             </Show>
         </Popover>

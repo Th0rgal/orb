@@ -2434,6 +2434,13 @@ pub(in crate::api) async fn create_mission_inner(
                 )
                 .await;
                 manager.set_machine_cap_pool(machine, cap_pool).await;
+                let bw_pool = crate::api::mission_budget::bandwidth_pool_for(
+                    &control.mission_store,
+                    mission.id,
+                    &user.id,
+                )
+                .await;
+                manager.set_machine_bandwidth_pool(machine, bw_pool).await;
             }
             if let Some((ref mut rented, _)) = rented_managed {
                 if let Some(updated_machine) = manager.get(machine).await {

@@ -1,74 +1,119 @@
-import { For, Show, createSignal, onMount } from "solid-js";
-import { Dialog, DialogButton, Field } from "./Dialog";
+import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { getMissionResources, isConnected, type MissionResourcesResponse } from "./api";
 import { ErrorNotice } from "./ErrorNotice";
+import * as Ic from "./icons";
 import { MissionStatsSection } from "./MissionStatsSection";
-import { BreakdownTable, type Column } from "./components/stats";
+import { pollWhileVisible } from "./poll";
+import { SettingsCard, SettingsRow } from "./SettingsCard";
+import { BreakdownTable, Legend, OutcomeBar, type Column } from "./components/stats";
 import type { getMissionStats } from "./missionStats";
 import {
   MANAGED_PROVIDERS,
+  bandwidthLimitsSummary,
+  bandwidthModeLine,
+  computeRunwayForecast,
   exceedsGrant,
+  formatTokensPerMin,
   getMissionBudget,
   managedProviderLabel,
   modeLine,
   money,
+  normalizeBandwidthLimits,
   normalizeVmLimits,
+  optimisticBandwidthLimits,
   optimisticBudget,
   optimisticVmLimits,
   parseAmount,
+  parseBandwidthLimits,
   parseVmLimits,
   providerLimitsSummary,
+  putMissionBandwidthLimits,
   putMissionBudget,
   putMissionVmLimits,
-  usedFraction,
   vmLimitsModeLine,
+  type BandwidthLimits,
   type ChildBudget,
   type MissionBudget,
   type VmConcurrencyLimits,
 } from "./missionBudget";
 
+const BUDGET_LEGEND = [
+  { key: "client", label: "Spent" },
+  { key: "limited", label: "Reserved" },
+  { key: "timeout", label: "Sub-budgets" },
+  { key: "ok", label: "Remaining" },
+];
+
 /**
- * Per-mission settings sheet, opened from the sidebar's right-click menu
- * ("Mission settings…"). Holds:
- * - **Budget**: optional USD spending pool shared by the mission's subtree.
- * - **Machine limit**: optional total and/or per-provider VM concurrency
- *   override that bypasses the global concurrency cap for this subtree.
- * - **Stats**: model and subagent spend breakdowns.
+ * Full-page per-mission settings view (`ms:<missionId>`), opened from the
+ * sidebar right-click menu ("Mission settings") or the conversation titlebar.
  *
- * Changes apply optimistically and roll back with an inline error and Retry
- * when the server refuses them.
+ * Composed with `SettingsCard` / `SettingsRow` and topped by a compact Runway &
+ * Spend forecast chart that reacts live to draft budget and bandwidth edits:
+ * - **Runway forecast**: observed cumulative spend, reserved hold, cap line,
+ *   and projected exhaustion ETA with a link to `Resources & DAG`.
+ * - **Budget**: optional USD spending pool shared by the mission's subtree.
+ * - **Bandwidth & pacing**: optional inference (`tokens/min`) and managed
+ *   compute (`vCPU/min`, `$/h`) rate ceilings enforced via pace/delay smoothing.
+ * - **Machine concurrency**: optional total and/or per-provider VM concurrency
+ *   override that bypasses the global concurrency cap for this subtree.
+ * - **Subagent pools & Stats**: subtree pool breakdown and model/subagent spend.
  */
 export function MissionSettings(p: {
   missionId: string;
   title: string;
   /** Display name for another mission (children, the pool's owner). */
   titleOf?: (id: string) => string | undefined;
-  onClose: () => void;
+  onClose?: () => void;
+  onOpen?: (id: string) => void;
   /** Injected in tests and the gallery; default to the Core API. */
   load?: (id: string) => Promise<MissionBudget>;
+  loadResources?: (id: string) => Promise<MissionResourcesResponse | null>;
   save?: (id: string, budget: number | null) => Promise<MissionBudget>;
   saveVmLimits?: (id: string, limits: VmConcurrencyLimits | null) => Promise<MissionBudget>;
+  saveBandwidthLimits?: (id: string, limits: BandwidthLimits | null) => Promise<MissionBudget>;
   loadStats?: typeof getMissionStats;
 }) {
   const loadBudget = (id: string) => (p.load ?? getMissionBudget)(id);
+  const loadResourcesApi = (id: string) =>
+    p.loadResources
+      ? p.loadResources(id)
+      : isConnected()
+        ? getMissionResources(id).catch(() => null)
+        : Promise.resolve(null);
   const saveBudgetApi = (id: string, budget: number | null) => (p.save ?? putMissionBudget)(id, budget);
   const saveLimitsApi = (id: string, limits: VmConcurrencyLimits | null) =>
     (p.saveVmLimits ?? putMissionVmLimits)(id, limits);
+  const saveBandwidthApi = (id: string, limits: BandwidthLimits | null) =>
+    (p.saveBandwidthLimits ?? putMissionBandwidthLimits)(id, limits);
 
   const [view, setView] = createSignal<MissionBudget | null>(null);
+  const [resources, setResources] = createSignal<MissionResourcesResponse | null>(null);
   const [loadError, setLoadError] = createSignal<string | null>(null);
   const [saveError, setSaveError] = createSignal<string | null>(null);
   const [retry, setRetry] = createSignal<(() => void) | null>(null);
   const [limitSaveError, setLimitSaveError] = createSignal<string | null>(null);
   const [limitRetry, setLimitRetry] = createSignal<(() => void) | null>(null);
+  const [bwSaveError, setBwSaveError] = createSignal<string | null>(null);
+  const [bwRetry, setBwRetry] = createSignal<(() => void) | null>(null);
   const [busy, setBusy] = createSignal(false);
 
   const [draft, setDraft] = createSignal("");
+  const [budgetEdited, setBudgetEdited] = createSignal(false);
   const [fieldError, setFieldError] = createSignal<string | null>(null);
 
   const [maxDraft, setMaxDraft] = createSignal("");
   const [provDrafts, setProvDrafts] = createSignal<Record<string, string>>({});
+  const [vmEdited, setVmEdited] = createSignal(false);
   const [limitFieldError, setLimitFieldError] = createSignal<string | null>(null);
   const [providersOpen, setProvidersOpen] = createSignal(false);
+
+  const [bwTokensDraft, setBwTokensDraft] = createSignal("");
+  const [bwVcpuDraft, setBwVcpuDraft] = createSignal("");
+  const [bwUsdHDraft, setBwUsdHDraft] = createSignal("");
+  const [bwProtectRoot, setBwProtectRoot] = createSignal(true);
+  const [bwEdited, setBwEdited] = createSignal(false);
+  const [bwFieldError, setBwFieldError] = createSignal<string | null>(null);
 
   const syncLimitDrafts = (v: MissionBudget) => {
     const own = v.own_vm_limits;
@@ -85,21 +130,43 @@ export function MissionSettings(p: {
       }
     }
     setProvDrafts(nextProv);
+    setVmEdited(false);
     if (hasProv) setProvidersOpen(true);
   };
 
-  const load = async () => {
-    setLoadError(null);
+  const syncBandwidthDrafts = (v: MissionBudget) => {
+    const own = v.own_bandwidth_limits;
+    setBwTokensDraft(own?.tokens_per_min != null ? String(own.tokens_per_min) : "");
+    setBwVcpuDraft(own?.compute_vcpu_per_min != null ? String(own.compute_vcpu_per_min) : "");
+    setBwUsdHDraft(own?.compute_usd_per_hour != null ? String(own.compute_usd_per_hour) : "");
+    setBwProtectRoot(own?.protect_root ?? true);
+    setBwEdited(false);
+  };
+
+  const load = async (background = false) => {
+    if (!background) setLoadError(null);
     try {
-      const v = await loadBudget(p.missionId);
+      const [v, res] = await Promise.all([
+        loadBudget(p.missionId),
+        loadResourcesApi(p.missionId).catch(() => null),
+      ]);
       setView(v);
-      setDraft(v.own_budget_usd != null ? String(v.own_budget_usd) : "");
-      syncLimitDrafts(v);
+      if (res) setResources(res);
+      if (!budgetEdited()) setDraft(v.own_budget_usd != null ? String(v.own_budget_usd) : "");
+      if (!vmEdited()) syncLimitDrafts(v);
+      if (!bwEdited()) syncBandwidthDrafts(v);
     } catch (e) {
-      setLoadError(e instanceof Error ? e.message : String(e));
+      if (!background) setLoadError(e instanceof Error ? e.message : String(e));
     }
   };
-  onMount(() => void load());
+
+  onMount(() => {
+    void load(false);
+    if (isConnected() && !p.load) {
+      const stop = pollWhileVisible(() => void load(true), 15_000);
+      onCleanup(stop);
+    }
+  });
 
   /** Optimistic budget write with rollback. */
   const commit = async (amount: number | null) => {
@@ -108,14 +175,19 @@ export function MissionSettings(p: {
     setBusy(true);
     setSaveError(null);
     setRetry(null);
-    setView(optimisticBudget(before, amount));
+    const opt = optimisticBudget(before, amount);
+    setView(opt);
+    setDraft(opt.own_budget_usd != null ? String(opt.own_budget_usd) : "");
+    setBudgetEdited(false);
     try {
       const next = await saveBudgetApi(p.missionId, amount);
       setView(next);
       setDraft(next.own_budget_usd != null ? String(next.own_budget_usd) : "");
+      setBudgetEdited(false);
     } catch (e) {
       setView(before);
-      setDraft(before.own_budget_usd != null ? String(before.own_budget_usd) : draft());
+      setDraft(before.own_budget_usd != null ? String(before.own_budget_usd) : "");
+      setBudgetEdited(false);
       setSaveError(e instanceof Error ? e.message : String(e));
       setRetry(() => () => void commit(amount));
     } finally {
@@ -130,7 +202,9 @@ export function MissionSettings(p: {
     setBusy(true);
     setLimitSaveError(null);
     setLimitRetry(null);
-    setView(optimisticVmLimits(before, limits));
+    const opt = optimisticVmLimits(before, limits);
+    setView(opt);
+    syncLimitDrafts(opt);
     try {
       const next = await saveLimitsApi(p.missionId, limits);
       setView(next);
@@ -145,8 +219,33 @@ export function MissionSettings(p: {
     }
   };
 
+  /** Optimistic bandwidth & pacing write with rollback. */
+  const commitBandwidth = async (limits: BandwidthLimits | null) => {
+    const before = view();
+    if (!before || busy()) return;
+    setBusy(true);
+    setBwSaveError(null);
+    setBwRetry(null);
+    const opt = optimisticBandwidthLimits(before, limits);
+    setView(opt);
+    syncBandwidthDrafts(opt);
+    try {
+      const next = await saveBandwidthApi(p.missionId, limits);
+      setView(next);
+      syncBandwidthDrafts(next);
+    } catch (e) {
+      setView(before);
+      syncBandwidthDrafts(before);
+      setBwSaveError(e instanceof Error ? e.message : String(e));
+      setBwRetry(() => () => void commitBandwidth(limits));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const enabled = () => view()?.mode === "own";
   const vmLimitsEnabled = () => view()?.vm_limits_mode === "own";
+  const bandwidthEnabled = () => view()?.bandwidth_mode === "own";
 
   const budgetDirty = () => {
     const v = view();
@@ -173,7 +272,19 @@ export function MissionSettings(p: {
     return currentDraftNormalized() !== normalizeVmLimits(v.own_vm_limits);
   };
 
-  const anyDirty = () => budgetDirty() || vmLimitsDirty();
+  const currentBandwidthNormalized = () => {
+    const parsed = parseBandwidthLimits(bwTokensDraft(), bwVcpuDraft(), bwUsdHDraft(), bwProtectRoot());
+    if ("error" in parsed) {
+      return `draft:${bwTokensDraft().trim()}|${bwVcpuDraft().trim()}|${bwUsdHDraft().trim()}|${bwProtectRoot()}`;
+    }
+    return normalizeBandwidthLimits(parsed.value);
+  };
+
+  const bandwidthDirty = () => {
+    const v = view();
+    if (!v || !bandwidthEnabled()) return false;
+    return currentBandwidthNormalized() !== normalizeBandwidthLimits(v.own_bandwidth_limits);
+  };
 
   const save = () => {
     const v = view();
@@ -195,16 +306,19 @@ export function MissionSettings(p: {
     void commitLimits(parsed.value);
   };
 
-  const saveAll = async () => {
-    if (budgetDirty()) save();
-    else if (vmLimitsDirty()) saveLimits();
+  const saveBandwidth = () => {
+    const v = view();
+    if (!v) return;
+    const parsed = parseBandwidthLimits(bwTokensDraft(), bwVcpuDraft(), bwUsdHDraft(), bwProtectRoot(), v);
+    if ("error" in parsed) return setBwFieldError(parsed.error);
+    setBwFieldError(null);
+    void commitBandwidth(parsed.value);
   };
 
   const toggle = () => {
     const v = view();
     if (!v || busy()) return;
     if (enabled()) return void commit(null);
-    // Default amount: what the parent can grant, else $5.
     const initial = v.max_grant_usd != null ? Math.min(5, Math.floor(v.max_grant_usd * 100) / 100) : 5;
     if (initial <= 0) return setFieldError("The parent pool has nothing left to grant");
     setFieldError(null);
@@ -226,6 +340,26 @@ export function MissionSettings(p: {
     void commitLimits({ max_concurrent: defaultMax, provider_max_concurrent: {} });
   };
 
+  const toggleBandwidth = () => {
+    const v = view();
+    if (!v || busy()) return;
+    if (bandwidthEnabled()) return void commitBandwidth(null);
+    const eff = v.effective_bandwidth;
+    const ancTpm = eff?.ancestor_tokens_per_min ?? null;
+    const defaultTpm = ancTpm != null ? Math.min(120_000, ancTpm) : 120_000;
+    setBwFieldError(null);
+    setBwTokensDraft(String(defaultTpm));
+    setBwVcpuDraft("");
+    setBwUsdHDraft("");
+    setBwProtectRoot(true);
+    void commitBandwidth({
+      tokens_per_min: defaultTpm,
+      compute_vcpu_per_min: null,
+      compute_usd_per_hour: null,
+      protect_root: true,
+    });
+  };
+
   const hasAnyProviderDraft = () =>
     MANAGED_PROVIDERS.some(prov => (provDrafts()[prov.id] ?? "").trim() !== "");
 
@@ -239,13 +373,26 @@ export function MissionSettings(p: {
     return parts.join(" · ");
   };
 
+  const forecast = createMemo(() =>
+    computeRunwayForecast({
+      budget: view(),
+      resources: resources(),
+      draftBudgetUsd: enabled() ? draft() : undefined,
+      draftComputeUsdPerH: bandwidthEnabled() ? bwUsdHDraft() : undefined,
+      draftComputeVcpu: bandwidthEnabled() ? bwVcpuDraft() : undefined,
+      bandwidthEnabled: bandwidthEnabled() || view()?.effective_bandwidth?.source === "mission",
+      budgetEnabled: enabled() || view()?.mode === "pooled",
+    }),
+  );
+
   const childTitle = (id: string) => p.titleOf?.(id) ?? `Agent ${id.slice(0, 8)}`;
 
   const showSubagentPoolTable = (v: MissionBudget) =>
-    v.children.length > 0 && (
+    (v.children?.length ?? 0) > 0 && (
       v.mode !== "none" ||
       (v.vm_limits_mode != null && v.vm_limits_mode !== "global") ||
-      v.children.some(c => c.mode === "sub_budget" || c.has_vm_limits)
+      (v.bandwidth_mode != null && v.bandwidth_mode !== "none") ||
+      v.children.some(c => c.mode === "sub_budget" || c.has_vm_limits || c.has_bandwidth_limits)
     );
 
   const subagentColumns: Column<ChildBudget>[] = [
@@ -263,6 +410,9 @@ export function MissionSettings(p: {
         <Show when={c.has_vm_limits}>
           {c.vm_max_concurrent != null ? ` · ≤${c.vm_max_concurrent} VMs` : " · own cap"}
         </Show>
+        <Show when={c.has_bandwidth_limits}>
+          {c.tokens_per_min != null ? ` · ${formatTokensPerMin(c.tokens_per_min)}` : " · paced"}
+        </Show>
       </span>,
     },
     {
@@ -273,182 +423,552 @@ export function MissionSettings(p: {
     },
   ];
 
-  return <Dialog title="Mission settings" description={p.title} size="standard" class="mission-settings" busy={false} dirty={anyDirty()} onClose={p.onClose}
-    footer={close => <>
-      <DialogButton onClick={close}>Close</DialogButton>
-      <Show when={enabled() && !vmLimitsDirty()}>
-        <DialogButton variant="primary" disabled={busy() || !budgetDirty()} onClick={save}>{busy() ? "Saving…" : "Save budget"}</DialogButton>
-      </Show>
-      <Show when={vmLimitsEnabled() && (vmLimitsDirty() || !enabled())}>
-        <DialogButton variant="primary" disabled={busy() || !anyDirty()} onClick={budgetDirty() && vmLimitsDirty() ? saveAll : saveLimits}>
-          {busy() ? "Saving…" : (budgetDirty() && vmLimitsDirty() ? "Save changes" : "Save limit")}
-        </DialogButton>
-      </Show>
-    </>}>
-    <section class="ms-section" aria-labelledby="ms-budget-title">
-      <div class="ms-head">
-        <div>
-          <h4 id="ms-budget-title">Budget</h4>
-          <p class="ms-hint">Caps what this agent and its subagents spend on managed machines.</p>
-        </div>
-        <Show when={view()} fallback={<span class="toggle" aria-hidden="true" />}>
-          <button class={`toggle ${enabled() ? "on" : ""}`} role="switch" aria-checked={enabled()} aria-label="Spending budget" disabled={busy()} onClick={toggle} />
-        </Show>
-      </div>
-      <Show when={loadError()}>
-        <ErrorNotice error={loadError()!} title="Couldn’t load mission settings"><DialogButton onClick={() => void load()}>Retry</DialogButton></ErrorNotice>
-      </Show>
-      <Show when={view()} fallback={<Show when={!loadError()}><div class="ms-skeleton" aria-hidden="true"><div class="sk-bar" style={{ width: "70%", height: "16px" }} /><div class="sk-bar" style={{ width: "100%", height: "8px" }} /><div class="sk-bar" style={{ width: "100%", height: "44px" }} /></div></Show>}>
-        {v => <>
-          <p class="ms-mode" data-mode={v().mode}>{modeLine(v(), v().pool_id ? p.titleOf?.(v().pool_id!) : undefined)}</p>
-          <Show when={enabled()}>
-            <form onSubmit={e => { e.preventDefault(); save(); }}>
-              <Field label="Amount (USD)" description={v().max_grant_usd != null ? `Up to ${money(v().max_grant_usd!)} from the parent pool.` : "Includes spend of every subagent without its own sub-budget."} error={fieldError()}>
-                <input class="s-input" inputmode="decimal" value={draft()} disabled={busy()} onInput={e => { setDraft(e.currentTarget.value); setFieldError(null); }} />
-              </Field>
-            </form>
-          </Show>
-          <Show when={!enabled() && fieldError()}><p class="field-error" role="alert">{fieldError()}</p></Show>
-          <Show when={saveError()}>
-            <ErrorNotice error={saveError()!} title="Budget not saved" onDismiss={() => setSaveError(null)}>
-              <Show when={retry()}>{r => <DialogButton onClick={() => r()()}>Retry</DialogButton>}</Show>
-            </ErrorNotice>
-          </Show>
-          <Show when={v().pool}>
-            {pool => <div class="ms-usage">
-              <div class="ms-bar" role="meter" aria-label="Budget used" aria-valuemin={0} aria-valuemax={1} aria-valuenow={usedFraction(pool())}>
-                <span style={{ width: `${usedFraction(pool()) * 100}%` }} />
-              </div>
-              <dl class="ms-stats">
-                <div><dt>Spent</dt><dd>{money(pool().spent_usd)}</dd></div>
-                <div><dt>Reserved</dt><dd>{money(pool().reserved_usd)}</dd></div>
-                <div><dt>Sub-budgets</dt><dd>{money(pool().carved_usd)}</dd></div>
-                <div><dt>Remaining</dt><dd data-low={pool().available_usd < pool().budget_usd * 0.1 ? "" : undefined}>{money(Math.max(0, pool().available_usd))} of {money(pool().budget_usd)}</dd></div>
-              </dl>
-              <p class="ms-hint">Reserved holds up to 60 minutes of each running machine; machines extend in 30 minute steps while busy, within the budget.</p>
-            </div>}
-          </Show>
-        </>}
-      </Show>
-    </section>
+  const handleBack = () => {
+    if (p.onOpen) p.onOpen(`m:${p.missionId}`);
+    else p.onClose?.();
+  };
 
-    <Show when={view()}>
-      {v => <>
-        <section class="ms-section" aria-labelledby="ms-vmlimit-title">
-          <div class="ms-head">
-            <div>
-              <h4 id="ms-vmlimit-title">Machine limit</h4>
-              <p class="ms-hint">Overrides the global concurrent VM cap for this agent and its subagents.</p>
-            </div>
-            <button class={`toggle ${vmLimitsEnabled() ? "on" : ""}`} role="switch" aria-checked={vmLimitsEnabled()} aria-label="Machine limit" disabled={busy()} onClick={toggleVmLimits} />
+  return (
+    <div class="scroll">
+      <div class="col ps-page ms-page mission-settings" role="region" aria-label="Mission settings">
+        <div class="page-head ms-page-head">
+          <div class="ms-page-title">
+            <h2>{p.title}</h2>
+            <p class="s-lead">Mission settings</p>
           </div>
-          <div class="ms-mode-row">
-            <p class="ms-mode" data-mode={v().vm_limits_mode ?? "global"}>
-              {vmLimitsModeLine(v(), v().vm_limits_pool_id ? p.titleOf?.(v().vm_limits_pool_id!) : undefined)}
-            </p>
-            <Show when={v().effective_vm_limits?.source === "mission"}>
-              {(() => {
-                const eff = () => v().effective_vm_limits!;
-                return <div class="ms-cap-pills">
-                  <Show when={eff().max_concurrent != null}>
-                    <span class="st-pill" data-tone={eff().active >= eff().max_concurrent! ? "warning" : undefined}>
-                      <span>{eff().active} of {eff().max_concurrent} running</span>
-                    </span>
-                  </Show>
-                  <For each={eff().provider_limits}>{pl =>
-                    <span class="st-pill" data-tone={pl.active >= pl.max_concurrent ? "warning" : undefined}>
-                      <span>{managedProviderLabel(pl.provider)}: {pl.max_concurrent === 0 ? "disabled" : `${pl.active} of ${pl.max_concurrent}`}</span>
-                    </span>
-                  }</For>
-                </div>;
-              })()}
+          <div class="ms-page-actions">
+            <Show when={p.onOpen}>
+              <button type="button" class="s-btn" onClick={() => p.onOpen!(`rm:${p.missionId}`)}>
+                <Ic.ResourcesIcon />
+                <span>Resources &amp; DAG</span>
+              </button>
+            </Show>
+            <Show when={p.onOpen || p.onClose}>
+              <button type="button" class="s-btn" onClick={handleBack}>
+                <Ic.ArrowLeft />
+                <span>Conversation</span>
+              </button>
             </Show>
           </div>
-          <Show when={vmLimitsEnabled()}>
-            <form class="ms-limit-form" onSubmit={e => { e.preventDefault(); saveLimits(); }}>
-              <Field
-                label="Max concurrent machines"
-                description={v().effective_vm_limits?.ancestor_max_concurrent != null
-                  ? `Up to ${v().effective_vm_limits!.ancestor_max_concurrent} within the parent pool.`
-                  : "Across all providers. Leave blank to override specific providers only."}
-                error={limitFieldError()}
-              >
-                <input
-                  class="s-input"
-                  inputmode="numeric"
-                  placeholder={hasAnyProviderDraft() ? "Any (use provider limits)" : "4"}
-                  value={maxDraft()}
-                  disabled={busy()}
-                  onInput={e => { setMaxDraft(e.currentTarget.value); setLimitFieldError(null); }}
-                />
-              </Field>
-              <div class="ms-disclosure-wrap">
-                <button
-                  type="button"
-                  class="ms-disclosure"
-                  aria-expanded={providersOpen()}
-                  onClick={() => setProvidersOpen(o => !o)}
-                >
-                  <span class="ms-disclosure-left">
-                    <span class="ms-disclosure-chevron" aria-hidden="true">{providersOpen() ? "▾" : "▸"}</span>
-                    <span>Per-provider limits</span>
-                  </span>
-                  <span class="ms-disclosure-meta">{draftProviderSummary() || providerLimitsSummary(v().own_vm_limits) || "Optional"}</span>
-                </button>
-                <Show when={providersOpen()}>
-                  <div class="ms-provider-body">
-                    <div class="ms-provider-grid">
-                      <For each={MANAGED_PROVIDERS}>{prov =>
-                        <label class="ms-provider-field">
-                          <span class="ms-provider-label">{prov.label}</span>
-                          <input
-                            class="s-input"
-                            inputmode="numeric"
-                            placeholder="Any"
-                            aria-label={`${prov.label} limit`}
-                            value={provDrafts()[prov.id] ?? ""}
-                            disabled={busy()}
-                            onInput={e => {
-                              const val = e.currentTarget.value;
-                              setProvDrafts(prev => ({ ...prev, [prov.id]: val }));
-                              setLimitFieldError(null);
-                            }}
-                          />
-                        </label>
-                      }</For>
+        </div>
+
+        <Show when={loadError()}>
+          <ErrorNotice error={loadError()!} title="Couldn’t load mission settings">
+            <button type="button" class="s-btn sm" onClick={() => void load(false)}>Retry</button>
+          </ErrorNotice>
+        </Show>
+
+        <Show
+          when={view()}
+          fallback={
+            <Show when={!loadError()}>
+              <div class="ms-page-skeleton" aria-hidden="true">
+                <div class="s-card ms-forecast-card ms-forecast-sk">
+                  <div class="sk-bar" style={{ width: "42%", height: "18px" }} />
+                  <div class="sk-bar" style={{ width: "68%", height: "13px" }} />
+                  <div class="sk-bar" style={{ width: "100%", height: "72px" }} />
+                </div>
+                <div class="s-card ms-card-sk"><div class="sk-bar" style={{ width: "55%", height: "16px" }} /><div class="sk-bar" style={{ width: "100%", height: "38px" }} /></div>
+                <div class="s-card ms-card-sk"><div class="sk-bar" style={{ width: "48%", height: "16px" }} /><div class="sk-bar" style={{ width: "100%", height: "38px" }} /></div>
+              </div>
+            </Show>
+          }
+        >
+          {v => (
+            <>
+              <section class="s-sec ms-forecast-sec" aria-label="Runway forecast">
+                <div class="s-card ms-forecast-card" data-testid="mission-forecast-card">
+                  <div class="ms-forecast-top">
+                    <div class="ms-forecast-copy">
+                      <div class="ms-forecast-headline" data-tone={forecast().tone}>
+                        {forecast().headline}
+                      </div>
+                      <div class="ms-forecast-sub">{forecast().subline}</div>
                     </div>
-                    <p class="ms-hint">Leave blank to share the mission limit (or the global cap if max concurrent is blank). Enter 0 to block a provider.</p>
+                    <div class="ms-forecast-pills">
+                      <Show when={forecast().pacingActive}>
+                        <span class="st-pill" data-tone="warning">
+                          <span>Pacing active</span>
+                        </span>
+                      </Show>
+                      <Show when={forecast().currentTokensPerMin > 0}>
+                        <span class="st-pill">
+                          <span>{formatTokensPerMin(forecast().currentTokensPerMin)}</span>
+                        </span>
+                      </Show>
+                      <Show when={forecast().currentVcpuPerMin > 0}>
+                        <span class="st-pill">
+                          <span>{forecast().currentVcpuPerMin} vCPU</span>
+                        </span>
+                      </Show>
+                    </div>
+                  </div>
+                  <svg
+                    class="ms-forecast-svg"
+                    viewBox={`0 0 ${forecast().chart.width} ${forecast().chart.height}`}
+                    preserveAspectRatio="none"
+                    role="img"
+                    aria-label={`Runway forecast: ${forecast().headline}`}
+                  >
+                    <Show when={forecast().chart.capY != null}>
+                      <line
+                        class="ms-fc-cap"
+                        x1={forecast().chart.padLeft}
+                        x2={forecast().chart.width - forecast().chart.padRight}
+                        y1={forecast().chart.capY!}
+                        y2={forecast().chart.capY!}
+                      />
+                    </Show>
+                    <path class="ms-fc-area" d={forecast().chart.observedAreaPath} />
+                    <path class="ms-fc-obs" d={forecast().chart.observedLinePath} />
+                    <line
+                      class="ms-fc-now"
+                      x1={forecast().chart.nowX}
+                      x2={forecast().chart.nowX}
+                      y1={forecast().chart.padTop}
+                      y2={forecast().chart.height - forecast().chart.padBottom}
+                    />
+                    <Show when={forecast().reservedUsd > 0.001}>
+                      <line
+                        class="ms-fc-reserved"
+                        x1={forecast().chart.nowX}
+                        x2={forecast().chart.nowX}
+                        y1={forecast().chart.nowY}
+                        y2={forecast().chart.reservedTopY}
+                      />
+                    </Show>
+                    <Show when={forecast().chart.unshapedLinePath}>
+                      {path => <path class="ms-fc-unshaped" d={path()} />}
+                    </Show>
+                    <path class="ms-fc-proj" data-tone={forecast().tone} d={forecast().chart.projectedLinePath} />
+                    <circle class="ms-fc-dot" cx={forecast().chart.nowX} cy={forecast().chart.reservedTopY} r="3" />
+                    <Show when={forecast().chart.exhaustionX != null && forecast().chart.capY != null}>
+                      <circle
+                        class="ms-fc-exhaust-dot"
+                        data-tone={forecast().tone}
+                        cx={forecast().chart.exhaustionX!}
+                        cy={forecast().chart.capY!}
+                        r="3.2"
+                      />
+                    </Show>
+                  </svg>
+                  <div class="ms-forecast-axis" aria-hidden="true">
+                    <span>Start</span>
+                    <span>Now</span>
+                    <span>{forecast().etaSecs != null ? "Projected runway" : "Projected burn"}</span>
+                  </div>
+                </div>
+              </section>
+
+              <SettingsCard title="Budget">
+                <SettingsRow
+                  title="Spending budget"
+                  desc={modeLine(v(), v().pool_id ? p.titleOf?.(v().pool_id!) : undefined)}
+                >
+                  <button
+                    type="button"
+                    class={`toggle ${enabled() ? "on" : ""}`}
+                    role="switch"
+                    aria-checked={enabled()}
+                    aria-label="Spending budget"
+                    disabled={busy()}
+                    onClick={toggle}
+                  />
+                </SettingsRow>
+                <Show when={enabled()}>
+                  <SettingsRow
+                    title={<label for="ms-budget-amount">Amount (USD)</label>}
+                    desc={
+                      v().max_grant_usd != null
+                        ? `Up to ${money(v().max_grant_usd!)} from the parent pool.`
+                        : "Includes spend of every subagent without its own sub-budget."
+                    }
+                  >
+                    <form
+                      class="ms-inline-ctrl"
+                      onSubmit={e => {
+                        e.preventDefault();
+                        save();
+                      }}
+                    >
+                      <input
+                        id="ms-budget-amount"
+                        aria-label="Amount (USD)"
+                        class="s-input ms-num-input"
+                        inputmode="decimal"
+                        aria-invalid={fieldError() ? "true" : undefined}
+                        value={draft()}
+                        disabled={busy()}
+                        onInput={e => {
+                          setBudgetEdited(true);
+                          setDraft(e.currentTarget.value);
+                          setFieldError(null);
+                        }}
+                      />
+                      <button type="button" class="s-btn primary" disabled={busy() || !budgetDirty()} onClick={save}>
+                        {busy() && budgetDirty() ? "Saving…" : "Save budget"}
+                      </button>
+                    </form>
+                  </SettingsRow>
+                </Show>
+                <Show when={fieldError()}>
+                  <div class="ms-card-notice">
+                    <p class="field-error" role="alert">{fieldError()}</p>
                   </div>
                 </Show>
-              </div>
-            </form>
-          </Show>
-          <Show when={!vmLimitsEnabled() && limitFieldError()}><p class="field-error" role="alert">{limitFieldError()}</p></Show>
-          <Show when={limitSaveError()}>
-            <ErrorNotice error={limitSaveError()!} title="Machine limit not saved" onDismiss={() => setLimitSaveError(null)}>
-              <Show when={limitRetry()}>{r => <DialogButton onClick={() => r()()}>Retry</DialogButton>}</Show>
-            </ErrorNotice>
-          </Show>
-        </section>
+                <Show when={saveError()}>
+                  <div class="ms-card-notice">
+                    <ErrorNotice error={saveError()!} title="Budget not saved" onDismiss={() => setSaveError(null)}>
+                      <Show when={retry()}>{r => <button type="button" class="s-btn sm" onClick={() => r()()}>Retry</button>}</Show>
+                    </ErrorNotice>
+                  </div>
+                </Show>
+                <Show when={v().pool}>
+                  {pool => (
+                    <div class="ms-pool-block">
+                      <OutcomeBar
+                        label="Budget allocation"
+                        format={money}
+                        segments={[
+                          { key: "client", label: "Spent", value: Math.max(0, pool().spent_usd) },
+                          { key: "limited", label: "Reserved", value: Math.max(0, pool().reserved_usd) },
+                          { key: "timeout", label: "Sub-budgets", value: Math.max(0, pool().carved_usd) },
+                          { key: "ok", label: "Remaining", value: Math.max(0, pool().available_usd) },
+                        ]}
+                      />
+                      <Legend items={BUDGET_LEGEND} />
+                      <dl class="ms-stats">
+                        <div><dt>Spent</dt><dd>{money(pool().spent_usd)}</dd></div>
+                        <div><dt>Reserved</dt><dd>{money(pool().reserved_usd)}</dd></div>
+                        <div><dt>Sub-budgets</dt><dd>{money(pool().carved_usd)}</dd></div>
+                        <div>
+                          <dt>Remaining</dt>
+                          <dd data-low={pool().available_usd < pool().budget_usd * 0.1 ? "" : undefined}>
+                            {money(Math.max(0, pool().available_usd))} of {money(pool().budget_usd)}
+                          </dd>
+                        </div>
+                      </dl>
+                      <p class="ms-hint">
+                        Reserved holds up to 60 minutes of each running machine; machines extend in 30 minute steps while busy, within the budget.
+                      </p>
+                    </div>
+                  )}
+                </Show>
+              </SettingsCard>
 
-        <Show when={showSubagentPoolTable(v())}>
-          <section class="ms-section" aria-labelledby="ms-subagents-title">
-            <h4 id="ms-subagents-title">Subagent pools</h4>
-            <BreakdownTable
-              label="Subagent budgets"
-              columns={subagentColumns}
-              rows={v().children}
-              rowKey={c => c.mission_id}
-              limit={5}
-              collapse={c => c.mode === "pooled" && !c.has_vm_limits && c.spent_usd === 0 && c.reserved_usd === 0}
-              collapsedLabel="pooled with $0 spend"
-              maxHeight="200px"
-            />
-          </section>
+              <SettingsCard title="Bandwidth &amp; pacing">
+                <SettingsRow
+                  title="Bandwidth limit"
+                  desc={
+                    <div class="ms-mode-row">
+                      <span>{bandwidthModeLine(v(), v().bandwidth_pool_id ? p.titleOf?.(v().bandwidth_pool_id!) : undefined)}</span>
+                      <Show when={v().effective_bandwidth?.source === "mission"}>
+                        {(() => {
+                          const eff = () => v().effective_bandwidth!;
+                          const summary = () => bandwidthLimitsSummary({
+                            tokens_per_min: eff().tokens_per_min,
+                            compute_vcpu_per_min: eff().compute_vcpu_per_min,
+                            compute_usd_per_hour: eff().compute_usd_per_hour,
+                          });
+                          return (
+                            <div class="ms-cap-pills">
+                              <Show when={summary()}>
+                                <span class="st-pill" data-tone={eff().pacing_active ? "warning" : undefined}>
+                                  <span>{summary()}</span>
+                                </span>
+                              </Show>
+                              <Show when={eff().pacing_active}>
+                                <span class="st-pill" data-tone="warning">
+                                  <span>Pacing (+{Math.max(1, Math.round(eff().paced_delay_ms / 100) / 10)}s)</span>
+                                </span>
+                              </Show>
+                            </div>
+                          );
+                        })()}
+                      </Show>
+                    </div>
+                  }
+                >
+                  <button
+                    type="button"
+                    class={`toggle ${bandwidthEnabled() ? "on" : ""}`}
+                    role="switch"
+                    aria-checked={bandwidthEnabled()}
+                    aria-label="Bandwidth limit"
+                    disabled={busy()}
+                    onClick={toggleBandwidth}
+                  />
+                </SettingsRow>
+                <Show when={bandwidthEnabled()}>
+                  <SettingsRow
+                    title={<label for="ms-bw-tpm">Tokens per minute</label>}
+                    desc={
+                      v().effective_bandwidth?.ancestor_tokens_per_min != null
+                        ? `Up to ${formatTokensPerMin(v().effective_bandwidth!.ancestor_tokens_per_min!)} within the parent pool. Paces bursts smoothly.`
+                        : "Inference throughput ceiling (e.g. 120k or 1.5M). Bursts pace smoothly instead of failing."
+                    }
+                  >
+                    <input
+                      id="ms-bw-tpm"
+                      aria-label="Tokens per minute"
+                      class="s-input ms-num-input"
+                      placeholder="120000"
+                      value={bwTokensDraft()}
+                      disabled={busy()}
+                      onInput={e => {
+                        setBwEdited(true);
+                        setBwTokensDraft(e.currentTarget.value);
+                        setBwFieldError(null);
+                      }}
+                      onKeyDown={e => e.key === "Enter" && saveBandwidth()}
+                    />
+                  </SettingsRow>
+                  <SettingsRow
+                    title={<label for="ms-bw-vcpu">Compute per minute (vCPU)</label>}
+                    desc={
+                      v().effective_bandwidth?.ancestor_compute_vcpu_per_min != null
+                        ? `Up to ${v().effective_bandwidth!.ancestor_compute_vcpu_per_min} vCPU/min within the parent pool.`
+                        : "Active managed-machine vCPU/min ceiling; new spawns queue briefly when saturated."
+                    }
+                  >
+                    <input
+                      id="ms-bw-vcpu"
+                      aria-label="Compute per minute (vCPU)"
+                      class="s-input ms-num-input"
+                      inputmode="numeric"
+                      placeholder="Optional"
+                      value={bwVcpuDraft()}
+                      disabled={busy()}
+                      onInput={e => {
+                        setBwEdited(true);
+                        setBwVcpuDraft(e.currentTarget.value);
+                        setBwFieldError(null);
+                      }}
+                      onKeyDown={e => e.key === "Enter" && saveBandwidth()}
+                    />
+                  </SettingsRow>
+                  <SettingsRow
+                    title={<label for="ms-bw-usdh">Compute burn ceiling ($/h)</label>}
+                    desc={
+                      v().effective_bandwidth?.ancestor_compute_usd_per_hour != null
+                        ? `Up to ${money(v().effective_bandwidth!.ancestor_compute_usd_per_hour!)}/h within the parent pool.`
+                        : "Caps hourly managed-VM spend rate to stretch budget runway."
+                    }
+                  >
+                    <input
+                      id="ms-bw-usdh"
+                      aria-label="Compute burn ceiling ($/h)"
+                      class="s-input ms-num-input"
+                      inputmode="decimal"
+                      placeholder="Optional"
+                      value={bwUsdHDraft()}
+                      disabled={busy()}
+                      onInput={e => {
+                        setBwEdited(true);
+                        setBwUsdHDraft(e.currentTarget.value);
+                        setBwFieldError(null);
+                      }}
+                      onKeyDown={e => e.key === "Enter" && saveBandwidth()}
+                    />
+                  </SettingsRow>
+                  <SettingsRow
+                    title="Prioritize root agent"
+                    desc="Keep this agent unthrottled while pooled subagents absorb pacing delays first."
+                  >
+                    <button
+                      type="button"
+                      class={`toggle ${bwProtectRoot() ? "on" : ""}`}
+                      role="switch"
+                      aria-checked={bwProtectRoot()}
+                      aria-label="Prioritize root agent"
+                      disabled={busy()}
+                      onClick={() => {
+                        setBwEdited(true);
+                        setBwProtectRoot(x => !x);
+                      }}
+                    />
+                  </SettingsRow>
+                  <div class="ms-card-actions">
+                    <Show when={bwFieldError()}>
+                      <p class="field-error" role="alert">{bwFieldError()}</p>
+                    </Show>
+                    <button type="button" class="s-btn primary" disabled={busy() || !bandwidthDirty()} onClick={saveBandwidth}>
+                      {busy() && bandwidthDirty() ? "Saving…" : "Save bandwidth"}
+                    </button>
+                  </div>
+                </Show>
+                <Show when={!bandwidthEnabled() && bwFieldError()}>
+                  <div class="ms-card-notice">
+                    <p class="field-error" role="alert">{bwFieldError()}</p>
+                  </div>
+                </Show>
+                <Show when={bwSaveError()}>
+                  <div class="ms-card-notice">
+                    <ErrorNotice error={bwSaveError()!} title="Bandwidth limit not saved" onDismiss={() => setBwSaveError(null)}>
+                      <Show when={bwRetry()}>{r => <button type="button" class="s-btn sm" onClick={() => r()()}>Retry</button>}</Show>
+                    </ErrorNotice>
+                  </div>
+                </Show>
+              </SettingsCard>
+
+              <SettingsCard title="Machine concurrency">
+                <SettingsRow
+                  title="Machine limit"
+                  desc={
+                    <div class="ms-mode-row">
+                      <span>{vmLimitsModeLine(v(), v().vm_limits_pool_id ? p.titleOf?.(v().vm_limits_pool_id!) : undefined)}</span>
+                      <Show when={v().effective_vm_limits?.source === "mission"}>
+                        {(() => {
+                          const eff = () => v().effective_vm_limits!;
+                          return (
+                            <div class="ms-cap-pills">
+                              <Show when={eff().max_concurrent != null}>
+                                <span class="st-pill" data-tone={eff().active >= eff().max_concurrent! ? "warning" : undefined}>
+                                  <span>{eff().active} of {eff().max_concurrent} running</span>
+                                </span>
+                              </Show>
+                              <For each={eff().provider_limits}>
+                                {pl => (
+                                  <span class="st-pill" data-tone={pl.active >= pl.max_concurrent ? "warning" : undefined}>
+                                    <span>{managedProviderLabel(pl.provider)}: {pl.max_concurrent === 0 ? "disabled" : `${pl.active} of ${pl.max_concurrent}`}</span>
+                                  </span>
+                                )}
+                              </For>
+                            </div>
+                          );
+                        })()}
+                      </Show>
+                    </div>
+                  }
+                >
+                  <button
+                    type="button"
+                    class={`toggle ${vmLimitsEnabled() ? "on" : ""}`}
+                    role="switch"
+                    aria-checked={vmLimitsEnabled()}
+                    aria-label="Machine limit"
+                    disabled={busy()}
+                    onClick={toggleVmLimits}
+                  />
+                </SettingsRow>
+                <Show when={vmLimitsEnabled()}>
+                  <SettingsRow
+                    title={<label for="ms-vm-max">Max concurrent machines</label>}
+                    desc={
+                      v().effective_vm_limits?.ancestor_max_concurrent != null
+                        ? `Up to ${v().effective_vm_limits!.ancestor_max_concurrent} within the parent pool.`
+                        : "Across all providers. Leave blank to override specific providers only."
+                    }
+                  >
+                    <form
+                      class="ms-inline-ctrl"
+                      onSubmit={e => {
+                        e.preventDefault();
+                        saveLimits();
+                      }}
+                    >
+                      <input
+                        id="ms-vm-max"
+                        aria-label="Max concurrent machines"
+                        class="s-input ms-num-input"
+                        inputmode="numeric"
+                        placeholder={hasAnyProviderDraft() ? "Any" : "4"}
+                        value={maxDraft()}
+                        disabled={busy()}
+                        onInput={e => {
+                          setVmEdited(true);
+                          setMaxDraft(e.currentTarget.value);
+                          setLimitFieldError(null);
+                        }}
+                      />
+                      <button type="button" class="s-btn primary" disabled={busy() || !vmLimitsDirty()} onClick={saveLimits}>
+                        {busy() && vmLimitsDirty() ? "Saving…" : "Save limit"}
+                      </button>
+                    </form>
+                  </SettingsRow>
+                  <div class="ms-card-disclosure">
+                    <button
+                      type="button"
+                      class="ms-disclosure"
+                      aria-expanded={providersOpen()}
+                      onClick={() => setProvidersOpen(o => !o)}
+                    >
+                      <span class="ms-disclosure-left">
+                        <span class="ms-disclosure-chevron" aria-hidden="true">{providersOpen() ? "▾" : "▸"}</span>
+                        <span>Per-provider limits</span>
+                      </span>
+                      <span class="ms-disclosure-meta">
+                        {draftProviderSummary() || providerLimitsSummary(v().own_vm_limits) || "Optional"}
+                      </span>
+                    </button>
+                    <Show when={providersOpen()}>
+                      <div class="ms-provider-body">
+                        <div class="ms-provider-grid">
+                          <For each={MANAGED_PROVIDERS}>
+                            {prov => (
+                              <label class="ms-provider-field">
+                                <span class="ms-provider-label">{prov.label}</span>
+                                <input
+                                  class="s-input"
+                                  inputmode="numeric"
+                                  placeholder="Any"
+                                  aria-label={`${prov.label} limit`}
+                                  value={provDrafts()[prov.id] ?? ""}
+                                  disabled={busy()}
+                                  onInput={e => {
+                                    const val = e.currentTarget.value;
+                                    setVmEdited(true);
+                                    setProvDrafts(prev => ({ ...prev, [prov.id]: val }));
+                                    setLimitFieldError(null);
+                                  }}
+                                  onKeyDown={e => e.key === "Enter" && saveLimits()}
+                                />
+                              </label>
+                            )}
+                          </For>
+                        </div>
+                        <p class="ms-hint">
+                          Leave blank to share the mission limit (or the global cap if max concurrent is blank). Enter 0 to block a provider.
+                        </p>
+                      </div>
+                    </Show>
+                  </div>
+                </Show>
+                <Show when={limitFieldError()}>
+                  <div class="ms-card-notice">
+                    <p class="field-error" role="alert">{limitFieldError()}</p>
+                  </div>
+                </Show>
+                <Show when={limitSaveError()}>
+                  <div class="ms-card-notice">
+                    <ErrorNotice error={limitSaveError()!} title="Machine limit not saved" onDismiss={() => setLimitSaveError(null)}>
+                      <Show when={limitRetry()}>{r => <button type="button" class="s-btn sm" onClick={() => r()()}>Retry</button>}</Show>
+                    </ErrorNotice>
+                  </div>
+                </Show>
+              </SettingsCard>
+
+              <Show when={showSubagentPoolTable(v())}>
+                <section class="s-sec" aria-labelledby="ms-subagents-title">
+                  <h3 id="ms-subagents-title">Subagent pools</h3>
+                  <BreakdownTable
+                    label="Subagent budgets"
+                    columns={subagentColumns}
+                    rows={v().children}
+                    rowKey={c => c.mission_id}
+                    limit={6}
+                    collapse={c => c.mode === "pooled" && !c.has_vm_limits && !c.has_bandwidth_limits && c.spent_usd === 0 && c.reserved_usd === 0}
+                    collapsedLabel="pooled with $0 spend"
+                    maxHeight="240px"
+                  />
+                </section>
+              </Show>
+            </>
+          )}
         </Show>
-      </>}
-    </Show>
 
-    <MissionStatsSection missionId={p.missionId} titleOf={p.titleOf} load={p.loadStats} />
-  </Dialog>;
+        <MissionStatsSection missionId={p.missionId} titleOf={p.titleOf} load={p.loadStats} />
+      </div>
+    </div>
+  );
 }
