@@ -726,10 +726,10 @@ pub async fn post_message(
                         local_interrupted_tool = Some(did);
                     }
                 }
-                Ok(Ok(SendQueuedNowOutcome::Promoted { interrupted_tool })) => {
-                    if let Some(did) = interrupted_tool {
-                        local_interrupted_tool = Some(did);
-                    }
+                Ok(Ok(SendQueuedNowOutcome::Promoted {
+                    interrupted_tool: Some(did),
+                })) => {
+                    local_interrupted_tool = Some(did);
                 }
                 _ => {}
             }

@@ -4984,22 +4984,12 @@ fn boost_warm_overlay_bootstrap_avoids_copyup_and_supports_non_systemd_init() {
 async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
     let dir = tempfile::tempdir().unwrap();
     let (m, fake) = manager(dir.path(), settings());
-    let spawned = m
-        .spawn(SpawnRequest {
-            wait: Some(false),
-            ttl_minutes: Some(15),
-            owner_mission_id: Some(uuid::Uuid::new_v4().to_string()),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+    let owner_mid = uuid::Uuid::new_v4().to_string();
+    let spawned = online_machine(&m, &owner_mid).await;
 
-    // Bring machine online with a deterministic `provider_id` at `expires_at - 3m`
-    // so `reap_once` triggers `pre_ttl_expiry` without racing background `provision()`.
+    // Place `expires_at` within the 5m pre-TTL checkpoint window.
     let now = Utc::now();
     m.update(&spawned.id, |row| {
-        row.state = MachineState::Online;
-        row.provider_id = Some("bx_fake_pre_stop".into());
         row.expires_at = now + chrono::Duration::minutes(3);
     })
     .await;
@@ -5037,7 +5027,15 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
             .and_then(Value::as_bool),
         Some(true)
     );
-    let last_script = fake.execs.lock().unwrap().last().cloned().unwrap();
+    let last_script = fake
+        .execs
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|s| s.contains("orb_pre_stop_checkpoint"))
+        .cloned()
+        .expect("checkpoint script executed");
     assert!(
         last_script.contains("ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))")
             && last_script.contains("[ \"$ORB_CHECKPOINT_FAILED\" -eq 0 ]"),
@@ -5098,8 +5096,12 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
     git(&repo_dir, &["push", "-u", "origin", "HEAD:main"]);
 
     let rewritten_script = last_script.replace(
-        "for root in /var/lib/orb-node/work /var/lib/sandboxed-node/work /workspace/repo; do",
+        "for root in '/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'; do",
         &format!("for root in '{}'; do", work_root.display()),
+    );
+    assert_ne!(
+        rewritten_script, last_script,
+        "expected default roots expression in checkpoint script"
     );
     let wip_ref = after_ok
         .pre_stop_summary
@@ -5157,8 +5159,114 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
         "unpushed HEAD commit must be preserved on origin WIP ref"
     );
     assert!(
-        repo_dir.join(".orb-pre-stop-wip.bundle").exists(),
-        "local bundle backup must also be written"
+        std::fs::read_dir(repo_dir.join(".git"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| e
+                .file_name()
+                .to_string_lossy()
+                .starts_with("orb-pre-stop-wip-")),
+        "local bundle backup must be written inside .git without polluting worktree"
+    );
+    assert!(
+        git(&repo_dir, &["status", "--porcelain"]).is_empty(),
+        "checkpoint bundle must not dirty a clean worktree"
+    );
+
+    // Push `local_head` to `origin/main` so `repo_dir` is clean+synced before testing linked worktree.
+    git(&repo_dir, &["push", "origin", "HEAD:main"]);
+
+    // 4c. Linked git worktree (`git worktree add`, where `.git` is a file, not a directory,
+    // matching `orb-cow-worktree`) AND custom mission root outside default `/var/lib/orb-node/work`
+    // (resolved via `set_mission_roots_probe`, e.g. `/home/orb/project/subdir`)!
+    let custom_base = git_fixture.path().join("home-orb-project");
+    let linked_wt = custom_base.join("worker-wt");
+    let linked_subdir = linked_wt.join("src/nested");
+    std::fs::create_dir_all(&custom_base).unwrap();
+    git(
+        &repo_dir,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            linked_wt.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(
+        linked_wt.join(".git").is_file(),
+        "linked git worktree must use a .git file"
+    );
+    std::fs::create_dir_all(&linked_subdir).unwrap();
+    std::fs::write(
+        linked_subdir.join("Extra.lean"),
+        "theorem linked_dirty : True := trivial\n",
+    )
+    .unwrap();
+
+    let probe_path = linked_subdir.to_string_lossy().into_owned();
+    m.set_mission_roots_probe(Arc::new(move |_tenant, _mids| {
+        let p = probe_path.clone();
+        Box::pin(async move { vec![p] })
+    }));
+    // Trigger another pre-stop checkpoint by placing `expires_at` within the 5m window again.
+    let now2 = Utc::now();
+    m.update(&spawned.id, |row| {
+        row.expires_at = now2 + chrono::Duration::minutes(3);
+    })
+    .await;
+    m.reap_once().await;
+    let probe_script = fake
+        .execs
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|s| s.contains("orb_pre_stop_checkpoint"))
+        .cloned()
+        .expect("probed checkpoint script executed");
+    assert!(
+        probe_script.contains(&linked_subdir.display().to_string()),
+        "checkpoint script must include mission's probed execution directory"
+    );
+    let probe_run = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(probe_script.replace(
+            "'/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'",
+            &format!("'{}'", work_root.display()),
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        probe_run.status.success(),
+        "POSIX sh execution of linked-worktree + custom-cwd checkpoint failed: {}",
+        String::from_utf8_lossy(&probe_run.stderr)
+    );
+    let probe_stdout = String::from_utf8_lossy(&probe_run.stdout);
+    assert!(
+        probe_stdout.contains("dirty_repos=1 pushed=1 failed=0"),
+        "expected dirty linked worktree in custom mission root to checkpoint and push, got: {probe_stdout}"
+    );
+    let linked_wip_sha = git(&bare_origin, &["rev-parse", wip_ref]);
+    assert_ne!(
+        linked_wip_sha, local_head,
+        "dirty linked worktree must produce a new synthetic WIP commit on origin"
+    );
+    let files_in_wip = git(
+        &bare_origin,
+        &["ls-tree", "-r", "--name-only", &linked_wip_sha],
+    );
+    assert!(
+        files_in_wip.contains("src/nested/Extra.lean"),
+        "linked worktree uncommitted file must be captured in WIP commit tree, got: {files_in_wip}"
+    );
+    let wip_branches = git(
+        &bare_origin,
+        &["for-each-ref", "--format=%(refname)", "refs/heads/orb/wip/"],
+    );
+    assert!(
+        wip_branches.lines().count() >= 2,
+        "expected canonical WIP ref plus per-worktree disambiguated WIP ref, got: {wip_branches}"
     );
 }
 

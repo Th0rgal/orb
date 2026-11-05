@@ -1179,6 +1179,15 @@ pub type ActiveMissionsProbe = Arc<
         + Sync,
 >;
 
+pub type MissionRootsProbe = Arc<
+    dyn Fn(
+            String,
+            Vec<String>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 static ALIASES: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -1518,6 +1527,7 @@ pub struct ManagedManager {
     pub relay: relay::RelayHub,
     owner_probe: std::sync::RwLock<Option<OwnerProbe>>,
     active_missions_probe: std::sync::RwLock<Option<ActiveMissionsProbe>>,
+    mission_roots_probe: std::sync::RwLock<Option<MissionRootsProbe>>,
     runtime: std::sync::RwLock<RuntimeSettings>,
     /// Reconciler memory (not persisted; a restart restarts the graces).
     reconcile_state: Mutex<ReconcileState>,
@@ -1860,6 +1870,7 @@ impl ManagedManager {
             relay: relay::RelayHub::default(),
             owner_probe: std::sync::RwLock::new(None),
             active_missions_probe: std::sync::RwLock::new(None),
+            mission_roots_probe: std::sync::RwLock::new(None),
             runtime: std::sync::RwLock::new(RuntimeSettings::default()),
             reconcile_state: Mutex::new(ReconcileState::default()),
             registry_authoritative: std::sync::atomic::AtomicBool::new(false),
@@ -2628,6 +2639,15 @@ impl ManagedManager {
     /// Install the live active-missions lookup (`node_id -> Vec<mission_id>`).
     pub fn set_active_missions_probe(&self, probe: ActiveMissionsProbe) {
         if let Ok(mut slot) = self.active_missions_probe.write() {
+            *slot = Some(probe);
+        }
+    }
+
+    /// Install the mission working-directory / transferred-root lookup used by
+    /// out-of-band pre-stop checkpoints to discover explicit remote execution
+    /// directories outside the default `/var/lib/orb-node/work` roots.
+    pub fn set_mission_roots_probe(&self, probe: MissionRootsProbe) {
+        if let Ok(mut slot) = self.mission_roots_probe.write() {
             *slot = Some(probe);
         }
     }
@@ -5230,70 +5250,140 @@ impl ManagedManager {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        let mut candidate_mission_ids: Vec<String> = Vec::new();
+        for opt_mid in [&m.owner_mission_id, &m.requested_by_mission_id] {
+            let maybe_mid = opt_mid
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !candidate_mission_ids.iter().any(|x| x == *s));
+            if let Some(mid) = maybe_mid {
+                candidate_mission_ids.push(mid.to_string());
+            }
+        }
+        if let Some(working_dir) = self.dir.parent() {
+            for mid in
+                crate::remote_node::job_ledger::mission_ids_for_node(working_dir, &m.node_id).await
+            {
+                let s = mid.to_string();
+                if !candidate_mission_ids.contains(&s) {
+                    candidate_mission_ids.push(s);
+                }
+            }
+        }
+        let mut extra_roots: Vec<String> = Vec::new();
+        if let Some(probe) = self.mission_roots_probe.read().ok().and_then(|p| p.clone()) {
+            let tenant = m.owner_user_id.clone().unwrap_or_default();
+            for r in probe(tenant, candidate_mission_ids).await {
+                if !extra_roots.contains(&r) {
+                    extra_roots.push(r);
+                }
+            }
+        }
+        let mut quoted_roots = vec![
+            "'/var/lib/orb-node/work'".to_string(),
+            "'/var/lib/sandboxed-node/work'".to_string(),
+            "'/workspace/repo'".to_string(),
+        ];
+        for r in &extra_roots {
+            let q = raw_operations::shell_quote(r);
+            if !quoted_roots.contains(&q) {
+                quoted_roots.push(q);
+            }
+        }
+        let roots_expr = quoted_roots.join(" ");
         let mut script = format!(
             r#"set +e
 ORB_WIP_REF='{wip_ref}'
 ORB_CHECKPOINT_REPOS=0
 ORB_CHECKPOINT_PUSHED=0
 ORB_CHECKPOINT_FAILED=0
-for root in /var/lib/orb-node/work /var/lib/sandboxed-node/work /workspace/repo; do
-  [ -d "$root" ] || continue
-  for gitdir in $(find "$root" -maxdepth 4 -name .git -type d 2>/dev/null); do
-    repo_dir=$(dirname "$gitdir")
-    cd "$repo_dir" 2>/dev/null || continue
-    status_out=$(git status --porcelain 2>/dev/null)
-    head_sha=$(git rev-parse --verify HEAD 2>/dev/null || true)
-    unpushed=0
-    if [ -z "$status_out" ] && [ -n "$head_sha" ]; then
-      if git remote get-url origin >/dev/null 2>&1; then
-        rem_refs=$(git for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null)
-        if [ -z "$rem_refs" ]; then
-          unpushed=1
-        elif [ -n "$(git rev-list -n 1 HEAD --not --remotes=origin 2>/dev/null)" ]; then
-          unpushed=1
-        fi
+ORB_SEEN_TOPS=""
+orb_checkpoint_repo() {{
+  target_dir="$1"
+  [ -d "$target_dir" ] || return 0
+  cd "$target_dir" 2>/dev/null || return 0
+  repo_dir=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  [ -n "$repo_dir" ] || return 0
+  case "
+$ORB_SEEN_TOPS
+" in
+    *"
+$repo_dir
+"*) return 0 ;;
+  esac
+  ORB_SEEN_TOPS="$ORB_SEEN_TOPS
+$repo_dir"
+  cd "$repo_dir" 2>/dev/null || return 0
+  status_out=$(git status --porcelain 2>/dev/null)
+  head_sha=$(git rev-parse --verify HEAD 2>/dev/null || true)
+  repo_gitdir=$(git rev-parse --git-dir 2>/dev/null || printf '.git')
+  common_gitdir=$(git rev-parse --git-common-dir 2>/dev/null || printf '%s' "$repo_gitdir")
+  bundle_path="$common_gitdir/orb-pre-stop-wip-$(printf '%s' "$repo_dir" | cksum | awk '{{print $1}}').bundle"
+  latest_ref="refs/orb-pre-stop/latest-$(printf '%s' "$repo_dir" | cksum | awk '{{print $1}}')"
+  unpushed=0
+  if [ -z "$status_out" ] && [ -n "$head_sha" ]; then
+    if git remote get-url origin >/dev/null 2>&1; then
+      rem_refs=$(git for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null)
+      if [ -z "$rem_refs" ]; then
+        unpushed=1
+      elif [ -n "$(git rev-list -n 1 HEAD --not --remotes=origin 2>/dev/null)" ]; then
+        unpushed=1
+      fi
+    else
+      local_saved=$(git rev-parse --verify "$latest_ref" 2>/dev/null || true)
+      if [ "$local_saved" != "$head_sha" ]; then
+        unpushed=1
+      fi
+    fi
+  fi
+  if [ -z "$status_out" ] && [ "$unpushed" -eq 0 ]; then
+    return 0
+  fi
+  ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+  commit_sha=""
+  if [ -n "$status_out" ]; then
+    tmp_idx=$(mktemp "/tmp/orb-wip-index.XXXXXX")
+    src_index=$(git rev-parse --git-path index 2>/dev/null || printf '%s/index' "$repo_gitdir")
+    cp -f "$src_index" "$tmp_idx" 2>/dev/null || rm -f "$tmp_idx"
+    GIT_INDEX_FILE="$tmp_idx" git add -A >/dev/null 2>&1
+    tree_sha=$(GIT_INDEX_FILE="$tmp_idx" git write-tree 2>/dev/null)
+    rm -f "$tmp_idx"
+    if [ -n "$tree_sha" ]; then
+      if [ -n "$head_sha" ]; then
+        commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" -p "$head_sha" 2>/dev/null)
       else
-        local_saved=$(git rev-parse --verify refs/orb-pre-stop/latest 2>/dev/null || true)
-        if [ "$local_saved" != "$head_sha" ]; then
-          unpushed=1
-        fi
+        commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" 2>/dev/null)
       fi
     fi
-    if [ -z "$status_out" ] && [ "$unpushed" -eq 0 ]; then
-      continue
-    fi
-    ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
-    commit_sha=""
-    if [ -n "$status_out" ]; then
-      tmp_idx=$(mktemp "/tmp/orb-wip-index.XXXXXX")
-      cp -f "$gitdir/index" "$tmp_idx" 2>/dev/null || true
-      GIT_INDEX_FILE="$tmp_idx" git add -A >/dev/null 2>&1
-      tree_sha=$(GIT_INDEX_FILE="$tmp_idx" git write-tree 2>/dev/null)
-      rm -f "$tmp_idx"
-      if [ -n "$tree_sha" ]; then
-        if [ -n "$head_sha" ]; then
-          commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" -p "$head_sha" 2>/dev/null)
-        else
-          commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" 2>/dev/null)
-        fi
+  else
+    commit_sha="$head_sha"
+  fi
+  if [ -n "$commit_sha" ]; then
+    git update-ref "$latest_ref" "$commit_sha" 2>/dev/null || true
+    git update-ref "refs/orb-pre-stop/latest" "$commit_sha" 2>/dev/null || true
+    git bundle create "$bundle_path" "$latest_ref" >/dev/null 2>&1 || true
+    if git remote get-url origin >/dev/null 2>&1; then
+      repo_suffix=$(printf '%s' "$repo_dir" | cksum | awk '{{print $1}}')
+      if timeout 25s git push --force origin "$commit_sha:$ORB_WIP_REF" "$commit_sha:${{ORB_WIP_REF}}-$repo_suffix" >/dev/null 2>&1; then
+        ORB_CHECKPOINT_PUSHED=$((ORB_CHECKPOINT_PUSHED + 1))
+      else
+        ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
       fi
-    else
-      commit_sha="$head_sha"
     fi
-    if [ -n "$commit_sha" ]; then
-      git update-ref "refs/orb-pre-stop/latest" "$commit_sha" 2>/dev/null || true
-      git bundle create "$repo_dir/.orb-pre-stop-wip.bundle" refs/orb-pre-stop/latest >/dev/null 2>&1 || true
-      if git remote get-url origin >/dev/null 2>&1; then
-        if timeout 25s git push --force origin "$commit_sha:$ORB_WIP_REF" >/dev/null 2>&1; then
-          ORB_CHECKPOINT_PUSHED=$((ORB_CHECKPOINT_PUSHED + 1))
-        else
-          ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
-        fi
-      fi
-    else
-      ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
-    fi
-  done
+  else
+    ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+  fi
+}}
+for root in {roots_expr}; do
+  [ -d "$root" ] || continue
+  orb_checkpoint_repo "$root"
+  find_list=$(mktemp "/tmp/orb-wip-find.XXXXXX")
+  find "$root" -maxdepth 4 -name .git \( -type d -o -type f \) 2>/dev/null > "$find_list" || true
+  while IFS= read -r gitmarker; do
+    [ -n "$gitmarker" ] || continue
+    orb_checkpoint_repo "$(dirname "$gitmarker")"
+  done < "$find_list"
+  rm -f "$find_list"
 done
 printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d failed=%d\n' '{trigger}' "$ORB_CHECKPOINT_REPOS" "$ORB_CHECKPOINT_PUSHED" "$ORB_CHECKPOINT_FAILED"
 "#

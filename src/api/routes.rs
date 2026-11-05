@@ -662,6 +662,62 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                 by_node
             })
         }));
+        let roots_state = Arc::clone(&state);
+        manager.set_mission_roots_probe(Arc::new(
+            move |tenant: String, mission_ids: Vec<String>| {
+                let st = Arc::clone(&roots_state);
+                Box::pin(async move {
+                    let mut roots = Vec::new();
+                    for raw_id in mission_ids {
+                        let Ok(uuid) = uuid::Uuid::parse_str(&raw_id) else {
+                            continue;
+                        };
+                        let store = match st.control.loaded_mission_store(&tenant).await {
+                            Some(s) => s,
+                            None => match super::mission_workspace_gc::persisted_mission_store(
+                                st.as_ref(),
+                                uuid,
+                            )
+                            .await
+                            {
+                                Ok(Some((s, _))) => s,
+                                _ => continue,
+                            },
+                        };
+                        let dest_opt = super::control::machine_transfer::committed(&store, uuid)
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|t| {
+                                t.destination_root
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|p| {
+                                        !p.is_empty() && std::path::Path::new(p).is_absolute()
+                                    })
+                                    .map(str::to_string)
+                            });
+                        if let Some(d) = dest_opt {
+                            if !roots.contains(&d) {
+                                roots.push(d);
+                            }
+                            continue;
+                        }
+                        let wd_opt = store.get_mission(uuid).await.ok().flatten().and_then(|m| {
+                            m.working_directory
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|p| !p.is_empty() && std::path::Path::new(p).is_absolute())
+                                .map(str::to_string)
+                        });
+                        if let Some(d) = wd_opt.filter(|d| !roots.contains(d)) {
+                            roots.push(d);
+                        }
+                    }
+                    roots
+                })
+            },
+        ));
         let bw_state = Arc::clone(&state);
         let bw_manager = Arc::clone(&manager);
         tokio::spawn(async move {
