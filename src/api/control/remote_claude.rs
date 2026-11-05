@@ -231,7 +231,6 @@ mod observer_tests {
         let owner = RemoteMissionOwner {
             mission_store: store,
             events_tx: None,
-            admission_state: None,
         };
         let job_id = Uuid::new_v4();
         let mut observer = NativeGrokObserver::attach(&owner, "spark", mission.id, job_id)

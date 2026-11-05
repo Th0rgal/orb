@@ -5,12 +5,12 @@ import { canForceSlot, isQueued, queueWaitLabel } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { remoteContinuation } from "./remoteContinuation";
 import { ErrorNotice, isNonResumableError } from "./ErrorNotice";
-import { SubscriptionResetDialog } from "./SubscriptionResetDialog";
-import { Show, createSignal, onCleanup, onMount } from "solid-js";
-import { ApiError, getAllProviderUsage, getApiUrl, getProviderUsage, isConnected, listProviders, type AIProvider, type Mission, type ProviderUsage, type RemoteLaunchCapability, type RemoteNodesResponse } from "./api";
-import { supportsSubscriptionReset, usableSubscriptionReset } from "./providerUsage";
+import { Show, Suspense, lazy } from "solid-js";
+import { ApiError, getApiUrl, type Mission, type RemoteLaunchCapability, type RemoteNodesResponse } from "./api";
 import { goalObjective, GoalTag } from "./goal";
 import type { StreamItem } from "./Transcript";
+
+const LazyQuotaResetAction = lazy(() => import("./SubscriptionResetDialog").then(m => ({ default: m.QuotaResetAction })));
 
 export type LaunchReceipt = { messageKey?:string; prompt: string; images?: DraftImage[]; nodeId: string; destination: string; replacement?: boolean };
 const receiptKey = (id: string) => `orb.launch:${getApiUrl()}:${id}`;
@@ -305,63 +305,6 @@ export function phaseIsQuiet(phase: { label: string; failed?: boolean; moving?: 
   return !phase.moving && !phase.detail;
 }
 
-function QuotaResetAction(p: { mission: Mission; disabled?: boolean; onResetRedeemed?: () => void }) {
-  const [candidate, setCandidate] = createSignal<{ provider: AIProvider; usage: ProviderUsage } | null>(null);
-  const [open, setOpen] = createSignal(false);
-  let disposed = false;
-
-  const targetType = () => p.mission.backend === "claudecode" ? "anthropic"
-    : p.mission.backend === "codex" ? "openai" : null;
-
-  onMount(() => {
-    const wanted = targetType();
-    if (!wanted || !isConnected()) return;
-    void (async () => {
-      try {
-        const [providers, bulk] = await Promise.all([listProviders(), getAllProviderUsage()]);
-        if (disposed) return;
-        const eligible = providers.filter(a => a.enabled !== false && a.provider_type === wanted && supportsSubscriptionReset(a));
-        for (const a of eligible) {
-          let u: ProviderUsage | undefined = bulk[a.id];
-          if (!u) {
-            try { u = await getProviderUsage(a.id); } catch { /* ignore */ }
-            if (disposed) return;
-          }
-          if (usableSubscriptionReset(u)) {
-            setCandidate({ provider: a, usage: u! });
-            return;
-          }
-        }
-      } catch { /* banner stays clean if provider catalog fails */ }
-    })();
-  });
-  onCleanup(() => { disposed = true; });
-
-  return (
-    <Show when={candidate()}>
-      {c => (
-        <>
-          <button type="button" tabIndex={0} disabled={p.disabled} onClick={() => setOpen(true)}>
-            Use subscription reset…
-          </button>
-          <Show when={open()}>
-            <SubscriptionResetDialog
-              provider={c().provider}
-              usage={c().usage}
-              onClose={() => setOpen(false)}
-              onDone={() => {
-                setOpen(false);
-                setCandidate(null);
-                p.onResetRedeemed?.();
-              }}
-            />
-          </Show>
-        </>
-      )}
-    </Show>
-  );
-}
-
 /**
  * The status above a transcript. Renders nothing at all while a mission is
  * simply working — no text, no reserved space — so the prompt and the answer
@@ -377,7 +320,7 @@ export function LaunchStatus(p: { destination: string; mission?: Mission | null;
       <Show when={phase().detail}><p>{phase().detail}</p></Show>
       <Show when={phase().label === "Recovery scheduled"}><div class="recovery-actions">
         <Show when={p.mission && p.mission.recovery?.kind === "quota"}>
-          <QuotaResetAction mission={p.mission!} disabled={p.recoveryPending} onResetRedeemed={p.onResetRedeemed} />
+          <Suspense><LazyQuotaResetAction mission={p.mission!} disabled={p.recoveryPending} onResetRedeemed={p.onResetRedeemed} /></Suspense>
         </Show>
         <Show when={p.onResume}><button type="button" tabIndex={0} disabled={p.recoveryPending} onClick={() => p.onResume?.()}>Resume now</button></Show>
         <Show when={p.onCancelRecovery}><button type="button" tabIndex={0} disabled={p.recoveryPending} onClick={() => p.onCancelRecovery?.()}>Cancel recovery</button></Show>

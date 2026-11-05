@@ -907,7 +907,6 @@ fn recovery_delay_secs(replays: u32, mission_id: Uuid) -> i64 {
 /// the wait. Recording is idempotent, so a finalization that is retried does
 /// not count twice. A job that did not fail on a usage limit clears the
 /// record, which resets the replay count.
-#[cfg(test)]
 pub(crate) async fn plan_remote(
     working_dir: &std::path::Path,
     mission_store: &Arc<dyn MissionStore>,
@@ -917,9 +916,10 @@ pub(crate) async fn plan_remote(
     job_id: Uuid,
     sustained_progress: bool,
 ) -> Option<UsageLimitWait> {
+    let registered = crate::api::ai_providers::registered_app_state();
     plan_remote_with_state(
         working_dir,
-        None,
+        registered.as_ref(),
         mission_store,
         mission_id,
         success,

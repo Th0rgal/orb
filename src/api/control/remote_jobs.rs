@@ -2544,14 +2544,8 @@ pub(super) async fn poll_remote_job(
                                 .map_or(0, |usage| usage.output_tokens),
                         );
                         let failure = cli_error.as_deref().unwrap_or(content.as_str());
-                        let state_ref = owner
-                            .admission_state
-                            .as_ref()
-                            .and_then(|s| s.get())
-                            .and_then(std::sync::Weak::upgrade);
-                        if let Some(wait) = usage_limit_wait::plan_remote_with_state(
+                        if let Some(wait) = usage_limit_wait::plan_remote(
                             ledger_dir,
-                            state_ref.as_ref(),
                             &owner.mission_store,
                             mission_id,
                             success,

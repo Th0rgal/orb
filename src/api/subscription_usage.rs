@@ -541,6 +541,12 @@ impl AnthropicResetStore {
         Arc::new(Self::default())
     }
 
+    pub fn shared() -> &'static Arc<Self> {
+        static SHARED: std::sync::LazyLock<Arc<AnthropicResetStore>> =
+            std::sync::LazyLock::new(AnthropicResetStore::new);
+        &SHARED
+    }
+
     pub async fn invalidate(&self, key: &str) {
         self.entries.write().await.remove(key);
     }

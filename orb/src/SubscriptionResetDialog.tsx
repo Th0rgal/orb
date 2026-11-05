@@ -1,9 +1,9 @@
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { Dialog, DialogButton, Field } from "./Dialog";
 import { ErrorNotice } from "./ErrorNotice";
 import { Select } from "./Select";
-import { resetProviderUsage, type AIProvider, type ProviderUsage } from "./api";
-import { formatResetGrantOption, subscriptionResetSummary } from "./providerUsage";
+import { getAllProviderUsage, getProviderUsage, isConnected, listProviders, resetProviderUsage, type AIProvider, type Mission, type ProviderUsage } from "./api";
+import { formatResetGrantOption, subscriptionResetSummary, supportsSubscriptionReset, usableSubscriptionReset } from "./providerUsage";
 
 export function SubscriptionResetDialog(p: {
   provider: Pick<AIProvider, "id" | "name" | "account_email" | "provider_type">;
@@ -75,5 +75,62 @@ export function SubscriptionResetDialog(p: {
         <ErrorNotice error={error()!} />
       </Show>
     </Dialog>
+  );
+}
+
+export function QuotaResetAction(p: { mission: Mission; disabled?: boolean; onResetRedeemed?: () => void }) {
+  const [candidate, setCandidate] = createSignal<{ provider: AIProvider; usage: ProviderUsage } | null>(null);
+  const [open, setOpen] = createSignal(false);
+  let disposed = false;
+
+  const targetType = () => p.mission.backend === "claudecode" ? "anthropic"
+    : p.mission.backend === "codex" ? "openai" : null;
+
+  onMount(() => {
+    const wanted = targetType();
+    if (!wanted || !isConnected()) return;
+    void (async () => {
+      try {
+        const [providers, bulk] = await Promise.all([listProviders(), getAllProviderUsage()]);
+        if (disposed) return;
+        const eligible = providers.filter(a => a.enabled !== false && a.provider_type === wanted && supportsSubscriptionReset(a));
+        for (const a of eligible) {
+          let u: ProviderUsage | undefined = bulk[a.id];
+          if (!u) {
+            try { u = await getProviderUsage(a.id); } catch { /* ignore */ }
+            if (disposed) return;
+          }
+          if (usableSubscriptionReset(u)) {
+            setCandidate({ provider: a, usage: u! });
+            return;
+          }
+        }
+      } catch { /* banner stays clean if provider catalog fails */ }
+    })();
+  });
+  onCleanup(() => { disposed = true; });
+
+  return (
+    <Show when={candidate()}>
+      {c => (
+        <>
+          <button type="button" tabIndex={0} disabled={p.disabled} onClick={() => setOpen(true)}>
+            Use subscription reset…
+          </button>
+          <Show when={open()}>
+            <SubscriptionResetDialog
+              provider={c().provider}
+              usage={c().usage}
+              onClose={() => setOpen(false)}
+              onDone={() => {
+                setOpen(false);
+                setCandidate(null);
+                p.onResetRedeemed?.();
+              }}
+            />
+          </Show>
+        </>
+      )}
+    </Show>
   );
 }

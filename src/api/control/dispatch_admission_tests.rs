@@ -407,7 +407,6 @@ impl Harness {
             control_metrics: Arc::new(crate::api::control_metrics::ControlMetrics::new()),
             provider_usage_cache: crate::api::provider_usage_cache::ProviderUsageCache::new(),
             codex_usage: crate::api::codex_usage::CodexUsageStore::new(),
-            anthropic_resets: crate::api::subscription_usage::AnthropicResetStore::new(),
             fleet: Arc::new(crate::remote_node::FleetMonitor::new()),
             validation: Arc::new(
                 crate::api::validation::ValidationStore::open(path.join("validation.db")).unwrap(),

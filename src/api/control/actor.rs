@@ -91,7 +91,6 @@ pub(super) fn spawn_control_session(
         mission_store: Arc::clone(&mission_store),
         mission_search_cache,
         working_dir: config.working_dir.clone(),
-        admission_state: Arc::clone(&control_hub.admission_state),
     };
 
     // Mission-status alerts are event-driven for low latency. The existing

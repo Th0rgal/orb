@@ -9,7 +9,6 @@ use super::*;
 pub(crate) struct RemoteMissionOwner {
     pub(super) mission_store: Arc<dyn MissionStore>,
     pub(super) events_tx: Option<broadcast::Sender<AgentEvent>>,
-    pub(super) admission_state: Option<Arc<std::sync::OnceLock<std::sync::Weak<AppState>>>>,
 }
 
 impl RemoteMissionOwner {
@@ -17,7 +16,6 @@ impl RemoteMissionOwner {
         Self {
             mission_store: Arc::clone(&control.mission_store),
             events_tx: Some(control.events_tx.clone()),
-            admission_state: Some(Arc::clone(&control.admission_state)),
         }
     }
 
@@ -25,7 +23,6 @@ impl RemoteMissionOwner {
         Self {
             mission_store,
             events_tx: None,
-            admission_state: None,
         }
     }
 

@@ -388,8 +388,6 @@ pub struct ControlState {
     pub mission_search_cache: Arc<RwLock<HashMap<u64, MissionSearchCacheEntry>>>,
     /// Core working directory for durable job ledger / placement lookups.
     pub(crate) working_dir: PathBuf,
-    /// Shared Weak<AppState> bound once on startup.
-    pub(crate) admission_state: Arc<std::sync::OnceLock<std::sync::Weak<AppState>>>,
 }
 
 impl ControlState {

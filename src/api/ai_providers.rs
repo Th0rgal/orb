@@ -39,6 +39,23 @@ use crate::util::{
 static OAUTH_WARN_DEDUP: LazyLock<StdMutex<HashMap<String, Instant>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
+static REGISTERED_APP_STATE: LazyLock<StdMutex<Option<std::sync::Weak<super::routes::AppState>>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+pub(crate) fn register_app_state(state: &Arc<super::routes::AppState>) {
+    *REGISTERED_APP_STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(state));
+}
+
+pub(crate) fn registered_app_state() -> Option<Arc<super::routes::AppState>> {
+    REGISTERED_APP_STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(std::sync::Weak::upgrade)
+}
+
 /// Accounts whose stored OAuth refresh token the provider has *permanently*
 /// rejected (`invalid_grant` / "refresh token not found"). Keyed by account id
 /// → the exact dead refresh-token value. The proactive usage-refresh loop
@@ -9254,16 +9271,16 @@ async fn get_provider_usage(
                         let reset_key = provider_uuid
                             .map(|u| u.to_string())
                             .unwrap_or_else(|| "anthropic".to_string());
-                        if let Some(resets) = state
-                            .anthropic_resets
-                            .get_or_fetch(
-                                &state.http_client,
-                                super::subscription_usage::ANTHROPIC_API_BASE,
-                                &reset_key,
-                                &auth,
-                                at_wall,
-                            )
-                            .await
+                        if let Some(resets) =
+                            super::subscription_usage::AnthropicResetStore::shared()
+                                .get_or_fetch(
+                                    &state.http_client,
+                                    super::subscription_usage::ANTHROPIC_API_BASE,
+                                    &reset_key,
+                                    &auth,
+                                    at_wall,
+                                )
+                                .await
                         {
                             if let Some(obj) = info.as_object_mut() {
                                 obj.insert(
@@ -10776,7 +10793,9 @@ async fn reset_provider_usage(
             );
             release_provider_limit(&state, uuid, true).await;
             let key = uuid.to_string();
-            state.anthropic_resets.invalidate(&key).await;
+            super::subscription_usage::AnthropicResetStore::shared()
+                .invalidate(&key)
+                .await;
             state.codex_usage.invalidate(&key).await;
             state.provider_usage_cache.remove(&key).await;
 
@@ -11031,7 +11050,9 @@ pub(crate) async fn try_auto_reset_subscription_on_limit(
             if let Some(state) = state_opt {
                 release_provider_limit(state, provider.id, true).await;
                 let key = provider.id.to_string();
-                state.anthropic_resets.invalidate(&key).await;
+                super::subscription_usage::AnthropicResetStore::shared()
+                    .invalidate(&key)
+                    .await;
                 state.codex_usage.invalidate(&key).await;
                 state.provider_usage_cache.remove(&key).await;
                 let bg_state = Arc::clone(state);
