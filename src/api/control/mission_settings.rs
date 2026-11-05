@@ -4256,6 +4256,45 @@ mod subtree_move_tests {
             .await;
         assert!(grants_after_revoke.is_empty());
         assert!(pending_after_revoke.is_empty());
+
+        // 4. Move `assistant -> None -> verity-core`: project-scoped session fails closed
+        // while unassigned (never escalates to unscoped) and rebinds to `verity-core` afterwards.
+        let r_unassign = move_missions(
+            State(state.clone()),
+            Extension(user.clone()),
+            Json(MoveMissionsRequest {
+                mission_ids: vec![m.id],
+                project: Some(None),
+                folder: "".into(),
+                approval_policy: ApprovalTransferPolicy::Check,
+                client_op_id: Some(4),
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(r_unassign.status(), StatusCode::OK);
+        assert!(
+            crate::control_mcp::gateway::verify(&state, &token).is_err(),
+            "project-scoped session must not become unscoped when mission moves to None"
+        );
+
+        let r_rebind = move_missions(
+            State(state.clone()),
+            Extension(user.clone()),
+            Json(MoveMissionsRequest {
+                mission_ids: vec![m.id],
+                project: Some(Some("verity-core".into())),
+                folder: "".into(),
+                approval_policy: ApprovalTransferPolicy::Check,
+                client_op_id: Some(5),
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(r_rebind.status(), StatusCode::OK);
+        let rebound = crate::control_mcp::gateway::verify(&state, &token)
+            .expect("session rebinds after None -> verity-core");
+        assert_eq!(rebound.project.as_deref(), Some("verity-core"));
         let _ = (grant, pending_write);
     }
 
