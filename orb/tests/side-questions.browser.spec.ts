@@ -317,3 +317,51 @@ test('expanding and shrinking the /btw composer recomputes --btw-dock-height wit
  expect(Math.abs(reopened.dockVar-compact.dockVar)).toBeLessThanOrEqual(2);
  expect(Math.abs(reopened.dockHeight-compact.dockHeight)).toBeLessThanOrEqual(2);
 });
+
+test('/btw thread wraps long unbroken tokens and keeps wide code blocks and tables from horizontally scrolling the thread',async({page})=>{
+ const unbrokenToken='antigravity_projected_verity_core_wave8_r16k_stage5_closer_rehearsal_receipt_ccf4bcda321e56eaa3ea264ffe6e741a';
+ const longPath='packages/verity_evm/VerityEvm/Proofs/Depth0FrameOpen/WkHostPayloadHeaders_WkBlockAuxLeaves_SoundnessRehearsal.lean';
+ const answer=[
+  `Confirmed pointer \`${unbrokenToken}\` and module ${longPath} without delta recompilation.`,
+  '',
+  '```bash',
+  'scripts/check_wave8_controller.sh --manifest work/WAVE8_CONTROLLER.md --state work/wave8-state.json --strict-sweep 600 --verify-tail-token FINAL_CODE_TOKEN',
+  '```',
+  '',
+  '| Shard | Leaf | Receipt | Command |',
+  '| --- | --- | --- | --- |',
+  '| wave8-r16k | Depth0FrameOpen | ccf4bcda-321e-56ea-a3ea-264ffe6e741a | `turbo-lean build --project-dir lean --strict-horizontal-check` |',
+ ].join('\n');
+ await mockAgent(page,answer);
+ await page.goto('/tests/side-questions.html');
+ await page.getByPlaceholder('Send follow-up').fill('/btw Check status');
+ await page.getByTitle('Ask side question',{exact:true}).click();
+ const thread=page.locator('.btw-sidebar .btw-thread');
+ await expect(thread).toContainText('Confirmed pointer');
+ await expect(thread.locator('.md-code-block pre')).toBeVisible();
+ await expect(thread.locator('.md-table-wrap table')).toBeVisible();
+
+ const checkNoHorizontalThreadScroll=()=>thread.evaluate(el=>{
+  el.scrollLeft=120;
+  const style=getComputedStyle(el);
+  return {
+   overflowX:style.overflowX,
+   scrollWidth:el.scrollWidth,
+   clientWidth:el.clientWidth,
+   scrollLeft:el.scrollLeft,
+  };
+ });
+
+ const desktop=await checkNoHorizontalThreadScroll();
+ expect(desktop.overflowX).toBe('hidden');
+ expect(desktop.scrollWidth).toBeLessThanOrEqual(desktop.clientWidth);
+ expect(desktop.scrollLeft).toBe(0);
+
+ // Code block and table still scroll horizontally inside their own wrappers.
+ expect(await thread.locator('.md-code-block pre').evaluate(el=>el.scrollWidth>el.clientWidth)).toBe(true);
+
+ await page.setViewportSize({width:390,height:844});
+ const mobile=await checkNoHorizontalThreadScroll();
+ expect(mobile.scrollWidth).toBeLessThanOrEqual(mobile.clientWidth);
+ expect(mobile.scrollLeft).toBe(0);
+});
