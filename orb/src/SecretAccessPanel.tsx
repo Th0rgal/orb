@@ -164,7 +164,7 @@ export function SecretAccessPanel(p: {
                   <SecretKindIcon request={r} />
                   <div class="bw-request-body">
                     <div class="bw-request-line">
-                      <strong class="secret-row-key">{r.key || (r.all_projects ? "Every secret project" : `Project ${tier()}`)}</strong>
+                      <strong class="secret-row-key" title={r.key || (r.all_projects ? "Every secret project" : `Project ${tier()}`)}>{r.key || (r.all_projects ? "Every secret project" : `Project ${tier()}`)}</strong>
                       <Show when={r.project_id && r.key}>
                         <span class={`bw-tier bw-tier-${tier()}`}>{tier()}</span>
                       </Show>
