@@ -4,15 +4,22 @@ import { cleanup } from "@solidjs/testing-library";
 afterEach(cleanup);
 import { MissionSettings } from "../src/MissionSettings";
 import {
+  bandwidthLimitsSummary,
+  bandwidthModeLine,
+  computeRunwayForecast,
   exceedsGrant,
+  formatTokensPerMin,
   modeLine,
+  optimisticBandwidthLimits,
   optimisticBudget,
   optimisticVmLimits,
   parseAmount,
+  parseBandwidthLimits,
   parseVmLimits,
   providerLimitsSummary,
   usedFraction,
   vmLimitsModeLine,
+  type BandwidthLimits,
   type MissionBudget,
   type VmConcurrencyLimits,
 } from "../src/missionBudget";
@@ -39,12 +46,42 @@ const base = (over: Partial<MissionBudget> = {}): MissionBudget => ({
     ancestor_max_concurrent: null,
     provider_limits: [],
   },
+  own_bandwidth_limits: null,
+  bandwidth_mode: "none",
+  bandwidth_pool_id: null,
+  effective_bandwidth: {
+    source: "none",
+    pool_id: null,
+    tokens_per_min: null,
+    compute_vcpu_per_min: null,
+    compute_usd_per_hour: null,
+    protect_root: false,
+    current_tokens_per_min: 48_000,
+    current_vcpu_per_min: 16,
+    current_compute_usd_per_hour: 2.0,
+    pacing_active: false,
+    paced_delay_ms: 0,
+    ancestor_tokens_per_min: null,
+    ancestor_compute_vcpu_per_min: null,
+    ancestor_compute_usd_per_hour: null,
+  },
   children: [],
   ...over,
 });
+
 const own = (budget: number, over: Partial<MissionBudget> = {}): MissionBudget => base({
-  own_budget_usd: budget, pool_id: "m1", mode: "own",
-  pool: { pool_id: "m1", budget_usd: budget, spent_usd: 0.4, reserved_usd: 0.2, carved_usd: 1, available_usd: budget - 1.6, live_machines: 1 },
+  own_budget_usd: budget,
+  pool_id: "m1",
+  mode: "own",
+  pool: {
+    pool_id: "m1",
+    budget_usd: budget,
+    spent_usd: 0.4,
+    reserved_usd: 0.2,
+    carved_usd: 1,
+    available_usd: budget - 1.6,
+    live_machines: 1,
+  },
   ...over,
 });
 
@@ -78,6 +115,56 @@ it("parses total and per-provider machine limits and enforces bounds", () => {
   expect(parseVmLimits("5", {}, childView)).toHaveProperty("error");
 });
 
+it("parses bandwidth limits, shorthand k/M tokens, and enforces ancestor ceilings", () => {
+  expect(parseBandwidthLimits("120k", "32", "$2.5", true)).toEqual({
+    value: { tokens_per_min: 120_000, compute_vcpu_per_min: 32, compute_usd_per_hour: 2.5, protect_root: true },
+  });
+  expect(parseBandwidthLimits("1.5M", "", "", false)).toEqual({
+    value: { tokens_per_min: 1_500_000, compute_vcpu_per_min: null, compute_usd_per_hour: null, protect_root: false },
+  });
+  expect(parseBandwidthLimits("", "", "", true)).toHaveProperty("error");
+  expect(parseBandwidthLimits("500", "", "", true)).toHaveProperty("error");
+  const childView = base({
+    effective_bandwidth: {
+      source: "mission",
+      pool_id: "root",
+      tokens_per_min: 80_000,
+      compute_vcpu_per_min: 16,
+      compute_usd_per_hour: 1.5,
+      protect_root: true,
+      current_tokens_per_min: 0,
+      current_vcpu_per_min: 0,
+      current_compute_usd_per_hour: 0,
+      pacing_active: false,
+      paced_delay_ms: 0,
+      ancestor_tokens_per_min: 80_000,
+      ancestor_compute_vcpu_per_min: 16,
+      ancestor_compute_usd_per_hour: 1.5,
+    },
+  });
+  expect(parseBandwidthLimits("100k", "", "", true, childView)).toHaveProperty("error");
+  expect(parseBandwidthLimits("40k", "24", "", true, childView)).toHaveProperty("error");
+  expect(parseBandwidthLimits("40k", "8", "2.0", true, childView)).toHaveProperty("error");
+});
+
+it("computes runway forecast and reacts live to bandwidth burn shaping", () => {
+  const b = own(10); // available = $8.40, current_compute_usd_per_hour = $2.00/h -> 4.2h (15,120s)
+  const unshaped = computeRunwayForecast({ budget: b, budgetEnabled: true });
+  expect(unshaped.etaSecs).toBeCloseTo(15_120, 0);
+  expect(unshaped.headline).toContain("~4h 12m runway left");
+
+  const shaped = computeRunwayForecast({
+    budget: b,
+    budgetEnabled: true,
+    bandwidthEnabled: true,
+    draftComputeUsdPerH: "1.0",
+  });
+  expect(shaped.etaSecs).toBeCloseTo(30_240, 0);
+  expect(shaped.etaGainSecs).toBeCloseTo(15_120, 0);
+  expect(shaped.subline).toContain("from bandwidth cap");
+  expect(shaped.chart.unshapedLinePath).toBeTruthy();
+});
+
 it("derives the optimistic view, mode lines, and empty model fallback", () => {
   const on = optimisticBudget(base(), 5);
   expect(on.mode).toBe("own");
@@ -89,9 +176,14 @@ it("derives the optimistic view, mode lines, and empty model fallback", () => {
   expect(modeLine(base({ mode: "pooled", pool_id: "p" }), "Parent")).toContain("Parent");
   expect(modeLine(base())).toContain("daily");
   expect(vmLimitsModeLine(base())).toContain("16 concurrent");
+  expect(bandwidthModeLine(base())).toContain("Unthrottled");
   const capOn = optimisticVmLimits(base(), { max_concurrent: null, provider_max_concurrent: { vastai: 2 } });
   expect(capOn.vm_limits_mode).toBe("own");
   expect(capOn.effective_vm_limits?.provider_limits).toEqual([{ provider: "vastai", active: 0, max_concurrent: 2 }]);
+  const bwOn = optimisticBandwidthLimits(base(), { tokens_per_min: 120_000, protect_root: true });
+  expect(bwOn.bandwidth_mode).toBe("own");
+  expect(bwOn.effective_bandwidth?.tokens_per_min).toBe(120_000);
+  expect(formatTokensPerMin(120_000)).toBe("120k tok/min");
   expect(usedFraction(own(4).pool!)).toBeCloseTo(0.4);
   expect(modelLabel({ provider: null, model: "" })).toBe("Unknown model");
   expect(modelLabel({ provider: "openai", model: "" })).toBe("openai/Unknown model");
@@ -111,6 +203,36 @@ it("turns the budget on optimistically and keeps the server's answer", async () 
   expect(screen.getByText(/of \$5\.00/)).toBeTruthy();
   resolve(own(5));
   await waitFor(() => expect(screen.getByText("$0.40")).toBeTruthy());
+});
+
+it("turns bandwidth limits on, updates live runway preview, and saves pace settings", async () => {
+  let savedBw: BandwidthLimits | null = null;
+  render(() => <MissionSettings missionId="m1" title="evm.fast" onClose={() => {}}
+    load={async () => own(10)}
+    loadStats={pendingStats}
+    saveBandwidthLimits={async (_id, lim) => { savedBw = lim; return optimisticBandwidthLimits(own(10), lim); }} />);
+  const toggle = await screen.findByRole("switch", { name: "Bandwidth limit" });
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  expect(screen.getByTestId("mission-forecast-card").textContent).toContain("~4h 12m runway left");
+
+  fireEvent.click(toggle);
+  await waitFor(() => expect((screen.getByLabelText("Tokens per minute") as HTMLInputElement).value).toBe("120000"));
+
+  const tpmInput = screen.getByLabelText("Tokens per minute") as HTMLInputElement;
+  const usdHInput = screen.getByLabelText("Compute burn ceiling ($/h)") as HTMLInputElement;
+  fireEvent.input(tpmInput, { target: { value: "90k" } });
+  fireEvent.input(usdHInput, { target: { value: "1.0" } });
+
+  // Forecast card updates live before saving.
+  expect(screen.getByTestId("mission-forecast-card").textContent).toContain("~8h 24m runway left");
+
+  fireEvent.click(screen.getByRole("button", { name: "Save bandwidth" }));
+  await waitFor(() => expect(savedBw).toEqual({
+    tokens_per_min: 90_000,
+    compute_vcpu_per_min: null,
+    compute_usd_per_hour: 1,
+    protect_root: true,
+  }));
 });
 
 it("turns machine limits on, expands per-provider limits, and saves overrides", async () => {
@@ -183,6 +305,9 @@ it("matches the shared cross-client mission-budget fixture", () => {
   const globalDefault = missionBudgetFixture.global_default as MissionBudget;
   const dedicated = missionBudgetFixture.dedicated_override as MissionBudget;
   expect(vmLimitsModeLine(globalDefault)).toBe("Uses the global limit (16 concurrent across Orb).");
+  expect(bandwidthModeLine(globalDefault)).toBe("Unthrottled. Requests and spawns run at full speed.");
   expect(providerLimitsSummary(dedicated.own_vm_limits)).toBe("Hetzner: off · Vast.ai: 2");
+  expect(bandwidthLimitsSummary(dedicated.own_bandwidth_limits)).toBe("120k tok/min · 32 vCPU/min · $2.50/h");
   expect(optimisticVmLimits(dedicated, null).effective_vm_limits?.max_concurrent).toBe(16);
+  expect(optimisticBandwidthLimits(dedicated, null).bandwidth_mode).toBe("none");
 });

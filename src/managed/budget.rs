@@ -31,6 +31,13 @@ pub const RESERVE_MINUTES: i64 = 60;
 /// Upper bound on any operator-specified per-mission VM concurrency override.
 pub const MAX_VM_CONCURRENCY_LIMIT: usize = 128;
 
+/// Bounds on per-mission inference & managed-compute bandwidth limits.
+pub const MIN_TOKENS_PER_MIN: u64 = 1_000;
+pub const MAX_TOKENS_PER_MIN: u64 = 100_000_000;
+pub const MAX_COMPUTE_VCPU_PER_MIN: u32 = 4_096;
+pub const MIN_COMPUTE_USD_PER_HOUR: f64 = 0.01;
+pub const MAX_COMPUTE_USD_PER_HOUR: f64 = 10_000.0;
+
 /// Concurrency cap override for a mission and its descendants.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VmConcurrencyLimits {
@@ -54,7 +61,39 @@ impl VmConcurrencyLimits {
     }
 }
 
-/// One mission's budget and/or concurrency override, keyed by mission id.
+/// Bandwidth (rate/pacing) limits for a mission and its descendants.
+/// Exceeding these rates applies transparent pace/delay smoothing rather than
+/// hard `429` rejections (unless a single VM exceeds the entire compute ceiling).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BandwidthLimits {
+    /// Optional LLM throughput ceiling in tokens per minute (`1_000..=100_000_000`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_min: Option<u64>,
+    /// Optional active managed-compute vCPU bandwidth ceiling (`1..=4_096` vCPU-min/min).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_vcpu_per_min: Option<u32>,
+    /// Optional active managed-compute burn ceiling in USD/hour (`0.01..=10_000.0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_usd_per_hour: Option<f64>,
+    /// When `true`, the mission owning this bandwidth pool bypasses pacing delays
+    /// itself while pooled descendant subagents absorb the smoothing delay.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub protect_root: bool,
+}
+
+impl BandwidthLimits {
+    pub fn is_empty(&self) -> bool {
+        self.tokens_per_min.is_none()
+            && self.compute_vcpu_per_min.is_none()
+            && self.compute_usd_per_hour.is_none()
+    }
+
+    pub fn has_compute_limit(&self) -> bool {
+        self.compute_vcpu_per_min.is_some() || self.compute_usd_per_hour.is_some()
+    }
+}
+
+/// One mission's budget, concurrency, and/or bandwidth override, keyed by mission id.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BudgetPool {
     pub mission_id: String,
@@ -71,9 +110,22 @@ pub struct BudgetPool {
     /// `None` for a root cap pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_cap_pool_id: Option<String>,
+    /// Optional bandwidth & pacing limits for this mission's subtree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth_limits: Option<BandwidthLimits>,
+    /// Nearest ancestor pool with `bandwidth_limits` when this override was set;
+    /// `None` for a root bandwidth pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_bandwidth_pool_id: Option<String>,
     #[serde(default)]
     pub owner_user_id: Option<String>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl BudgetPool {
+    pub fn has_any_override(&self) -> bool {
+        self.budget_usd.is_some() || self.vm_limits.is_some() || self.bandwidth_limits.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -381,6 +433,179 @@ pub fn validate_vm_limits(raw: VmConcurrencyLimits) -> Result<VmConcurrencyLimit
     if normalized.is_empty() {
         return Err(
             "Set max_concurrent or at least one provider limit, or clear vm_limits to use the global cap"
+                .into(),
+        );
+    }
+    Ok(normalized)
+}
+
+/// First mission in `lineage` (self first, then ancestors) that has a
+/// `bandwidth_limits` override owned by `user`.
+pub fn nearest_bandwidth_pool<'a>(
+    lineage: impl IntoIterator<Item = &'a str>,
+    pools: &HashMap<String, BudgetPool>,
+    user: &str,
+) -> Option<String> {
+    lineage
+        .into_iter()
+        .find(|id| {
+            pools.get(*id).is_some_and(|p| {
+                p.bandwidth_limits.is_some() && p.owner_user_id.as_deref() == Some(user)
+            })
+        })
+        .map(str::to_string)
+}
+
+/// First mission in `lineage` (self first, then ancestors) whose
+/// `bandwidth_limits` sets a compute ceiling (`compute_vcpu_per_min` or
+/// `compute_usd_per_hour`) owned by `user`.
+pub fn nearest_compute_bandwidth_pool<'a>(
+    lineage: impl IntoIterator<Item = &'a str>,
+    pools: &HashMap<String, BudgetPool>,
+    user: &str,
+) -> Option<String> {
+    lineage
+        .into_iter()
+        .find(|id| {
+            pools.get(*id).is_some_and(|p| {
+                p.owner_user_id.as_deref() == Some(user)
+                    && p.bandwidth_limits
+                        .as_ref()
+                        .is_some_and(BandwidthLimits::has_compute_limit)
+            })
+        })
+        .map(str::to_string)
+}
+
+/// True when `leaf_pool` is `ancestor_pool` or descends from it via
+/// `parent_bandwidth_pool_id` (bounded, cycle-safe).
+pub fn bandwidth_pool_descends_from(
+    leaf_pool: &str,
+    ancestor_pool: &str,
+    pools: &HashMap<String, BudgetPool>,
+) -> bool {
+    let mut cur = Some(leaf_pool);
+    for _ in 0..32 {
+        let Some(id) = cur else {
+            return false;
+        };
+        if id == ancestor_pool {
+            return true;
+        }
+        cur = pools
+            .get(id)
+            .and_then(|p| p.parent_bandwidth_pool_id.as_deref());
+    }
+    false
+}
+
+/// Live compute bandwidth (`(active_vcpu, active_usd_per_hour)`) attributed to
+/// `pool_id` or any descendant bandwidth pool below it (or live VMs charged to
+/// `pool_id`'s USD budget pool when `bandwidth_pool_id` was not yet populated).
+pub fn bandwidth_pool_compute_usage(
+    pool_id: &str,
+    pools: &HashMap<String, BudgetPool>,
+    machines: &[ManagedMachine],
+) -> (u32, f64) {
+    let mut vcpu = 0u32;
+    let mut usd_per_h = 0.0f64;
+    for m in machines {
+        if !m.state.is_live() {
+            continue;
+        }
+        let matches_bw = m
+            .bandwidth_pool_id
+            .as_deref()
+            .is_some_and(|bp| bandwidth_pool_descends_from(bp, pool_id, pools));
+        let matches_owner = m.bandwidth_pool_id.is_none()
+            && (m.owner_mission_id.as_deref() == Some(pool_id)
+                || m.budget_pool_id.as_deref() == Some(pool_id)
+                || m.cap_pool_id.as_deref() == Some(pool_id));
+        if matches_bw || matches_owner {
+            vcpu = vcpu.saturating_add(m.cpu);
+            usd_per_h += m.usd_per_hour;
+        }
+    }
+    (vcpu, round4(usd_per_h))
+}
+
+/// Strict ancestor bandwidth pools above `start_pool`.
+pub fn ancestor_bandwidth_chain(
+    start_pool: &str,
+    lineage: &[String],
+    pools: &HashMap<String, BudgetPool>,
+    user: Option<&str>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = pools
+        .get(start_pool)
+        .and_then(|p| p.parent_bandwidth_pool_id.as_deref());
+    for _ in 0..32 {
+        let Some(id) = cur else { break };
+        if out.iter().any(|x| x == id) || id == start_pool {
+            break;
+        }
+        if pools.get(id).is_some_and(|p| p.bandwidth_limits.is_some()) {
+            out.push(id.to_string());
+        }
+        cur = pools
+            .get(id)
+            .and_then(|p| p.parent_bandwidth_pool_id.as_deref());
+    }
+    if let Some(pos) = lineage.iter().position(|id| id == start_pool) {
+        for anc in lineage.iter().skip(pos + 1) {
+            if anc != start_pool
+                && !out.iter().any(|x| x == anc)
+                && pools.get(anc.as_str()).is_some_and(|p| {
+                    p.bandwidth_limits.is_some()
+                        && user.is_none_or(|u| p.owner_user_id.as_deref() == Some(u))
+                })
+            {
+                out.push(anc.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Validate per-mission bandwidth/pacing overrides from an operator client.
+pub fn validate_bandwidth_limits(raw: BandwidthLimits) -> Result<BandwidthLimits, String> {
+    if let Some(tpm) = raw.tokens_per_min {
+        if !(MIN_TOKENS_PER_MIN..=MAX_TOKENS_PER_MIN).contains(&tpm) {
+            return Err(format!(
+                "tokens_per_min must be between {MIN_TOKENS_PER_MIN} and {MAX_TOKENS_PER_MIN}"
+            ));
+        }
+    }
+    if let Some(vcpu) = raw.compute_vcpu_per_min {
+        if !(1..=MAX_COMPUTE_VCPU_PER_MIN).contains(&vcpu) {
+            return Err(format!(
+                "compute_vcpu_per_min must be between 1 and {MAX_COMPUTE_VCPU_PER_MIN}"
+            ));
+        }
+    }
+    let compute_usd_per_hour = match raw.compute_usd_per_hour {
+        None => None,
+        Some(rate) => {
+            if !rate.is_finite()
+                || !(MIN_COMPUTE_USD_PER_HOUR..=MAX_COMPUTE_USD_PER_HOUR).contains(&rate)
+            {
+                return Err(format!(
+                    "compute_usd_per_hour must be between {MIN_COMPUTE_USD_PER_HOUR:.2} and {MAX_COMPUTE_USD_PER_HOUR:.0}"
+                ));
+            }
+            Some(round4(rate))
+        }
+    };
+    let normalized = BandwidthLimits {
+        tokens_per_min: raw.tokens_per_min,
+        compute_vcpu_per_min: raw.compute_vcpu_per_min,
+        compute_usd_per_hour,
+        protect_root: raw.protect_root,
+    };
+    if normalized.is_empty() {
+        return Err(
+            "Set tokens_per_min, compute_vcpu_per_min, or compute_usd_per_hour, or clear bandwidth_limits to disable pacing"
                 .into(),
         );
     }

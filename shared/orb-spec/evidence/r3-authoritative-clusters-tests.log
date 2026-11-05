@@ -1,4 +1,4 @@
-    Finished `test` profile [unoptimized] target(s) in 0.11s
+    Finished `test` profile [unoptimized] target(s) in 0.12s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-d791927b4d2534f0)
 
 running 40 tests
@@ -179,13 +179,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 48.66s
+    Finished `test` profile [unoptimized] target(s) in 55.20s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test provider_health::tests::subscription_cooldown_classifies_empty_chain_as_retryable ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -320,13 +320,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.39s
+    Finished `test` profile [unoptimized] target(s) in 0.32s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test provider_health::tests::account_error_cooldown_doubles_from_ten_minutes_to_six_hours ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -461,13 +461,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.32s
+    Finished `test` profile [unoptimized] target(s) in 0.36s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test provider_health::tests::provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -602,13 +602,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.32s
+    Finished `test` profile [unoptimized] target(s) in 0.31s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test cost::tests::test_cost_calculation_basic ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -743,13 +743,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.26s
+    Finished `test` profile [unoptimized] target(s) in 0.33s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::control::host_goal::tests::armed_wakeup_gives_paused ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -884,13 +884,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.30s
+    Finished `test` profile [unoptimized] target(s) in 0.31s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::reconcile::tests::active_mission_with_any_liveness_signal_is_kept ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1031,7 +1031,7 @@ warning: `sandboxed_sh` (lib test) generated 9 warnings
 running 1 test
 test api::control::tests::queue_snapshot_replays_prepared_parallel_message_until_run_exists ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1166,13 +1166,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.25s
+    Finished `test` profile [unoptimized] target(s) in 0.31s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::control::dispatch_admission_tests::rejected_actor_dispatch_with_failed_rollback_is_durably_recoverable ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.85s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.89s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1307,13 +1307,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.24s
+    Finished `test` profile [unoptimized] target(s) in 0.31s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::usage_attribution::tests::forged_hints_are_rejected_and_keep_the_principal ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1448,13 +1448,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.20s
+    Finished `test` profile [unoptimized] target(s) in 0.30s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::control::automation_scheduler::native_schedule_bounds_tests::native_schedule_stops_after_ttl_or_a_finished_mission ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1589,13 +1589,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.29s
+    Finished `test` profile [unoptimized] target(s) in 0.36s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::mission_stats::tests::mission_and_subtree_totals_are_conserved_and_replays_count_once ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1730,13 +1730,436 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.31s
+    Finished `test` profile [unoptimized] target(s) in 0.30s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::privilege_broker::tests::grant_lifecycle_audit_log_session_reap_and_bunker_lockdown ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.03s
+
+warning: field `billable_tokens` is never read
+  --> src/api/mission_store/sqlite_resources.rs:47:9
+   |
+42 | pub struct UsageRollupRow {
+   |            -------------- field in this struct
+...
+47 |     pub billable_tokens: u64,
+   |         ^^^^^^^^^^^^^^^
+   |
+   = note: `UsageRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `node_id` is never read
+  --> src/api/mission_store/sqlite_resources.rs:56:9
+   |
+53 | pub struct ComputeRollupRow {
+   |            ---------------- field in this struct
+...
+56 |     pub node_id: String,
+   |         ^^^^^^^
+   |
+   = note: `ComputeRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `backend`, `remote_node_id`, `created_at`, `updated_at`, `first_started_at`, and `completed_at` are never read
+  --> src/api/mission_store/sqlite_resources.rs:69:9
+   |
+64 | pub struct RootMissionResourceRow {
+   |            ---------------------- fields in this struct
+...
+69 |     pub backend: String,
+   |         ^^^^^^^
+70 |     pub remote_node_id: Option<String>,
+   |         ^^^^^^^^^^^^^^
+71 |     pub created_at: String,
+   |         ^^^^^^^^^^
+72 |     pub updated_at: String,
+   |         ^^^^^^^^^^
+73 |     pub first_started_at: Option<String>,
+   |         ^^^^^^^^^^^^^^^^
+74 |     pub completed_at: Option<String>,
+   |         ^^^^^^^^^^^^
+   |
+   = note: `RootMissionResourceRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `status` is never read
+  --> src/api/mission_store/sqlite_resources.rs:88:9
+   |
+82 | pub struct ActiveRunAttributionRow {
+   |            ----------------------- field in this struct
+...
+88 |     pub status: String,
+   |         ^^^^^^
+   |
+   = note: `ActiveRunAttributionRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `parent_mission_id`, `updated_at`, `terminal_reason`, and `active_run_ms` are never read
+   --> src/api/mission_store/sqlite_resources.rs:103:9
+    |
+101 | pub struct MissionNodeRow {
+    |            -------------- fields in this struct
+102 |     pub id: String,
+103 |     pub parent_mission_id: Option<String>,
+    |         ^^^^^^^^^^^^^^^^^
+...
+112 |     pub updated_at: String,
+    |         ^^^^^^^^^^
+113 |     pub terminal_reason: Option<String>,
+    |         ^^^^^^^^^^^^^^^
+...
+118 |     pub active_run_ms: i64,
+    |         ^^^^^^^^^^^^^
+    |
+    = note: `MissionNodeRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `boss_mission_id`, `status`, `created_at`, and `updated_at` are never read
+   --> src/api/mission_store/sqlite_resources.rs:128:9
+    |
+126 | pub struct BoardTaskResourceRow {
+    |            -------------------- fields in this struct
+127 |     pub id: String,
+128 |     pub boss_mission_id: String,
+    |         ^^^^^^^^^^^^^^^
+...
+135 |     pub status: String,
+    |         ^^^^^^
+136 |     pub worker_mission_id: Option<String>,
+137 |     pub created_at: String,
+    |         ^^^^^^^^^^
+138 |     pub updated_at: String,
+    |         ^^^^^^^^^^
+    |
+    = note: `BoardTaskResourceRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `started_at`, `ended_at`, `scope_unit`, and `terminal_reason` are never read
+   --> src/api/mission_store/sqlite_resources.rs:156:9
+    |
+154 | pub struct MissionRunIntervalRow {
+    |            --------------------- fields in this struct
+155 |     pub mission_id: String,
+156 |     pub started_at: String,
+    |         ^^^^^^^^^^
+157 |     pub ended_at: Option<String>,
+    |         ^^^^^^^^
+158 |     pub scope_unit: Option<String>,
+    |         ^^^^^^^^^^
+159 |     pub terminal_reason: Option<String>,
+    |         ^^^^^^^^^^^^^^^
+    |
+    = note: `MissionRunIntervalRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `node_id` is never read
+   --> src/api/mission_store/sqlite_resources.rs:177:9
+    |
+174 | pub struct MissionComputeBucketRow {
+    |            ----------------------- field in this struct
+...
+177 |     pub node_id: String,
+    |         ^^^^^^^
+    |
+    = note: `MissionComputeBucketRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `run_intervals` is never read
+   --> src/api/mission_store/sqlite_resources.rs:190:9
+    |
+185 | pub struct MissionResourcesStoreSnapshot {
+    |            ----------------------------- field in this struct
+...
+190 |     pub run_intervals: Vec<MissionRunIntervalRow>,
+    |         ^^^^^^^^^^^^^
+    |
+    = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.33s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
+
+running 1 test
+test api::system::tests::orb_and_sandboxed_service_aliases_map_to_same_deploy_tiers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
+
+warning: field `billable_tokens` is never read
+  --> src/api/mission_store/sqlite_resources.rs:47:9
+   |
+42 | pub struct UsageRollupRow {
+   |            -------------- field in this struct
+...
+47 |     pub billable_tokens: u64,
+   |         ^^^^^^^^^^^^^^^
+   |
+   = note: `UsageRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `node_id` is never read
+  --> src/api/mission_store/sqlite_resources.rs:56:9
+   |
+53 | pub struct ComputeRollupRow {
+   |            ---------------- field in this struct
+...
+56 |     pub node_id: String,
+   |         ^^^^^^^
+   |
+   = note: `ComputeRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `backend`, `remote_node_id`, `created_at`, `updated_at`, `first_started_at`, and `completed_at` are never read
+  --> src/api/mission_store/sqlite_resources.rs:69:9
+   |
+64 | pub struct RootMissionResourceRow {
+   |            ---------------------- fields in this struct
+...
+69 |     pub backend: String,
+   |         ^^^^^^^
+70 |     pub remote_node_id: Option<String>,
+   |         ^^^^^^^^^^^^^^
+71 |     pub created_at: String,
+   |         ^^^^^^^^^^
+72 |     pub updated_at: String,
+   |         ^^^^^^^^^^
+73 |     pub first_started_at: Option<String>,
+   |         ^^^^^^^^^^^^^^^^
+74 |     pub completed_at: Option<String>,
+   |         ^^^^^^^^^^^^
+   |
+   = note: `RootMissionResourceRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `status` is never read
+  --> src/api/mission_store/sqlite_resources.rs:88:9
+   |
+82 | pub struct ActiveRunAttributionRow {
+   |            ----------------------- field in this struct
+...
+88 |     pub status: String,
+   |         ^^^^^^
+   |
+   = note: `ActiveRunAttributionRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `parent_mission_id`, `updated_at`, `terminal_reason`, and `active_run_ms` are never read
+   --> src/api/mission_store/sqlite_resources.rs:103:9
+    |
+101 | pub struct MissionNodeRow {
+    |            -------------- fields in this struct
+102 |     pub id: String,
+103 |     pub parent_mission_id: Option<String>,
+    |         ^^^^^^^^^^^^^^^^^
+...
+112 |     pub updated_at: String,
+    |         ^^^^^^^^^^
+113 |     pub terminal_reason: Option<String>,
+    |         ^^^^^^^^^^^^^^^
+...
+118 |     pub active_run_ms: i64,
+    |         ^^^^^^^^^^^^^
+    |
+    = note: `MissionNodeRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `boss_mission_id`, `status`, `created_at`, and `updated_at` are never read
+   --> src/api/mission_store/sqlite_resources.rs:128:9
+    |
+126 | pub struct BoardTaskResourceRow {
+    |            -------------------- fields in this struct
+127 |     pub id: String,
+128 |     pub boss_mission_id: String,
+    |         ^^^^^^^^^^^^^^^
+...
+135 |     pub status: String,
+    |         ^^^^^^
+136 |     pub worker_mission_id: Option<String>,
+137 |     pub created_at: String,
+    |         ^^^^^^^^^^
+138 |     pub updated_at: String,
+    |         ^^^^^^^^^^
+    |
+    = note: `BoardTaskResourceRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `started_at`, `ended_at`, `scope_unit`, and `terminal_reason` are never read
+   --> src/api/mission_store/sqlite_resources.rs:156:9
+    |
+154 | pub struct MissionRunIntervalRow {
+    |            --------------------- fields in this struct
+155 |     pub mission_id: String,
+156 |     pub started_at: String,
+    |         ^^^^^^^^^^
+157 |     pub ended_at: Option<String>,
+    |         ^^^^^^^^
+158 |     pub scope_unit: Option<String>,
+    |         ^^^^^^^^^^
+159 |     pub terminal_reason: Option<String>,
+    |         ^^^^^^^^^^^^^^^
+    |
+    = note: `MissionRunIntervalRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `node_id` is never read
+   --> src/api/mission_store/sqlite_resources.rs:177:9
+    |
+174 | pub struct MissionComputeBucketRow {
+    |            ----------------------- field in this struct
+...
+177 |     pub node_id: String,
+    |         ^^^^^^^
+    |
+    = note: `MissionComputeBucketRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `run_intervals` is never read
+   --> src/api/mission_store/sqlite_resources.rs:190:9
+    |
+185 | pub struct MissionResourcesStoreSnapshot {
+    |            ----------------------------- field in this struct
+...
+190 |     pub run_intervals: Vec<MissionRunIntervalRow>,
+    |         ^^^^^^^^^^^^^
+    |
+    = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.30s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
+
+running 1 test
+test managed::tests::budget_and_concurrency_are_hard_refusals ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.01s
+
+warning: field `billable_tokens` is never read
+  --> src/api/mission_store/sqlite_resources.rs:47:9
+   |
+42 | pub struct UsageRollupRow {
+   |            -------------- field in this struct
+...
+47 |     pub billable_tokens: u64,
+   |         ^^^^^^^^^^^^^^^
+   |
+   = note: `UsageRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `node_id` is never read
+  --> src/api/mission_store/sqlite_resources.rs:56:9
+   |
+53 | pub struct ComputeRollupRow {
+   |            ---------------- field in this struct
+...
+56 |     pub node_id: String,
+   |         ^^^^^^^
+   |
+   = note: `ComputeRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `backend`, `remote_node_id`, `created_at`, `updated_at`, `first_started_at`, and `completed_at` are never read
+  --> src/api/mission_store/sqlite_resources.rs:69:9
+   |
+64 | pub struct RootMissionResourceRow {
+   |            ---------------------- fields in this struct
+...
+69 |     pub backend: String,
+   |         ^^^^^^^
+70 |     pub remote_node_id: Option<String>,
+   |         ^^^^^^^^^^^^^^
+71 |     pub created_at: String,
+   |         ^^^^^^^^^^
+72 |     pub updated_at: String,
+   |         ^^^^^^^^^^
+73 |     pub first_started_at: Option<String>,
+   |         ^^^^^^^^^^^^^^^^
+74 |     pub completed_at: Option<String>,
+   |         ^^^^^^^^^^^^
+   |
+   = note: `RootMissionResourceRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `status` is never read
+  --> src/api/mission_store/sqlite_resources.rs:88:9
+   |
+82 | pub struct ActiveRunAttributionRow {
+   |            ----------------------- field in this struct
+...
+88 |     pub status: String,
+   |         ^^^^^^
+   |
+   = note: `ActiveRunAttributionRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `parent_mission_id`, `updated_at`, `terminal_reason`, and `active_run_ms` are never read
+   --> src/api/mission_store/sqlite_resources.rs:103:9
+    |
+101 | pub struct MissionNodeRow {
+    |            -------------- fields in this struct
+102 |     pub id: String,
+103 |     pub parent_mission_id: Option<String>,
+    |         ^^^^^^^^^^^^^^^^^
+...
+112 |     pub updated_at: String,
+    |         ^^^^^^^^^^
+113 |     pub terminal_reason: Option<String>,
+    |         ^^^^^^^^^^^^^^^
+...
+118 |     pub active_run_ms: i64,
+    |         ^^^^^^^^^^^^^
+    |
+    = note: `MissionNodeRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `boss_mission_id`, `status`, `created_at`, and `updated_at` are never read
+   --> src/api/mission_store/sqlite_resources.rs:128:9
+    |
+126 | pub struct BoardTaskResourceRow {
+    |            -------------------- fields in this struct
+127 |     pub id: String,
+128 |     pub boss_mission_id: String,
+    |         ^^^^^^^^^^^^^^^
+...
+135 |     pub status: String,
+    |         ^^^^^^
+136 |     pub worker_mission_id: Option<String>,
+137 |     pub created_at: String,
+    |         ^^^^^^^^^^
+138 |     pub updated_at: String,
+    |         ^^^^^^^^^^
+    |
+    = note: `BoardTaskResourceRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `started_at`, `ended_at`, `scope_unit`, and `terminal_reason` are never read
+   --> src/api/mission_store/sqlite_resources.rs:156:9
+    |
+154 | pub struct MissionRunIntervalRow {
+    |            --------------------- fields in this struct
+155 |     pub mission_id: String,
+156 |     pub started_at: String,
+    |         ^^^^^^^^^^
+157 |     pub ended_at: Option<String>,
+    |         ^^^^^^^^
+158 |     pub scope_unit: Option<String>,
+    |         ^^^^^^^^^^
+159 |     pub terminal_reason: Option<String>,
+    |         ^^^^^^^^^^^^^^^
+    |
+    = note: `MissionRunIntervalRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `node_id` is never read
+   --> src/api/mission_store/sqlite_resources.rs:177:9
+    |
+174 | pub struct MissionComputeBucketRow {
+    |            ----------------------- field in this struct
+...
+177 |     pub node_id: String,
+    |         ^^^^^^^
+    |
+    = note: `MissionComputeBucketRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `run_intervals` is never read
+   --> src/api/mission_store/sqlite_resources.rs:190:9
+    |
+185 | pub struct MissionResourcesStoreSnapshot {
+    |            ----------------------------- field in this struct
+...
+190 |     pub run_intervals: Vec<MissionRunIntervalRow>,
+    |         ^^^^^^^^^^^^^
+    |
+    = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.30s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
+
+running 1 test
+test managed::lifecycle::tests::busy_lease_protects_everything_but_ttl ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1875,432 +2298,9 @@ warning: `sandboxed_sh` (lib test) generated 9 warnings
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
-test api::system::tests::orb_and_sandboxed_service_aliases_map_to_same_deploy_tiers ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
-
-warning: field `billable_tokens` is never read
-  --> src/api/mission_store/sqlite_resources.rs:47:9
-   |
-42 | pub struct UsageRollupRow {
-   |            -------------- field in this struct
-...
-47 |     pub billable_tokens: u64,
-   |         ^^^^^^^^^^^^^^^
-   |
-   = note: `UsageRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: field `node_id` is never read
-  --> src/api/mission_store/sqlite_resources.rs:56:9
-   |
-53 | pub struct ComputeRollupRow {
-   |            ---------------- field in this struct
-...
-56 |     pub node_id: String,
-   |         ^^^^^^^
-   |
-   = note: `ComputeRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: fields `backend`, `remote_node_id`, `created_at`, `updated_at`, `first_started_at`, and `completed_at` are never read
-  --> src/api/mission_store/sqlite_resources.rs:69:9
-   |
-64 | pub struct RootMissionResourceRow {
-   |            ---------------------- fields in this struct
-...
-69 |     pub backend: String,
-   |         ^^^^^^^
-70 |     pub remote_node_id: Option<String>,
-   |         ^^^^^^^^^^^^^^
-71 |     pub created_at: String,
-   |         ^^^^^^^^^^
-72 |     pub updated_at: String,
-   |         ^^^^^^^^^^
-73 |     pub first_started_at: Option<String>,
-   |         ^^^^^^^^^^^^^^^^
-74 |     pub completed_at: Option<String>,
-   |         ^^^^^^^^^^^^
-   |
-   = note: `RootMissionResourceRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: field `status` is never read
-  --> src/api/mission_store/sqlite_resources.rs:88:9
-   |
-82 | pub struct ActiveRunAttributionRow {
-   |            ----------------------- field in this struct
-...
-88 |     pub status: String,
-   |         ^^^^^^
-   |
-   = note: `ActiveRunAttributionRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: fields `parent_mission_id`, `updated_at`, `terminal_reason`, and `active_run_ms` are never read
-   --> src/api/mission_store/sqlite_resources.rs:103:9
-    |
-101 | pub struct MissionNodeRow {
-    |            -------------- fields in this struct
-102 |     pub id: String,
-103 |     pub parent_mission_id: Option<String>,
-    |         ^^^^^^^^^^^^^^^^^
-...
-112 |     pub updated_at: String,
-    |         ^^^^^^^^^^
-113 |     pub terminal_reason: Option<String>,
-    |         ^^^^^^^^^^^^^^^
-...
-118 |     pub active_run_ms: i64,
-    |         ^^^^^^^^^^^^^
-    |
-    = note: `MissionNodeRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: fields `boss_mission_id`, `status`, `created_at`, and `updated_at` are never read
-   --> src/api/mission_store/sqlite_resources.rs:128:9
-    |
-126 | pub struct BoardTaskResourceRow {
-    |            -------------------- fields in this struct
-127 |     pub id: String,
-128 |     pub boss_mission_id: String,
-    |         ^^^^^^^^^^^^^^^
-...
-135 |     pub status: String,
-    |         ^^^^^^
-136 |     pub worker_mission_id: Option<String>,
-137 |     pub created_at: String,
-    |         ^^^^^^^^^^
-138 |     pub updated_at: String,
-    |         ^^^^^^^^^^
-    |
-    = note: `BoardTaskResourceRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: fields `started_at`, `ended_at`, `scope_unit`, and `terminal_reason` are never read
-   --> src/api/mission_store/sqlite_resources.rs:156:9
-    |
-154 | pub struct MissionRunIntervalRow {
-    |            --------------------- fields in this struct
-155 |     pub mission_id: String,
-156 |     pub started_at: String,
-    |         ^^^^^^^^^^
-157 |     pub ended_at: Option<String>,
-    |         ^^^^^^^^
-158 |     pub scope_unit: Option<String>,
-    |         ^^^^^^^^^^
-159 |     pub terminal_reason: Option<String>,
-    |         ^^^^^^^^^^^^^^^
-    |
-    = note: `MissionRunIntervalRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: field `node_id` is never read
-   --> src/api/mission_store/sqlite_resources.rs:177:9
-    |
-174 | pub struct MissionComputeBucketRow {
-    |            ----------------------- field in this struct
-...
-177 |     pub node_id: String,
-    |         ^^^^^^^
-    |
-    = note: `MissionComputeBucketRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: field `run_intervals` is never read
-   --> src/api/mission_store/sqlite_resources.rs:190:9
-    |
-185 | pub struct MissionResourcesStoreSnapshot {
-    |            ----------------------------- field in this struct
-...
-190 |     pub run_intervals: Vec<MissionRunIntervalRow>,
-    |         ^^^^^^^^^^^^^
-    |
-    = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.23s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 1 test
-test managed::tests::budget_and_concurrency_are_hard_refusals ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.01s
-
-warning: field `billable_tokens` is never read
-  --> src/api/mission_store/sqlite_resources.rs:47:9
-   |
-42 | pub struct UsageRollupRow {
-   |            -------------- field in this struct
-...
-47 |     pub billable_tokens: u64,
-   |         ^^^^^^^^^^^^^^^
-   |
-   = note: `UsageRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: field `node_id` is never read
-  --> src/api/mission_store/sqlite_resources.rs:56:9
-   |
-53 | pub struct ComputeRollupRow {
-   |            ---------------- field in this struct
-...
-56 |     pub node_id: String,
-   |         ^^^^^^^
-   |
-   = note: `ComputeRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: fields `backend`, `remote_node_id`, `created_at`, `updated_at`, `first_started_at`, and `completed_at` are never read
-  --> src/api/mission_store/sqlite_resources.rs:69:9
-   |
-64 | pub struct RootMissionResourceRow {
-   |            ---------------------- fields in this struct
-...
-69 |     pub backend: String,
-   |         ^^^^^^^
-70 |     pub remote_node_id: Option<String>,
-   |         ^^^^^^^^^^^^^^
-71 |     pub created_at: String,
-   |         ^^^^^^^^^^
-72 |     pub updated_at: String,
-   |         ^^^^^^^^^^
-73 |     pub first_started_at: Option<String>,
-   |         ^^^^^^^^^^^^^^^^
-74 |     pub completed_at: Option<String>,
-   |         ^^^^^^^^^^^^
-   |
-   = note: `RootMissionResourceRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: field `status` is never read
-  --> src/api/mission_store/sqlite_resources.rs:88:9
-   |
-82 | pub struct ActiveRunAttributionRow {
-   |            ----------------------- field in this struct
-...
-88 |     pub status: String,
-   |         ^^^^^^
-   |
-   = note: `ActiveRunAttributionRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: fields `parent_mission_id`, `updated_at`, `terminal_reason`, and `active_run_ms` are never read
-   --> src/api/mission_store/sqlite_resources.rs:103:9
-    |
-101 | pub struct MissionNodeRow {
-    |            -------------- fields in this struct
-102 |     pub id: String,
-103 |     pub parent_mission_id: Option<String>,
-    |         ^^^^^^^^^^^^^^^^^
-...
-112 |     pub updated_at: String,
-    |         ^^^^^^^^^^
-113 |     pub terminal_reason: Option<String>,
-    |         ^^^^^^^^^^^^^^^
-...
-118 |     pub active_run_ms: i64,
-    |         ^^^^^^^^^^^^^
-    |
-    = note: `MissionNodeRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: fields `boss_mission_id`, `status`, `created_at`, and `updated_at` are never read
-   --> src/api/mission_store/sqlite_resources.rs:128:9
-    |
-126 | pub struct BoardTaskResourceRow {
-    |            -------------------- fields in this struct
-127 |     pub id: String,
-128 |     pub boss_mission_id: String,
-    |         ^^^^^^^^^^^^^^^
-...
-135 |     pub status: String,
-    |         ^^^^^^
-136 |     pub worker_mission_id: Option<String>,
-137 |     pub created_at: String,
-    |         ^^^^^^^^^^
-138 |     pub updated_at: String,
-    |         ^^^^^^^^^^
-    |
-    = note: `BoardTaskResourceRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: fields `started_at`, `ended_at`, `scope_unit`, and `terminal_reason` are never read
-   --> src/api/mission_store/sqlite_resources.rs:156:9
-    |
-154 | pub struct MissionRunIntervalRow {
-    |            --------------------- fields in this struct
-155 |     pub mission_id: String,
-156 |     pub started_at: String,
-    |         ^^^^^^^^^^
-157 |     pub ended_at: Option<String>,
-    |         ^^^^^^^^
-158 |     pub scope_unit: Option<String>,
-    |         ^^^^^^^^^^
-159 |     pub terminal_reason: Option<String>,
-    |         ^^^^^^^^^^^^^^^
-    |
-    = note: `MissionRunIntervalRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: field `node_id` is never read
-   --> src/api/mission_store/sqlite_resources.rs:177:9
-    |
-174 | pub struct MissionComputeBucketRow {
-    |            ----------------------- field in this struct
-...
-177 |     pub node_id: String,
-    |         ^^^^^^^
-    |
-    = note: `MissionComputeBucketRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: field `run_intervals` is never read
-   --> src/api/mission_store/sqlite_resources.rs:190:9
-    |
-185 | pub struct MissionResourcesStoreSnapshot {
-    |            ----------------------------- field in this struct
-...
-190 |     pub run_intervals: Vec<MissionRunIntervalRow>,
-    |         ^^^^^^^^^^^^^
-    |
-    = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.21s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 1 test
-test managed::lifecycle::tests::busy_lease_protects_everything_but_ttl ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
-
-warning: field `billable_tokens` is never read
-  --> src/api/mission_store/sqlite_resources.rs:47:9
-   |
-42 | pub struct UsageRollupRow {
-   |            -------------- field in this struct
-...
-47 |     pub billable_tokens: u64,
-   |         ^^^^^^^^^^^^^^^
-   |
-   = note: `UsageRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: field `node_id` is never read
-  --> src/api/mission_store/sqlite_resources.rs:56:9
-   |
-53 | pub struct ComputeRollupRow {
-   |            ---------------- field in this struct
-...
-56 |     pub node_id: String,
-   |         ^^^^^^^
-   |
-   = note: `ComputeRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: fields `backend`, `remote_node_id`, `created_at`, `updated_at`, `first_started_at`, and `completed_at` are never read
-  --> src/api/mission_store/sqlite_resources.rs:69:9
-   |
-64 | pub struct RootMissionResourceRow {
-   |            ---------------------- fields in this struct
-...
-69 |     pub backend: String,
-   |         ^^^^^^^
-70 |     pub remote_node_id: Option<String>,
-   |         ^^^^^^^^^^^^^^
-71 |     pub created_at: String,
-   |         ^^^^^^^^^^
-72 |     pub updated_at: String,
-   |         ^^^^^^^^^^
-73 |     pub first_started_at: Option<String>,
-   |         ^^^^^^^^^^^^^^^^
-74 |     pub completed_at: Option<String>,
-   |         ^^^^^^^^^^^^
-   |
-   = note: `RootMissionResourceRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: field `status` is never read
-  --> src/api/mission_store/sqlite_resources.rs:88:9
-   |
-82 | pub struct ActiveRunAttributionRow {
-   |            ----------------------- field in this struct
-...
-88 |     pub status: String,
-   |         ^^^^^^
-   |
-   = note: `ActiveRunAttributionRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: fields `parent_mission_id`, `updated_at`, `terminal_reason`, and `active_run_ms` are never read
-   --> src/api/mission_store/sqlite_resources.rs:103:9
-    |
-101 | pub struct MissionNodeRow {
-    |            -------------- fields in this struct
-102 |     pub id: String,
-103 |     pub parent_mission_id: Option<String>,
-    |         ^^^^^^^^^^^^^^^^^
-...
-112 |     pub updated_at: String,
-    |         ^^^^^^^^^^
-113 |     pub terminal_reason: Option<String>,
-    |         ^^^^^^^^^^^^^^^
-...
-118 |     pub active_run_ms: i64,
-    |         ^^^^^^^^^^^^^
-    |
-    = note: `MissionNodeRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: fields `boss_mission_id`, `status`, `created_at`, and `updated_at` are never read
-   --> src/api/mission_store/sqlite_resources.rs:128:9
-    |
-126 | pub struct BoardTaskResourceRow {
-    |            -------------------- fields in this struct
-127 |     pub id: String,
-128 |     pub boss_mission_id: String,
-    |         ^^^^^^^^^^^^^^^
-...
-135 |     pub status: String,
-    |         ^^^^^^
-136 |     pub worker_mission_id: Option<String>,
-137 |     pub created_at: String,
-    |         ^^^^^^^^^^
-138 |     pub updated_at: String,
-    |         ^^^^^^^^^^
-    |
-    = note: `BoardTaskResourceRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: fields `started_at`, `ended_at`, `scope_unit`, and `terminal_reason` are never read
-   --> src/api/mission_store/sqlite_resources.rs:156:9
-    |
-154 | pub struct MissionRunIntervalRow {
-    |            --------------------- fields in this struct
-155 |     pub mission_id: String,
-156 |     pub started_at: String,
-    |         ^^^^^^^^^^
-157 |     pub ended_at: Option<String>,
-    |         ^^^^^^^^
-158 |     pub scope_unit: Option<String>,
-    |         ^^^^^^^^^^
-159 |     pub terminal_reason: Option<String>,
-    |         ^^^^^^^^^^^^^^^
-    |
-    = note: `MissionRunIntervalRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: field `node_id` is never read
-   --> src/api/mission_store/sqlite_resources.rs:177:9
-    |
-174 | pub struct MissionComputeBucketRow {
-    |            ----------------------- field in this struct
-...
-177 |     pub node_id: String,
-    |         ^^^^^^^
-    |
-    = note: `MissionComputeBucketRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: field `run_intervals` is never read
-   --> src/api/mission_store/sqlite_resources.rs:190:9
-    |
-185 | pub struct MissionResourcesStoreSnapshot {
-    |            ----------------------------- field in this struct
-...
-190 |     pub run_intervals: Vec<MissionRunIntervalRow>,
-    |         ^^^^^^^^^^^^^
-    |
-    = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.31s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 1 test
 test managed::tests::claim_moves_ownership_to_the_served_mission_only ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.02s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -2435,13 +2435,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.27s
+    Finished `test` profile [unoptimized] target(s) in 0.30s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::secret_broker::tests::compute_secret_confinement_blocks_reserved_keys_and_untrusted_nodes ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -2576,13 +2576,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.28s
+    Finished `test` profile [unoptimized] target(s) in 0.30s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test node::capacity::tests::shrink_with_jobs_in_flight_never_revokes_and_blocks_until_under_cap ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.03s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -2717,13 +2717,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.35s
+    Finished `test` profile [unoptimized] target(s) in 0.30s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::runners::stream_guard::tests::matches_exhaustive_oracle_on_unicode_and_partial_repeats ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.05s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.06s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -2858,13 +2858,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.27s
+    Finished `test` profile [unoptimized] target(s) in 0.30s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::control::remote_grok::tests::phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.01s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -3005,7 +3005,7 @@ warning: `sandboxed_sh` (lib test) generated 9 warnings
 running 1 test
 test api::mission_store::harness_session_tests::phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.17s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.17s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -3140,13 +3140,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.29s
+    Finished `test` profile [unoptimized] target(s) in 0.30s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::approval_queue::tests::admit_is_the_shared_gate ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -3281,13 +3281,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.28s
+    Finished `test` profile [unoptimized] target(s) in 0.30s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.01s
 
    Compiling sandboxed_sh v1.3.0 (/var/lib/sandboxed-node/work/8f8e1c2b-e2d6-4e2b-857f-bebba571969f/orb)
 warning: function `hermes_model_options` is never used
@@ -3448,9 +3448,9 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: function `timed_response` is never used
-    --> src/api/proxy.rs:3275:4
+    --> src/api/proxy.rs:3285:4
      |
-3275 | fn timed_response(resp: Response, cell: Arc<super::proxy_timing::Timin...
+3285 | fn timed_response(resp: Response, cell: Arc<super::proxy_timing::Timin...
      |    ^^^^^^^^^^^^^^
 
 warning: field `retired_at` is never read
@@ -3477,7 +3477,7 @@ warning: function `check_schema` is never used
   |        ^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib) generated 17 warnings
-    Finished `test` profile [unoptimized] target(s) in 1m 33s
+    Finished `test` profile [unoptimized] target(s) in 3m 49s
      Running unittests src/bin/palomactl.rs (target/debug/deps/palomactl-0d68396f1c661faf)
 
 running 1 test

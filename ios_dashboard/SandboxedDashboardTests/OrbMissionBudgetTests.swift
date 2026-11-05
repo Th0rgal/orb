@@ -6,6 +6,7 @@ final class OrbMissionBudgetTests: XCTestCase {
         var o: [String: OrbJSON] = [
             "mission_id": .string("m1"), "own_budget_usd": .number(budget), "pool_id": .string("m1"), "mode": .string("own"),
             "pool": .object(["budget_usd": .number(budget), "spent_usd": .number(0.4), "reserved_usd": .number(0.2), "carved_usd": .number(1), "available_usd": .number(budget - 1.6)]),
+            "effective_bandwidth": .object(["source": .string("none"), "current_compute_usd_per_hour": .number(2.0), "current_tokens_per_min": .number(48_000), "current_vcpu_per_min": .number(16)]),
             "children": .array([.object(["mission_id": .string("c1"), "mode": .string("sub_budget"), "budget_usd": .number(1), "spent_usd": .number(0.3)])]),
         ]
         o["max_grant_usd"] = maxGrant.map { .number($0) } ?? .null
@@ -29,27 +30,34 @@ final class OrbMissionBudgetTests: XCTestCase {
         XCTAssertEqual(OrbMissionBudget.money(2), "$2.00")
     }
 
-    func testDecodesSharedMissionBudgetFixtureAndVmLimits() throws {
+    func testDecodesSharedMissionBudgetFixtureAndLimits() throws {
         let data = try Data(contentsOf: OrbSpec.url("fixtures/mission-budget.json"))
         let root = try JSONDecoder().decode(OrbJSON.self, from: data)
 
         let globalDefault = OrbMissionBudget(root["global_default"])
         XCTAssertEqual(globalDefault.mode, "none")
         XCTAssertEqual(globalDefault.vmLimitsMode, "global")
+        XCTAssertEqual(globalDefault.bandwidthMode, "none")
         XCTAssertNil(globalDefault.ownVmLimits)
+        XCTAssertNil(globalDefault.ownBandwidthLimits)
         XCTAssertEqual(globalDefault.effectiveVmLimits?.globalMaxConcurrent, 16)
         XCTAssertEqual(globalDefault.vmLimitsModeLine, "Uses the global limit (16 concurrent across Orb).")
+        XCTAssertEqual(globalDefault.bandwidthModeLine, "Unthrottled. Requests and spawns run at full speed.")
         XCTAssertFalse(globalDefault.showsSubagents)
         XCTAssertTrue(globalDefault.children.allSatisfy(\.isIdlePooled))
 
         let dedicated = OrbMissionBudget(root["dedicated_override"])
         XCTAssertEqual(dedicated.mode, "own")
         XCTAssertEqual(dedicated.vmLimitsMode, "own")
+        XCTAssertEqual(dedicated.bandwidthMode, "own")
         XCTAssertEqual(dedicated.ownVmLimits?.maxConcurrent, 6)
         XCTAssertEqual(dedicated.ownVmLimits?.providerMaxConcurrent, ["hetzner": 0, "vastai": 2])
         XCTAssertEqual(OrbMissionBudget.providerLimitsSummary(dedicated.ownVmLimits), "Hetzner: off · Vast.ai: 2")
+        XCTAssertEqual(OrbMissionBudget.bandwidthLimitsSummary(dedicated.ownBandwidthLimits), "120k tok/min · 32 vCPU/min · $2.50/h")
         XCTAssertEqual(dedicated.effectiveVmLimits?.active, 3)
         XCTAssertEqual(dedicated.effectiveVmLimits?.providerLimits.count, 2)
+        XCTAssertEqual(dedicated.effectiveBandwidth?.tokensPerMin, 120_000)
+        XCTAssertEqual(dedicated.effectiveBandwidth?.protectRoot, true)
         XCTAssertTrue(dedicated.showsSubagents)
         XCTAssertFalse(dedicated.children[0].isIdlePooled)
         XCTAssertTrue(dedicated.children[1].isIdlePooled)
@@ -58,20 +66,38 @@ final class OrbMissionBudgetTests: XCTestCase {
         XCTAssertEqual(cleared.vmLimitsMode, "global")
         XCTAssertNil(cleared.ownVmLimits)
         XCTAssertEqual(cleared.effectiveVmLimits?.maxConcurrent, 16)
+
+        let clearedBw = dedicated.optimisticBandwidthLimits(nil)
+        XCTAssertEqual(clearedBw.bandwidthMode, "none")
+        XCTAssertNil(clearedBw.ownBandwidthLimits)
     }
 
-    func testValidatesVmLimitsInputs() throws {
+    func testValidatesVmAndBandwidthInputsAndForecast() throws {
         let ok = try OrbMissionBudget.parseVmLimits(
             totalRaw: "8",
             providerRaws: ["vastai": "2", "hetzner": "0"]
         ).get()
         XCTAssertEqual(ok.maxConcurrent, 8)
         XCTAssertEqual(ok.providerMaxConcurrent, ["vastai": 2, "hetzner": 0])
+        XCTAssertThrowsError(try OrbMissionBudget.parseVmLimits(totalRaw: "", providerRaws: [:]).get())
+        XCTAssertThrowsError(try OrbMissionBudget.parseVmLimits(totalRaw: "2", providerRaws: ["vastai": "4"]).get())
 
-        let empty = OrbMissionBudget.parseVmLimits(totalRaw: "", providerRaws: [:])
-        XCTAssertThrowsError(try empty.get())
+        let bw = try OrbMissionBudget.parseBandwidthLimits(
+            tokensPerMinRaw: "120k",
+            computeVcpuRaw: "32",
+            computeUsdPerHRaw: "$2.5",
+            protectRoot: true
+        ).get()
+        XCTAssertEqual(bw.tokensPerMin, 120_000)
+        XCTAssertEqual(bw.computeVcpuPerMin, 32)
+        XCTAssertEqual(bw.computeUsdPerHour ?? 0, 2.5, accuracy: 1e-9)
+        XCTAssertThrowsError(try OrbMissionBudget.parseBandwidthLimits(tokensPerMinRaw: "", computeVcpuRaw: "", computeUsdPerHRaw: "", protectRoot: true).get())
 
-        let exceedsTotal = OrbMissionBudget.parseVmLimits(totalRaw: "2", providerRaws: ["vastai": "4"])
-        XCTAssertThrowsError(try exceedsTotal.get())
+        let base10 = own(10)
+        let unshaped = base10.computeRunwayForecast(budgetEnabled: true)
+        XCTAssertEqual(unshaped.etaSecs ?? 0, 15_120, accuracy: 1)
+        let shaped = base10.computeRunwayForecast(draftComputeUsdPerH: "1.0", bandwidthEnabled: true, budgetEnabled: true)
+        XCTAssertEqual(shaped.etaSecs ?? 0, 30_240, accuracy: 1)
+        XCTAssertTrue(shaped.subline.contains("from bandwidth cap"))
     }
 }

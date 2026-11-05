@@ -575,6 +575,7 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         last_busy_at: None,
         budget_pool_id: None,
         cap_pool_id: None,
+        bandwidth_pool_id: None,
         auto_extensions: 0,
         prior_pool_charges: Vec::new(),
         pool_spent_offset: 0.0,
@@ -986,6 +987,7 @@ fn spend_machine(
         last_busy_at: None,
         budget_pool_id: None,
         cap_pool_id: None,
+        bandwidth_pool_id: None,
         auto_extensions: 0,
         prior_pool_charges: Vec::new(),
         pool_spent_offset: 0.0,
@@ -1381,6 +1383,8 @@ fn pool(id: &str, usd: f64, parent: Option<&str>) -> budget::BudgetPool {
         parent_pool_id: parent.map(Into::into),
         vm_limits: None,
         parent_cap_pool_id: None,
+        bandwidth_limits: None,
+        parent_bandwidth_pool_id: None,
         owner_user_id: Some("t1".into()),
         updated_at: Utc::now(),
     }
@@ -3216,6 +3220,7 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
         last_busy_at: Some(t0),
         budget_pool_id: None,
         cap_pool_id: None,
+        bandwidth_pool_id: None,
         auto_extensions: 0,
         stopped_at: None,
         stopped_by_reaper: false,
@@ -4990,4 +4995,144 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
             .and_then(Value::as_bool),
         Some(true)
     );
+}
+
+#[tokio::test]
+async fn mission_bandwidth_limits_enforce_ancestor_monotonicity_and_pace_subagent_spawns() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = settings();
+    st.max_concurrent = Some(16);
+    st.daily_cap_usd = Some(100.0);
+    let boat = NamedFakeProvider::new("boat");
+    let m = Arc::new(ManagedManager::new(st, Some(boat), dir.path(), 3000));
+
+    // Root mission configures 4 vCPU/min compute bandwidth and 100k tok/min with protect_root=true.
+    m.set_mission_bandwidth_limits(
+        "root",
+        Some(budget::BandwidthLimits {
+            tokens_per_min: Some(100_000),
+            compute_vcpu_per_min: Some(4),
+            compute_usd_per_hour: Some(2.0),
+            protect_root: true,
+        }),
+        &["root".into()],
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    // Child cannot exceed ancestor tokens_per_min or compute_vcpu_per_min.
+    let err = m
+        .set_mission_bandwidth_limits(
+            "child",
+            Some(budget::BandwidthLimits {
+                tokens_per_min: Some(150_000),
+                compute_vcpu_per_min: Some(2),
+                compute_usd_per_hour: None,
+                protect_root: false,
+            }),
+            &["child".into(), "root".into()],
+            Some("root".into()),
+            Some("t1".into()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error, "sub_bandwidth_exceeds_pool");
+
+    // Single oversized VM (xlarge = 16 vCPU > 4 vCPU/min ceiling) fails fast without waiting.
+    let big_err = m
+        .spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("xlarge".into()),
+            owner_mission_id: Some("child".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["child".into(), "root".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(big_err.error, "bandwidth_exceeded");
+    assert_eq!(big_err.status, 429);
+
+    // Spawn 2 small VMs (2 * 2 vCPU = 4 vCPU/min full).
+    let vm1 = m
+        .spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            owner_mission_id: Some("child".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["child".into(), "root".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(vm1.bandwidth_pool_id.as_deref(), Some("root"));
+    let _vm2 = m
+        .spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            owner_mission_id: Some("child".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["child".into(), "root".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // Because `protect_root = true` on `root`, `root` itself bypasses transient pacing!
+    let root_vm = m
+        .spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            owner_mission_id: Some("root".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["root".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    m.destroy(&root_vm.id, "done").await.unwrap();
+
+    // A 3rd `child` VM paces until `vm1` is destroyed, then wakes immediately via Notify!
+    let m_waiter = Arc::clone(&m);
+    let waiter = tokio::spawn(async move {
+        m_waiter
+            .spawn(SpawnRequest {
+                provider: Some("boat".into()),
+                size: Some("small".into()),
+                owner_mission_id: Some("child".into()),
+                owner_user_id: Some("t1".into()),
+                cap_lineage: vec!["child".into(), "root".into()],
+                wait: Some(false),
+                ..Default::default()
+            })
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(
+        !waiter.is_finished(),
+        "subagent spawn should be pacing while bandwidth is full"
+    );
+    m.destroy(&vm1.id, "freed").await.unwrap();
+    let vm3 = tokio::time::timeout(Duration::from_secs(2), waiter)
+        .await
+        .expect("waiter woke promptly after VM destroy")
+        .unwrap()
+        .unwrap();
+    assert_eq!(vm3.bandwidth_pool_id.as_deref(), Some("root"));
+
+    let view = m
+        .mission_budget("root", &["root".into()], &["child".into()], "t1")
+        .await;
+    assert_eq!(view.bandwidth_mode, "own");
+    assert_eq!(view.effective_bandwidth.source, "mission");
+    assert_eq!(view.effective_bandwidth.tokens_per_min, Some(100_000));
+    assert_eq!(view.effective_bandwidth.compute_vcpu_per_min, Some(4));
+    assert_eq!(view.effective_bandwidth.current_vcpu_per_min, 4);
+    assert!(view.effective_bandwidth.protect_root);
 }

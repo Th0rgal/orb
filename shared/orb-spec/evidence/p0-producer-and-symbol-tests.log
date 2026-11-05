@@ -132,13 +132,13 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 54.52s
+    Finished `test` profile [unoptimized] target(s) in 52.84s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::control::dispatch_admission_tests::remote_submission_rejects_closed_snapshots_and_records_host_observations ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.72s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.68s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -273,7 +273,7 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.25s
+    Finished `test` profile [unoptimized] target(s) in 0.29s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 14 tests
@@ -292,14 +292,14 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3750 filtered out; finished in 0.45s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3753 filtered out; finished in 0.45s
 
-    Finished `test` profile [unoptimized] target(s) in 0.13s
+    Finished `test` profile [unoptimized] target(s) in 0.12s
      Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-70c0d7a6354c9bb7)
 
 running 2 tests
 test missing_extra_duplicate_nontext_and_imported_symbols_fail ... ok
 test real_object_and_archive_mutations_are_rejected ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.63s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.61s
 

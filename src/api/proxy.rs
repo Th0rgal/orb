@@ -2284,6 +2284,13 @@ async fn record_proxy_usage(
         );
     }
     let record = proxy_usage_record(target, tokens);
+    if let Some(mid) = target.attribution.mission_id {
+        let billed = tokens
+            .input
+            .saturating_add(tokens.output)
+            .saturating_add(tokens.reasoning);
+        super::mission_budget::record_mission_inference_tokens(state, mid, billed).await;
+    }
     let user = super::auth::implicit_single_tenant_user(&state.config);
     let control_state = state.control.get_or_spawn(&user).await;
     if let Err(error) = control_state
@@ -2425,6 +2432,9 @@ async fn native_protocol_proxy(
     let _in_flight = attribution
         .mission_id
         .map(crate::api::proxy_liveness::begin_request);
+    if let Some(mid) = attribution.mission_id {
+        super::mission_budget::pace_mission_inference(&state, mid).await;
+    }
     let mission_key_id = execution_key
         .as_ref()
         .and_then(|key| key.name.strip_prefix("remote-launch:"))
@@ -3687,6 +3697,9 @@ async fn chat_completions_routed(
     let _in_flight = liveness_mission_id.map(crate::api::proxy_liveness::begin_request);
     if let Some(cell) = super::proxy_timing::current() {
         cell.set_attribution(&attribution);
+    }
+    if let Some(mid) = attribution.mission_id {
+        super::mission_budget::pace_mission_inference(&state, mid).await;
     }
 
     let exact_chain_exists = state.chain_store.get(&requested_model).await.is_some();

@@ -531,6 +531,13 @@ async fn set_owner(
             )
             .await;
             m.set_machine_cap_pool(&machine.id, cap_pool).await;
+            let bw_pool = crate::api::mission_budget::bandwidth_pool_for(
+                &store,
+                body.owner_mission_id,
+                &user.id,
+            )
+            .await;
+            m.set_machine_bandwidth_pool(&machine.id, bw_pool).await;
             Json(m.get(&machine.id).await.unwrap_or(machine)).into_response()
         }
         Err(e) => err(e),

@@ -37,6 +37,7 @@ pub mod boost;
 pub mod budget;
 pub mod hetzner;
 pub mod lifecycle;
+pub mod pacing;
 pub mod raw_operations;
 pub mod relay;
 pub mod scaleway;
@@ -793,6 +794,10 @@ pub struct ManagedMachine {
     /// `None` when counted against the shared global concurrency pool.
     #[serde(default)]
     pub cap_pool_id: Option<String>,
+    /// Mission bandwidth-pacing pool this machine's vCPU/hourly burn counts
+    /// toward; `None` when no compute bandwidth pool governs its lineage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth_pool_id: Option<String>,
     /// Automatic TTL extensions granted while the node was busy.
     #[serde(default)]
     pub auto_extensions: u32,
@@ -1133,6 +1138,16 @@ impl std::fmt::Display for ManagedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.error, self.message)
     }
+}
+
+pub(crate) struct ComputePacingRequest<'a> {
+    pub cap_lineage: &'a [String],
+    pub existing_bw_pool_id: Option<&'a str>,
+    pub target_mission_id: Option<&'a str>,
+    pub user_id: Option<&'a str>,
+    pub requested_cpu: u32,
+    pub requested_usd_per_hour: f64,
+    pub exclude_machine_id: Option<&'a str>,
 }
 
 // ------------------------------------------------- dynamic node registry
@@ -3905,6 +3920,20 @@ impl ManagedManager {
         let quoted_offer_id = quote.and_then(|q| q.offer_id);
 
         let machine = {
+            let target_mission_for_bw = req
+                .owner_mission_id
+                .as_deref()
+                .or(req.requested_by_mission_id.as_deref());
+            self.pace_compute_bandwidth(ComputePacingRequest {
+                cap_lineage: &req.cap_lineage,
+                existing_bw_pool_id: None,
+                target_mission_id: target_mission_for_bw,
+                user_id: req.owner_user_id.as_deref(),
+                requested_cpu: effective_cpu,
+                requested_usd_per_hour: effective_usd_per_hour,
+                exclude_machine_id: None,
+            })
+            .await?;
             let _guard = self.admission.lock().await;
             let live_snapshot = self.machines.lock().await.clone();
             let cap_pool_id = self
@@ -3920,6 +3949,16 @@ impl ManagedManager {
                 )
                 .await?;
             let pools_snapshot = self.budgets.lock().await.clone();
+            let bw_chain = if !req.cap_lineage.is_empty() {
+                req.cap_lineage.clone()
+            } else {
+                Self::fallback_bandwidth_lineage(&pools_snapshot, None, target_mission_for_bw)
+            };
+            let bandwidth_pool_id = Self::resolve_covering_bandwidth_pool(
+                &pools_snapshot,
+                &bw_chain,
+                req.owner_user_id.as_deref(),
+            );
             let governed_by_mission_pool =
                 Self::has_active_budget_pool(&pools_snapshot, req.budget_pool_id.as_deref());
             let (shared_spent_usd, shared_committed_usd) =
@@ -4077,6 +4116,7 @@ impl ManagedManager {
                 last_busy_at: None,
                 budget_pool_id: req.budget_pool_id.clone(),
                 cap_pool_id,
+                bandwidth_pool_id,
                 auto_extensions: 0,
                 stopped_at: None,
                 stopped_by_reaper: false,
@@ -5012,6 +5052,7 @@ impl ManagedManager {
             .await
             .unwrap_or(m);
         self.ledger("destroyed", &m);
+        pacing::notify_capacity_changed();
         // Close the ledger with the metered cost once the provider confirms.
         self.refresh_usage(id).await;
         Ok(self.get(id).await.unwrap_or(m))
@@ -5753,6 +5794,7 @@ printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d\n' '{trigger
         unregister_node(&m);
         self.relay.close(&m.id).await;
         self.ledger("destroyed", &m);
+        pacing::notify_capacity_changed();
         self.refresh_usage(id).await;
         // The provider may not meter a VM it no longer knows: close anyway.
         if let Some(m) = self.get(id).await {
@@ -5790,7 +5832,28 @@ pub struct EffectiveVmLimitsView {
     pub provider_limits: Vec<ProviderCapUsageView>,
 }
 
-/// A mission's budget and VM concurrency limits as the API returns them.
+/// Resolved bandwidth & pacing limits governing a mission (from its own or
+/// an ancestor bandwidth pool, plus live throughput telemetry).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EffectiveBandwidthView {
+    /// `"mission"` when a bandwidth pool governs this mission, else `"none"`.
+    pub source: &'static str,
+    pub pool_id: Option<String>,
+    pub tokens_per_min: Option<u64>,
+    pub compute_vcpu_per_min: Option<u32>,
+    pub compute_usd_per_hour: Option<f64>,
+    pub protect_root: bool,
+    pub current_tokens_per_min: u64,
+    pub current_vcpu_per_min: u32,
+    pub current_compute_usd_per_hour: f64,
+    pub pacing_active: bool,
+    pub paced_delay_ms: u64,
+    pub ancestor_tokens_per_min: Option<u64>,
+    pub ancestor_compute_vcpu_per_min: Option<u32>,
+    pub ancestor_compute_usd_per_hour: Option<f64>,
+}
+
+/// A mission's budget, VM concurrency, and bandwidth limits as the API returns them.
 #[derive(Debug, Clone, Serialize)]
 pub struct MissionBudgetView {
     pub mission_id: String,
@@ -5811,6 +5874,13 @@ pub struct MissionBudgetView {
     /// Nearest pool in lineage with `vm_limits` (self, ancestor, or none).
     pub vm_limits_pool_id: Option<String>,
     pub effective_vm_limits: EffectiveVmLimitsView,
+    /// Operator-configured bandwidth & pacing limits on this mission itself.
+    pub own_bandwidth_limits: Option<budget::BandwidthLimits>,
+    /// `"own"`, `"pooled"` (from an ancestor), or `"none"` (unthrottled).
+    pub bandwidth_mode: &'static str,
+    /// Nearest pool in lineage with `bandwidth_limits` (self, ancestor, or none).
+    pub bandwidth_pool_id: Option<String>,
+    pub effective_bandwidth: EffectiveBandwidthView,
     pub children: Vec<ChildBudgetView>,
 }
 
@@ -5824,6 +5894,10 @@ pub struct ChildBudgetView {
     pub reserved_usd: f64,
     pub has_vm_limits: bool,
     pub vm_max_concurrent: Option<usize>,
+    #[serde(default)]
+    pub has_bandwidth_limits: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_min: Option<u64>,
     pub live_machines: usize,
 }
 
@@ -5886,6 +5960,163 @@ impl ManagedManager {
                     })
                 })
                 .cloned()
+        }
+    }
+
+    fn fallback_bandwidth_lineage(
+        pools: &HashMap<String, budget::BudgetPool>,
+        existing_bw_pool_id: Option<&str>,
+        owner_mission_id: Option<&str>,
+    ) -> Vec<String> {
+        let mut chain = Vec::new();
+        if let Some(m) = owner_mission_id {
+            chain.push(m.to_string());
+        }
+        let mut cur = existing_bw_pool_id.or(owner_mission_id);
+        for _ in 0..32 {
+            let Some(id) = cur else { break };
+            if !chain.iter().any(|x| x == id) {
+                chain.push(id.to_string());
+            }
+            cur = pools
+                .get(id)
+                .and_then(|p| p.parent_bandwidth_pool_id.as_deref());
+        }
+        chain
+    }
+
+    pub(crate) fn resolve_covering_bandwidth_pool(
+        pools: &HashMap<String, budget::BudgetPool>,
+        chain: &[String],
+        user_id: Option<&str>,
+    ) -> Option<String> {
+        if let Some(u) = user_id {
+            budget::nearest_bandwidth_pool(chain.iter().map(String::as_str), pools, u)
+        } else {
+            chain
+                .iter()
+                .find(|id| {
+                    pools
+                        .get(id.as_str())
+                        .is_some_and(|p| p.owner_user_id.is_none() && p.bandwidth_limits.is_some())
+                })
+                .cloned()
+        }
+    }
+
+    /// Pace or fail-fast a managed VM spawn/resume against any governing
+    /// compute bandwidth ceilings (`compute_vcpu_per_min` / `compute_usd_per_hour`)
+    /// in `cap_lineage`. Called BEFORE taking `self.admission` so transient
+    /// pacing sleeps never block unrelated tenant spawns.
+    pub(crate) async fn pace_compute_bandwidth(
+        &self,
+        req: ComputePacingRequest<'_>,
+    ) -> Result<(), ManagedError> {
+        let ComputePacingRequest {
+            cap_lineage,
+            existing_bw_pool_id,
+            target_mission_id,
+            user_id,
+            requested_cpu,
+            requested_usd_per_hour,
+            exclude_machine_id,
+        } = req;
+        let started = std::time::Instant::now();
+        loop {
+            let pools = self.budgets.lock().await.clone();
+            let chain = if !cap_lineage.is_empty() {
+                cap_lineage.to_vec()
+            } else {
+                Self::fallback_bandwidth_lineage(&pools, existing_bw_pool_id, target_mission_id)
+            };
+            let covering = Self::resolve_covering_bandwidth_pool(&pools, &chain, user_id);
+            let Some(start_pool) = covering else {
+                return Ok(());
+            };
+            let mut pool_chain = vec![start_pool.clone()];
+            pool_chain.extend(budget::ancestor_bandwidth_chain(
+                &start_pool,
+                &chain,
+                &pools,
+                user_id,
+            ));
+
+            let machines: Vec<ManagedMachine> = self
+                .machines
+                .lock()
+                .await
+                .iter()
+                .filter(|m| exclude_machine_id.is_none_or(|ex| m.id != ex))
+                .cloned()
+                .collect();
+
+            let mut transient_block: Option<String> = None;
+            for pid in &pool_chain {
+                let Some(bw) = pools.get(pid).and_then(|p| p.bandwidth_limits.as_ref()) else {
+                    continue;
+                };
+                if !bw.has_compute_limit() {
+                    continue;
+                }
+                // Single-machine hard ceiling check (waiting can never admit a single VM
+                // larger than the pool's entire compute bandwidth ceiling).
+                if let Some(max_vcpu) = bw.compute_vcpu_per_min {
+                    if requested_cpu > max_vcpu {
+                        return Err(ManagedError::new(
+                            "bandwidth_exceeded",
+                            429,
+                            format!(
+                                "Requested machine ({requested_cpu} vCPU) exceeds mission compute bandwidth limit ({max_vcpu} vCPU/min) on pool {pid}; pick a smaller size or raise the bandwidth limit"
+                            ),
+                        ));
+                    }
+                }
+                if let Some(max_usd_h) = bw.compute_usd_per_hour {
+                    if requested_usd_per_hour > max_usd_h + 1e-6 {
+                        return Err(ManagedError::new(
+                            "bandwidth_exceeded",
+                            429,
+                            format!(
+                                "Requested machine (${requested_usd_per_hour:.2}/h) exceeds mission compute burn limit (${max_usd_h:.2}/h) on pool {pid}; pick a smaller size or raise the bandwidth limit"
+                            ),
+                        ));
+                    }
+                }
+                // Root-protection bypass: when `protect_root` is enabled on `pid`,
+                // the pool owner itself skips transient pacing delays while its
+                // pooled descendants absorb the smoothing wait.
+                if bw.protect_root && target_mission_id == Some(pid.as_str()) {
+                    continue;
+                }
+                let (cur_vcpu, cur_usd_h) =
+                    budget::bandwidth_pool_compute_usage(pid, &pools, &machines);
+                if let Some(max_vcpu) = bw.compute_vcpu_per_min {
+                    if cur_vcpu.saturating_add(requested_cpu) > max_vcpu {
+                        transient_block = Some(format!(
+                            "Mission compute bandwidth on pool {pid} is full ({cur_vcpu} + {requested_cpu} > {max_vcpu} vCPU/min); wait for a running VM to finish or raise the bandwidth limit"
+                        ));
+                        break;
+                    }
+                }
+                if let Some(max_usd_h) = bw.compute_usd_per_hour {
+                    if cur_usd_h + requested_usd_per_hour > max_usd_h + 1e-6 {
+                        transient_block = Some(format!(
+                            "Mission compute burn rate on pool {pid} is full (${cur_usd_h:.2}/h + ${requested_usd_per_hour:.2}/h > ${max_usd_h:.2}/h); wait for a running VM to finish or raise the bandwidth limit"
+                        ));
+                        break;
+                    }
+                }
+            }
+
+            let Some(msg) = transient_block else {
+                return Ok(());
+            };
+            let elapsed = started.elapsed();
+            if elapsed >= pacing::MAX_COMPUTE_PACE_DELAY {
+                return Err(ManagedError::new("bandwidth_exceeded", 429, msg));
+            }
+            let step = (pacing::MAX_COMPUTE_PACE_DELAY - elapsed).min(Duration::from_secs(2));
+            pacing::wait_or_notified(step).await;
         }
     }
 
@@ -6133,7 +6364,9 @@ impl ManagedManager {
                 {
                     let mut pools = self.budgets.lock().await;
                     let remove_entry = match pools.get_mut(mission_id) {
-                        Some(entry) if entry.vm_limits.is_some() => {
+                        Some(entry)
+                            if entry.vm_limits.is_some() || entry.bandwidth_limits.is_some() =>
+                        {
                             entry.budget_usd = None;
                             entry.parent_pool_id = None;
                             entry.updated_at = Utc::now();
@@ -6201,6 +6434,12 @@ impl ManagedManager {
                         parent_cap_pool_id: existing
                             .as_ref()
                             .and_then(|p| p.parent_cap_pool_id.clone()),
+                        bandwidth_limits: existing
+                            .as_ref()
+                            .and_then(|p| p.bandwidth_limits.clone()),
+                        parent_bandwidth_pool_id: existing
+                            .as_ref()
+                            .and_then(|p| p.parent_bandwidth_pool_id.clone()),
                         owner_user_id: owner_user_id
                             .or_else(|| existing.and_then(|p| p.owner_user_id)),
                         updated_at: Utc::now(),
@@ -6240,7 +6479,9 @@ impl ManagedManager {
                 let pools_snapshot = {
                     let mut pools = self.budgets.lock().await;
                     let remove_entry = match pools.get_mut(mission_id) {
-                        Some(entry) if entry.budget_usd.is_some() => {
+                        Some(entry)
+                            if entry.budget_usd.is_some() || entry.bandwidth_limits.is_some() =>
+                        {
                             entry.vm_limits = None;
                             entry.parent_cap_pool_id = None;
                             entry.updated_at = Utc::now();
@@ -6347,6 +6588,12 @@ impl ManagedManager {
                                 .and_then(|p| p.parent_pool_id.clone()),
                             vm_limits: Some(validated),
                             parent_cap_pool_id: parent_cap_pool.clone().filter(|p| p != mission_id),
+                            bandwidth_limits: existing
+                                .as_ref()
+                                .and_then(|p| p.bandwidth_limits.clone()),
+                            parent_bandwidth_pool_id: existing
+                                .as_ref()
+                                .and_then(|p| p.parent_bandwidth_pool_id.clone()),
                             owner_user_id: owner_user_id
                                 .or_else(|| existing.and_then(|p| p.owner_user_id)),
                             updated_at: Utc::now(),
@@ -6446,6 +6693,218 @@ impl ManagedManager {
         }
     }
 
+    /// Attribute a machine's compute bandwidth to `bandwidth_pool` (or `None`).
+    pub async fn set_machine_bandwidth_pool(&self, id: &str, bandwidth_pool: Option<String>) {
+        if let Some(m) = self.get(id).await {
+            if m.bandwidth_pool_id != bandwidth_pool {
+                if let Some(m) = self
+                    .update(&m.id, |m| {
+                        m.bandwidth_pool_id = bandwidth_pool;
+                    })
+                    .await
+                {
+                    self.ledger("bandwidth_pool_set", &m);
+                }
+            }
+        }
+    }
+
+    /// Set (`Some`) or clear (`None`) a mission's bandwidth & pacing override.
+    pub async fn set_mission_bandwidth_limits(
+        &self,
+        mission_id: &str,
+        limits: Option<budget::BandwidthLimits>,
+        lineage: &[String],
+        parent_bandwidth_pool: Option<String>,
+        owner_user_id: Option<String>,
+    ) -> Result<(), ManagedError> {
+        let _guard = self.admission.lock().await;
+        match limits {
+            None => {
+                let pools_snapshot = {
+                    let mut pools = self.budgets.lock().await;
+                    let remove_entry = match pools.get_mut(mission_id) {
+                        Some(entry) if entry.budget_usd.is_some() || entry.vm_limits.is_some() => {
+                            entry.bandwidth_limits = None;
+                            entry.parent_bandwidth_pool_id = None;
+                            entry.updated_at = Utc::now();
+                            false
+                        }
+                        Some(_) => true,
+                        None => false,
+                    };
+                    if remove_entry {
+                        pools.remove(mission_id);
+                    }
+                    for p in pools.values_mut() {
+                        if p.parent_bandwidth_pool_id.as_deref() == Some(mission_id) {
+                            p.parent_bandwidth_pool_id = parent_bandwidth_pool
+                                .clone()
+                                .filter(|anc| anc != &p.mission_id);
+                        }
+                    }
+                    pools.clone()
+                };
+                pacing::clear_pool_debt(mission_id);
+                let mut machines = self.machines.lock().await;
+                for m in machines.iter_mut() {
+                    if m.bandwidth_pool_id.as_deref() == Some(mission_id) {
+                        let fallback_chain = Self::fallback_bandwidth_lineage(
+                            &pools_snapshot,
+                            parent_bandwidth_pool.as_deref(),
+                            None,
+                        );
+                        m.bandwidth_pool_id = Self::resolve_covering_bandwidth_pool(
+                            &pools_snapshot,
+                            &fallback_chain,
+                            m.owner_user_id.as_deref(),
+                        );
+                    }
+                }
+            }
+            Some(raw) => {
+                let validated = budget::validate_bandwidth_limits(raw)
+                    .map_err(|e| ManagedError::new("invalid_bandwidth_limits", 400, e))?;
+                let pools_before = self.budgets.lock().await.clone();
+                let anc_chain = if !lineage.is_empty() {
+                    lineage.iter().skip(1).cloned().collect::<Vec<_>>()
+                } else {
+                    Self::fallback_bandwidth_lineage(
+                        &pools_before,
+                        parent_bandwidth_pool.as_deref(),
+                        None,
+                    )
+                };
+                for anc_id in &anc_chain {
+                    let Some(anc_pool) = pools_before.get(anc_id.as_str()) else {
+                        continue;
+                    };
+                    if owner_user_id.is_some() && anc_pool.owner_user_id != owner_user_id {
+                        continue;
+                    }
+                    let Some(anc_bw) = anc_pool.bandwidth_limits.as_ref() else {
+                        continue;
+                    };
+                    if let (Some(c_tpm), Some(a_tpm)) =
+                        (validated.tokens_per_min, anc_bw.tokens_per_min)
+                    {
+                        if c_tpm > a_tpm {
+                            return Err(ManagedError::new(
+                                "sub_bandwidth_exceeds_pool",
+                                400,
+                                format!(
+                                    "tokens_per_min ({c_tpm}) exceeds ancestor pool {anc_id}'s tokens_per_min ({a_tpm})"
+                                ),
+                            ));
+                        }
+                    }
+                    if let (Some(c_vcpu), Some(a_vcpu)) =
+                        (validated.compute_vcpu_per_min, anc_bw.compute_vcpu_per_min)
+                    {
+                        if c_vcpu > a_vcpu {
+                            return Err(ManagedError::new(
+                                "sub_bandwidth_exceeds_pool",
+                                400,
+                                format!(
+                                    "compute_vcpu_per_min ({c_vcpu}) exceeds ancestor pool {anc_id}'s compute_vcpu_per_min ({a_vcpu})"
+                                ),
+                            ));
+                        }
+                    }
+                    if let (Some(c_usd), Some(a_usd)) =
+                        (validated.compute_usd_per_hour, anc_bw.compute_usd_per_hour)
+                    {
+                        if c_usd > a_usd + 1e-6 {
+                            return Err(ManagedError::new(
+                                "sub_bandwidth_exceeds_pool",
+                                400,
+                                format!(
+                                    "compute_usd_per_hour (${c_usd:.2}/h) exceeds ancestor pool {anc_id}'s compute_usd_per_hour (${a_usd:.2}/h)"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                let had_tpm = validated.tokens_per_min.is_some();
+                let pools_snapshot = {
+                    let mut pools = self.budgets.lock().await;
+                    let existing = pools.get(mission_id).cloned();
+                    pools.insert(
+                        mission_id.to_string(),
+                        budget::BudgetPool {
+                            mission_id: mission_id.to_string(),
+                            budget_usd: existing.as_ref().and_then(|p| p.budget_usd),
+                            parent_pool_id: existing
+                                .as_ref()
+                                .and_then(|p| p.parent_pool_id.clone()),
+                            vm_limits: existing.as_ref().and_then(|p| p.vm_limits.clone()),
+                            parent_cap_pool_id: existing
+                                .as_ref()
+                                .and_then(|p| p.parent_cap_pool_id.clone()),
+                            bandwidth_limits: Some(validated),
+                            parent_bandwidth_pool_id: parent_bandwidth_pool
+                                .clone()
+                                .filter(|p| p != mission_id),
+                            owner_user_id: owner_user_id
+                                .or_else(|| existing.and_then(|p| p.owner_user_id)),
+                            updated_at: Utc::now(),
+                        },
+                    );
+                    pools.clone()
+                };
+                if !had_tpm {
+                    pacing::clear_pool_debt(mission_id);
+                } else {
+                    pacing::notify_capacity_changed();
+                }
+                let mut machines = self.machines.lock().await;
+                for m in machines.iter_mut().filter(|m| {
+                    (m.state.is_live() || m.state == MachineState::Stopped)
+                        && (m.owner_mission_id.as_deref() == Some(mission_id)
+                            || m.bandwidth_pool_id.as_deref() == Some(mission_id))
+                }) {
+                    let chain = Self::fallback_bandwidth_lineage(
+                        &pools_snapshot,
+                        Some(mission_id),
+                        m.owner_mission_id.as_deref(),
+                    );
+                    m.bandwidth_pool_id = Self::resolve_covering_bandwidth_pool(
+                        &pools_snapshot,
+                        &chain,
+                        m.owner_user_id.as_deref(),
+                    );
+                }
+            }
+        }
+        self.persist_budgets().await;
+        self.persist().await;
+        Ok(())
+    }
+
+    /// Re-attach a bandwidth override pool to its current nearest ancestor bandwidth pool.
+    pub async fn reparent_bandwidth_pool(
+        &self,
+        mission_id: &str,
+        parent_bandwidth_pool: Option<String>,
+    ) {
+        let changed = {
+            let mut pools = self.budgets.lock().await;
+            match pools.get_mut(mission_id) {
+                Some(p)
+                    if p.bandwidth_limits.is_some()
+                        && p.parent_bandwidth_pool_id != parent_bandwidth_pool =>
+                {
+                    p.parent_bandwidth_pool_id = parent_bandwidth_pool.filter(|p| p != mission_id);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.persist_budgets().await;
+        }
+    }
+
     /// Budget and concurrency-override view for one mission. `lineage` is the
     /// mission then its ancestors; `children` its direct children.
     pub async fn mission_budget(
@@ -6461,6 +6920,8 @@ impl ManagedManager {
             budget::nearest_pool(lineage.iter().skip(1).map(String::as_str), &pools, user_id);
         let cap_pool_id =
             budget::nearest_cap_pool(lineage.iter().map(String::as_str), &pools, user_id);
+        let bandwidth_pool_id =
+            budget::nearest_bandwidth_pool(lineage.iter().map(String::as_str), &pools, user_id);
         let open = self.open_pools(&pools).await;
         let machines = self.machines.lock().await.clone();
         let now = Utc::now();
@@ -6470,6 +6931,9 @@ impl ManagedManager {
             .and_then(|p| budget::pool_usage(p, &pools, &machines, now, &is_open));
         let own = pools.get(mission_id).and_then(|p| p.budget_usd);
         let own_vm_limits = pools.get(mission_id).and_then(|p| p.vm_limits.clone());
+        let own_bandwidth_limits = pools
+            .get(mission_id)
+            .and_then(|p| p.bandwidth_limits.clone());
 
         let global_active = machines
             .iter()
@@ -6551,6 +7015,132 @@ impl ManagedManager {
             }
         };
 
+        let ancestor_tokens_per_min = lineage
+            .iter()
+            .skip(1)
+            .filter_map(|anc| {
+                pools
+                    .get(anc.as_str())
+                    .filter(|p| p.owner_user_id.as_deref() == Some(user_id))
+                    .and_then(|p| p.bandwidth_limits.as_ref())
+                    .and_then(|b| b.tokens_per_min)
+            })
+            .min();
+        let ancestor_compute_vcpu_per_min = lineage
+            .iter()
+            .skip(1)
+            .filter_map(|anc| {
+                pools
+                    .get(anc.as_str())
+                    .filter(|p| p.owner_user_id.as_deref() == Some(user_id))
+                    .and_then(|p| p.bandwidth_limits.as_ref())
+                    .and_then(|b| b.compute_vcpu_per_min)
+            })
+            .min();
+        let ancestor_compute_usd_per_hour = lineage
+            .iter()
+            .skip(1)
+            .filter_map(|anc| {
+                pools
+                    .get(anc.as_str())
+                    .filter(|p| p.owner_user_id.as_deref() == Some(user_id))
+                    .and_then(|p| p.bandwidth_limits.as_ref())
+                    .and_then(|b| b.compute_usd_per_hour)
+            })
+            .reduce(f64::min);
+
+        let effective_bandwidth = if let Some(ref bw_id) = bandwidth_pool_id {
+            let mut bw_chain_pools = vec![bw_id.clone()];
+            bw_chain_pools.extend(budget::ancestor_bandwidth_chain(
+                bw_id,
+                lineage,
+                &pools,
+                Some(user_id),
+            ));
+            let eff_tpm = bw_chain_pools
+                .iter()
+                .filter_map(|id| {
+                    pools
+                        .get(id.as_str())
+                        .and_then(|p| p.bandwidth_limits.as_ref())
+                        .and_then(|b| b.tokens_per_min)
+                })
+                .min();
+            let eff_vcpu = bw_chain_pools
+                .iter()
+                .filter_map(|id| {
+                    pools
+                        .get(id.as_str())
+                        .and_then(|p| p.bandwidth_limits.as_ref())
+                        .and_then(|b| b.compute_vcpu_per_min)
+                })
+                .min();
+            let eff_usd_h = bw_chain_pools
+                .iter()
+                .filter_map(|id| {
+                    pools
+                        .get(id.as_str())
+                        .and_then(|p| p.bandwidth_limits.as_ref())
+                        .and_then(|b| b.compute_usd_per_hour)
+                })
+                .reduce(f64::min);
+            let protect_root = pools
+                .get(bw_id.as_str())
+                .and_then(|p| p.bandwidth_limits.as_ref())
+                .is_some_and(|b| b.protect_root);
+            let (cur_vcpu, cur_usd_h) =
+                budget::bandwidth_pool_compute_usage(bw_id, &pools, &machines);
+            let snap = pacing::snapshot_pool(bw_id, eff_tpm);
+            EffectiveBandwidthView {
+                source: "mission",
+                pool_id: Some(bw_id.clone()),
+                tokens_per_min: eff_tpm,
+                compute_vcpu_per_min: eff_vcpu,
+                compute_usd_per_hour: eff_usd_h,
+                protect_root,
+                current_tokens_per_min: snap.current_tokens_per_min,
+                current_vcpu_per_min: cur_vcpu,
+                current_compute_usd_per_hour: cur_usd_h,
+                pacing_active: snap.pacing_active,
+                paced_delay_ms: snap.paced_delay_ms,
+                ancestor_tokens_per_min,
+                ancestor_compute_vcpu_per_min,
+                ancestor_compute_usd_per_hour,
+            }
+        } else {
+            // Even without a bandwidth pool, report live subtree/mission compute burn
+            // and rolling token throughput if observed on this mission id.
+            let (cur_vcpu, cur_usd_h) = machines
+                .iter()
+                .filter(|m| {
+                    m.state.is_live()
+                        && (m.owner_mission_id.as_deref() == Some(mission_id)
+                            || pool_id
+                                .as_deref()
+                                .is_some_and(|pid| m.budget_pool_id.as_deref() == Some(pid)))
+                })
+                .fold((0u32, 0.0f64), |(v, u), m| {
+                    (v.saturating_add(m.cpu), u + m.usd_per_hour)
+                });
+            let snap = pacing::snapshot_pool(mission_id, None);
+            EffectiveBandwidthView {
+                source: "none",
+                pool_id: None,
+                tokens_per_min: None,
+                compute_vcpu_per_min: None,
+                compute_usd_per_hour: None,
+                protect_root: false,
+                current_tokens_per_min: snap.current_tokens_per_min,
+                current_vcpu_per_min: cur_vcpu,
+                current_compute_usd_per_hour: round4(cur_usd_h),
+                pacing_active: false,
+                paced_delay_ms: 0,
+                ancestor_tokens_per_min,
+                ancestor_compute_vcpu_per_min,
+                ancestor_compute_usd_per_hour,
+            }
+        };
+
         let children = children
             .iter()
             .map(|c| {
@@ -6559,6 +7149,10 @@ impl ManagedManager {
                 let vm_max_concurrent = child_pool
                     .and_then(|p| p.vm_limits.as_ref())
                     .and_then(|l| l.max_concurrent);
+                let has_bandwidth_limits = child_pool.is_some_and(|p| p.bandwidth_limits.is_some());
+                let tokens_per_min = child_pool
+                    .and_then(|p| p.bandwidth_limits.as_ref())
+                    .and_then(|b| b.tokens_per_min);
                 let live_machines = if has_vm_limits {
                     budget::cap_pool_counts(c, "", &pools, &machines).0
                 } else {
@@ -6580,6 +7174,8 @@ impl ManagedManager {
                             reserved_usd: u.as_ref().map_or(0.0, |u| u.reserved_usd + u.carved_usd),
                             has_vm_limits,
                             vm_max_concurrent,
+                            has_bandwidth_limits,
+                            tokens_per_min,
                             live_machines,
                         }
                     }
@@ -6603,6 +7199,8 @@ impl ManagedManager {
                             reserved_usd: (reserved * 10000.0).round() / 10000.0,
                             has_vm_limits,
                             vm_max_concurrent,
+                            has_bandwidth_limits,
+                            tokens_per_min,
                             live_machines,
                         }
                     }
@@ -6634,6 +7232,16 @@ impl ManagedManager {
             own_vm_limits,
             vm_limits_pool_id: cap_pool_id,
             effective_vm_limits,
+            bandwidth_mode: if own_bandwidth_limits.is_some() {
+                "own"
+            } else if bandwidth_pool_id.is_some() {
+                "pooled"
+            } else {
+                "none"
+            },
+            own_bandwidth_limits,
+            bandwidth_pool_id,
+            effective_bandwidth,
             children,
         }
     }
@@ -6706,6 +7314,12 @@ impl ManagedManager {
         };
         let target_cap_pool =
             Self::resolve_covering_cap_pool(&pools, &eff_chain, &pick.provider, tenant);
+        let eff_bw_chain = if !cap_lineage.is_empty() {
+            cap_lineage.to_vec()
+        } else {
+            Self::fallback_bandwidth_lineage(&pools, None, Some(requested_by))
+        };
+        let target_bw_pool = Self::resolve_covering_bandwidth_pool(&pools, &eff_bw_chain, tenant);
         drop(pools);
         if pick.cap_pool_id != target_cap_pool {
             let others: Vec<ManagedMachine> = all_machines
@@ -6742,6 +7356,7 @@ impl ManagedManager {
             .update(&pick.id, |m| {
                 m.change_pool(pool, Utc::now());
                 m.cap_pool_id = target_cap_pool;
+                m.bandwidth_pool_id = target_bw_pool;
                 m.owner_mission_id = None;
                 m.requested_by_mission_id = Some(requested_by.to_string());
                 m.reap_at = None;

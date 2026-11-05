@@ -4775,6 +4775,12 @@ impl AssistantMcp {
                         if let Some(limits) = b.get("effective_vm_limits") {
                             obj.insert("effective_vm_limits".to_string(), limits.clone());
                         }
+                        if let Some(bw) = b
+                            .get("effective_bandwidth")
+                            .filter(|v| v.get("source").and_then(Value::as_str) == Some("mission"))
+                        {
+                            obj.insert("effective_bandwidth".to_string(), bw.clone());
+                        }
                         if let Some(summary) = summarize_mission_budget(b) {
                             obj.insert("mission_budget".to_string(), summary);
                         }
@@ -8413,6 +8419,11 @@ pub(crate) fn compact_managed_list(list: &Value) -> Value {
     if let Some(eff) = list.get("effective_vm_limits") {
         if let Some(obj) = out.as_object_mut() {
             obj.insert("effective_vm_limits".to_string(), eff.clone());
+        }
+    }
+    if let Some(bw) = list.get("effective_bandwidth") {
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("effective_bandwidth".to_string(), bw.clone());
         }
     }
     out
