@@ -1517,6 +1517,53 @@ mod tests {
         assert_eq!(tail[0].path, "Audits");
     }
     #[test]
+    fn pending_folder_delete_recovers_cleanly_when_concurrent_child_appears() {
+        let (_dir, s) = setup();
+        tree(&s);
+        // Simulate a committed batched deletion of `notes` where an agent wrote a
+        // new file into `notes` before crash recovery unlinked the directory.
+        let mut state = s.load().unwrap();
+        let entries: Vec<(String, Entry)> = state
+            .manifest
+            .entries
+            .iter()
+            .filter(|(p, _)| p.as_str() == "notes" || p.starts_with("notes/"))
+            .map(|(p, e)| (p.clone(), e.clone()))
+            .collect();
+        for (source, entry) in entries.into_iter().rev() {
+            state.manifest.revision += 1;
+            let change = Change {
+                before: Some(entry),
+                timestamp: timestamp(),
+                revision: state.manifest.revision,
+                path: source.clone(),
+                entry: None,
+                source: "Orb".into(),
+            };
+            state.manifest.entries.remove(&source);
+            state.history.push(change.clone());
+            state.pending.push(change);
+        }
+        s.save(&state).unwrap();
+        fs::write(s.root.join("notes/late-arrival.md"), "saved by agent").unwrap();
+
+        // Next manifest read must recover without getting wedged on ENOTEMPTY,
+        // remove the deleted files, and adopt the newly created file + directory.
+        let manifest = s.manifest().unwrap();
+        assert!(!s.root.join("notes/a.md").exists());
+        assert!(!s.root.join("notes/deep").exists());
+        assert_eq!(
+            fs::read_to_string(s.root.join("notes/late-arrival.md")).unwrap(),
+            "saved by agent"
+        );
+        assert!(manifest.entries.get("notes").is_some_and(|e| e.directory));
+        assert!(manifest
+            .entries
+            .get("notes/late-arrival.md")
+            .is_some_and(|e| !e.directory));
+        assert!(s.load().unwrap().pending.is_empty());
+    }
+    #[test]
     fn transfer_between_projects_copies_before_it_deletes() {
         let (_dir, s) = setup();
         tree(&s);

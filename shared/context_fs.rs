@@ -179,7 +179,16 @@ pub fn remove(root: &Path, path: &str, directory: bool) -> Result<(), String> {
         )
     } < 0
     {
-        return Err(std::io::Error::last_os_error().to_string());
+        let error = std::io::Error::last_os_error();
+        if directory && matches!(error.raw_os_error(), Some(libc::ENOTEMPTY | libc::EEXIST)) {
+            // Another writer added a child after deletion was committed; keep the
+            // directory so the next reconciliation adopts the new file cleanly.
+            return Ok(());
+        }
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(());
+        }
+        return Err(error.to_string());
     }
     Ok(())
 }
