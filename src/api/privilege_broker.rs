@@ -1064,29 +1064,36 @@ pub struct PrivilegeBroker {
     changed: tokio::sync::Notify,
 }
 
-static BROKER: OnceLock<Arc<PrivilegeBroker>> = OnceLock::new();
+static BROKERS: OnceLock<dashmap::DashMap<PathBuf, Arc<PrivilegeBroker>>> = OnceLock::new();
 
 pub fn store(state: &AppState) -> Arc<PrivilegeBroker> {
-    BROKER
-        .get_or_init(|| {
-            Arc::new(PrivilegeBroker::open(
-                state
-                    .config
-                    .working_dir
-                    .join(".sandboxed-sh")
-                    .join("privilege_access.json"),
-            ))
-        })
+    let path = state
+        .config
+        .working_dir
+        .join(".sandboxed-sh")
+        .join("privilege_access.json");
+    let brokers = BROKERS.get_or_init(dashmap::DashMap::new);
+    if let Some(existing) = brokers.get(&path) {
+        return Arc::clone(existing.value());
+    }
+    brokers
+        .entry(path.clone())
+        .or_insert_with(|| Arc::new(PrivilegeBroker::open(path)))
+        .value()
         .clone()
 }
 
 /// Reap session-scoped grants when the broker has been initialized in this process.
 pub async fn reap_if_initialized(mission_id: Uuid, reason: &str) -> usize {
-    if let Some(broker) = BROKER.get() {
-        broker.reap_mission_grants(mission_id, reason).await
-    } else {
-        0
+    let Some(brokers) = BROKERS.get() else {
+        return 0;
+    };
+    let active: Vec<Arc<PrivilegeBroker>> = brokers.iter().map(|e| Arc::clone(e.value())).collect();
+    let mut total = 0;
+    for broker in active {
+        total += broker.reap_mission_grants(mission_id, reason).await;
     }
+    total
 }
 
 #[derive(Debug, Clone)]

@@ -195,18 +195,22 @@ pub struct SecretBroker {
     resolving: Mutex<()>,
 }
 
-static BROKER: OnceLock<Arc<SecretBroker>> = OnceLock::new();
+static BROKERS: OnceLock<dashmap::DashMap<PathBuf, Arc<SecretBroker>>> = OnceLock::new();
 
 pub fn broker(state: &AppState) -> Arc<SecretBroker> {
-    BROKER
-        .get_or_init(|| {
-            let path = state
-                .config
-                .working_dir
-                .join(".sandboxed-sh")
-                .join("secret_broker.json");
-            SecretBroker::load(path)
-        })
+    let path = state
+        .config
+        .working_dir
+        .join(".sandboxed-sh")
+        .join("secret_broker.json");
+    let brokers = BROKERS.get_or_init(dashmap::DashMap::new);
+    if let Some(existing) = brokers.get(&path) {
+        return Arc::clone(existing.value());
+    }
+    brokers
+        .entry(path.clone())
+        .or_insert_with(|| SecretBroker::load(path))
+        .value()
         .clone()
 }
 

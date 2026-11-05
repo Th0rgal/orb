@@ -191,7 +191,7 @@ if source_mode != "full":
         )
     else:
         pack_process = subprocess.Popen(
-            ["git", "-C", str(repo_root), "pack-objects", "--stdout", "--no-reuse-delta"],
+            ["git", "-C", str(repo_root), "pack-objects", "--stdout", "--no-reuse-delta", "--threads=1"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
         )

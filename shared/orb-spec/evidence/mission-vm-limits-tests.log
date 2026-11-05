@@ -1,4 +1,4 @@
-    Finished `test` profile [unoptimized] target(s) in 0.14s
+    Finished `test` profile [unoptimized] target(s) in 0.10s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-d791927b4d2534f0)
 
 running 1 test
@@ -6,7 +6,6 @@ test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified 
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/var/lib/sandboxed-node/work/9c44a457-5ffd-4ea6-bde4-12b97183bd0f/orb)
 warning: function `populate_activity` is never used
     --> src/api/control/mission_list.rs:1177:21
      |
@@ -168,12 +167,12 @@ warning: method `note_activity` is never used
    |            ^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 5m 54s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 2 tests
 test managed::tests::mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_usd_budget ... ok
 test managed::tests::mission_vm_limits_bypass_saturated_global_pool_and_enforce_per_provider_caps ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3781 filtered out; finished in 0.02s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3787 filtered out; finished in 0.03s
 

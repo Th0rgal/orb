@@ -1951,6 +1951,12 @@ async fn snapshot_then_spawn_from_it_is_tenant_and_status_checked() {
         "snapshot_not_found"
     );
     let vm = m.spawn(spawn("t1")).await.unwrap();
+    for _ in 0..100 {
+        if m.get(&vm.id).await.unwrap().state == MachineState::Enrolling {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(vm.image, s.name);
     assert_eq!(vm.source_snapshot.as_deref(), Some(s.name.as_str()));
     assert!(m.snapshots.lock().await[0].last_used_at.is_some());

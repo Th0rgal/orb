@@ -253,19 +253,22 @@ pub struct MissionAccess {
     changed: tokio::sync::Notify,
 }
 
-static STORE: OnceLock<Arc<MissionAccess>> = OnceLock::new();
+static STORES: OnceLock<dashmap::DashMap<PathBuf, Arc<MissionAccess>>> = OnceLock::new();
 
 pub fn store(state: &AppState) -> Arc<MissionAccess> {
-    STORE
-        .get_or_init(|| {
-            Arc::new(MissionAccess::open(
-                state
-                    .config
-                    .working_dir
-                    .join(".sandboxed-sh")
-                    .join("mission_access.json"),
-            ))
-        })
+    let path = state
+        .config
+        .working_dir
+        .join(".sandboxed-sh")
+        .join("mission_access.json");
+    let stores = STORES.get_or_init(dashmap::DashMap::new);
+    if let Some(existing) = stores.get(&path) {
+        return Arc::clone(existing.value());
+    }
+    stores
+        .entry(path.clone())
+        .or_insert_with(|| Arc::new(MissionAccess::open(path)))
+        .value()
         .clone()
 }
 

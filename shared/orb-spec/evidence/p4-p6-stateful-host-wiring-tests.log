@@ -168,7 +168,7 @@ warning: method `note_activity` is never used
    |            ^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 38.43s
+    Finished `test` profile [unoptimized] target(s) in 36.84s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 1 test
@@ -337,7 +337,7 @@ warning: method `note_activity` is never used
    |            ^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.20s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 1 test
@@ -506,7 +506,7 @@ warning: method `note_activity` is never used
    |            ^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.18s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 1 test
@@ -844,7 +844,7 @@ warning: method `note_activity` is never used
    |            ^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.18s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 1 test
@@ -1013,7 +1013,7 @@ warning: method `note_activity` is never used
    |            ^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.18s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 1 test

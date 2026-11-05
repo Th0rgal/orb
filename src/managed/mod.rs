@@ -4618,7 +4618,17 @@ impl ManagedManager {
         }
 
         let enroll_token = enroll_token.ok_or("missing enrollment token")?;
-        self.update(id, |m| m.state = MachineState::Enrolling).await;
+        let enrolling = self
+            .update(id, |m| {
+                if m.state == MachineState::Provisioning {
+                    m.state = MachineState::Enrolling;
+                }
+            })
+            .await
+            .ok_or("machine vanished")?;
+        if enrolling.state != MachineState::Enrolling {
+            return Err("machine destroyed while provisioning".into());
+        }
         let (provision_ms, provisioned) = if provider.uses_cloud_init_bootstrap() {
             // Cloud-init / onstart script already writes enroll.env, runs
             // PROVISION_SCRIPT and starts sandboxed-node inside the guest.
@@ -5067,6 +5077,17 @@ impl ManagedManager {
             .get(id)
             .await
             .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
+        if matches!(
+            current.state,
+            MachineState::Destroyed | MachineState::Failed
+        ) || (failed
+            && matches!(
+                current.state,
+                MachineState::Destroying | MachineState::Stopped | MachineState::Online
+            ))
+        {
+            return Ok(current);
+        }
         let was_online = current.state == MachineState::Online;
         // Scaleway Apple Silicon 24h minimum lease (`deletable_at`): never
         // call provider DELETE before `deletable_at`. Unregister the node &
