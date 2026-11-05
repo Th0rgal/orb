@@ -8125,8 +8125,7 @@ def PlacementMergeCheck.Admissible (p : PlacementMergeCheck) : Bool :=
   else if !(p.hasPlacement == 1) then false
   else if p.pendingOpId != 0 then
     decide (p.curRev < p.incRev) ||
-    (p.sourceKind == 1 && p.ackOpId == p.pendingOpId && decide (p.curRev ≤ p.incRev)) ||
-    (p.matchesOptimistic == 1 && p.incRev == p.curRev)
+    (p.sourceKind == 1 && p.ackOpId == p.pendingOpId && decide (p.curRev ≤ p.incRev))
   else
     decide (p.curRev ≤ p.incRev)
 
@@ -8171,10 +8170,8 @@ theorem placementMerge_admit_eq (p : PlacementMergeCheck) :
               cases hsk1 : (p.sourceKind == 1) <;>
                 cases hack : (p.ackOpId == p.pendingOpId) <;>
                 by_cases hge : p.curRev ≤ p.incRev <;>
-                cases hmo : (p.matchesOptimistic == 1) <;>
-                cases heq : (p.incRev == p.curRev) <;>
-                (simp only [hsk1, hack, hge, decide_true, decide_false, hmo, heq,
-                  Bool.true_and, Bool.false_and, Bool.true_or, Bool.false_or,
+                (simp only [hsk1, hack, hge, decide_true, decide_false,
+                  Bool.true_and, Bool.false_and,
                   Bool.false_eq_true, ite_true, ite_false];
                  decide)
       · simp only [hsk_rb, ite_true]
@@ -8310,8 +8307,10 @@ def placementMergeMetaStepSpec :
 
 /-- Key anti-reversion invariants for `orb_placement_merge_step`:
     1. **Pending-op fence (`status = 5`)**: While an optimistic move `pendingOpId != 0` is in flight,
-       a stale list poll (`sourceKind = 0`) carrying the pre-move placement (`matchesOptimistic = 0`)
-       at `incRev ≤ curRev` is rejected (`lo32 = 5`, `admittedBit = 0`), preventing snap-back.
+       ANY list poll (`sourceKind = 0`) at `incRev ≤ curRev` — whether `matchesOptimistic = 0` OR
+       `matchesOptimistic = 1` (e.g., an overlapping `A → B → A` return-to-origin move before either
+       move commits) — is fenced (`lo32 = 5`, `admittedBit = 0`, `clearPendingBit = 0`), preventing
+       snap-back and keeping the pending operation alive until confirmed.
     2. **Monotone settled revision (`status = 4`)**: Once settled (`pendingOpId = 0`), any poll or
        SSE frame with `incRev < curRev` is rejected (`lo32 = 4`, `admittedBit = 0`).
     3. **Authoritative ack clears fence & evicts stale buckets (`lo32 = 1793`)**: A matching ack or
@@ -8322,10 +8321,10 @@ def placementMergeMetaStepSpec :
        newer `pendingOpId != 0` is still running admits (`256`) and updates the confirmed rollback
        baseline without clearing the pending op (`clearPendingBit = 0`). -/
 theorem placement_merge_fences_stale_polls_and_advances_monotonically
-    (curRev incRev : UInt64) (pendingOpId : UInt32)
+    (curRev incRev : UInt64) (pendingOpId : UInt32) (matchesOptimistic : UInt8)
     (h_pend : pendingOpId != 0)
     (h_le : incRev ≤ curRev) :
-    (placementMergeStep curRev incRev pendingOpId 0 0 1 0 &&& 0xFFFFFFFF) = 5 ∧
+    (placementMergeStep curRev incRev pendingOpId 0 0 1 matchesOptimistic &&& 0xFFFFFFFF) = 5 ∧
     (incRev < curRev →
       (placementMergeStep curRev incRev 0 0 0 1 0 &&& 0xFFFFFFFF) = 4) ∧
     (curRev < curRev + 1 →

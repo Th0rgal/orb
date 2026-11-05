@@ -4525,5 +4525,89 @@ mod subtree_move_tests {
         assert!(broadcast_ids.contains(&m_exact.id));
         assert!(broadcast_ids.contains(&m_nested.id));
         assert!(!broadcast_ids.contains(&m_other.id));
+
+        // Chained rename (`reviews/2026 -> archive/2026`) keeps filesystem + cron + mission folders aligned under the per-project lock.
+        for p in ["archive", "broken"] {
+            let receipt = ctx_store
+                .apply(crate::project_context::Operation {
+                    id: Uuid::new_v4().to_string(),
+                    path: p.into(),
+                    base: None,
+                    hash: None,
+                    directory: true,
+                    delete: false,
+                    source: "test".into(),
+                    confirmed_large: false,
+                })
+                .unwrap();
+            assert!(!receipt.conflict);
+        }
+        let Json(resp2) = crate::api::project_files::transfer_file(
+            State(state.clone()),
+            Some(axum::Extension(user.clone())),
+            axum::extract::Path("assistant".to_string()),
+            Json(crate::api::project_files::TransferFileRequest {
+                path: "reviews/2026".into(),
+                destination: "archive/2026".into(),
+                copy: false,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp2["moved_crons"], serde_json::json!(1));
+        assert_eq!(resp2["moved_missions"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            store
+                .get_mission_metadata(m_nested.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .project
+                .folder,
+            "archive/2026/sub"
+        );
+
+        // If `cascade_rename_folder` fails in SQLite, `transfer_file` rolls back BOTH `moved_crons`
+        // and the context folder rename and propagates `500 Internal Server Error` instead of returning `200`.
+        {
+            let mission_db =
+                rusqlite::Connection::open(dir.path().join("missions/missions-subtree-test.db"))
+                    .unwrap();
+            mission_db
+                .execute_batch(
+                    "CREATE TRIGGER abort_mission_cascade BEFORE UPDATE ON missions
+                     BEGIN SELECT RAISE(ABORT, 'simulated mission cascade failure'); END;",
+                )
+                .unwrap();
+        }
+        let (err_status, err_msg) = crate::api::project_files::transfer_file(
+            State(state.clone()),
+            Some(axum::Extension(user.clone())),
+            axum::extract::Path("assistant".to_string()),
+            Json(crate::api::project_files::TransferFileRequest {
+                path: "archive/2026".into(),
+                destination: "broken/2026".into(),
+                copy: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            err_msg.contains("rolled back"),
+            "unexpected error: {err_msg}"
+        );
+        let rolled_back_manifest = ctx_store.manifest().unwrap();
+        assert!(rolled_back_manifest
+            .entries
+            .contains_key("archive/2026/sub/readme.md"));
+        assert!(!rolled_back_manifest.entries.contains_key("broken/2026"));
+        assert_eq!(
+            state
+                .projects
+                .project_cron_folder("assistant", "cron-daily-audit")
+                .unwrap(),
+            "archive/2026/sub"
+        );
     }
 }

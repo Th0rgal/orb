@@ -835,29 +835,41 @@ pub struct PrivilegeBroker {
     changed: tokio::sync::Notify,
 }
 
-static BROKER: OnceLock<Arc<PrivilegeBroker>> = OnceLock::new();
+static BROKERS: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<PrivilegeBroker>>>,
+> = OnceLock::new();
 
 pub fn store(state: &AppState) -> Arc<PrivilegeBroker> {
-    BROKER
-        .get_or_init(|| {
-            Arc::new(PrivilegeBroker::open(
-                state
-                    .config
-                    .working_dir
-                    .join(".sandboxed-sh")
-                    .join("privilege_access.json"),
-            ))
-        })
+    let path = state
+        .config
+        .working_dir
+        .join(".sandboxed-sh")
+        .join("privilege_access.json");
+    let mut map = BROKERS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.entry(path.clone())
+        .or_insert_with(|| Arc::new(PrivilegeBroker::open(path)))
         .clone()
 }
 
 /// Reap session-scoped grants when the broker has been initialized in this process.
 pub async fn reap_if_initialized(mission_id: Uuid, reason: &str) -> usize {
-    if let Some(broker) = BROKER.get() {
-        broker.reap_mission_grants(mission_id, reason).await
-    } else {
-        0
+    let Some(brokers) = BROKERS.get() else {
+        return 0;
+    };
+    let list: Vec<Arc<PrivilegeBroker>> = brokers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .cloned()
+        .collect();
+    let mut total = 0;
+    for broker in list {
+        total += broker.reap_mission_grants(mission_id, reason).await;
     }
+    total
 }
 
 #[derive(Debug, Clone)]

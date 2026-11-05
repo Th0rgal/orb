@@ -11126,6 +11126,22 @@ mod stateful_tests {
         assert!(!fenced_poll.clear_pending);
         assert_eq!(fenced_poll.next_rev32, 5);
 
+        // Return-to-origin (`A -> B -> A`) pre-move poll at `inc_rev == cur_rev` MUST also stay fenced
+        // (`matches_optimistic = true` does not clear `pending_op_id` on unacknowledged polls).
+        let return_to_origin_poll = placement_merge_step(PlacementMergeInput {
+            cur_rev: 5,
+            inc_rev: 5,
+            pending_op_id: 8,
+            ack_op_id: 0,
+            source_kind: 0,
+            has_placement: true,
+            matches_optimistic: true,
+        });
+        assert!(!return_to_origin_poll.admitted);
+        assert_eq!(return_to_origin_poll.status, 5);
+        assert!(!return_to_origin_poll.clear_pending);
+        assert_eq!(return_to_origin_poll.next_rev32, 5);
+
         // Matching HTTP ack commits new revision, clears pending op, and triggers cross-project eviction.
         let ack = placement_merge_step(PlacementMergeInput {
             cur_rev: 5,

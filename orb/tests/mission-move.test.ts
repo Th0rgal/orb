@@ -454,3 +454,59 @@ it("preserves newer optimistic move when an intermediate poll arrives before the
     pendingOpId: 0,
   });
 });
+
+it("keeps return-to-origin (A -> B -> A) moves pending across a pre-move poll at the origin", () => {
+  const RETURN_ID = "return-origin-1001";
+  stickHierarchy({
+    id: RETURN_ID,
+    project: "assistant",
+    folder: "Origin",
+    placement_revision: 0,
+    status: "active",
+  });
+  const op1 = allocatePlacementOpId();
+  stageOptimisticPlacement(RETURN_ID, "assistant", "FolderB", op1);
+  const op2 = allocatePlacementOpId();
+  stageOptimisticPlacement(RETURN_ID, "assistant", "Origin", op2);
+
+  // Delayed pre-move poll still showing `Origin` at `placement_revision: 0` (`matchesOptimistic = true`)
+  // MUST NOT clear `pendingOpId = op2`, otherwise Move 1's ack for `FolderB` would overwrite `Origin`!
+  const delayedOriginPoll = stickHierarchy({
+    id: RETURN_ID,
+    project: "assistant",
+    folder: "Origin",
+    placement_revision: 0,
+    status: "active",
+  });
+  expect(delayedOriginPoll.folder).toBe("Origin");
+  expect(authoritativePlacement(RETURN_ID)?.pendingOpId).toBe(op2);
+
+  // Move 1 (`op1 -> FolderB`) commits at `placement_revision: 1` while `op2` (`-> Origin`) is still running:
+  expect(
+    commitAuthoritativePlacements(
+      [{ mission_id: RETURN_ID, project: "assistant", folder: "FolderB", placement_revision: 1 }],
+      op1,
+    ),
+  ).toEqual([]);
+  expect(authoritativePlacement(RETURN_ID)).toMatchObject({
+    project: "assistant",
+    folder: "Origin",
+    rev: 1,
+    pendingOpId: op2,
+    rollback: { project: "assistant", folder: "FolderB", rev: 1 },
+  });
+
+  // Move 2 (`op2 -> Origin`) commits at `placement_revision: 2` and settles cleanly:
+  expect(
+    commitAuthoritativePlacements(
+      [{ mission_id: RETURN_ID, project: "assistant", folder: "Origin", placement_revision: 2 }],
+      op2,
+    ),
+  ).toEqual([{ mission_id: RETURN_ID, project: "assistant", folder: "Origin", placement_revision: 2 }]);
+  expect(authoritativePlacement(RETURN_ID)).toMatchObject({
+    project: "assistant",
+    folder: "Origin",
+    rev: 2,
+    pendingOpId: 0,
+  });
+});

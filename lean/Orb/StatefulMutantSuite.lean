@@ -501,8 +501,7 @@ def mutantPlacementAcceptsOlderRevision (p : PlacementMergeCheck) : Bool :=
   else if !(p.hasPlacement == 1) then false
   else if p.pendingOpId != 0 then
     decide (p.curRev < p.incRev) ||
-    (p.sourceKind == 1 && p.ackOpId == p.pendingOpId && decide (p.curRev ≤ p.incRev)) ||
-    (p.matchesOptimistic == 1 && p.incRev == p.curRev)
+    (p.sourceKind == 1 && p.ackOpId == p.pendingOpId && decide (p.curRev ≤ p.incRev))
   else
     true
 
@@ -515,6 +514,22 @@ def mutantPlacementUnboundRollback (p : PlacementMergeCheck) : Bool :=
     p.hasPlacement == 1 && p.ackOpId != 0
   else if p.sourceKind == 3 then
     p.pendingOpId != 0
+  else if !(p.hasPlacement == 1) then false
+  else if p.pendingOpId != 0 then
+    decide (p.curRev < p.incRev) ||
+    (p.sourceKind == 1 && p.ackOpId == p.pendingOpId && decide (p.curRev ≤ p.incRev))
+  else
+    decide (p.curRev ≤ p.incRev)
+
+/-- Mutant 9D (Return-to-origin stale poll clears pending op): admits an unacknowledged list poll
+    (`sourceKind == 0`) at `incRev == curRev` merely because `matchesOptimistic == 1`, clearing
+    `pendingOpId` during `A -> B -> A` so Move 1's subsequent ack (`B`) overwrites `A`. -/
+def mutantPlacementReturnToOriginStalePoll (p : PlacementMergeCheck) : Bool :=
+  if !(decide (p.sourceKind ≤ 3)) then false
+  else if p.sourceKind == 2 then
+    p.hasPlacement == 1 && p.ackOpId != 0
+  else if p.sourceKind == 3 then
+    p.pendingOpId != 0 && p.ackOpId == p.pendingOpId
   else if !(p.hasPlacement == 1) then false
   else if p.pendingOpId != 0 then
     decide (p.curRev < p.incRev) ||
@@ -538,8 +553,14 @@ theorem kill_placement_unbound_rollback :
       placementMergeMetaGate.gate ⟨4, 4, 12, 11, 3, 1, 0⟩ := by
   decide
 
+theorem kill_placement_return_to_origin_stale_poll :
+    mutantPlacementReturnToOriginStalePoll ⟨4, 4, 11, 0, 0, 1, 1⟩ ≠
+      placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1, 1⟩ := by
+  decide
+
 #guard placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1, 0⟩ == false
 #guard placementMergeMetaGate.gate ⟨5, 4, 0, 0, 0, 1, 0⟩ == false
 #guard placementMergeMetaGate.gate ⟨4, 4, 12, 11, 3, 1, 0⟩ == false
+#guard placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1, 1⟩ == false
 
 end Orb.StatefulMutantSuite

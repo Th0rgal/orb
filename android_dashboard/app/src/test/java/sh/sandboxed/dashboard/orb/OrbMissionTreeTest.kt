@@ -460,6 +460,32 @@ class OrbMissionTreeTest {
         assertEquals(2L, revertedD.first().placementRevision)
         assertEquals("assistant", OrbMissionTree.projectSlug(pollBeforeAck))
         assertEquals("FolderX", OrbMissionTree.folderPath(pollBeforeAck))
+
+        // Return-to-origin (`FolderX -> FolderY -> FolderX`): a delayed pre-move poll at rev 2 (`FolderX`)
+        // MUST NOT clear `opF`, keeping Move 1 (`opE -> FolderY`) fenced when its rev-3 ack arrives.
+        val opE = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opE, "assistant", "FolderY")
+        val opF = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opF, "assistant", "FolderX")
+        val originPoll = m("rapid-kt", "project" to "assistant", "folder" to "FolderX", "placement_revision" to 2L)
+        assertEquals("FolderX", OrbMissionTree.folderPath(originPoll))
+        assertEquals(opF, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+        assertEquals(
+            0,
+            OrbMissionTree.commitAuthoritativePlacements(
+                listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderY", 3L, explicitProject = true)),
+                ackOpId = opE
+            ).size
+        )
+        assertEquals("FolderX", OrbMissionTree.folderPath(originPoll))
+        assertEquals(opF, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+        val settledReturn = OrbMissionTree.commitAuthoritativePlacements(
+            listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderX", 4L, explicitProject = true)),
+            ackOpId = opF
+        )
+        assertEquals(1, settledReturn.size)
+        assertEquals("FolderX", OrbMissionTree.folderPath(originPoll))
+        assertEquals(0, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
         OrbMissionTree.resetHierarchy()
     }
 }

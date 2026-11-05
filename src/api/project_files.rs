@@ -408,23 +408,55 @@ pub(crate) struct TransferFileRequest {
     pub(crate) copy: bool,
 }
 
+fn project_transfer_lock(canonical: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+        >,
+    > = std::sync::OnceLock::new();
+    let mut map = LOCKS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = map.get(canonical).and_then(|w| w.upgrade()) {
+        return existing;
+    }
+    map.retain(|_, w| w.strong_count() > 0);
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    map.insert(canonical.to_string(), Arc::downgrade(&lock));
+    lock
+}
+
 pub(crate) async fn transfer_file(
     State(state): State<Arc<super::routes::AppState>>,
     user: Option<axum::Extension<super::auth::AuthUser>>,
     AxumPath(slug): AxumPath<String>,
     Json(req): Json<TransferFileRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let canonical = {
+        let c = state.projects.resolve_project_slug(&slug);
+        if c.is_empty() {
+            slug.clone()
+        } else {
+            c
+        }
+    };
+    let project_lock = project_transfer_lock(&canonical);
+    let _guard = project_lock.lock().await;
+
     let store = context_store(&state, &slug)?;
     let src_path = req.path.clone();
     let dst_path = req.destination.clone();
     let is_copy = req.copy;
+    let store_for_move = store.clone();
     let was_directory = tokio::task::spawn_blocking(move || {
-        let was_dir = store
+        let was_dir = store_for_move
             .manifest()
-            .ok()
-            .and_then(|m| m.entries.get(&src_path).map(|e| e.directory))
-            .unwrap_or(false);
-        store
+            .map_err(bad_request)?
+            .entries
+            .get(&src_path)
+            .is_some_and(|e| e.directory);
+        store_for_move
             .transfer_file(&src_path, &dst_path, is_copy)
             .map_err(bad_request)?;
         Ok::<bool, ApiError>(was_dir)
@@ -435,28 +467,35 @@ pub(crate) async fn transfer_file(
     let mut moved_missions = Vec::new();
     let mut moved_crons = 0usize;
     if !req.copy && was_directory {
-        let canonical = {
-            let c = state.projects.resolve_project_slug(&slug);
-            if c.is_empty() {
-                slug.clone()
-            } else {
-                c
-            }
-        };
-        if let Ok(n) =
-            state
+        moved_crons =
+            match state
                 .projects
                 .cascade_rename_cron_folder(&canonical, &req.path, &req.destination)
-        {
-            moved_crons = n;
-        }
-        if let Some(axum::Extension(auth_user)) = user {
-            let control = super::control::control_for_user(&state, &auth_user).await;
-            if let Ok(moved) = control
-                .mission_store
-                .cascade_rename_folder(&canonical, &req.path, &req.destination)
-                .await
             {
+                Ok(n) => n,
+                Err(err) => {
+                    let src_rb = req.path.clone();
+                    let dst_rb = req.destination.clone();
+                    let rb_store = store.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        rb_store.transfer_file(&dst_rb, &src_rb, false)
+                    })
+                    .await;
+                    return Err(internal(format!(
+                        "Failed to update folder crons ({err}); folder move rolled back"
+                    )));
+                }
+            };
+        let auth_user = user
+            .map(|axum::Extension(u)| u)
+            .unwrap_or_else(|| super::auth::implicit_single_tenant_user(&state.config));
+        let control = super::control::control_for_user(&state, &auth_user).await;
+        match control
+            .mission_store
+            .cascade_rename_folder(&canonical, &req.path, &req.destination)
+            .await
+        {
+            Ok(moved) => {
                 if !moved.is_empty() {
                     let _ = control.events_tx.send(
                         super::control::events::AgentEvent::MissionPlacementChanged {
@@ -466,6 +505,25 @@ pub(crate) async fn transfer_file(
                     );
                 }
                 moved_missions = moved;
+            }
+            Err(err) => {
+                if moved_crons > 0 {
+                    let _ = state.projects.cascade_rename_cron_folder(
+                        &canonical,
+                        &req.destination,
+                        &req.path,
+                    );
+                }
+                let src_rb = req.path.clone();
+                let dst_rb = req.destination.clone();
+                let rb_store = store.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    rb_store.transfer_file(&dst_rb, &src_rb, false)
+                })
+                .await;
+                return Err(internal(format!(
+                    "Failed to update folder conversations ({err}); folder move rolled back"
+                )));
             }
         }
     }

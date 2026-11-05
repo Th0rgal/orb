@@ -957,6 +957,34 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderX")
         XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 2)
         XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, 0)
+
+        // Return-to-origin (`FolderX -> FolderY -> FolderX`): a delayed pre-move poll at rev 2 (`FolderX`)
+        // MUST NOT clear `op7`, keeping Move 1 (`op6 -> FolderY`) fenced when its rev-3 ack arrives.
+        let op6 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderY", opID: op6)
+        let op7 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderX", opID: op7)
+        let preMoveOriginPoll = OrbRow(.object([
+            "id": .string("rapid-ios"),
+            "project": .string("assistant"),
+            "folder": .string("FolderX"),
+            "placement_revision": .number(2),
+            "status": .string("active")
+        ]))
+        XCTAssertEqual(preMoveOriginPoll.folder, "FolderX")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op7)
+        XCTAssertTrue(OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "rapid-ios", project: "assistant", folder: "FolderY", placementRevision: 3)
+        ], ackOpID: op6).isEmpty)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderX")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op7)
+        let settledReturn = OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "rapid-ios", project: "assistant", folder: "FolderX", placementRevision: 4)
+        ], ackOpID: op7)
+        XCTAssertEqual(settledReturn.count, 1)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderX")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 4)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, 0)
         OrbHierarchy.reset()
     }
 }
