@@ -245,6 +245,62 @@ Scoped vs. shared pool accounting (`orb_vm_cap_admit`):
    per-provider `active`/`max_concurrent`) so orchestrators see their dedicated
    slots even when the shared global pool is full.
 
+## Mission bandwidth & pacing (`bandwidth_limits`, optional, off by default)
+
+Operators can configure `bandwidth_limits` on any mission via
+`PUT /api/control/missions/:id/budget` (dashboard JWT only; persisted alongside
+`BudgetPool` in `.sandboxed-sh/mission_budgets.json`, independent of `budget_usd`
+and `vm_limits`):
+
+- `tokens_per_min`: optional LLM throughput ceiling (`1_000..=100_000_000`
+  tokens/min across input + output + reasoning tokens) for the pool's subtree;
+- `compute_vcpu_per_min`: optional active managed-VM vCPU bandwidth ceiling
+  (`1..=4_096` vCPU-min/min, i.e., active vCPU across live VMs in the pool);
+- `compute_usd_per_hour`: optional active managed-VM dollar burn rate ceiling
+  (`0.01..=10_000.0` USD/hour across live VMs in the pool);
+- `protect_root`: boolean (`false` by default). When `true`, the mission that
+  owns the bandwidth pool bypasses pacing delays itself while its pooled
+  descendants absorb the smoothing delay.
+
+Hierarchical inheritance & pace/delay enforcement:
+
+1. **Ancestor monotonicity:** A child mission's `bandwidth_limits` cannot exceed
+   any ancestor bandwidth pool's configured `tokens_per_min`,
+   `compute_vcpu_per_min`, or `compute_usd_per_hour` (`sub_bandwidth_exceeds_pool`).
+   Removing or editing `bandwidth_limits` re-attaches descendant bandwidth pools
+   and live VMs' `bandwidth_pool_id` to the nearest ancestor bandwidth pool, and
+   immediately wakes any in-flight paced requests.
+2. **Inference token pacing (`src/managed/pacing.rs` & `src/api/proxy.rs`):**
+   Every routed LLM proxy request (`/v1/chat/completions`, `/v1/responses`,
+   `/v1/messages`) attributed to a mission checks all bandwidth pools in its
+   lineage (skipping a pool whose `pool_id == mission_id` when `protect_root` is
+   `true`). Each pool maintains a continuous-refill token-bucket debt ledger
+   charged on response/stream completion (`record_proxy_usage`). When a pool's
+   token debt is positive, incoming requests sleep transparently before upstream
+   dispatch (`delay_ms = min(debt / rate, 30_000 ms)`) while keeping
+   `proxy_liveness` active so stall watchdogs never misclassify intentional
+   pacing as a hung CLI. No synthetic `429` is returned to the harness.
+3. **Managed compute bandwidth pacing (`ManagedManager::spawn` & `resume`):**
+   Before acquiring the final admission lock, if the mission's governing
+   bandwidth pool sets `compute_vcpu_per_min` or `compute_usd_per_hour`:
+   - if the single requested VM alone exceeds the pool's entire ceiling
+     (`effective_cpu > compute_vcpu_per_min` or
+     `effective_usd_per_hour > compute_usd_per_hour`), Core fails fast with
+     `429 bandwidth_exceeded` since waiting can never admit it;
+   - otherwise, while active subtree compute + the requested VM exceeds the
+     ceiling (unless `protect_root` exempts the pool root), Core paces and awaits
+     capacity release or limit edits (up to `45s`) before proceeding to
+     admission.
+4. **Surface & runway forecast:** `GET /api/control/missions/:id/budget` and MCP
+   `list_managed_machines` return `own_bandwidth_limits`, `bandwidth_mode`
+   (`"own" | "pooled" | "none"`), `bandwidth_pool_id`, and `effective_bandwidth`
+   (including live `current_tokens_per_min`, `current_vcpu_per_min`,
+   `current_compute_usd_per_hour`, `pacing_active`, and `paced_delay_ms`). Orb
+   renders Mission Settings as a full-page view (`ms:<id>`) with a top compact
+   spend/runway forecast chart showing observed burn, `now`, reserved hold, cap
+   line, and estimated time until budget exhaustion at the effective (or draft
+   shaped) burn rate.
+
 ## Provisioning
 
 `provision` runs `src/managed/orb-node-provision.sh` as root before

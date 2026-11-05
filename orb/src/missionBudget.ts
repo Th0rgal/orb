@@ -1,4 +1,4 @@
-import { api } from "./api";
+import { api, type MissionResourcesResponse } from "./api";
 
 /** One pool's derived usage (`crate::managed::budget::PoolUsage`). */
 export type PoolUsage = {
@@ -22,6 +22,11 @@ export const MANAGED_PROVIDERS = [
 export type ManagedProviderId = (typeof MANAGED_PROVIDERS)[number]["id"];
 
 export const MAX_VM_CONCURRENCY = 128;
+export const MIN_TOKENS_PER_MIN = 1_000;
+export const MAX_TOKENS_PER_MIN = 100_000_000;
+export const MAX_COMPUTE_VCPU_PER_MIN = 4_096;
+export const MIN_COMPUTE_USD_PER_HOUR = 0.01;
+export const MAX_COMPUTE_USD_PER_HOUR = 10_000;
 
 export type VmConcurrencyLimits = {
   max_concurrent?: number | null;
@@ -45,6 +50,30 @@ export type EffectiveVmLimits = {
   provider_limits: ProviderCapUsage[];
 };
 
+export type BandwidthLimits = {
+  tokens_per_min?: number | null;
+  compute_vcpu_per_min?: number | null;
+  compute_usd_per_hour?: number | null;
+  protect_root?: boolean;
+};
+
+export type EffectiveBandwidth = {
+  source: "mission" | "none";
+  pool_id: string | null;
+  tokens_per_min: number | null;
+  compute_vcpu_per_min: number | null;
+  compute_usd_per_hour: number | null;
+  protect_root: boolean;
+  current_tokens_per_min: number;
+  current_vcpu_per_min: number;
+  current_compute_usd_per_hour: number;
+  pacing_active: boolean;
+  paced_delay_ms: number;
+  ancestor_tokens_per_min: number | null;
+  ancestor_compute_vcpu_per_min: number | null;
+  ancestor_compute_usd_per_hour: number | null;
+};
+
 export type ChildBudget = {
   mission_id: string;
   mode: "pooled" | "sub_budget";
@@ -53,6 +82,8 @@ export type ChildBudget = {
   reserved_usd: number;
   has_vm_limits?: boolean;
   vm_max_concurrent?: number | null;
+  has_bandwidth_limits?: boolean;
+  tokens_per_min?: number | null;
   live_machines?: number;
 };
 
@@ -68,6 +99,10 @@ export type MissionBudget = {
   vm_limits_mode?: "own" | "pooled" | "global";
   vm_limits_pool_id?: string | null;
   effective_vm_limits?: EffectiveVmLimits;
+  own_bandwidth_limits?: BandwidthLimits | null;
+  bandwidth_mode?: "own" | "pooled" | "none";
+  bandwidth_pool_id?: string | null;
+  effective_bandwidth?: EffectiveBandwidth;
   children: ChildBudget[];
 };
 
@@ -88,7 +123,39 @@ export const putMissionVmLimits = (id: string, vm_limits: VmConcurrencyLimits | 
     body: JSON.stringify({ vm_limits }),
   });
 
+export const putMissionBandwidthLimits = (id: string, bandwidth_limits: BandwidthLimits | null) =>
+  api<MissionBudget>(`/api/control/missions/${encodeURIComponent(id)}/budget`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bandwidth_limits }),
+  });
+
 export const money = (v: number) => `$${v < 10 ? v.toFixed(2) : v.toFixed(0)}`;
+
+export const formatTokensPerMin = (v: number): string => {
+  if (v >= 1_000_000) {
+    const m = v / 1_000_000;
+    return `${Number.isInteger(m) ? m.toFixed(0) : m.toFixed(1)}M tok/min`;
+  }
+  if (v >= 1_000) {
+    const k = v / 1_000;
+    return `${Number.isInteger(k) ? k.toFixed(0) : k.toFixed(1)}k tok/min`;
+  }
+  return `${Math.round(v)} tok/min`;
+};
+
+export const formatDurationEta = (secs: number): string => {
+  if (!Number.isFinite(secs) || secs <= 0) return "0m";
+  if (secs < 60) return "<1m";
+  const totalMins = Math.round(secs / 60);
+  if (totalMins < 60) return `~${totalMins}m`;
+  const hours = Math.floor(totalMins / 60);
+  const mins = totalMins % 60;
+  if (hours < 48) return mins > 0 ? `~${hours}h ${mins}m` : `~${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return remHours > 0 ? `~${days}d ${remHours}h` : `~${days}d`;
+};
 
 export const managedProviderLabel = (id: string) =>
   MANAGED_PROVIDERS.find(p => p.id === id)?.label ?? id;
@@ -114,6 +181,18 @@ function parseWholeInt(raw: string, min: number, max: number, label: string): { 
   const value = Number(raw);
   if (!Number.isInteger(value) || value < min || value > max) {
     return { error: `${label} must be between ${min} and ${max}` };
+  }
+  return { value };
+}
+
+function parseTokenRateInput(raw: string): { value: number } | { error: string } {
+  const cleaned = raw.trim().replace(/,/g, "").replace(/_/g, "");
+  const m = /^(\d+(?:\.\d+)?)\s*([kKmM])?$/.exec(cleaned);
+  if (!m) return { error: "Tokens per minute must be a number (for example 120000 or 120k)" };
+  const mult = m[2]?.toLowerCase() === "m" ? 1_000_000 : m[2]?.toLowerCase() === "k" ? 1_000 : 1;
+  const value = Math.round(Number(m[1]) * mult);
+  if (!Number.isFinite(value) || value < MIN_TOKENS_PER_MIN || value > MAX_TOKENS_PER_MIN) {
+    return { error: `Tokens per minute must be between ${MIN_TOKENS_PER_MIN.toLocaleString()} and ${MAX_TOKENS_PER_MIN.toLocaleString()}` };
   }
   return { value };
 }
@@ -155,12 +234,86 @@ export function parseVmLimits(
   return { value: { max_concurrent, provider_max_concurrent } };
 }
 
+/** Parse inference & compute bandwidth inputs into `BandwidthLimits`. */
+export function parseBandwidthLimits(
+  tokensPerMinRaw: string,
+  computeVcpuRaw: string,
+  computeUsdPerHRaw: string,
+  protectRoot: boolean,
+  view?: MissionBudget,
+): { value: BandwidthLimits } | { error: string } {
+  const eff = view?.effective_bandwidth;
+  const ancTpm = eff?.ancestor_tokens_per_min ?? null;
+  const ancVcpu = eff?.ancestor_compute_vcpu_per_min ?? null;
+  const ancUsdH = eff?.ancestor_compute_usd_per_hour ?? null;
+
+  let tokens_per_min: number | null = null;
+  if (tokensPerMinRaw.trim()) {
+    const parsed = parseTokenRateInput(tokensPerMinRaw);
+    if ("error" in parsed) return parsed;
+    if (ancTpm != null && parsed.value > ancTpm) {
+      return { error: `Tokens per minute cannot exceed the parent pool (${formatTokensPerMin(ancTpm)})` };
+    }
+    tokens_per_min = parsed.value;
+  }
+
+  let compute_vcpu_per_min: number | null = null;
+  if (computeVcpuRaw.trim()) {
+    const parsed = parseWholeInt(computeVcpuRaw.trim(), 1, MAX_COMPUTE_VCPU_PER_MIN, "Compute vCPU/min");
+    if ("error" in parsed) return parsed;
+    if (ancVcpu != null && parsed.value > ancVcpu) {
+      return { error: `Compute vCPU/min cannot exceed the parent pool (${ancVcpu} vCPU/min)` };
+    }
+    compute_vcpu_per_min = parsed.value;
+  }
+
+  let compute_usd_per_hour: number | null = null;
+  const usdTrim = computeUsdPerHRaw.trim().replace(/^\$/, "");
+  if (usdTrim) {
+    const num = Number(usdTrim);
+    if (!Number.isFinite(num) || num < MIN_COMPUTE_USD_PER_HOUR || num > MAX_COMPUTE_USD_PER_HOUR) {
+      return { error: `Compute burn ceiling must be between $${MIN_COMPUTE_USD_PER_HOUR} and $${MAX_COMPUTE_USD_PER_HOUR}/h` };
+    }
+    const rounded = Math.round(num * 10000) / 10000;
+    if (ancUsdH != null && rounded > ancUsdH + 1e-9) {
+      return { error: `Compute burn ceiling cannot exceed the parent pool (${money(ancUsdH)}/h)` };
+    }
+    compute_usd_per_hour = rounded;
+  }
+
+  if (tokens_per_min == null && compute_vcpu_per_min == null && compute_usd_per_hour == null) {
+    return { error: "Enter at least one bandwidth limit (tokens/min, vCPU/min, or $/h)" };
+  }
+
+  return {
+    value: {
+      tokens_per_min,
+      compute_vcpu_per_min,
+      compute_usd_per_hour,
+      protect_root: protectRoot,
+    },
+  };
+}
+
 export function normalizeVmLimits(limits: VmConcurrencyLimits | null | undefined): string {
   if (!limits) return "null";
   const provEntries = MANAGED_PROVIDERS
     .map(p => [p.id, limits.provider_max_concurrent?.[p.id]] as const)
     .filter(([, v]) => v != null);
   return JSON.stringify({ m: limits.max_concurrent ?? null, p: provEntries });
+}
+
+export function normalizeBandwidthLimits(limits: BandwidthLimits | null | undefined): string {
+  if (!limits) return "null";
+  if (limits.tokens_per_min == null && limits.compute_vcpu_per_min == null && limits.compute_usd_per_hour == null) {
+    return "null";
+  }
+  return JSON.stringify({
+    t: limits.tokens_per_min ?? null,
+    v: limits.compute_vcpu_per_min ?? null,
+    u: limits.compute_usd_per_hour != null ? Math.round(limits.compute_usd_per_hour * 10000) / 10000 : null,
+    p: Boolean(limits.protect_root),
+  });
 }
 
 /**
@@ -234,6 +387,76 @@ export function optimisticVmLimits(view: MissionBudget, limits: VmConcurrencyLim
   };
 }
 
+/** Optimistic projection right after a bandwidth-limit change. */
+export function optimisticBandwidthLimits(view: MissionBudget, limits: BandwidthLimits | null): MissionBudget {
+  const prev = view.effective_bandwidth;
+  const ancTpm = prev?.ancestor_tokens_per_min ?? null;
+  const ancVcpu = prev?.ancestor_compute_vcpu_per_min ?? null;
+  const ancUsdH = prev?.ancestor_compute_usd_per_hour ?? null;
+  const curTpm = prev?.current_tokens_per_min ?? 0;
+  const curVcpu = prev?.current_vcpu_per_min ?? 0;
+  const curUsdH = prev?.current_compute_usd_per_hour ?? 0;
+
+  if (limits == null) {
+    const inherited = view.bandwidth_mode === "own" && (ancTpm != null || ancVcpu != null || ancUsdH != null);
+    return {
+      ...view,
+      own_bandwidth_limits: null,
+      bandwidth_mode: inherited ? "pooled" : "none",
+      bandwidth_pool_id: null,
+      effective_bandwidth: {
+        source: inherited ? "mission" : "none",
+        pool_id: null,
+        tokens_per_min: ancTpm,
+        compute_vcpu_per_min: ancVcpu,
+        compute_usd_per_hour: ancUsdH,
+        protect_root: false,
+        current_tokens_per_min: curTpm,
+        current_vcpu_per_min: curVcpu,
+        current_compute_usd_per_hour: curUsdH,
+        pacing_active: false,
+        paced_delay_ms: 0,
+        ancestor_tokens_per_min: ancTpm,
+        ancestor_compute_vcpu_per_min: ancVcpu,
+        ancestor_compute_usd_per_hour: ancUsdH,
+      },
+    };
+  }
+
+  const effTpm = limits.tokens_per_min != null && ancTpm != null
+    ? Math.min(limits.tokens_per_min, ancTpm)
+    : (limits.tokens_per_min ?? ancTpm);
+  const effVcpu = limits.compute_vcpu_per_min != null && ancVcpu != null
+    ? Math.min(limits.compute_vcpu_per_min, ancVcpu)
+    : (limits.compute_vcpu_per_min ?? ancVcpu);
+  const effUsdH = limits.compute_usd_per_hour != null && ancUsdH != null
+    ? Math.min(limits.compute_usd_per_hour, ancUsdH)
+    : (limits.compute_usd_per_hour ?? ancUsdH);
+
+  return {
+    ...view,
+    own_bandwidth_limits: limits,
+    bandwidth_mode: "own",
+    bandwidth_pool_id: view.mission_id,
+    effective_bandwidth: {
+      source: "mission",
+      pool_id: view.mission_id,
+      tokens_per_min: effTpm,
+      compute_vcpu_per_min: effVcpu,
+      compute_usd_per_hour: effUsdH,
+      protect_root: Boolean(limits.protect_root),
+      current_tokens_per_min: curTpm,
+      current_vcpu_per_min: curVcpu,
+      current_compute_usd_per_hour: curUsdH,
+      pacing_active: prev?.pacing_active ?? false,
+      paced_delay_ms: prev?.paced_delay_ms ?? 0,
+      ancestor_tokens_per_min: ancTpm,
+      ancestor_compute_vcpu_per_min: ancVcpu,
+      ancestor_compute_usd_per_hour: ancUsdH,
+    },
+  };
+}
+
 /** One line describing where the money comes from. */
 export function modeLine(view: MissionBudget, parentTitle?: string): string {
   if (view.mode === "own") {
@@ -263,6 +486,21 @@ export function vmLimitsModeLine(view: MissionBudget, parentTitle?: string): str
   return "Uses the global machine limit.";
 }
 
+/** One line describing which bandwidth/pacing policy governs this mission. */
+export function bandwidthModeLine(view: MissionBudget, parentTitle?: string): string {
+  const mode = view.bandwidth_mode ?? "none";
+  if (mode === "own") {
+    const prot = view.own_bandwidth_limits?.protect_root;
+    return prot
+      ? "Smooths bursts by pacing subagent calls and spawns while keeping this root agent unthrottled."
+      : "Smooths inference and machine spawn bursts with pace delays instead of hard errors.";
+  }
+  if (mode === "pooled") {
+    return `Shares the bandwidth pace pool of ${parentTitle ?? "an ancestor agent"}.`;
+  }
+  return "Unthrottled. Requests and spawns run at full speed.";
+}
+
 /** Summary chips text for configured per-provider limits ("Vast.ai: 2 · boat.dev: 8"). */
 export function providerLimitsSummary(limits: VmConcurrencyLimits | null | undefined): string {
   const map = limits?.provider_max_concurrent;
@@ -273,8 +511,324 @@ export function providerLimitsSummary(limits: VmConcurrencyLimits | null | undef
     .join(" · ");
 }
 
+/** Summary string for configured bandwidth limits. */
+export function bandwidthLimitsSummary(limits: BandwidthLimits | null | undefined): string {
+  if (!limits) return "";
+  const parts: string[] = [];
+  if (limits.tokens_per_min != null) parts.push(formatTokensPerMin(limits.tokens_per_min));
+  if (limits.compute_vcpu_per_min != null) parts.push(`${limits.compute_vcpu_per_min} vCPU/min`);
+  if (limits.compute_usd_per_hour != null) parts.push(`${money(limits.compute_usd_per_hour)}/h`);
+  return parts.join(" · ");
+}
+
 /** Fraction of the pool used (spent + reserved + sub-budgets), 0..1. */
 export function usedFraction(pool: PoolUsage): number {
   if (pool.budget_usd <= 0) return 1;
   return Math.min(1, Math.max(0, (pool.spent_usd + pool.reserved_usd + pool.carved_usd) / pool.budget_usd));
+}
+
+export type RunwayForecast = {
+  hasBudget: boolean;
+  capUsd: number | null;
+  spentUsd: number;
+  reservedUsd: number;
+  carvedUsd: number;
+  availableUsd: number;
+  observedComputeBurnUsdPerH: number;
+  shapedComputeBurnUsdPerH: number;
+  observedInferenceBurnUsdPerH: number;
+  currentTokensPerMin: number;
+  currentVcpuPerMin: number;
+  pacingActive: boolean;
+  etaSecs: number | null;
+  unshapedEtaSecs: number | null;
+  etaGainSecs: number | null;
+  missionEtaSecs: number | null;
+  exhaustsBeforeMissionEta: boolean;
+  tone: "ok" | "warning" | "danger";
+  headline: string;
+  subline: string;
+  chart: {
+    width: number;
+    height: number;
+    padLeft: number;
+    padRight: number;
+    padTop: number;
+    padBottom: number;
+    nowX: number;
+    nowY: number;
+    capY: number | null;
+    reservedTopY: number;
+    exhaustionX: number | null;
+    observedAreaPath: string;
+    observedLinePath: string;
+    projectedLinePath: string;
+    unshapedLinePath: string | null;
+  };
+};
+
+function latestNonNull(arr: Array<number | null> | undefined): number | null {
+  if (!arr) return null;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const v = arr[i];
+    if (v != null && Number.isFinite(v)) return v;
+  }
+  return null;
+}
+
+/**
+ * Pure forecast derivation for the compact Runway & Spend chart at the top of
+ * Mission Settings. Reacts live to draft budget and bandwidth edits so the user
+ * immediately sees how constraints extend or bound the runway.
+ */
+export function computeRunwayForecast(opts: {
+  budget: MissionBudget | null;
+  resources?: MissionResourcesResponse | null;
+  draftBudgetUsd?: string;
+  draftComputeUsdPerH?: string;
+  draftComputeVcpu?: string;
+  bandwidthEnabled?: boolean;
+  budgetEnabled?: boolean;
+}): RunwayForecast {
+  const b = opts.budget;
+  const pool = b?.pool ?? null;
+  const effBw = b?.effective_bandwidth;
+  const res = opts.resources ?? null;
+
+  const budgetOn = opts.budgetEnabled ?? (b?.mode === "own" || b?.mode === "pooled");
+  let capUsd: number | null = pool?.budget_usd ?? b?.own_budget_usd ?? null;
+  if (opts.budgetEnabled && opts.draftBudgetUsd != null) {
+    const parsed = parseAmount(opts.draftBudgetUsd);
+    if ("value" in parsed) capUsd = parsed.value;
+  }
+  if (!budgetOn) capUsd = null;
+
+  const spentUsd = pool?.spent_usd ?? 0;
+  const reservedUsd = pool?.reserved_usd ?? 0;
+  const carvedUsd = pool?.carved_usd ?? 0;
+  const committedPreReserved = spentUsd + carvedUsd;
+  const committedTotal = committedPreReserved + reservedUsd;
+  const availableUsd = capUsd != null ? Math.max(0, capUsd - committedTotal) : 0;
+
+  const timelineObsCompute = latestNonNull(res?.timeline.observed_compute_usd_per_h);
+  const observedComputeBurnUsdPerH = Math.max(
+    0,
+    effBw?.current_compute_usd_per_hour ?? timelineObsCompute ?? 0,
+  );
+  const observedInferenceBurnUsdPerH = Math.max(
+    0,
+    latestNonNull(res?.timeline.observed_inference_usd_per_h) ?? 0,
+  );
+  const currentTokensPerMin = effBw?.current_tokens_per_min ?? Math.round(((latestNonNull(res?.timeline.observed_b_tok_per_h) ?? 0) * 1_000_000_000) / 60);
+  const currentVcpuPerMin = effBw?.current_vcpu_per_min ?? Math.round(latestNonNull(res?.timeline.observed_vcpu) ?? 0);
+
+  let shapedComputeBurnUsdPerH = observedComputeBurnUsdPerH;
+  const bwOn = opts.bandwidthEnabled ?? (effBw?.source === "mission");
+  if (bwOn) {
+    let usdCap = effBw?.compute_usd_per_hour ?? null;
+    if (opts.draftComputeUsdPerH !== undefined) {
+      const raw = opts.draftComputeUsdPerH.trim().replace(/^\$/, "");
+      const n = raw ? Number(raw) : NaN;
+      usdCap = Number.isFinite(n) && n > 0 ? n : null;
+    }
+    if (usdCap != null && shapedComputeBurnUsdPerH > usdCap) {
+      shapedComputeBurnUsdPerH = usdCap;
+    }
+    let vcpuCap = effBw?.compute_vcpu_per_min ?? null;
+    if (opts.draftComputeVcpu !== undefined) {
+      const raw = opts.draftComputeVcpu.trim();
+      const n = raw && /^\d+$/.test(raw) ? Number(raw) : NaN;
+      vcpuCap = Number.isInteger(n) && n > 0 ? n : null;
+    }
+    if (vcpuCap != null && currentVcpuPerMin > vcpuCap && currentVcpuPerMin > 0) {
+      shapedComputeBurnUsdPerH = Math.min(
+        shapedComputeBurnUsdPerH,
+        observedComputeBurnUsdPerH * (vcpuCap / currentVcpuPerMin),
+      );
+    }
+  }
+
+  const etaSecs =
+    capUsd != null && availableUsd > 0 && shapedComputeBurnUsdPerH > 0.005
+      ? (availableUsd / shapedComputeBurnUsdPerH) * 3600
+      : capUsd != null && availableUsd <= 0
+        ? 0
+        : null;
+
+  const unshapedEtaSecs =
+    capUsd != null && availableUsd > 0 && observedComputeBurnUsdPerH > 0.005
+      ? (availableUsd / observedComputeBurnUsdPerH) * 3600
+      : null;
+
+  const etaGainSecs =
+    etaSecs != null && unshapedEtaSecs != null && etaSecs > unshapedEtaSecs + 120
+      ? etaSecs - unshapedEtaSecs
+      : null;
+
+  const missionEtaSecs = res?.mission.eta_remaining_secs ?? null;
+  const exhaustsBeforeMissionEta =
+    etaSecs != null && missionEtaSecs != null && missionEtaSecs > 0 && etaSecs < missionEtaSecs;
+
+  let tone: "ok" | "warning" | "danger" = "ok";
+  if (capUsd != null) {
+    if (availableUsd <= 0 || (etaSecs != null && etaSecs < 1800) || exhaustsBeforeMissionEta) {
+      tone = "danger";
+    } else if ((etaSecs != null && etaSecs < 7200) || (capUsd > 0 && availableUsd < capUsd * 0.15)) {
+      tone = "warning";
+    }
+  }
+
+  let headline: string;
+  let subline: string;
+  if (capUsd != null) {
+    if (availableUsd <= 0) {
+      headline = "Budget exhausted";
+      subline = `${money(committedTotal)} committed of ${money(capUsd)} pool`;
+    } else if (etaSecs != null) {
+      headline = `${formatDurationEta(etaSecs)} runway left`;
+      const parts = [`${money(shapedComputeBurnUsdPerH)}/h compute burn`, `${money(availableUsd)} left (${money(capUsd)} cap)`];
+      if (etaGainSecs != null) parts.push(`+${formatDurationEta(etaGainSecs).replace(/^~/, "")} from bandwidth cap`);
+      if (exhaustsBeforeMissionEta && missionEtaSecs != null) {
+        parts.push(`exhausts before ${formatDurationEta(missionEtaSecs)} task ETA`);
+      }
+      subline = parts.join(" · ");
+    } else {
+      headline = `${money(availableUsd)} available (${money(capUsd)} cap)`;
+      subline = pool && pool.live_machines > 0
+        ? `${pool.live_machines} active machine${pool.live_machines === 1 ? "" : "s"} · waiting for burn sample`
+        : "No active managed-machine burn right now";
+    }
+  } else {
+    headline = observedComputeBurnUsdPerH > 0.005
+      ? `${money(observedComputeBurnUsdPerH)}/h current compute burn`
+      : "No spending cap";
+    const parts = ["Only the daily managed-machine cap applies"];
+    if (currentTokensPerMin > 0) parts.push(formatTokensPerMin(currentTokensPerMin));
+    subline = parts.join(" · ");
+  }
+
+  // Compact SVG geometry (560x96 viewBox).
+  const width = 560;
+  const height = 96;
+  const padLeft = 8;
+  const padRight = 8;
+  const padTop = 10;
+  const padBottom = 10;
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
+  const nowX = Math.round(padLeft + plotW * 0.42);
+
+  const projHorizonSecs = Math.min(
+    Math.max(etaSecs ?? missionEtaSecs ?? 7200, 1800),
+    86_400,
+  );
+  const projectedEnd = committedTotal + shapedComputeBurnUsdPerH * (projHorizonSecs / 3600);
+  const unshapedEnd = committedTotal + observedComputeBurnUsdPerH * (projHorizonSecs / 3600);
+  const maxVal = Math.max(
+    capUsd ?? 0,
+    committedTotal,
+    projectedEnd,
+    unshapedEnd,
+    1,
+  ) * 1.08;
+
+  const yOf = (usdVal: number) => {
+    const clamped = Math.max(0, Math.min(maxVal, usdVal));
+    return Math.round((padTop + plotH * (1 - clamped / maxVal)) * 10) / 10;
+  };
+
+  // Build observed cumulative curve from padLeft..nowX.
+  const obsPoints: Array<[number, number]> = [];
+  const tl = res?.timeline;
+  if (tl && tl.offsets_secs.length >= 2) {
+    const rates = tl.observed_compute_usd_per_h;
+    const deltas: number[] = [0];
+    for (let i = 1; i < tl.offsets_secs.length; i++) {
+      const dt = Math.max(0, tl.offsets_secs[i]! - tl.offsets_secs[i - 1]!);
+      const r = rates[i] ?? rates[i - 1] ?? 0;
+      deltas.push(deltas[deltas.length - 1]! + Math.max(0, r) * (dt / 3600));
+    }
+    const totalDelta = deltas[deltas.length - 1] || 0;
+    const scale = totalDelta > 0 ? committedPreReserved / totalDelta : 0;
+    const t0 = tl.offsets_secs[0]!;
+    const tSpan = Math.max(1, tl.offsets_secs[tl.offsets_secs.length - 1]! - t0);
+    for (let i = 0; i < tl.offsets_secs.length; i++) {
+      const frac = (tl.offsets_secs[i]! - t0) / tSpan;
+      const x = Math.round((padLeft + (nowX - padLeft) * frac) * 10) / 10;
+      const val = totalDelta > 0 ? deltas[i]! * scale : committedPreReserved * frac;
+      obsPoints.push([x, yOf(val)]);
+    }
+  } else {
+    obsPoints.push([padLeft, yOf(0)]);
+    obsPoints.push([Math.round((padLeft + (nowX - padLeft) * 0.55) * 10) / 10, yOf(committedPreReserved * 0.48)]);
+    obsPoints.push([nowX, yOf(committedPreReserved)]);
+  }
+
+  const nowY = yOf(committedPreReserved);
+  const reservedTopY = yOf(committedTotal);
+  const capY = capUsd != null ? yOf(capUsd) : null;
+  const endX = width - padRight;
+  const projEndY = yOf(Math.min(maxVal, projectedEnd));
+
+  const observedLinePath = obsPoints
+    .map(([x, y], i) => `${i === 0 ? "M" : "L"}${x},${y}`)
+    .join(" ");
+  const baselineY = yOf(0);
+  const observedAreaPath = `${observedLinePath} L${nowX},${baselineY} L${padLeft},${baselineY} Z`;
+
+  let exhaustionX: number | null = null;
+  if (capUsd != null && availableUsd > 0 && shapedComputeBurnUsdPerH > 0.005 && etaSecs != null && etaSecs <= projHorizonSecs) {
+    const frac = Math.max(0, Math.min(1, etaSecs / projHorizonSecs));
+    exhaustionX = Math.round((nowX + (endX - nowX) * frac) * 10) / 10;
+  }
+
+  const projectedLinePath = exhaustionX != null && capY != null
+    ? `M${nowX},${reservedTopY} L${exhaustionX},${capY} L${endX},${capY}`
+    : `M${nowX},${reservedTopY} L${endX},${projEndY}`;
+
+  let unshapedLinePath: string | null = null;
+  if (shapedComputeBurnUsdPerH + 0.01 < observedComputeBurnUsdPerH) {
+    const unshapedEndY = yOf(Math.min(maxVal, unshapedEnd));
+    unshapedLinePath = `M${nowX},${reservedTopY} L${endX},${unshapedEndY}`;
+  }
+
+  return {
+    hasBudget: capUsd != null,
+    capUsd,
+    spentUsd,
+    reservedUsd,
+    carvedUsd,
+    availableUsd,
+    observedComputeBurnUsdPerH,
+    shapedComputeBurnUsdPerH,
+    observedInferenceBurnUsdPerH,
+    currentTokensPerMin,
+    currentVcpuPerMin,
+    pacingActive: Boolean(effBw?.pacing_active),
+    etaSecs,
+    unshapedEtaSecs,
+    etaGainSecs,
+    missionEtaSecs,
+    exhaustsBeforeMissionEta,
+    tone,
+    headline,
+    subline,
+    chart: {
+      width,
+      height,
+      padLeft,
+      padRight,
+      padTop,
+      padBottom,
+      nowX,
+      nowY,
+      capY,
+      reservedTopY,
+      exhaustionX,
+      observedAreaPath,
+      observedLinePath,
+      projectedLinePath,
+      unshapedLinePath,
+    },
+  };
 }
