@@ -624,19 +624,21 @@ fun OrbProjectDocumentsPage(
                 TextButton(
                     onClick = {
                         deleteTarget = null
+                        val previousEntries = entries
+                        entries = entries.filterNot { e ->
+                            val n = e.str("name") ?: e.id
+                            val p = e.str("path") ?: if (directoryPath.isEmpty()) n else "$directoryPath/$n"
+                            p == targetPath
+                        }
                         scope.launch {
                             try {
                                 core.request(
                                     "/api/projects/${core.encodeComponent(slug)}/file?path=${core.encodeComponent(targetPath)}",
                                     method = "DELETE"
                                 )
-                                entries = entries.filterNot { e ->
-                                    val n = e.str("name") ?: e.id
-                                    val p = e.str("path") ?: if (directoryPath.isEmpty()) n else "$directoryPath/$n"
-                                    p == targetPath
-                                }
                                 load()
                             } catch (e: Throwable) {
+                                entries = previousEntries
                                 error = e.message ?: "Failed to delete"
                             }
                         }

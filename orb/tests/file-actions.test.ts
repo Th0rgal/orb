@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { fileDestination, readFileReference, transferProjectFile } from "../src/fileActions";
+import { fileDestination, folderWorkError, readFileReference, transferProjectFile } from "../src/fileActions";
 import { setApiUrl } from "../src/api";
 afterEach(() => vi.restoreAllMocks());
 it("renames exactly and moves to the root without allowing traversal", () => {
@@ -38,6 +38,13 @@ it("allows a document folder but blocks a nested cron", async () => {
   await expect(assertFolderHasNoWork('test','notes')).resolves.toBeUndefined();
   fetch.mockResolvedValueOnce(new Response('[]')).mockResolvedValueOnce(new Response(JSON.stringify({jobs:[{id:'job',name:'Cron',folder:'notes/deep',enabled:true}]})));
   await expect(assertFolderHasNoWork('test','notes')).rejects.toThrow('crons');
+});
+
+it("synchronously flags loaded missions and crons inside a folder", () => {
+  expect(folderWorkError("test", "Audits", [], [])).toBeNull();
+  expect(folderWorkError("test", "Audits", [{ id: "m1", title: null, status: "completed", project: "test", tags: ["orb-folder:Audits/sub"], history: [] }], [])).toContain("Move the agents");
+  expect(folderWorkError("test", "Audits", [], [{ folder: "Audits" }])).toContain("crons");
+  expect(folderWorkError("test", "Audits", [{ id: "m2", title: null, status: "completed", project: "other", tags: ["orb-folder:Audits"], history: [] }], [{ folder: "Audits-other" }])).toBeNull();
 });
 
 it("moves a file to another project through its own route", async () => {

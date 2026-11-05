@@ -1632,6 +1632,10 @@ fun OrbProjectPage(
             return
         }
         folderActionError = null
+        val removedCustom = customFolders.filterKeys { it == folderPath || it.startsWith("$folderPath/") }
+        removedCustom.keys.forEach { customFolders.remove(it) }
+        val previousManifestFolders = manifestFolders
+        manifestFolders = manifestFolders.filterNot { it == folderPath || it.startsWith("$folderPath/") }
         scope.launch {
             try {
                 val encoded = core.encodeComponent(projectSlug)
@@ -1640,11 +1644,10 @@ fun OrbProjectPage(
                     path = "/api/projects/$encoded/file?path=$encodedPath",
                     method = "DELETE"
                 )
-                val toRemove = customFolders.keys.filter { it == folderPath || it.startsWith("$folderPath/") }
-                toRemove.forEach { customFolders.remove(it) }
-                manifestFolders = manifestFolders.filterNot { it == folderPath || it.startsWith("$folderPath/") }
                 loadProjectData()
             } catch (e: Throwable) {
+                removedCustom.forEach { (k, v) -> customFolders[k] = v }
+                manifestFolders = previousManifestFolders
                 folderActionError = e.message ?: "Failed to delete folder"
             }
         }

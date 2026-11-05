@@ -62,6 +62,61 @@ test('folder rename retains expanded descendants', async ({page}) => {
   await expect(page.getByRole('button',{name:'reference',exact:true})).toHaveCount(0);
 });
 
+test('folder delete dismisses dialog immediately and rolls back cleanly on failure', async ({page}) => {
+  await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
+  let folders=['Audits','Notes'];
+  let pendingDelete: (() => void) | null = null;
+  let failNextDelete=true;
+  await page.route('**/api/**',async route=>{
+    const req=route.request(),url=new URL(req.url()),path=url.pathname;
+    if(req.method()==='DELETE' && path.endsWith('/file')) {
+      const target=url.searchParams.get('path')??'';
+      await new Promise<void>(resolve=>{pendingDelete=resolve;});
+      pendingDelete=null;
+      if(failNextDelete) {
+        failNextDelete=false;
+        return route.fulfill({status:400,body:'This folder contains files that are not part of the project context'});
+      }
+      folders=folders.filter(f=>f!==target);
+      return route.fulfill({json:{deleted:target}});
+    }
+    const folder=url.searchParams.get('path')??'';
+    const entries=folder===''?folders.map(name=>({name,kind:'dir'})):[{name:'report.md',kind:'file'}];
+    const json=path==='/api/projects'?{projects:[{slug:'one',title:'One'}]}:path.endsWith('/files')?{entries}:path.endsWith('/crons')?{jobs:[]}:path.endsWith('/controller')?{job:null,runs:[]}:[];
+    await route.fulfill({json});
+  });
+  await page.goto('/');await page.getByRole('button',{name:'One',exact:true}).click();
+  await expect(page.getByRole('button',{name:'Audits',exact:true})).toBeVisible();
+
+  await page.getByRole('button',{name:'Audits',exact:true}).click({button:'right'});
+  await page.getByRole('menuitem',{name:'Delete…',exact:true}).click();
+  const dialog=page.getByRole('dialog');
+  await expect(dialog).toContainText('Delete folder?');
+  await dialog.getByRole('button',{name:'Delete',exact:true}).click();
+
+  // Dialog closes and folder disappears immediately while DELETE is still in flight.
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Audits',exact:true})).toHaveCount(0);
+  await expect.poll(()=>pendingDelete!==null).toBe(true);
+
+  // When DELETE fails, folder reappears in place and an error toast explains why.
+  pendingDelete!();
+  await expect(page.getByRole('button',{name:'Audits',exact:true})).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('Couldn’t delete Audits');
+
+  // Second attempt succeeds optimistically and stays gone after completion.
+  await page.getByRole('button',{name:'Audits',exact:true}).click({button:'right'});
+  await page.getByRole('menuitem',{name:'Delete…',exact:true}).click();
+  await page.getByRole('dialog').getByRole('button',{name:'Delete',exact:true}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Audits',exact:true})).toHaveCount(0);
+  await expect.poll(()=>pendingDelete!==null).toBe(true);
+  pendingDelete!();
+  await page.waitForTimeout(100);
+  await expect(page.getByRole('button',{name:'Audits',exact:true})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Notes',exact:true})).toBeVisible();
+});
+
 
 test('off-screen archived rows do not move the project viewport', async ({page}) => {
   await page.goto('/tests/sidebar-viewport.html');

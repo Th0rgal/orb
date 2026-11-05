@@ -1961,13 +1961,17 @@ struct OrbProjectPage: View {
             self.error = "Move or archive the agents in \"\(folder)\" before deleting it."
             return
         }
+        let previousFolders = folders
+        folders.removeAll { $0 == folder || $0.hasPrefix(folder + "/") }
         do {
             _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/file?path=\(OrbCore.escape(folder))", method: "DELETE")
-            folders.removeAll { $0 == folder || $0.hasPrefix(folder + "/") }
             OrbReadCache.invalidate("project:\(project.id)")
             OrbReadCache.invalidate("project:\(project.id):all")
             await load(force: true)
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            folders = previousFolders
+            self.error = error.localizedDescription
+        }
     }
 }
 

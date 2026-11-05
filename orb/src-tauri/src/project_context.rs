@@ -431,8 +431,8 @@ pub async fn project_context_file(
         project_context_prepare(request).await?;
     }
     let store = replica.store.clone();
-    let manifest = store.manifest()?;
     if operation == "list" {
+        let manifest = store.manifest()?;
         let prefix = if path.is_empty() {
             String::new()
         } else {
@@ -444,6 +444,7 @@ pub async fn project_context_file(
     }
     crate::project_context_store::valid_path(&path)?;
     if operation == "read" {
+        let manifest = store.manifest()?;
         let entry = manifest
             .entries
             .get(&path)
@@ -494,7 +495,10 @@ pub async fn project_context_file(
     } else {
         None
     };
-    let base = revision.or_else(|| manifest.entries.get(&path).map(|e| e.revision));
+    let base = match revision {
+        Some(rev) => Some(rev),
+        None => store.manifest()?.entries.get(&path).map(|e| e.revision),
+    };
     let receipt = store.apply(Operation {
         id: uuid::Uuid::new_v4().to_string(),
         path: path.clone(),

@@ -237,12 +237,16 @@ struct OrbDocuments: View {
     }
 
     private func deleteItem(_ itemPath: String) async {
+        let previousEntries = entries
+        entries.removeAll { (path.isEmpty ? $0["name"].text : "\(path)/\($0["name"].text)") == itemPath }
         do {
             _ = try await api.call("/api/projects/\(OrbCore.escape(project))/file?path=\(OrbCore.escape(itemPath))", method: "DELETE")
-            entries.removeAll { (path.isEmpty ? $0["name"].text : "\(path)/\($0["name"].text)") == itemPath }
             invalidateProjectCaches()
             await reload(initial: false)
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            entries = previousEntries
+            self.error = error.localizedDescription
+        }
     }
 }
 
