@@ -290,7 +290,8 @@ data class OrbPlacementCommitItem(
     val project: String?,
     val folder: String,
     val placementRevision: Long,
-    val explicitProject: Boolean = false
+    val explicitProject: Boolean = false,
+    val isPreview: Boolean = false
 )
 
 class OrbApprovalTransferConfirmationException(
@@ -617,33 +618,42 @@ object OrbMissionTree {
         return commitAuthoritativePlacements(items, ackOpId = ackOpId)
     }
 
-    /** Full moving family closure (fork siblings + launched descendants at any depth) for optimistic staging. */
+    /** Full moving family closure (co-located fork siblings when moving a group leader + launched descendants at any depth) for optimistic staging. */
     fun subtree(missions: List<OrbRow>, rootIds: Collection<String>): List<OrbRow> {
         if (rootIds.isEmpty()) return emptyList()
         for (m in missions) observe(m)
         val byId = LinkedHashMap<String, OrbRow>(missions.size)
         for (m in missions) byId.putIfAbsent(m.id, m)
+        val buckets = LinkedHashMap<String, MutableList<OrbRow>>()
+        for (m in byId.values) {
+            val bucket = effectiveProject(m).ifEmpty { "default" }
+            buckets.getOrPut(bucket) { mutableListOf() }.add(m)
+        }
+        val leadersByBucket = buckets.mapValues { (_, list) -> forkLeaders(list) }
         val childrenByParent = HashMap<String, MutableList<String>>()
-        val forksBySource = HashMap<String, MutableList<String>>()
         for (m in byId.values) {
             parentId(m)?.let { p -> childrenByParent.getOrPut(p) { mutableListOf() }.add(m.id) }
-            forkSource(m)?.let { f ->
-                forksBySource.getOrPut(f) { mutableListOf() }.add(m.id)
-                forksBySource.getOrPut(m.id) { mutableListOf() }.add(f)
-            }
         }
         val visited = LinkedHashSet<String>()
         val queue = ArrayDeque<String>()
         for (rid in rootIds) {
-            if (rid.isNotEmpty() && visited.add(rid)) queue.add(rid)
+            if (rid.isEmpty()) continue
+            if (visited.add(rid)) queue.add(rid)
+            val target = byId[rid] ?: continue
+            val bucket = effectiveProject(target).ifEmpty { "default" }
+            val leaders = leadersByBucket[bucket]
+            if (leaders?.get(rid)?.id == rid) {
+                for (sibling in buckets[bucket].orEmpty()) {
+                    if (leaders[sibling.id]?.id == rid && visited.add(sibling.id)) {
+                        queue.add(sibling.id)
+                    }
+                }
+            }
         }
         while (queue.isNotEmpty()) {
             val cur = queue.removeFirst()
             for (kid in childrenByParent[cur].orEmpty()) {
                 if (visited.add(kid)) queue.add(kid)
-            }
-            for (fk in forksBySource[cur].orEmpty()) {
-                if (visited.add(fk)) queue.add(fk)
             }
         }
         return visited.mapNotNull { byId[it] }
@@ -692,9 +702,10 @@ object OrbMissionTree {
         val hasFolderKey = mission.raw.containsKey("folder") && mission.raw["folder"] is String
         val rawFolder = if (isChild) "" else if (hasFolderKey) normalizeFolder(mission.raw["folder"] as String) else null
         val incRev = maxOf(0L, (mission.raw["placement_revision"] as? Number)?.toLong() ?: 0L)
-        val hasPlacementPayload = hasProjectKey || hasFolderKey || mission.raw.containsKey("placement_revision")
-        var resolvedProject = rawProject?.takeIf { it.isNotEmpty() }
-        var clearSeenProject = hasProjectKey && resolvedProject == null
+        val isProjectedPreview = mission.bool("orb_projected_move") == true
+        val hasPlacementPayload = !isProjectedPreview && (hasProjectKey || hasFolderKey || mission.raw.containsKey("placement_revision"))
+        var resolvedProject = if (isProjectedPreview) null else rawProject?.takeIf { it.isNotEmpty() }
+        var clearSeenProject = !isProjectedPreview && hasProjectKey && resolvedProject == null
         if (hasPlacementPayload) {
             placements.compute(id) { _, prev ->
                 val curRev = prev?.revision ?: 0L
@@ -1479,7 +1490,8 @@ object OrbReadCache {
     /** Reconciles cached per-project mission rosters immediately on optimistic or authoritative placement commits. */
     fun applyPlacementCommit(
         accepted: List<OrbPlacementCommitItem>,
-        fallbackRows: Map<String, OrbRow> = emptyMap()
+        fallbackRows: Map<String, OrbRow> = emptyMap(),
+        persistToDisk: Boolean = true
     ) {
         if (accepted.isEmpty()) return
         val byId = accepted.associateBy { it.missionId }
@@ -1529,7 +1541,11 @@ object OrbReadCache {
                 }
             }
             if (changed) {
-                saveRows(key, updated)
+                if (persistToDisk) {
+                    saveRows(key, updated)
+                } else {
+                    saveRowsMemoryOnly(key, updated)
+                }
             }
         }
     }
@@ -1543,6 +1559,11 @@ object OrbReadCache {
         }
         next["folder"] = if (OrbMissionTree.parentId(row) != null) "" else OrbMissionTree.normalizeFolder(item.folder)
         next["placement_revision"] = item.placementRevision
+        if (item.isPreview) {
+            next["orb_projected_move"] = true
+        } else {
+            next.remove("orb_projected_move")
+        }
         return OrbRow(row.id, next)
     }
 }
@@ -2488,7 +2509,8 @@ class OrbCore private constructor(context: Context) {
                 OrbReadCache.patchRowPlacement(row, item)
             }
         }
-        OrbReadCache.applyPlacementCommit(accepted, fallbackRows)
+        val persistToDisk = accepted.none { it.isPreview }
+        OrbReadCache.applyPlacementCommit(accepted, fallbackRows, persistToDisk = persistToDisk)
         _placementVersion.value = _placementVersion.value + 1L
     }
 

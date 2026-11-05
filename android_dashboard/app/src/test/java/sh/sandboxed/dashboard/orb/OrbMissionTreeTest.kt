@@ -330,11 +330,16 @@ class OrbMissionTreeTest {
         assertEquals("Benchmarks", OrbMissionTree.folderPath(stalePoll))
         assertEquals("default", OrbMissionTree.projectSlug(stalePoll))
 
-        // Test 409 approval confirmation rollback
+        // Test 409 approval confirmation rollback — including rendering preview-patched rows (`isPreview = true`)
         val op2 = OrbMissionTree.allocateOpId()
         OrbMissionTree.stageOptimisticPlacement(listOf("9f559751", "06203bdc"), op2, "ethereum", "Audits")
-        assertEquals("ethereum", OrbMissionTree.projectSlug(stalePoll))
-        assertEquals("Audits", OrbMissionTree.folderPath(stalePoll))
+        val previewPatched = OrbReadCache.patchRowPlacement(
+            stalePoll,
+            OrbPlacementCommitItem("9f559751", "ethereum", "Audits", 4L, explicitProject = true, isPreview = true)
+        )
+        assertEquals("ethereum", OrbMissionTree.projectSlug(previewPatched))
+        assertEquals("Audits", OrbMissionTree.folderPath(previewPatched))
+        assertEquals(op2, OrbMissionTree.placementOf("9f559751")?.pendingOpId)
 
         val reverted = OrbMissionTree.rollbackOptimisticPlacement(op2)
         assertEquals(2, reverted.size)
@@ -384,6 +389,18 @@ class OrbMissionTreeTest {
         assertEquals("GITHUB_TOKEN", parsed?.activeGrants?.first()?.secretName)
         assertEquals(1, parsed?.pendingRequests?.size)
         assertEquals("NPM_TOKEN", parsed?.pendingRequests?.first()?.secretName)
+
+        // Leader-only fork expansion in `subtree`: selecting the leader moves the co-located fork group + workers,
+        // whereas selecting an earlier version moves ONLY that version and its own workers (never the leader).
+        OrbMissionTree.resetHierarchy()
+        val olderVer = m("v1", "project" to "assistant", "status" to "completed", "updated_at" to "2026-10-28T00:00:00Z")
+        val olderWorker = m("v1-worker", "project" to "assistant", "parent_mission_id" to "v1", "status" to "completed", "updated_at" to "2026-10-28T01:00:00Z")
+        val leaderVer = m("v2", "project" to "assistant", "tags" to listOf("fork-of:v1"), "status" to "active", "updated_at" to "2026-10-30T00:00:00Z")
+        val otherProjectFork = m("v3-other", "project" to "elsewhere", "tags" to listOf("fork-of:v1"), "status" to "completed", "updated_at" to "2026-10-29T00:00:00Z")
+        val roster = listOf(olderVer, olderWorker, leaderVer, otherProjectFork)
+
+        assertEquals(setOf("v2", "v1", "v1-worker"), OrbMissionTree.subtree(roster, listOf("v2")).map { it.id }.toSet())
+        assertEquals(setOf("v1", "v1-worker"), OrbMissionTree.subtree(roster, listOf("v1")).map { it.id }.toSet())
         OrbMissionTree.resetHierarchy()
     }
 }

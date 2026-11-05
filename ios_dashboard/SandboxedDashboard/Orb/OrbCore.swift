@@ -1042,7 +1042,24 @@ enum OrbMissionTree {
     static func countVersions(_ node: OrbNestedMission) -> Int { node.children.filter(\.version).count }
 
     static func subtree(_ missions: [OrbRow], rootIDs: [String]) -> [OrbRow] {
+        guard !rootIDs.isEmpty else { return [] }
+        var byID: [String: OrbRow] = [:]
+        for m in missions where byID[m.id] == nil { byID[m.id] = m }
+        var buckets: [String: [OrbRow]] = [:]
+        for m in missions {
+            let bucket = m.project.isEmpty ? "default" : m.project
+            buckets[bucket, default: []].append(m)
+        }
+        let leadersByBucket = buckets.mapValues { forkLeaders($0) }
         var included = Set(rootIDs)
+        for rid in rootIDs {
+            guard let target = byID[rid] else { continue }
+            let bucket = target.project.isEmpty ? "default" : target.project
+            guard let leaders = leadersByBucket[bucket], leaders[rid]?.id == rid else { continue }
+            for sibling in buckets[bucket] ?? [] where leaders[sibling.id]?.id == rid {
+                included.insert(sibling.id)
+            }
+        }
         var added = true
         while added {
             added = false

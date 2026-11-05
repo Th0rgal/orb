@@ -2863,7 +2863,9 @@ object OrbMoveClipboard {
                 missionId = r.id,
                 project = slug,
                 folder = if (isChild) "" else cleanFolder,
-                placementRevision = rev
+                placementRevision = rev,
+                explicitProject = true,
+                isPreview = true
             )
         }
         core.applyPlacementCommit(previewItems, extraRows = rowsToStage)

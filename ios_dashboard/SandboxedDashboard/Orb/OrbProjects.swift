@@ -2099,6 +2099,7 @@ final class OrbMoveClipboard {
         let sourceProject: String
         let destinationProject: String
         let destinationFolder: String
+        let rootIDs: [String]
         let descendantIDs: [String]
         let confirmation: OrbApprovalTransferConfirmationError
     }
@@ -2106,6 +2107,7 @@ final class OrbMoveClipboard {
     static let shared = OrbMoveClipboard()
     private(set) var mission: OrbRow?
     private(set) var sourceProject = ""
+    private(set) var rootIDs: [String] = []
     private(set) var descendantIDs: [String] = []
     private(set) var pendingApprovalPrompt: PendingApprovalPrompt?
 
@@ -2113,13 +2115,17 @@ final class OrbMoveClipboard {
         self.mission = mission
         self.sourceProject = project
         let sub = OrbMissionTree.subtree(rows, rootIDs: [mission.id])
-        self.descendantIDs = sub.map(\.id).filter { $0 != mission.id }
+        let roots = sub.filter { $0.parentMissionID == nil }.map(\.id)
+        self.rootIDs = roots.isEmpty ? [mission.id] : roots
+        let rootSet = Set(self.rootIDs)
+        self.descendantIDs = sub.map(\.id).filter { !rootSet.contains($0) }
         OrbHaptics.selection()
     }
 
     func clear() {
         mission = nil
         sourceProject = ""
+        rootIDs = []
         descendantIDs = []
         pendingApprovalPrompt = nil
     }
@@ -2140,16 +2146,19 @@ final class OrbMoveClipboard {
         guard let mission else { return false }
         let normalizedFolder = OrbRow.normalizeFolder(folder)
         let opID = OrbHierarchy.allocateOpID()
+        let activeRootIDs = rootIDs.isEmpty ? [mission.id] : rootIDs
+        let rootSet = Set(activeRootIDs)
+        let allIDs = activeRootIDs + descendantIDs
         let optimistic = OrbHierarchy.stageOptimisticPlacement(
-            rootIDs: [mission.id],
+            rootIDs: activeRootIDs,
             descendantIDs: descendantIDs,
             project: project,
             folder: normalizedFolder,
             opID: opID
         )
         if !optimistic.isEmpty {
-            let previewItems = ([mission.id] + descendantIDs).filter { optimistic.contains($0) }.map { mid in
-                let isChild = mid != mission.id
+            let previewItems = allIDs.filter { optimistic.contains($0) }.map { mid in
+                let isChild = !rootSet.contains(mid) || OrbHierarchy.parent(of: mid) != nil
                 let rev = OrbHierarchy.placement(of: mid)?.revision ?? mission.placementRevision
                 return OrbPlacementCommitItem(
                     missionID: mid,
@@ -2182,8 +2191,8 @@ final class OrbMoveClipboard {
             clear()
             return true
         } catch let confirmation as OrbApprovalTransferConfirmationError {
-            _ = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: [mission.id] + descendantIDs, opID: opID)
-            let rollbackItems = ([mission.id] + descendantIDs).compactMap { mid -> OrbPlacementCommitItem? in
+            _ = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: allIDs, opID: opID)
+            let rollbackItems = allIDs.compactMap { mid -> OrbPlacementCommitItem? in
                 guard let snap = OrbHierarchy.placement(of: mid) else { return nil }
                 return OrbPlacementCommitItem(
                     missionID: mid,
@@ -2204,13 +2213,14 @@ final class OrbMoveClipboard {
                 sourceProject: sourceProject,
                 destinationProject: project,
                 destinationFolder: normalizedFolder,
+                rootIDs: activeRootIDs,
                 descendantIDs: descendantIDs,
                 confirmation: confirmation
             )
             return false
         } catch {
-            _ = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: [mission.id] + descendantIDs, opID: opID)
-            let rollbackItems = ([mission.id] + descendantIDs).compactMap { mid -> OrbPlacementCommitItem? in
+            _ = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: allIDs, opID: opID)
+            let rollbackItems = allIDs.compactMap { mid -> OrbPlacementCommitItem? in
                 guard let snap = OrbHierarchy.placement(of: mid) else { return nil }
                 return OrbPlacementCommitItem(
                     missionID: mid,
@@ -2236,6 +2246,7 @@ final class OrbMoveClipboard {
         if self.mission == nil {
             self.mission = prompt.mission
             self.sourceProject = prompt.sourceProject
+            self.rootIDs = prompt.rootIDs
             self.descendantIDs = prompt.descendantIDs
         }
         _ = try await drop(project: prompt.destinationProject, folder: prompt.destinationFolder, approvalPolicy: policy)
