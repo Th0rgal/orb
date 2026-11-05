@@ -1,14 +1,20 @@
 import { api, type MissionResourcesResponse } from "./api";
 
+export type BudgetResetPeriod = "total" | "daily" | "weekly";
+
 /** One pool's derived usage (`crate::managed::budget::PoolUsage`). */
 export type PoolUsage = {
   pool_id: string;
   budget_usd: number;
   spent_usd: number;
+  lifetime_spent_usd?: number;
   reserved_usd: number;
   carved_usd: number;
   available_usd: number;
   live_machines: number;
+  reset_period?: BudgetResetPeriod;
+  period_started_at?: string | null;
+  period_resets_at?: string | null;
 };
 
 export const MANAGED_PROVIDERS = [
@@ -25,6 +31,8 @@ export type ManagedProviderId = (typeof MANAGED_PROVIDERS)[number]["id"];
 export const MAX_VM_CONCURRENCY = 128;
 export const MIN_TOKENS_PER_MIN = 1_000;
 export const MAX_TOKENS_PER_MIN = 100_000_000;
+export const MIN_INFERENCE_USD_PER_HOUR = 0.01;
+export const MAX_INFERENCE_USD_PER_HOUR = 10_000;
 export const MAX_COMPUTE_VCPU_PER_MIN = 4_096;
 export const MIN_COMPUTE_USD_PER_HOUR = 0.01;
 export const MAX_COMPUTE_USD_PER_HOUR = 10_000;
@@ -53,6 +61,7 @@ export type EffectiveVmLimits = {
 
 export type BandwidthLimits = {
   tokens_per_min?: number | null;
+  inference_usd_per_hour?: number | null;
   compute_vcpu_per_min?: number | null;
   compute_usd_per_hour?: number | null;
   protect_root?: boolean;
@@ -62,15 +71,18 @@ export type EffectiveBandwidth = {
   source: "mission" | "none";
   pool_id: string | null;
   tokens_per_min: number | null;
+  inference_usd_per_hour?: number | null;
   compute_vcpu_per_min: number | null;
   compute_usd_per_hour: number | null;
   protect_root: boolean;
   current_tokens_per_min: number;
+  current_inference_usd_per_hour?: number;
   current_vcpu_per_min: number;
   current_compute_usd_per_hour: number;
   pacing_active: boolean;
   paced_delay_ms: number;
   ancestor_tokens_per_min: number | null;
+  ancestor_inference_usd_per_hour?: number | null;
   ancestor_compute_vcpu_per_min: number | null;
   ancestor_compute_usd_per_hour: number | null;
 };
@@ -92,6 +104,7 @@ export type ChildBudget = {
 export type MissionBudget = {
   mission_id: string;
   own_budget_usd: number | null;
+  own_budget_reset_period?: BudgetResetPeriod;
   pool_id: string | null;
   mode: "own" | "pooled" | "none";
   pool: PoolUsage | null;
@@ -110,11 +123,19 @@ export type MissionBudget = {
 export const getMissionBudget = (id: string) =>
   api<MissionBudget>(`/api/control/missions/${encodeURIComponent(id)}/budget`, { method: "GET" });
 
-export const putMissionBudget = (id: string, budget_usd: number | null) =>
+export const putMissionBudget = (
+  id: string,
+  budget_usd: number | null,
+  budget_reset_period?: BudgetResetPeriod,
+) =>
   api<MissionBudget>(`/api/control/missions/${encodeURIComponent(id)}/budget`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ budget_usd }),
+    body: JSON.stringify(
+      budget_usd != null && budget_reset_period != null
+        ? { budget_usd, budget_reset_period }
+        : { budget_usd },
+    ),
   });
 
 export const putMissionVmLimits = (id: string, vm_limits: VmConcurrencyLimits | null) =>
@@ -242,9 +263,11 @@ export function parseBandwidthLimits(
   computeUsdPerHRaw: string,
   protectRoot: boolean,
   view?: MissionBudget,
+  inferenceUsdPerHRaw: string = "",
 ): { value: BandwidthLimits } | { error: string } {
   const eff = view?.effective_bandwidth;
   const ancTpm = eff?.ancestor_tokens_per_min ?? null;
+  const ancInfUsdH = eff?.ancestor_inference_usd_per_hour ?? null;
   const ancVcpu = eff?.ancestor_compute_vcpu_per_min ?? null;
   const ancUsdH = eff?.ancestor_compute_usd_per_hour ?? null;
 
@@ -256,6 +279,20 @@ export function parseBandwidthLimits(
       return { error: `Tokens per minute cannot exceed the parent pool (${formatTokensPerMin(ancTpm)})` };
     }
     tokens_per_min = parsed.value;
+  }
+
+  let inference_usd_per_hour: number | null = null;
+  const infUsdTrim = inferenceUsdPerHRaw.trim().replace(/^\$/, "");
+  if (infUsdTrim) {
+    const num = Number(infUsdTrim);
+    if (!Number.isFinite(num) || num < MIN_INFERENCE_USD_PER_HOUR || num > MAX_INFERENCE_USD_PER_HOUR) {
+      return { error: `Inference burn ceiling must be between $${MIN_INFERENCE_USD_PER_HOUR} and $${MAX_INFERENCE_USD_PER_HOUR}/h` };
+    }
+    const rounded = Math.round(num * 10000) / 10000;
+    if (ancInfUsdH != null && rounded > ancInfUsdH + 1e-9) {
+      return { error: `Inference burn ceiling cannot exceed the parent pool (${money(ancInfUsdH)}/h)` };
+    }
+    inference_usd_per_hour = rounded;
   }
 
   let compute_vcpu_per_min: number | null = null;
@@ -282,13 +319,19 @@ export function parseBandwidthLimits(
     compute_usd_per_hour = rounded;
   }
 
-  if (tokens_per_min == null && compute_vcpu_per_min == null && compute_usd_per_hour == null) {
-    return { error: "Enter at least one bandwidth limit (tokens/min, vCPU/min, or $/h)" };
+  if (
+    tokens_per_min == null &&
+    inference_usd_per_hour == null &&
+    compute_vcpu_per_min == null &&
+    compute_usd_per_hour == null
+  ) {
+    return { error: "Enter at least one bandwidth limit (tokens/min, LLM $/h, vCPU/min, or VM $/h)" };
   }
 
   return {
     value: {
       tokens_per_min,
+      inference_usd_per_hour,
       compute_vcpu_per_min,
       compute_usd_per_hour,
       protect_root: protectRoot,
@@ -306,11 +349,17 @@ export function normalizeVmLimits(limits: VmConcurrencyLimits | null | undefined
 
 export function normalizeBandwidthLimits(limits: BandwidthLimits | null | undefined): string {
   if (!limits) return "null";
-  if (limits.tokens_per_min == null && limits.compute_vcpu_per_min == null && limits.compute_usd_per_hour == null) {
+  if (
+    limits.tokens_per_min == null &&
+    limits.inference_usd_per_hour == null &&
+    limits.compute_vcpu_per_min == null &&
+    limits.compute_usd_per_hour == null
+  ) {
     return "null";
   }
   return JSON.stringify({
     t: limits.tokens_per_min ?? null,
+    i: limits.inference_usd_per_hour != null ? Math.round(limits.inference_usd_per_hour * 10000) / 10000 : null,
     v: limits.compute_vcpu_per_min ?? null,
     u: limits.compute_usd_per_hour != null ? Math.round(limits.compute_usd_per_hour * 10000) / 10000 : null,
     p: Boolean(limits.protect_root),
@@ -321,16 +370,53 @@ export function normalizeBandwidthLimits(limits: BandwidthLimits | null | undefi
  * What the sheet shows right after a budget change, before the server answers
  * (optimistic). Usage numbers stay as they were; only ownership changes.
  */
-export function optimisticBudget(view: MissionBudget, amount: number | null): MissionBudget {
+export function optimisticBudget(
+  view: MissionBudget,
+  amount: number | null,
+  resetPeriod?: BudgetResetPeriod,
+): MissionBudget {
   if (amount == null) {
     const inherited = view.mode === "own" && view.max_grant_usd != null;
     // The parent's pool numbers arrive with the server's answer.
-    return { ...view, own_budget_usd: null, mode: inherited ? "pooled" : "none", pool: null, pool_id: null };
+    return {
+      ...view,
+      own_budget_usd: null,
+      own_budget_reset_period: "total",
+      mode: inherited ? "pooled" : "none",
+      pool: null,
+      pool_id: null,
+    };
   }
-  const pool = view.pool && view.mode === "own"
-    ? { ...view.pool, budget_usd: amount, available_usd: view.pool.available_usd + (amount - view.pool.budget_usd) }
-    : { pool_id: view.mission_id, budget_usd: amount, spent_usd: 0, reserved_usd: 0, carved_usd: 0, available_usd: amount, live_machines: 0 };
-  return { ...view, own_budget_usd: amount, mode: "own", pool_id: view.mission_id, pool };
+  const effectivePeriod: BudgetResetPeriod =
+    view.max_grant_usd != null
+      ? "total"
+      : (resetPeriod ?? view.own_budget_reset_period ?? view.pool?.reset_period ?? "total");
+  const pool: PoolUsage = view.pool && view.mode === "own"
+    ? {
+        ...view.pool,
+        budget_usd: amount,
+        available_usd: view.pool.available_usd + (amount - view.pool.budget_usd),
+        reset_period: effectivePeriod,
+      }
+    : {
+        pool_id: view.mission_id,
+        budget_usd: amount,
+        spent_usd: 0,
+        lifetime_spent_usd: 0,
+        reserved_usd: 0,
+        carved_usd: 0,
+        available_usd: amount,
+        live_machines: 0,
+        reset_period: effectivePeriod,
+      };
+  return {
+    ...view,
+    own_budget_usd: amount,
+    own_budget_reset_period: effectivePeriod,
+    mode: "own",
+    pool_id: view.mission_id,
+    pool,
+  };
 }
 
 /** Optimistic projection right after a machine-limit change. */
@@ -392,14 +478,18 @@ export function optimisticVmLimits(view: MissionBudget, limits: VmConcurrencyLim
 export function optimisticBandwidthLimits(view: MissionBudget, limits: BandwidthLimits | null): MissionBudget {
   const prev = view.effective_bandwidth;
   const ancTpm = prev?.ancestor_tokens_per_min ?? null;
+  const ancInfUsdH = prev?.ancestor_inference_usd_per_hour ?? null;
   const ancVcpu = prev?.ancestor_compute_vcpu_per_min ?? null;
   const ancUsdH = prev?.ancestor_compute_usd_per_hour ?? null;
   const curTpm = prev?.current_tokens_per_min ?? 0;
+  const curInfUsdH = prev?.current_inference_usd_per_hour ?? 0;
   const curVcpu = prev?.current_vcpu_per_min ?? 0;
   const curUsdH = prev?.current_compute_usd_per_hour ?? 0;
 
   if (limits == null) {
-    const inherited = view.bandwidth_mode === "own" && (ancTpm != null || ancVcpu != null || ancUsdH != null);
+    const inherited =
+      view.bandwidth_mode === "own" &&
+      (ancTpm != null || ancInfUsdH != null || ancVcpu != null || ancUsdH != null);
     return {
       ...view,
       own_bandwidth_limits: null,
@@ -409,15 +499,18 @@ export function optimisticBandwidthLimits(view: MissionBudget, limits: Bandwidth
         source: inherited ? "mission" : "none",
         pool_id: null,
         tokens_per_min: ancTpm,
+        inference_usd_per_hour: ancInfUsdH,
         compute_vcpu_per_min: ancVcpu,
         compute_usd_per_hour: ancUsdH,
         protect_root: false,
         current_tokens_per_min: curTpm,
+        current_inference_usd_per_hour: curInfUsdH,
         current_vcpu_per_min: curVcpu,
         current_compute_usd_per_hour: curUsdH,
         pacing_active: false,
         paced_delay_ms: 0,
         ancestor_tokens_per_min: ancTpm,
+        ancestor_inference_usd_per_hour: ancInfUsdH,
         ancestor_compute_vcpu_per_min: ancVcpu,
         ancestor_compute_usd_per_hour: ancUsdH,
       },
@@ -427,6 +520,9 @@ export function optimisticBandwidthLimits(view: MissionBudget, limits: Bandwidth
   const effTpm = limits.tokens_per_min != null && ancTpm != null
     ? Math.min(limits.tokens_per_min, ancTpm)
     : (limits.tokens_per_min ?? ancTpm);
+  const effInfUsdH = limits.inference_usd_per_hour != null && ancInfUsdH != null
+    ? Math.min(limits.inference_usd_per_hour, ancInfUsdH)
+    : (limits.inference_usd_per_hour ?? ancInfUsdH);
   const effVcpu = limits.compute_vcpu_per_min != null && ancVcpu != null
     ? Math.min(limits.compute_vcpu_per_min, ancVcpu)
     : (limits.compute_vcpu_per_min ?? ancVcpu);
@@ -443,15 +539,18 @@ export function optimisticBandwidthLimits(view: MissionBudget, limits: Bandwidth
       source: "mission",
       pool_id: view.mission_id,
       tokens_per_min: effTpm,
+      inference_usd_per_hour: effInfUsdH,
       compute_vcpu_per_min: effVcpu,
       compute_usd_per_hour: effUsdH,
       protect_root: Boolean(limits.protect_root),
       current_tokens_per_min: curTpm,
+      current_inference_usd_per_hour: curInfUsdH,
       current_vcpu_per_min: curVcpu,
       current_compute_usd_per_hour: curUsdH,
       pacing_active: prev?.pacing_active ?? false,
       paced_delay_ms: prev?.paced_delay_ms ?? 0,
       ancestor_tokens_per_min: ancTpm,
+      ancestor_inference_usd_per_hour: ancInfUsdH,
       ancestor_compute_vcpu_per_min: ancVcpu,
       ancestor_compute_usd_per_hour: ancUsdH,
     },
@@ -461,9 +560,17 @@ export function optimisticBandwidthLimits(view: MissionBudget, limits: Bandwidth
 /** One line describing where the money comes from. */
 export function modeLine(view: MissionBudget, parentTitle?: string): string {
   if (view.mode === "own") {
-    return view.max_grant_usd != null
-      ? "Own sub-budget, carved from the parent's pool. Its subagents share it."
-      : "Own budget. Subagents share it unless you give one a sub-budget.";
+    if (view.max_grant_usd != null) {
+      return "Own sub-budget, carved from the parent's pool. Its subagents share it.";
+    }
+    const period = view.own_budget_reset_period ?? view.pool?.reset_period ?? "total";
+    if (period === "daily") {
+      return "Own daily budget (resets 00:00 UTC). Subagents share it unless you give one a sub-budget.";
+    }
+    if (period === "weekly") {
+      return "Own weekly budget (resets Mon 00:00 UTC). Subagents share it unless you give one a sub-budget.";
+    }
+    return "Own budget. Subagents share it unless you give one a sub-budget.";
   }
   if (view.mode === "pooled") return `Shares the pool of ${parentTitle ?? "an ancestor agent"}.`;
   return "No budget. Only the daily managed-machine cap applies.";
@@ -517,9 +624,24 @@ export function bandwidthLimitsSummary(limits: BandwidthLimits | null | undefine
   if (!limits) return "";
   const parts: string[] = [];
   if (limits.tokens_per_min != null) parts.push(formatTokensPerMin(limits.tokens_per_min));
+  if (limits.inference_usd_per_hour != null) parts.push(`${money(limits.inference_usd_per_hour)}/h LLM`);
   if (limits.compute_vcpu_per_min != null) parts.push(`${limits.compute_vcpu_per_min} vCPU/min`);
   if (limits.compute_usd_per_hour != null) parts.push(`${money(limits.compute_usd_per_hour)}/h`);
   return parts.join(" · ");
+}
+
+/** Next UTC reset boundary in epoch milliseconds (`00:00Z` daily or ISO Monday `00:00Z` weekly). */
+export function nextBudgetResetMs(period: BudgetResetPeriod, nowMs: number = Date.now()): number | null {
+  if (period === "total") return null;
+  const d = new Date(nowMs);
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth();
+  const day = d.getUTCDate();
+  if (period === "daily") {
+    return Date.UTC(y, m, day + 1, 0, 0, 0, 0);
+  }
+  const daysSinceMonday = (d.getUTCDay() + 6) % 7;
+  return Date.UTC(y, m, day + (7 - daysSinceMonday), 0, 0, 0, 0);
 }
 
 /** Fraction of the pool used (spent + reserved + sub-budgets), 0..1. */
@@ -538,9 +660,14 @@ export type RunwayForecast = {
   observedComputeBurnUsdPerH: number;
   shapedComputeBurnUsdPerH: number;
   observedInferenceBurnUsdPerH: number;
+  shapedInferenceBurnUsdPerH: number;
   currentTokensPerMin: number;
   currentVcpuPerMin: number;
   pacingActive: boolean;
+  resetPeriod: BudgetResetPeriod;
+  resetsInSecs: number | null;
+  sustainsUntilReset: boolean;
+  leaseCliffSecs: number | null;
   etaSecs: number | null;
   unshapedEtaSecs: number | null;
   etaGainSecs: number | null;
@@ -586,10 +713,13 @@ export function computeRunwayForecast(opts: {
   budget: MissionBudget | null;
   resources?: MissionResourcesResponse | null;
   draftBudgetUsd?: string;
+  draftResetPeriod?: BudgetResetPeriod;
+  draftInferenceUsdPerH?: string;
   draftComputeUsdPerH?: string;
   draftComputeVcpu?: string;
   bandwidthEnabled?: boolean;
   budgetEnabled?: boolean;
+  nowMs?: number;
 }): RunwayForecast {
   const b = opts.budget;
   const pool = b?.pool ?? null;
@@ -603,6 +733,30 @@ export function computeRunwayForecast(opts: {
     if ("value" in parsed) capUsd = parsed.value;
   }
   if (!budgetOn) capUsd = null;
+
+  let resetPeriod: BudgetResetPeriod = "total";
+  if (capUsd != null && b?.max_grant_usd == null) {
+    if (opts.budgetEnabled && opts.draftResetPeriod != null) {
+      resetPeriod = opts.draftResetPeriod;
+    } else {
+      resetPeriod = pool?.reset_period ?? b?.own_budget_reset_period ?? "total";
+    }
+  }
+
+  const nowMs = opts.nowMs ?? Date.now();
+  let resetsInSecs: number | null = null;
+  if (capUsd != null && resetPeriod !== "total") {
+    const serverResetMs =
+      pool?.reset_period === resetPeriod && pool?.period_resets_at
+        ? Date.parse(pool.period_resets_at)
+        : NaN;
+    const targetMs = Number.isFinite(serverResetMs)
+      ? serverResetMs
+      : nextBudgetResetMs(resetPeriod, nowMs);
+    if (targetMs != null) {
+      resetsInSecs = Math.max(0, (targetMs - nowMs) / 1000);
+    }
+  }
 
   const spentUsd = pool?.spent_usd ?? 0;
   const reservedUsd = pool?.reserved_usd ?? 0;
@@ -622,14 +776,24 @@ export function computeRunwayForecast(opts: {
   );
   const observedInferenceBurnUsdPerH = Math.max(
     0,
-    latestNonNull(res?.timeline.observed_inference_usd_per_h) ?? 0,
+    effBw?.current_inference_usd_per_hour ?? latestNonNull(res?.timeline.observed_inference_usd_per_h) ?? 0,
   );
   const currentTokensPerMin = effBw?.current_tokens_per_min ?? Math.round(((latestNonNull(res?.timeline.observed_b_tok_per_h) ?? 0) * 1_000_000_000) / 60);
   const currentVcpuPerMin = effBw?.current_vcpu_per_min ?? Math.round(latestNonNull(res?.timeline.observed_vcpu) ?? 0);
 
   let shapedComputeBurnUsdPerH = observedComputeBurnUsdPerH;
+  let shapedInferenceBurnUsdPerH = observedInferenceBurnUsdPerH;
   const bwOn = opts.bandwidthEnabled ?? (effBw?.source === "mission");
   if (bwOn) {
+    let infCap = effBw?.inference_usd_per_hour ?? null;
+    if (opts.draftInferenceUsdPerH !== undefined) {
+      const raw = opts.draftInferenceUsdPerH.trim().replace(/^\$/, "");
+      const n = raw ? Number(raw) : NaN;
+      infCap = Number.isFinite(n) && n > 0 ? n : null;
+    }
+    if (infCap != null && shapedInferenceBurnUsdPerH > infCap) {
+      shapedInferenceBurnUsdPerH = infCap;
+    }
     let usdCap = effBw?.compute_usd_per_hour ?? null;
     if (opts.draftComputeUsdPerH !== undefined) {
       const raw = opts.draftComputeUsdPerH.trim().replace(/^\$/, "");
@@ -660,6 +824,25 @@ export function computeRunwayForecast(opts: {
         ? 0
         : null;
 
+  const sustainsUntilReset = Boolean(
+    capUsd != null &&
+      resetPeriod !== "total" &&
+      resetsInSecs != null &&
+      runwayUsd > 0 &&
+      (etaSecs == null || etaSecs >= resetsInSecs),
+  );
+
+  const leaseCliffSecs =
+    capUsd != null &&
+    runwayUsd > 0 &&
+    reservedUsd > 0.005 &&
+    shapedComputeBurnUsdPerH > 0.005 &&
+    availableUsd < runwayUsd - 0.005
+      ? availableUsd <= 0
+        ? 0
+        : (availableUsd / shapedComputeBurnUsdPerH) * 3600
+      : null;
+
   const unshapedEtaSecs =
     capUsd != null && runwayUsd > 0 && observedComputeBurnUsdPerH > 0.005
       ? (runwayUsd / observedComputeBurnUsdPerH) * 3600
@@ -672,13 +855,20 @@ export function computeRunwayForecast(opts: {
 
   const missionEtaSecs = res?.mission.eta_remaining_secs ?? null;
   const exhaustsBeforeMissionEta =
-    etaSecs != null && missionEtaSecs != null && missionEtaSecs > 0 && etaSecs < missionEtaSecs;
+    !sustainsUntilReset &&
+    etaSecs != null &&
+    missionEtaSecs != null &&
+    missionEtaSecs > 0 &&
+    etaSecs < missionEtaSecs;
 
   let tone: "ok" | "warning" | "danger" = "ok";
   if (capUsd != null) {
-    if (runwayUsd <= 0 || (etaSecs != null && etaSecs < 1800) || exhaustsBeforeMissionEta) {
+    if (runwayUsd <= 0 || (!sustainsUntilReset && etaSecs != null && etaSecs < 1800) || exhaustsBeforeMissionEta) {
       tone = "danger";
-    } else if ((etaSecs != null && etaSecs < 7200) || (capUsd > 0 && runwayUsd < capUsd * 0.15)) {
+    } else if (
+      (!sustainsUntilReset && ((etaSecs != null && etaSecs < 7200) || (capUsd > 0 && runwayUsd < capUsd * 0.15))) ||
+      (leaseCliffSecs != null && leaseCliffSecs < 3600)
+    ) {
       tone = "warning";
     }
   }
@@ -688,25 +878,51 @@ export function computeRunwayForecast(opts: {
   if (capUsd != null) {
     if (runwayUsd <= 0) {
       headline = "Budget exhausted";
-      subline = `${money(committedPreReserved)} spent of ${money(capUsd)} pool`;
+      const parts = [`${money(committedPreReserved)} spent of ${money(capUsd)} pool`];
+      if (resetPeriod !== "total" && resetsInSecs != null) {
+        parts.push(`resets in ${formatDurationEta(resetsInSecs)}`);
+      }
+      subline = parts.join(" · ");
     } else if (etaSecs != null) {
-      headline = `${formatDurationEta(etaSecs)} runway left`;
+      headline = sustainsUntilReset
+        ? `Sustains until ${resetPeriod} reset`
+        : `${formatDurationEta(etaSecs)} runway left`;
       const parts = [
         `${money(shapedComputeBurnUsdPerH)}/h compute burn`,
         reservedUsd > 0.005
           ? `${money(availableUsd)} unallocated (${money(reservedUsd)} reserved · ${money(capUsd)} cap)`
           : `${money(availableUsd)} left (${money(capUsd)} cap)`,
       ];
+      if (resetPeriod !== "total" && resetsInSecs != null) {
+        if (sustainsUntilReset) {
+          parts.push(`resets in ${formatDurationEta(resetsInSecs)} (${formatDurationEta(etaSecs)} runway)`);
+        } else {
+          parts.push(`exhausts ${formatDurationEta(resetsInSecs - etaSecs)} before ${resetPeriod} reset`);
+        }
+      }
+      if (leaseCliffSecs != null && leaseCliffSecs < 3600) {
+        parts.push(
+          leaseCliffSecs <= 0
+            ? "VM auto-extensions paused (0 unallocated)"
+            : `VM extensions pause in ${formatDurationEta(leaseCliffSecs)}`,
+        );
+      }
       if (etaGainSecs != null) parts.push(`+${formatDurationEta(etaGainSecs).replace(/^~/, "")} from bandwidth cap`);
       if (exhaustsBeforeMissionEta && missionEtaSecs != null) {
         parts.push(`exhausts before ${formatDurationEta(missionEtaSecs)} task ETA`);
       }
       subline = parts.join(" · ");
     } else {
-      headline = `${money(availableUsd)} available (${money(capUsd)} cap)`;
-      subline = pool && pool.live_machines > 0
+      headline = sustainsUntilReset
+        ? `Sustains until ${resetPeriod} reset`
+        : `${money(availableUsd)} available (${money(capUsd)} cap)`;
+      const baseSub = pool && pool.live_machines > 0
         ? `${pool.live_machines} active machine${pool.live_machines === 1 ? "" : "s"} · waiting for burn sample`
         : "No active managed-machine burn right now";
+      subline =
+        resetPeriod !== "total" && resetsInSecs != null
+          ? `${baseSub} · resets in ${formatDurationEta(resetsInSecs)}`
+          : baseSub;
     }
   } else {
     headline = observedComputeBurnUsdPerH > 0.005
@@ -729,7 +945,7 @@ export function computeRunwayForecast(opts: {
   const nowX = Math.round(padLeft + plotW * 0.42);
 
   const projHorizonSecs = Math.min(
-    Math.max(etaSecs ?? missionEtaSecs ?? 7200, 1800),
+    Math.max(etaSecs ?? resetsInSecs ?? missionEtaSecs ?? 7200, 1800),
     86_400,
   );
   const projectedEnd = committedPreReserved + shapedComputeBurnUsdPerH * (projHorizonSecs / 3600);
@@ -812,9 +1028,14 @@ export function computeRunwayForecast(opts: {
     observedComputeBurnUsdPerH,
     shapedComputeBurnUsdPerH,
     observedInferenceBurnUsdPerH,
+    shapedInferenceBurnUsdPerH,
     currentTokensPerMin,
     currentVcpuPerMin,
     pacingActive: Boolean(effBw?.pacing_active),
+    resetPeriod,
+    resetsInSecs,
+    sustainsUntilReset,
+    leaseCliffSecs,
     etaSecs,
     unshapedEtaSecs,
     etaGainSecs,

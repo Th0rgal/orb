@@ -117,10 +117,31 @@ it("parses total and per-provider machine limits and enforces bounds", () => {
 
 it("parses bandwidth limits, shorthand k/M tokens, and enforces ancestor ceilings", () => {
   expect(parseBandwidthLimits("120k", "32", "$2.5", true)).toEqual({
-    value: { tokens_per_min: 120_000, compute_vcpu_per_min: 32, compute_usd_per_hour: 2.5, protect_root: true },
+    value: {
+      tokens_per_min: 120_000,
+      inference_usd_per_hour: null,
+      compute_vcpu_per_min: 32,
+      compute_usd_per_hour: 2.5,
+      protect_root: true,
+    },
   });
   expect(parseBandwidthLimits("1.5M", "", "", false)).toEqual({
-    value: { tokens_per_min: 1_500_000, compute_vcpu_per_min: null, compute_usd_per_hour: null, protect_root: false },
+    value: {
+      tokens_per_min: 1_500_000,
+      inference_usd_per_hour: null,
+      compute_vcpu_per_min: null,
+      compute_usd_per_hour: null,
+      protect_root: false,
+    },
+  });
+  expect(parseBandwidthLimits("", "", "", true, undefined, "$12.5")).toEqual({
+    value: {
+      tokens_per_min: null,
+      inference_usd_per_hour: 12.5,
+      compute_vcpu_per_min: null,
+      compute_usd_per_hour: null,
+      protect_root: true,
+    },
   });
   expect(parseBandwidthLimits("", "", "", true)).toHaveProperty("error");
   expect(parseBandwidthLimits("500", "", "", true)).toHaveProperty("error");
@@ -129,15 +150,18 @@ it("parses bandwidth limits, shorthand k/M tokens, and enforces ancestor ceiling
       source: "mission",
       pool_id: "root",
       tokens_per_min: 80_000,
+      inference_usd_per_hour: 10.0,
       compute_vcpu_per_min: 16,
       compute_usd_per_hour: 1.5,
       protect_root: true,
       current_tokens_per_min: 0,
+      current_inference_usd_per_hour: 0,
       current_vcpu_per_min: 0,
       current_compute_usd_per_hour: 0,
       pacing_active: false,
       paced_delay_ms: 0,
       ancestor_tokens_per_min: 80_000,
+      ancestor_inference_usd_per_hour: 10.0,
       ancestor_compute_vcpu_per_min: 16,
       ancestor_compute_usd_per_hour: 1.5,
     },
@@ -145,6 +169,7 @@ it("parses bandwidth limits, shorthand k/M tokens, and enforces ancestor ceiling
   expect(parseBandwidthLimits("100k", "", "", true, childView)).toHaveProperty("error");
   expect(parseBandwidthLimits("40k", "24", "", true, childView)).toHaveProperty("error");
   expect(parseBandwidthLimits("40k", "8", "2.0", true, childView)).toHaveProperty("error");
+  expect(parseBandwidthLimits("40k", "8", "1.0", true, childView, "15.0")).toHaveProperty("error");
 });
 
 it("computes runway forecast from unspent pool funds without double-counting live VM reservations", () => {
@@ -247,8 +272,10 @@ it("turns bandwidth limits on, updates live runway preview, and saves pace setti
   await waitFor(() => expect((screen.getByLabelText("Tokens per minute") as HTMLInputElement).value).toBe("120000"));
 
   const tpmInput = screen.getByLabelText("Tokens per minute") as HTMLInputElement;
+  const infUsdHInput = screen.getByLabelText("Inference burn ceiling ($/h)") as HTMLInputElement;
   const usdHInput = screen.getByLabelText("Compute burn ceiling ($/h)") as HTMLInputElement;
   fireEvent.input(tpmInput, { target: { value: "90k" } });
+  fireEvent.input(infUsdHInput, { target: { value: "15" } });
   fireEvent.input(usdHInput, { target: { value: "1.0" } });
 
   // Forecast card updates live before saving.
@@ -257,10 +284,36 @@ it("turns bandwidth limits on, updates live runway preview, and saves pace setti
   fireEvent.click(screen.getByRole("button", { name: "Save bandwidth" }));
   await waitFor(() => expect(savedBw).toEqual({
     tokens_per_min: 90_000,
+    inference_usd_per_hour: 15,
     compute_vcpu_per_min: null,
     compute_usd_per_hour: 1,
     protect_root: true,
   }));
+});
+
+it("switches budget reset cadence to Daily, previews reset sustainability, and saves reset_period", async () => {
+  let savedArgs: { amount: number | null; period?: string } | null = null;
+  render(() => (
+    <MissionSettings
+      missionId="m1"
+      title="evm.fast"
+      onClose={() => {}}
+      load={async () => own(10)}
+      loadStats={pendingStats}
+      save={async (_id, amount, period) => {
+        savedArgs = { amount, period };
+        return optimisticBudget(own(amount ?? 10), amount, period);
+      }}
+    />
+  ));
+  const dailyRadio = await screen.findByRole("radio", { name: "Daily" });
+  expect(dailyRadio.getAttribute("aria-checked")).toBe("false");
+  fireEvent.click(dailyRadio);
+  expect(dailyRadio.getAttribute("aria-checked")).toBe("true");
+
+  fireEvent.click(screen.getByRole("button", { name: "Save budget" }));
+  await waitFor(() => expect(savedArgs).toEqual({ amount: 10, period: "daily" }));
+  expect(screen.getByText("Spent today")).toBeTruthy();
 });
 
 it("ignores stale background poll responses captured before a settings mutation", async () => {
@@ -374,10 +427,27 @@ it("hides duplicate idle subagent pool rows when off and folds $0 rows when on",
 it("matches the shared cross-client mission-budget fixture", () => {
   const globalDefault = missionBudgetFixture.global_default as MissionBudget;
   const dedicated = missionBudgetFixture.dedicated_override as MissionBudget;
+  const dailySust = missionBudgetFixture.daily_sustainable_with_lease_cliff as MissionBudget;
   expect(vmLimitsModeLine(globalDefault)).toBe("Uses the global limit (16 concurrent across Orb).");
   expect(bandwidthModeLine(globalDefault)).toBe("Unthrottled. Requests and spawns run at full speed.");
   expect(providerLimitsSummary(dedicated.own_vm_limits)).toBe("Hetzner: off · Vast.ai: 2");
   expect(bandwidthLimitsSummary(dedicated.own_bandwidth_limits)).toBe("120k tok/min · 32 vCPU/min · $2.50/h");
+  expect(bandwidthLimitsSummary(dailySust.own_bandwidth_limits)).toBe("150k tok/min · $18/h LLM · 64 vCPU/min · $10/h");
+  expect(modeLine(dailySust)).toContain("Own daily budget");
   expect(optimisticVmLimits(dedicated, null).effective_vm_limits?.max_concurrent).toBe(16);
   expect(optimisticBandwidthLimits(dedicated, null).bandwidth_mode).toBe("none");
+
+  const fc = computeRunwayForecast({
+    budget: dailySust,
+    budgetEnabled: true,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T20:00:00Z"),
+  });
+  expect(fc.resetPeriod).toBe("daily");
+  expect(fc.sustainsUntilReset).toBe(true);
+  expect(fc.resetsInSecs).toBe(14_400);
+  expect(fc.leaseCliffSecs).toBeCloseTo(720, 0);
+  expect(fc.headline).toBe("Sustains until daily reset");
+  expect(fc.subline).toContain("VM extensions pause in ~12m");
+  expect(fc.tone).toBe("warning");
 });

@@ -6389,15 +6389,18 @@ pub struct EffectiveBandwidthView {
     pub source: &'static str,
     pub pool_id: Option<String>,
     pub tokens_per_min: Option<u64>,
+    pub inference_usd_per_hour: Option<f64>,
     pub compute_vcpu_per_min: Option<u32>,
     pub compute_usd_per_hour: Option<f64>,
     pub protect_root: bool,
     pub current_tokens_per_min: u64,
+    pub current_inference_usd_per_hour: f64,
     pub current_vcpu_per_min: u32,
     pub current_compute_usd_per_hour: f64,
     pub pacing_active: bool,
     pub paced_delay_ms: u64,
     pub ancestor_tokens_per_min: Option<u64>,
+    pub ancestor_inference_usd_per_hour: Option<f64>,
     pub ancestor_compute_vcpu_per_min: Option<u32>,
     pub ancestor_compute_usd_per_hour: Option<f64>,
 }
@@ -6408,6 +6411,8 @@ pub struct MissionBudgetView {
     pub mission_id: String,
     /// The mission has its own budget (a pool root).
     pub own_budget_usd: Option<f64>,
+    /// Reset period configured on this mission's own root budget (`"total"`, `"daily"`, `"weekly"`).
+    pub own_budget_reset_period: budget::BudgetResetPeriod,
     /// The pool the mission draws from (itself, an ancestor, or none).
     pub pool_id: Option<String>,
     /// `pooled` (draws from an ancestor), `own` (its own budget) or `none`.
@@ -6932,6 +6937,22 @@ impl ManagedManager {
         parent_pool: Option<String>,
         owner_user_id: Option<String>,
     ) -> Result<(), ManagedError> {
+        self.set_mission_budget_with_period(mission_id, amount, None, parent_pool, owner_user_id)
+            .await
+    }
+
+    /// Set (`Some`) or remove (`None`) a mission's own budget, optionally
+    /// updating `budget_reset_period` (`Total`, `Daily`, `Weekly`).
+    /// Only root pools (`parent_pool == None`) may select `Daily` or `Weekly`;
+    /// carved sub-budgets are always `Total` so they cannot overdraw an ancestor.
+    pub async fn set_mission_budget_with_period(
+        &self,
+        mission_id: &str,
+        amount: Option<f64>,
+        reset_period: Option<budget::BudgetResetPeriod>,
+        parent_pool: Option<String>,
+        owner_user_id: Option<String>,
+    ) -> Result<(), ManagedError> {
         let _guard = self.admission.lock().await;
         match amount {
             None => {
@@ -6942,6 +6963,7 @@ impl ManagedManager {
                             if entry.vm_limits.is_some() || entry.bandwidth_limits.is_some() =>
                         {
                             entry.budget_usd = None;
+                            entry.budget_reset_period = budget::BudgetResetPeriod::Total;
                             entry.parent_pool_id = None;
                             entry.updated_at = Utc::now();
                             false
@@ -6981,16 +7003,27 @@ impl ManagedManager {
                 drop(machines);
             }
             Some(raw) => {
+                let effective_parent = parent_pool.clone().filter(|p| p != mission_id);
+                if effective_parent.is_some() && reset_period.is_some_and(|rp| !rp.is_total()) {
+                    return Err(ManagedError::new(
+                        "invalid_budget_period",
+                        400,
+                        "Sub-budgets carved from a parent pool cannot reset daily or weekly; set reset period on the root pool instead",
+                    ));
+                }
                 let amount = budget::validate_amount(raw)
                     .map_err(|e| ManagedError::new("invalid_budget", 400, e))?;
-                if let Some(max) = self.max_grant(mission_id, parent_pool.as_deref()).await {
+                if let Some(max) = self
+                    .max_grant(mission_id, effective_parent.as_deref())
+                    .await
+                {
                     if amount > max + 1e-9 {
                         return Err(ManagedError::new(
                             "sub_budget_exceeds_pool",
                             402,
                             format!(
                                 "Sub-budget ${amount:.2} exceeds what the parent pool {} can grant (${max:.4} remaining)",
-                                parent_pool.as_deref().unwrap_or_default()
+                                effective_parent.as_deref().unwrap_or_default()
                             ),
                         ));
                     }
@@ -6998,12 +7031,20 @@ impl ManagedManager {
                 let mut pools = self.budgets.lock().await;
                 let existing = pools.get(mission_id).cloned();
                 let had_budget = existing.as_ref().is_some_and(|p| p.budget_usd.is_some());
+                let resolved_period = if effective_parent.is_some() {
+                    budget::BudgetResetPeriod::Total
+                } else {
+                    reset_period
+                        .or_else(|| existing.as_ref().map(|p| p.budget_reset_period))
+                        .unwrap_or_default()
+                };
                 pools.insert(
                     mission_id.to_string(),
                     budget::BudgetPool {
                         mission_id: mission_id.to_string(),
                         budget_usd: Some(amount),
-                        parent_pool_id: parent_pool.clone().filter(|p| p != mission_id),
+                        budget_reset_period: resolved_period,
+                        parent_pool_id: effective_parent,
                         vm_limits: existing.as_ref().and_then(|p| p.vm_limits.clone()),
                         parent_cap_pool_id: existing
                             .as_ref()
@@ -7157,6 +7198,10 @@ impl ManagedManager {
                         budget::BudgetPool {
                             mission_id: mission_id.to_string(),
                             budget_usd: existing.as_ref().and_then(|p| p.budget_usd),
+                            budget_reset_period: existing
+                                .as_ref()
+                                .map(|p| p.budget_reset_period)
+                                .unwrap_or_default(),
                             parent_pool_id: existing
                                 .as_ref()
                                 .and_then(|p| p.parent_pool_id.clone()),
@@ -7209,7 +7254,11 @@ impl ManagedManager {
             let mut pools = self.budgets.lock().await;
             match pools.get_mut(mission_id) {
                 Some(p) if p.budget_usd.is_some() && p.parent_pool_id != parent_pool => {
-                    p.parent_pool_id = parent_pool.filter(|p| p != mission_id);
+                    let next_parent = parent_pool.filter(|p| p != mission_id);
+                    if next_parent.is_some() {
+                        p.budget_reset_period = budget::BudgetResetPeriod::Total;
+                    }
+                    p.parent_pool_id = next_parent;
                     true
                 }
                 _ => false,
@@ -7372,6 +7421,20 @@ impl ManagedManager {
                             ));
                         }
                     }
+                    if let (Some(c_inf_usd), Some(a_inf_usd)) = (
+                        validated.inference_usd_per_hour,
+                        anc_bw.inference_usd_per_hour,
+                    ) {
+                        if c_inf_usd > a_inf_usd + 1e-6 {
+                            return Err(ManagedError::new(
+                                "sub_bandwidth_exceeds_pool",
+                                400,
+                                format!(
+                                    "inference_usd_per_hour (${c_inf_usd:.2}/h) exceeds ancestor pool {anc_id}'s inference_usd_per_hour (${a_inf_usd:.2}/h)"
+                                ),
+                            ));
+                        }
+                    }
                     if let (Some(c_vcpu), Some(a_vcpu)) =
                         (validated.compute_vcpu_per_min, anc_bw.compute_vcpu_per_min)
                     {
@@ -7399,7 +7462,7 @@ impl ManagedManager {
                         }
                     }
                 }
-                let had_tpm = validated.tokens_per_min.is_some();
+                let had_inf_limit = validated.has_inference_limit();
                 let pools_snapshot = {
                     let mut pools = self.budgets.lock().await;
                     let existing = pools.get(mission_id).cloned();
@@ -7408,6 +7471,10 @@ impl ManagedManager {
                         budget::BudgetPool {
                             mission_id: mission_id.to_string(),
                             budget_usd: existing.as_ref().and_then(|p| p.budget_usd),
+                            budget_reset_period: existing
+                                .as_ref()
+                                .map(|p| p.budget_reset_period)
+                                .unwrap_or_default(),
                             parent_pool_id: existing
                                 .as_ref()
                                 .and_then(|p| p.parent_pool_id.clone()),
@@ -7426,7 +7493,7 @@ impl ManagedManager {
                     );
                     pools.clone()
                 };
-                if !had_tpm {
+                if !had_inf_limit {
                     pacing::clear_pool_debt(mission_id);
                 } else {
                     pacing::notify_capacity_changed();
@@ -7504,6 +7571,11 @@ impl ManagedManager {
             .as_deref()
             .and_then(|p| budget::pool_usage(p, &pools, &machines, now, &is_open));
         let own = pools.get(mission_id).and_then(|p| p.budget_usd);
+        let own_budget_reset_period = pools
+            .get(mission_id)
+            .filter(|p| p.budget_usd.is_some() && p.parent_pool_id.is_none())
+            .map(|p| p.budget_reset_period)
+            .unwrap_or_default();
         let own_vm_limits = pools.get(mission_id).and_then(|p| p.vm_limits.clone());
         let own_bandwidth_limits = pools
             .get(mission_id)
@@ -7600,6 +7672,17 @@ impl ManagedManager {
                     .and_then(|b| b.tokens_per_min)
             })
             .min();
+        let ancestor_inference_usd_per_hour = lineage
+            .iter()
+            .skip(1)
+            .filter_map(|anc| {
+                pools
+                    .get(anc.as_str())
+                    .filter(|p| p.owner_user_id.as_deref() == Some(user_id))
+                    .and_then(|p| p.bandwidth_limits.as_ref())
+                    .and_then(|b| b.inference_usd_per_hour)
+            })
+            .reduce(f64::min);
         let ancestor_compute_vcpu_per_min = lineage
             .iter()
             .skip(1)
@@ -7640,6 +7723,15 @@ impl ManagedManager {
                         .and_then(|b| b.tokens_per_min)
                 })
                 .min();
+            let eff_inf_usd_h = bw_chain_pools
+                .iter()
+                .filter_map(|id| {
+                    pools
+                        .get(id.as_str())
+                        .and_then(|p| p.bandwidth_limits.as_ref())
+                        .and_then(|b| b.inference_usd_per_hour)
+                })
+                .reduce(f64::min);
             let eff_vcpu = bw_chain_pools
                 .iter()
                 .filter_map(|id| {
@@ -7664,26 +7756,35 @@ impl ManagedManager {
                 .is_some_and(|b| b.protect_root);
             let (cur_vcpu, cur_usd_h) =
                 budget::bandwidth_pool_compute_usage(bw_id, &pools, &machines);
-            let snap = pacing::snapshot_pool(bw_id, eff_tpm);
+            let snap = pacing::snapshot_pool(
+                bw_id,
+                pacing::InferenceRateConstraint {
+                    tokens_per_min: eff_tpm,
+                    usd_per_hour: eff_inf_usd_h,
+                },
+            );
             EffectiveBandwidthView {
                 source: "mission",
                 pool_id: Some(bw_id.clone()),
                 tokens_per_min: eff_tpm,
+                inference_usd_per_hour: eff_inf_usd_h,
                 compute_vcpu_per_min: eff_vcpu,
                 compute_usd_per_hour: eff_usd_h,
                 protect_root,
                 current_tokens_per_min: snap.current_tokens_per_min,
+                current_inference_usd_per_hour: snap.current_inference_usd_per_hour,
                 current_vcpu_per_min: cur_vcpu,
                 current_compute_usd_per_hour: cur_usd_h,
                 pacing_active: snap.pacing_active,
                 paced_delay_ms: snap.paced_delay_ms,
                 ancestor_tokens_per_min,
+                ancestor_inference_usd_per_hour,
                 ancestor_compute_vcpu_per_min,
                 ancestor_compute_usd_per_hour,
             }
         } else {
             // Even without a bandwidth pool, report live subtree/mission compute burn
-            // and rolling token throughput if observed on this mission id.
+            // and rolling token/dollar throughput if observed on this mission id.
             let (cur_vcpu, cur_usd_h) = machines
                 .iter()
                 .filter(|m| {
@@ -7696,20 +7797,24 @@ impl ManagedManager {
                 .fold((0u32, 0.0f64), |(v, u), m| {
                     (v.saturating_add(m.cpu), u + m.usd_per_hour)
                 });
-            let snap = pacing::snapshot_pool(mission_id, None);
+            let snap =
+                pacing::snapshot_pool(mission_id, pacing::InferenceRateConstraint::default());
             EffectiveBandwidthView {
                 source: "none",
                 pool_id: None,
                 tokens_per_min: None,
+                inference_usd_per_hour: None,
                 compute_vcpu_per_min: None,
                 compute_usd_per_hour: None,
                 protect_root: false,
                 current_tokens_per_min: snap.current_tokens_per_min,
+                current_inference_usd_per_hour: snap.current_inference_usd_per_hour,
                 current_vcpu_per_min: cur_vcpu,
                 current_compute_usd_per_hour: round4(cur_usd_h),
                 pacing_active: false,
                 paced_delay_ms: 0,
                 ancestor_tokens_per_min,
+                ancestor_inference_usd_per_hour,
                 ancestor_compute_vcpu_per_min,
                 ancestor_compute_usd_per_hour,
             }
@@ -7786,6 +7891,7 @@ impl ManagedManager {
         MissionBudgetView {
             mission_id: mission_id.to_string(),
             own_budget_usd: own,
+            own_budget_reset_period,
             mode: if own.is_some() {
                 "own"
             } else if pool_id.is_some() {

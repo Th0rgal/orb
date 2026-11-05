@@ -720,6 +720,30 @@ pub fn cost_cents_from_usage(model: &str, usage: &TokenUsage) -> u64 {
     )
 }
 
+/// Exact list-price USD cost from token usage and model (retains sub-cent nanodollar precision
+/// for inference rate-shaping buckets).
+pub fn cost_usd_from_usage(model: &str, usage: &TokenUsage) -> f64 {
+    if !usage.has_usage() {
+        return 0.0;
+    }
+    let Some(pricing) = pricing_for_model(model) else {
+        return 0.0;
+    };
+    let cache_create_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
+    let cache_read_tokens = usage.cache_read_input_tokens.unwrap_or(0);
+    let cache_create_nano = pricing
+        .cache_create_nano_per_token
+        .unwrap_or(pricing.input_nano_per_token);
+    let cache_read_nano = pricing
+        .cache_read_nano_per_token
+        .unwrap_or(pricing.input_nano_per_token);
+    let total_nanos = u128::from(usage.input_tokens) * u128::from(pricing.input_nano_per_token)
+        + u128::from(usage.output_tokens) * u128::from(pricing.output_nano_per_token)
+        + u128::from(cache_create_tokens) * u128::from(cache_create_nano)
+        + u128::from(cache_read_tokens) * u128::from(cache_read_nano);
+    (total_nanos as f64) / 1_000_000_000.0
+}
+
 /// Resolve cost and provenance from optional actual billing, model name, and
 /// token usage.  This is the canonical function used by all agent backends
 /// (Claude Code, OpenCode, Codex) to produce the `(cost_cents, CostSource)`

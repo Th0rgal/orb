@@ -70,6 +70,22 @@ final class OrbMissionBudgetTests: XCTestCase {
         let clearedBw = dedicated.optimisticBandwidthLimits(nil)
         XCTAssertEqual(clearedBw.bandwidthMode, "none")
         XCTAssertNil(clearedBw.ownBandwidthLimits)
+
+        let dailySust = OrbMissionBudget(root["daily_sustainable_with_lease_cliff"])
+        XCTAssertEqual(dailySust.ownBudgetResetPeriod, .daily)
+        XCTAssertEqual(dailySust.pool?.lifetimeSpent ?? 0, 920, accuracy: 1e-9)
+        XCTAssertEqual(
+            OrbMissionBudget.bandwidthLimitsSummary(dailySust.ownBandwidthLimits),
+            "150k tok/min · $18/h LLM · 64 vCPU/min · $10/h"
+        )
+        XCTAssertTrue(dailySust.modeLine.contains("Own daily budget"))
+        let fc = dailySust.computeRunwayForecast(bandwidthEnabled: true, budgetEnabled: true, nowMs: 1_793_908_800_000)
+        XCTAssertTrue(fc.sustainsUntilReset)
+        XCTAssertEqual(fc.resetsInSecs ?? 0, 14_400, accuracy: 1)
+        XCTAssertEqual(fc.leaseCliffSecs ?? 0, 720, accuracy: 1)
+        XCTAssertEqual(fc.headline, "Sustains until daily reset")
+        XCTAssertTrue(fc.subline.contains("VM extensions pause in ~12m"))
+        XCTAssertEqual(fc.tone, .warning)
     }
 
     func testValidatesVmAndBandwidthInputsAndForecast() throws {
@@ -91,6 +107,14 @@ final class OrbMissionBudgetTests: XCTestCase {
         XCTAssertEqual(bw.tokensPerMin, 120_000)
         XCTAssertEqual(bw.computeVcpuPerMin, 32)
         XCTAssertEqual(bw.computeUsdPerHour ?? 0, 2.5, accuracy: 1e-9)
+        let bwInf = try OrbMissionBudget.parseBandwidthLimits(
+            tokensPerMinRaw: "",
+            computeVcpuRaw: "",
+            computeUsdPerHRaw: "",
+            protectRoot: true,
+            inferenceUsdPerHRaw: "$12.5"
+        ).get()
+        XCTAssertEqual(bwInf.inferenceUsdPerHour ?? 0, 12.5, accuracy: 1e-9)
         XCTAssertThrowsError(try OrbMissionBudget.parseBandwidthLimits(tokensPerMinRaw: "", computeVcpuRaw: "", computeUsdPerHRaw: "", protectRoot: true).get())
 
         let base10 = own(10)

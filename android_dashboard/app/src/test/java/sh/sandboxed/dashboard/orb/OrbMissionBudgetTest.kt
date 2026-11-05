@@ -73,6 +73,26 @@ class OrbMissionBudgetTest {
         val clearedBw = dedicated.optimisticBandwidthLimits(null)
         assertEquals("none", clearedBw.bandwidthMode)
         assertNull(clearedBw.ownBandwidthLimits)
+
+        val dailySust = OrbMissionBudget.from(root["daily_sustainable_with_lease_cliff"])
+        assertEquals(OrbMissionBudget.BudgetResetPeriod.DAILY, dailySust.ownBudgetResetPeriod)
+        assertEquals(920.0, dailySust.pool?.lifetimeSpent ?: 0.0, 1e-9)
+        assertEquals(
+            "150k tok/min · $18/h LLM · 64 vCPU/min · $10/h",
+            OrbMissionBudget.bandwidthLimitsSummary(dailySust.ownBandwidthLimits),
+        )
+        assertTrue(dailySust.modeLine.contains("Own daily budget"))
+        val fc = dailySust.computeRunwayForecast(
+            bandwidthEnabled = true,
+            budgetEnabled = true,
+            nowMs = 1_793_908_800_000L,
+        )
+        assertTrue(fc.sustainsUntilReset)
+        assertEquals(14_400.0, fc.resetsInSecs ?: 0.0, 1.0)
+        assertEquals(720.0, fc.leaseCliffSecs ?: 0.0, 1.0)
+        assertEquals("Sustains until daily reset", fc.headline)
+        assertTrue(fc.subline.contains("VM extensions pause in ~12m"))
+        assertEquals(OrbMissionBudget.RunwayForecast.Tone.WARNING, fc.tone)
     }
 
     @Test fun validatesVmAndBandwidthInputsAndForecast() {
@@ -87,6 +107,8 @@ class OrbMissionBudgetTest {
         assertEquals(120_000, bw.tokensPerMin)
         assertEquals(32, bw.computeVcpuPerMin)
         assertEquals(2.5, bw.computeUsdPerHour ?: 0.0, 1e-9)
+        val bwInf = OrbMissionBudget.parseBandwidthLimits("", "", "", true, inferenceUsdPerHRaw = "$12.5").getOrThrow()
+        assertEquals(12.5, bwInf.inferenceUsdPerHour ?: 0.0, 1e-9)
         assertTrue(OrbMissionBudget.parseBandwidthLimits("", "", "", true).isFailure)
 
         val base10 = own(10.0)

@@ -1380,6 +1380,7 @@ fn pool(id: &str, usd: f64, parent: Option<&str>) -> budget::BudgetPool {
     budget::BudgetPool {
         mission_id: id.into(),
         budget_usd: Some(usd),
+        budget_reset_period: budget::BudgetResetPeriod::Total,
         parent_pool_id: parent.map(Into::into),
         vm_limits: None,
         parent_cap_pool_id: None,
@@ -5610,6 +5611,7 @@ async fn mission_bandwidth_limits_enforce_ancestor_monotonicity_and_pace_subagen
         "root",
         Some(budget::BandwidthLimits {
             tokens_per_min: Some(100_000),
+            inference_usd_per_hour: None,
             compute_vcpu_per_min: Some(4),
             compute_usd_per_hour: Some(2.0),
             protect_root: true,
@@ -5627,6 +5629,7 @@ async fn mission_bandwidth_limits_enforce_ancestor_monotonicity_and_pace_subagen
             "child",
             Some(budget::BandwidthLimits {
                 tokens_per_min: Some(150_000),
+                inference_usd_per_hour: None,
                 compute_vcpu_per_min: Some(2),
                 compute_usd_per_hour: None,
                 protect_root: false,
@@ -5755,6 +5758,7 @@ async fn mission_bandwidth_protect_root_paces_auto_child_and_concurrent_burst() 
         "root",
         Some(budget::BandwidthLimits {
             tokens_per_min: None,
+            inference_usd_per_hour: None,
             compute_vcpu_per_min: Some(2),
             compute_usd_per_hour: None,
             protect_root: true,
@@ -5886,6 +5890,7 @@ async fn vastai_fallback_rejects_offer_exceeding_compute_bandwidth_ceiling() {
         "root",
         Some(budget::BandwidthLimits {
             tokens_per_min: None,
+            inference_usd_per_hour: None,
             compute_vcpu_per_min: Some(20),
             compute_usd_per_hour: None,
             protect_root: true,
@@ -6092,4 +6097,230 @@ async fn colab_managed_manager_explicit_only_orphan_safety_and_saturation() {
     assert!(crate::api::secret_broker::is_core_reserved_compute_secret(
         "colab_api_token"
     ));
+}
+
+#[test]
+fn daily_and_weekly_budget_pools_reset_window_spend_while_preserving_lifetime_spend() {
+    // 1. Verify Weekly bounds on a Sunday (2026-11-08 is Sunday -> ISO week started Monday 2026-11-02).
+    let sunday = chrono::DateTime::parse_from_rfc3339("2026-11-08T15:30:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let (wk_start, wk_end) = budget::BudgetResetPeriod::Weekly
+        .period_bounds(sunday)
+        .unwrap();
+    assert_eq!(wk_start.to_rfc3339(), "2026-11-02T00:00:00+00:00");
+    assert_eq!(wk_end.to_rfc3339(), "2026-11-09T00:00:00+00:00");
+
+    // 2. Daily pool: yesterday's closed VMs stay in `lifetime_spent_usd` while today's window starts fresh;
+    //    a VM spanning UTC midnight prorates cleanly; closed child sub-budgets only carve spend inside today's window.
+    let now = chrono::DateTime::parse_from_rfc3339("2026-11-05T02:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut root = pool("root", 300.0, None);
+    root.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    let child = pool("closed_kid", 100.0, Some("root"));
+    let mut pools = HashMap::new();
+    pools.insert("root".to_string(), root);
+    pools.insert("closed_kid".to_string(), child);
+
+    // VM 1: ran yesterday and spent $240 -> 0 in today's window, $240 in lifetime.
+    let mut m_yesterday = spend_machine(
+        "m-yest",
+        "large",
+        Some("root"),
+        "2026-11-04T10:00:00Z",
+        Some("2026-11-04T20:00:00Z"),
+        240.0,
+    );
+    m_yesterday.budget_pool_id = Some("root".into());
+
+    // VM 2: started 2 hours before midnight, still running 2 hours after midnight (4h total, $40 spent -> $20 in today's window).
+    let mut m_spanning = spend_machine(
+        "m-span",
+        "large",
+        Some("root"),
+        "2026-11-04T22:00:00Z",
+        None,
+        40.0,
+    );
+    m_spanning.expires_at = now + chrono::Duration::minutes(60);
+    m_spanning.usd_per_hour = 10.0;
+    m_spanning.budget_pool_id = Some("root".into());
+
+    // VM 3: ran yesterday on `closed_kid` and spent $50 -> closed child carved_usd in today's window must be $0, not $50!
+    let mut m_kid_yesterday = spend_machine(
+        "m-kid-yest",
+        "small",
+        Some("closed_kid"),
+        "2026-11-04T12:00:00Z",
+        Some("2026-11-04T14:00:00Z"),
+        50.0,
+    );
+    m_kid_yesterday.budget_pool_id = Some("closed_kid".into());
+
+    let machines = vec![m_yesterday, m_spanning, m_kid_yesterday];
+    let is_open = |id: &str| id == "root"; // `closed_kid` has terminated
+    let u = budget::pool_usage("root", &pools, &machines, now, &is_open).unwrap();
+    assert_eq!(u.reset_period, budget::BudgetResetPeriod::Daily);
+    assert_eq!(
+        u.period_started_at.unwrap().to_rfc3339(),
+        "2026-11-05T00:00:00+00:00"
+    );
+    assert_eq!(
+        u.period_resets_at.unwrap().to_rfc3339(),
+        "2026-11-06T00:00:00+00:00"
+    );
+    assert!(
+        (u.spent_usd - 20.0).abs() < 0.01,
+        "expected $20 prorated window spend, got {u:?}"
+    );
+    assert!(
+        (u.lifetime_spent_usd - 280.0).abs() < 0.01,
+        "expected $280 lifetime direct spend, got {u:?}"
+    );
+    assert!(
+        u.carved_usd.abs() < 0.001,
+        "closed child's yesterday spend must not carve today's daily budget: {u:?}"
+    );
+    assert!(
+        (u.reserved_usd - 10.0).abs() < 0.01,
+        "expected $10 60-min live reservation, got {u:?}"
+    );
+    assert!(
+        (u.available_usd - 270.0).abs() < 0.02,
+        "expected $270 remaining today, got {u:?}"
+    );
+}
+
+#[tokio::test]
+async fn sub_budget_rejects_non_total_reset_period_and_reparenting_clears_period() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    m.set_mission_budget_with_period(
+        "root",
+        Some(100.0),
+        Some(budget::BudgetResetPeriod::Daily),
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    // Updating amount with `reset_period = None` preserves `Daily`.
+    m.set_mission_budget_with_period("root", Some(120.0), None, None, Some("t1".into()))
+        .await
+        .unwrap();
+    let root_view = m.mission_budget("root", &["root".into()], &[], "t1").await;
+    assert_eq!(
+        root_view.own_budget_reset_period,
+        budget::BudgetResetPeriod::Daily
+    );
+    assert_eq!(
+        root_view.pool.as_ref().unwrap().reset_period,
+        budget::BudgetResetPeriod::Daily
+    );
+
+    // Carved child sub-budget cannot use a periodic reset period.
+    let err = m
+        .set_mission_budget_with_period(
+            "kid",
+            Some(25.0),
+            Some(budget::BudgetResetPeriod::Weekly),
+            Some("root".into()),
+            Some("t1".into()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error, "invalid_budget_period");
+    assert_eq!(err.status, 400);
+
+    // Standalone root with `Weekly` that is later reparented under `root` resets to `Total`.
+    m.set_mission_budget_with_period(
+        "orphan",
+        Some(20.0),
+        Some(budget::BudgetResetPeriod::Weekly),
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+    m.reparent_pool("orphan", Some("root".into())).await;
+    let orphan_view = m
+        .mission_budget("orphan", &["orphan".into(), "root".into()], &[], "t1")
+        .await;
+    assert_eq!(
+        orphan_view.own_budget_reset_period,
+        budget::BudgetResetPeriod::Total
+    );
+}
+
+#[tokio::test]
+async fn bandwidth_inference_usd_per_hour_validates_and_enforces_ancestor_monotonicity() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+
+    m.set_mission_bandwidth_limits(
+        "root",
+        Some(budget::BandwidthLimits {
+            tokens_per_min: None,
+            inference_usd_per_hour: Some(12.5),
+            compute_vcpu_per_min: None,
+            compute_usd_per_hour: None,
+            protect_root: true,
+        }),
+        &["root".into()],
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    let err = m
+        .set_mission_bandwidth_limits(
+            "child",
+            Some(budget::BandwidthLimits {
+                tokens_per_min: None,
+                inference_usd_per_hour: Some(15.0),
+                compute_vcpu_per_min: None,
+                compute_usd_per_hour: None,
+                protect_root: false,
+            }),
+            &["child".into(), "root".into()],
+            Some("root".into()),
+            Some("t1".into()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error, "sub_bandwidth_exceeds_pool");
+    assert_eq!(err.status, 400);
+
+    m.set_mission_bandwidth_limits(
+        "child",
+        Some(budget::BandwidthLimits {
+            tokens_per_min: None,
+            inference_usd_per_hour: Some(8.0),
+            compute_vcpu_per_min: None,
+            compute_usd_per_hour: None,
+            protect_root: false,
+        }),
+        &["child".into(), "root".into()],
+        Some("root".into()),
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    let child_view = m
+        .mission_budget("child", &["child".into(), "root".into()], &[], "t1")
+        .await;
+    assert_eq!(
+        child_view.effective_bandwidth.inference_usd_per_hour,
+        Some(8.0)
+    );
+    assert_eq!(
+        child_view
+            .effective_bandwidth
+            .ancestor_inference_usd_per_hour,
+        Some(12.5)
+    );
 }
