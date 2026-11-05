@@ -142,4 +142,8 @@ Android (`OrbBackgroundSync.kt`) share one per-device **Background sync** policy
    - While unfocused in `Off` / paused mode on an unbroken `/api/control/sync`
      connection, clients track per-mission and `/btw` dirty flags from
      `mission_presentation` hints so returning to an untouched conversation skips
-     redundant metadata, queue, and `/btw` history fetches.
+     redundant metadata, queue, and `/btw` history fetches. Disk-persisted `/btw`
+     drafts never overwrite warm `/btw` state or mark it clean, pending turns
+     always force authoritative Core reconciliation, and any partial `/btw` event
+     fetch failure keeps the parent marked dirty (see
+     [`docs/specs/side-questions.md`](../specs/side-questions.md)).

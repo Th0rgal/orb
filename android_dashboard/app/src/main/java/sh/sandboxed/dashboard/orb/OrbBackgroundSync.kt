@@ -836,9 +836,21 @@ object OrbWarmSyncCoordinator {
             if (markClean) {
                 dirtyBtwParents.remove(parentId)
                 checkedCleanBtwParents.add(parentId)
+            } else {
+                dirtyBtwParents.add(parentId)
+                checkedCleanBtwParents.remove(parentId)
             }
         }
         reconcile(core)
+    }
+
+    fun markBtwDirty(core: OrbCore, parentId: String) {
+        if (parentId.isEmpty()) return
+        synchronized(lock) {
+            ensureScopeLocked(core)
+            dirtyBtwParents.add(parentId)
+            checkedCleanBtwParents.remove(parentId)
+        }
     }
 
     fun canSkipBtwServerCrawl(core: OrbCore, parentId: String): Boolean = synchronized(lock) {

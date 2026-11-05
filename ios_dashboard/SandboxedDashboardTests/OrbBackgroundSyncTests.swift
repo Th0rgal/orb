@@ -140,4 +140,50 @@ final class OrbBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(history[0]["content"].text, "Inspect build")
         XCTAssertEqual(history[1]["content"].text, "All green.")
     }
+
+    func testBtwDirtyInvalidationAndDuplicateQuestionDisambiguation() throws {
+        let parentId = "06203bdc-3543-483e-a8c5-3bf20eb5c34a"
+        OrbWarmSyncCoordinator.shared.markBtwClean(parentId: parentId)
+        OrbWarmSyncCoordinator.shared.markBtwDirty(parentId: parentId)
+        XCTAssertFalse(OrbWarmSyncCoordinator.shared.canSkipBtwServerCrawl(parentId: parentId))
+
+        let firstTurn = OrbBtwThreads.Turn(
+            id: "btw:3d7b16e7:83",
+            question: "and now?",
+            answer: "First status.",
+            at: "2026-11-04T19:21:00Z"
+        )
+        let secondAskedAt = try XCTUnwrap(OrbTurnSummary.parseDate("2026-11-04T20:07:00Z"))
+        // Earlier identical "and now?" turn must NOT satisfy the second "and now?" pending turn:
+        XCTAssertFalse(
+            OrbBtwThreads.doesTurnAnswerPending(
+                question: "and now?",
+                askedAt: secondAskedAt,
+                reconciledTurns: [firstTurn],
+                priorTurns: [firstTurn]
+            )
+        )
+        XCTAssertFalse(
+            OrbBtwThreads.doesTurnAnswerPending(
+                question: "and now?",
+                askedAt: secondAskedAt,
+                reconciledTurns: [firstTurn],
+                priorTurns: []
+            )
+        )
+        let secondTurn = OrbBtwThreads.Turn(
+            id: "btw:3d7b16e7:98",
+            question: "and now?",
+            answer: "Second status.",
+            at: "2026-11-04T20:07:30Z"
+        )
+        XCTAssertTrue(
+            OrbBtwThreads.doesTurnAnswerPending(
+                question: "and now?",
+                askedAt: secondAskedAt,
+                reconciledTurns: [firstTurn, secondTurn],
+                priorTurns: [firstTurn]
+            )
+        )
+    }
 }
