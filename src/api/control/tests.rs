@@ -6692,6 +6692,10 @@ fn remote_opencode_config_declares_a_context_limit() {
     let limit = &config["provider"]["builtin"]["models"]["private"]["limit"];
     assert_eq!(limit["context"], 200_000);
     assert_eq!(limit["output"], 32_000);
+    assert_eq!(
+        config["provider"]["builtin"]["options"]["timeout"],
+        crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS
+    );
 }
 
 #[test]
