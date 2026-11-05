@@ -657,7 +657,6 @@ export function LiveProjectsSection(p: {
         }
       }
       setFileAction(null);
-      clearDeletedFileUi(target.slug, target.path, !!target.directory);
       const label = target.directory ? folderLabel(target.slug, target.path) : fileBaseName(target.path);
       try {
         await deleteFileOptimistically(target.slug, target.path, !!target.directory, async () => {
@@ -665,8 +664,12 @@ export function LiveProjectsSection(p: {
           await deleteProjectFile(target.slug, target.path);
         }, label);
         if (version !== connectionVersion()) return;
-        await refreshFileParents(target.slug, target.path);
-        settleMove(moveKey);
+        clearDeletedFileUi(target.slug, target.path, !!target.directory);
+        try {
+          await refreshFileParents(target.slug, target.path);
+        } finally {
+          settleMove(moveKey);
+        }
       } catch {
         // `deleteFileOptimistically` restores the row and surfaces an error toast.
       }

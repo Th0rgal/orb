@@ -124,6 +124,12 @@ test('folder delete dismisses dialog immediately and rolls back cleanly on failu
       folders=folders.filter(f=>f!==target);
       return route.fulfill({json:{deleted:target}});
     }
+    if(req.method()==='GET' && path.endsWith('/file')) {
+      return route.fulfill({json:{content:'Initial report',revision:1}});
+    }
+    if(req.method()==='PUT' && path.endsWith('/file')) {
+      return route.fulfill({status:500,body:'disk full'});
+    }
     const folder=url.searchParams.get('path')??'';
     const entries=folder===''?folders.map(name=>({name,kind:'dir'})):[{name:'report.md',kind:'file'}];
     const json=path==='/api/projects'?{projects:[{slug:'one',title:'One'}]}:path.endsWith('/files')?{entries}:path.endsWith('/crons')?{jobs:[]}:path.endsWith('/controller')?{job:null,runs:[]}:[];
@@ -131,6 +137,10 @@ test('folder delete dismisses dialog immediately and rolls back cleanly on failu
   });
   await page.goto('/');await page.getByRole('button',{name:'One',exact:true}).click();
   await expect(page.getByRole('button',{name:'Audits',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'Audits',exact:true}).click();
+  await page.locator('[data-tree-id="pf:one:Audits/report.md"]').getByRole('button',{name:'report.md',exact:true}).click();
+  await page.getByRole('button',{name:'Edit',exact:true}).click();
+  await page.locator('.file-view textarea').fill('Unsaved offline draft');
 
   await page.getByRole('button',{name:'Audits',exact:true}).click({button:'right'});
   await page.getByRole('menuitem',{name:'Delete…',exact:true}).click();
@@ -143,12 +153,13 @@ test('folder delete dismisses dialog immediately and rolls back cleanly on failu
   await expect(page.getByRole('button',{name:'Audits',exact:true})).toHaveCount(0);
   await expect.poll(()=>pendingDelete!==null).toBe(true);
 
-  // When DELETE fails, folder reappears in place and an error toast explains why.
+  // When DELETE fails, folder reappears in place, the open draft stays mounted, and an error toast explains why.
   pendingDelete!();
   await expect(page.getByRole('button',{name:'Audits',exact:true})).toBeVisible();
-  await expect(page.getByRole('alert')).toContainText('Couldn’t delete Audits');
+  await expect(page.locator('.file-view textarea')).toHaveValue('Unsaved offline draft');
+  await expect(page.getByRole('alert').filter({hasText:'Couldn’t delete Audits'})).toBeVisible();
 
-  // Second attempt succeeds optimistically and stays gone after completion.
+  // Second attempt succeeds optimistically, closes the deleted document on completion, and stays gone.
   await page.getByRole('button',{name:'Audits',exact:true}).click({button:'right'});
   await page.getByRole('menuitem',{name:'Delete…',exact:true}).click();
   await page.getByRole('dialog').getByRole('button',{name:'Delete',exact:true}).click();
@@ -156,7 +167,7 @@ test('folder delete dismisses dialog immediately and rolls back cleanly on failu
   await expect(page.getByRole('button',{name:'Audits',exact:true})).toHaveCount(0);
   await expect.poll(()=>pendingDelete!==null).toBe(true);
   pendingDelete!();
-  await page.waitForTimeout(100);
+  await expect(page.locator('.pf-path')).toHaveCount(0);
   await expect(page.getByRole('button',{name:'Audits',exact:true})).toHaveCount(0);
   await expect(page.getByRole('button',{name:'Notes',exact:true})).toBeVisible();
 });
