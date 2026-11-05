@@ -1237,10 +1237,11 @@ async fn cancel_working_agent(turn: &AskTurn) -> Result<(), String> {
 /// On any failure we return `false`, degrading to the authoritative UserMessage
 /// path (which starts a turn when idle and queues when running).
 async fn mission_has_live_turn(turn: &AskTurn) -> bool {
-    if let Some(rt) = &turn.remote_target {
-        if rt.live {
-            return true;
-        }
+    if turn.remote_target.is_some() {
+        // Local `ask_store` operator notes are only drained by local
+        // `mission_runner` turns; remote missions must fall through to the
+        // authoritative `ControlCommand::UserMessage` outbox path.
+        return false;
     }
     if let Ok(Some(run)) = turn
         .mission_store

@@ -1565,6 +1565,8 @@ async fn idle_machine_of_an_ended_sibling_is_reused_once() {
                 tenant: Some("t1"),
                 budget_pool_id: None,
                 sub_budget_usd: None,
+                retain_vm_for_parent_minutes: Some(30),
+                pre_stop_hook: Some("echo child-hook"),
             },
             &|o| o == "sib-done",
         )
@@ -1573,6 +1575,8 @@ async fn idle_machine_of_an_ended_sibling_is_reused_once() {
     assert_eq!(got.id, vm.id);
     assert_eq!(got.owner_mission_id, None);
     assert_eq!(got.requested_by_mission_id.as_deref(), Some("parent"));
+    assert_eq!(got.retain_vm_for_parent_minutes, Some(30));
+    assert_eq!(got.pre_stop_hook.as_deref(), Some("echo child-hook"));
     // Wrong size, other tenant, or already taken: nothing.
     assert!(m
         .take_idle_sibling(
@@ -1582,7 +1586,9 @@ async fn idle_machine_of_an_ended_sibling_is_reused_once() {
                 requested_by: "parent",
                 tenant: Some("t1"),
                 budget_pool_id: None,
-                sub_budget_usd: None
+                sub_budget_usd: None,
+                retain_vm_for_parent_minutes: None,
+                pre_stop_hook: None,
             },
             &|o| o == "sib-done"
         )
@@ -1597,7 +1603,9 @@ async fn idle_machine_of_an_ended_sibling_is_reused_once() {
                 requested_by: "parent",
                 tenant: Some("t1"),
                 budget_pool_id: None,
-                sub_budget_usd: None
+                sub_budget_usd: None,
+                retain_vm_for_parent_minutes: None,
+                pre_stop_hook: None,
             },
             &|_| true
         )
@@ -1611,7 +1619,9 @@ async fn idle_machine_of_an_ended_sibling_is_reused_once() {
                 requested_by: "parent",
                 tenant: Some("t2"),
                 budget_pool_id: None,
-                sub_budget_usd: None
+                sub_budget_usd: None,
+                retain_vm_for_parent_minutes: None,
+                pre_stop_hook: None,
             },
             &|_| true
         )
@@ -1704,7 +1714,9 @@ async fn reusing_an_idle_sibling_vm_respects_the_target_budget() {
                 requested_by: "parent",
                 tenant: Some("t1"),
                 budget_pool_id: Some("parent"),
-                sub_budget_usd: None
+                sub_budget_usd: None,
+                retain_vm_for_parent_minutes: None,
+                pre_stop_hook: None,
             },
             &|_| true
         )
@@ -1722,7 +1734,9 @@ async fn reusing_an_idle_sibling_vm_respects_the_target_budget() {
                 requested_by: "parent",
                 tenant: Some("t1"),
                 budget_pool_id: Some("parent"),
-                sub_budget_usd: Some(0.01)
+                sub_budget_usd: Some(0.01),
+                retain_vm_for_parent_minutes: None,
+                pre_stop_hook: None,
             },
             &|_| true
         )
@@ -1743,6 +1757,8 @@ async fn reusing_an_idle_sibling_vm_respects_the_target_budget() {
                 tenant: Some("t1"),
                 budget_pool_id: Some("parent"),
                 sub_budget_usd: Some(1.0),
+                retain_vm_for_parent_minutes: None,
+                pre_stop_hook: None,
             },
             &|_| true,
         )
@@ -4152,19 +4168,39 @@ async fn dispatch_reservation_reuses_unclaimed_vm_and_clears_on_claim() {
     // Retrying with the same `(tenant, parent, idempotency_key)` before claim
     // reuses the exact pre-spawned VM requested by `parent-1`.
     let reused = m
-        .take_unclaimed_for_dispatch("t1", Some("parent-1"), "dispatch:parent-1:key-1")
+        .take_unclaimed_for_dispatch(
+            "t1",
+            Some("parent-1"),
+            "dispatch:parent-1:key-1",
+            Some(25),
+            Some("echo retry-hook"),
+        )
         .await
         .expect("should reuse unclaimed reservation");
     assert_eq!(reused.id, vm.id);
+    assert_eq!(reused.retain_vm_for_parent_minutes, Some(25));
+    assert_eq!(reused.pre_stop_hook.as_deref(), Some("echo retry-hook"));
 
     // Re-record to test tenant/parent isolation: another tenant or wrong parent
     // cannot hijack the reservation (and invalid lookups drop stale keys).
     assert!(m
-        .take_unclaimed_for_dispatch("t2", Some("parent-1"), "dispatch:parent-1:key-1")
+        .take_unclaimed_for_dispatch(
+            "t2",
+            Some("parent-1"),
+            "dispatch:parent-1:key-1",
+            None,
+            None,
+        )
         .await
         .is_none());
     assert!(m
-        .take_unclaimed_for_dispatch("t1", Some("other-parent"), "dispatch:parent-1:key-1")
+        .take_unclaimed_for_dispatch(
+            "t1",
+            Some("other-parent"),
+            "dispatch:parent-1:key-1",
+            None,
+            None,
+        )
         .await
         .is_none());
     m.record_dispatch_reservation("t1", "dispatch:parent-1:key-1", &vm.id)
@@ -4179,7 +4215,13 @@ async fn dispatch_reservation_reuses_unclaimed_vm_and_clears_on_claim() {
     assert_eq!(claimed.owner_mission_id.as_deref(), Some("child-1"));
     assert_eq!(claimed.requested_by_mission_id.as_deref(), Some("parent-1"));
     assert!(m
-        .take_unclaimed_for_dispatch("t1", Some("parent-1"), "dispatch:parent-1:key-1")
+        .take_unclaimed_for_dispatch(
+            "t1",
+            Some("parent-1"),
+            "dispatch:parent-1:key-1",
+            None,
+            None,
+        )
         .await
         .is_none());
 }
@@ -4994,6 +5036,20 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
             .and_then(|v| v.get("succeeded"))
             .and_then(Value::as_bool),
         Some(true)
+    );
+    let last_script = fake.execs.lock().unwrap().last().cloned().unwrap();
+    assert!(
+        last_script.contains("ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))")
+            && last_script.contains("[ \"$ORB_CHECKPOINT_FAILED\" -eq 0 ]"),
+        "checkpoint script must exit non-zero when dirty repo preservation or custom hook fails"
+    );
+
+    // 3. Extending TTL resets `pre_stop_ran_at` so later work before the new deadline or
+    // hard cap will take a fresh checkpoint instead of reusing the earlier snapshot!
+    let extended = m.extend(&spawned.id, 30).await.unwrap();
+    assert!(
+        extended.pre_stop_ran_at.is_none(),
+        "extend() must reset pre_stop_ran_at for subsequent expiry/teardown checkpoints"
     );
 }
 

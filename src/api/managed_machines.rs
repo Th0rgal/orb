@@ -325,7 +325,13 @@ pub(crate) async fn spawn_for_inner(
     })?;
     if let Some(key) = dispatch_key.map(str::trim).filter(|k| !k.is_empty()) {
         if let Some(machine) = m
-            .take_unclaimed_for_dispatch(&user.id, req.requested_by_mission_id.as_deref(), key)
+            .take_unclaimed_for_dispatch(
+                &user.id,
+                req.requested_by_mission_id.as_deref(),
+                key,
+                req.retain_vm_for_parent_minutes,
+                req.pre_stop_hook.as_deref(),
+            )
             .await
         {
             return Ok((machine, true));
@@ -449,6 +455,8 @@ async fn reuse_idle_sibling(
                 tenant: req.owner_user_id.as_deref(),
                 budget_pool_id: req.budget_pool_id.as_deref(),
                 sub_budget_usd: req.sub_budget_usd,
+                retain_vm_for_parent_minutes: req.retain_vm_for_parent_minutes,
+                pre_stop_hook: req.pre_stop_hook.as_deref(),
             },
             &|owner| ended.contains(owner),
         )

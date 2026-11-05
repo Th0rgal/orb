@@ -2777,6 +2777,8 @@ impl ManagedManager {
         tenant: &str,
         requested_by: Option<&str>,
         dispatch_key: &str,
+        retain_vm_for_parent_minutes: Option<u64>,
+        pre_stop_hook: Option<&str>,
     ) -> Option<ManagedMachine> {
         let _guard = self.admission.lock().await;
         let mut map = self.load_dispatch_reservations();
@@ -2800,11 +2802,24 @@ impl ManagedManager {
                 && !Self::node_busy(&m.node_id)
                 && Utc::now() + chrono::Duration::minutes(2) < m.expires_at
         });
-        if usable.is_none() {
+        let Some(usable) = usable else {
             map.remove(&lookup_key);
             self.persist_dispatch_reservations(&map);
-        }
-        usable
+            return None;
+        };
+        let next_retain = retain_vm_for_parent_minutes.map(|mins| mins.min(720));
+        let next_hook = pre_stop_hook
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        self.update(&usable.id, |m| {
+            m.retain_vm_for_parent_minutes = next_retain;
+            m.pre_stop_hook = next_hook;
+            m.pre_stop_ran_at = None;
+            m.pre_stop_trigger = None;
+            m.pre_stop_summary = None;
+        })
+        .await
     }
 
     fn runtime_path(&self) -> PathBuf {
@@ -4910,7 +4925,15 @@ impl ManagedManager {
                 .map_err(|e| ManagedError::new("provider_error", 502, e))?;
         }
         Ok(self
-            .update(&m.id, |m| m.expires_at = new_end)
+            .update(&m.id, |m| {
+                m.expires_at = new_end;
+                // An earlier `pre_ttl_expiry` checkpoint is superseded once the
+                // machine's TTL is extended; allow a fresh checkpoint when the
+                // new deadline or 720m hard cap approaches.
+                m.pre_stop_ran_at = None;
+                m.pre_stop_trigger = None;
+                m.pre_stop_summary = None;
+            })
             .await
             .unwrap_or(m))
     }
@@ -5212,6 +5235,7 @@ impl ManagedManager {
 ORB_WIP_REF='{wip_ref}'
 ORB_CHECKPOINT_REPOS=0
 ORB_CHECKPOINT_PUSHED=0
+ORB_CHECKPOINT_FAILED=0
 for root in /var/lib/orb-node/work /var/lib/sandboxed-node/work; do
   [ -d "$root" ] || continue
   for gitdir in $(find "$root" -maxdepth 4 -name .git -type d 2>/dev/null); do
@@ -5235,21 +5259,30 @@ for root in /var/lib/orb-node/work /var/lib/sandboxed-node/work; do
       if [ -n "$commit_sha" ]; then
         git update-ref "refs/orb-pre-stop/latest" "$commit_sha" 2>/dev/null || true
         git bundle create "$repo_dir/.orb-pre-stop-wip.bundle" "$commit_sha" >/dev/null 2>&1 || true
-        if timeout 25s git push --force origin "$commit_sha:$ORB_WIP_REF" >/dev/null 2>&1; then
-          ORB_CHECKPOINT_PUSHED=$((ORB_CHECKPOINT_PUSHED + 1))
+        if git remote get-url origin >/dev/null 2>&1; then
+          if timeout 25s git push --force origin "$commit_sha:$ORB_WIP_REF" >/dev/null 2>&1; then
+            ORB_CHECKPOINT_PUSHED=$((ORB_CHECKPOINT_PUSHED + 1))
+          else
+            ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+          fi
         fi
+      else
+        ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
       fi
+    else
+      ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
     fi
   done
 done
-printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d\n' '{trigger}' "$ORB_CHECKPOINT_REPOS" "$ORB_CHECKPOINT_PUSHED"
+printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d failed=%d\n' '{trigger}' "$ORB_CHECKPOINT_REPOS" "$ORB_CHECKPOINT_PUSHED" "$ORB_CHECKPOINT_FAILED"
 "#
         );
         if let Some(hook) = custom_hook {
             script.push_str("\n# Custom pre_stop_hook\n(\n");
             script.push_str(hook);
-            script.push_str("\n)\n");
+            script.push_str("\n) || ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))\n");
         }
+        script.push_str("[ \"$ORB_CHECKPOINT_FAILED\" -eq 0 ]\n");
 
         let mut transport = "none";
         let mut exit_code: Option<i32> = None;
@@ -5912,6 +5945,8 @@ pub struct SiblingReuse<'a> {
     /// Pool the VM will be charged to.
     pub budget_pool_id: Option<&'a str>,
     pub sub_budget_usd: Option<f64>,
+    pub retain_vm_for_parent_minutes: Option<u64>,
+    pub pre_stop_hook: Option<&'a str>,
 }
 
 impl ManagedManager {
@@ -7285,6 +7320,8 @@ impl ManagedManager {
             tenant,
             budget_pool_id,
             sub_budget_usd,
+            retain_vm_for_parent_minutes,
+            pre_stop_hook,
         } = *want;
         let _guard = self.admission.lock().await;
         let all_machines = self.machines.lock().await.clone();
@@ -7352,6 +7389,11 @@ impl ManagedManager {
             }
         }
         let pool = budget_pool_id.map(str::to_string);
+        let next_retain = retain_vm_for_parent_minutes.map(|mins| mins.min(720));
+        let next_hook = pre_stop_hook
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let m = self
             .update(&pick.id, |m| {
                 m.change_pool(pool, Utc::now());
@@ -7359,6 +7401,11 @@ impl ManagedManager {
                 m.bandwidth_pool_id = target_bw_pool;
                 m.owner_mission_id = None;
                 m.requested_by_mission_id = Some(requested_by.to_string());
+                m.retain_vm_for_parent_minutes = next_retain;
+                m.pre_stop_hook = next_hook;
+                m.pre_stop_ran_at = None;
+                m.pre_stop_trigger = None;
+                m.pre_stop_summary = None;
                 m.reap_at = None;
                 m.reap_reason = None;
                 m.last_busy_at = Some(Utc::now());

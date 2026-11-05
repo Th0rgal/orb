@@ -934,6 +934,9 @@ impl ManagedManager {
                     x.destroy_reason = None;
                     x.online_at = None;
                     x.error = None;
+                    x.pre_stop_ran_at = None;
+                    x.pre_stop_trigger = None;
+                    x.pre_stop_summary = None;
                 })
                 .await
                 .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
