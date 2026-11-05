@@ -11047,15 +11047,21 @@ pub(crate) async fn try_auto_reset_subscription_on_limit(
 
         let outcome = match target_type {
             ProviderType::Anthropic => {
-                let Some(inventory) = super::subscription_usage::fetch_anthropic_resets_uncached(
-                    &client,
-                    &anthropic_base,
-                    &token,
-                    true,
-                )
-                .await
-                .ok()
-                .flatten() else {
+                let Ok(snapshot) =
+                    super::subscription_usage::fetch_anthropic_reset_snapshot_uncached(
+                        &client,
+                        &anthropic_base,
+                        &token,
+                        false,
+                    )
+                    .await
+                else {
+                    continue;
+                };
+                if !snapshot.exhausted {
+                    continue;
+                }
+                let Some(inventory) = snapshot.resets else {
                     continue;
                 };
                 let Some(grant) = inventory

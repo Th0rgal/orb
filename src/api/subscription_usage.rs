@@ -469,6 +469,52 @@ pub fn parse_anthropic_resets(payload: &Value, now_unix: i64) -> Option<Subscrip
     None
 }
 
+/// True when an Anthropic `/api/oauth/usage` payload shows the subscription is
+/// currently exhausted (either `cedar_ember.at_limit` / `juniper_tide.at_limit`
+/// is true or one of the rate-limit windows is at 100% / exceeded / rejected).
+pub fn parse_anthropic_exhausted(payload: &Value) -> bool {
+    if payload
+        .get("cedar_ember")
+        .and_then(|ce| ce.get("at_limit"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return true;
+    }
+    if payload
+        .get("juniper_tide")
+        .and_then(|jt| jt.get("at_limit"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return true;
+    }
+    [
+        "five_hour",
+        "seven_day",
+        "seven_day_sonnet",
+        "seven_day_opus",
+        "seven_day_oauth_apps",
+    ]
+    .iter()
+    .any(|key| {
+        let Some(w) = payload.get(*key) else {
+            return false;
+        };
+        w.get("is_exceeded").and_then(Value::as_bool) == Some(true)
+            || w.get("status").and_then(Value::as_str) == Some("rejected")
+            || w.get("utilization")
+                .and_then(Value::as_f64)
+                .is_some_and(|u| u >= 100.0)
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct AnthropicResetSnapshot {
+    pub resets: Option<SubscriptionResets>,
+    pub exhausted: bool,
+}
+
 #[derive(Debug)]
 pub enum AnthropicResetReadError {
     RateLimited,
@@ -476,12 +522,12 @@ pub enum AnthropicResetReadError {
     Other(String),
 }
 
-pub async fn fetch_anthropic_resets_uncached(
+pub async fn fetch_anthropic_reset_snapshot_uncached(
     client: &reqwest::Client,
     api_base: &str,
     access_token: &str,
     at_wall: bool,
-) -> Result<Option<SubscriptionResets>, AnthropicResetReadError> {
+) -> Result<AnthropicResetSnapshot, AnthropicResetReadError> {
     let base = api_base.trim_end_matches('/');
     let url = if at_wall {
         format!("{base}/api/oauth/usage?at_wall=1&cedar_ember=1&skip_spend=1")
@@ -516,10 +562,21 @@ pub async fn fetch_anthropic_resets_uncached(
     let payload: Value = resp.json().await.map_err(|e| {
         AnthropicResetReadError::Other(format!("Unreadable Anthropic reset response: {e}"))
     })?;
-    Ok(parse_anthropic_resets(
-        &payload,
-        chrono::Utc::now().timestamp(),
-    ))
+    Ok(AnthropicResetSnapshot {
+        resets: parse_anthropic_resets(&payload, chrono::Utc::now().timestamp()),
+        exhausted: parse_anthropic_exhausted(&payload),
+    })
+}
+
+pub async fn fetch_anthropic_resets_uncached(
+    client: &reqwest::Client,
+    api_base: &str,
+    access_token: &str,
+    at_wall: bool,
+) -> Result<Option<SubscriptionResets>, AnthropicResetReadError> {
+    fetch_anthropic_reset_snapshot_uncached(client, api_base, access_token, at_wall)
+        .await
+        .map(|snap| snap.resets)
 }
 
 struct StoredAnthropicResets {

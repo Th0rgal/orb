@@ -2704,6 +2704,11 @@ CLI error: {"data":{"message":"Failed to execute statement"},"name":"UnknownErro
         use serde_json::{json, Value};
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+        let anthropic_exhausted = Arc::new(AtomicBool::new(false));
+        let anthropic_consumes = Arc::new(AtomicUsize::new(0));
+        let anthropic_exhausted_route = Arc::clone(&anthropic_exhausted);
+        let anthropic_consumes_route = Arc::clone(&anthropic_consumes);
+
         let codex_exhausted = Arc::new(AtomicBool::new(false));
         let codex_consumes = Arc::new(AtomicUsize::new(0));
         let codex_exhausted_route = Arc::clone(&codex_exhausted);
@@ -2712,31 +2717,40 @@ CLI error: {"data":{"message":"Failed to execute statement"},"name":"UnknownErro
         let app = Router::new()
             .route(
                 "/api/oauth/usage",
-                get(|| async {
-                    Json(json!({
-                        "cedar_ember": {
-                            "eligible": true,
-                            "at_limit": true,
-                            "grants": [{
-                                "id": "grant_auto",
-                                "label": "Max reset",
-                                "resets_left": 1,
-                                "clears": ["five_hour", "seven_day"],
-                                "usable_now": true
-                            }]
-                        }
-                    }))
+                get(move || {
+                    let exhausted = anthropic_exhausted_route.load(Ordering::SeqCst);
+                    async move {
+                        Json(json!({
+                            "five_hour": {
+                                "utilization": if exhausted { 100.0 } else { 20.0 }
+                            },
+                            "cedar_ember": {
+                                "eligible": true,
+                                "at_limit": exhausted,
+                                "grants": [{
+                                    "id": "grant_auto",
+                                    "label": "Max reset",
+                                    "resets_left": 1,
+                                    "clears": ["five_hour", "seven_day"],
+                                    "use_requires_limit": false,
+                                    "usable_now": true
+                                }]
+                            }
+                        }))
+                    }
                 }),
             )
             .route(
                 "/api/organizations/:org/reset_rate_limits",
-                post(
-                    |Path(org): Path<String>, Json(body): Json<Value>| async move {
+                post(move |Path(org): Path<String>, Json(body): Json<Value>| {
+                    let consumes = Arc::clone(&anthropic_consumes_route);
+                    async move {
                         assert_eq!(org, "org_test");
                         assert_eq!(body["grant_id"], "grant_auto");
+                        consumes.fetch_add(1, Ordering::SeqCst);
                         Json(json!({ "result": "reset", "resets_left": 0 }))
-                    },
-                ),
+                    }
+                }),
             )
             .route(
                 "/wham/usage",
@@ -2802,6 +2816,23 @@ CLI error: {"data":{"message":"Failed to execute statement"},"name":"UnknownErro
         .unwrap();
 
         let mission = active_mission(&store, "claudecode").await;
+        // Non-exhausted Anthropic account (e.g. capacity already restored by an
+        // earlier concurrent reset, even when `usable_now` is true because
+        // `use_requires_limit` is false) must NOT consume a banked grant.
+        assert_eq!(
+            crate::api::ai_providers::try_auto_reset_subscription_on_limit(
+                dir.path(),
+                None,
+                "claudecode",
+                mission.id,
+                "run:anthropic-not-exhausted",
+            )
+            .await,
+            None
+        );
+        assert_eq!(anthropic_consumes.load(Ordering::SeqCst), 0);
+
+        anthropic_exhausted.store(true, Ordering::SeqCst);
         let hit = limited("You've hit your weekly limit · resets Nov 10, 4pm (UTC)");
         let (_m, wait) = plan_in(Some(dir.path()), None, &store, mission.id, &hit)
             .await
@@ -2810,6 +2841,7 @@ CLI error: {"data":{"message":"Failed to execute statement"},"name":"UnknownErro
             .limit
             .contains("Subscription reset redeemed on Primary Max"));
         assert!(wait.resume_at <= Utc::now() + Duration::seconds(30));
+        assert_eq!(anthropic_consumes.load(Ordering::SeqCst), 1);
 
         // Codex auto-reset must skip an account that already has capacity again
         // (e.g. 35% used after a concurrent mission redeemed a reset), even though
