@@ -166,8 +166,12 @@ for p in sorted(targets, reverse=True):\n\
             }
         }
     }
-    // Fallback `CancelMission` is fenced to the exact `placement.job_id` so a
-    // concurrent job transition can never cancel a newer turn.
+    // Fallback is job-scoped: cancel `placement.job_id` directly on the remote
+    // node (if reachable) without mutating mission status, revoking
+    // continuations/wake-ups, or cascade-cancelling child missions. When no
+    // reachable node config exists, fall back to `CancelMission` with
+    // `keep_remote_queue: true` (which stops only the current execution while
+    // preserving child missions, continuations, and the remote outbox).
     let still_same_job = remote_grok::placement(
         &state.config.working_dir,
         &control.mission_store,
@@ -179,6 +183,24 @@ for p in sorted(targets, reverse=True):\n\
     .is_some_and(|cur| cur.live && cur.job_id == placement.job_id);
     if !still_same_job {
         return false;
+    }
+    if let Some(node) = state.config.remote_nodes.node(&placement.node_id) {
+        if let Ok(token) = crate::remote_node::node_token(&node.token_env) {
+            let client = crate::remote_node::RemoteNodeClient::default();
+            if client
+                .cancel_job_with_reason(
+                    node,
+                    &token,
+                    placement.job_id,
+                    "core",
+                    "Remote steering fallback: interrupt current job so queued steering message can run",
+                )
+                .await
+                .is_ok()
+            {
+                return mode == MessageDeliveryMode::InterruptNow;
+            }
+        }
     }
     let (tx, rx) = oneshot::channel();
     if control

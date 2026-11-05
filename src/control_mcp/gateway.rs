@@ -1874,8 +1874,9 @@ async fn handle_fleet_sweep(
         .ok_or_else(|| ToolError::invalid("Parent mission not found"))?;
 
     let mut descendants = Vec::new();
-    let mut visited = std::collections::HashSet::from([parent_id]);
-    let mut queue = std::collections::VecDeque::from([parent_id]);
+    let seed_roots = fork_lineage(&store, parent_id).await;
+    let mut visited: std::collections::HashSet<Uuid> = seed_roots.iter().copied().collect();
+    let mut queue: std::collections::VecDeque<Uuid> = seed_roots.into_iter().collect();
     while let Some(cur) = queue.pop_front() {
         if descendants.len() >= 128 {
             break;
@@ -1884,6 +1885,11 @@ async fn handle_fleet_sweep(
             for child in children {
                 if !visited.insert(child.id) {
                     continue;
+                }
+                for fork_ver in fork_lineage(&store, child.id).await {
+                    if visited.insert(fork_ver) {
+                        queue.push_back(fork_ver);
+                    }
                 }
                 queue.push_back(child.id);
                 descendants.push(child);

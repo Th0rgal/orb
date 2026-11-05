@@ -20034,3 +20034,297 @@ async fn replayed_remote_interrupt_now_does_not_interrupt_delivered_or_newer_job
         MissionStatus::Active
     );
 }
+
+#[tokio::test]
+async fn fallback_remote_steering_preserves_children_and_fleet_sweep_includes_fork_lineage() {
+    use crate::api::mission_store::{
+        Automation, AutomationDriver, MissionProjectPatch, RetryConfig, StopPolicy, TriggerType,
+    };
+    use crate::remote_node::job_ledger::{self, JobHandle, JobHandleKind};
+    use std::sync::atomic::Ordering;
+
+    let fixture = spawn_fixture_node("legacy-node-404", "LEGACY_NODE_404_TOKEN", "running").await;
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    let store = h.control.mission_store.clone();
+
+    // 1. Create an active coordinator with an active child worker + active continuation
+    //    both on the legacy node (`404` on `/jobs/:id/interrupt`) and on an unconfigured node
+    //    (exercising both the direct `cancel_job` fallback and the `CancelMission { keep_remote_queue: true }` fallback).
+    for (idx, node_id) in [
+        (1, fixture.node.id.as_str()),
+        (2, "unconfigured-fallback-node"),
+    ] {
+        let coord = store
+            .create_mission(
+                Some(&format!("Coordinator {idx}")),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                coord.id,
+                MissionProjectPatch {
+                    project: Some(Some("lido".into())),
+                    tags: Some(vec![format!("remote_node:{node_id}")]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(coord.id, MissionStatus::Active)
+            .await
+            .unwrap();
+
+        let child = store
+            .create_mission_with_parent(
+                Some(&format!("Active Child Worker {idx}")),
+                None,
+                None,
+                None,
+                None,
+                false,
+                Some("opencode"),
+                None,
+                Some(coord.id),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(child.id, MissionStatus::Active)
+            .await
+            .unwrap();
+
+        let coord_auto = Automation {
+            id: Uuid::new_v4(),
+            mission_id: coord.id,
+            command_source: crate::api::mission_store::CommandSource::Inline {
+                content: "coordinator scheduled wakeup".into(),
+            },
+            trigger: TriggerType::Interval { seconds: 600 },
+            driver: AutomationDriver::Scheduler,
+            variables: HashMap::new(),
+            active: true,
+            created_at: crate::api::mission_store::now_string(),
+            last_triggered_at: None,
+            stop_policy: StopPolicy::Never,
+            fresh_session: Default::default(),
+            retry_config: RetryConfig::default(),
+            consecutive_failures: 0,
+        };
+        let child_auto = Automation {
+            id: Uuid::new_v4(),
+            mission_id: child.id,
+            command_source: crate::api::mission_store::CommandSource::Inline {
+                content: "worker scheduled wakeup".into(),
+            },
+            trigger: TriggerType::Interval { seconds: 600 },
+            driver: AutomationDriver::Scheduler,
+            variables: HashMap::new(),
+            active: true,
+            created_at: crate::api::mission_store::now_string(),
+            last_triggered_at: None,
+            stop_policy: StopPolicy::Never,
+            fresh_session: Default::default(),
+            retry_config: RetryConfig::default(),
+            consecutive_failures: 0,
+        };
+        store.create_automation(coord_auto.clone()).await.unwrap();
+        store.create_automation(child_auto.clone()).await.unwrap();
+
+        let now = chrono::Utc::now();
+        let coord_job = Uuid::new_v4();
+        job_ledger::record(
+            &h.state.config.working_dir,
+            JobHandle {
+                mission_id: coord.id,
+                node_id: node_id.into(),
+                job_id: coord_job,
+                started_at: now,
+                submission_sequence: idx,
+                accepted_at: Some(now),
+                heartbeat_at: Some(now),
+                disk_reservation_bytes: 0,
+                kind: JobHandleKind::Mission,
+                identity: None,
+                wait_for_completion: None,
+                wake_on_terminal: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let steer_res = h
+            .request(
+                false,
+                coord.id,
+                json!({
+                    "content": "steer coordinator without killing child workers",
+                    "mode": "interrupt_now"
+                }),
+            )
+            .await;
+        assert_eq!(steer_res.status(), StatusCode::OK);
+        if idx == 1 {
+            assert_eq!(
+                fixture.cancels.load(Ordering::SeqCst),
+                1,
+                "legacy node 404 on /interrupt must invoke job-scoped /jobs/:id/cancel"
+            );
+            assert_eq!(
+                store.get_mission(coord.id).await.unwrap().unwrap().status,
+                MissionStatus::Active,
+                "job-scoped cancel must leave coordinator mission status Active while poller observes job stop"
+            );
+        }
+
+        let child_after = store.get_mission(child.id).await.unwrap().unwrap();
+        assert_eq!(
+            child_after.status,
+            MissionStatus::Active,
+            "fallback steering on coordinator {idx} must NOT cascade-cancel active child worker"
+        );
+        assert!(
+            store
+                .get_automation(coord_auto.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .active,
+            "fallback steering on coordinator {idx} must NOT revoke coordinator continuations"
+        );
+        assert!(
+            store
+                .get_automation(child_auto.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .active,
+            "fallback steering on coordinator {idx} must NOT revoke child worker continuations"
+        );
+    }
+
+    // 2. Verify `get_fleet_sweep` seeds traversal from `fork_lineage(parent_id)` so a forked
+    //    coordinator (`fork-of:<pred_coord>`) sees workers spawned under its predecessor.
+    let pred_coord = store
+        .create_mission(
+            Some("Predecessor Coordinator"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    let inherited_worker = store
+        .create_mission_with_parent(
+            Some("Inherited Predecessor Worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(pred_coord.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(inherited_worker.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    let forked_coord = store
+        .create_mission(
+            Some("Forked Coordinator"),
+            None,
+            None,
+            None,
+            None,
+            Some("claudecode"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            forked_coord.id,
+            MissionProjectPatch {
+                tags: Some(vec![format!("fork-of:{}", pred_coord.id)]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let new_worker = store
+        .create_mission_with_parent(
+            Some("New Forked Coordinator Worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(forked_coord.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(new_worker.id, MissionStatus::Active)
+        .await
+        .unwrap();
+
+    let forked_principal = crate::control_mcp::gateway::Principal {
+        sub: h.user.id.clone(),
+        username: h.user.username.clone(),
+        role: crate::control_mcp::Role::Executor,
+        mission_id: Some(forked_coord.id),
+        project: None,
+        action_run_generation: None,
+        session_id: Uuid::new_v4(),
+        exp: (chrono::Utc::now().timestamp() + 3600) as usize,
+        client_kind: None,
+        client_label: None,
+        host_hint: None,
+    };
+    let sweep_call = crate::control_mcp::gateway::Call {
+        name: "get_fleet_sweep".into(),
+        arguments: json!({
+            "include_machines": false
+        }),
+    };
+    let Json(sweep_resp) = crate::control_mcp::gateway::call(
+        State(h.state.clone()),
+        Extension(forked_principal),
+        Json(sweep_call),
+    )
+    .await;
+    assert_eq!(sweep_resp["ok"], true, "{sweep_resp}");
+    let worker_ids: Vec<String> = sweep_resp["result"]["workers"]
+        .as_array()
+        .expect("workers array")
+        .iter()
+        .filter_map(|w| w["mission_id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        worker_ids.contains(&inherited_worker.id.to_string()),
+        "fleet sweep from forked coordinator must include workers of fork predecessor, got: {worker_ids:?}"
+    );
+    assert!(
+        worker_ids.contains(&new_worker.id.to_string()),
+        "fleet sweep from forked coordinator must include its own workers, got: {worker_ids:?}"
+    );
+    assert_eq!(sweep_resp["result"]["summary"]["workers_active"], json!(2));
+}

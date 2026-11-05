@@ -4022,9 +4022,11 @@ pub(super) async fn control_actor_loop(
                                         }
                                     }
                                 }
-                                if let Err(error) = continuations::stop_for_mission(&mission_store, mission_id).await {
-                                    let _ = respond.send(Err(format!("Failed to fence mission wake-ups: {error}")));
-                                    continue;
+                                if !keep_remote_queue {
+                                    if let Err(error) = continuations::stop_for_mission(&mission_store, mission_id).await {
+                                        let _ = respond.send(Err(format!("Failed to fence mission wake-ups: {error}")));
+                                        continue;
+                                    }
                                 }
                                 // Helper: cascade-cancel all child missions of the given parent.
                                 async fn cancel_child_missions(
@@ -4100,8 +4102,10 @@ pub(super) async fn control_actor_loop(
                                     // Don't send an Error event here — the turn will complete and
                                     // emit its terminal AssistantMessage (resumable=true), matching
                                     // main-runner cancellation below and avoiding red error cards.
-                                    // Cascade cancel child missions
-                                    cancel_child_missions(mission_id, &mission_store, &mut parallel_runners, &events_tx, &config.working_dir).await;
+                                    if !keep_remote_queue {
+                                        // Cascade cancel child missions on explicit Stop only
+                                        cancel_child_missions(mission_id, &mission_store, &mut parallel_runners, &events_tx, &config.working_dir).await;
+                                    }
                                     if let Err(error) = persist_control_queue_if_changed(
                                         &mission_store,
                                         &session_user_id,
@@ -4154,8 +4158,10 @@ pub(super) async fn control_actor_loop(
                                             // Don't send Error event here - the task will complete and send
                                             // an AssistantMessage with resumable=true when it finishes.
                                             // Sending both causes duplicate UI messages.
-                                            // Cascade cancel child missions
-                                            cancel_child_missions(mission_id, &mission_store, &mut parallel_runners, &events_tx, &config.working_dir).await;
+                                            if !keep_remote_queue {
+                                                // Cascade cancel child missions on explicit Stop only
+                                                cancel_child_missions(mission_id, &mission_store, &mut parallel_runners, &events_tx, &config.working_dir).await;
+                                            }
                                             let _ = respond.send(Ok(CancelMissionOutcome::Cancelled));
                                         } else {
                                             let _ = respond.send(Err("Mission not currently executing".to_string()));
@@ -4226,20 +4232,22 @@ pub(super) async fn control_actor_loop(
                                                         summary: None,
                                                     },
                                                 );
-                                                close_mission_desktop_sessions(
-                                                    &mission_store,
-                                                    mission_id,
-                                                    &config.working_dir,
-                                                )
-                                                .await;
-                                                cancel_child_missions(
-                                                    mission_id,
-                                                    &mission_store,
-                                                    &mut parallel_runners,
-                                                    &events_tx,
-                                                    &config.working_dir,
-                                                )
-                                                .await;
+                                                if !keep_remote_queue {
+                                                    close_mission_desktop_sessions(
+                                                        &mission_store,
+                                                        mission_id,
+                                                        &config.working_dir,
+                                                    )
+                                                    .await;
+                                                    cancel_child_missions(
+                                                        mission_id,
+                                                        &mission_store,
+                                                        &mut parallel_runners,
+                                                        &events_tx,
+                                                        &config.working_dir,
+                                                    )
+                                                    .await;
+                                                }
                                                 let _ = respond.send(Ok(CancelMissionOutcome::Cancelled));
                                             }
                                             Ok(None) => {

@@ -142,12 +142,23 @@ pub(crate) async fn filter_machines_to_own_pool(
     if root_uuid != mission_id {
         allowed_missions.extend(mission_subtree_ids(store, root_uuid).await);
     }
-    for anc in &lineage {
-        allowed_missions.insert(anc.clone());
-    }
     let mut allowed_pools = std::collections::HashSet::new();
     if let Some(ref pid) = pool_id {
         allowed_pools.insert(pid.clone());
+    }
+    for fork_root in crate::control_mcp::gateway::fork_lineage(store, mission_id).await {
+        if fork_root != mission_id {
+            allowed_missions.extend(mission_subtree_ids(store, fork_root).await);
+            if let Some(fpid) =
+                crate::api::mission_budget::pool_for(store, fork_root, user_id).await
+            {
+                allowed_pools.insert(fpid);
+            }
+        }
+        allowed_missions.insert(fork_root.to_string());
+    }
+    for anc in &lineage {
+        allowed_missions.insert(anc.clone());
     }
     for mid in &allowed_missions {
         allowed_pools.insert(mid.clone());
