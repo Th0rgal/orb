@@ -438,6 +438,8 @@ pub(super) fn is_orchestration_ui_tool(name: &str) -> bool {
             | "spawn_managed_machine"
             | "destroy_managed_machine"
             | "get_action"
+            | "wait_actions"
+            | "get_fleet_sweep"
             | "get_mission"
             | "get_mission_health"
             | "get_mission_status"

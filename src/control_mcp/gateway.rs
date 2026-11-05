@@ -18,6 +18,14 @@ fn btw_parent_tool_allowed(tool: &str) -> bool {
     crate::api::mission_access::READ_TOOLS.contains(&tool)
         || crate::api::mission_access::CONTROL_TOOLS.contains(&tool)
 }
+
+/// Tools a `/btw` side agent (or ancestor coordinator) may call to inspect or
+/// query (`ask_mission`) descendants in its associated parent mission's child tree.
+fn descendant_tree_read_tool_allowed(tool: &str) -> bool {
+    crate::api::mission_access::READ_TOOLS.contains(&tool)
+        || matches!(tool, "ask_mission" | "get_fleet_sweep")
+}
+
 fn direct_btw_parent_ids(owner_tags: &[String]) -> Vec<Uuid> {
     owner_tags
         .iter()
@@ -76,6 +84,66 @@ pub(crate) async fn btw_associated_with_target(
         }
     }
     false
+}
+
+/// Whether `target` is a descendant (via `parent_mission_id` hops, honoring
+/// `fork-of:` versions at each hop) of any root in `allowed_roots`.
+pub(crate) async fn target_in_descendant_tree(
+    store: &Arc<dyn crate::api::mission_store::MissionStore>,
+    allowed_roots: &[Uuid],
+    target: Uuid,
+) -> bool {
+    if allowed_roots.is_empty() {
+        return false;
+    }
+    let mut allowed = std::collections::HashSet::new();
+    for &root in allowed_roots {
+        for v in fork_lineage(store, root).await {
+            allowed.insert(v);
+        }
+    }
+    let mut visited = std::collections::HashSet::new();
+    let mut cur = target;
+    for _ in 0..32 {
+        if !visited.insert(cur) {
+            break;
+        }
+        for v in fork_lineage(store, cur).await {
+            if allowed.contains(&v) {
+                return true;
+            }
+        }
+        // Walk `parent_mission_id` on `cur` (or on an earlier `fork-of:` version
+        // if `cur` was forked from a child mission).
+        let mut next_parent = None;
+        for v in fork_lineage(store, cur).await {
+            if let Ok(Some(m)) = store.get_mission(v).await {
+                if let Some(p) = m.parent_mission_id {
+                    next_parent = Some(p);
+                    break;
+                }
+            }
+        }
+        match next_parent {
+            Some(p) => cur = p,
+            None => break,
+        }
+    }
+    false
+}
+
+/// Whether `owner_tags` carries a Core-minted `btw-parent:<id>` whose child /
+/// descendant mission tree contains `target`.
+pub(crate) async fn btw_reads_parent_descendant_tree(
+    store: &Arc<dyn crate::api::mission_store::MissionStore>,
+    owner_tags: &[String],
+    target: Uuid,
+) -> bool {
+    let parents = direct_btw_parent_ids(owner_tags);
+    if parents.is_empty() {
+        return false;
+    }
+    target_in_descendant_tree(store, &parents, target).await
 }
 
 fn sets_reserved_lineage_tag(args: &Value) -> bool {
@@ -386,6 +454,8 @@ fn external_executor_allows(name: &str) -> bool {
             name,
             "get_capabilities"
                 | "get_action"
+                | "wait_actions"
+                | "get_fleet_sweep"
                 | "cancel_action"
                 | "list_cloud_models"
                 | "list_cloud_accounts"
@@ -452,6 +522,44 @@ async fn authorize(
                 ))
             }
             _ => {}
+        }
+    }
+    if tool.definition.name == "get_fleet_sweep" {
+        if let Some(obj) = args.as_object_mut() {
+            if let Some(pmid) = obj.remove("parent_mission_id") {
+                if !pmid.is_null() {
+                    if let Some(existing) = obj.get("mission_id").filter(|v| !v.is_null()) {
+                        if existing != &pmid {
+                            return Err(ToolError::invalid(
+                                "Pass either `parent_mission_id` or `mission_id`, not conflicting values",
+                            ));
+                        }
+                    } else {
+                        obj.insert("mission_id".to_string(), pmid);
+                    }
+                }
+            }
+            if obj.get("mission_id").is_none_or(Value::is_null) {
+                if let Some(own) = p.mission_id {
+                    let user = AuthUser {
+                        id: p.sub.clone(),
+                        username: p.username.clone(),
+                    };
+                    let store = state.control.get_or_spawn(&user).await.mission_store;
+                    let effective = store
+                        .get_mission(own)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|m| direct_btw_parent_ids(&m.project.tags).into_iter().next())
+                        .unwrap_or(own);
+                    obj.insert("mission_id".to_string(), json!(effective.to_string()));
+                } else {
+                    return Err(ToolError::invalid(
+                        "Pass `parent_mission_id` when calling get_fleet_sweep from a missionless session",
+                    ));
+                }
+            }
         }
     }
     if args.get("parent_mission_id").is_some() || args.get("caller").is_some() {
@@ -576,9 +684,13 @@ async fn authorize(
                 .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
             if mission.project.project.as_deref() != Some(project) {
                 let allowed_btw_parent = field == "mission_id"
-                    && btw_parent_tool_allowed(&tool.definition.name)
                     && match owner_tags.as_deref() {
-                        Some(tags) => btw_associated_with_target(&store, tags, id).await,
+                        Some(tags) => {
+                            (btw_parent_tool_allowed(&tool.definition.name)
+                                && btw_associated_with_target(&store, tags, id).await)
+                                || (descendant_tree_read_tool_allowed(&tool.definition.name)
+                                    && btw_reads_parent_descendant_tree(&store, tags, id).await)
+                        }
                         None => false,
                     };
                 if allowed_btw_parent {
@@ -706,18 +818,24 @@ async fn authorize(
             .map_err(|_| ToolError::denied("Mission unavailable"))?
             .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
         // A /btw side agent (`btw-parent:<id>`, minted only by Core) may read and control
-        // its associated parent conversation (including its `fork-of:` lineage chain) by default.
+        // its associated parent conversation (including its `fork-of:` lineage chain) by default,
+        // and inherits read + `ask_mission` scope over `<id>`'s child/descendant mission tree.
         let allowed_btw_parent = field == "mission_id"
-            && btw_parent_tool_allowed(&tool.definition.name)
-            && btw_associated_with_target(&store, &owner.project.tags, id).await;
+            && ((btw_parent_tool_allowed(&tool.definition.name)
+                && btw_associated_with_target(&store, &owner.project.tags, id).await)
+                || (descendant_tree_read_tool_allowed(&tool.definition.name)
+                    && btw_reads_parent_descendant_tree(&store, &owner.project.tags, id).await));
         // A conversation fork (`fork-of:<id>`, minted only by Core when transferring a
         // conversation) continues the same coordinator session on a new harness:
         // read tools may inspect earlier versions in its fork chain, and it retains
         // child-mission read/control/supersede authority over workers spawned by earlier
-        // versions in `fork_chain`.
+        // versions in `fork_chain`, plus read + `ask_mission` scope over multi-hop descendants.
         let fork_child = m
             .parent_mission_id
             .is_some_and(|parent| fork_chain.contains(&parent));
+        let reads_descendant_tree = field == "mission_id"
+            && descendant_tree_read_tool_allowed(&tool.definition.name)
+            && target_in_descendant_tree(&store, &fork_chain, id).await;
         let reads_fork_lineage = field == "mission_id"
             && crate::api::mission_access::READ_TOOLS.contains(&tool.definition.name.as_str())
             && (fork_chain.contains(&id) || fork_child);
@@ -729,6 +847,7 @@ async fn authorize(
         if id != own
             && m.parent_mission_id != Some(own)
             && !allowed_btw_parent
+            && !reads_descendant_tree
             && !reads_fork_lineage
             && !controls_fork_child
         {
@@ -799,9 +918,14 @@ async fn authorize(
             managed_owner_check(&store, own, &id).await?;
             args["owner_mission_id"] = json!(own.to_string());
         }
-        // A mission reads its own budget and effective VM limits only.
+        // A mission reads its own budget and effective VM limits only; a `/btw`
+        // side-agent (`btw-parent:<id>`) inherits its parent conversation's pool.
         "get_budget" | "list_managed_machines" => {
-            args["mission_id"] = json!(own.to_string());
+            let effective_mission = direct_btw_parent_ids(&owner.project.tags)
+                .into_iter()
+                .next()
+                .unwrap_or(own);
+            args["mission_id"] = json!(effective_mission.to_string());
         }
         "destroy_managed_machine" | "extend_managed_machine" => {
             let id = args
@@ -1183,6 +1307,126 @@ async fn managed_owner_check(
     }
 }
 
+async fn resolve_mission_id_for_preflight(
+    store: &std::sync::Arc<dyn crate::api::mission_store::MissionStore>,
+    raw: &str,
+) -> Option<Uuid> {
+    let trimmed = raw.trim();
+    if let Ok(id) = Uuid::parse_str(trimmed) {
+        return Some(id);
+    }
+    if trimmed.len() < 4 || !trimmed.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let missions = store.list_missions(500, 0).await.ok()?;
+    let matches: Vec<Uuid> = missions
+        .into_iter()
+        .filter(|m| m.id.to_string().to_ascii_lowercase().starts_with(&lower))
+        .map(|m| m.id)
+        .collect();
+    (matches.len() == 1).then(|| matches[0])
+}
+
+async fn preflight_remote_continuation_mutation(
+    state: &Arc<AppState>,
+    user: &AuthUser,
+    call: &Call,
+) -> Result<(), ToolError> {
+    let Some(raw_mid) = call.arguments.get("mission_id").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let control = crate::api::control::control_for_user(state, user).await;
+    let Some(mid) = resolve_mission_id_for_preflight(&control.mission_store, raw_mid).await else {
+        return Ok(());
+    };
+    crate::api::control::cyber::validate_remote_mission(state, &control, mid)
+        .await
+        .map_err(|e| ToolError::invalid(&e))?;
+    let Ok(Some(placement)) = crate::api::control::remote_grok::placement(
+        &state.config.working_dir,
+        &control.mission_store,
+        mid,
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let Ok(Some(mission)) = control.mission_store.get_mission(mid).await else {
+        return Ok(());
+    };
+    if call.name == "send_message_to_mission"
+        && (call
+            .arguments
+            .get("github_pr")
+            .is_some_and(|v| !v.is_null())
+            || call.arguments.get("track").is_some_and(|v| !v.is_null())
+            || call.arguments.get("title").is_some_and(|v| !v.is_null()))
+    {
+        return Err(ToolError {
+            code: "remote_resume_requires_replacement".into(),
+            message: format!(
+                "{}: remote continuation supports content only; use a linked replacement for agent or writer identity changes",
+                crate::api::control::remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT
+            ),
+            accepted: "no".into(),
+            retryable: false,
+            action_id: None,
+        });
+    }
+    if call.name == "resume_mission"
+        && (call
+            .arguments
+            .get("clean_workspace")
+            .and_then(Value::as_bool)
+            == Some(true)
+            || call.arguments.get("skip_message").and_then(Value::as_bool) == Some(true)
+            || call
+                .arguments
+                .get("github_pr")
+                .is_some_and(|v| !v.is_null())
+            || call.arguments.get("track").is_some_and(|v| !v.is_null())
+            || call.arguments.get("title").is_some_and(|v| !v.is_null()))
+    {
+        return Err(ToolError {
+            code: "remote_resume_requires_replacement".into(),
+            message: format!(
+                "{}: remote continuation supports content only; use a linked replacement for workspace or writer identity changes",
+                crate::api::control::remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT
+            ),
+            accepted: "no".into(),
+            retryable: false,
+            action_id: None,
+        });
+    }
+    if let Err(err) = crate::api::control::remote_queue::check_remote_continuation_admissibility(
+        state, &control, &mission, &placement,
+    )
+    .await
+    {
+        let auto_replace_allowed = call.name == "send_message_to_mission"
+            && call
+                .arguments
+                .get("auto_replace_on_same_node")
+                .and_then(Value::as_bool)
+                == Some(true)
+            && !placement.live
+            && state.config.remote_nodes.enabled
+            && state.config.remote_nodes.node(&placement.node_id).is_some()
+            && !crate::managed::node_provably_gone(&placement.node_id).await;
+        if !auto_replace_allowed {
+            return Err(ToolError {
+                code: "remote_resume_requires_replacement".into(),
+                message: err,
+                accepted: "no".into(),
+                retryable: false,
+                action_id: None,
+            });
+        }
+    }
+    Ok(())
+}
+
 async fn authorize_job(
     state: &Arc<AppState>,
     p: &Principal,
@@ -1340,6 +1584,12 @@ async fn call_inner(
         )
         .map_err(|e| ToolError::denied(&e));
     }
+    if call.name == "wait_actions" {
+        return handle_wait_actions(&state, p, &call.arguments).await;
+    }
+    if call.name == "get_fleet_sweep" {
+        return handle_fleet_sweep(&state, p, &call.arguments).await;
+    }
     if call.name == "cancel_action" {
         return super::actions::cancel(
             &*state
@@ -1406,6 +1656,23 @@ async fn call_inner(
         super::assistant::validate_consult_params_and_models(&params, &options)
             .map_err(|e| ToolError::invalid(&e))?;
     }
+    if matches!(
+        call.name.as_str(),
+        "send_message_to_mission" | "resume_mission"
+    ) {
+        let existing_receipt = {
+            let conn = state
+                .projects
+                .connection
+                .lock()
+                .map_err(|_| ToolError::denied("Action store unavailable"))?;
+            super::actions::existing(&conn, p, call).map_err(|e| ToolError::invalid(&e))?
+        };
+        if let Some(receipt) = existing_receipt {
+            return Ok(receipt);
+        }
+        preflight_remote_continuation_mutation(&state, &user, call).await?;
+    }
     if tool.mutation {
         let mut issuer = p.clone();
         if is_wakeup(&call.name) {
@@ -1466,6 +1733,397 @@ async fn call_inner(
     }
     super::assistant::scrub_sensitive_json(&mut value);
     Ok(value)
+}
+
+async fn handle_wait_actions(
+    state: &Arc<AppState>,
+    p: &Principal,
+    args: &Value,
+) -> Result<Value, ToolError> {
+    let raw_ids = args["action_ids"]
+        .as_array()
+        .ok_or_else(|| ToolError::invalid("`action_ids` must be an array of action UUIDs"))?;
+    if raw_ids.is_empty() || raw_ids.len() > 64 {
+        return Err(ToolError::invalid(
+            "`action_ids` must contain between 1 and 64 action UUIDs",
+        ));
+    }
+    let mut action_ids = Vec::with_capacity(raw_ids.len());
+    for raw in raw_ids {
+        let id = raw
+            .as_str()
+            .and_then(|s| Uuid::parse_str(s.trim()).ok())
+            .ok_or_else(|| ToolError::invalid("Each entry in `action_ids` must be a valid UUID"))?;
+        action_ids.push(id.to_string());
+    }
+    let timeout_ms = args
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(15_000)
+        .min(30_000);
+    let return_when = match args.get("return_when").and_then(Value::as_str) {
+        None | Some("all") => "all",
+        Some("any") => "any",
+        Some(other) => {
+            return Err(ToolError::invalid(&format!(
+                "Invalid `return_when` '{other}'; expected 'all' or 'any'"
+            )))
+        }
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        let notified = super::actions::ACTION_SETTLED.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        let (mut receipts, settled_count) = {
+            let conn = state
+                .projects
+                .connection
+                .lock()
+                .map_err(|_| ToolError::denied("Action store unavailable"))?;
+            let mut receipts = Vec::with_capacity(action_ids.len());
+            let mut settled = 0usize;
+            for id in &action_ids {
+                let receipt =
+                    super::actions::read(&conn, p, id).map_err(|e| ToolError::denied(&e))?;
+                if super::actions::is_settled_state(receipt["state"].as_str().unwrap_or("")) {
+                    settled += 1;
+                }
+                receipts.push(receipt);
+            }
+            (receipts, settled)
+        };
+        for receipt in &mut receipts {
+            super::assistant::scrub_sensitive_json(receipt);
+        }
+
+        let total = receipts.len();
+        let satisfied = if return_when == "any" {
+            settled_count > 0
+        } else {
+            settled_count == total
+        };
+        let now = std::time::Instant::now();
+        if satisfied || now >= deadline {
+            return Ok(json!({
+                "all_settled": settled_count == total,
+                "settled_count": settled_count,
+                "pending_count": total.saturating_sub(settled_count),
+                "timed_out": !satisfied,
+                "actions": receipts,
+            }));
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let _ = tokio::time::timeout(
+            remaining.min(std::time::Duration::from_millis(250)),
+            notified,
+        )
+        .await;
+    }
+}
+
+async fn handle_fleet_sweep(
+    state: &Arc<AppState>,
+    p: &Principal,
+    args: &Value,
+) -> Result<Value, ToolError> {
+    let parent_id = args["mission_id"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s.trim()).ok())
+        .ok_or_else(|| ToolError::invalid("Invalid parent/mission UUID"))?;
+    let include_completed = args
+        .get("include_completed")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let offset = args
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(100_000) as usize;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(128)
+        .clamp(1, 256) as usize;
+    let include_machines = args
+        .get("include_machines")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    let actions_snapshot = if let Some(arr) = args
+        .get("action_ids")
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty())
+    {
+        let wait_ms = args
+            .get("wait_timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(25_000);
+        let wait_args = json!({
+            "action_ids": arr,
+            "timeout_ms": wait_ms,
+            "return_when": "all",
+        });
+        Some(handle_wait_actions(state, p, &wait_args).await?)
+    } else {
+        None
+    };
+
+    let user = AuthUser {
+        id: p.sub.clone(),
+        username: p.username.clone(),
+    };
+    let control = state.control.get_or_spawn(&user).await;
+    let store = control.mission_store.clone();
+    let _parent = store
+        .get_mission(parent_id)
+        .await
+        .map_err(|_| ToolError::denied("Mission store unavailable"))?
+        .ok_or_else(|| ToolError::invalid("Parent mission not found"))?;
+
+    const MAX_TRAVERSED_DESCENDANTS: usize = 4096;
+    let mut all_descendants = Vec::new();
+    let mut traversal_truncated = false;
+    let seed_roots = fork_lineage(&store, parent_id).await;
+    let mut visited: std::collections::HashSet<Uuid> = seed_roots.iter().copied().collect();
+    let mut queue: std::collections::VecDeque<Uuid> = seed_roots.into_iter().collect();
+    while let Some(cur) = queue.pop_front() {
+        if all_descendants.len() >= MAX_TRAVERSED_DESCENDANTS {
+            traversal_truncated = true;
+            break;
+        }
+        if let Ok(children) = store.get_child_missions(cur).await {
+            for child in children {
+                if !visited.insert(child.id) {
+                    continue;
+                }
+                for fork_ver in fork_lineage(&store, child.id).await {
+                    if visited.insert(fork_ver) {
+                        queue.push_back(fork_ver);
+                    }
+                }
+                queue.push_back(child.id);
+                all_descendants.push(child);
+                if all_descendants.len() >= MAX_TRAVERSED_DESCENDANTS {
+                    if !queue.is_empty() {
+                        traversal_truncated = true;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    let running_map: std::collections::HashMap<
+        Uuid,
+        crate::api::mission_runner::RunningMissionInfo,
+    > = crate::api::control::get_running_missions(&control)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|info| (info.mission_id, info))
+        .collect();
+
+    let mut matching_descendants = Vec::with_capacity(all_descendants.len());
+    let mut workers_active = 0usize;
+    for worker in all_descendants {
+        let is_terminal = worker.status.is_terminal()
+            || worker.status == crate::api::control::MissionStatus::Acknowledged;
+        if !is_terminal {
+            workers_active += 1;
+        }
+        if !include_completed && is_terminal {
+            continue;
+        }
+        matching_descendants.push((worker, is_terminal));
+    }
+
+    let workers_matched = matching_descendants.len();
+    let page_end = offset.saturating_add(limit).min(workers_matched);
+    let has_more_filtered = page_end < workers_matched;
+    let truncated = has_more_filtered || traversal_truncated;
+    let next_offset = if has_more_filtered {
+        Some(page_end)
+    } else {
+        None
+    };
+    let workers_omitted =
+        workers_matched.saturating_sub(page_end.saturating_sub(offset.min(workers_matched)));
+
+    let page_slice = if offset < workers_matched {
+        &matching_descendants[offset..page_end]
+    } else {
+        &[][..]
+    };
+
+    let mut workers = Vec::with_capacity(page_slice.len());
+    let mut in_flight_count = 0usize;
+    let mut loop_count = 0usize;
+    for (worker, _is_terminal) in page_slice {
+        let stored_events = store
+            .get_latest_events(worker.id, 60)
+            .await
+            .unwrap_or_default();
+        let trace_events: Vec<Value> = stored_events
+            .into_iter()
+            .map(|ev| {
+                json!({
+                    "sequence": ev.sequence,
+                    "event_type": ev.event_type,
+                    "timestamp": ev.timestamp,
+                    "tool_call_id": ev.tool_call_id,
+                    "tool_name": ev.tool_name,
+                    "content": ev.content,
+                    "metadata": ev.metadata,
+                })
+            })
+            .collect();
+        let (signals, suspected_loop, recent_errors, trace_tool_calls) =
+            super::assistant::analyze_trace_events_json(&trace_events);
+        if !suspected_loop.is_null() {
+            loop_count += 1;
+        }
+        let live_info = running_map.get(&worker.id);
+        let tool_call_in_flight = live_info.is_some_and(|l| l.tool_call_in_flight);
+        if tool_call_in_flight {
+            in_flight_count += 1;
+        }
+        let placement = crate::api::control::remote_grok::placement(
+            &state.config.working_dir,
+            &store,
+            worker.id,
+        )
+        .await
+        .ok()
+        .flatten();
+        let remote_node_id = live_info
+            .and_then(|l| l.remote_node_id.clone())
+            .or_else(|| placement.as_ref().map(|pl| pl.node_id.clone()));
+        let live_val = match live_info {
+            Some(info) => serde_json::to_value(info).unwrap_or(Value::Null),
+            None => Value::Null,
+        };
+        workers.push(json!({
+            "mission_id": worker.id,
+            "parent_mission_id": worker.parent_mission_id,
+            "title": worker.title,
+            "status": worker.status.to_string(),
+            "backend": worker.backend,
+            "model_override": worker.model_override,
+            "project": worker.project.project,
+            "track": worker.project.track,
+            "github_pr": worker.project.github_pr,
+            "remote_node_id": remote_node_id,
+            "live": live_val,
+            "tool_call_in_flight": tool_call_in_flight,
+            "seconds_since_activity": live_info.map(|l| l.seconds_since_activity),
+            "signals": signals,
+            "suspected_loop": suspected_loop,
+            "recent_errors": recent_errors,
+            "trace_tool_calls": trace_tool_calls,
+            "updated_at": worker.updated_at,
+        }));
+    }
+
+    let now = chrono::Utc::now();
+    let mut machines_val = json!([]);
+    let mut budget_val = Value::Null;
+    let mut vms_online = 0usize;
+    let mut vms_near_hard_cap = 0usize;
+    if include_machines {
+        if let Some(mgr) = crate::managed::global() {
+            let mut view = mgr.list(24).await;
+            view.machines.retain(|machine| {
+                machine.provisioning_mode.is_worker()
+                    || machine.owner_user_id.as_deref() == Some(user.id.as_str())
+            });
+            crate::api::managed_machines::filter_machines_to_own_pool(
+                &store,
+                &user.id,
+                parent_id,
+                &mut view.machines,
+            )
+            .await;
+            view.budget = mgr.visible_budget(&user.id).await;
+            let mut list_json = serde_json::to_value(&view).unwrap_or(Value::Null);
+            if let Ok(b_view) = crate::api::mission_budget::view(&store, &user.id, parent_id).await
+            {
+                if let Ok(b_json) = serde_json::to_value(&b_view) {
+                    if let Some(obj) = list_json.as_object_mut() {
+                        if let Some(limits) = b_json.get("effective_vm_limits") {
+                            obj.insert("effective_vm_limits".to_string(), limits.clone());
+                        }
+                        if let Some(summary) = super::assistant::summarize_mission_budget(&b_json) {
+                            obj.insert("mission_budget".to_string(), summary.clone());
+                            budget_val = summary;
+                        }
+                    }
+                    if budget_val.is_null() {
+                        budget_val = b_json;
+                    }
+                }
+            }
+            let compacted = super::assistant::compact_managed_list(&list_json);
+            if let Some(arr) = compacted.get("machines").and_then(Value::as_array) {
+                for m in arr {
+                    if m.get("state").and_then(Value::as_str) == Some("online") {
+                        vms_online += 1;
+                        let near_cap = ["hard_cap_at", "expires_at"].iter().any(|field| {
+                            m.get(*field)
+                                .and_then(Value::as_str)
+                                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                                .is_some_and(|dt| {
+                                    (dt.with_timezone(&chrono::Utc) - now).num_minutes() <= 30
+                                })
+                        });
+                        if near_cap {
+                            vms_near_hard_cap += 1;
+                        }
+                    }
+                }
+            }
+            machines_val = compacted
+                .get("machines")
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            if budget_val.is_null() {
+                budget_val = compacted.get("budget").cloned().unwrap_or(Value::Null);
+            }
+        }
+    }
+
+    let actions_pending = actions_snapshot
+        .as_ref()
+        .and_then(|s| s.get("pending_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mut out = json!({
+        "parent_mission_id": parent_id,
+        "generated_at": now.to_rfc3339(),
+        "truncated": truncated,
+        "next_offset": next_offset,
+        "summary": {
+            "workers_total": workers_matched,
+            "workers_returned": workers.len(),
+            "workers_omitted": workers_omitted,
+            "workers_active": workers_active,
+            "truncated": truncated,
+            "next_offset": next_offset,
+            "tool_call_in_flight": in_flight_count,
+            "suspected_loops": loop_count,
+            "vms_online": vms_online,
+            "vms_near_hard_cap": vms_near_hard_cap,
+            "actions_pending": actions_pending,
+        },
+        "workers": workers,
+        "machines": machines_val,
+        "budget": budget_val,
+        "actions": actions_snapshot,
+    });
+    super::assistant::scrub_sensitive_json(&mut out);
+    Ok(out)
 }
 
 /// One durable dispatcher per Core process; queued actions survive a restart.
@@ -2579,6 +3237,81 @@ mod tests {
         assert!(external_executor_allows("send_message_to_mission"));
         assert!(crate::api::mission_access::READ_TOOLS.contains(&"get_cloud_execution"));
         assert!(crate::api::mission_access::CONTROL_TOOLS.contains(&"send_message_to_mission"));
+    }
+
+    #[tokio::test]
+    async fn btw_and_ancestor_inherit_descendant_tree_read_and_ask_scope() {
+        use crate::api::mission_store::{InMemoryMissionStore, MissionProjectPatch, MissionStore};
+
+        let store: Arc<dyn MissionStore> = Arc::new(InMemoryMissionStore::new());
+        let root = store
+            .create_mission(Some("Root Coordinator"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let child = store
+            .create_mission_with_parent(
+                Some("Boat Worker A"),
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                Some(root.id),
+                None,
+            )
+            .await
+            .unwrap();
+        let grandchild = store
+            .create_mission_with_parent(
+                Some("Nested Sub-Worker"),
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                Some(child.id),
+                None,
+            )
+            .await
+            .unwrap();
+        let unrelated = store
+            .create_mission(Some("Unrelated Root"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        let btw = store
+            .create_mission(Some("Side · /btw"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let btw_tags = vec![format!("btw-parent:{}", root.id), "btw-subagent".into()];
+        store
+            .update_mission_project(
+                btw.id,
+                MissionProjectPatch {
+                    tags: Some(btw_tags.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(btw_reads_parent_descendant_tree(&store, &btw_tags, child.id).await);
+        assert!(btw_reads_parent_descendant_tree(&store, &btw_tags, grandchild.id).await);
+        assert!(!btw_reads_parent_descendant_tree(&store, &btw_tags, unrelated.id).await);
+        assert!(target_in_descendant_tree(&store, &[root.id], grandchild.id).await);
+        assert!(!target_in_descendant_tree(&store, &[root.id], unrelated.id).await);
+
+        assert!(descendant_tree_read_tool_allowed("get_mission"));
+        assert!(descendant_tree_read_tool_allowed("get_mission_events"));
+        assert!(descendant_tree_read_tool_allowed("ask_mission"));
+        assert!(descendant_tree_read_tool_allowed("get_fleet_sweep"));
+        assert!(!descendant_tree_read_tool_allowed(
+            "send_message_to_mission"
+        ));
     }
 }
 

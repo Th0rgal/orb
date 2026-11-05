@@ -90,6 +90,7 @@ pub(super) fn spawn_control_session(
         dispatch_capacity: Arc::new(RwLock::new(None)),
         mission_store: Arc::clone(&mission_store),
         mission_search_cache,
+        working_dir: config.working_dir.clone(),
     };
 
     // Mission-status alerts are event-driven for low latency. The existing
@@ -647,6 +648,7 @@ pub(super) async fn control_actor_loop(
     // running" (e.g. a 12-minute `lake build`). See stall_severity().
     let main_runner_active_tool_calls: std::sync::Arc<std::sync::atomic::AtomicUsize> =
         std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut main_runner_steer_after_tool = false;
     // Deadline for force-reaping a runner whose cancel token was fired
     // but whose JoinHandle never resolved. This handles the "zombie
     // runner" case: the underlying CLI subprocess died (or never reacts
@@ -4020,9 +4022,11 @@ pub(super) async fn control_actor_loop(
                                         }
                                     }
                                 }
-                                if let Err(error) = continuations::stop_for_mission(&mission_store, mission_id).await {
-                                    let _ = respond.send(Err(format!("Failed to fence mission wake-ups: {error}")));
-                                    continue;
+                                if !keep_remote_queue {
+                                    if let Err(error) = continuations::stop_for_mission(&mission_store, mission_id).await {
+                                        let _ = respond.send(Err(format!("Failed to fence mission wake-ups: {error}")));
+                                        continue;
+                                    }
                                 }
                                 // Helper: cascade-cancel all child missions of the given parent.
                                 async fn cancel_child_missions(
@@ -4098,8 +4102,10 @@ pub(super) async fn control_actor_loop(
                                     // Don't send an Error event here — the turn will complete and
                                     // emit its terminal AssistantMessage (resumable=true), matching
                                     // main-runner cancellation below and avoiding red error cards.
-                                    // Cascade cancel child missions
-                                    cancel_child_missions(mission_id, &mission_store, &mut parallel_runners, &events_tx, &config.working_dir).await;
+                                    if !keep_remote_queue {
+                                        // Cascade cancel child missions on explicit Stop only
+                                        cancel_child_missions(mission_id, &mission_store, &mut parallel_runners, &events_tx, &config.working_dir).await;
+                                    }
                                     if let Err(error) = persist_control_queue_if_changed(
                                         &mission_store,
                                         &session_user_id,
@@ -4152,8 +4158,10 @@ pub(super) async fn control_actor_loop(
                                             // Don't send Error event here - the task will complete and send
                                             // an AssistantMessage with resumable=true when it finishes.
                                             // Sending both causes duplicate UI messages.
-                                            // Cascade cancel child missions
-                                            cancel_child_missions(mission_id, &mission_store, &mut parallel_runners, &events_tx, &config.working_dir).await;
+                                            if !keep_remote_queue {
+                                                // Cascade cancel child missions on explicit Stop only
+                                                cancel_child_missions(mission_id, &mission_store, &mut parallel_runners, &events_tx, &config.working_dir).await;
+                                            }
                                             let _ = respond.send(Ok(CancelMissionOutcome::Cancelled));
                                         } else {
                                             let _ = respond.send(Err("Mission not currently executing".to_string()));
@@ -4224,20 +4232,22 @@ pub(super) async fn control_actor_loop(
                                                         summary: None,
                                                     },
                                                 );
-                                                close_mission_desktop_sessions(
-                                                    &mission_store,
-                                                    mission_id,
-                                                    &config.working_dir,
-                                                )
-                                                .await;
-                                                cancel_child_missions(
-                                                    mission_id,
-                                                    &mission_store,
-                                                    &mut parallel_runners,
-                                                    &events_tx,
-                                                    &config.working_dir,
-                                                )
-                                                .await;
+                                                if !keep_remote_queue {
+                                                    close_mission_desktop_sessions(
+                                                        &mission_store,
+                                                        mission_id,
+                                                        &config.working_dir,
+                                                    )
+                                                    .await;
+                                                    cancel_child_missions(
+                                                        mission_id,
+                                                        &mission_store,
+                                                        &mut parallel_runners,
+                                                        &events_tx,
+                                                        &config.working_dir,
+                                                    )
+                                                    .await;
+                                                }
                                                 let _ = respond.send(Ok(CancelMissionOutcome::Cancelled));
                                             }
                                             Ok(None) => {
@@ -4407,6 +4417,15 @@ pub(super) async fn control_actor_loop(
                                             generation: running_run.as_ref().map(|run| run.generation),
                                             heartbeat_at: running_run.as_ref().map(|run| run.heartbeat_at.clone()),
                                             scope_unit: running_run.as_ref().and_then(|run| run.scope_unit.clone()),
+                                            remote_node_id: running_run
+                                                .as_ref()
+                                                .and_then(|run| run.scope_unit.as_deref())
+                                                .and_then(|s| s.strip_prefix("remote-node:"))
+                                                .map(str::to_string),
+                                            remote_job_id: running_run
+                                                .as_ref()
+                                                .and_then(|run| run.owner_actor_id.strip_prefix("remote-job:"))
+                                                .and_then(|s| Uuid::parse_str(s).ok()),
                                             status_conflict: running_run
                                                 .is_none()
                                                 .then(|| "actor_without_durable_run".to_string()),
@@ -5105,6 +5124,7 @@ pub(super) async fn control_actor_loop(
                             ControlCommand::SendQueuedNow {
                                 message_id,
                                 interrupt,
+                                steer_after_tool,
                                 respond,
                             } => {
                                 let exists_in_queue = queue.iter().any(|(id, _, _, _, _)| *id == message_id)
@@ -5115,7 +5135,8 @@ pub(super) async fn control_actor_loop(
                                     let _ = respond.send(Err("message not in queue".to_string()));
                                     continue;
                                 }
-                                if let Some((mid, position, message)) = take_queued_by_id(
+                                let mut did_interrupt_tool: Option<bool> = None;
+                                if let Some((mid, position, mut message)) = take_queued_by_id(
                                     message_id,
                                     running_mission_id,
                                     &mut queue,
@@ -5151,6 +5172,22 @@ pub(super) async fn control_actor_loop(
                                             }
                                             let _ = respond.send(Err(error));
                                             continue;
+                                        }
+                                    }
+                                    if interrupt && did_interrupt_tool.is_none() {
+                                        let signalled = super::super::runners::live_session::interrupt_child_tools(mid);
+                                        if signalled > 0 {
+                                            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                                            if !message.content.starts_with(super::message_handlers::INTERRUPTED_TOOL_SYNTHETIC_BANNER) {
+                                                message.content = format!(
+                                                    "{}{}",
+                                                    super::message_handlers::INTERRUPTED_TOOL_SYNTHETIC_BANNER,
+                                                    message.content
+                                                );
+                                            }
+                                            did_interrupt_tool = Some(true);
+                                        } else {
+                                            did_interrupt_tool = Some(false);
                                         }
                                     }
                                     let persisted = persist_control_queue_if_changed(
@@ -5203,7 +5240,9 @@ pub(super) async fn control_actor_loop(
                                             }
                                         }
                                         prune_empty_provisional_runners(&mut parallel_runners);
-                                        let _ = respond.send(Ok(SendQueuedNowOutcome::DeliveredLive));
+                                        let _ = respond.send(Ok(SendQueuedNowOutcome::DeliveredLive {
+                                            interrupted_tool: did_interrupt_tool,
+                                        }));
                                         continue;
                                     }
                                     if let Err(error) = &persisted {
@@ -5240,12 +5279,12 @@ pub(super) async fn control_actor_loop(
                                     .await;
                                 }
 
-                                if !interrupt {
+                                if !interrupt && !steer_after_tool {
                                     let _ = respond.send(Ok(SendQueuedNowOutcome::NotDelivered));
                                     continue;
                                 }
 
-                                let Some((target_mid, position, message)) = take_queued_for_promotion(
+                                let Some((target_mid, position, mut message)) = take_queued_for_promotion(
                                     message_id,
                                     running_mission_id,
                                     &mut queue,
@@ -5287,6 +5326,22 @@ pub(super) async fn control_actor_loop(
                                             continue;
                                         }
                                     }
+                                    if interrupt && did_interrupt_tool.is_none() {
+                                        let signalled = super::super::runners::live_session::interrupt_child_tools(mid);
+                                        if signalled > 0 {
+                                            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                                            if !message.content.starts_with(super::message_handlers::INTERRUPTED_TOOL_SYNTHETIC_BANNER) {
+                                                message.content = format!(
+                                                    "{}{}",
+                                                    super::message_handlers::INTERRUPTED_TOOL_SYNTHETIC_BANNER,
+                                                    message.content
+                                                );
+                                            }
+                                            did_interrupt_tool = Some(true);
+                                        } else {
+                                            did_interrupt_tool = Some(false);
+                                        }
+                                    }
                                 }
 
                                 push_front_promoted_message(
@@ -5315,41 +5370,62 @@ pub(super) async fn control_actor_loop(
 
                                 if let Some(mid) = target_mid {
                                     if let Some(runner) = parallel_runners.get_mut(&mid) {
-                                        runner.interrupt_for_promoted_followup();
-                                        if runner.is_running() {
-                                            if let Some(run) = runner.durable_run.as_ref() {
-                                                let _ = mission_store
-                                                    .heartbeat_mission_run(
-                                                        run.run_id,
-                                                        run.generation,
-                                                        MissionExecutionState::Stopping,
-                                                        None,
-                                                    )
-                                                    .await;
+                                        let in_flight = runner
+                                            .active_tool_calls
+                                            .load(std::sync::atomic::Ordering::Relaxed);
+                                        if interrupt || in_flight == 0 {
+                                            runner
+                                                .steer_after_tool
+                                                .store(false, std::sync::atomic::Ordering::Relaxed);
+                                            runner.interrupt_for_promoted_followup();
+                                            if runner.is_running() {
+                                                if let Some(run) = runner.durable_run.as_ref() {
+                                                    let _ = mission_store
+                                                        .heartbeat_mission_run(
+                                                            run.run_id,
+                                                            run.generation,
+                                                            MissionExecutionState::Stopping,
+                                                            None,
+                                                        )
+                                                        .await;
+                                                }
                                             }
+                                        } else if steer_after_tool {
+                                            runner
+                                                .steer_after_tool
+                                                .store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
                                     } else if running_mission_id == Some(mid) {
-                                        if let Some(token) = &running_cancel {
-                                            token.cancel();
-                                            if let Some(run) = running_run.as_ref() {
-                                                let _ = mission_store
-                                                    .heartbeat_mission_run(
-                                                        run.run_id,
-                                                        run.generation,
-                                                        MissionExecutionState::Stopping,
-                                                        None,
-                                                    )
-                                                    .await;
+                                        let in_flight = main_runner_active_tool_calls
+                                            .load(std::sync::atomic::Ordering::Relaxed);
+                                        if interrupt || in_flight == 0 {
+                                            main_runner_steer_after_tool = false;
+                                            if let Some(token) = &running_cancel {
+                                                token.cancel();
+                                                if let Some(run) = running_run.as_ref() {
+                                                    let _ = mission_store
+                                                        .heartbeat_mission_run(
+                                                            run.run_id,
+                                                            run.generation,
+                                                            MissionExecutionState::Stopping,
+                                                            None,
+                                                        )
+                                                        .await;
+                                                }
+                                                runner_force_clear_deadline = Some(
+                                                    tokio::time::Instant::now()
+                                                        + RUNNER_FORCE_CLEAR_GRACE,
+                                                );
                                             }
-                                            runner_force_clear_deadline = Some(
-                                                tokio::time::Instant::now()
-                                                    + RUNNER_FORCE_CLEAR_GRACE,
-                                            );
+                                        } else if steer_after_tool {
+                                            main_runner_steer_after_tool = true;
                                         }
                                     }
                                 }
 
-                                let _ = respond.send(Ok(SendQueuedNowOutcome::Promoted));
+                                let _ = respond.send(Ok(SendQueuedNowOutcome::Promoted {
+                                    interrupted_tool: did_interrupt_tool,
+                                }));
                             }
                             ControlCommand::ClearQueue { mission_id, respond } => {
                                 let main_mission_id = if running.is_some() {
@@ -5571,6 +5647,7 @@ pub(super) async fn control_actor_loop(
                             main_runner_activity = None;
                             main_runner_active_tool_calls
                                 .store(0, std::sync::atomic::Ordering::Relaxed);
+                            main_runner_steer_after_tool = false;
                             // Runner cleared itself; cancel the force-clear watchdog.
                             runner_force_clear_deadline = None;
                             let mut completed_terminal_reason = None;
@@ -6259,6 +6336,7 @@ pub(super) async fn control_actor_loop(
                             main_runner_subtasks.clear();
                             main_runner_active_tool_calls
                                 .store(0, std::sync::atomic::Ordering::Relaxed);
+                            main_runner_steer_after_tool = false;
                             let user_id_for_turn = control_hub.identities.read().await.get(&session_user_id).cloned();
                             let turn_mission_store = mission_store.clone();
                             let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
@@ -7205,6 +7283,7 @@ pub(super) async fn control_actor_loop(
                         main_runner_activity = None;
                         main_runner_active_tool_calls
                             .store(0, std::sync::atomic::Ordering::Relaxed);
+                        main_runner_steer_after_tool = false;
                         runner_force_clear_deadline = None;
                         if let Some(run) = running_run.take() {
                             let _ = mission_store
@@ -7533,6 +7612,30 @@ pub(super) async fn control_actor_loop(
                                                     std::sync::atomic::Ordering::Relaxed,
                                                     |c| if c > 0 { Some(c - 1) } else { None },
                                                 );
+                                            if main_runner_steer_after_tool
+                                                && main_runner_active_tool_calls
+                                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                                    == 0
+                                            {
+                                                main_runner_steer_after_tool = false;
+                                                if let Some(token) = &running_cancel {
+                                                    token.cancel();
+                                                    if let Some(run) = running_run.as_ref() {
+                                                        let _ = mission_store
+                                                            .heartbeat_mission_run(
+                                                                run.run_id,
+                                                                run.generation,
+                                                                MissionExecutionState::Stopping,
+                                                                None,
+                                                            )
+                                                            .await;
+                                                    }
+                                                    runner_force_clear_deadline = Some(
+                                                        tokio::time::Instant::now()
+                                                            + RUNNER_FORCE_CLEAR_GRACE,
+                                                    );
+                                                }
+                                            }
                                         } else if let Some(runner) = parallel_runners.get_mut(mid) {
                                             runner.current_activity = None;
                                             let _ = runner.active_tool_calls.fetch_update(
@@ -7540,6 +7643,32 @@ pub(super) async fn control_actor_loop(
                                                 std::sync::atomic::Ordering::Relaxed,
                                                 |c| if c > 0 { Some(c - 1) } else { None },
                                             );
+                                            if runner
+                                                .steer_after_tool
+                                                .load(std::sync::atomic::Ordering::Relaxed)
+                                                && runner
+                                                    .active_tool_calls
+                                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                                    == 0
+                                            {
+                                                runner.steer_after_tool.store(
+                                                    false,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                                runner.interrupt_for_promoted_followup();
+                                                if runner.is_running() {
+                                                    if let Some(run) = runner.durable_run.as_ref() {
+                                                        let _ = mission_store
+                                                            .heartbeat_mission_run(
+                                                                run.run_id,
+                                                                run.generation,
+                                                                MissionExecutionState::Stopping,
+                                                                None,
+                                                            )
+                                                            .await;
+                                                    }
+                                                }
+                                            }
                                         }
 
                                         let durable_run = if running_mission_id == Some(*mid) {

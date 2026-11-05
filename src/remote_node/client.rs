@@ -5,8 +5,9 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use super::protocol::{
-    CancelJobResponse, ExecuteResponse, ForceJobRequest, ForceJobResponse, JobLogChunk,
-    LeaseRequest, NodeHeartbeat, NodeJobStatus, SubmitJobRequest, SubmitJobResponse,
+    CancelJobResponse, ExecuteResponse, ForceJobRequest, ForceJobResponse, InterruptJobRequest,
+    InterruptJobResponse, JobLogChunk, LeaseRequest, NodeHeartbeat, NodeJobStatus,
+    SubmitJobRequest, SubmitJobResponse,
 };
 use super::{RemoteNodeConfig, RemoteNodeError};
 
@@ -295,6 +296,39 @@ impl RemoteNodeClient {
         }
         response
             .json::<CancelJobResponse>()
+            .await
+            .map_err(|e| RemoteNodeError::Request(e.to_string()))
+    }
+
+    /// Interrupt an in-flight child tool (`interrupt_now`) or steer after the
+    /// current tool call finishes (`steer_between_tools`) via `POST /jobs/:id/interrupt`.
+    pub async fn interrupt_job(
+        &self,
+        node: &RemoteNodeConfig,
+        shared_token: &str,
+        job_id: Uuid,
+        request: &InterruptJobRequest,
+    ) -> Result<InterruptJobResponse, RemoteNodeError> {
+        let url = format!("{}/jobs/{}/interrupt", node.base_url, job_id);
+        let response = self
+            .http
+            .post(url)
+            .timeout(JOB_STATUS_TIMEOUT)
+            .bearer_auth(shared_token)
+            .json(request)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(RemoteNodeError::Rejected {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        response
+            .json::<InterruptJobResponse>()
             .await
             .map_err(|e| RemoteNodeError::Request(e.to_string()))
     }

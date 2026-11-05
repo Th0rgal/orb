@@ -89,6 +89,11 @@ pub struct ReapFacts {
     /// Last time the node was seen busy (or its creation time).
     pub idle_since: DateTime<Utc>,
     pub owner: Owner,
+    /// Optional extended grace window (minutes) to retain an auto-managed child
+    /// VM after its child owner finishes while `parent_alive` is still true, so
+    /// the parent's `schedule_wakeup` can inspect or fork uncommitted files.
+    pub retain_for_parent_minutes: Option<i64>,
+    pub parent_alive: bool,
     /// Reap already scheduled by an earlier pass: (reason, due time). Keeps a
     /// grace that is counted from first observation stable across passes.
     pub scheduled: Option<(String, DateTime<Utc>)>,
@@ -181,7 +186,13 @@ pub fn decide(f: &ReapFacts, p: &LifecyclePolicy) -> ReapDecision {
         ),
         Owner::Mission(Some(OwnerState::Terminal { status })) => {
             let reason = format!("owner_{status}");
-            let due = grace_due(f, &reason, p.ended_grace_minutes);
+            let grace = if f.parent_alive {
+                p.ended_grace_minutes
+                    .max(f.retain_for_parent_minutes.unwrap_or(0))
+            } else {
+                p.ended_grace_minutes
+            };
+            let due = grace_due(f, &reason, grace);
             (VmOwnerClass::TerminalOrMissing, reason, due)
         }
         Owner::Mission(Some(OwnerState::Missing)) => {
@@ -245,11 +256,14 @@ pub fn decide(f: &ReapFacts, p: &LifecyclePolicy) -> ReapDecision {
 }
 
 /// A grace counted from the first pass that saw the condition: reuse the
-/// earlier schedule when it is for the same reason.
+/// earlier schedule when it is for the same reason, clamped to `now + minutes`
+/// so a shortened grace (e.g. parent finishing after `retain_for_parent_minutes`)
+/// takes effect promptly instead of preserving the stale extended deadline.
 fn grace_due(f: &ReapFacts, reason: &str, minutes: i64) -> DateTime<Utc> {
+    let fresh_due = f.now + Duration::minutes(minutes);
     match &f.scheduled {
-        Some((r, at)) if r == reason => *at,
-        _ => f.now + Duration::minutes(minutes),
+        Some((r, at)) if r == reason => (*at).min(fresh_due),
+        _ => fresh_due,
     }
 }
 
@@ -322,6 +336,8 @@ mod tests {
             supports_free_stop: false,
             idle_since: t(-5),
             owner,
+            retain_for_parent_minutes: None,
+            parent_alive: false,
             scheduled: None,
         }
     }
@@ -568,5 +584,75 @@ mod tests {
         ] {
             assert_eq!(mission_of_orb_session(s), None, "{s}");
         }
+    }
+
+    #[test]
+    fn retain_for_parent_minutes_extends_terminal_grace_only_while_parent_alive() {
+        let mut f = facts(Owner::Mission(Some(OwnerState::Terminal {
+            status: "completed",
+        })));
+        f.retain_for_parent_minutes = Some(20);
+        f.parent_alive = true;
+        // Parent alive: grace is extended to 20 minutes instead of 5.
+        assert_eq!(
+            decide(&f, &P),
+            ReapDecision::Schedule {
+                reason: "owner_completed".into(),
+                at: t(20),
+            }
+        );
+        f.now = t(10);
+        f.scheduled = Some(("owner_completed".into(), t(20)));
+        assert_eq!(
+            decide(&f, &P),
+            ReapDecision::Schedule {
+                reason: "owner_completed".into(),
+                at: t(20),
+            }
+        );
+        f.now = t(20);
+        assert_eq!(decide(&f, &P), destroy("owner_completed"));
+
+        // If the parent finishes mid-retention after an extended schedule was persisted,
+        // the next pass shortens the retained deadline to `now + ended_grace_minutes` (5m)
+        // rather than keeping the stale 20-minute deadline.
+        let mut parent_finished_later = facts(Owner::Mission(Some(OwnerState::Terminal {
+            status: "completed",
+        })));
+        parent_finished_later.retain_for_parent_minutes = Some(20);
+        parent_finished_later.scheduled = Some(("owner_completed".into(), t(20)));
+        parent_finished_later.now = t(2);
+        parent_finished_later.parent_alive = false;
+        assert_eq!(
+            decide(&parent_finished_later, &P),
+            ReapDecision::Schedule {
+                reason: "owner_completed".into(),
+                at: t(7),
+            }
+        );
+
+        // And if an existing normal deadline is already sooner than `now + 5m`, keep the sooner one.
+        parent_finished_later.now = t(18);
+        assert_eq!(
+            decide(&parent_finished_later, &P),
+            ReapDecision::Schedule {
+                reason: "owner_completed".into(),
+                at: t(20),
+            }
+        );
+
+        // When parent is already finished on first observation, normal ended_grace_minutes (5m) applies.
+        let mut dead_parent = facts(Owner::Mission(Some(OwnerState::Terminal {
+            status: "completed",
+        })));
+        dead_parent.retain_for_parent_minutes = Some(20);
+        dead_parent.parent_alive = false;
+        assert_eq!(
+            decide(&dead_parent, &P),
+            ReapDecision::Schedule {
+                reason: "owner_completed".into(),
+                at: t(5),
+            }
+        );
     }
 }

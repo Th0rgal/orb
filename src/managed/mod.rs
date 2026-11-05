@@ -271,13 +271,23 @@ pub struct SpawnQuote {
     pub ram_gb: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ProviderMachine {
     pub provider_id: String,
     pub state: String,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletable_at: Option<DateTime<Utc>>,
+    /// Structured warnings produced during provisioning (e.g. Boost `repo=`
+    /// HTTP 403 overlay fallback to `lean_mode="off"`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Effective Lean overlay mode applied by the provider when adjusted via fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_lean_mode: Option<String>,
+    /// Effective warm repo applied by the provider (`Some(None)` clears `repo`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_repo: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -853,6 +863,31 @@ pub struct ManagedMachine {
     /// Optional Lean overlay mode (`"auto"`, `"cache-only"`, `"off"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lean_mode: Option<String>,
+    /// Structured provisioning warnings (e.g. Boost `repo=` 403 auto-fallback).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Extended grace (minutes) to retain an auto-managed child VM after its
+    /// child owner terminates while its parent mission is still alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_vm_for_parent_minutes: Option<u64>,
+    /// Optional custom shell command executed out-of-band before TTL/hard-cap kill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_stop_hook: Option<String>,
+    /// Timestamp when the out-of-band pre-expiry / pre-720m hook executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_stop_ran_at: Option<DateTime<Utc>>,
+    /// Trigger label (`"pre_720m_hard_cap"`, `"pre_ttl_expiry"`, `"pre_destroy"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_stop_trigger: Option<String>,
+    /// Bounded JSON summary of the pre-stop checkpoint / hook execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_stop_summary: Option<Value>,
+    /// Computed hard lifetime ceiling (`created_at + max_ttl_minutes`, default 720m).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_cap_at: Option<DateTime<Utc>>,
+    /// Whether `fork_managed_machine` can clone this VM right now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forkable: bool,
 }
 
 impl ManagedMachine {
@@ -981,6 +1016,13 @@ pub struct SpawnRequest {
     /// Optional `boost.ci` RAM override in MiB (`4096..=131072`, multiple of `1024`).
     #[serde(default)]
     pub memory_mib: Option<u32>,
+    /// Optional grace window (minutes, `0..=720`) to retain this VM after its
+    /// owning child mission ends while its parent mission is still alive.
+    #[serde(default)]
+    pub retain_vm_for_parent_minutes: Option<u64>,
+    /// Optional shell command executed out-of-band on the VM before TTL/hard-cap kill.
+    #[serde(default)]
+    pub pre_stop_hook: Option<String>,
     /// Root ancestor mission ID resolved server-side from mission lineage.
     #[serde(skip)]
     pub root_mission_id: Option<String>,
@@ -1079,6 +1121,15 @@ impl ManagedError {
                 ),
             );
         }
+        if boost::is_repo_overlay_forbidden_or_unavailable(&err) {
+            return Self::new(
+                "boost_repo_overlay_unavailable",
+                422,
+                format!(
+                    "{err} — warm repository overlay is private or not connected on boost.ci; omit repo or pass lean_mode=\"auto\" / lean_mode=\"off\" (alias \"none\")"
+                ),
+            );
+        }
         if lower.contains("unable to resolve project_id") {
             return Self::new("provider_misconfigured", 422, err);
         }
@@ -1142,6 +1193,15 @@ pub type ActiveMissionsProbe = Arc<
     dyn Fn() -> std::pin::Pin<
             Box<dyn std::future::Future<Output = HashMap<String, Vec<String>>> + Send>,
         > + Send
+        + Sync,
+>;
+
+pub type MissionRootsProbe = Arc<
+    dyn Fn(
+            String,
+            Vec<String>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<String>> + Send>>
+        + Send
         + Sync,
 >;
 
@@ -1484,6 +1544,7 @@ pub struct ManagedManager {
     pub relay: relay::RelayHub,
     owner_probe: std::sync::RwLock<Option<OwnerProbe>>,
     active_missions_probe: std::sync::RwLock<Option<ActiveMissionsProbe>>,
+    mission_roots_probe: std::sync::RwLock<Option<MissionRootsProbe>>,
     runtime: std::sync::RwLock<RuntimeSettings>,
     /// Reconciler memory (not persisted; a restart restarts the graces).
     reconcile_state: Mutex<ReconcileState>,
@@ -1826,6 +1887,7 @@ impl ManagedManager {
             relay: relay::RelayHub::default(),
             owner_probe: std::sync::RwLock::new(None),
             active_missions_probe: std::sync::RwLock::new(None),
+            mission_roots_probe: std::sync::RwLock::new(None),
             runtime: std::sync::RwLock::new(RuntimeSettings::default()),
             reconcile_state: Mutex::new(ReconcileState::default()),
             registry_authoritative: std::sync::atomic::AtomicBool::new(false),
@@ -2598,6 +2660,15 @@ impl ManagedManager {
         }
     }
 
+    /// Install the mission working-directory / transferred-root lookup used by
+    /// out-of-band pre-stop checkpoints to discover explicit remote execution
+    /// directories outside the default `/var/lib/orb-node/work` roots.
+    pub fn set_mission_roots_probe(&self, probe: MissionRootsProbe) {
+        if let Ok(mut slot) = self.mission_roots_probe.write() {
+            *slot = Some(probe);
+        }
+    }
+
     /// Hand a live machine to another mission of the owner's tree (the
     /// gateway has already checked lineage). The new owner's lifetime then
     /// governs the machine.
@@ -2743,6 +2814,8 @@ impl ManagedManager {
         tenant: &str,
         requested_by: Option<&str>,
         dispatch_key: &str,
+        retain_vm_for_parent_minutes: Option<u64>,
+        pre_stop_hook: Option<&str>,
     ) -> Option<ManagedMachine> {
         let _guard = self.admission.lock().await;
         let mut map = self.load_dispatch_reservations();
@@ -2766,11 +2839,24 @@ impl ManagedManager {
                 && !Self::node_busy(&m.node_id)
                 && Utc::now() + chrono::Duration::minutes(2) < m.expires_at
         });
-        if usable.is_none() {
+        let Some(usable) = usable else {
             map.remove(&lookup_key);
             self.persist_dispatch_reservations(&map);
-        }
-        usable
+            return None;
+        };
+        let next_retain = retain_vm_for_parent_minutes.map(|mins| mins.min(720));
+        let next_hook = pre_stop_hook
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        self.update(&usable.id, |m| {
+            m.retain_vm_for_parent_minutes = next_retain;
+            m.pre_stop_hook = next_hook;
+            m.pre_stop_ran_at = None;
+            m.pre_stop_trigger = None;
+            m.pre_stop_summary = None;
+        })
+        .await
     }
 
     fn runtime_path(&self) -> PathBuf {
@@ -2986,7 +3072,7 @@ impl ManagedManager {
             m.clone()
         };
         self.persist().await;
-        Some(out)
+        Some(self.enrich_machine_view(out))
     }
 
     pub async fn get(&self, id: &str) -> Option<ManagedMachine> {
@@ -3001,6 +3087,7 @@ impl ManagedManager {
                     || (m.state.is_live() && !m.name.is_empty() && m.name == id)
             })
             .cloned()
+            .map(|m| self.enrich_machine_view(m))
     }
 
     /// Whether the managed VM behind `node_id` provably cannot run a process
@@ -3113,6 +3200,18 @@ impl ManagedManager {
         ((spent * 10000.0).round() / 10000.0, committed)
     }
 
+    fn enrich_machine_view(&self, mut m: ManagedMachine) -> ManagedMachine {
+        let max_ttl = self.settings.max_ttl_minutes.max(5) as i64;
+        m.hard_cap_at = Some(m.created_at + chrono::Duration::minutes(max_ttl));
+        m.forkable = matches!(m.state, MachineState::Online | MachineState::Stopped)
+            && !m.antigravity_projected
+            && m.provider_id.is_some()
+            && self
+                .provider_for(&m.provider)
+                .is_some_and(|p| p.supports_snapshots());
+        m
+    }
+
     pub async fn list(&self, include_history_hours: i64) -> ListView {
         let cutoff = Utc::now() - chrono::Duration::hours(include_history_hours);
         let active_by_node = match self
@@ -3137,7 +3236,7 @@ impl ManagedManager {
                 if let Some(ids) = active_by_node.get(&m.node_id) {
                     m.active_mission_ids = ids.clone();
                 }
-                m
+                self.enrich_machine_view(m)
             })
             .collect();
         machines.sort_by_key(|m| std::cmp::Reverse(m.created_at));
@@ -3305,14 +3404,21 @@ impl ManagedManager {
             None => None,
             Some(m) => {
                 let lower = m.to_ascii_lowercase();
-                if !matches!(lower.as_str(), "auto" | "cache-only" | "off") {
-                    return Err(ManagedError::new(
-                        "invalid_lean_mode",
-                        400,
-                        format!("Invalid lean_mode '{m}'; use 'auto', 'cache-only', or 'off'"),
-                    ));
-                }
-                Some(lower)
+                let canonical = match lower.as_str() {
+                    "auto" => "auto",
+                    "cache-only" | "cache_only" => "cache-only",
+                    "off" | "none" => "off",
+                    _ => {
+                        return Err(ManagedError::new(
+                            "invalid_lean_mode",
+                            400,
+                            format!(
+                                "Invalid lean_mode '{m}'; expected one of: 'auto', 'cache-only', or 'off' (alias 'none')"
+                            ),
+                        ));
+                    }
+                };
+                Some(canonical.to_string())
             }
         };
 
@@ -4090,6 +4196,23 @@ impl ManagedManager {
                     repo: validated_repo.clone(),
                     base_key: validated_base_key.clone(),
                     lean_mode: validated_lean_mode.clone(),
+                    warnings: Vec::new(),
+                    retain_vm_for_parent_minutes: req
+                        .retain_vm_for_parent_minutes
+                        .map(|mins| mins.min(720)),
+                    pre_stop_hook: req
+                        .pre_stop_hook
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    pre_stop_ran_at: None,
+                    pre_stop_trigger: None,
+                    pre_stop_summary: None,
+                    hard_cap_at: Some(
+                        now + chrono::Duration::minutes(self.settings.max_ttl_minutes.max(5) as i64),
+                    ),
+                    forkable: false,
                 };
                 self.machines.lock().await.push(machine.clone());
                 self.persist().await;
@@ -4390,12 +4513,32 @@ impl ManagedManager {
         };
         let provider_id = created.provider_id.clone();
         let created_deletable_at = created.deletable_at;
+        let created_warnings = created.warnings.clone();
+        let created_effective_lean_mode = created.effective_lean_mode.clone();
+        let created_effective_repo = created.effective_repo.clone();
+        let supports_snapshots = provider.supports_snapshots();
         self.update(id, |m| {
             m.provider_id = Some(provider_id.clone());
             m.fork_source_provider_id = None;
             if created_deletable_at.is_some() {
                 m.deletable_at = created_deletable_at;
             }
+            if !created_warnings.is_empty() {
+                for w in &created_warnings {
+                    if !m.warnings.contains(w) {
+                        m.warnings.push(w.clone());
+                    }
+                }
+            }
+            if let Some(ref eff_mode) = created_effective_lean_mode {
+                m.lean_mode = Some(eff_mode.clone());
+            }
+            if let Some(ref eff_repo) = created_effective_repo {
+                m.repo = eff_repo.clone();
+            }
+            m.forkable = matches!(m.state, MachineState::Online | MachineState::Stopped)
+                && !m.antigravity_projected
+                && supports_snapshots;
         })
         .await;
         let m = self.get(id).await.ok_or("machine vanished")?;
@@ -4739,6 +4882,9 @@ impl ManagedManager {
                                 m.state = MachineState::Online;
                                 m.online_at = Some(Utc::now());
                                 m.last_busy_at = Some(Utc::now());
+                                m.forkable = !m.antigravity_projected
+                                    && m.provider_id.is_some()
+                                    && provider.supports_snapshots();
                             })
                             .await
                             .ok_or("machine vanished")?;
@@ -4882,7 +5028,15 @@ impl ManagedManager {
                 .map_err(|e| ManagedError::new("provider_error", 502, e))?;
         }
         Ok(self
-            .update(&m.id, |m| m.expires_at = new_end)
+            .update(&m.id, |m| {
+                m.expires_at = new_end;
+                // An earlier `pre_ttl_expiry` checkpoint is superseded once the
+                // machine's TTL is extended; allow a fresh checkpoint when the
+                // new deadline or 720m hard cap approaches.
+                m.pre_stop_ran_at = None;
+                m.pre_stop_trigger = None;
+                m.pre_stop_summary = None;
+            })
             .await
             .unwrap_or(m))
     }
@@ -4906,6 +5060,7 @@ impl ManagedManager {
             .get(id)
             .await
             .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
+        let was_online = current.state == MachineState::Online;
         // Scaleway Apple Silicon 24h minimum lease (`deletable_at`): never
         // call provider DELETE before `deletable_at`. Unregister the node &
         // close the relay so no new work lands on it, and schedule exact
@@ -4916,6 +5071,13 @@ impl ManagedManager {
                 .deletable_at
                 .is_some_and(|del_at| Utc::now() < del_at)
         {
+            if was_online
+                && current.provisioning_mode.is_worker()
+                && current.pre_stop_trigger.as_deref() != Some("pre_destroy")
+            {
+                self.run_pre_stop_checkpoint(&current, "pre_destroy", Utc::now())
+                    .await;
+            }
             let del_at = current.deletable_at.unwrap();
             let defer_reason = format!(
                 "awaiting_deletable_at:{}",
@@ -4956,6 +5118,20 @@ impl ManagedManager {
                 "Unknown managed machine",
             ));
         };
+        // Always take a fresh final checkpoint before destructive teardown of an
+        // online worker VM, even if an earlier warning-window checkpoint
+        // (`pre_720m_hard_cap` / `pre_ttl_expiry`) already set `pre_stop_ran_at`,
+        // so work produced during the remaining warning window is preserved.
+        if !failed
+            && was_online
+            && m.provisioning_mode.is_worker()
+            && reason.as_deref().is_some_and(|r| {
+                r == "ttl_expired" || r.starts_with("owner_") || r == "idle_timeout"
+            })
+        {
+            self.run_pre_stop_checkpoint(&m, "pre_destroy", Utc::now())
+                .await;
+        }
         unregister_node(&m);
         self.relay.close(&m.id).await;
         if let (Some(provider), Some(pid)) = (self.provider_for(&m.provider), &m.provider_id) {
@@ -5106,6 +5282,489 @@ impl ManagedManager {
         }
     }
 
+    async fn parent_alive_of(&self, m: &ManagedMachine) -> bool {
+        let Some(tenant) = m.owner_user_id.clone() else {
+            return false;
+        };
+        let parent_id = m
+            .requested_by_mission_id
+            .as_deref()
+            .or(m.root_mission_id.as_deref())
+            .filter(|pid| m.owner_mission_id.as_deref() != Some(*pid))
+            .map(str::to_string);
+        let Some(parent_id) = parent_id else {
+            return false;
+        };
+        let Some(probe) = self.owner_probe.read().ok().and_then(|p| p.clone()) else {
+            return false;
+        };
+        !matches!(
+            probe(tenant, parent_id).await,
+            Some(OwnerState::Terminal { .. }) | Some(OwnerState::Missing) | None
+        )
+    }
+
+    /// Out-of-band pre-expiry / pre-720m checkpoint hook executed directly on
+    /// `orb-node` outside the LLM turn using a temporary `GIT_INDEX_FILE` so an
+    /// active worker bash/Lean loop is never disrupted.
+    async fn run_pre_stop_checkpoint(&self, m: &ManagedMachine, trigger: &str, now: DateTime<Utc>) {
+        if !m.provisioning_mode.is_worker() {
+            return;
+        }
+        let mission_uuid = m
+            .owner_mission_id
+            .as_deref()
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .or_else(|| {
+                m.requested_by_mission_id
+                    .as_deref()
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            })
+            .unwrap_or_else(uuid::Uuid::nil);
+        let mission_short = m
+            .owner_mission_id
+            .as_deref()
+            .and_then(|s| s.get(..8))
+            .unwrap_or("unowned");
+        let safe_machine: String = m
+            .name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        let wip_ref = format!(
+            "refs/heads/orb/wip/{}-{}",
+            if safe_machine.is_empty() {
+                m.id.as_str()
+            } else {
+                safe_machine.as_str()
+            },
+            mission_short
+        );
+        let custom_hook = m
+            .pre_stop_hook
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let mut candidate_mission_ids: Vec<String> = Vec::new();
+        for opt_mid in [&m.owner_mission_id, &m.requested_by_mission_id] {
+            let maybe_mid = opt_mid
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !candidate_mission_ids.iter().any(|x| x == *s));
+            if let Some(mid) = maybe_mid {
+                candidate_mission_ids.push(mid.to_string());
+            }
+        }
+        if let Some(working_dir) = self.dir.parent() {
+            for mid in
+                crate::remote_node::job_ledger::mission_ids_for_node(working_dir, &m.node_id).await
+            {
+                let s = mid.to_string();
+                if !candidate_mission_ids.contains(&s) {
+                    candidate_mission_ids.push(s);
+                }
+            }
+        }
+        let mut extra_roots: Vec<String> = Vec::new();
+        if let Some(probe) = self.mission_roots_probe.read().ok().and_then(|p| p.clone()) {
+            let tenant = m.owner_user_id.clone().unwrap_or_default();
+            for r in probe(tenant, candidate_mission_ids).await {
+                if !extra_roots.contains(&r) {
+                    extra_roots.push(r);
+                }
+            }
+        }
+        let mut quoted_roots = vec![
+            "'/var/lib/orb-node/work'".to_string(),
+            "'/var/lib/sandboxed-node/work'".to_string(),
+            "'/workspace/repo'".to_string(),
+        ];
+        for r in &extra_roots {
+            let q = raw_operations::shell_quote(r);
+            if !quoted_roots.contains(&q) {
+                quoted_roots.push(q);
+            }
+        }
+        let roots_expr = quoted_roots.join(" ");
+        let has_custom_hook = custom_hook.is_some() as u8;
+        let confirmed_exports = m
+            .pre_stop_summary
+            .as_ref()
+            .and_then(|s| s.get("confirmed_bundle_commits"))
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|entry| {
+                        entry
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_'))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        let mut script = format!(
+            r#"set +e
+[ -r /etc/orb/boost-env ] && {{ set -a; . /etc/orb/boost-env; set +a; }}
+export GIT_TERMINAL_PROMPT=0
+export GIT_AUTHOR_NAME="${{GIT_AUTHOR_NAME:-Orb Reaper}}"
+export GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-orb-reaper@localhost}}"
+export GIT_COMMITTER_NAME="${{GIT_COMMITTER_NAME:-Orb Reaper}}"
+export GIT_COMMITTER_EMAIL="${{GIT_COMMITTER_EMAIL:-orb-reaper@localhost}}"
+export SANDBOXED_SH_MISSION_ID="${{SANDBOXED_SH_MISSION_ID:-{mission_uuid}}}"
+if [ -z "${{SANDBOXED_SECRETS_DIR:-}}" ] && [ -z "${{GITHUB_TOKEN:-}}" ] && [ -z "${{GH_TOKEN:-}}" ]; then
+  for sec_base in "${{XDG_RUNTIME_DIR:-}}/paloma-secrets" "${{HOME:-}}/.paloma-secrets"; do
+    [ -d "$sec_base" ] || continue
+    if [ -r "$sec_base/$SANDBOXED_SH_MISSION_ID/GITHUB_TOKEN" ]; then
+      export SANDBOXED_SECRETS_DIR="$sec_base/$SANDBOXED_SH_MISSION_ID"
+      break
+    fi
+    for cand_tok in "$sec_base"/*/GITHUB_TOKEN; do
+      if [ -r "$cand_tok" ]; then
+        export SANDBOXED_SECRETS_DIR=$(dirname "$cand_tok")
+        break
+      fi
+    done
+    [ -n "${{SANDBOXED_SECRETS_DIR:-}}" ] && break
+  done
+fi
+ORB_WIP_REF='{wip_ref}'
+ORB_HAS_CUSTOM_HOOK={has_custom_hook}
+ORB_CONFIRMED_EXPORTS='{confirmed_exports}'
+ORB_MAX_BUNDLE_EXPORT_BYTES=1572864
+ORB_CHECKPOINT_REPOS=0
+ORB_CHECKPOINT_PUSHED=0
+ORB_CHECKPOINT_EXPORTED=0
+ORB_CHECKPOINT_FAILED=0
+ORB_SEEN_TOPS=""
+orb_emit_bundle() {{
+  bfile="$1"
+  rhash="$2"
+  csha="$3"
+  rpath="$4"
+  [ -r "$bfile" ] || return 1
+  bsize=$(wc -c < "$bfile" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$bsize" ] || return 1
+  [ "$bsize" -gt 0 ] || return 1
+  [ "$bsize" -le "$ORB_MAX_BUNDLE_EXPORT_BYTES" ] || return 1
+  if command -v base64 >/dev/null 2>&1; then
+    b64=$(base64 "$bfile" 2>/dev/null | tr -d '\r\n ') || return 1
+  elif command -v openssl >/dev/null 2>&1; then
+    b64=$(openssl base64 -A -in "$bfile" 2>/dev/null | tr -d '\r\n ') || return 1
+  else
+    return 1
+  fi
+  [ -n "$b64" ] || return 1
+  printf 'ORB_BUNDLE_EXPORT_BEGIN hash=%s commit=%s size=%s repo=%s\n%s\nORB_BUNDLE_EXPORT_END\n' "$rhash" "$csha" "$bsize" "$rpath" "$b64"
+  return 0
+}}
+orb_checkpoint_repo() {{
+  target_dir="$1"
+  must_be_repo="${{2:-0}}"
+  if [ ! -d "$target_dir" ] || ! cd "$target_dir" 2>/dev/null; then
+    if [ "$must_be_repo" -eq 1 ]; then
+      ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+      ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+    fi
+    return 0
+  fi
+  rev_err=""
+  if ! repo_dir=$(git rev-parse --show-toplevel 2>&1); then
+    rev_err="$repo_dir"
+    repo_dir=""
+  fi
+  if [ -z "$repo_dir" ]; then
+    case "$rev_err" in
+      *"not a git repository"*)
+        if [ "$must_be_repo" -eq 1 ]; then
+          ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+          ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+        fi
+        ;;
+      *)
+        ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+        ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+        ;;
+    esac
+    return 0
+  fi
+  case "
+$ORB_SEEN_TOPS
+" in
+    *"
+$repo_dir
+"*) return 0 ;;
+  esac
+  ORB_SEEN_TOPS="$ORB_SEEN_TOPS
+$repo_dir"
+  if ! cd "$repo_dir" 2>/dev/null; then
+    ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+    ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+    return 0
+  fi
+  if ! status_out=$(git status --porcelain 2>/dev/null); then
+    ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+    ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+    return 0
+  fi
+  head_sha=$(git rev-parse --verify HEAD 2>/dev/null || true)
+  repo_gitdir=$(git rev-parse --git-dir 2>/dev/null || printf '.git')
+  common_gitdir=$(git rev-parse --git-common-dir 2>/dev/null || printf '%s' "$repo_gitdir")
+  repo_suffix=$(printf '%s' "$repo_dir" | cksum | awk '{{print $1}}')
+  bundle_path="$common_gitdir/orb-pre-stop-wip-$repo_suffix.bundle"
+  latest_ref="refs/orb-pre-stop/latest-$repo_suffix"
+  unpushed=0
+  if [ -z "$status_out" ] && [ -n "$head_sha" ]; then
+    if git remote get-url origin >/dev/null 2>&1; then
+      rem_refs=$(git for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null || true)
+      if [ -z "$rem_refs" ]; then
+        unpushed=1
+      elif ! ahead_out=$(git rev-list -n 1 HEAD --not --remotes=origin 2>/dev/null) || [ -n "$ahead_out" ]; then
+        unpushed=1
+      fi
+    else
+      case " $ORB_CONFIRMED_EXPORTS " in
+        *" $repo_suffix:$head_sha "*) ;;
+        *) unpushed=1 ;;
+      esac
+    fi
+  fi
+  if [ -z "$status_out" ] && [ "$unpushed" -eq 0 ]; then
+    return 0
+  fi
+  ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+  commit_sha=""
+  if [ -n "$status_out" ]; then
+    tmp_idx=$(mktemp "/tmp/orb-wip-index.XXXXXX" 2>/dev/null || true)
+    tree_sha=""
+    if [ -n "$tmp_idx" ]; then
+      rm -f "$tmp_idx"
+      src_index=$(git rev-parse --git-path index 2>/dev/null || printf '%s/index' "$repo_gitdir")
+      stage_ok=1
+      if [ -e "$src_index" ] && ! cp -f "$src_index" "$tmp_idx" 2>/dev/null; then
+        stage_ok=0
+      fi
+      if [ "$stage_ok" -eq 1 ] && GIT_INDEX_FILE="$tmp_idx" git add -A >/dev/null 2>&1; then
+        tree_sha=$(GIT_INDEX_FILE="$tmp_idx" git write-tree 2>/dev/null || true)
+      fi
+      rm -f "$tmp_idx"
+    fi
+    if [ -n "$tree_sha" ]; then
+      if [ -n "$head_sha" ]; then
+        commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" -p "$head_sha" 2>/dev/null || true)
+      else
+        commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" 2>/dev/null || true)
+      fi
+    fi
+  else
+    commit_sha="$head_sha"
+  fi
+  if [ -n "$commit_sha" ]; then
+    local_ok=1
+    git update-ref "$latest_ref" "$commit_sha" 2>/dev/null || local_ok=0
+    git update-ref "refs/orb-pre-stop/latest" "$commit_sha" 2>/dev/null || true
+    git bundle create "$bundle_path" "$latest_ref" >/dev/null 2>&1 || local_ok=0
+    if git remote get-url origin >/dev/null 2>&1; then
+      if timeout 25s git push --force origin "$commit_sha:$ORB_WIP_REF" "$commit_sha:${{ORB_WIP_REF}}-$repo_suffix" >/dev/null 2>&1; then
+        ORB_CHECKPOINT_PUSHED=$((ORB_CHECKPOINT_PUSHED + 1))
+      else
+        ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+      fi
+    elif [ "$local_ok" -eq 1 ]; then
+      if orb_emit_bundle "$bundle_path" "$repo_suffix" "$commit_sha" "$repo_dir"; then
+        ORB_CHECKPOINT_EXPORTED=$((ORB_CHECKPOINT_EXPORTED + 1))
+      else
+        git update-ref -d "$latest_ref" 2>/dev/null || true
+        rm -f "$bundle_path" 2>/dev/null || true
+        if [ "$ORB_HAS_CUSTOM_HOOK" -ne 1 ]; then
+          ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+        fi
+      fi
+    else
+      ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+    fi
+  else
+    ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+  fi
+}}
+for root in {roots_expr}; do
+  [ -d "$root" ] || continue
+  orb_checkpoint_repo "$root" 0
+  find_list=$(mktemp "/tmp/orb-wip-find.XXXXXX")
+  find "$root" -maxdepth 4 -name .git \( -type d -o -type f \) 2>/dev/null > "$find_list" || true
+  while IFS= read -r gitmarker; do
+    [ -n "$gitmarker" ] || continue
+    orb_checkpoint_repo "$(dirname "$gitmarker")" 1
+  done < "$find_list"
+  rm -f "$find_list"
+done
+printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d exported=%d failed=%d\n' '{trigger}' "$ORB_CHECKPOINT_REPOS" "$ORB_CHECKPOINT_PUSHED" "$ORB_CHECKPOINT_EXPORTED" "$ORB_CHECKPOINT_FAILED"
+"#
+        );
+        if let Some(hook) = custom_hook {
+            script.push_str("\n# Custom pre_stop_hook\n(\n");
+            script.push_str(hook);
+            script.push_str("\n) || ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))\n");
+        }
+        script.push_str("[ \"$ORB_CHECKPOINT_FAILED\" -eq 0 ]\n");
+
+        let mut transport = "none";
+        let mut exit_code: Option<i32> = None;
+        let mut raw_stdout = String::new();
+
+        if let Some(cfg) = node_config(&m.node_id) {
+            if let Some(token) = node_token(&cfg.token_env) {
+                let claims = crate::remote_node::LeaseClaims {
+                    mission_id: mission_uuid,
+                    node_id: cfg.id.clone(),
+                    scope: crate::remote_node::SCOPE_MISSION_EXECUTE.to_string(),
+                    expires_at: (now + chrono::Duration::minutes(5)).timestamp(),
+                    job_id: None,
+                };
+                if let Ok(lease_token) = crate::remote_node::create_lease_token(&claims, &token) {
+                    let req = crate::remote_node::LeaseRequest {
+                        mission_id: mission_uuid,
+                        node_id: cfg.id.clone(),
+                        lease_token,
+                        command: format!(
+                            "timeout 45s bash -c {}",
+                            raw_operations::shell_quote(&script)
+                        ),
+                        side_lane: true,
+                    };
+                    if let Ok(Ok(resp)) = tokio::time::timeout(
+                        Duration::from_secs(50),
+                        crate::remote_node::RemoteNodeClient::default().execute(cfg, &token, &req),
+                    )
+                    .await
+                    {
+                        if resp.accepted {
+                            transport = "orb_node_side_lane";
+                            exit_code = resp.exit_code;
+                            raw_stdout = resp.stdout;
+                        }
+                    }
+                }
+            }
+        }
+
+        if transport == "none" {
+            if let (Some(provider), Some(pid)) = (self.provider_for(&m.provider), &m.provider_id) {
+                // Provider exec runs as `root` on Boost (`as_root: true`) or `user` on Boat,
+                // whereas worker repositories and credentials belong to `orbnode`. Switch to
+                // `orbnode` with its Git/Boost environment whenever `orbnode` exists on the VM.
+                let mut delim = "__ORB_PRE_STOP_CHECKPOINT_EOF__".to_string();
+                while script.contains(&delim) {
+                    delim.push('_');
+                }
+                let provider_exec_script = format!(
+                    r#"orb_ckpt_script=$(mktemp "/tmp/orb-ckpt-run.XXXXXX") || exit 1
+cat <<'{delim}' > "$orb_ckpt_script"
+{script}
+{delim}
+chmod 0644 "$orb_ckpt_script"
+orb_rc=1
+if [ "$(id -un 2>/dev/null)" != "orbnode" ] && id -u orbnode >/dev/null 2>&1; then
+  orb_uid=$(id -u orbnode)
+  orb_path="/opt/boost/bin:/opt/elan/bin:/opt/orb/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  if [ "$(id -u 2>/dev/null)" = "0" ]; then
+    if command -v runuser >/dev/null 2>&1; then
+      runuser -u orbnode -- env HOME=/var/lib/orb-node USER=orbnode LOGNAME=orbnode XDG_RUNTIME_DIR="/run/user/$orb_uid" SANDBOXED_SH_MISSION_ID='{mission_uuid}' GIT_TERMINAL_PROMPT=0 PATH="$orb_path" sh "$orb_ckpt_script"
+      orb_rc=$?
+    else
+      su -s /bin/sh orbnode -c "HOME=/var/lib/orb-node USER=orbnode LOGNAME=orbnode XDG_RUNTIME_DIR=/run/user/$orb_uid SANDBOXED_SH_MISSION_ID='{mission_uuid}' GIT_TERMINAL_PROMPT=0 PATH=\"$orb_path\" sh '$orb_ckpt_script'"
+      orb_rc=$?
+    fi
+  elif command -v sudo >/dev/null 2>&1 && sudo -n -u orbnode true 2>/dev/null; then
+    sudo -n -u orbnode env HOME=/var/lib/orb-node USER=orbnode LOGNAME=orbnode XDG_RUNTIME_DIR="/run/user/$orb_uid" SANDBOXED_SH_MISSION_ID='{mission_uuid}' GIT_TERMINAL_PROMPT=0 PATH="$orb_path" sh "$orb_ckpt_script"
+    orb_rc=$?
+  else
+    sh "$orb_ckpt_script"
+    orb_rc=$?
+  fi
+else
+  sh "$orb_ckpt_script"
+  orb_rc=$?
+fi
+rm -f "$orb_ckpt_script"
+exit "$orb_rc"
+"#
+                );
+                if let Ok(val) = provider.exec(pid, &provider_exec_script, 45).await {
+                    transport = "provider_exec";
+                    exit_code = exec_exit_code(&val).and_then(|c| i32::try_from(c).ok());
+                    raw_stdout = val
+                        .get("stdout")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                }
+            }
+        }
+
+        let mut merged_confirmed: Vec<String> = m
+            .pre_stop_summary
+            .as_ref()
+            .and_then(|s| s.get("confirmed_bundle_commits"))
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (cleaned_output, exported_bundles, new_confirmed_commits, bundle_persist_failed) =
+            persist_exported_checkpoint_bundles(&self.dir, &m.id, &raw_stdout);
+        for tok in new_confirmed_commits {
+            if let Some((prefix, _)) = tok.split_once(':') {
+                let prefix_colon = format!("{prefix}:");
+                merged_confirmed.retain(|existing| !existing.starts_with(&prefix_colon));
+            }
+            if !merged_confirmed.contains(&tok) {
+                merged_confirmed.push(tok);
+            }
+        }
+        let output_snippet: String = cleaned_output.chars().take(500).collect();
+
+        let checkpoint_succeeded =
+            transport != "none" && exit_code.unwrap_or(0) == 0 && !bundle_persist_failed;
+        let summary = serde_json::json!({
+            "trigger": trigger,
+            "transport": transport,
+            "succeeded": checkpoint_succeeded,
+            "wip_ref": wip_ref,
+            "custom_hook": custom_hook.is_some(),
+            "exported_bundles": exported_bundles,
+            "confirmed_bundle_commits": merged_confirmed,
+            "exit_code": exit_code,
+            "output": output_snippet,
+        });
+        let trig = trigger.to_string();
+        let summary_clone = summary.clone();
+        if let Some(updated) = self
+            .update(&m.id, |row| {
+                if checkpoint_succeeded {
+                    row.pre_stop_ran_at = Some(now);
+                }
+                row.pre_stop_trigger = Some(trig);
+                row.pre_stop_summary = Some(summary_clone);
+            })
+            .await
+        {
+            self.ledger_with(
+                if checkpoint_succeeded {
+                    "pre_stop_hook"
+                } else {
+                    "pre_stop_hook_failed"
+                },
+                &updated,
+                summary,
+            );
+        }
+    }
+
     /// The decision for one live, online machine this pass.
     async fn decide_for(&self, m: &ManagedMachine, now: DateTime<Utc>) -> (ReapDecision, Owner) {
         let busy = self.machine_busy(m).await;
@@ -5113,6 +5772,17 @@ impl ManagedManager {
         let supports_free_stop = self
             .provider_for(&m.provider)
             .is_some_and(|p| p.supports_free_stop());
+        let retain_for_parent_minutes = m
+            .retain_vm_for_parent_minutes
+            .and_then(|mins| i64::try_from(mins).ok())
+            .filter(|mins| *mins > 0);
+        let parent_alive = if retain_for_parent_minutes.is_some()
+            && matches!(owner, Owner::Mission(Some(OwnerState::Terminal { .. })))
+        {
+            self.parent_alive_of(m).await
+        } else {
+            false
+        };
         let facts = lifecycle::ReapFacts {
             now,
             expires_at: m.expires_at,
@@ -5126,6 +5796,8 @@ impl ManagedManager {
                 m.last_busy_at.unwrap_or(m.created_at)
             },
             owner,
+            retain_for_parent_minutes,
+            parent_alive,
             scheduled: m.reap_reason.clone().zip(m.reap_at),
         };
         (lifecycle::decide(&facts, &self.settings.policy()), owner)
@@ -5203,6 +5875,37 @@ impl ManagedManager {
                             }
                         }
                         let (decision, _) = self.decide_for(&m, now).await;
+                        let deferring_ttl_destroy = matches!(
+                            &decision,
+                            ReapDecision::Schedule { reason, .. }
+                                if reason.starts_with("awaiting_deletable_at:ttl_expired")
+                        );
+                        if !dry_run
+                            && m.pre_stop_ran_at.is_none()
+                            && matches!(
+                                decision,
+                                ReapDecision::Keep | ReapDecision::Schedule { .. }
+                            )
+                            && !deferring_ttl_destroy
+                        {
+                            let max_ttl = self.settings.max_ttl_minutes.max(5) as i64;
+                            let hard_cap_at = m.created_at + chrono::Duration::minutes(max_ttl);
+                            let near_hard_cap =
+                                max_ttl > 10 && now >= hard_cap_at - chrono::Duration::minutes(10);
+                            let near_ttl_expiry =
+                                now >= m.expires_at - chrono::Duration::minutes(5);
+                            if near_hard_cap || near_ttl_expiry {
+                                let trigger = if near_hard_cap {
+                                    "pre_720m_hard_cap"
+                                } else {
+                                    "pre_ttl_expiry"
+                                };
+                                self.run_pre_stop_checkpoint(&m, trigger, now).await;
+                                if let Some(refreshed) = self.get(&m.id).await {
+                                    m = refreshed;
+                                }
+                            }
+                        }
                         match &decision {
                             ReapDecision::Stop { reason } => {
                                 let admitted =
@@ -5263,6 +5966,11 @@ impl ManagedManager {
                             }
                             ReapDecision::Schedule { reason, at } => {
                                 if reason.starts_with("awaiting_deletable_at:ttl_expired") {
+                                    if m.provisioning_mode.is_worker()
+                                        && m.pre_stop_trigger.as_deref() != Some("pre_destroy")
+                                    {
+                                        self.run_pre_stop_checkpoint(&m, "pre_destroy", now).await;
+                                    }
                                     unregister_node(&m);
                                     self.relay.close(&m.id).await;
                                 }
@@ -5645,6 +6353,8 @@ pub struct SiblingReuse<'a> {
     /// Pool the VM will be charged to.
     pub budget_pool_id: Option<&'a str>,
     pub sub_budget_usd: Option<f64>,
+    pub retain_vm_for_parent_minutes: Option<u64>,
+    pub pre_stop_hook: Option<&'a str>,
 }
 
 impl ManagedManager {
@@ -7036,6 +7746,8 @@ impl ManagedManager {
             tenant,
             budget_pool_id,
             sub_budget_usd,
+            retain_vm_for_parent_minutes,
+            pre_stop_hook,
         } = *want;
         let _guard = self.admission.lock().await;
         let all_machines = self.machines.lock().await.clone();
@@ -7124,6 +7836,11 @@ impl ManagedManager {
             }
         }
         let pool = budget_pool_id.map(str::to_string);
+        let next_retain = retain_vm_for_parent_minutes.map(|mins| mins.min(720));
+        let next_hook = pre_stop_hook
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let m = self
             .update(&pick.id, |m| {
                 m.change_pool(pool, Utc::now());
@@ -7131,6 +7848,11 @@ impl ManagedManager {
                 m.bandwidth_pool_id = target_bw_pool;
                 m.owner_mission_id = None;
                 m.requested_by_mission_id = Some(requested_by.to_string());
+                m.retain_vm_for_parent_minutes = next_retain;
+                m.pre_stop_hook = next_hook;
+                m.pre_stop_ran_at = None;
+                m.pre_stop_trigger = None;
+                m.pre_stop_summary = None;
                 m.reap_at = None;
                 m.reap_reason = None;
                 m.last_busy_at = Some(Utc::now());
@@ -7404,6 +8126,99 @@ pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<Managed
     let _ = MANAGER.set(Arc::clone(&manager));
     manager.ensure_background_loops();
     manager
+}
+
+/// Extract `ORB_BUNDLE_EXPORT_BEGIN ... ORB_BUNDLE_EXPORT_END` blocks emitted by
+/// `run_pre_stop_checkpoint` for local-only repositories (no `origin` remote),
+/// decode and persist them under `<managed_dir>/checkpoints/<machine_id>/` on Core
+/// so they survive VM destruction, and strip the base64 payload from log output.
+pub(crate) fn persist_exported_checkpoint_bundles(
+    managed_dir: &std::path::Path,
+    machine_id: &str,
+    stdout: &str,
+) -> (String, Vec<String>, Vec<String>, bool) {
+    use base64::Engine as _;
+
+    let safe_machine: String = machine_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let machine_dir_name = if safe_machine.is_empty() {
+        "machine"
+    } else {
+        safe_machine.as_str()
+    };
+
+    let mut cleaned_lines = Vec::new();
+    let mut exported_paths = Vec::new();
+    let mut confirmed_commits = Vec::new();
+    let mut persist_failed = false;
+
+    let mut lines = stdout.lines();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.strip_prefix("ORB_BUNDLE_EXPORT_BEGIN ") else {
+            cleaned_lines.push(line);
+            continue;
+        };
+        let mut hash_tag = String::new();
+        let mut commit_tag = String::new();
+        for tok in rest.split_whitespace() {
+            if let Some(h) = tok.strip_prefix("hash=") {
+                hash_tag = h
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+            } else if let Some(c) = tok.strip_prefix("commit=") {
+                commit_tag = c.chars().filter(|ch| ch.is_ascii_hexdigit()).collect();
+            }
+        }
+        if hash_tag.is_empty() {
+            hash_tag = format!("repo-{}", exported_paths.len() + 1);
+        }
+
+        let mut b64_buf = String::new();
+        let mut closed = false;
+        for inner in lines.by_ref() {
+            if inner == "ORB_BUNDLE_EXPORT_END" {
+                closed = true;
+                break;
+            }
+            b64_buf.push_str(inner.trim());
+        }
+        if !closed || b64_buf.is_empty() {
+            persist_failed = true;
+            continue;
+        }
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64_buf.as_bytes()) else {
+            persist_failed = true;
+            continue;
+        };
+        if bytes.is_empty() {
+            persist_failed = true;
+            continue;
+        }
+        let out_dir = managed_dir.join("checkpoints").join(machine_dir_name);
+        if std::fs::create_dir_all(&out_dir).is_err() {
+            persist_failed = true;
+            continue;
+        }
+        let dest = out_dir.join(format!("orb-pre-stop-wip-{hash_tag}.bundle"));
+        if std::fs::write(&dest, &bytes).is_err() {
+            persist_failed = true;
+            continue;
+        }
+        if !commit_tag.is_empty() {
+            confirmed_commits.push(format!("{hash_tag}:{commit_tag}"));
+        }
+        exported_paths.push(dest.to_string_lossy().into_owned());
+    }
+
+    (
+        cleaned_lines.join("\n"),
+        exported_paths,
+        confirmed_commits,
+        persist_failed,
+    )
 }
 
 #[cfg(test)]

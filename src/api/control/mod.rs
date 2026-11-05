@@ -38,7 +38,7 @@ mod event_page_cursor_tests;
 mod health_verdict_tests;
 #[cfg(test)]
 mod inherited_track_tests;
-mod remote_queue;
+pub(crate) mod remote_queue;
 #[cfg(test)]
 mod remote_skill_prefix_tests;
 pub mod speed;
