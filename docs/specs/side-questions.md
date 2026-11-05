@@ -233,12 +233,14 @@ fabricates an interruption or drops completed turns:
      async `readSideQuestion` preserves those warm turns (merging local
      attachment metadata) instead of rolling `history` back to an older
      IndexedDB snapshot.
-   - Whenever `reconcileBtwServerHistory` completes authoritatively, it also
-     heals persisted `sideQuestionStorage` (`IndexedDB`) for `parent`: if a
-     saved `pending` turn (`!notSent`) is already answered in the reconciled
-     history, `reconcileBtwServerHistory` clears `saved.pending` and writes the
-     merged history immediately so background warm refreshes never leave a
-     stale pending entry behind across app restarts.
+   - Whenever `reconcileBtwServerHistory` completes authoritatively, it asks the
+     single storage owner (`reconcileSavedSideQuestion` in `sideQuestionStorage.ts`,
+     backed by per-key serialization and a single `'readwrite'` IndexedDB
+     transaction via `updateSideThread`) to conditionally heal `parent`: only if
+     the currently stored `pending` turn (`!notSent`) is still answered by the
+     reconciled history does it clear `pending` and write merged history,
+     preserving any newer `draft`, `queue`, or subsequent `pending` turn saved
+     concurrently by a mounted panel.
 2. **Mandatory Core verification for pending, in-flight launch, and previously-interrupted turns**:
    - Mounting with `saved.pending` (unless `peekWarmBtwState` already proves the
      pending turn was answered), settling an unmounted `btwLaunchPending(parent)`

@@ -4,6 +4,11 @@ vi.mock('../src/composerDrafts',()=>({
  saveComposerDraft:async()=>{},
  readSideThread:async(key:string)=>sideThreadStore.get(key),
  saveSideThread:async(key:string,value:unknown)=>{sideThreadStore.set(key,structuredClone(value));},
+ updateSideThread:async(key:string,updater:(current:any)=>any)=>{
+  const next=updater(structuredClone(sideThreadStore.get(key)));
+  if(next!==undefined)sideThreadStore.set(key,structuredClone(next));
+  return {updated:next!==undefined,value:next};
+ },
 }));
 vi.mock('../src/btwContext',()=>({prepareBtwContext:vi.fn(async(_s:any,context:string)=>({context,cursor:{sequence:10,visibleHash:'hash'}}))}));
 import {it,expect,vi,afterEach} from 'vitest';
@@ -1280,5 +1285,66 @@ it('heals persisted sideQuestionStorage pending turn during background reconcile
  }finally{
   muxSpy.mockRestore();
  }
+});
+
+it('serializes reconcileSavedSideQuestion with concurrent panel writes so newer drafts and newer pending turns are never clobbered',async()=>{
+ const draftsMod=await import('../src/composerDrafts');
+ const {readSideQuestion,writeSideQuestion,reconcileSavedSideQuestion}=await import('../src/sideQuestionStorage');
+ const key=sideQuestionKey('concurrent-panel-race');
+ const serverHistory=[
+  {id:'t1',question:'Turn 1',answer:'Answer 1',at:'2026-11-05T11:10:00Z'},
+  {id:'t2',question:'Turn 2',answer:'Answer 2',at:'2026-11-05T11:20:54Z',userEventId:'turn-2'},
+ ];
+
+ // Case 1: panel saves a newer draft while Turn 2 is still pending; reconcile heals Turn 2 without losing the new draft.
+ await writeSideQuestion(key,{
+  history:[{id:'t1',question:'Turn 1',answer:'Answer 1'}],
+  draft:'old draft',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{question:'Turn 2',answer:'',turnId:'turn-2',startedAt:'2026-11-05T11:20:02Z'},
+ });
+ let releaseWrite!:()=>void;
+ const gate=new Promise<void>(resolve=>{releaseWrite=resolve;});
+ const origSave=draftsMod.saveSideThread;
+ const saveSpy=vi.spyOn(draftsMod,'saveSideThread').mockImplementationOnce(async(k:string,v:unknown)=>{
+  await gate;
+  return origSave(k,v);
+ });
+ const panelDraftWrite=writeSideQuestion(key,{
+  history:[{id:'t1',question:'Turn 1',answer:'Answer 1'}],
+  draft:'newer draft typed while in flight',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{question:'Turn 2',answer:'',turnId:'turn-2',startedAt:'2026-11-05T11:20:02Z'},
+ });
+ const healTurn2=reconcileSavedSideQuestion(key,serverHistory);
+ releaseWrite();
+ const [,healed]=await Promise.all([panelDraftWrite,healTurn2]);
+ expect(healed).toBe(true);
+ const afterDraftRace=await readSideQuestion(key);
+ expect(afterDraftRace?.pending).toBeUndefined();
+ expect(afterDraftRace?.draft).toBe('newer draft typed while in flight');
+ expect(afterDraftRace?.history).toHaveLength(2);
+
+ // Case 2: panel submits a new pending Turn 3 before Turn 2 reconciliation commits; Turn 3 and its draft stay intact.
+ const panelNewTurnWrite=writeSideQuestion(key,{
+  history:serverHistory,
+  draft:'draft for turn 4',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{question:'Turn 3?',answer:'',turnId:'turn-3',startedAt:'2026-11-05T11:25:00Z'},
+ });
+ const staleHeal=reconcileSavedSideQuestion(key,serverHistory);
+ const [,didOverwriteNewTurn]=await Promise.all([panelNewTurnWrite,staleHeal]);
+ expect(didOverwriteNewTurn).toBe(false);
+ const afterNewTurnRace=await readSideQuestion(key);
+ expect(afterNewTurnRace?.pending?.turnId).toBe('turn-3');
+ expect(afterNewTurnRace?.pending?.question).toBe('Turn 3?');
+ expect(afterNewTurnRace?.draft).toBe('draft for turn 4');
+ saveSpy.mockRestore();
 });
 

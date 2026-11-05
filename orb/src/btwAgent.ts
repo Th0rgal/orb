@@ -7,7 +7,7 @@ import {prepareBtwContext,type ConversationCursor} from './btwContext';
 import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion,isTransientNetworkError} from './api';
 import {note} from './diagnostics';
 import {btwConfig} from './btwSettings';
-import {readSideQuestion,writeSideQuestion,sideQuestionKey,BTW_HISTORY_LIMIT} from './sideQuestionStorage';
+import {reconcileSavedSideQuestion,sideQuestionKey,BTW_HISTORY_LIMIT} from './sideQuestionStorage';
 import {forkSource} from './missionTree';
 import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
 import {enqueueLocalMessage,queuedLocalMessages} from './localMessageQueue';
@@ -955,27 +955,10 @@ function healSavedSideQuestionFromServer(
  result: { history: SideExchange[]; activeSession?: BtwSession },
 ): void {
  if (!result.history.length || result.activeSession) return;
- const key = sideQuestionKey(parent);
- void readSideQuestion(key)
-  .then(saved => {
-   if (connectionVersion() !== version || !saved?.pending || saved.pending.notSent) return;
-   const cleanLocal = saved.history.filter(row => !isSyntheticRemoteAssistantNote(row.answer));
-   if (!doesTurnAnswerPending(saved.pending, result.history, cleanLocal, BTW_HISTORY_LIMIT)) return;
-   const localByPair = new Map<string, SideAttachment[]>();
-   for (const row of cleanLocal) {
-    if (row.attachments?.length) {
-     localByPair.set(`${row.question.trim()}\u0000${row.answer.trim()}`, row.attachments);
-    }
-   }
-   const mergedHistory = result.history.map(row => {
-    const attached = row.attachments?.length
-     ? row.attachments
-     : localByPair.get(`${row.question.trim()}\u0000${row.answer.trim()}`);
-    return { ...row, ...(attached?.length ? { attachments: attached } : {}) };
-   });
-   return writeSideQuestion(key, { ...saved, history: mergedHistory, pending: undefined });
-  })
-  .catch(() => {});
+ void reconcileSavedSideQuestion(sideQuestionKey(parent), result.history, {
+  canCommit: () => connectionVersion() === version,
+  isIgnoredAnswer: isSyntheticRemoteAssistantNote,
+ }).catch(() => {});
 }
 
 function storeWarmBtwResult(
