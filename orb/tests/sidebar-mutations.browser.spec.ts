@@ -38,15 +38,21 @@ for (const action of ['rename', 'delete'] as const) test(`sidebar preserves view
   expect(Math.abs(after-before)).toBeLessThan(2);
 });
 
-test('folder rename retains expanded descendants', async ({page}) => {
+test('folder rename retains expanded descendants and surfaces work migration errors', async ({page}) => {
   await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
   let root='reference';
+  let failCronMove=false;
   await page.route('**/api/**',async route=>{
     const req=route.request(),url=new URL(req.url()),path=url.pathname;
     if(path.endsWith('/file/transfer')) {root=req.postDataJSON().destination;return route.fulfill({json:{}});}
+    if(req.method()==='PATCH' && path.includes('/crons/')) {
+      if(failCronMove) return route.fulfill({status:500,body:'scheduler busy'});
+      return route.fulfill({json:{slug:'one',job:{id:'job-1',name:'Nightly audit',schedule:'every 1h',enabled:true,failure_streak:0,folder:root},runs:[]}});
+    }
     const folder=url.searchParams.get('path')??'';
     const entries=folder===''?[{name:root,kind:'dir'}]:folder===root?[{name:'nested',kind:'dir'}]:folder===`${root}/nested`?[{name:'notes.md',kind:'file'}]:[];
-    const json=path==='/api/projects'?{projects:[{slug:'one',title:'One'}]}:path.endsWith('/files')?{entries}:path.endsWith('/crons')?{jobs:[]}:path.endsWith('/controller')?{job:null,runs:[]}:[];
+    const jobs=failCronMove?[{id:'job-1',name:'Nightly audit',schedule:'every 1h',enabled:true,failure_streak:0,folder:'Research'}]:[];
+    const json=path==='/api/projects'?{projects:[{slug:'one',title:'One'}]}:path.endsWith('/files')?{entries}:path.endsWith('/crons')?{jobs}:path.endsWith('/controller')?{job:null,runs:[]}:[];
     await route.fulfill({json});
   });
   await page.goto('/');await page.getByRole('button',{name:'One',exact:true}).click();
@@ -60,6 +66,14 @@ test('folder rename retains expanded descendants', async ({page}) => {
   await expect(page.locator('[data-tree-id="pf:one:Research/nested/notes.md"]')).toBeVisible();
   await expect(page.getByRole('button',{name:'nested',exact:true})).toHaveAttribute('aria-expanded','true');
   await expect(page.getByRole('button',{name:'reference',exact:true})).toHaveCount(0);
+
+  failCronMove=true;
+  await page.getByRole('button',{name:'Research',exact:true}).click({button:'right'});
+  await page.getByRole('menuitem',{name:'Rename',exact:true}).click();
+  await page.getByLabel('Folder name',{exact:true}).fill('Archive');
+  await page.getByRole('dialog').getByRole('button',{name:'Rename',exact:true}).click();
+  await expect(page.getByRole('dialog')).toContainText('Nightly audit');
+  await expect(page.getByRole('dialog')).toContainText('could not follow');
 });
 
 test('folder delete dismisses dialog immediately and rolls back cleanly on failure', async ({page}) => {

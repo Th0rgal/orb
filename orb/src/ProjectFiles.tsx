@@ -698,17 +698,6 @@ export function LiveProjectsSection(p: {
         () => transferProjectFile(target.slug, target.path, destination),
         label,
       );
-      if (version !== connectionVersion()) return;
-      if (target.directory) {
-        try { await folderMoved(target.slug, target.path, destination, target.slug, true); }
-        finally {
-          await refreshFileParents(target.slug, target.path, destination);
-          settleMove(moveKey);
-        }
-        return;
-      }
-      await refreshFileParents(target.slug, target.path, destination);
-      settleMove(moveKey);
     } catch {
       if (version === connectionVersion()) {
         if (target.directory) {
@@ -721,6 +710,22 @@ export function LiveProjectsSection(p: {
           p.open(previousSelection);
         }
       }
+      return;
+    }
+    if (version !== connectionVersion()) return;
+    try {
+      if (target.directory) {
+        try { await folderMoved(target.slug, target.path, destination, target.slug, true); }
+        finally {
+          await refreshFileParents(target.slug, target.path, destination);
+          settleMove(moveKey);
+        }
+        return;
+      }
+      await refreshFileParents(target.slug, target.path, destination);
+      settleMove(moveKey);
+    } catch (e) {
+      if (version === connectionVersion()) setActionError(e instanceof Error ? e.message : String(e));
     }
   };
   const copyFile = async (slug: string, path: string, copy: boolean, directory = false, clipboardData?: DataTransfer | null) => {

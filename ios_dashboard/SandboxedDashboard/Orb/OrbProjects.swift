@@ -1330,6 +1330,7 @@ struct OrbProjectPage: View {
     @State private var movingFolder: String?
     @State private var moveFolderDraft = ""
     @State private var deletingFolder: String?
+    @State private var pendingFolderDeletes: Set<String> = []
     @State private var loadedArchived = false
     @State private var renamingMission: OrbRow?
     @State private var settingsMission: OrbRow?
@@ -1383,7 +1384,11 @@ struct OrbProjectPage: View {
     }
     private var filtering: Bool { !search.isEmpty || filter != "All" }
     private var paths: [String] {
-        let sources = (filtering ? [] : folders) + nestedRoots.map(\.mission.folder)
+        let isDeleting = { (candidate: String) in
+            pendingFolderDeletes.contains { candidate == $0 || candidate.hasPrefix($0 + "/") }
+        }
+        let activeFolders = folders.filter { !isDeleting($0) }
+        let sources = (filtering ? [] : activeFolders) + nestedRoots.map(\.mission.folder)
         var all = Set(sources)
         for path in sources {
             let parts = path.split(separator: "/")
@@ -1956,20 +1961,21 @@ struct OrbProjectPage: View {
         } catch { self.error = error.localizedDescription }
     }
     private func deleteFolder(_ folder: String) async {
+        guard !pendingFolderDeletes.contains(folder) else { return }
         let hasMissions = missions.contains { $0.state != "acknowledged" && ($0.folder == folder || $0.folder.hasPrefix(folder + "/")) }
         if hasMissions {
             self.error = "Move or archive the agents in \"\(folder)\" before deleting it."
             return
         }
-        let previousFolders = folders
-        folders.removeAll { $0 == folder || $0.hasPrefix(folder + "/") }
+        pendingFolderDeletes.insert(folder)
+        defer { pendingFolderDeletes.remove(folder) }
         do {
             _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/file?path=\(OrbCore.escape(folder))", method: "DELETE")
+            folders.removeAll { $0 == folder || $0.hasPrefix(folder + "/") }
             OrbReadCache.invalidate("project:\(project.id)")
             OrbReadCache.invalidate("project:\(project.id):all")
             await load(force: true)
         } catch {
-            folders = previousFolders
             self.error = error.localizedDescription
         }
     }
