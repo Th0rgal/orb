@@ -5282,6 +5282,7 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
 
     let now3 = Utc::now();
     m.update(&spawned.id, |row| {
+        row.pre_stop_ran_at = None;
         row.expires_at = now3 + chrono::Duration::minutes(3);
     })
     .await;
@@ -5316,6 +5317,60 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
         git(&bare_origin, &["rev-parse", wip_ref]),
         linked_wip_sha,
         "staging failure must not overwrite origin WIP ref with a stale index commit"
+    );
+
+    // 5. Hard-cap teardown MUST refresh the checkpoint even after an earlier `pre_720m_hard_cap`
+    // warning checkpoint already set `pre_stop_ran_at`, so work produced during the remaining
+    // 10-minute window before destruction is never lost!
+    let now4 = Utc::now();
+    let max_ttl = m.settings.max_ttl_minutes as i64;
+    m.update(&spawned.id, |row| {
+        row.created_at = now4 - chrono::Duration::minutes(max_ttl - 5);
+        row.expires_at = now4 + chrono::Duration::minutes(5);
+        row.pre_stop_ran_at = None;
+        row.pre_stop_trigger = None;
+    })
+    .await;
+    m.reap_once().await;
+    let after_warning = m.get(&spawned.id).await.unwrap();
+    assert_eq!(after_warning.state, MachineState::Online);
+    assert_eq!(
+        after_warning.pre_stop_trigger.as_deref(),
+        Some("pre_720m_hard_cap")
+    );
+    assert!(after_warning.pre_stop_ran_at.is_some());
+    let checkpoints_before_destroy = fake
+        .execs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.contains("orb_pre_stop_checkpoint"))
+        .count();
+
+    // Advance past `expires_at` (`ttl_expired` at hard cap) without clearing `pre_stop_ran_at`.
+    m.update(&spawned.id, |row| {
+        row.expires_at = Utc::now() - chrono::Duration::minutes(1);
+    })
+    .await;
+    m.reap_once().await;
+    let after_destroy = m.get(&spawned.id).await.unwrap();
+    assert_eq!(after_destroy.state, MachineState::Destroyed);
+    assert_eq!(
+        after_destroy.pre_stop_trigger.as_deref(),
+        Some("pre_destroy"),
+        "destructive teardown must refresh checkpoint even when pre_720m_hard_cap already ran"
+    );
+    let checkpoints_after_destroy = fake
+        .execs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.contains("orb_pre_stop_checkpoint"))
+        .count();
+    assert_eq!(
+        checkpoints_after_destroy,
+        checkpoints_before_destroy + 1,
+        "expected exactly one fresh pre_destroy checkpoint right before hard-cap destruction"
     );
 }
 

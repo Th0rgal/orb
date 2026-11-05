@@ -57,7 +57,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -126,7 +126,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -195,7 +195,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -264,7 +264,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -334,11 +334,11 @@
           },
           {
             "path": "src/api/control/remote_queue.rs",
-            "sha256": "58bca70ad77fa8c9f8b6c3ad7d050b5c176eaaf84e4781c711fdf1458ee591f4"
+            "sha256": "d6cc09ac7fd51e79c5cda4743961c9089efb1fe1e56b447d240203e1326559dc"
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -407,7 +407,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -476,7 +476,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -545,7 +545,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -614,7 +614,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -683,7 +683,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -760,7 +760,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -829,7 +829,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -906,7 +906,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -1138,7 +1138,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -1215,7 +1215,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -1292,7 +1292,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -1373,7 +1373,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -1442,11 +1442,11 @@
           },
           {
             "path": "src/managed/mod.rs",
-            "sha256": "df5f3cc6865cb1a2e5ff73f58db0531dd6a84f741d15fc32f1cb0eeea36faa46"
+            "sha256": "edd0d592095ce210e8092846e221bb30712f2343e282c23bb2963c807ba68d7b"
           },
           {
             "path": "src/managed/tests.rs",
-            "sha256": "576fb63d849b01104ca84d0a3bf79263b0b1d6ff4325ccdfd04b1004e0becbdb"
+            "sha256": "68e01420aa5bd8888f98b5b1dbd018ac5d716acd73bfa88b128c8fb7e1a40cdb"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
@@ -1454,7 +1454,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -1695,7 +1695,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -1772,7 +1772,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -1849,7 +1849,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -1926,7 +1926,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -2085,7 +2085,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -2162,7 +2162,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -2303,7 +2303,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -2380,7 +2380,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -2457,7 +2457,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -2534,7 +2534,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -2611,7 +2611,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -2688,7 +2688,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -3453,7 +3453,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -3530,7 +3530,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -3958,7 +3958,7 @@
           },
           {
             "path": "src/api/control/remote_grok.rs",
-            "sha256": "1ce9cc273cfa0ae7c7620eff4649c57ab85261c96fd9aa72c384aaa724289fc2"
+            "sha256": "83e02509da1e3b1891710f2aa8a98e0fbf86951ef5d2d5bdfd00b8ea773663e0"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
@@ -3966,7 +3966,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -4035,7 +4035,7 @@
           },
           {
             "path": "src/api/control/remote_grok.rs",
-            "sha256": "1ce9cc273cfa0ae7c7620eff4649c57ab85261c96fd9aa72c384aaa724289fc2"
+            "sha256": "83e02509da1e3b1891710f2aa8a98e0fbf86951ef5d2d5bdfd00b8ea773663e0"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
@@ -4043,7 +4043,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -4120,7 +4120,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -4197,7 +4197,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -4282,7 +4282,7 @@
           },
           {
             "path": "src/api/control/remote_grok.rs",
-            "sha256": "1ce9cc273cfa0ae7c7620eff4649c57ab85261c96fd9aa72c384aaa724289fc2"
+            "sha256": "83e02509da1e3b1891710f2aa8a98e0fbf86951ef5d2d5bdfd00b8ea773663e0"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
@@ -4290,7 +4290,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -4378,7 +4378,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "25006291ad30a932228dbbf717fb7771ca5cc63a09eead51692ea34c18dbd15c"
+            "sha256": "9d9a1e8387ab6928b5e0334cdf963f33ed110a1c43a7227aa07377624c62d9cf"
           }
         ],
         "execution": {
@@ -4467,7 +4467,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "25006291ad30a932228dbbf717fb7771ca5cc63a09eead51692ea34c18dbd15c"
+            "sha256": "9d9a1e8387ab6928b5e0334cdf963f33ed110a1c43a7227aa07377624c62d9cf"
           }
         ],
         "execution": {
@@ -4569,7 +4569,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "25006291ad30a932228dbbf717fb7771ca5cc63a09eead51692ea34c18dbd15c"
+            "sha256": "9d9a1e8387ab6928b5e0334cdf963f33ed110a1c43a7227aa07377624c62d9cf"
           }
         ],
         "execution": {
@@ -4667,11 +4667,11 @@
           },
           {
             "path": "src/api/control/remote_grok.rs",
-            "sha256": "1ce9cc273cfa0ae7c7620eff4649c57ab85261c96fd9aa72c384aaa724289fc2"
+            "sha256": "83e02509da1e3b1891710f2aa8a98e0fbf86951ef5d2d5bdfd00b8ea773663e0"
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "25006291ad30a932228dbbf717fb7771ca5cc63a09eead51692ea34c18dbd15c"
+            "sha256": "9d9a1e8387ab6928b5e0334cdf963f33ed110a1c43a7227aa07377624c62d9cf"
           }
         ],
         "execution": {
@@ -4773,7 +4773,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "25006291ad30a932228dbbf717fb7771ca5cc63a09eead51692ea34c18dbd15c"
+            "sha256": "9d9a1e8387ab6928b5e0334cdf963f33ed110a1c43a7227aa07377624c62d9cf"
           }
         ],
         "execution": {
@@ -4875,7 +4875,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "25006291ad30a932228dbbf717fb7771ca5cc63a09eead51692ea34c18dbd15c"
+            "sha256": "9d9a1e8387ab6928b5e0334cdf963f33ed110a1c43a7227aa07377624c62d9cf"
           }
         ],
         "execution": {
@@ -4977,7 +4977,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "25006291ad30a932228dbbf717fb7771ca5cc63a09eead51692ea34c18dbd15c"
+            "sha256": "9d9a1e8387ab6928b5e0334cdf963f33ed110a1c43a7227aa07377624c62d9cf"
           }
         ],
         "execution": {
@@ -5080,15 +5080,15 @@
           },
           {
             "path": "src/managed/mod.rs",
-            "sha256": "df5f3cc6865cb1a2e5ff73f58db0531dd6a84f741d15fc32f1cb0eeea36faa46"
+            "sha256": "edd0d592095ce210e8092846e221bb30712f2343e282c23bb2963c807ba68d7b"
           },
           {
             "path": "src/managed/tests.rs",
-            "sha256": "576fb63d849b01104ca84d0a3bf79263b0b1d6ff4325ccdfd04b1004e0becbdb"
+            "sha256": "68e01420aa5bd8888f98b5b1dbd018ac5d716acd73bfa88b128c8fb7e1a40cdb"
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "25006291ad30a932228dbbf717fb7771ca5cc63a09eead51692ea34c18dbd15c"
+            "sha256": "9d9a1e8387ab6928b5e0334cdf963f33ed110a1c43a7227aa07377624c62d9cf"
           }
         ],
         "execution": {
@@ -5203,7 +5203,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "25006291ad30a932228dbbf717fb7771ca5cc63a09eead51692ea34c18dbd15c"
+            "sha256": "9d9a1e8387ab6928b5e0334cdf963f33ed110a1c43a7227aa07377624c62d9cf"
           }
         ],
         "execution": {
@@ -5274,7 +5274,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -5357,7 +5357,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -5557,7 +5557,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -5619,7 +5619,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -5729,7 +5729,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -6013,7 +6013,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -6089,7 +6089,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -6151,7 +6151,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "25006291ad30a932228dbbf717fb7771ca5cc63a09eead51692ea34c18dbd15c"
+            "sha256": "9d9a1e8387ab6928b5e0334cdf963f33ed110a1c43a7227aa07377624c62d9cf"
           }
         ],
         "execution": {
@@ -6229,7 +6229,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -6298,11 +6298,11 @@
           },
           {
             "path": "src/managed/mod.rs",
-            "sha256": "df5f3cc6865cb1a2e5ff73f58db0531dd6a84f741d15fc32f1cb0eeea36faa46"
+            "sha256": "edd0d592095ce210e8092846e221bb30712f2343e282c23bb2963c807ba68d7b"
           },
           {
             "path": "src/managed/tests.rs",
-            "sha256": "576fb63d849b01104ca84d0a3bf79263b0b1d6ff4325ccdfd04b1004e0becbdb"
+            "sha256": "68e01420aa5bd8888f98b5b1dbd018ac5d716acd73bfa88b128c8fb7e1a40cdb"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
@@ -6310,7 +6310,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -6387,7 +6387,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -6471,7 +6471,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -6549,7 +6549,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -6634,15 +6634,15 @@
           },
           {
             "path": "src/managed/mod.rs",
-            "sha256": "df5f3cc6865cb1a2e5ff73f58db0531dd6a84f741d15fc32f1cb0eeea36faa46"
+            "sha256": "edd0d592095ce210e8092846e221bb30712f2343e282c23bb2963c807ba68d7b"
           },
           {
             "path": "src/managed/tests.rs",
-            "sha256": "576fb63d849b01104ca84d0a3bf79263b0b1d6ff4325ccdfd04b1004e0becbdb"
+            "sha256": "68e01420aa5bd8888f98b5b1dbd018ac5d716acd73bfa88b128c8fb7e1a40cdb"
           },
           {
             "path": "shared/orb-spec/evidence/mission-vm-limits-tests.log",
-            "sha256": "373cc2e0c52bb10fadbe370e4f919c417233d0ba3478d5d19874f9058bdf309f"
+            "sha256": "6ecf82567c5fbe87adf69007b336b3ebc5e1a12fe752ba4b5d94d250b7ea59f2"
           }
         ],
         "execution": {
@@ -6717,7 +6717,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -6794,7 +6794,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r3-authoritative-clusters-tests.log",
-            "sha256": "3f1efab7c333e0349097c51eb80b3c272ef579ecf3c994479ef4e840c7adfc14"
+            "sha256": "d9a4e6bf0ae2532819bee5a043f2052d665d439ef6a4a8f7fbf4785b0b78a562"
           }
         ],
         "execution": {
@@ -6868,7 +6868,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -6963,7 +6963,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -7053,7 +7053,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {
@@ -7143,7 +7143,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
-            "sha256": "73540e1e110ff8bdaf1c5dc4788484a105bd620279f2ca5420de6b507ebd3256"
+            "sha256": "e016a768602e1eb4f17fb3d35e19b8c29d73380b7b4586e4286578fd83c93536"
           }
         ],
         "execution": {

@@ -1,3 +1,174 @@
+
+running 1 test
+test orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3769 filtered out; finished in 0.00s
+
+
+running 1 test
+test orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3769 filtered out; finished in 0.00s
+
+
+running 4 tests
+test api::control::streaming::presentation_tests::kmp_suffix_prefix_overlap_matches_naive_across_multibyte_utf8 ... ok
+test api::control::streaming::presentation_tests::legacy_android_filter_is_not_silently_ignored ... ok
+test api::control::streaming::presentation_tests::offscreen_hints_exclude_heavy_payloads_and_bound_labels ... ok
+test api::control::streaming::presentation_tests::text_op_events_for_stream_handles_multibyte_utf8_across_forced_tail_boundary ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.02s
+
+
+running 1 test
+test node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3769 filtered out; finished in 0.01s
+
+
+running 1 test
+test node::lean::tests::collect_artifacts_hashes_and_sizes_matches ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3769 filtered out; finished in 0.00s
+
+
+running 2 tests
+test node::lean::tests::tiered_gc_evicts_hot_caches_under_emergency_floor_while_respecting_active_locks ... ok
+test node::lean::tests::tiered_gc_preserves_hot_caches_when_disk_pressure_is_pinned_above_emergency ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.00s
+
+
+running 14 tests
+test remote_node::protocol::tests::heartbeat_v1_payload_parses_with_defaults ... ok
+test remote_node::protocol::tests::heartbeat_v2_round_trips ... ok
+test remote_node::protocol::tests::job_payload_round_trips_with_kind_tag ... ok
+test remote_node::protocol::tests::job_status_artifacts_default_for_old_nodes ... ok
+test remote_node::protocol::tests::lean_build_payload_round_trips_with_defaults ... ok
+test remote_node::protocol::tests::lease_and_bearer_token_auth_gates_fail_closed_on_expiry_and_rotation ... ok
+test remote_node::protocol::tests::lease_claims_without_job_id_still_parse ... ok
+test remote_node::protocol::tests::lease_scopes_are_not_interchangeable ... ok
+test remote_node::protocol::tests::parses_label_lists ... ok
+test remote_node::protocol::tests::source_capacity_is_exactly_the_advertised_limit ... ok
+test remote_node::protocol::tests::source_capacity_wire_and_actual_payload_size ... ok
+test remote_node::protocol::tests::token_rotation_accepts_current_or_previous ... ok
+test remote_node::protocol::tests::token_rotation_decision_table ... ok
+test remote_node::protocol::tests::validates_scoped_lease_token ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3756 filtered out; finished in 0.00s
+
+
+running 29 tests
+test node::runner::tests::cancel_finalizes_a_running_job_with_no_live_process ... ok
+test node::runner::tests::cancel_kills_a_running_job ... ok
+test node::runner::tests::cancel_transitions_lost_job_after_restart ... ok
+test node::runner::tests::cancelling_queued_job_is_terminal_and_releases_capacity_immediately ... ok
+test node::runner::tests::cleanup_does_not_complete_until_scope_stop_is_confirmed ... ok
+test node::runner::tests::conversation_turn_runs_beside_its_own_background_job ... ok
+test node::runner::tests::coordinator_wakeup_runs_immediately_while_child_workers_saturate_main ... ok
+test node::runner::tests::force_start_bypasses_saturated_pool_with_single_extra_slot ... ok
+test node::runner::tests::interrupt_job_supports_interrupt_now_and_steer_between_tools ... ok
+test node::runner::tests::liveness_sweep_finalizes_running_job_without_a_process ... ok
+test node::runner::tests::liveness_sweep_never_finalizes_a_live_job ... ok
+test node::runner::tests::log_chunks_preserve_unicode_and_partial_writes ... ok
+test node::runner::tests::managed_grok_job_keeps_isolated_home_and_overrides_payload_home ... ok
+test node::runner::tests::native_goal_outlives_node_ceiling_but_explicit_deadline_remains ... ok
+test node::runner::tests::normal_exit_kills_background_process_group ... ok
+test node::runner::tests::persisted_lean_payload_redacts_source_archive_bytes ... ok
+test node::runner::tests::proc_stat_fields_dual_cabi_gates_reject_malformed_and_short_records ... ok
+test node::runner::tests::runs_a_job_and_captures_its_log ... ok
+test node::runner::tests::scope_namespace_is_stable_and_isolates_node_instances ... ok
+test node::runner::tests::scope_oom_policy_tracks_manager_version ... ok
+test node::runner::tests::side_questions_have_one_independent_cancellable_slot ... ok
+test node::runner::tests::stuck_supervisor_after_exit_is_finalized_with_its_exit_code ... ok
+test node::runner::tests::systemd_scope_kills_setsid_descendants ... ok
+test node::runner::tests::systemd_scope_wrapper_keeps_environment_out_of_argv ... ok
+test node::runner::tests::timeout_fails_the_job ... ok
+test node::runner::tests::user_scope_probe_ignores_stale_configured_runtime ... ok
+test node::runner::tests::user_scope_probe_requires_an_accessible_bus_socket ... ok
+test node::runner::tests::user_scope_probe_selects_user_mode_for_accessible_bus ... ok
+test node::runner::tests::user_scope_wrapper_preserves_cleared_payload_environment ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 3741 filtered out; finished in 15.65s
+
+
+running 1 test
+test api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3769 filtered out; finished in 0.00s
+
+
+running 1 test
+test api::track_leases::tests::lease_mode_precedence_table ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3769 filtered out; finished in 0.00s
+
+
+running 4 tests
+test api::control::execution_ownership::followup_tests::missing_owner_is_distinct_from_explicitly_unassigned_pr ... ok
+test api::control::execution_ownership::followup_tests::queued_followup_protects_assignment_without_claiming_execution ... ok
+test api::control::execution_ownership::repository_identity_tests::github_repository_forms_canonicalise_to_owner_repo ... ok
+test api::control::execution_ownership::repository_identity_tests::unrecognised_repositories_prove_nothing ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
+
+
+running 1 test
+test api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3769 filtered out; finished in 0.58s
+
+
+running 40 tests
+test api::control::board::tests::accepted_dep_unblocks ... ok
+test api::control::board::tests::automatic_retry_is_bounded_by_max_attempts ... ok
+test api::control::board::tests::automatic_retry_relaxes_the_spec_instead_of_repeating_it ... ok
+test api::control::board::tests::boss_terminal_status_classification ... ok
+test api::control::board::tests::classify_blocked_and_failed ... ok
+test api::control::board::tests::client_worker_waits_for_board_adoption_and_rejects_cancelled_task ... ok
+test api::control::board::tests::codex_worker_and_reconciler_roles_default_to_gpt_6_1_terra ... ok
+test api::control::board::tests::dead_boss_board_is_cancelled_and_drops_out ... ok
+test api::control::board::tests::digest_excerpt_truncates_keeping_tail ... ok
+test api::control::board::tests::dropped_delivery_is_released_for_pending_replay ... ok
+test api::control::board::tests::durable_delivery_stays_pending_until_actor_acknowledges ... ok
+test api::control::board::tests::external_worker_capacity_survives_scheduler_passes ... ok
+test api::control::board::tests::external_worker_directories_require_explicit_isolation ... ok
+test api::control::board::tests::first_spawn_prompt_carries_no_retry_guidance ... ok
+test api::control::board::tests::high_risk_tasks_never_retry_silently ... ok
+test api::control::board::tests::live_and_zombie_settle_use_the_same_delivery_rule ... ok
+test api::control::board::tests::native_goal_live_board_settlement_gates_dependents ... ok
+test api::control::board::tests::native_goal_recovery_board_settlement_gates_dependents ... ok
+test api::control::board::tests::native_goal_stop_overrides_prose_and_success_flag ... ok
+test api::control::board::tests::needs_attention_detection ... ok
+test api::control::board::tests::only_a_merged_prior_attempt_parks_the_retry ... ok
+test api::control::board::tests::post_rejection_fresh_spawn_does_not_reuse_retry_guard ... ok
+test api::control::board::tests::ready_blocks_on_failed_or_blocked_dep ... ok
+test api::control::board::tests::ready_respects_dependencies ... ok
+test api::control::board::tests::replay_coalesces_same_attempt_spawn_and_retry ... ok
+test api::control::board::tests::replay_retires_spawn_for_acknowledged_worker_without_dispatching ... ok
+test api::control::board::tests::replay_retires_wake_for_terminal_boss_without_dispatching ... ok
+test api::control::board::tests::retired_gemini_board_task_is_blocked_without_spawning_or_retrying ... ok
+test api::control::board::tests::retry_pr_state_ignores_stale_merge_when_branch_head_changed ... ok
+test api::control::board::tests::retry_rekick_retains_branch_guard_from_persisted_metadata ... ok
+test api::control::board::tests::retry_with_merged_pr_is_parked_for_boss_review ... ok
+test api::control::board::tests::retry_with_surviving_branch_includes_prior_attempt_digest ... ok
+test api::control::board::tests::retry_without_outcome_contract_keeps_the_prompt_binding ... ok
+test api::control::board::tests::retry_without_repository_metadata_keeps_original_prompt ... ok
+test api::control::board::tests::running_task_outcome_contract_can_still_be_corrected ... ok
+test api::control::board::tests::task_workers_inherit_the_boss_project_tagging ... ok
+test api::control::board::tests::unresolvable_dependencies_are_visible_and_trigger_attention ... ok
+test api::control::board::tests::upsert_and_dep_flow_in_memory_store ... ok
+test api::control::board::tests::wake_revision_reissues_after_boss_consumes_wake ... ok
+test api::control::board::tests::worker_contract_delivers_acceptance_criteria_as_the_success_condition ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 3730 filtered out; finished in 0.02s
+
+
+running 1 test
+test node::job_store::tests::terminal_outcome_is_first_wins ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3769 filtered out; finished in 0.08s
+
    Compiling sandboxed_sh v1.3.0 (/var/lib/sandboxed-node/work/8f8e1c2b-e2d6-4e2b-857f-bebba571969f/orb)
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -132,14 +303,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 52.47s
+    Finished `test` profile [unoptimized] target(s) in 36.36s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 1 test
-test orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -273,14 +438,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.29s
+    Finished `test` profile [unoptimized] target(s) in 0.18s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 1 test
-test orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -414,17 +573,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.28s
+    Finished `test` profile [unoptimized] target(s) in 0.18s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 4 tests
-test api::control::streaming::presentation_tests::kmp_suffix_prefix_overlap_matches_naive_across_multibyte_utf8 ... ok
-test api::control::streaming::presentation_tests::legacy_android_filter_is_not_silently_ignored ... ok
-test api::control::streaming::presentation_tests::offscreen_hints_exclude_heavy_payloads_and_bound_labels ... ok
-test api::control::streaming::presentation_tests::text_op_events_for_stream_handles_multibyte_utf8_across_forced_tail_boundary ... ok
-
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.03s
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -558,14 +708,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.29s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 1 test
-test node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.01s
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -699,14 +843,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.28s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 1 test
-test node::lean::tests::collect_artifacts_hashes_and_sizes_matches ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -840,15 +978,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.29s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 2 tests
-test node::lean::tests::tiered_gc_evicts_hot_caches_under_emergency_floor_while_respecting_active_locks ... ok
-test node::lean::tests::tiered_gc_preserves_hot_caches_when_disk_pressure_is_pinned_above_emergency ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3765 filtered out; finished in 0.00s
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -982,27 +1113,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.29s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 14 tests
-test remote_node::protocol::tests::heartbeat_v1_payload_parses_with_defaults ... ok
-test remote_node::protocol::tests::heartbeat_v2_round_trips ... ok
-test remote_node::protocol::tests::job_payload_round_trips_with_kind_tag ... ok
-test remote_node::protocol::tests::job_status_artifacts_default_for_old_nodes ... ok
-test remote_node::protocol::tests::lean_build_payload_round_trips_with_defaults ... ok
-test remote_node::protocol::tests::lease_and_bearer_token_auth_gates_fail_closed_on_expiry_and_rotation ... ok
-test remote_node::protocol::tests::lease_claims_without_job_id_still_parse ... ok
-test remote_node::protocol::tests::lease_scopes_are_not_interchangeable ... ok
-test remote_node::protocol::tests::parses_label_lists ... ok
-test remote_node::protocol::tests::source_capacity_is_exactly_the_advertised_limit ... ok
-test remote_node::protocol::tests::source_capacity_wire_and_actual_payload_size ... ok
-test remote_node::protocol::tests::token_rotation_accepts_current_or_previous ... ok
-test remote_node::protocol::tests::token_rotation_decision_table ... ok
-test remote_node::protocol::tests::validates_scoped_lease_token ... ok
-
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3753 filtered out; finished in 0.00s
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -1136,42 +1248,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.27s
+    Finished `test` profile [unoptimized] target(s) in 0.18s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 29 tests
-test node::runner::tests::cancel_finalizes_a_running_job_with_no_live_process ... ok
-test node::runner::tests::cancel_kills_a_running_job ... ok
-test node::runner::tests::cancel_transitions_lost_job_after_restart ... ok
-test node::runner::tests::cancelling_queued_job_is_terminal_and_releases_capacity_immediately ... ok
-test node::runner::tests::cleanup_does_not_complete_until_scope_stop_is_confirmed ... ok
-test node::runner::tests::conversation_turn_runs_beside_its_own_background_job ... ok
-test node::runner::tests::coordinator_wakeup_runs_immediately_while_child_workers_saturate_main ... ok
-test node::runner::tests::force_start_bypasses_saturated_pool_with_single_extra_slot ... ok
-test node::runner::tests::interrupt_job_supports_interrupt_now_and_steer_between_tools ... ok
-test node::runner::tests::liveness_sweep_finalizes_running_job_without_a_process ... ok
-test node::runner::tests::liveness_sweep_never_finalizes_a_live_job ... ok
-test node::runner::tests::log_chunks_preserve_unicode_and_partial_writes ... ok
-test node::runner::tests::managed_grok_job_keeps_isolated_home_and_overrides_payload_home ... ok
-test node::runner::tests::native_goal_outlives_node_ceiling_but_explicit_deadline_remains ... ok
-test node::runner::tests::normal_exit_kills_background_process_group ... ok
-test node::runner::tests::persisted_lean_payload_redacts_source_archive_bytes ... ok
-test node::runner::tests::proc_stat_fields_dual_cabi_gates_reject_malformed_and_short_records ... ok
-test node::runner::tests::runs_a_job_and_captures_its_log ... ok
-test node::runner::tests::scope_namespace_is_stable_and_isolates_node_instances ... ok
-test node::runner::tests::scope_oom_policy_tracks_manager_version ... ok
-test node::runner::tests::side_questions_have_one_independent_cancellable_slot ... ok
-test node::runner::tests::stuck_supervisor_after_exit_is_finalized_with_its_exit_code ... ok
-test node::runner::tests::systemd_scope_kills_setsid_descendants ... ok
-test node::runner::tests::systemd_scope_wrapper_keeps_environment_out_of_argv ... ok
-test node::runner::tests::timeout_fails_the_job ... ok
-test node::runner::tests::user_scope_probe_ignores_stale_configured_runtime ... ok
-test node::runner::tests::user_scope_probe_requires_an_accessible_bus_socket ... ok
-test node::runner::tests::user_scope_probe_selects_user_mode_for_accessible_bus ... ok
-test node::runner::tests::user_scope_wrapper_preserves_cleared_payload_environment ... ok
-
-test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 3738 filtered out; finished in 15.20s
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -1305,14 +1383,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.30s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 1 test
-test api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -1446,14 +1518,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.30s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 1 test
-test api::track_leases::tests::lease_mode_precedence_table ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.00s
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -1587,17 +1653,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.29s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 4 tests
-test api::control::execution_ownership::followup_tests::missing_owner_is_distinct_from_explicitly_unassigned_pr ... ok
-test api::control::execution_ownership::followup_tests::queued_followup_protects_assignment_without_claiming_execution ... ok
-test api::control::execution_ownership::repository_identity_tests::github_repository_forms_canonicalise_to_owner_repo ... ok
-test api::control::execution_ownership::repository_identity_tests::unrecognised_repositories_prove_nothing ... ok
-
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.00s
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -1731,14 +1788,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.29s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 1 test
-test api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.47s
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -1872,53 +1923,8 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.30s
+    Finished `test` profile [unoptimized] target(s) in 0.21s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 40 tests
-test api::control::board::tests::accepted_dep_unblocks ... ok
-test api::control::board::tests::automatic_retry_is_bounded_by_max_attempts ... ok
-test api::control::board::tests::automatic_retry_relaxes_the_spec_instead_of_repeating_it ... ok
-test api::control::board::tests::boss_terminal_status_classification ... ok
-test api::control::board::tests::classify_blocked_and_failed ... ok
-test api::control::board::tests::client_worker_waits_for_board_adoption_and_rejects_cancelled_task ... ok
-test api::control::board::tests::codex_worker_and_reconciler_roles_default_to_gpt_6_1_terra ... ok
-test api::control::board::tests::dead_boss_board_is_cancelled_and_drops_out ... ok
-test api::control::board::tests::digest_excerpt_truncates_keeping_tail ... ok
-test api::control::board::tests::dropped_delivery_is_released_for_pending_replay ... ok
-test api::control::board::tests::durable_delivery_stays_pending_until_actor_acknowledges ... ok
-test api::control::board::tests::external_worker_capacity_survives_scheduler_passes ... ok
-test api::control::board::tests::external_worker_directories_require_explicit_isolation ... ok
-test api::control::board::tests::first_spawn_prompt_carries_no_retry_guidance ... ok
-test api::control::board::tests::high_risk_tasks_never_retry_silently ... ok
-test api::control::board::tests::live_and_zombie_settle_use_the_same_delivery_rule ... ok
-test api::control::board::tests::native_goal_live_board_settlement_gates_dependents ... ok
-test api::control::board::tests::native_goal_recovery_board_settlement_gates_dependents ... ok
-test api::control::board::tests::native_goal_stop_overrides_prose_and_success_flag ... ok
-test api::control::board::tests::needs_attention_detection ... ok
-test api::control::board::tests::only_a_merged_prior_attempt_parks_the_retry ... ok
-test api::control::board::tests::post_rejection_fresh_spawn_does_not_reuse_retry_guard ... ok
-test api::control::board::tests::ready_blocks_on_failed_or_blocked_dep ... ok
-test api::control::board::tests::ready_respects_dependencies ... ok
-test api::control::board::tests::replay_coalesces_same_attempt_spawn_and_retry ... ok
-test api::control::board::tests::replay_retires_spawn_for_acknowledged_worker_without_dispatching ... ok
-test api::control::board::tests::replay_retires_wake_for_terminal_boss_without_dispatching ... ok
-test api::control::board::tests::retired_gemini_board_task_is_blocked_without_spawning_or_retrying ... ok
-test api::control::board::tests::retry_pr_state_ignores_stale_merge_when_branch_head_changed ... ok
-test api::control::board::tests::retry_rekick_retains_branch_guard_from_persisted_metadata ... ok
-test api::control::board::tests::retry_with_merged_pr_is_parked_for_boss_review ... ok
-test api::control::board::tests::retry_with_surviving_branch_includes_prior_attempt_digest ... ok
-test api::control::board::tests::retry_without_outcome_contract_keeps_the_prompt_binding ... ok
-test api::control::board::tests::retry_without_repository_metadata_keeps_original_prompt ... ok
-test api::control::board::tests::running_task_outcome_contract_can_still_be_corrected ... ok
-test api::control::board::tests::task_workers_inherit_the_boss_project_tagging ... ok
-test api::control::board::tests::unresolvable_dependencies_are_visible_and_trigger_attention ... ok
-test api::control::board::tests::upsert_and_dep_flow_in_memory_store ... ok
-test api::control::board::tests::wake_revision_reissues_after_boss_consumes_wake ... ok
-test api::control::board::tests::worker_contract_delivers_acceptance_criteria_as_the_success_condition ... ok
-
-test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 3727 filtered out; finished in 0.03s
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -2052,11 +2058,5 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.26s
+    Finished `test` profile [unoptimized] target(s) in 0.20s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
-
-running 1 test
-test node::job_store::tests::terminal_outcome_is_first_wins ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3766 filtered out; finished in 0.09s
-

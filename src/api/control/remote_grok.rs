@@ -3742,25 +3742,35 @@ if ses:\n\
             }
         }
 
-        if let Some(ref found_ses) = native_session {
-            if found_ses.starts_with("ses_")
-                && mission.session_id.as_deref() != Some(found_ses.as_str())
+        if let Some(found_ses) = native_session
+            .as_deref()
+            .filter(|s| s.starts_with("ses_") && mission.session_id.as_deref() != Some(*s))
+            .map(str::to_string)
+        {
+            let prev_session = mission.session_id.clone();
+            let latest_fence = store
+                .get_latest_mission_run(mission_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| crate::api::mission_store::SessionUpdateRun::from(&r));
+            if store
+                .update_mission_session_id(
+                    mission_id,
+                    &found_ses,
+                    "opencode",
+                    latest_fence.as_ref(),
+                )
+                .await
+                .unwrap_or(false)
             {
-                let latest_fence = store
-                    .get_latest_mission_run(mission_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|r| crate::api::mission_store::SessionUpdateRun::from(&r));
-                let _ = store
-                    .update_mission_session_id(
-                        mission_id,
-                        found_ses,
-                        "opencode",
-                        latest_fence.as_ref(),
-                    )
-                    .await;
-                mission.session_id = Some(found_ses.clone());
+                let _ = super::remote_queue::rebind_session_id(
+                    &state.projects,
+                    mission_id,
+                    prev_session.as_deref(),
+                    &found_ses,
+                );
+                mission.session_id = Some(found_ses);
             }
         }
     }

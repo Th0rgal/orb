@@ -4977,6 +4977,7 @@ impl ManagedManager {
             .get(id)
             .await
             .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
+        let was_online = current.state == MachineState::Online;
         // Scaleway Apple Silicon 24h minimum lease (`deletable_at`): never
         // call provider DELETE before `deletable_at`. Unregister the node &
         // close the relay so no new work lands on it, and schedule exact
@@ -4987,6 +4988,13 @@ impl ManagedManager {
                 .deletable_at
                 .is_some_and(|del_at| Utc::now() < del_at)
         {
+            if was_online
+                && current.provisioning_mode.is_worker()
+                && current.pre_stop_trigger.as_deref() != Some("pre_destroy")
+            {
+                self.run_pre_stop_checkpoint(&current, "pre_destroy", Utc::now())
+                    .await;
+            }
             let del_at = current.deletable_at.unwrap();
             let defer_reason = format!(
                 "awaiting_deletable_at:{}",
@@ -5027,12 +5035,16 @@ impl ManagedManager {
                 "Unknown managed machine",
             ));
         };
+        // Always take a fresh final checkpoint before destructive teardown of an
+        // online worker VM, even if an earlier warning-window checkpoint
+        // (`pre_720m_hard_cap` / `pre_ttl_expiry`) already set `pre_stop_ran_at`,
+        // so work produced during the remaining warning window is preserved.
         if !failed
+            && was_online
             && m.provisioning_mode.is_worker()
-            && m.pre_stop_ran_at.is_none()
-            && reason
-                .as_deref()
-                .is_some_and(|r| r == "ttl_expired" || r.starts_with("owner_"))
+            && reason.as_deref().is_some_and(|r| {
+                r == "ttl_expired" || r.starts_with("owner_") || r == "idle_timeout"
+            })
         {
             self.run_pre_stop_checkpoint(&m, "pre_destroy", Utc::now())
                 .await;
@@ -5609,7 +5621,20 @@ printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d failed=%d\n'
                                 continue;
                             }
                         }
-                        if !dry_run && m.pre_stop_ran_at.is_none() {
+                        let (decision, _) = self.decide_for(&m, now).await;
+                        let deferring_ttl_destroy = matches!(
+                            &decision,
+                            ReapDecision::Schedule { reason, .. }
+                                if reason.starts_with("awaiting_deletable_at:ttl_expired")
+                        );
+                        if !dry_run
+                            && m.pre_stop_ran_at.is_none()
+                            && matches!(
+                                decision,
+                                ReapDecision::Keep | ReapDecision::Schedule { .. }
+                            )
+                            && !deferring_ttl_destroy
+                        {
                             let max_ttl = self.settings.max_ttl_minutes.max(5) as i64;
                             let hard_cap_at = m.created_at + chrono::Duration::minutes(max_ttl);
                             let near_hard_cap =
@@ -5628,7 +5653,6 @@ printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d failed=%d\n'
                                 }
                             }
                         }
-                        let (decision, _) = self.decide_for(&m, now).await;
                         match &decision {
                             ReapDecision::Stop { reason } => {
                                 let admitted =
@@ -5689,6 +5713,11 @@ printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d failed=%d\n'
                             }
                             ReapDecision::Schedule { reason, at } => {
                                 if reason.starts_with("awaiting_deletable_at:ttl_expired") {
+                                    if m.provisioning_mode.is_worker()
+                                        && m.pre_stop_trigger.as_deref() != Some("pre_destroy")
+                                    {
+                                        self.run_pre_stop_checkpoint(&m, "pre_destroy", now).await;
+                                    }
                                     unregister_node(&m);
                                     self.relay.close(&m.id).await;
                                 }

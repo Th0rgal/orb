@@ -910,6 +910,93 @@ mod tests {
         assert!(waiting(&db, None).unwrap().is_empty());
         assert!(!finish(&db, "u", first, "cancelled").unwrap());
     }
+
+    #[tokio::test]
+    async fn rebind_session_id_updates_placeholder_and_unbound_waiting_entries_without_touching_foreign_sessions(
+    ) {
+        let missions = crate::api::mission_store::InMemoryMissionStore::new();
+        let mut mission = missions
+            .create_mission(None, None, None, None, None, Some("opencode"), None)
+            .await
+            .unwrap();
+        mission.session_id = Some("legacy-placeholder-uuid".into());
+        let db = ProjectsStore::open_in_memory().unwrap();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let foreign = Uuid::new_v4();
+        for (id, ses) in [
+            (first, Some("legacy-placeholder-uuid".to_string())),
+            (second, None),
+            (foreign, Some("ses_other_generation".to_string())),
+        ] {
+            save(
+                &db,
+                &Entry {
+                    user_id: "u".into(),
+                    node_id: "managed-mm1".into(),
+                    session_id: ses,
+                    job_id: None,
+                    assignment: assignment(&mission),
+                    message: QueuedMessage {
+                        id,
+                        content: "continue".into(),
+                        agent: None,
+                        mission_id: Some(mission.id),
+                        source: Some("remote-queue".into()),
+                        inflight: false,
+                        queue_error: None,
+                    },
+                },
+            )
+            .unwrap();
+        }
+        // Once OpenCode session recovery persists `ses_recovered`, the old placeholder
+        // would fail `validate` unless rebound under dispatch admission.
+        mission.session_id = Some("ses_recovered".into());
+        assert!(validate(&db, "u", first, &mission, "managed-mm1").is_err());
+
+        let updated = rebind_session_id(
+            &db,
+            mission.id,
+            Some("legacy-placeholder-uuid"),
+            "ses_recovered",
+        )
+        .unwrap();
+        assert_eq!(updated, 2);
+
+        let e1 = validate(&db, "u", first, &mission, "managed-mm1").unwrap();
+        assert_eq!(e1.session_id.as_deref(), Some("ses_recovered"));
+        assert!(finish(&db, "u", first, "accepted").unwrap());
+
+        let e2 = validate(&db, "u", second, &mission, "managed-mm1").unwrap();
+        assert_eq!(e2.session_id.as_deref(), Some("ses_recovered"));
+        assert!(finish(&db, "u", second, "accepted").unwrap());
+
+        // An entry bound to a distinct real session ID is never overwritten.
+        assert!(validate(&db, "u", foreign, &mission, "managed-mm1").is_err());
+    }
+}
+
+/// Update waiting outbox bindings for `mission_id` under dispatch admission when
+/// OpenCode session recovery replaces a legacy placeholder (or unbound `None`)
+/// with the discovered native `ses_...` identity.
+pub(super) fn rebind_session_id(
+    store: &ProjectsStore,
+    mission_id: Uuid,
+    previous_session_id: Option<&str>,
+    new_session_id: &str,
+) -> Result<usize, String> {
+    let conn = store.lock()?;
+    conn.execute(
+        "UPDATE remote_message_queue \
+         SET payload = json_set(payload, '$.session_id', ?2) \
+         WHERE mission_id = ?1 \
+           AND state = 'waiting' \
+           AND (json_extract(payload, '$.session_id') IS NULL \
+                OR (?3 IS NOT NULL AND json_extract(payload, '$.session_id') = ?3))",
+        params![mission_id.to_string(), new_session_id, previous_session_id],
+    )
+    .map_err(|e| e.to_string())
 }
 
 // Bind before submit, under dispatch admission. Unlike scheduled wake receipts,

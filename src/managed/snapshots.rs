@@ -725,6 +725,10 @@ impl ManagedManager {
                 ));
             }
         }
+        if by_reaper && m.provisioning_mode.is_worker() {
+            self.run_pre_stop_checkpoint(&m, "pre_stop", Utc::now())
+                .await;
+        }
         unregister_node(&m);
         self.relay.close(&m.id).await;
         let mut secrets_wiped = false;
