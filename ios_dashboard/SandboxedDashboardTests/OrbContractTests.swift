@@ -985,6 +985,31 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderX")
         XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 4)
         XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, 0)
+
+        // Repeated-destination (`FolderX -> FolderY -> FolderZ -> FolderY`): neither Move 1's older ack (`FolderY`, rev 5)
+        // nor an intermediate poll clears Move 3 (`op10`), so Move 2's ack (`FolderZ`, rev 6) cannot overwrite `FolderY`.
+        let op8 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderY", opID: op8)
+        let op9 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderZ", opID: op9)
+        let op10 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderY", opID: op10)
+        XCTAssertTrue(OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "rapid-ios", project: "assistant", folder: "FolderY", placementRevision: 5)
+        ], ackOpID: op8).isEmpty)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op10)
+        XCTAssertTrue(OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "rapid-ios", project: "assistant", folder: "FolderZ", placementRevision: 6)
+        ], ackOpID: op9).isEmpty)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderY")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op10)
+        let settledRepeat = OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "rapid-ios", project: "assistant", folder: "FolderY", placementRevision: 7)
+        ], ackOpID: op10)
+        XCTAssertEqual(settledRepeat.count, 1)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderY")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 7)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, 0)
         OrbHierarchy.reset()
     }
 }

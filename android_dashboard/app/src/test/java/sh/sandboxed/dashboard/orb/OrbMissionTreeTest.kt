@@ -486,6 +486,39 @@ class OrbMissionTreeTest {
         assertEquals(1, settledReturn.size)
         assertEquals("FolderX", OrbMissionTree.folderPath(originPoll))
         assertEquals(0, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+
+        // Repeated-destination (`FolderX -> FolderY -> FolderZ -> FolderY`): neither Move 1's older ack (`FolderY`, rev 5)
+        // nor an intermediate poll clears Move 3 (`opI`), so Move 2's ack (`FolderZ`, rev 6) cannot overwrite `FolderY`.
+        val opG = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opG, "assistant", "FolderY")
+        val opH = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opH, "assistant", "FolderZ")
+        val opI = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opI, "assistant", "FolderY")
+        assertEquals(
+            0,
+            OrbMissionTree.commitAuthoritativePlacements(
+                listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderY", 5L, explicitProject = true)),
+                ackOpId = opG
+            ).size
+        )
+        assertEquals(opI, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+        assertEquals(
+            0,
+            OrbMissionTree.commitAuthoritativePlacements(
+                listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderZ", 6L, explicitProject = true)),
+                ackOpId = opH
+            ).size
+        )
+        assertEquals("FolderY", OrbMissionTree.folderPath(originPoll))
+        assertEquals(opI, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+        val settledRepeat = OrbMissionTree.commitAuthoritativePlacements(
+            listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderY", 7L, explicitProject = true)),
+            ackOpId = opI
+        )
+        assertEquals(1, settledRepeat.size)
+        assertEquals("FolderY", OrbMissionTree.folderPath(originPoll))
+        assertEquals(0, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
         OrbMissionTree.resetHierarchy()
     }
 }

@@ -256,6 +256,7 @@ async fn auto_replace_remote_mission_on_same_node(
             !t.starts_with("superseded_by:")
                 && !t.starts_with("remote_node:")
                 && !t.starts_with("fork-workspace:")
+                && !t.starts_with("orb-folder:")
                 && *t != "pr-writer"
                 && *t != "pr-readonly"
         })
@@ -304,6 +305,11 @@ async fn auto_replace_remote_mission_on_same_node(
         not_before: None,
         deadline: None,
         project: prior.project.project.clone(),
+        folder: if prior.parent_mission_id.is_some() || prior.project.folder.is_empty() {
+            None
+        } else {
+            Some(prior.project.folder.clone())
+        },
         track: prior.project.track.clone(),
         idempotency_key: Some(format!("auto-replace:{prior_id}:{message_id}")),
         intent: prior.project.intent.clone(),

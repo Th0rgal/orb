@@ -77,8 +77,12 @@ separate and governed by [ORB_MISSION_TRANSFER.md](../ORB_MISSION_TRANSFER.md).
      folder, placement_revision)` through the Lean-verified
      `orb_placement_merge_step` gate:
      - While an optimistic local move is in flight (`pendingLocalOpId != 0`),
-       polls/snapshots lacking a confirming revision (`incomingRev <= baseRev` on
-       the old placement) cannot snap the row back to its prior folder or project.
+       polls/snapshots at `incomingRev <= currentRev` cannot snap the row back
+       to its prior folder or project, and intermediate polls (`sourceKind = 0`)
+       or older local acknowledgements (`0 < ackOpId < pendingLocalOpId`) at
+       `incomingRev > currentRev` advance the confirmed rollback base without
+       clearing `pendingLocalOpId` — even when their destination matches the
+       current optimistic preview (e.g., `A -> B -> C -> B`).
      - Once settled, any payload with `incomingRev < currentRev` preserves the
        newer `(project, folder, currentRev)` instead of reverting.
      - Any payload or SSE event advancing a mission to `project = P` with a newer

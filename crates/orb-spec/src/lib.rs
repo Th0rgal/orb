@@ -11208,6 +11208,38 @@ mod stateful_tests {
         assert!(intermediate_poll.evict_other_projects);
         assert_eq!(intermediate_poll.next_rev32, 1);
 
+        // Repeated-destination (`A -> B -> C -> B`): neither Move 1's ack (`ack_op_id = 1 < pending_op_id = 3`)
+        // nor an intermediate rev-1 poll (`source_kind = 0`) clears `pending_op_id = 3` when `matches_optimistic = true`.
+        let repeated_dest_older_ack = placement_merge_step(PlacementMergeInput {
+            cur_rev: 0,
+            inc_rev: 1,
+            pending_op_id: 3,
+            ack_op_id: 1,
+            source_kind: 1,
+            has_placement: true,
+            matches_optimistic: true,
+        });
+        assert!(repeated_dest_older_ack.admitted);
+        assert_eq!(repeated_dest_older_ack.status, 1);
+        assert!(!repeated_dest_older_ack.clear_pending);
+        assert!(repeated_dest_older_ack.evict_other_projects);
+        assert_eq!(repeated_dest_older_ack.next_rev32, 1);
+
+        let repeated_dest_intermediate_poll = placement_merge_step(PlacementMergeInput {
+            cur_rev: 0,
+            inc_rev: 1,
+            pending_op_id: 3,
+            ack_op_id: 0,
+            source_kind: 0,
+            has_placement: true,
+            matches_optimistic: true,
+        });
+        assert!(repeated_dest_intermediate_poll.admitted);
+        assert_eq!(repeated_dest_intermediate_poll.status, 1);
+        assert!(!repeated_dest_intermediate_poll.clear_pending);
+        assert!(repeated_dest_intermediate_poll.evict_other_projects);
+        assert_eq!(repeated_dest_intermediate_poll.next_rev32, 1);
+
         // Older revision is rejected even without a pending op.
         let older = placement_merge_step(PlacementMergeInput {
             cur_rev: 7,

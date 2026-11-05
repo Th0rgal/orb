@@ -558,9 +558,33 @@ theorem kill_placement_return_to_origin_stale_poll :
       placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1, 1⟩ := by
   decide
 
+/-- Mutant 9E (Repeated-destination older ack / intermediate poll clears newer pending op): sets
+    `clearPendingBit(512)` (`lo32 = 1793`) whenever `matchesOptimistic == 1` on an intermediate poll
+    (`sourceKind == 0`) or older ack (`sourceKind == 1 && ackOpId < pendingOpId`) during `A -> B -> C -> B`,
+    prematurely clearing Move 3 (`-> B`) so Move 2's ack (`-> C`) overwrites the optimistic preview. -/
+def mutantPlacementRepeatedDestClearsPending (p : PlacementMergeCheck) : UInt32 :=
+  if p.pendingOpId != 0 && decide (p.curRev < p.incRev) &&
+      (p.sourceKind == 0 || (p.sourceKind == 1 && p.ackOpId != 0 && decide (p.ackOpId < p.pendingOpId))) then
+    if p.matchesOptimistic == 1 then 1793 else 1281
+  else
+    placementMergeLo32 p.curRev p.incRev p.pendingOpId p.ackOpId
+      p.sourceKind p.hasPlacement p.matchesOptimistic
+
+theorem kill_placement_repeated_dest_older_ack :
+    mutantPlacementRepeatedDestClearsPending ⟨0, 1, 3, 1, 1, 1, 1⟩ ≠
+      placementMergeLo32 0 1 3 1 1 1 1 := by
+  decide
+
+theorem kill_placement_repeated_dest_intermediate_poll :
+    mutantPlacementRepeatedDestClearsPending ⟨0, 1, 3, 0, 0, 1, 1⟩ ≠
+      placementMergeLo32 0 1 3 0 0 1 1 := by
+  decide
+
 #guard placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1, 0⟩ == false
 #guard placementMergeMetaGate.gate ⟨5, 4, 0, 0, 0, 1, 0⟩ == false
 #guard placementMergeMetaGate.gate ⟨4, 4, 12, 11, 3, 1, 0⟩ == false
 #guard placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1, 1⟩ == false
+#guard ((placementMergeStep 0 1 3 1 1 1 1 &&& 0xFFFFFFFF) &&& 512) == 0
+#guard ((placementMergeStep 0 1 3 0 0 1 1 &&& 0xFFFFFFFF) &&& 512) == 0
 
 end Orb.StatefulMutantSuite

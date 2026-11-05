@@ -8161,8 +8161,7 @@ theorem placementMerge_admit_eq (p : PlacementMergeCheck) :
                 cases hsk1 : (p.sourceKind == 1) <;>
                 cases hack0 : (p.ackOpId != 0) <;>
                 by_cases hlt_op : p.ackOpId < p.pendingOpId <;>
-                cases hmo : (p.matchesOptimistic == 1) <;>
-                (simp only [hsk0, hsk1, hack0, hlt_op, decide_true, decide_false, hmo,
+                (simp only [hsk0, hsk1, hack0, hlt_op, decide_true, decide_false,
                   Bool.true_and, Bool.false_and, Bool.true_or, Bool.false_or,
                   Bool.false_eq_true, ite_true, ite_false];
                  decide)
@@ -8316,12 +8315,13 @@ def placementMergeMetaStepSpec :
     3. **Authoritative ack clears fence & evicts stale buckets (`lo32 = 1793`)**: A matching ack or
        remote SSE frame with `incRev > curRev` while `pendingOpId != 0` admits (`256`), clears the
        pending op (`512`), and signals cross-project eviction (`1024`).
-    4. **Intermediate poll preserves newer pending op (`lo32 = 1281`)**: A poll (`sourceKind = 0`)
-       observing an intermediate revision (`incRev > curRev`) with `matchesOptimistic = 0` while a
-       newer `pendingOpId != 0` is still running admits (`256`) and updates the confirmed rollback
-       baseline without clearing the pending op (`clearPendingBit = 0`). -/
+    4. **Intermediate poll & older ack preserve newer pending op (`lo32 = 1281`)**: Both a poll
+       (`sourceKind = 0`) and an older acknowledgement (`sourceKind = 1`, `0 < ackOpId < pendingOpId`)
+       observing an intermediate revision (`incRev > curRev`) while `pendingOpId != 0` admit (`256`)
+       and update the confirmed rollback baseline without clearing `pendingOpId` (`clearPendingBit = 0`),
+       even when `matchesOptimistic = 1` (such as `A → B → C → B`). -/
 theorem placement_merge_fences_stale_polls_and_advances_monotonically
-    (curRev incRev : UInt64) (pendingOpId : UInt32) (matchesOptimistic : UInt8)
+    (curRev incRev : UInt64) (pendingOpId ackOpId : UInt32) (matchesOptimistic : UInt8)
     (h_pend : pendingOpId != 0)
     (h_le : incRev ≤ curRev) :
     (placementMergeStep curRev incRev pendingOpId 0 0 1 matchesOptimistic &&& 0xFFFFFFFF) = 5 ∧
@@ -8330,7 +8330,9 @@ theorem placement_merge_fences_stale_polls_and_advances_monotonically
     (curRev < curRev + 1 →
       (placementMergeStep curRev (curRev + 1) pendingOpId pendingOpId 1 1 1 &&& 0xFFFFFFFF) = 1793) ∧
     (curRev < curRev + 1 →
-      (placementMergeStep curRev (curRev + 1) pendingOpId 0 0 1 0 &&& 0xFFFFFFFF) = 1281) := by
+      (placementMergeStep curRev (curRev + 1) pendingOpId 0 0 1 matchesOptimistic &&& 0xFFFFFFFF) = 1281) ∧
+    (curRev < curRev + 1 → ackOpId != 0 → ackOpId < pendingOpId →
+      (placementMergeStep curRev (curRev + 1) pendingOpId ackOpId 1 1 matchesOptimistic &&& 0xFFFFFFFF) = 1281) := by
   have h_not_gt : ¬ (curRev < incRev) := UInt64.not_lt.mpr h_le
   have hsk0_3 : ((0 : UInt8) ≤ 3) := by decide
   have hsk1_3 : ((1 : UInt8) ≤ 3) := by decide
@@ -8342,7 +8344,7 @@ theorem placement_merge_fences_stale_polls_and_advances_monotonically
   have h1_eq2 : ((1 : UInt8) == 2) = false := by decide
   have h1_eq3 : ((1 : UInt8) == 3) = false := by decide
   have h1_eq1 : ((1 : UInt8) == 1) = true := by decide
-  refine ⟨?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
   · unfold placementMergeStep placementMergeLo32
     rw [pack32_lo]
     dsimp only [GT.gt, GE.ge]
@@ -8373,6 +8375,14 @@ theorem placement_merge_fences_stale_polls_and_advances_monotonically
     dsimp only [GT.gt, GE.ge]
     simp only [hsk0_3, h_ovf, decide_true, Bool.not_true, Bool.false_eq_true,
       ite_false, h0_eq0, h0_eq2, h0_eq3, h1_eq1, h0_eq1, h_pend, ite_true, Bool.true_or]
+    decide
+  · intro h_ovf hack_nz hack_lt
+    unfold placementMergeStep placementMergeLo32
+    rw [pack32_lo]
+    dsimp only [GT.gt, GE.ge]
+    simp only [hsk1_3, h_ovf, hack_lt, decide_true, Bool.not_true, Bool.false_eq_true,
+      ite_false, h1_eq0, h1_eq2, h1_eq3, h1_eq1, h_pend, hack_nz, ite_true,
+      Bool.true_and, Bool.false_or]
     decide
 
 end Orb.Spec

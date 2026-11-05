@@ -510,3 +510,101 @@ it("keeps return-to-origin (A -> B -> A) moves pending across a pre-move poll at
     pendingOpId: 0,
   });
 });
+
+it("preserves newer pending move across repeated-destination (A -> B -> C -> B) older acks and intermediate polls", () => {
+  // Case 1: Move 1's HTTP ack (`FolderB`, `rev: 1`) arrives while Move 2 (`-> FolderC`) and Move 3 (`-> FolderB`) are pending.
+  const REPEAT_ACK_ID = "repeat-dest-ack-1002";
+  stickHierarchy({
+    id: REPEAT_ACK_ID,
+    project: "assistant",
+    folder: "FolderA",
+    placement_revision: 0,
+    status: "active",
+  });
+  const op1 = allocatePlacementOpId();
+  stageOptimisticPlacement(REPEAT_ACK_ID, "assistant", "FolderB", op1);
+  const op2 = allocatePlacementOpId();
+  stageOptimisticPlacement(REPEAT_ACK_ID, "assistant", "FolderC", op2);
+  const op3 = allocatePlacementOpId();
+  stageOptimisticPlacement(REPEAT_ACK_ID, "assistant", "FolderB", op3);
+
+  expect(
+    commitAuthoritativePlacements(
+      [{ mission_id: REPEAT_ACK_ID, project: "assistant", folder: "FolderB", placement_revision: 1 }],
+      op1,
+    ),
+  ).toEqual([]);
+  expect(authoritativePlacement(REPEAT_ACK_ID)?.pendingOpId).toBe(op3);
+
+  // Move 2's ack (`FolderC`, `rev: 2`) MUST NOT overwrite `FolderB` while `op3` is still pending:
+  expect(
+    commitAuthoritativePlacements(
+      [{ mission_id: REPEAT_ACK_ID, project: "assistant", folder: "FolderC", placement_revision: 2 }],
+      op2,
+    ),
+  ).toEqual([]);
+  expect(authoritativePlacement(REPEAT_ACK_ID)).toMatchObject({
+    project: "assistant",
+    folder: "FolderB",
+    rev: 2,
+    pendingOpId: op3,
+    rollback: { project: "assistant", folder: "FolderC", rev: 2 },
+  });
+
+  // Move 3's ack (`FolderB`, `rev: 3`) settles `pendingOpId` to `0`:
+  expect(
+    commitAuthoritativePlacements(
+      [{ mission_id: REPEAT_ACK_ID, project: "assistant", folder: "FolderB", placement_revision: 3 }],
+      op3,
+    ),
+  ).toEqual([{ mission_id: REPEAT_ACK_ID, project: "assistant", folder: "FolderB", placement_revision: 3 }]);
+  expect(authoritativePlacement(REPEAT_ACK_ID)).toMatchObject({
+    project: "assistant",
+    folder: "FolderB",
+    rev: 3,
+    pendingOpId: 0,
+  });
+
+  // Case 2: Intermediate poll at `rev: 1` (`FolderB`) arrives before Move 1's ack during `A -> B -> C -> B`.
+  const REPEAT_POLL_ID = "repeat-dest-poll-1003";
+  stickHierarchy({
+    id: REPEAT_POLL_ID,
+    project: "assistant",
+    folder: "FolderA",
+    placement_revision: 0,
+    status: "active",
+  });
+  const pOp1 = allocatePlacementOpId();
+  stageOptimisticPlacement(REPEAT_POLL_ID, "assistant", "FolderB", pOp1);
+  const pOp2 = allocatePlacementOpId();
+  stageOptimisticPlacement(REPEAT_POLL_ID, "assistant", "FolderC", pOp2);
+  const pOp3 = allocatePlacementOpId();
+  stageOptimisticPlacement(REPEAT_POLL_ID, "assistant", "FolderB", pOp3);
+
+  const pollAt1 = stickHierarchy({
+    id: REPEAT_POLL_ID,
+    project: "assistant",
+    folder: "FolderB",
+    placement_revision: 1,
+    status: "active",
+  });
+  expect(pollAt1.folder).toBe("FolderB");
+  expect(authoritativePlacement(REPEAT_POLL_ID)?.pendingOpId).toBe(pOp3);
+
+  expect(
+    commitAuthoritativePlacements(
+      [{ mission_id: REPEAT_POLL_ID, project: "assistant", folder: "FolderC", placement_revision: 2 }],
+      pOp2,
+    ),
+  ).toEqual([]);
+  expect(authoritativePlacement(REPEAT_POLL_ID)?.folder).toBe("FolderB");
+  expect(authoritativePlacement(REPEAT_POLL_ID)?.pendingOpId).toBe(pOp3);
+
+  expect(
+    commitAuthoritativePlacements(
+      [{ mission_id: REPEAT_POLL_ID, project: "assistant", folder: "FolderB", placement_revision: 3 }],
+      pOp3,
+    ),
+  ).toEqual([{ mission_id: REPEAT_POLL_ID, project: "assistant", folder: "FolderB", placement_revision: 3 }]);
+  expect(authoritativePlacement(REPEAT_POLL_ID)?.pendingOpId).toBe(0);
+});

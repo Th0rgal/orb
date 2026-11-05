@@ -2868,7 +2868,7 @@ def wireTranscriptSliceStep
 def placementMergeLo32
     (curRev incRev : UInt64)
     (pendingOpId ackOpId : UInt32)
-    (sourceKind hasPlacement matchesOptimistic : UInt8) : UInt32 :=
+    (sourceKind hasPlacement _matchesOptimistic : UInt8) : UInt32 :=
   if !(sourceKind ≤ 3) then 2
   else if sourceKind == 2 then
     if hasPlacement == 1 && ackOpId != 0 then 1281 else 3
@@ -2878,7 +2878,7 @@ def placementMergeLo32
   else if pendingOpId != 0 then
     if incRev > curRev then
       if sourceKind == 0 || (sourceKind == 1 && ackOpId != 0 && ackOpId < pendingOpId) then
-        if matchesOptimistic == 1 then 1793 else 1281
+        1281
       else 1793
     else if sourceKind == 1 && ackOpId == pendingOpId && incRev ≥ curRev then 1793
     else 5
