@@ -1,18 +1,11 @@
+    Finished `test` profile [unoptimized] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-d791927b4d2534f0)
 
 running 1 test
 test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
 
-
-running 2 tests
-test managed::tests::mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_usd_budget ... ok
-test managed::tests::mission_vm_limits_bypass_saturated_global_pool_and_enforce_per_provider_caps ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3772 filtered out; finished in 0.02s
-
-    Finished `test` profile [unoptimized] target(s) in 0.11s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-d791927b4d2534f0)
    Compiling sandboxed_sh v1.3.0 (/var/lib/sandboxed-node/work/8f8e1c2b-e2d6-4e2b-857f-bebba571969f/orb)
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -147,5 +140,12 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 56.78s
+    Finished `test` profile [unoptimized] target(s) in 55.52s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
+
+running 2 tests
+test managed::tests::mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_usd_budget ... ok
+test managed::tests::mission_vm_limits_bypass_saturated_global_pool_and_enforce_per_provider_caps ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3775 filtered out; finished in 0.03s
+

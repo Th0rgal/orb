@@ -5119,7 +5119,7 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
     assert!(clean_synced.status.success());
     let synced_stdout = String::from_utf8_lossy(&clean_synced.stdout);
     assert!(
-        synced_stdout.contains("dirty_repos=0 pushed=0 failed=0"),
+        synced_stdout.contains("dirty_repos=0 pushed=0 exported=0 failed=0"),
         "expected synced clean repo to skip, got: {synced_stdout}"
     );
 
@@ -5150,7 +5150,7 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
     );
     let unpushed_stdout = String::from_utf8_lossy(&clean_unpushed.stdout);
     assert!(
-        unpushed_stdout.contains("dirty_repos=1 pushed=1 failed=0"),
+        unpushed_stdout.contains("dirty_repos=1 pushed=1 exported=0 failed=0"),
         "expected clean repo with unpushed commit to push, got: {unpushed_stdout}"
     );
     let remote_wip_sha = git(&bare_origin, &["rev-parse", wip_ref]);
@@ -5244,7 +5244,7 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
     );
     let probe_stdout = String::from_utf8_lossy(&probe_run.stdout);
     assert!(
-        probe_stdout.contains("dirty_repos=1 pushed=1 failed=0"),
+        probe_stdout.contains("dirty_repos=1 pushed=1 exported=0 failed=0"),
         "expected dirty linked worktree in custom mission root to checkpoint and push, got: {probe_stdout}"
     );
     let linked_wip_sha = git(&bare_origin, &["rev-parse", wip_ref]);
@@ -5310,8 +5310,8 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
     );
     let stage_fail_stdout = String::from_utf8_lossy(&stage_fail_run.stdout);
     assert!(
-        stage_fail_stdout.contains("dirty_repos=1 pushed=0 failed=1"),
-        "expected staging failure to record pushed=0 failed=1, got: {stage_fail_stdout}"
+        stage_fail_stdout.contains("dirty_repos=1 pushed=0 exported=0 failed=1"),
+        "expected staging failure to record pushed=0 exported=0 failed=1, got: {stage_fail_stdout}"
     );
     assert_eq!(
         git(&bare_origin, &["rev-parse", wip_ref]),
@@ -5350,8 +5350,128 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
     );
     let detect_fail_stdout = String::from_utf8_lossy(&detect_fail_run.stdout);
     assert!(
-        detect_fail_stdout.contains("dirty_repos=1 pushed=0 failed=1"),
+        detect_fail_stdout.contains("dirty_repos=1 pushed=0 exported=0 failed=1"),
         "expected discovered .git marker detection failure to record failed=1, got: {detect_fail_stdout}"
+    );
+
+    // 4f. Local-only repository (no `origin` remote and no custom hook): checkpoint script must
+    // emit `ORB_BUNDLE_EXPORT_BEGIN ... ORB_BUNDLE_EXPORT_END` so Core persists the git bundle
+    // onto host storage before VM destruction (and fails closed if bundle export exceeds the cap)!
+    std::fs::remove_dir_all(&rejected_repo).unwrap();
+    let local_only_repo = work_root.join("local-only-repo");
+    std::fs::create_dir_all(&local_only_repo).unwrap();
+    git(&local_only_repo, &["init", "-b", "main"]);
+    git(&local_only_repo, &["config", "user.email", "test@orb.test"]);
+    git(&local_only_repo, &["config", "user.name", "Test"]);
+    std::fs::write(
+        local_only_repo.join("ScratchProof.lean"),
+        "theorem local_only_preserved : True := trivial\n",
+    )
+    .unwrap();
+    // Remove `custom_hook` so we test the default no-origin + no-custom-hook path.
+    m.update(&spawned.id, |row| {
+        row.pre_stop_hook = None;
+        row.pre_stop_ran_at = None;
+        row.expires_at = Utc::now() + chrono::Duration::minutes(3);
+    })
+    .await;
+    m.reap_once().await;
+    let no_hook_script = fake
+        .execs
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|s| s.contains("orb_pre_stop_checkpoint"))
+        .cloned()
+        .expect("no-hook checkpoint script executed");
+    let local_export_run = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(no_hook_script.replace(
+            "'/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'",
+            &format!("'{}'", work_root.display()),
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        local_export_run.status.success(),
+        "local-only repo bundle export should succeed: {}",
+        String::from_utf8_lossy(&local_export_run.stderr)
+    );
+    let local_export_stdout = String::from_utf8_lossy(&local_export_run.stdout);
+    assert!(
+        local_export_stdout.contains("dirty_repos=1 pushed=0 exported=1 failed=0"),
+        "expected local-only repo to report exported=1 failed=0, got: {local_export_stdout}"
+    );
+    let (cleaned_out, saved_bundles, persist_failed) =
+        persist_exported_checkpoint_bundles(&m.dir, &spawned.id, &local_export_stdout);
+    assert!(!persist_failed, "Core bundle persistence must succeed");
+    assert_eq!(saved_bundles.len(), 1, "expected 1 persisted host bundle");
+    assert!(
+        !cleaned_out.contains("ORB_BUNDLE_EXPORT_BEGIN"),
+        "cleaned output snippet must strip base64 bundle payload"
+    );
+    // Destroy the VM local repo directory completely, then clone/restore from the host-persisted bundle!
+    std::fs::remove_dir_all(&local_only_repo).unwrap();
+    let restored_repo = git_fixture.path().join("restored-from-host-bundle");
+    std::fs::create_dir_all(&restored_repo).unwrap();
+    git(&restored_repo, &["init", "-b", "main"]);
+    git(
+        &restored_repo,
+        &[
+            "fetch",
+            &saved_bundles[0],
+            "+refs/orb-pre-stop/*:refs/orb-pre-stop/*",
+        ],
+    );
+    let restored_refs = git(
+        &restored_repo,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/orb-pre-stop/",
+        ],
+    );
+    let restored_sha = restored_refs.lines().next().expect("bundle commit");
+    let restored_files = git(
+        &restored_repo,
+        &["ls-tree", "-r", "--name-only", restored_sha],
+    );
+    assert!(
+        restored_files.contains("ScratchProof.lean"),
+        "host-persisted bundle must preserve uncommitted local-only repo files after VM deletion, got: {restored_files}"
+    );
+
+    // And if a local-only repo's bundle cannot be exported (e.g. exceeds ORB_MAX_BUNDLE_EXPORT_BYTES)
+    // and no custom hook is configured, the script MUST fail closed (`failed=1`, non-zero exit)!
+    let oversized_repo = work_root.join("oversized-local-only-repo");
+    std::fs::create_dir_all(&oversized_repo).unwrap();
+    git(&oversized_repo, &["init", "-b", "main"]);
+    git(&oversized_repo, &["config", "user.email", "test@orb.test"]);
+    git(&oversized_repo, &["config", "user.name", "Test"]);
+    std::fs::write(oversized_repo.join("Big.bin"), vec![b'x'; 256]).unwrap();
+    let cap_fail_script = no_hook_script
+        .replace(
+            "'/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'",
+            &format!("'{}'", work_root.display()),
+        )
+        .replace(
+            "ORB_MAX_BUNDLE_EXPORT_BYTES=1572864",
+            "ORB_MAX_BUNDLE_EXPORT_BYTES=16",
+        );
+    let cap_fail_run = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cap_fail_script)
+        .output()
+        .unwrap();
+    assert!(
+        !cap_fail_run.status.success(),
+        "local-only repo whose bundle cannot be exported off-VM must exit non-zero"
+    );
+    let cap_fail_stdout = String::from_utf8_lossy(&cap_fail_run.stdout);
+    assert!(
+        cap_fail_stdout.contains("dirty_repos=1 pushed=0 exported=0 failed=1"),
+        "expected unexportable local-only repo to report failed=1, got: {cap_fail_stdout}"
     );
 
     // 5. Hard-cap teardown MUST refresh the checkpoint even after an earlier `pre_720m_hard_cap`

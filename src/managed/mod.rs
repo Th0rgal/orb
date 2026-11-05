@@ -5386,6 +5386,7 @@ impl ManagedManager {
             }
         }
         let roots_expr = quoted_roots.join(" ");
+        let has_custom_hook = custom_hook.is_some() as u8;
         let mut script = format!(
             r#"set +e
 [ -r /etc/orb/boost-env ] && {{ set -a; . /etc/orb/boost-env; set +a; }}
@@ -5412,10 +5413,33 @@ if [ -z "${{SANDBOXED_SECRETS_DIR:-}}" ] && [ -z "${{GITHUB_TOKEN:-}}" ] && [ -z
   done
 fi
 ORB_WIP_REF='{wip_ref}'
+ORB_HAS_CUSTOM_HOOK={has_custom_hook}
+ORB_MAX_BUNDLE_EXPORT_BYTES=1572864
 ORB_CHECKPOINT_REPOS=0
 ORB_CHECKPOINT_PUSHED=0
+ORB_CHECKPOINT_EXPORTED=0
 ORB_CHECKPOINT_FAILED=0
 ORB_SEEN_TOPS=""
+orb_emit_bundle() {{
+  bfile="$1"
+  rhash="$2"
+  rpath="$3"
+  [ -r "$bfile" ] || return 1
+  bsize=$(wc -c < "$bfile" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$bsize" ] || return 1
+  [ "$bsize" -gt 0 ] || return 1
+  [ "$bsize" -le "$ORB_MAX_BUNDLE_EXPORT_BYTES" ] || return 1
+  if command -v base64 >/dev/null 2>&1; then
+    b64=$(base64 "$bfile" 2>/dev/null | tr -d '\r\n ') || return 1
+  elif command -v openssl >/dev/null 2>&1; then
+    b64=$(openssl base64 -A -in "$bfile" 2>/dev/null | tr -d '\r\n ') || return 1
+  else
+    return 1
+  fi
+  [ -n "$b64" ] || return 1
+  printf 'ORB_BUNDLE_EXPORT_BEGIN hash=%s size=%s repo=%s\n%s\nORB_BUNDLE_EXPORT_END\n' "$rhash" "$bsize" "$rpath" "$b64"
+  return 0
+}}
 orb_checkpoint_repo() {{
   target_dir="$1"
   must_be_repo="${{2:-0}}"
@@ -5518,17 +5542,23 @@ $repo_dir"
   fi
   if [ -n "$commit_sha" ]; then
     local_ok=1
+    repo_suffix=$(printf '%s' "$repo_dir" | cksum | awk '{{print $1}}')
     git update-ref "$latest_ref" "$commit_sha" 2>/dev/null || local_ok=0
     git update-ref "refs/orb-pre-stop/latest" "$commit_sha" 2>/dev/null || true
     git bundle create "$bundle_path" "$latest_ref" >/dev/null 2>&1 || local_ok=0
     if git remote get-url origin >/dev/null 2>&1; then
-      repo_suffix=$(printf '%s' "$repo_dir" | cksum | awk '{{print $1}}')
       if timeout 25s git push --force origin "$commit_sha:$ORB_WIP_REF" "$commit_sha:${{ORB_WIP_REF}}-$repo_suffix" >/dev/null 2>&1; then
         ORB_CHECKPOINT_PUSHED=$((ORB_CHECKPOINT_PUSHED + 1))
       else
         ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
       fi
-    elif [ "$local_ok" -ne 1 ]; then
+    elif [ "$local_ok" -eq 1 ]; then
+      if orb_emit_bundle "$bundle_path" "$repo_suffix" "$repo_dir"; then
+        ORB_CHECKPOINT_EXPORTED=$((ORB_CHECKPOINT_EXPORTED + 1))
+      elif [ "$ORB_HAS_CUSTOM_HOOK" -ne 1 ]; then
+        ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+      fi
+    else
       ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
     fi
   else
@@ -5546,7 +5576,7 @@ for root in {roots_expr}; do
   done < "$find_list"
   rm -f "$find_list"
 done
-printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d failed=%d\n' '{trigger}' "$ORB_CHECKPOINT_REPOS" "$ORB_CHECKPOINT_PUSHED" "$ORB_CHECKPOINT_FAILED"
+printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d exported=%d failed=%d\n' '{trigger}' "$ORB_CHECKPOINT_REPOS" "$ORB_CHECKPOINT_PUSHED" "$ORB_CHECKPOINT_EXPORTED" "$ORB_CHECKPOINT_FAILED"
 "#
         );
         if let Some(hook) = custom_hook {
@@ -5558,7 +5588,7 @@ printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d failed=%d\n'
 
         let mut transport = "none";
         let mut exit_code: Option<i32> = None;
-        let mut output_snippet = String::new();
+        let mut raw_stdout = String::new();
 
         if let Some(cfg) = node_config(&m.node_id) {
             if let Some(token) = node_token(&cfg.token_env) {
@@ -5589,7 +5619,7 @@ printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d failed=%d\n'
                         if resp.accepted {
                             transport = "orb_node_side_lane";
                             exit_code = resp.exit_code;
-                            output_snippet = resp.stdout.chars().take(500).collect();
+                            raw_stdout = resp.stdout;
                         }
                     }
                 }
@@ -5641,24 +5671,28 @@ exit "$orb_rc"
                 if let Ok(val) = provider.exec(pid, &provider_exec_script, 45).await {
                     transport = "provider_exec";
                     exit_code = exec_exit_code(&val).and_then(|c| i32::try_from(c).ok());
-                    output_snippet = val
+                    raw_stdout = val
                         .get("stdout")
                         .and_then(Value::as_str)
                         .unwrap_or_default()
-                        .chars()
-                        .take(500)
-                        .collect();
+                        .to_string();
                 }
             }
         }
 
-        let checkpoint_succeeded = transport != "none" && exit_code.unwrap_or(0) == 0;
+        let (cleaned_output, exported_bundles, bundle_persist_failed) =
+            persist_exported_checkpoint_bundles(&self.dir, &m.id, &raw_stdout);
+        let output_snippet: String = cleaned_output.chars().take(500).collect();
+
+        let checkpoint_succeeded =
+            transport != "none" && exit_code.unwrap_or(0) == 0 && !bundle_persist_failed;
         let summary = serde_json::json!({
             "trigger": trigger,
             "transport": transport,
             "succeeded": checkpoint_succeeded,
             "wip_ref": wip_ref,
             "custom_hook": custom_hook.is_some(),
+            "exported_bundles": exported_bundles,
             "exit_code": exit_code,
             "output": output_snippet,
         });
@@ -8047,6 +8081,88 @@ pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<Managed
     let _ = MANAGER.set(Arc::clone(&manager));
     manager.ensure_background_loops();
     manager
+}
+
+/// Extract `ORB_BUNDLE_EXPORT_BEGIN ... ORB_BUNDLE_EXPORT_END` blocks emitted by
+/// `run_pre_stop_checkpoint` for local-only repositories (no `origin` remote),
+/// decode and persist them under `<managed_dir>/checkpoints/<machine_id>/` on Core
+/// so they survive VM destruction, and strip the base64 payload from log output.
+pub(crate) fn persist_exported_checkpoint_bundles(
+    managed_dir: &std::path::Path,
+    machine_id: &str,
+    stdout: &str,
+) -> (String, Vec<String>, bool) {
+    use base64::Engine as _;
+
+    let safe_machine: String = machine_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let machine_dir_name = if safe_machine.is_empty() {
+        "machine"
+    } else {
+        safe_machine.as_str()
+    };
+
+    let mut cleaned_lines = Vec::new();
+    let mut exported_paths = Vec::new();
+    let mut persist_failed = false;
+
+    let mut lines = stdout.lines();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.strip_prefix("ORB_BUNDLE_EXPORT_BEGIN ") else {
+            cleaned_lines.push(line);
+            continue;
+        };
+        let mut hash_tag = String::new();
+        for tok in rest.split_whitespace() {
+            if let Some(h) = tok.strip_prefix("hash=") {
+                hash_tag = h
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                break;
+            }
+        }
+        if hash_tag.is_empty() {
+            hash_tag = format!("repo-{}", exported_paths.len() + 1);
+        }
+
+        let mut b64_buf = String::new();
+        let mut closed = false;
+        for inner in lines.by_ref() {
+            if inner == "ORB_BUNDLE_EXPORT_END" {
+                closed = true;
+                break;
+            }
+            b64_buf.push_str(inner.trim());
+        }
+        if !closed || b64_buf.is_empty() {
+            persist_failed = true;
+            continue;
+        }
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64_buf.as_bytes()) else {
+            persist_failed = true;
+            continue;
+        };
+        if bytes.is_empty() {
+            persist_failed = true;
+            continue;
+        }
+        let out_dir = managed_dir.join("checkpoints").join(machine_dir_name);
+        if std::fs::create_dir_all(&out_dir).is_err() {
+            persist_failed = true;
+            continue;
+        }
+        let dest = out_dir.join(format!("orb-pre-stop-wip-{hash_tag}.bundle"));
+        if std::fs::write(&dest, &bytes).is_err() {
+            persist_failed = true;
+            continue;
+        }
+        exported_paths.push(dest.to_string_lossy().into_owned());
+    }
+
+    (cleaned_lines.join("\n"), exported_paths, persist_failed)
 }
 
 #[cfg(test)]
