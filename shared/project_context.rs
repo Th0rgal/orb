@@ -1013,15 +1013,25 @@ impl Store {
     /// for nothing.
     pub fn delete_tree(&self, path: &str) -> Result<()> {
         valid_path(path)?;
-        let manifest = self.manifest()?;
+        let _lock = self.lock()?;
+        let mut state = self.load()?;
+        self.reconcile(&mut state)?;
         let prefix = format!("{path}/");
-        let entries: Vec<(String, Entry)> = manifest
+        let entries: Vec<(String, Entry)> = state
+            .manifest
             .entries
             .iter()
             .filter(|(p, _)| p.as_str() == path || p.starts_with(&prefix))
             .map(|(p, e)| (p.clone(), e.clone()))
             .collect();
-        if manifest.entries.get(path).is_some_and(|e| e.directory)
+        if entries.is_empty() {
+            return Ok(());
+        }
+        if state
+            .manifest
+            .entries
+            .get(path)
+            .is_some_and(|e| e.directory)
             && Self::disk_entries(&checked(&self.root, path)?)? != entries.len() - 1
         {
             return Err(
@@ -1030,22 +1040,23 @@ impl Store {
             );
         }
         // Children sort after their parent: delete them first.
-        for (path, entry) in entries.into_iter().rev() {
-            let receipt = self.apply(Operation {
-                id: uuid::Uuid::new_v4().to_string(),
-                path,
-                base: Some(entry.revision),
-                hash: None,
-                directory: false,
-                delete: true,
+        let mut changes = Vec::with_capacity(entries.len());
+        for (source, entry) in entries.into_iter().rev() {
+            state.manifest.revision += 1;
+            changes.push(Change {
+                before: Some(entry),
+                timestamp: timestamp(),
+                revision: state.manifest.revision,
+                path: source.clone(),
+                entry: None,
                 source: "Orb".into(),
-                confirmed_large: false,
-            })?;
-            if receipt.conflict {
-                return Err("A file changed during deletion; the remaining files were kept".into());
-            }
+            });
+            state.manifest.entries.remove(&source);
         }
-        Ok(())
+        state.history.extend(changes.clone());
+        state.pending.extend(changes);
+        self.save(&state)?;
+        self.recover(&mut state)
     }
     /// Copy a file or folder into another project's context, then remove the
     /// exact source revisions for a move. The copy always lands first, so an
@@ -1463,6 +1474,94 @@ mod tests {
         s.delete_tree("archive").unwrap();
         assert!(s.manifest().unwrap().entries.is_empty());
         s.delete_tree("already-gone").unwrap();
+    }
+    #[test]
+    fn folder_delete_batches_nested_tree_in_single_commit() {
+        let (_dir, s) = setup();
+        fs::create_dir_all(s.root.join("Audits/round1/deep")).unwrap();
+        fs::create_dir_all(s.root.join("keep")).unwrap();
+        fs::write(s.root.join("keep/large.bin"), vec![7u8; 256 * 1024]).unwrap();
+        for i in 0..40 {
+            fs::write(
+                s.root.join(format!("Audits/round1/deep/report-{i:02}.md")),
+                format!("# Report {i}\n"),
+            )
+            .unwrap();
+        }
+        let before = s.manifest().unwrap();
+        let expected_removed = before
+            .entries
+            .keys()
+            .filter(|p| p.as_str() == "Audits" || p.starts_with("Audits/"))
+            .count() as u64;
+        assert_eq!(expected_removed, 43);
+        s.delete_tree("Audits").unwrap();
+        assert!(!s.root.join("Audits").exists());
+        assert!(s.root.join("keep/large.bin").exists());
+        let after = s.manifest().unwrap();
+        assert!(!after
+            .entries
+            .keys()
+            .any(|p| p == "Audits" || p.starts_with("Audits/")));
+        assert!(after.entries.contains_key("keep/large.bin"));
+        assert_eq!(after.revision, before.revision + expected_removed);
+        let history = s.history().unwrap();
+        let tail: Vec<_> = history
+            .iter()
+            .rev()
+            .take(expected_removed as usize)
+            .collect();
+        assert!(tail
+            .iter()
+            .all(|change| change.entry.is_none() && change.source == "Orb"));
+        assert_eq!(tail[0].path, "Audits");
+    }
+    #[test]
+    fn pending_folder_delete_recovers_cleanly_when_concurrent_child_appears() {
+        let (_dir, s) = setup();
+        tree(&s);
+        // Simulate a committed batched deletion of `notes` where an agent wrote a
+        // new file into `notes` before crash recovery unlinked the directory.
+        let mut state = s.load().unwrap();
+        let entries: Vec<(String, Entry)> = state
+            .manifest
+            .entries
+            .iter()
+            .filter(|(p, _)| p.as_str() == "notes" || p.starts_with("notes/"))
+            .map(|(p, e)| (p.clone(), e.clone()))
+            .collect();
+        for (source, entry) in entries.into_iter().rev() {
+            state.manifest.revision += 1;
+            let change = Change {
+                before: Some(entry),
+                timestamp: timestamp(),
+                revision: state.manifest.revision,
+                path: source.clone(),
+                entry: None,
+                source: "Orb".into(),
+            };
+            state.manifest.entries.remove(&source);
+            state.history.push(change.clone());
+            state.pending.push(change);
+        }
+        s.save(&state).unwrap();
+        fs::write(s.root.join("notes/late-arrival.md"), "saved by agent").unwrap();
+
+        // Next manifest read must recover without getting wedged on ENOTEMPTY,
+        // remove the deleted files, and adopt the newly created file + directory.
+        let manifest = s.manifest().unwrap();
+        assert!(!s.root.join("notes/a.md").exists());
+        assert!(!s.root.join("notes/deep").exists());
+        assert_eq!(
+            fs::read_to_string(s.root.join("notes/late-arrival.md")).unwrap(),
+            "saved by agent"
+        );
+        assert!(manifest.entries.get("notes").is_some_and(|e| e.directory));
+        assert!(manifest
+            .entries
+            .get("notes/late-arrival.md")
+            .is_some_and(|e| !e.directory));
+        assert!(s.load().unwrap().pending.is_empty());
     }
     #[test]
     fn transfer_between_projects_copies_before_it_deletes() {

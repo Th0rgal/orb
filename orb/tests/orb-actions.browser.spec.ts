@@ -557,7 +557,7 @@ test('folder deletion requires confirmation and agent badges overlap their icon'
   await page.getByRole('menuitem',{name:'Delete…',exact:true}).click();
   await page.getByRole('button',{name:'Delete',exact:true}).click();
   await expect(folder).toHaveCount(0);
-  expect(deleted).toBe(true);
+  await expect.poll(() => deleted).toBe(true);
 });
 
 test('a refused sidebar action explains itself in a dialog, not inside the project list', async ({page}) => {

@@ -49,6 +49,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -98,6 +99,12 @@ fun OrbProjectDocumentsPage(
     var moveTarget by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
     var moveDraft by remember { mutableStateOf("") }
     var deleteTarget by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+    val pendingDeletes = remember { mutableStateMapOf<String, Boolean>() }
+    val visibleEntries = entries.filterNot { e ->
+        val n = e.str("name") ?: e.id
+        val p = e.str("path") ?: if (directoryPath.isEmpty()) n else "$directoryPath/$n"
+        pendingDeletes.containsKey(p)
+    }
 
     val pageTitle = remember(directoryPath) {
         if (directoryPath.isEmpty()) "Project context" else directoryPath.substringAfterLast('/').ifEmpty { "Project context" }
@@ -216,11 +223,11 @@ fun OrbProjectDocumentsPage(
                     }
                 }
 
-                if (loading && entries.isEmpty()) {
+                if (loading && visibleEntries.isEmpty()) {
                     items(4) { idx ->
                         OrbSkeletonRow()
                     }
-                } else if (entries.isEmpty()) {
+                } else if (visibleEntries.isEmpty()) {
                     item(key = "empty") {
                         Column(
                             modifier = Modifier
@@ -257,7 +264,7 @@ fun OrbProjectDocumentsPage(
                                 .background(OrbStyle.surface)
                                 .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
                         ) {
-                            entries.forEachIndexed { idx, entry ->
+                            visibleEntries.forEachIndexed { idx, entry ->
                                 val kind = (entry.str("kind", "type") ?: "file").lowercase()
                                 val isDir = kind == "directory" || kind == "dir" ||
                                     entry.bool("is_dir", "is_directory") == true
@@ -387,7 +394,7 @@ fun OrbProjectDocumentsPage(
                                     }
                                 }
 
-                                if (idx < entries.lastIndex) {
+                                if (idx < visibleEntries.lastIndex) {
                                     HorizontalDivider(
                                         color = OrbStyle.border,
                                         modifier = Modifier.padding(start = 44.dp)
@@ -624,20 +631,25 @@ fun OrbProjectDocumentsPage(
                 TextButton(
                     onClick = {
                         deleteTarget = null
-                        scope.launch {
-                            try {
-                                core.request(
-                                    "/api/projects/${core.encodeComponent(slug)}/file?path=${core.encodeComponent(targetPath)}",
-                                    method = "DELETE"
-                                )
-                                entries = entries.filterNot { e ->
-                                    val n = e.str("name") ?: e.id
-                                    val p = e.str("path") ?: if (directoryPath.isEmpty()) n else "$directoryPath/$n"
-                                    p == targetPath
+                        if (!pendingDeletes.containsKey(targetPath)) {
+                            pendingDeletes[targetPath] = true
+                            scope.launch {
+                                try {
+                                    core.request(
+                                        "/api/projects/${core.encodeComponent(slug)}/file?path=${core.encodeComponent(targetPath)}",
+                                        method = "DELETE"
+                                    )
+                                    entries = entries.filterNot { e ->
+                                        val n = e.str("name") ?: e.id
+                                        val p = e.str("path") ?: if (directoryPath.isEmpty()) n else "$directoryPath/$n"
+                                        p == targetPath
+                                    }
+                                    load()
+                                } catch (e: Throwable) {
+                                    error = e.message ?: "Failed to delete"
+                                } finally {
+                                    pendingDeletes.remove(targetPath)
                                 }
-                                load()
-                            } catch (e: Throwable) {
-                                error = e.message ?: "Failed to delete"
                             }
                         }
                     }
