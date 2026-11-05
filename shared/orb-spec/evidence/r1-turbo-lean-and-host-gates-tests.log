@@ -1,36 +1,3 @@
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb)
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -163,52 +130,14 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 40.27s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.33s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test orb_spec::tests::reexported_orb_spec_links_and_executes_all_30_kernels ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3726 filtered out; finished in 0.00s
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -342,52 +271,14 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.54s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.32s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test orb_spec::tests::host_slice_bounds_and_isa_selection_gates_verified ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3726 filtered out; finished in 0.00s
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -521,15 +412,9 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.32s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 4 tests
 test api::control::streaming::presentation_tests::kmp_suffix_prefix_overlap_matches_naive_across_multibyte_utf8 ... ok
@@ -537,39 +422,7 @@ test api::control::streaming::presentation_tests::legacy_android_filter_is_not_s
 test api::control::streaming::presentation_tests::offscreen_hints_exclude_heavy_payloads_and_bound_labels ... ok
 test api::control::streaming::presentation_tests::text_op_events_for_stream_handles_multibyte_utf8_across_forced_tail_boundary ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3723 filtered out; finished in 0.01s
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3759 filtered out; finished in 0.03s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -703,52 +556,14 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.15s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.33s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3726 filtered out; finished in 0.01s
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.01s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -882,52 +697,14 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.16s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.33s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test node::lean::tests::collect_artifacts_hashes_and_sizes_matches ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3726 filtered out; finished in 0.00s
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.01s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1061,53 +838,15 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.16s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.33s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 2 tests
 test node::lean::tests::tiered_gc_evicts_hot_caches_under_emergency_floor_while_respecting_active_locks ... ok
 test node::lean::tests::tiered_gc_preserves_hot_caches_when_disk_pressure_is_pinned_above_emergency ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3725 filtered out; finished in 0.00s
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3761 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1241,15 +980,9 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.16s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.33s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 14 tests
 test remote_node::protocol::tests::heartbeat_v1_payload_parses_with_defaults ... ok
@@ -1267,39 +1000,7 @@ test remote_node::protocol::tests::token_rotation_accepts_current_or_previous ..
 test remote_node::protocol::tests::token_rotation_decision_table ... ok
 test remote_node::protocol::tests::validates_scoped_lease_token ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3713 filtered out; finished in 0.00s
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3749 filtered out; finished in 0.01s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1433,17 +1134,11 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.34s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.15s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
-
-running 19 tests
+running 29 tests
 test node::runner::tests::cancel_finalizes_a_running_job_with_no_live_process ... ok
 test node::runner::tests::cancel_kills_a_running_job ... ok
 test node::runner::tests::cancel_transitions_lost_job_after_restart ... ok
@@ -1452,6 +1147,7 @@ test node::runner::tests::cleanup_does_not_complete_until_scope_stop_is_confirme
 test node::runner::tests::conversation_turn_runs_beside_its_own_background_job ... ok
 test node::runner::tests::coordinator_wakeup_runs_immediately_while_child_workers_saturate_main ... ok
 test node::runner::tests::force_start_bypasses_saturated_pool_with_single_extra_slot ... ok
+test node::runner::tests::interrupt_job_supports_interrupt_now_and_steer_between_tools ... ok
 test node::runner::tests::liveness_sweep_finalizes_running_job_without_a_process ... ok
 test node::runner::tests::liveness_sweep_never_finalizes_a_live_job ... ok
 test node::runner::tests::log_chunks_preserve_unicode_and_partial_writes ... ok
@@ -1459,44 +1155,21 @@ test node::runner::tests::managed_grok_job_keeps_isolated_home_and_overrides_pay
 test node::runner::tests::native_goal_outlives_node_ceiling_but_explicit_deadline_remains ... ok
 test node::runner::tests::normal_exit_kills_background_process_group ... ok
 test node::runner::tests::persisted_lean_payload_redacts_source_archive_bytes ... ok
+test node::runner::tests::proc_stat_fields_dual_cabi_gates_reject_malformed_and_short_records ... ok
 test node::runner::tests::runs_a_job_and_captures_its_log ... ok
+test node::runner::tests::scope_namespace_is_stable_and_isolates_node_instances ... ok
+test node::runner::tests::scope_oom_policy_tracks_manager_version ... ok
 test node::runner::tests::side_questions_have_one_independent_cancellable_slot ... ok
 test node::runner::tests::stuck_supervisor_after_exit_is_finalized_with_its_exit_code ... ok
+test node::runner::tests::systemd_scope_kills_setsid_descendants ... ok
+test node::runner::tests::systemd_scope_wrapper_keeps_environment_out_of_argv ... ok
 test node::runner::tests::timeout_fails_the_job ... ok
+test node::runner::tests::user_scope_probe_ignores_stale_configured_runtime ... ok
+test node::runner::tests::user_scope_probe_requires_an_accessible_bus_socket ... ok
+test node::runner::tests::user_scope_probe_selects_user_mode_for_accessible_bus ... ok
+test node::runner::tests::user_scope_wrapper_preserves_cleared_payload_environment ... ok
 
-test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 3708 filtered out; finished in 10.90s
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 15.23s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1630,52 +1303,14 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.43s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.34s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::writer_recycle::tests::explicit_same_track_allows_exclusions_and_collaborator_references ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3726 filtered out; finished in 0.00s
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1809,52 +1444,14 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.34s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::track_leases::tests::lease_mode_precedence_table ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3726 filtered out; finished in 0.00s
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -1988,15 +1585,9 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.15s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.34s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 4 tests
 test api::control::execution_ownership::followup_tests::missing_owner_is_distinct_from_explicitly_unassigned_pr ... ok
@@ -2004,39 +1595,7 @@ test api::control::execution_ownership::followup_tests::queued_followup_protects
 test api::control::execution_ownership::repository_identity_tests::github_repository_forms_canonicalise_to_owner_repo ... ok
 test api::control::execution_ownership::repository_identity_tests::unrecognised_repositories_prove_nothing ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3723 filtered out; finished in 0.00s
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3759 filtered out; finished in 0.00s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -2170,52 +1729,14 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.33s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test api::control::remote_queue::tests::remote_queue_reopen_fifo_cancel_and_receipts ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3726 filtered out; finished in 0.02s
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.49s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -2349,15 +1870,9 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.32s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 40 tests
 test api::control::board::tests::accepted_dep_unblocks ... ok
@@ -2401,39 +1916,7 @@ test api::control::board::tests::upsert_and_dep_flow_in_memory_store ... ok
 test api::control::board::tests::wake_revision_reissues_after_boss_consumes_wake ... ok
 test api::control::board::tests::worker_contract_delivers_acceptance_criteria_as_the_success_condition ... ok
 
-test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 3687 filtered out; finished in 0.01s
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
-
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
-    |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 3723 filtered out; finished in 0.03s
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -2567,18 +2050,12 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.16s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 9 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.33s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
 
 running 1 test
 test node::job_store::tests::terminal_outcome_is_first_wins ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3726 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3762 filtered out; finished in 0.11s
 

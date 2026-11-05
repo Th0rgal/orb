@@ -2,6 +2,248 @@
 
 use super::*;
 
+const INTERRUPTED_TOOL_SYNTHETIC_BANNER: &str =
+    "[Interrupted in-flight tool call via SIGINT (interrupt_now) — synthetic tool result: command terminated by controller interrupt before completion.]\n\n";
+
+async fn interrupt_remote_mission_job(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    mission_id: Uuid,
+    placement: &remote_grok::RemotePlacement,
+    mode: MessageDeliveryMode,
+) -> bool {
+    let remote_mode = match mode {
+        MessageDeliveryMode::Queue => return false,
+        MessageDeliveryMode::SteerBetweenTools => {
+            crate::remote_node::RemoteInterruptMode::SteerBetweenTools
+        }
+        MessageDeliveryMode::InterruptNow => crate::remote_node::RemoteInterruptMode::InterruptNow,
+    };
+    if let Some(node) = state.config.remote_nodes.node(&placement.node_id) {
+        if let Ok(token) = crate::remote_node::node_token(&node.token_env) {
+            let client = crate::remote_node::RemoteNodeClient::default();
+            match client
+                .interrupt_job(
+                    node,
+                    &token,
+                    placement.job_id,
+                    &crate::remote_node::InterruptJobRequest { mode: remote_mode },
+                )
+                .await
+            {
+                Ok(resp) => {
+                    return resp.signalled_pids > 0
+                        || (mode == MessageDeliveryMode::InterruptNow && resp.accepted);
+                }
+                Err(err) if err.is_not_found() => {
+                    // Un-upgraded node without `/jobs/:id/interrupt`: for `InterruptNow`,
+                    // best-effort SIGINT child tools via `/execute` (`side_lane: true`),
+                    // then cancel the turn while preserving the promoted remote queue row.
+                    if mode == MessageDeliveryMode::InterruptNow {
+                        let mission_tags = control
+                            .mission_store
+                            .get_mission(mission_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|m| m.project.tags)
+                            .unwrap_or_default();
+                        let ws_mid = crate::api::durable_jobs::workspace_mission_id(
+                            &mission_tags,
+                            mission_id,
+                        );
+                        let claims = crate::remote_node::LeaseClaims {
+                            mission_id: ws_mid,
+                            node_id: node.id.clone(),
+                            scope: crate::remote_node::SCOPE_MISSION_EXECUTE.into(),
+                            expires_at: (chrono::Utc::now() + chrono::Duration::minutes(1))
+                                .timestamp(),
+                            job_id: None,
+                        };
+                        if let Ok(lease_token) =
+                            crate::remote_node::create_lease_token(&claims, &token)
+                        {
+                            let _ = client
+                                .execute(
+                                    node,
+                                    &token,
+                                    &crate::remote_node::LeaseRequest {
+                                        mission_id: ws_mid,
+                                        node_id: node.id.clone(),
+                                        lease_token,
+                                        command:
+                                            "pkill -INT -f 'lake|lean|cargo|pytest' >/dev/null 2>&1 || true"
+                                                .to_string(),
+                                        side_lane: true,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        %mission_id,
+                        job_id = %placement.job_id,
+                        %err,
+                        "remote interrupt_job call failed; falling back to CancelMission"
+                    );
+                }
+            }
+        }
+    }
+    let (tx, rx) = oneshot::channel();
+    if control
+        .cmd_tx
+        .send(ControlCommand::CancelMission {
+            mission_id,
+            min_idle: None,
+            keep_remote_queue: true,
+            respond: tx,
+        })
+        .await
+        .is_ok()
+    {
+        let _ = rx.await;
+    }
+    mode == MessageDeliveryMode::InterruptNow
+}
+
+async fn auto_replace_remote_mission_on_same_node(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    user: &AuthUser,
+    prior_id: Uuid,
+    placement: &remote_grok::RemotePlacement,
+    content: &str,
+    message_id: Uuid,
+) -> Result<Uuid, (StatusCode, String)> {
+    if !state.config.remote_nodes.enabled
+        || state.config.remote_nodes.node(&placement.node_id).is_none()
+        || crate::managed::node_provably_gone(&placement.node_id).await
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "{}: remote node '{}' is no longer configured or online; cannot auto-replace on same node",
+                remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                placement.node_id
+            ),
+        ));
+    }
+    let prior = control
+        .mission_store
+        .get_mission(prior_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or((StatusCode::NOT_FOUND, "mission not found".into()))?;
+    let ws_mid = crate::api::durable_jobs::workspace_mission_id(&prior.project.tags, prior_id);
+    let mut tags: Vec<String> = prior
+        .project
+        .tags
+        .iter()
+        .filter(|t| {
+            !t.starts_with("superseded_by:")
+                && !t.starts_with("remote_node:")
+                && !t.starts_with("fork-workspace:")
+                && *t != "pr-writer"
+                && *t != "pr-readonly"
+        })
+        .cloned()
+        .collect();
+    tags.push(format!("fork-workspace:{ws_mid}"));
+    let writer = if prior.project.tags.iter().any(|t| t == "pr-writer") {
+        Some(true)
+    } else if prior.project.tags.iter().any(|t| t == "pr-readonly") {
+        Some(false)
+    } else {
+        None
+    };
+    let events = control
+        .mission_store
+        .get_events(
+            prior_id,
+            Some(&["user_message", "assistant_message"]),
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_default();
+    let prompt = fork::recovery_prompt(prior_id, prior.title.as_deref(), &events, content)
+        .unwrap_or_else(|| content.to_string());
+    let model_override = match prior.model_override.clone() {
+        Some(m) => Some(m),
+        None if prior.backend == "claudecode" => Some("claude-sonnet-4-6".to_string()),
+        None => None,
+    };
+    let create_req = CreateMissionRequest {
+        cyber_access: None,
+        title: prior.title.clone(),
+        workspace_id: Some(prior.workspace_id),
+        agent: prior.agent.clone(),
+        model_override,
+        model_effort: prior.model_effort.clone(),
+        fast_mode: prior.fast_mode,
+        service_tier: prior.service_tier,
+        config_profile: prior.config_profile.clone(),
+        backend: Some(prior.backend.clone()),
+        parent_mission_id: prior.parent_mission_id,
+        supersedes_mission_id: Some(prior_id),
+        working_directory: prior.working_directory.clone(),
+        priority: None,
+        not_before: None,
+        deadline: None,
+        project: prior.project.project.clone(),
+        track: prior.project.track.clone(),
+        idempotency_key: Some(format!("auto-replace:{prior_id}:{message_id}")),
+        intent: prior.project.intent.clone(),
+        github_pr: prior.project.github_pr.clone(),
+        writer,
+        acceptance_criteria: Vec::new(),
+        tags: Some(tags),
+        desired_state: None,
+        next_check_at: None,
+        prompt: Some(prompt),
+        remote_node_id: Some(placement.node_id.clone()),
+        remote_requirements: None,
+        remote_command: None,
+        remote_async: Some(true),
+        estimated_disk_gib: None,
+        origin: None,
+        origin_session_id: None,
+        attachments: None,
+        placement: None,
+        claim_managed_machine_id: None,
+        managed_ttl_minutes: None,
+        managed_from_snapshot: None,
+        managed_allow_24h_commitment: None,
+        managed_repo: None,
+        managed_base_key: None,
+        managed_lean_mode: None,
+        managed_memory_mib: None,
+        retain_vm_for_parent_minutes: None,
+        managed_pre_stop_hook: None,
+        budget_usd: None,
+        validate_only: None,
+        extra: Default::default(),
+    };
+    let (_headers, Json(created)) = create_mission_inner(
+        State(Arc::clone(state)),
+        Extension(user.clone()),
+        Some(Json(create_req)),
+        false,
+        None,
+    )
+    .await?;
+    let new_id_str = created.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "replacement mission missing id".to_string(),
+        )
+    })?;
+    Uuid::parse_str(new_id_str).map_err(internal_error)
+}
+
 /// Enqueue a user message for the global control session.
 /// If mission_id is provided and differs from the currently running mission,
 /// the backend will automatically start it in parallel (if capacity allows).
@@ -39,6 +281,8 @@ pub async fn post_message(
         return Ok(response);
     }
     let id = req.client_message_id.unwrap_or_else(Uuid::new_v4);
+    let delivery_mode = req.mode;
+    let auto_replace_on_same_node = req.auto_replace_on_same_node;
     let agent = req.agent;
     let target_mission_id = req.mission_id;
     // Fail loud on unrecognized fields (see ControlMessageRequest::extra).
@@ -91,6 +335,10 @@ pub async fn post_message(
                 queued: true,
                 message_accepted: true,
                 mission_id: Some(mid),
+                delivery_mode: (delivery_mode != MessageDeliveryMode::Queue)
+                    .then_some(delivery_mode),
+                interrupted_tool: None,
+                replaced_by_mission_id: None,
                 previous_execution: None,
                 warnings,
             }));
@@ -152,32 +400,115 @@ pub async fn post_message(
                 &content,
             )
             .await?;
-            remote_queue::enqueue(
+            let effective_content =
+                if placement.live && delivery_mode == MessageDeliveryMode::InterruptNow {
+                    format!("{INTERRUPTED_TOOL_SYNTHETIC_BANNER}{content}")
+                } else {
+                    content.clone()
+                };
+            if let Err((status, error)) = remote_queue::enqueue(
                 &state,
                 &control,
                 &user.id,
                 mid,
                 req.continue_identity.as_ref(),
-                content,
+                effective_content,
                 id,
             )
-            .await?;
+            .await
+            {
+                if auto_replace_on_same_node
+                    && error.starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)
+                {
+                    let new_id = auto_replace_remote_mission_on_same_node(
+                        &state, &control, &user, mid, &placement, &content, id,
+                    )
+                    .await?;
+                    warnings.push(format!(
+                        "Automatically spawned continuation mission {new_id} on remote node '{}' (supersedes_mission_id={mid})",
+                        placement.node_id
+                    ));
+                    return Ok(Json(ControlMessageResponse {
+                        id,
+                        queued: false,
+                        message_accepted: true,
+                        mission_id: Some(new_id),
+                        delivery_mode: (delivery_mode != MessageDeliveryMode::Queue)
+                            .then_some(delivery_mode),
+                        interrupted_tool: None,
+                        replaced_by_mission_id: Some(new_id),
+                        previous_execution: None,
+                        warnings,
+                    }));
+                }
+                return Err((status, error));
+            }
             // Idle continuations retain their immediate-delivery behavior.
             // A racing dispatch or temporary failure leaves the durable entry
             // queued for the same-node retry loop; permanent continuation
             // refusals withdraw the unsubmitted entry and surface immediately.
+            let mut interrupted_tool = None;
             if !placement.live {
-                if let Err((status, error)) =
-                    remote_grok::deliver_queued(&state, &control, &user.id, mid, placement, id)
-                        .await
+                if let Err((status, error)) = remote_grok::deliver_queued(
+                    &state,
+                    &control,
+                    &user.id,
+                    mid,
+                    placement.clone(),
+                    id,
+                )
+                .await
                 {
                     if error.starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)
                         || error.starts_with(remote_grok::REMOTE_AUTH_REQUIRED)
                     {
                         let _ = remote_queue::finish(&state.projects, &user.id, id, "cancelled");
+                        if auto_replace_on_same_node
+                            && error.starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)
+                        {
+                            let new_id = auto_replace_remote_mission_on_same_node(
+                                &state, &control, &user, mid, &placement, &content, id,
+                            )
+                            .await?;
+                            warnings.push(format!(
+                                "Automatically spawned continuation mission {new_id} on remote node '{}' (supersedes_mission_id={mid})",
+                                placement.node_id
+                            ));
+                            return Ok(Json(ControlMessageResponse {
+                                id,
+                                queued: false,
+                                message_accepted: true,
+                                mission_id: Some(new_id),
+                                delivery_mode: (delivery_mode != MessageDeliveryMode::Queue)
+                                    .then_some(delivery_mode),
+                                interrupted_tool: None,
+                                replaced_by_mission_id: Some(new_id),
+                                previous_execution: None,
+                                warnings,
+                            }));
+                        }
                         return Err((status, error));
                     }
                 }
+            } else if delivery_mode != MessageDeliveryMode::Queue {
+                {
+                    let _guard = DISPATCH_ADMISSION.lock().await;
+                    let _file = dispatch_admission::durable_lock(&state.config)
+                        .await
+                        .map_err(internal_error)?;
+                    if remote_queue::is_waiting(&state.projects, &user.id, id)
+                        .map_err(internal_error)?
+                    {
+                        let _ = remote_queue::promote(&state.projects, &user.id, id);
+                    }
+                }
+                let did_interrupt =
+                    interrupt_remote_mission_job(&state, &control, mid, &placement, delivery_mode)
+                        .await;
+                if delivery_mode == MessageDeliveryMode::InterruptNow {
+                    interrupted_tool = Some(did_interrupt);
+                }
+                remote_queue::wake();
             }
             let queued =
                 remote_queue::is_waiting(&state.projects, &user.id, id).map_err(internal_error)?;
@@ -186,6 +517,10 @@ pub async fn post_message(
                 queued,
                 message_accepted: true,
                 mission_id: Some(mid),
+                delivery_mode: (delivery_mode != MessageDeliveryMode::Queue)
+                    .then_some(delivery_mode),
+                interrupted_tool,
+                replaced_by_mission_id: None,
                 previous_execution: None,
                 warnings,
             }));
@@ -230,6 +565,24 @@ pub async fn post_message(
             warnings.push(format!("Some attachments were skipped or capped; see .paloma/messages/{id}/.paloma/attach.md"));
         }
         content
+    } else {
+        content
+    };
+    let mut local_interrupted_tool = None;
+    let content = if delivery_mode == MessageDeliveryMode::InterruptNow {
+        if let Some(mid) = target_mission_id {
+            let signalled = crate::api::runners::live_session::interrupt_child_tools(mid);
+            if signalled > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                local_interrupted_tool = Some(true);
+                format!("{INTERRUPTED_TOOL_SYNTHETIC_BANNER}{content}")
+            } else {
+                local_interrupted_tool = Some(false);
+                content
+            }
+        } else {
+            content
+        }
     } else {
         content
     };
@@ -282,7 +635,7 @@ pub async fn post_message(
     if let Some(mission_id) = target_mission_id {
         dispatch_admission_tests::notify_wait(mission_id, "enqueued");
     }
-    let (queued, message_accepted, previous_execution) = match queued_rx.await {
+    let (mut queued, message_accepted, previous_execution) = match queued_rx.await {
         Ok(UserMessageAck::Queued) => (true, true, None),
         Ok(UserMessageAck::Delivered) => (false, true, None),
         Ok(UserMessageAck::Continued {
@@ -295,11 +648,32 @@ pub async fn post_message(
         }
         Err(error) => return Err(recv_failed(error)),
     };
+    if queued && message_accepted && delivery_mode != MessageDeliveryMode::Queue {
+        let (now_tx, now_rx) = oneshot::channel();
+        if control
+            .cmd_tx
+            .send(ControlCommand::SendQueuedNow {
+                message_id: id,
+                interrupt: delivery_mode == MessageDeliveryMode::InterruptNow,
+                steer_after_tool: delivery_mode == MessageDeliveryMode::SteerBetweenTools,
+                respond: now_tx,
+            })
+            .await
+            .is_ok()
+        {
+            if let Ok(Ok(SendQueuedNowOutcome::DeliveredLive)) = now_rx.await {
+                queued = false;
+            }
+        }
+    }
     Ok(Json(ControlMessageResponse {
         id,
         queued,
         message_accepted,
         mission_id: target_mission_id,
+        delivery_mode: (delivery_mode != MessageDeliveryMode::Queue).then_some(delivery_mode),
+        interrupted_tool: local_interrupted_tool,
+        replaced_by_mission_id: None,
         previous_execution,
         warnings,
     }))
@@ -739,6 +1113,7 @@ pub async fn send_queued_now(
         .send(ControlCommand::SendQueuedNow {
             message_id,
             interrupt,
+            steer_after_tool: false,
             respond: tx,
         })
         .await

@@ -5277,6 +5277,7 @@ struct FixtureNode {
     submit_delay: Arc<std::sync::Mutex<std::time::Duration>>,
     status_delay: Arc<std::sync::Mutex<std::time::Duration>>,
     status_requests: Arc<std::sync::atomic::AtomicUsize>,
+    execute_stdout: Arc<std::sync::Mutex<String>>,
     _server: tokio::task::JoinHandle<()>,
 }
 
@@ -5303,6 +5304,7 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
     let status_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let log = Arc::new(std::sync::Mutex::new(String::new()));
     let capabilities = Arc::new(std::sync::Mutex::new((StatusCode::NOT_FOUND, json!({}))));
+    let execute_stdout = Arc::new(std::sync::Mutex::new(String::new()));
     let app = axum::Router::new()
         .route(
             "/machine-transfer/capabilities",
@@ -5420,6 +5422,34 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
             }),
         )
         .route(
+            "/execute",
+            axum::routing::post({
+                let execute_stdout = execute_stdout.clone();
+                let node_id = id.to_string();
+                move |Json(body): Json<Value>| {
+                    let stdout = execute_stdout.lock().unwrap().clone();
+                    let node_id = node_id.clone();
+                    async move {
+                        let mission_id = body["mission_id"]
+                            .as_str()
+                            .and_then(|s| Uuid::parse_str(s).ok())
+                            .unwrap_or_else(Uuid::nil);
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "accepted": true,
+                                "node_id": node_id,
+                                "mission_id": mission_id,
+                                "exit_code": 0,
+                                "stdout": stdout,
+                                "stderr": "",
+                            })),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
             "/heartbeat",
             axum::routing::get({
                 let node_id = id.to_string();
@@ -5463,6 +5493,7 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
         status_delay,
         status_requests,
         log,
+        execute_stdout,
         _server: server,
     }
 }
@@ -17255,6 +17286,7 @@ impl crate::managed::ManagedProvider for AutoEnrollingBoatFixtureProvider {
             state: "ready".into(),
             name: spec.name.clone(),
             deletable_at: None,
+            ..Default::default()
         })
     }
     async fn get(&self, provider_id: &str) -> Result<crate::managed::ProviderMachine, String> {
@@ -17263,6 +17295,7 @@ impl crate::managed::ManagedProvider for AutoEnrollingBoatFixtureProvider {
             state: "ready".into(),
             name: String::new(),
             deletable_at: None,
+            ..Default::default()
         })
     }
     async fn list(&self) -> Result<Vec<crate::managed::ProviderMachine>, String> {
@@ -18228,6 +18261,7 @@ async fn bugbot_regressions_pin_boat_provider_exclude_vibe_cleanup_rented_vm_and
                 state: "ready".into(),
                 name: String::new(),
                 deletable_at: None,
+                ..Default::default()
             })
         }
         async fn list(&self) -> Result<Vec<crate::managed::ProviderMachine>, String> {
@@ -19362,4 +19396,283 @@ async fn secret_broker_subagent_tree_inherits_grants_and_development_identity_gi
             .allows("CUSTOM_VERIFIER_TOKEN", Some("bw-shared-proj")),
         "/btw side mission must not inherit parent secret grant"
     );
+}
+
+#[tokio::test]
+async fn remote_opencode_writer_reattaches_sqlite_session_and_gateway_fails_synchronously_when_node_gone(
+) {
+    std::env::set_var("SANDBOXED_PUBLIC_URL", "http://127.0.0.1:9");
+    let fixture = spawn_fixture_node(
+        "managed-mm-reattach",
+        "REMOTE_OPENCODE_REATTACH_TOKEN",
+        "running",
+    )
+    .await;
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::opencode::OpenCodeBackend::new("http://127.0.0.1:9".into(), None, false),
+    ));
+
+    let create_body = json!({
+        "title": "Boat OpenCode PR Writer",
+        "project": "lido",
+        "track": "evm-fast-proof",
+        "github_pr": "Layr-Labs/evm.fast#101",
+        "writer": true,
+        "backend": "opencode",
+        "model_override": "xai/grok-4.6",
+        "remote_node_id": "managed-mm-reattach",
+        "prompt": "Prove the lemma and push WIP",
+        "idempotency_key": "opencode-writer-launch-1",
+    });
+    let created_res = h
+        .state
+        .http_client
+        .post(format!("{}/missions", h.url))
+        .json(&create_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        created_res.status(),
+        StatusCode::OK,
+        "{}",
+        created_res.text().await.unwrap()
+    );
+    let created: Value = created_res.json().await.unwrap();
+    let mid = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+    let store = h.control.mission_store.clone();
+    let mission = store.get_mission(mid).await.unwrap().unwrap();
+    assert!(mission.project.tags.iter().any(|t| t == "pr-writer"));
+    assert_eq!(
+        mission.project.github_pr.as_deref(),
+        Some("Layr-Labs/evm.fast#101")
+    );
+
+    // Finish first turn without streaming `ses_...` in the job log, but expose it via
+    // remote `/execute` SQLite probe (`WS=1` + `SES=ses_persisted_remote_db`).
+    *fixture.execute_stdout.lock().unwrap() = "WS=1\nSES=ses_persisted_remote_db\n".to_string();
+    fixture.set_state("succeeded");
+    wait_until("first remote OpenCode turn settles", 20, || async {
+        store.get_mission(mid).await.unwrap().unwrap().status == MissionStatus::Completed
+            && crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+                .await
+                .unwrap()
+                .is_empty()
+    })
+    .await;
+
+    // 1. Follow-up on the still-online remote managed node reattaches to `ses_persisted_remote_db`
+    //    with a refreshed writer lease instead of failing with `409 REMOTE_RESUME_REQUIRES_REPLACEMENT`!
+    fixture.set_state("running");
+    let followup_res = h
+        .request(
+            false,
+            mid,
+            json!({
+                "content": "Push WIP commit before hard cap",
+                "continue_identity": {
+                    "project": "lido",
+                    "track": "evm-fast-proof",
+                    "github_pr": "Layr-Labs/evm.fast#101"
+                }
+            }),
+        )
+        .await;
+    let followup_status = followup_res.status();
+    let followup_body: Value = followup_res.json().await.unwrap();
+    assert_eq!(followup_status, StatusCode::OK, "{followup_body}");
+    assert_eq!(followup_body["message_accepted"], true);
+    assert_eq!(followup_body["queued"], false);
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+    let resumed_cmd = fixture.submissions.lock().unwrap()[1]["payload"]["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        resumed_cmd.contains("ses_persisted_remote_db"),
+        "expected OpenCode continuation to reattach persisted SQLite session, got: {resumed_cmd}"
+    );
+    assert_eq!(
+        store
+            .get_mission(mid)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some("ses_persisted_remote_db")
+    );
+
+    // Settle second turn so the mission is idle again.
+    fixture.set_state("succeeded");
+    wait_until("second remote OpenCode turn settles", 20, || async {
+        crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+            .await
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+
+    // 2. Simulate an unresumable idle mission on an unconfigured/reaped node and verify
+    //    MCP `gateway::dispatch` fails synchronously (`accepted == "no"`, no `queued` action)!
+    let orphan = store
+        .create_mission(
+            Some("Reaped Node Mission"),
+            None,
+            None,
+            None,
+            None,
+            Some("claudecode"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            orphan.id,
+            MissionProjectPatch {
+                tags: Some(vec!["remote_node:managed-mm-reaped-gone".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .set_mission_requires_local_disk(orphan.id, false)
+        .await
+        .unwrap();
+    store
+        .update_mission_status(orphan.id, MissionStatus::Interrupted)
+        .await
+        .unwrap();
+
+    let coordinator = crate::control_mcp::gateway::Principal {
+        sub: h.user.id.clone(),
+        username: h.user.username.clone(),
+        role: crate::control_mcp::Role::Coordinator,
+        mission_id: None,
+        project: None,
+        action_run_generation: None,
+        session_id: Uuid::new_v4(),
+        exp: (chrono::Utc::now().timestamp() + 3600) as usize,
+        client_kind: None,
+        client_label: None,
+        host_hint: None,
+    };
+    let mcp_call = crate::control_mcp::gateway::Call {
+        name: "send_message_to_mission".into(),
+        arguments: json!({
+            "mission_id": orphan.id.to_string(),
+            "content": "Attempt follow-up on reaped node",
+            "idempotency_key": "sync-fail-reaped-node-1"
+        }),
+    };
+    let Json(mcp_resp) = crate::control_mcp::gateway::call(
+        State(h.state.clone()),
+        Extension(coordinator.clone()),
+        Json(mcp_call.clone()),
+    )
+    .await;
+    assert_eq!(mcp_resp["ok"], false, "{mcp_resp}");
+    assert_eq!(
+        mcp_resp["error"]["code"],
+        "remote_resume_requires_replacement"
+    );
+    assert_eq!(mcp_resp["error"]["accepted"], "no");
+    assert!(mcp_resp["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT));
+    let conn = h.state.projects.connection.lock().unwrap();
+    assert!(
+        crate::control_mcp::actions::existing(&conn, &coordinator, &mcp_call)
+            .unwrap()
+            .is_none(),
+        "must not leave a queued action receipt when continuation is impossible"
+    );
+    drop(conn);
+
+    // 3. On a still-online node (`managed-mm-reattach`), when native continuation is impossible
+    //    (e.g. Grok mission whose launch died before session creation) and `auto_replace_on_same_node: true`
+    //    is passed, `post_message` spawns a continuation mission on the same node automatically!
+    let unstarted_grok = store
+        .create_mission(
+            Some("Unstarted Grok Worker"),
+            None,
+            None,
+            None,
+            None,
+            Some("grok"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            unstarted_grok.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                tags: Some(vec!["remote_node:managed-mm-reattach".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .set_mission_requires_local_disk(unstarted_grok.id, false)
+        .await
+        .unwrap();
+    store
+        .update_mission_status(unstarted_grok.id, MissionStatus::Failed)
+        .await
+        .unwrap();
+    // Register grok + managed_auth so replacement creation succeeds on `managed-mm-reattach`.
+    h.state
+        .backend_registry
+        .write()
+        .await
+        .register(Arc::new(crate::backend::grok::GrokBackend::new()));
+    h.state.fleet.record_heartbeat(
+        "managed-mm-reattach",
+        serde_json::from_value(json!({
+            "node_id": "managed-mm-reattach",
+            "online": true,
+            "capacity_total": 2,
+            "capacity_available": 2,
+            "active_leases": 0,
+            "version": "test",
+            "protocol_version": crate::remote_node::protocol::NODE_PROTOCOL_VERSION,
+            "managed_auth": ["grok"]
+        }))
+        .unwrap(),
+    );
+    fixture.set_state("running");
+    let auto_replace_res = h
+        .request(
+            false,
+            unstarted_grok.id,
+            json!({
+                "content": "Continue in auto-spawned replacement on same node",
+                "auto_replace_on_same_node": true
+            }),
+        )
+        .await;
+    let auto_status = auto_replace_res.status();
+    let auto_text = auto_replace_res.text().await.unwrap();
+    assert_eq!(auto_status, StatusCode::OK, "{auto_text}");
+    let auto_body: Value = serde_json::from_str(&auto_text).unwrap();
+    let replaced_id = Uuid::parse_str(
+        auto_body["replaced_by_mission_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("replaced_by_mission_id must be returned, got: {auto_body}")),
+    )
+    .unwrap();
+    assert_ne!(replaced_id, unstarted_grok.id);
+    assert_eq!(auto_body["mission_id"], json!(replaced_id.to_string()));
+    let prior_after = store.get_mission(unstarted_grok.id).await.unwrap().unwrap();
+    assert!(prior_after
+        .project
+        .tags
+        .contains(&format!("superseded_by:{replaced_id}")));
 }

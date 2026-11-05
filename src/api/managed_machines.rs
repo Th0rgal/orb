@@ -95,9 +95,87 @@ pub fn public_routes() -> Router<Arc<AppState>> {
 #[derive(Deserialize)]
 struct ListQuery {
     history_hours: Option<i64>,
+    mission_id: Option<String>,
+    scope: Option<String>,
+    pool_only: Option<bool>,
+}
+
+/// Collect `root` and all descendants in `store` (bounded BFS up to 256 nodes).
+pub(crate) async fn mission_subtree_ids(
+    store: &Arc<dyn crate::api::mission_store::MissionStore>,
+    root: uuid::Uuid,
+) -> std::collections::HashSet<String> {
+    let mut visited = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(root);
+    while let Some(cur) = queue.pop_front() {
+        if visited.len() >= 256 || !visited.insert(cur.to_string()) {
+            continue;
+        }
+        if let Ok(children) = store.get_child_missions(cur).await {
+            for child in children {
+                if !visited.contains(&child.id.to_string()) {
+                    queue.push_back(child.id);
+                }
+            }
+        }
+    }
+    visited
+}
+
+/// Filter `machines` to those belonging to `mission_id`'s budget/cap pool or
+/// mission lineage/descendant tree.
+pub(crate) async fn filter_machines_to_own_pool(
+    store: &Arc<dyn crate::api::mission_store::MissionStore>,
+    user_id: &str,
+    mission_id: uuid::Uuid,
+    machines: &mut Vec<crate::managed::ManagedMachine>,
+) {
+    let lineage = crate::api::mission_budget::lineage(store, mission_id).await;
+    let pool_id = crate::api::mission_budget::pool_for(store, mission_id, user_id).await;
+    let root_id = lineage
+        .last()
+        .cloned()
+        .unwrap_or_else(|| mission_id.to_string());
+    let root_uuid = uuid::Uuid::parse_str(&root_id).unwrap_or(mission_id);
+    let mut allowed_missions = mission_subtree_ids(store, mission_id).await;
+    if root_uuid != mission_id {
+        allowed_missions.extend(mission_subtree_ids(store, root_uuid).await);
+    }
+    for anc in &lineage {
+        allowed_missions.insert(anc.clone());
+    }
+    let mut allowed_pools = std::collections::HashSet::new();
+    if let Some(ref pid) = pool_id {
+        allowed_pools.insert(pid.clone());
+    }
+    for mid in &allowed_missions {
+        allowed_pools.insert(mid.clone());
+    }
+    machines.retain(|m| {
+        m.budget_pool_id
+            .as_deref()
+            .is_some_and(|p| allowed_pools.contains(p))
+            || m.cap_pool_id
+                .as_deref()
+                .is_some_and(|p| allowed_pools.contains(p))
+            || m.owner_mission_id
+                .as_deref()
+                .is_some_and(|o| allowed_missions.contains(o))
+            || m.requested_by_mission_id
+                .as_deref()
+                .is_some_and(|r| allowed_missions.contains(r))
+            || m.root_mission_id
+                .as_deref()
+                .is_some_and(|r| allowed_missions.contains(r))
+            || m.active_mission_ids
+                .iter()
+                .any(|a| allowed_missions.contains(a))
+    });
 }
 
 async fn list(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
     Query(q): Query<ListQuery>,
 ) -> Response {
@@ -110,6 +188,24 @@ async fn list(
                 machine.provisioning_mode.is_worker()
                     || machine.owner_user_id.as_deref() == Some(user.id.as_str())
             });
+            let effective_own_pool = match (q.pool_only, q.scope.as_deref()) {
+                (Some(true), _) | (_, Some("own_pool")) => true,
+                (Some(false), _) | (_, Some("all")) => false,
+                (None, None) => q.mission_id.is_some(),
+                _ => q.mission_id.is_some(),
+            };
+            if effective_own_pool {
+                if let Some(mid) = q
+                    .mission_id
+                    .as_deref()
+                    .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+                {
+                    let store = crate::api::control::control_for_user(&state, &user)
+                        .await
+                        .mission_store;
+                    filter_machines_to_own_pool(&store, &user.id, mid, &mut view.machines).await;
+                }
+            }
             view.budget = m.visible_budget(&user.id).await;
             let visible = visible_machines(&m, &user.id).await;
             view.daily_spend = crate::managed::daily_spend(

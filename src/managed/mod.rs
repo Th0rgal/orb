@@ -270,13 +270,23 @@ pub struct SpawnQuote {
     pub ram_gb: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ProviderMachine {
     pub provider_id: String,
     pub state: String,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletable_at: Option<DateTime<Utc>>,
+    /// Structured warnings produced during provisioning (e.g. Boost `repo=`
+    /// HTTP 403 overlay fallback to `lean_mode="off"`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Effective Lean overlay mode applied by the provider when adjusted via fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_lean_mode: Option<String>,
+    /// Effective warm repo applied by the provider (`Some(None)` clears `repo`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_repo: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -848,6 +858,31 @@ pub struct ManagedMachine {
     /// Optional Lean overlay mode (`"auto"`, `"cache-only"`, `"off"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lean_mode: Option<String>,
+    /// Structured provisioning warnings (e.g. Boost `repo=` 403 auto-fallback).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Extended grace (minutes) to retain an auto-managed child VM after its
+    /// child owner terminates while its parent mission is still alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_vm_for_parent_minutes: Option<u64>,
+    /// Optional custom shell command executed out-of-band before TTL/hard-cap kill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_stop_hook: Option<String>,
+    /// Timestamp when the out-of-band pre-expiry / pre-720m hook executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_stop_ran_at: Option<DateTime<Utc>>,
+    /// Trigger label (`"pre_720m_hard_cap"`, `"pre_ttl_expiry"`, `"pre_destroy"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_stop_trigger: Option<String>,
+    /// Bounded JSON summary of the pre-stop checkpoint / hook execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_stop_summary: Option<Value>,
+    /// Computed hard lifetime ceiling (`created_at + max_ttl_minutes`, default 720m).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_cap_at: Option<DateTime<Utc>>,
+    /// Whether `fork_managed_machine` can clone this VM right now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forkable: bool,
 }
 
 impl ManagedMachine {
@@ -976,6 +1011,13 @@ pub struct SpawnRequest {
     /// Optional `boost.ci` RAM override in MiB (`4096..=131072`, multiple of `1024`).
     #[serde(default)]
     pub memory_mib: Option<u32>,
+    /// Optional grace window (minutes, `0..=720`) to retain this VM after its
+    /// owning child mission ends while its parent mission is still alive.
+    #[serde(default)]
+    pub retain_vm_for_parent_minutes: Option<u64>,
+    /// Optional shell command executed out-of-band on the VM before TTL/hard-cap kill.
+    #[serde(default)]
+    pub pre_stop_hook: Option<String>,
     /// Root ancestor mission ID resolved server-side from mission lineage.
     #[serde(skip)]
     pub root_mission_id: Option<String>,
@@ -1068,6 +1110,15 @@ impl ManagedError {
                 422,
                 format!(
                     "{err} — upstream cloud provider rejected credentials; switch provider until operator updates the API key"
+                ),
+            );
+        }
+        if boost::is_repo_overlay_forbidden_or_unavailable(&err) {
+            return Self::new(
+                "boost_repo_overlay_unavailable",
+                422,
+                format!(
+                    "{err} — warm repository overlay is private or not connected on boost.ci; omit repo or pass lean_mode=\"auto\" / lean_mode=\"off\" (alias \"none\")"
                 ),
             );
         }
@@ -2954,7 +3005,7 @@ impl ManagedManager {
             m.clone()
         };
         self.persist().await;
-        Some(out)
+        Some(self.enrich_machine_view(out))
     }
 
     pub async fn get(&self, id: &str) -> Option<ManagedMachine> {
@@ -2969,6 +3020,7 @@ impl ManagedManager {
                     || (m.state.is_live() && !m.name.is_empty() && m.name == id)
             })
             .cloned()
+            .map(|m| self.enrich_machine_view(m))
     }
 
     /// Whether the managed VM behind `node_id` provably cannot run a process
@@ -3081,6 +3133,18 @@ impl ManagedManager {
         ((spent * 10000.0).round() / 10000.0, committed)
     }
 
+    fn enrich_machine_view(&self, mut m: ManagedMachine) -> ManagedMachine {
+        let max_ttl = self.settings.max_ttl_minutes.max(5) as i64;
+        m.hard_cap_at = Some(m.created_at + chrono::Duration::minutes(max_ttl));
+        m.forkable = matches!(m.state, MachineState::Online | MachineState::Stopped)
+            && !m.antigravity_projected
+            && m.provider_id.is_some()
+            && self
+                .provider_for(&m.provider)
+                .is_some_and(|p| p.supports_snapshots());
+        m
+    }
+
     pub async fn list(&self, include_history_hours: i64) -> ListView {
         let cutoff = Utc::now() - chrono::Duration::hours(include_history_hours);
         let active_by_node = match self
@@ -3105,7 +3169,7 @@ impl ManagedManager {
                 if let Some(ids) = active_by_node.get(&m.node_id) {
                     m.active_mission_ids = ids.clone();
                 }
-                m
+                self.enrich_machine_view(m)
             })
             .collect();
         machines.sort_by_key(|m| std::cmp::Reverse(m.created_at));
@@ -3273,14 +3337,21 @@ impl ManagedManager {
             None => None,
             Some(m) => {
                 let lower = m.to_ascii_lowercase();
-                if !matches!(lower.as_str(), "auto" | "cache-only" | "off") {
-                    return Err(ManagedError::new(
-                        "invalid_lean_mode",
-                        400,
-                        format!("Invalid lean_mode '{m}'; use 'auto', 'cache-only', or 'off'"),
-                    ));
-                }
-                Some(lower)
+                let canonical = match lower.as_str() {
+                    "auto" => "auto",
+                    "cache-only" | "cache_only" => "cache-only",
+                    "off" | "none" => "off",
+                    _ => {
+                        return Err(ManagedError::new(
+                            "invalid_lean_mode",
+                            400,
+                            format!(
+                                "Invalid lean_mode '{m}'; expected one of: 'auto', 'cache-only', or 'off' (alias 'none')"
+                            ),
+                        ));
+                    }
+                };
+                Some(canonical.to_string())
             }
         };
 
@@ -4029,6 +4100,23 @@ impl ManagedManager {
                 repo: validated_repo.clone(),
                 base_key: validated_base_key.clone(),
                 lean_mode: validated_lean_mode.clone(),
+                warnings: Vec::new(),
+                retain_vm_for_parent_minutes: req
+                    .retain_vm_for_parent_minutes
+                    .map(|mins| mins.min(720)),
+                pre_stop_hook: req
+                    .pre_stop_hook
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                pre_stop_ran_at: None,
+                pre_stop_trigger: None,
+                pre_stop_summary: None,
+                hard_cap_at: Some(
+                    now + chrono::Duration::minutes(self.settings.max_ttl_minutes.max(5) as i64),
+                ),
+                forkable: false,
             };
             self.machines.lock().await.push(machine.clone());
             self.persist().await;
@@ -4267,12 +4355,32 @@ impl ManagedManager {
         };
         let provider_id = created.provider_id.clone();
         let created_deletable_at = created.deletable_at;
+        let created_warnings = created.warnings.clone();
+        let created_effective_lean_mode = created.effective_lean_mode.clone();
+        let created_effective_repo = created.effective_repo.clone();
+        let supports_snapshots = provider.supports_snapshots();
         self.update(id, |m| {
             m.provider_id = Some(provider_id.clone());
             m.fork_source_provider_id = None;
             if created_deletable_at.is_some() {
                 m.deletable_at = created_deletable_at;
             }
+            if !created_warnings.is_empty() {
+                for w in &created_warnings {
+                    if !m.warnings.contains(w) {
+                        m.warnings.push(w.clone());
+                    }
+                }
+            }
+            if let Some(ref eff_mode) = created_effective_lean_mode {
+                m.lean_mode = Some(eff_mode.clone());
+            }
+            if let Some(ref eff_repo) = created_effective_repo {
+                m.repo = eff_repo.clone();
+            }
+            m.forkable = matches!(m.state, MachineState::Online | MachineState::Stopped)
+                && !m.antigravity_projected
+                && supports_snapshots;
         })
         .await;
         let m = self.get(id).await.ok_or("machine vanished")?;
@@ -4616,6 +4724,9 @@ impl ManagedManager {
                                 m.state = MachineState::Online;
                                 m.online_at = Some(Utc::now());
                                 m.last_busy_at = Some(Utc::now());
+                                m.forkable = !m.antigravity_projected
+                                    && m.provider_id.is_some()
+                                    && provider.supports_snapshots();
                             })
                             .await
                             .ok_or("machine vanished")?;
@@ -4833,6 +4944,16 @@ impl ManagedManager {
                 "Unknown managed machine",
             ));
         };
+        if !failed
+            && m.provisioning_mode.is_worker()
+            && m.pre_stop_ran_at.is_none()
+            && reason
+                .as_deref()
+                .is_some_and(|r| r == "ttl_expired" || r.starts_with("owner_"))
+        {
+            self.run_pre_stop_checkpoint(&m, "pre_destroy", Utc::now())
+                .await;
+        }
         unregister_node(&m);
         self.relay.close(&m.id).await;
         if let (Some(provider), Some(pid)) = (self.provider_for(&m.provider), &m.provider_id) {
@@ -4982,6 +5103,191 @@ impl ManagedManager {
         }
     }
 
+    async fn parent_alive_of(&self, m: &ManagedMachine) -> bool {
+        let Some(tenant) = m.owner_user_id.clone() else {
+            return false;
+        };
+        let parent_id = m
+            .requested_by_mission_id
+            .as_deref()
+            .or(m.root_mission_id.as_deref())
+            .filter(|pid| m.owner_mission_id.as_deref() != Some(*pid))
+            .map(str::to_string);
+        let Some(parent_id) = parent_id else {
+            return false;
+        };
+        let Some(probe) = self.owner_probe.read().ok().and_then(|p| p.clone()) else {
+            return false;
+        };
+        !matches!(
+            probe(tenant, parent_id).await,
+            Some(OwnerState::Terminal { .. }) | Some(OwnerState::Missing) | None
+        )
+    }
+
+    /// Out-of-band pre-expiry / pre-720m checkpoint hook executed directly on
+    /// `orb-node` outside the LLM turn using a temporary `GIT_INDEX_FILE` so an
+    /// active worker bash/Lean loop is never disrupted.
+    async fn run_pre_stop_checkpoint(&self, m: &ManagedMachine, trigger: &str, now: DateTime<Utc>) {
+        if !m.provisioning_mode.is_worker() {
+            return;
+        }
+        let mission_uuid = m
+            .owner_mission_id
+            .as_deref()
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .or_else(|| {
+                m.requested_by_mission_id
+                    .as_deref()
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            })
+            .unwrap_or_else(uuid::Uuid::nil);
+        let mission_short = m
+            .owner_mission_id
+            .as_deref()
+            .and_then(|s| s.get(..8))
+            .unwrap_or("unowned");
+        let safe_machine: String = m
+            .name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        let wip_ref = format!(
+            "refs/heads/orb/wip/{}-{}",
+            if safe_machine.is_empty() {
+                m.id.as_str()
+            } else {
+                safe_machine.as_str()
+            },
+            mission_short
+        );
+        let custom_hook = m
+            .pre_stop_hook
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let mut script = format!(
+            r#"set +e
+ORB_WIP_REF='{wip_ref}'
+ORB_CHECKPOINT_REPOS=0
+ORB_CHECKPOINT_PUSHED=0
+for root in /var/lib/orb-node/work /var/lib/sandboxed-node/work; do
+  [ -d "$root" ] || continue
+  for gitdir in $(find "$root" -maxdepth 4 -name .git -type d 2>/dev/null); do
+    repo_dir=$(dirname "$gitdir")
+    cd "$repo_dir" 2>/dev/null || continue
+    status_out=$(git status --porcelain 2>/dev/null)
+    [ -n "$status_out" ] || continue
+    ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+    tmp_idx=$(mktemp "/tmp/orb-wip-index.XXXXXX")
+    cp -f "$gitdir/index" "$tmp_idx" 2>/dev/null || true
+    GIT_INDEX_FILE="$tmp_idx" git add -A >/dev/null 2>&1
+    tree_sha=$(GIT_INDEX_FILE="$tmp_idx" git write-tree 2>/dev/null)
+    rm -f "$tmp_idx"
+    if [ -n "$tree_sha" ]; then
+      head_sha=$(git rev-parse --verify HEAD 2>/dev/null || true)
+      if [ -n "$head_sha" ]; then
+        commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" -p "$head_sha" 2>/dev/null)
+      else
+        commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" 2>/dev/null)
+      fi
+      if [ -n "$commit_sha" ]; then
+        git update-ref "refs/orb-pre-stop/latest" "$commit_sha" 2>/dev/null || true
+        git bundle create "$repo_dir/.orb-pre-stop-wip.bundle" "$commit_sha" >/dev/null 2>&1 || true
+        if timeout 25s git push --force origin "$commit_sha:$ORB_WIP_REF" >/dev/null 2>&1; then
+          ORB_CHECKPOINT_PUSHED=$((ORB_CHECKPOINT_PUSHED + 1))
+        fi
+      fi
+    fi
+  done
+done
+printf 'orb_pre_stop_checkpoint trigger=%s dirty_repos=%d pushed=%d\n' '{trigger}' "$ORB_CHECKPOINT_REPOS" "$ORB_CHECKPOINT_PUSHED"
+"#
+        );
+        if let Some(hook) = custom_hook {
+            script.push_str("\n# Custom pre_stop_hook\n(\n");
+            script.push_str(hook);
+            script.push_str("\n)\n");
+        }
+
+        let mut transport = "none";
+        let mut exit_code: Option<i32> = None;
+        let mut output_snippet = String::new();
+
+        if let Some(cfg) = node_config(&m.node_id) {
+            if let Some(token) = node_token(&cfg.token_env) {
+                let claims = crate::remote_node::LeaseClaims {
+                    mission_id: mission_uuid,
+                    node_id: cfg.id.clone(),
+                    scope: crate::remote_node::SCOPE_MISSION_EXECUTE.to_string(),
+                    expires_at: (now + chrono::Duration::minutes(5)).timestamp(),
+                    job_id: None,
+                };
+                if let Ok(lease_token) = crate::remote_node::create_lease_token(&claims, &token) {
+                    let req = crate::remote_node::LeaseRequest {
+                        mission_id: mission_uuid,
+                        node_id: cfg.id.clone(),
+                        lease_token,
+                        command: format!(
+                            "timeout 45s bash -c {}",
+                            raw_operations::shell_quote(&script)
+                        ),
+                        side_lane: true,
+                    };
+                    if let Ok(Ok(resp)) = tokio::time::timeout(
+                        Duration::from_secs(50),
+                        crate::remote_node::RemoteNodeClient::default().execute(cfg, &token, &req),
+                    )
+                    .await
+                    {
+                        if resp.accepted {
+                            transport = "orb_node_side_lane";
+                            exit_code = resp.exit_code;
+                            output_snippet = resp.stdout.chars().take(500).collect();
+                        }
+                    }
+                }
+            }
+        }
+
+        if transport == "none" {
+            if let (Some(provider), Some(pid)) = (self.provider_for(&m.provider), &m.provider_id) {
+                if let Ok(val) = provider.exec(pid, &script, 45).await {
+                    transport = "provider_exec";
+                    exit_code = exec_exit_code(&val).and_then(|c| i32::try_from(c).ok());
+                    output_snippet = val
+                        .get("stdout")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(500)
+                        .collect();
+                }
+            }
+        }
+
+        let summary = serde_json::json!({
+            "trigger": trigger,
+            "transport": transport,
+            "wip_ref": wip_ref,
+            "custom_hook": custom_hook.is_some(),
+            "exit_code": exit_code,
+            "output": output_snippet,
+        });
+        let trig = trigger.to_string();
+        let summary_clone = summary.clone();
+        if let Some(updated) = self
+            .update(&m.id, |row| {
+                row.pre_stop_ran_at = Some(now);
+                row.pre_stop_trigger = Some(trig);
+                row.pre_stop_summary = Some(summary_clone);
+            })
+            .await
+        {
+            self.ledger_with("pre_stop_hook", &updated, summary);
+        }
+    }
+
     /// The decision for one live, online machine this pass.
     async fn decide_for(&self, m: &ManagedMachine, now: DateTime<Utc>) -> (ReapDecision, Owner) {
         let busy = self.machine_busy(m).await;
@@ -4989,6 +5295,17 @@ impl ManagedManager {
         let supports_free_stop = self
             .provider_for(&m.provider)
             .is_some_and(|p| p.supports_free_stop());
+        let retain_for_parent_minutes = m
+            .retain_vm_for_parent_minutes
+            .and_then(|mins| i64::try_from(mins).ok())
+            .filter(|mins| *mins > 0);
+        let parent_alive = if retain_for_parent_minutes.is_some()
+            && matches!(owner, Owner::Mission(Some(OwnerState::Terminal { .. })))
+        {
+            self.parent_alive_of(m).await
+        } else {
+            false
+        };
         let facts = lifecycle::ReapFacts {
             now,
             expires_at: m.expires_at,
@@ -5002,6 +5319,8 @@ impl ManagedManager {
                 m.last_busy_at.unwrap_or(m.created_at)
             },
             owner,
+            retain_for_parent_minutes,
+            parent_alive,
             scheduled: m.reap_reason.clone().zip(m.reap_at),
         };
         (lifecycle::decide(&facts, &self.settings.policy()), owner)
@@ -5076,6 +5395,25 @@ impl ManagedManager {
                             }
                             if self.auto_extend(&m, now).await {
                                 continue;
+                            }
+                        }
+                        if !dry_run && m.pre_stop_ran_at.is_none() {
+                            let max_ttl = self.settings.max_ttl_minutes.max(5) as i64;
+                            let hard_cap_at = m.created_at + chrono::Duration::minutes(max_ttl);
+                            let near_hard_cap =
+                                max_ttl > 10 && now >= hard_cap_at - chrono::Duration::minutes(10);
+                            let near_ttl_expiry =
+                                now >= m.expires_at - chrono::Duration::minutes(5);
+                            if near_hard_cap || near_ttl_expiry {
+                                let trigger = if near_hard_cap {
+                                    "pre_720m_hard_cap"
+                                } else {
+                                    "pre_ttl_expiry"
+                                };
+                                self.run_pre_stop_checkpoint(&m, trigger, now).await;
+                                if let Some(refreshed) = self.get(&m.id).await {
+                                    m = refreshed;
+                                }
                             }
                         }
                         let (decision, _) = self.decide_for(&m, now).await;

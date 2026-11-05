@@ -231,6 +231,8 @@ pub struct ControlState {
     pub mission_store: Arc<dyn MissionStore>,
     /// Cache for semantic mission search results keyed by normalized query hash
     pub mission_search_cache: Arc<RwLock<HashMap<u64, MissionSearchCacheEntry>>>,
+    /// Core working directory for durable job ledger / placement lookups.
+    pub(crate) working_dir: PathBuf,
 }
 
 /// Control session manager for per-user sessions.

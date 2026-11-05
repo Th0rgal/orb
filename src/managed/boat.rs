@@ -180,6 +180,7 @@ fn machine_from(v: &Value) -> Option<ProviderMachine> {
             .unwrap_or_default()
             .to_string(),
         deletable_at: None,
+        ..Default::default()
     })
 }
 

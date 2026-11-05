@@ -272,6 +272,11 @@ pub struct LeaseRequest {
     pub node_id: String,
     pub lease_token: String,
     pub command: String,
+    /// Acquire from the independent side-question capacity lane (`capacity.side`)
+    /// instead of main job admission (`capacity.main`), so read-only `ask_mission`
+    /// sidecars and out-of-band reaper checkpoints can run while main slots are full.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub side_lane: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -474,6 +479,32 @@ pub struct ForceJobResponse {
     pub state: String,
     #[serde(default)]
     pub forced: bool,
+}
+
+/// Steering/interruption behavior requested by Core on `POST /jobs/:id/interrupt`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteInterruptMode {
+    SteerBetweenTools,
+    InterruptNow,
+}
+
+/// Body of `POST /jobs/:id/interrupt` on `sandboxed-node`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InterruptJobRequest {
+    pub mode: RemoteInterruptMode,
+}
+
+/// Response of `POST /jobs/:id/interrupt` on `sandboxed-node`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InterruptJobResponse {
+    pub job_id: Uuid,
+    pub state: String,
+    pub accepted: bool,
+    #[serde(default)]
+    pub signalled_pids: usize,
+    #[serde(default)]
+    pub deferred_until_tool_finishes: bool,
 }
 
 /// Body of `POST /capacity` on `sandboxed-node`.

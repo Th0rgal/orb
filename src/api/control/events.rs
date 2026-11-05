@@ -589,10 +589,12 @@ pub enum ControlCommand {
     },
     /// Deliver a queued message immediately to a running turn when the harness
     /// supports mid-turn user message injection, or promote it to run next and
-    /// interrupt the active turn when `interrupt` is set.
+    /// interrupt the active turn immediately (`interrupt`) or right after the
+    /// in-flight tool call finishes (`steer_after_tool`).
     SendQueuedNow {
         message_id: Uuid,
         interrupt: bool,
+        steer_after_tool: bool,
         respond: oneshot::Sender<Result<SendQueuedNowOutcome, String>>,
     },
     /// Clear queued messages. When `mission_id` is set, only messages

@@ -3297,6 +3297,11 @@ pub struct MissionRunner {
     /// without holding the runner's outer lock.
     pub active_tool_calls: Arc<std::sync::atomic::AtomicUsize>,
 
+    /// Set when `steer_between_tools` promoted a queued message while a tool
+    /// call was in flight; cleared and triggers `interrupt_for_promoted_followup`
+    /// as soon as `active_tool_calls` drops back to zero.
+    pub steer_after_tool: std::sync::atomic::AtomicBool,
+
     /// In-flight background shell tasks started this mission (`Bash` with
     /// `run_in_background: true`), keyed by background-task id.
     ///
@@ -3371,6 +3376,7 @@ impl MissionRunner {
             working_directory: None,
             user: None,
             active_tool_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            steer_after_tool: std::sync::atomic::AtomicBool::new(false),
             background_tasks: HashMap::new(),
             durable_run: None,
             session_store: None,
@@ -3503,6 +3509,8 @@ impl MissionRunner {
     fn reset_turn_tool_calls(&self) {
         self.active_tool_calls
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.steer_after_tool
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Queue a message for this mission.
@@ -10106,6 +10114,10 @@ pub struct RunningMissionInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_unit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_node_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_job_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status_conflict: Option<String>,
 }
 
@@ -10144,6 +10156,17 @@ impl From<&MissionRunner> for RunningMissionInfo {
                 .durable_run
                 .as_ref()
                 .and_then(|run| run.scope_unit.clone()),
+            remote_node_id: runner
+                .durable_run
+                .as_ref()
+                .and_then(|run| run.scope_unit.as_deref())
+                .and_then(|s| s.strip_prefix("remote-node:"))
+                .map(str::to_string),
+            remote_job_id: runner
+                .durable_run
+                .as_ref()
+                .and_then(|run| run.owner_actor_id.strip_prefix("remote-job:"))
+                .and_then(|s| Uuid::parse_str(s).ok()),
             status_conflict: runner
                 .durable_run
                 .is_none()

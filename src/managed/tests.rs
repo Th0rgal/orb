@@ -69,6 +69,7 @@ impl ManagedProvider for FakeProvider {
             state: "ready".into(),
             name: spec.name.clone(),
             deletable_at: None,
+            ..Default::default()
         })
     }
     async fn get(&self, provider_id: &str) -> Result<ProviderMachine, String> {
@@ -77,6 +78,7 @@ impl ManagedProvider for FakeProvider {
             state: "ready".into(),
             name: String::new(),
             deletable_at: None,
+            ..Default::default()
         })
     }
     async fn list(&self) -> Result<Vec<ProviderMachine>, String> {
@@ -326,18 +328,21 @@ async fn reconcile_stops_tagged_orphans_only() {
             state: "ready".into(),
             name: "orb-managed-mmzzzz".into(),
             deletable_at: None,
+            ..Default::default()
         },
         ProviderMachine {
             provider_id: "bx_research".into(),
             state: "ready".into(),
             name: "autoresearch run".into(),
             deletable_at: None,
+            ..Default::default()
         },
         ProviderMachine {
             provider_id: "bx_old".into(),
             state: "archived".into(),
             name: "orb-managed-mmold".into(),
             deletable_at: None,
+            ..Default::default()
         },
     ];
     let report = m.reconcile_once().await.unwrap();
@@ -586,6 +591,14 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         repo: None,
         base_key: None,
         lean_mode: None,
+        warnings: Vec::new(),
+        retain_vm_for_parent_minutes: None,
+        pre_stop_hook: None,
+        pre_stop_ran_at: None,
+        pre_stop_trigger: None,
+        pre_stop_summary: None,
+        hard_cap_at: None,
+        forkable: false,
     };
     register_node(&machine, 3999, "tok");
     let settings = crate::remote_node::RemoteNodeSettings {
@@ -989,6 +1002,14 @@ fn spend_machine(
         repo: None,
         base_key: None,
         lean_mode: None,
+        warnings: Vec::new(),
+        retain_vm_for_parent_minutes: None,
+        pre_stop_hook: None,
+        pre_stop_ran_at: None,
+        pre_stop_trigger: None,
+        pre_stop_summary: None,
+        hard_cap_at: None,
+        forkable: false,
     }
 }
 
@@ -1250,6 +1271,7 @@ async fn reconcile_orphan_grace_and_vanished_rows() {
         state: "ready".into(),
         name: "not ours".into(),
         deletable_at: None,
+        ..Default::default()
     };
     *fake.listed.lock().unwrap() = vec![
         ProviderMachine {
@@ -1257,6 +1279,7 @@ async fn reconcile_orphan_grace_and_vanished_rows() {
             state: "ready".into(),
             name: "orb-managed-mmzz".into(),
             deletable_at: None,
+            ..Default::default()
         },
         other.clone(),
     ];
@@ -1306,6 +1329,7 @@ async fn reconcile_dry_run_keeps_orphans() {
         state: "ready".into(),
         name: "orb-managed-mmzz".into(),
         deletable_at: None,
+        ..Default::default()
     }];
     let r = m.reconcile_once().await.unwrap();
     assert_eq!(r["dry_run"], serde_json::json!(true));
@@ -3208,6 +3232,14 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
         repo: None,
         base_key: None,
         lean_mode: None,
+        warnings: Vec::new(),
+        retain_vm_for_parent_minutes: None,
+        pre_stop_hook: None,
+        pre_stop_ran_at: None,
+        pre_stop_trigger: None,
+        pre_stop_summary: None,
+        hard_cap_at: None,
+        forkable: false,
     };
     let view = ListView {
         enabled: true,

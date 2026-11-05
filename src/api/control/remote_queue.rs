@@ -87,6 +87,124 @@ pub(super) fn allow_abandon(store: &ProjectsStore, user: &str, id: Uuid) -> Resu
     Ok(())
 }
 
+pub(crate) async fn check_remote_continuation_admissibility(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    mission: &Mission,
+    placement: &remote_grok::RemotePlacement,
+) -> Result<(), String> {
+    if !matches!(
+        mission.backend.as_str(),
+        "grok" | "codex" | "claudecode" | "opencode" | "antigravity" | "vibe"
+    ) {
+        return Err("This remote harness cannot continue its session".into());
+    }
+    if crate::api::mission_horizon::superseded_by(mission).is_some() {
+        return Err(format!(
+            "{}: mission {} has been superseded",
+            remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+            mission.id
+        ));
+    }
+    let has_pr_writer = mission.project.tags.iter().any(|tag| tag == "pr-writer");
+    let has_pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
+    if has_pr_writer && has_pr_readonly {
+        return Err(format!(
+            "{}: mission {} carries contradictory PR capability tags",
+            remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+            mission.id
+        ));
+    }
+    if let Some(pr) = mission.project.github_pr.as_deref() {
+        if !has_pr_writer && !has_pr_readonly {
+            return Err(format!(
+                "{}: PR mission {} lacks admitted writer/readonly capability tag; create a remote replacement with supersedes_mission_id={}",
+                remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                mission.id,
+                mission.id
+            ));
+        }
+        if has_pr_writer && !placement.live {
+            if let Some(existing) =
+                super::find_existing_pr_writer_global(&state.control, pr, Some(mission.id)).await?
+            {
+                return Err(format!(
+                    "{}: PR writer lease for {} is already held by mission {} (status={})",
+                    remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                    super::canonical_github_pr(pr),
+                    existing.id,
+                    existing.status
+                ));
+            }
+        }
+    }
+    if !placement.live {
+        if !state.config.remote_nodes.enabled
+            || state.config.remote_nodes.node(&placement.node_id).is_none()
+            || crate::managed::node_provably_gone(&placement.node_id).await
+        {
+            return Err(format!(
+                "{}: remote node '{}' is no longer configured or online; create a replacement mission",
+                remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                placement.node_id
+            ));
+        }
+        if let Some(track) = mission.project.track.as_deref() {
+            let Some(slug) = mission.project.project.as_deref() else {
+                return Err(format!(
+                    "{}: track '{}' has no project binding; create a replacement mission with supersedes_mission_id={}",
+                    remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                    track,
+                    mission.id
+                ));
+            };
+            let canonical = state
+                .projects
+                .track(slug, track)
+                .map_err(|e| e.to_string())?;
+            let Some(canonical) = canonical else {
+                return Err(format!(
+                    "{}: track '{}' on project '{}' is missing; create a replacement mission with supersedes_mission_id={}",
+                    remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                    track,
+                    slug,
+                    mission.id
+                ));
+            };
+            if canonical.track != track
+                || matches!(
+                    canonical.status.as_deref(),
+                    Some("cancelled" | "done" | "satisfied")
+                )
+            {
+                return Err(format!(
+                    "{}: track '{}' on project '{}' is closed; create a replacement mission with supersedes_mission_id={}",
+                    remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                    track,
+                    slug,
+                    mission.id
+                ));
+            }
+        }
+        let session_ready = mission
+            .session_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+            || machine_transfer::committed(&control.mission_store, mission.id)
+                .await?
+                .is_some()
+            || mission.backend == "opencode";
+        if !session_ready {
+            return Err(format!(
+                "{}: mission {} has no recorded native session",
+                remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT,
+                mission.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn enqueue(
     state: &Arc<AppState>,
     control: &ControlState,
@@ -151,6 +269,22 @@ pub(super) async fn enqueue(
         ));
     }
     let is_superseded = crate::api::mission_horizon::superseded_by(&mission).is_some();
+    // Validate only new messages: an accepted ID retains its receipt even if
+    // the assignment changed after a response was lost. Admission protects
+    // this identity read and the persisted queue snapshot from reassignment.
+    // Run before track/PR admissibility checks so a racing project/track
+    // reassignment always surfaces `writer_identity_stale`.
+    if !is_superseded {
+        if let Some(expected) = expected {
+            writer_reuse_or_conflict(
+                &mission,
+                &crate::api::writer_recycle::WriterIdentityPatch {
+                    continue_identity: Some(expected.clone()),
+                    ..Default::default()
+                },
+            )?;
+        }
+    }
     let session_ready = placement.live
         || mission
             .session_id
@@ -161,11 +295,11 @@ pub(super) async fn enqueue(
             .map_err(internal_error)?
             .is_some()
         || mission.backend == "opencode";
-    let writer_identity = mission.project.tags.iter().any(|tag| tag == "pr-writer")
-        || mission.project.track.as_ref().is_some_and(|track| {
-            track != &crate::api::track_leases::generated_track_key(&mid.to_string())
-        });
-    let unsupported = mission.project.github_pr.is_some() || (writer_identity && !placement.live);
+    let admissibility_err =
+        check_remote_continuation_admissibility(state, control, &mission, &placement)
+            .await
+            .err();
+    let unsupported = !is_superseded && session_ready && admissibility_err.is_some();
     if !crate::orb_spec::remote_outbox_admit_enqueue(crate::orb_spec::RemoteOutboxEnqueue {
         already_exists: false,
         same_mission: true,
@@ -184,6 +318,8 @@ pub(super) async fn enqueue(
                 "{}: mission {mid} has no recorded native session",
                 remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT
             )
+        } else if let Some(err) = admissibility_err {
+            err
         } else {
             let prefix = if placement.live {
                 remote_grok::REMOTE_JOB_STILL_RUNNING
@@ -193,18 +329,6 @@ pub(super) async fn enqueue(
             format!("{prefix}: this mission's writer identity does not support native continuation")
         };
         return Err((StatusCode::CONFLICT, msg));
-    }
-    // Validate only new messages: an accepted ID retains its receipt even if
-    // the assignment changed after a response was lost. Admission protects
-    // this identity read and the persisted queue snapshot from reassignment.
-    if let Some(expected) = expected {
-        writer_reuse_or_conflict(
-            &mission,
-            &crate::api::writer_recycle::WriterIdentityPatch {
-                continue_identity: Some(expected.clone()),
-                ..Default::default()
-            },
-        )?;
     }
     save(
         &state.projects,

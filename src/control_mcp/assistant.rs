@@ -289,6 +289,10 @@ struct SpawnManagedParams {
     #[serde(default)]
     memory_mib: Option<u32>,
     #[serde(default)]
+    retain_vm_for_parent_minutes: Option<u64>,
+    #[serde(default)]
+    pre_stop_hook: Option<String>,
+    #[serde(default)]
     reason: Option<String>,
     /// Registry name of a project snapshot to start from.
     #[serde(default)]
@@ -346,6 +350,12 @@ struct ListManagedParams {
     /// Full rows (every field, last 24 h history) instead of the summary.
     #[serde(default)]
     verbose: Option<bool>,
+    /// Scope filter: `"own_pool"` (default for missions) or `"all"`.
+    #[serde(default)]
+    scope: Option<String>,
+    /// Convenience alias for `scope="own_pool"` (`true`) vs `scope="all"` (`false`).
+    #[serde(default)]
+    pool_only: Option<bool>,
     /// Set by the gateway to the calling mission so `effective_vm_limits` is included.
     #[serde(default)]
     mission_id: Option<String>,
@@ -395,6 +405,10 @@ struct StartMissionParams {
     managed_memory_mib: Option<u32>,
     #[serde(default)]
     managed_allow_24h_commitment: Option<bool>,
+    #[serde(default, alias = "managed_retain_for_parent_minutes")]
+    retain_vm_for_parent_minutes: Option<u64>,
+    #[serde(default, alias = "pre_stop_hook")]
+    managed_pre_stop_hook: Option<String>,
     /// Optional managed-machine budget (USD) for the new mission's subtree;
     /// under a parent budget it is a sub-budget carved from the parent pool.
     #[serde(default)]
@@ -1015,6 +1029,10 @@ struct SendMessageParams {
     cloud_model_params: Option<Vec<crate::api::cloud_agents::ModelParam>>,
     #[serde(default)]
     client_message_id: Option<String>,
+    #[serde(default, alias = "delivery")]
+    mode: Option<crate::api::control::MessageDeliveryMode>,
+    #[serde(default)]
+    auto_replace_on_same_node: Option<bool>,
     #[serde(flatten)]
     identity: DispatchIdentityParams,
     mission_id: String,
@@ -1828,8 +1846,10 @@ impl AssistantMcp {
                         "image": {"type": "string", "description": "Optional image or snapshot override."},
                         "repo": {"type": "string", "description": "Only on `boost`: GitHub `owner/repo` (e.g. `Layr-Labs/evm.fast`) to mount the latest warm `.olean` CoW overlay at `/workspace/boost-cvm/lean-overlay/merged`."},
                         "base_key": {"type": "string", "description": "Only on `boost`: exact warm base commit/cache key override."},
-                        "lean_mode": {"type": "string", "enum": ["auto", "cache-only", "off"], "description": "Only on `boost`: Lean overlay mode (`auto` default, `cache-only`, or `off`)."},
+                        "lean_mode": {"type": "string", "enum": ["auto", "cache-only", "off", "none"], "description": "Only on `boost`: Lean overlay mode (`auto` default, `cache-only`, or `off`; `none` is accepted as an alias for `off`)."},
                         "memory_mib": {"type": "integer", "minimum": 4096, "maximum": 131072, "description": "Only on `boost`: optional custom RAM override in MiB (multiple of 1024, 4096..=131072)."},
+                        "retain_vm_for_parent_minutes": {"type": "integer", "minimum": 0, "maximum": 720, "description": "Optional grace window in minutes (0..=720) to keep this VM alive after its child owner finishes while its parent mission is still active, preventing premature owner_completed reaps before parent wakeups."},
+                        "pre_stop_hook": {"type": "string", "description": "Optional shell command executed out-of-band on the VM (alongside Orb's automatic non-destructive git WIP-checkpoint) at expires_at - 5m and created_at + 710m before hard-cap kill."},
                         "provisioning_mode": {"type": "string", "enum": ["worker", "raw"], "description": "Worker installs/enrolls Orb (default). Raw only rents the VM (Boat/Boost): use `exec_raw_managed_machine` for bounded guest ops."},
                         "from_snapshot": {"type": "string", "description": "Optional Boat/Boost project snapshot (`list_managed_snapshots`), \"latest\" for the newest ready project snapshot, or \"light\"/\"none\" for the clean base image. Omitted defaults to light mode (clean base image, no snapshot files restored)."},
                         "reason": {"type": "string", "description": "Why you need it (shown to the operator and in the cost ledger)."}
@@ -1854,8 +1874,15 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "list_managed_machines".to_string(),
-                description: "List live managed VMs across all configured providers (`boat`, `boost`, `hetzner`, `vastai`, `scaleway`) compactly: name, provider, size, state, project, owner, expires_at, reap_at, deletable_at, cost so far, plus configured providers (including live `availability` status `available`/`degraded`/`saturated`), today's spend, global running count/caps, `mission_budget` (when your mission or an ancestor has a USD budget pool, which overrides `budget.daily_cap_usd`), and your mission's `effective_vm_limits` (which overrides the global concurrency cap when configured in Mission settings). Pass verbose=true for full rows and the last 24 h of destroyed machines. Check this before spawning to reuse a machine you already own.".to_string(),
-                input_schema: json!({"type": "object", "properties": {"verbose": {"type": "boolean", "description": "Full rows and history (large)."}}}),
+                description: "List live managed VMs across configured providers (`boat`, `boost`, `hetzner`, `vastai`, `scaleway`) compactly: name, provider, size, state, project, owner, created_at, expires_at, hard_cap_at, forkable, reap_at, deletable_at, cost so far, plus configured providers (including live `availability` status `available`/`degraded`/`saturated`), today's spend, global running count/caps, `mission_budget`, and your mission's `effective_vm_limits`. Defaults to `scope=\"own_pool\"` (`pool_only=true`) for mission sessions so foreign `budget_pool_id=null` VMs do not clutter sweeps; pass `scope=\"all\"` (`pool_only=false`) for the tenant-wide fleet or `verbose=true` for full rows and 24 h history.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "verbose": {"type": "boolean", "description": "Full rows and history (large)."},
+                        "scope": {"type": "string", "enum": ["own_pool", "all"], "description": "Filter machines to the caller's mission pool/subtree (`own_pool`, default for missions) or show all visible tenant machines (`all`)."},
+                        "pool_only": {"type": "boolean", "description": "Convenience boolean alias for `scope`: `true` selects `own_pool`, `false` selects `all`."}
+                    }
+                }),
             },
             ToolDefinition {
                 name: "snapshot_managed_machine".to_string(),
@@ -2086,7 +2113,7 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "send_message_to_mission".to_string(),
-                description: "Send a follow-up message to an existing mission, waking it if it is idle. This is the general way to restart a parked mission and KEEP THE SAME mission id: it activates pending, awaiting_user, acknowledged, waiting_background, interrupted, blocked, completed and failed missions alike. If the mission is already running the message is delivered to the live turn. There is no idle status that requires starting a new mission just to get the agent's attention. For existing work with excluded/collaborating PR references, read get_mission and pass continue_identity with the exact stored project, track and github_pr (null if unset). For different work use explicit github_pr/track identity updates instead; ownership checks still apply.".to_string(),
+                description: "Send a follow-up message to an existing mission, waking it if it is idle. This is the general way to restart a parked mission and KEEP THE SAME mission id: it activates pending, awaiting_user, acknowledged, waiting_background, interrupted, blocked, completed and failed missions alike. Use mode='steer_between_tools' to inject immediately after the current tool call finishes without waiting for the full turn, or mode='interrupt_now' to send SIGINT to an in-flight bash/Lean tool and steer immediately. For existing work with excluded/collaborating PR references, read get_mission and pass continue_identity with the exact stored project, track and github_pr (null if unset). Set auto_replace_on_same_node=true if an idle remote mission without a resumable native session should automatically spawn a continuation mission on the same node.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id", "content"],
@@ -2094,6 +2121,9 @@ impl AssistantMcp {
                         "cloud_model":{"type":"string","description":"Model for this cloud turn only. Discover supported models before selecting."},
                         "cloud_model_params":{"type":"array","items":{"type":"object","required":["id","value"],"properties":{"id":{"type":"string"},"value":{"type":"string"}}}},
                         "client_message_id": {"type":"string","format":"uuid","description":"Required stable UUID for cloud follow-ups. Reuse on retries."},
+                        "mode": {"type": "string", "enum": ["queue", "steer_between_tools", "interrupt_now", "steer_now", "interrupt"], "default": "queue", "description": "Delivery mode when the target mission has a turn in flight: 'queue' (default FIFO), 'steer_between_tools' (alias 'steer_now': inject immediately after current tool call finishes), or 'interrupt_now' (alias 'interrupt': SIGINT in-flight child tool and steer immediately)."},
+                        "delivery": {"type": "string", "enum": ["queue", "steer_between_tools", "interrupt_now", "steer_now", "interrupt"], "description": "Alias for `mode`."},
+                        "auto_replace_on_same_node": {"type": "boolean", "default": false, "description": "When true and an idle remote mission cannot natively continue on a still-online node, automatically spawn a continuation mission (`supersedes_mission_id`) on that same node."},
                         "continue_identity": dispatch_identity_schema(),
                         "github_pr": {"type": "string", "description": "Explicit retask identity update; empty string clears. Omit to preserve."},
                         "track": {"type": "string", "description": "Explicit retask identity update; empty string clears. Omit to preserve."},
@@ -2979,6 +3009,8 @@ impl AssistantMcp {
             "managed_lean_mode": params.managed_lean_mode,
             "managed_memory_mib": params.managed_memory_mib,
             "managed_allow_24h_commitment": params.managed_allow_24h_commitment,
+            "retain_vm_for_parent_minutes": params.retain_vm_for_parent_minutes,
+            "managed_pre_stop_hook": params.managed_pre_stop_hook,
             "budget_usd": params.budget_usd,
         });
         if let Some(cloud) = params.cloud {
@@ -3026,12 +3058,21 @@ impl AssistantMcp {
         if managed_machine.is_null() {
             Ok(json!({ "mission": mission }))
         } else {
-            Ok(json!({
+            let warnings = managed_machine
+                .get("warnings")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut out = json!({
                 "mission": mission,
                 "managed_machine": managed_machine,
                 "reused_idle_machine": managed_reused,
                 "note": "The subagent runs on a managed VM (reused from an ended sibling when one of the same size was idle). It belongs to the subagent: it is destroyed a few minutes after the subagent ends (or 15 idle minutes after it is interrupted or waiting), and at its TTL at the latest (default 60 min, auto-extended in 30 min chunks while busy and within budget). destroy_managed_machine releases it earlier."
-            }))
+            });
+            if !warnings.is_empty() {
+                out["warnings"] = json!(warnings);
+            }
+            Ok(out)
         }
     }
 
@@ -3107,6 +3148,8 @@ impl AssistantMcp {
                     managed_lean_mode: None,
                     managed_memory_mib: None,
                     managed_allow_24h_commitment: None,
+                    retain_vm_for_parent_minutes: None,
+                    managed_pre_stop_hook: None,
                     budget_usd: None,
                     backend: Some("opencode".into()),
                     model_override: Some(model.clone()),
@@ -3386,6 +3429,12 @@ impl AssistantMcp {
         }
         if let Some(params) = params.cloud_model_params {
             body["cloud_model_params"] = json!(params);
+        }
+        if let Some(mode) = params.mode {
+            body["mode"] = json!(mode);
+        }
+        if let Some(auto_replace) = params.auto_replace_on_same_node {
+            body["auto_replace_on_same_node"] = json!(auto_replace);
         }
         params.identity.add_to(&mut body);
         let response = self.api_post("/api/control/message", body).await?;
@@ -3714,6 +3763,8 @@ impl AssistantMcp {
                     "base_key": params.base_key,
                     "lean_mode": params.lean_mode,
                     "memory_mib": params.memory_mib,
+                    "retain_vm_for_parent_minutes": params.retain_vm_for_parent_minutes,
+                    "pre_stop_hook": params.pre_stop_hook,
                     "reason": params.reason,
                     "from_snapshot": params.from_snapshot,
                     "provisioning_mode": params.provisioning_mode,
@@ -3724,7 +3775,12 @@ impl AssistantMcp {
                 })),
             )
             .await?;
-        Ok(json!({
+        let warnings = machine
+            .get("warnings")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut out = json!({
             "machine": machine,
             "node_id": machine["node_id"],
             "name": machine["name"],
@@ -3733,7 +3789,11 @@ impl AssistantMcp {
                 name = machine["name"].as_str().unwrap_or_default(),
                 node = machine["node_id"].as_str().unwrap_or_default(),
             ) },
-        }))
+        });
+        if !warnings.is_empty() {
+            out["warnings"] = json!(warnings);
+        }
+        Ok(out)
     }
 
     async fn get_compute_fleet(&self) -> Result<Value, String> {
@@ -4370,6 +4430,12 @@ impl AssistantMcp {
             recommendation =
                 format!("{recommendation} (Note: live runner state unavailable — {warning})");
         }
+        let remote_node_id = mission
+            .get("remote_node_id")
+            .filter(|v| !v.is_null())
+            .cloned()
+            .or_else(|| live.get("remote_node_id").filter(|v| !v.is_null()).cloned())
+            .unwrap_or(Value::Null);
         Ok(json!({
             "mission_id": id.to_string(),
             "title": mission.get("title").cloned().unwrap_or(Value::Null),
@@ -4380,6 +4446,7 @@ impl AssistantMcp {
             "backend": mission.get("backend").cloned().unwrap_or(Value::Null),
             "model_override": mission.get("model_override").cloned().unwrap_or(Value::Null),
             "model_effort": mission.get("model_effort").cloned().unwrap_or(Value::Null),
+            "remote_node_id": remote_node_id,
             "live": live,
             "live_warning": live_warning,
             "queue_wait": queue_wait,
@@ -4414,8 +4481,6 @@ impl AssistantMcp {
         let mut timeline = Vec::new();
         let mut tool_counts: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
-        let mut repeat_counts: std::collections::BTreeMap<(String, String), usize> =
-            std::collections::BTreeMap::new();
         let mut errors = Vec::new();
         let mut results = Vec::new();
 
@@ -4433,9 +4498,6 @@ impl AssistantMcp {
                         .to_string();
                     let args = event.get("content").and_then(Value::as_str).unwrap_or("");
                     *tool_counts.entry(tool.clone()).or_insert(0) += 1;
-                    *repeat_counts
-                        .entry((tool.clone(), args.trim().to_string()))
-                        .or_insert(0) += 1;
                     timeline.push(json!({
                         "sequence": event.get("sequence").cloned().unwrap_or(Value::Null),
                         "tool": tool,
@@ -4444,9 +4506,11 @@ impl AssistantMcp {
                 }
                 "tool_result" => {
                     let content = event.get("content").and_then(Value::as_str).unwrap_or("");
+                    let metadata = event.get("metadata");
                     results.push(json!({
                         "sequence": event.get("sequence"),
                         "tool_call_id": event.get("tool_call_id"),
+                        "exit_code": crate::tool_loop_progress::extract_exit_code(content, metadata),
                         "snippet": diagnostic_result_snippet(content),
                     }));
                 }
@@ -4465,11 +4529,18 @@ impl AssistantMcp {
 
         // Keep the most recent slice of the tool timeline to bound output.
         let timeline_tail: Vec<Value> = timeline.iter().rev().take(30).rev().cloned().collect();
-        let repeated: Vec<Value> = repeat_counts
+        let repeated: Vec<Value> = crate::tool_loop_progress::analyze_tool_call_progress(events)
             .into_iter()
-            .filter(|(_, count)| *count >= 2)
-            .map(|((tool, args), count)| {
-                json!({ "tool": tool, "repeats": count, "args": truncate_snippet(&args, 160) })
+            .filter(|group| group.repeats >= 2)
+            .map(|group| {
+                json!({
+                    "tool": group.tool,
+                    "repeats": group.repeats,
+                    "args": truncate_snippet(&group.normalized_args, 160),
+                    "exit_code": group.exit_code,
+                    "watched_tree_hash": group.watched_tree_hash,
+                    "state_fingerprint": group.fingerprint,
+                })
             })
             .collect();
         let tool_counts: Vec<Value> = tool_counts
@@ -4670,8 +4741,23 @@ impl AssistantMcp {
             }
             "list_managed_machines" => {
                 let params: ListManagedParams = parse_params(arguments)?;
+                let mut qs = Vec::new();
+                if let Some(mid) = params.mission_id.as_deref() {
+                    qs.push(format!("mission_id={}", urlencoding::encode(mid)));
+                }
+                if let Some(scope) = params.scope.as_deref() {
+                    qs.push(format!("scope={}", urlencoding::encode(scope)));
+                }
+                if let Some(pool_only) = params.pool_only {
+                    qs.push(format!("pool_only={pool_only}"));
+                }
+                let path = if qs.is_empty() {
+                    "/api/managed-machines".to_string()
+                } else {
+                    format!("/api/managed-machines?{}", qs.join("&"))
+                };
                 let mut list = self
-                    .managed_request(reqwest::Method::GET, "/api/managed-machines".into(), None)
+                    .managed_request(reqwest::Method::GET, path, None)
                     .await?;
                 let mission_budget_resp = if let Some(mid) = params.mission_id.as_deref() {
                     self.managed_request(
@@ -5042,6 +5128,7 @@ fn compact_mission_summary(mission: Value) -> Value {
         "fast_mode": mission.get("fast_mode").cloned().unwrap_or(json!(false)),
         "workspace_id": mission.get("workspace_id").cloned().unwrap_or(Value::Null),
         "workspace_name": mission.get("workspace_name").cloned().unwrap_or(Value::Null),
+        "remote_node_id": mission.get("remote_node_id").cloned().unwrap_or(Value::Null),
         "short_description": mission.get("short_description").cloned().unwrap_or(Value::Null),
         "updated_at": mission.get("updated_at").cloned().unwrap_or(Value::Null),
         // Project tagging + awaiting classification + staleness anchors so
@@ -5499,6 +5586,9 @@ struct TraceAnalysis {
     loop_tool: Option<String>,
     loop_repeats: usize,
     loop_snippet: Option<String>,
+    loop_exit_code: Option<i32>,
+    loop_tree_hash: Option<String>,
+    loop_fingerprint: Option<String>,
     tool_call_count: usize,
 }
 
@@ -5520,17 +5610,29 @@ impl TraceAnalysis {
                 "tool": tool,
                 "repeats": self.loop_repeats,
                 "args": self.loop_snippet.clone().unwrap_or_default(),
+                "exit_code": self.loop_exit_code,
+                "watched_tree_hash": self.loop_tree_hash,
+                "state_fingerprint": self.loop_fingerprint,
             }),
             None => Value::Null,
         }
     }
 }
 
-/// Scan trace events (ascending) for error signals and looping tool calls.
+/// Scan trace events (ascending) for error signals and state-progress-aware
+/// looping tool calls `(normalized_command_without_comments, watched_file_tree_hash, exit_code)`.
+pub(crate) fn analyze_trace_events_json(events: &[Value]) -> (Value, Value, Vec<Value>, usize) {
+    let analysis = analyze_trace_events(events);
+    (
+        analysis.signals_json(),
+        analysis.loop_json(),
+        analysis.recent_errors,
+        analysis.tool_call_count,
+    )
+}
+
 fn analyze_trace_events(events: &[Value]) -> TraceAnalysis {
     let mut analysis = TraceAnalysis::default();
-    let mut repeat_counts: std::collections::BTreeMap<(String, String), usize> =
-        std::collections::BTreeMap::new();
 
     for event in events {
         match event.get("event_type").and_then(Value::as_str) {
@@ -5551,31 +5653,24 @@ fn analyze_trace_events(events: &[Value]) -> TraceAnalysis {
             }
             Some("tool_call") => {
                 analysis.tool_call_count += 1;
-                let tool = event
-                    .get("tool_name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("(unknown)")
-                    .to_string();
-                let args = event
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let count = repeat_counts
-                    .entry((tool.clone(), args.clone()))
-                    .or_insert(0);
-                *count += 1;
-                // 3+ identical calls (same tool + same args) within the window
-                // is a strong loop signal.
-                if *count >= 3 && *count > analysis.loop_repeats {
-                    analysis.loop_repeats = *count;
-                    analysis.loop_tool = Some(tool);
-                    analysis.loop_snippet = Some(truncate_snippet(&args, 160));
-                }
             }
             _ => {}
         }
+    }
+
+    // 3+ calls with identical `(normalized_command_without_comments, watched_tree_state, exit_code)`
+    // within the trace window indicates no state progress (catches `# step-XX`
+    // comment spoofing while permitting legitimate rebuilds after file edits).
+    if let Some(top) = crate::tool_loop_progress::analyze_tool_call_progress(events)
+        .into_iter()
+        .find(|group| group.repeats >= 3)
+    {
+        analysis.loop_repeats = top.repeats;
+        analysis.loop_tool = Some(top.tool);
+        analysis.loop_snippet = Some(truncate_snippet(&top.normalized_args, 160));
+        analysis.loop_exit_code = top.exit_code;
+        analysis.loop_tree_hash = top.watched_tree_hash;
+        analysis.loop_fingerprint = Some(top.fingerprint);
     }
     analysis
 }
@@ -8224,7 +8319,7 @@ fn parse_auto_managed_spec(raw: &str) -> Option<(Option<String>, Option<String>)
     crate::api::control::parse_auto_managed_spec(raw)
 }
 
-fn summarize_mission_budget(budget_view: &Value) -> Option<Value> {
+pub(crate) fn summarize_mission_budget(budget_view: &Value) -> Option<Value> {
     let mode = budget_view.get("mode")?.as_str()?;
     let pool = budget_view.get("pool").filter(|p| !p.is_null());
     if mode != "own" && mode != "pooled" {
@@ -8248,14 +8343,14 @@ fn summarize_mission_budget(budget_view: &Value) -> Option<Value> {
 
 /// `list_managed_machines` summary: live machines with the fields an agent
 /// needs, plus the budget block (the full list was ~60 KB and truncated).
-fn compact_managed_list(list: &Value) -> Value {
+pub(crate) fn compact_managed_list(list: &Value) -> Value {
     let machines: Vec<Value> = list["machines"]
         .as_array()
         .map(|rows| {
             rows.iter()
                 .filter(|m| !matches!(m["state"].as_str(), Some("destroyed") | Some("failed")))
                 .map(|m| {
-                    json!({
+                    let mut row = json!({
                         "name": m["name"],
                         "id": m["id"],
                         "node_id": m["node_id"],
@@ -8265,14 +8360,34 @@ fn compact_managed_list(list: &Value) -> Value {
                         "project": m["project"],
                         "owner_mission_id": m["owner_mission_id"],
                         "active_mission_ids": m["active_mission_ids"],
+                        "created_at": m["created_at"],
                         "expires_at": m["expires_at"],
+                        "hard_cap_at": m["hard_cap_at"],
+                        "forkable": m["forkable"].as_bool().unwrap_or(false),
                         "reap_at": m["reap_at"],
                         "reap_reason": m["reap_reason"],
                         "deletable_at": m["deletable_at"],
                         "cost_usd": m["cost_usd"],
                         "budget_pool_id": m["budget_pool_id"],
                         "cap_pool_id": m["cap_pool_id"],
-                    })
+                    });
+                    if let Some(retain) = m
+                        .get("retain_vm_for_parent_minutes")
+                        .filter(|v| !v.is_null())
+                    {
+                        row["retain_vm_for_parent_minutes"] = retain.clone();
+                    }
+                    if let Some(ran) = m.get("pre_stop_ran_at").filter(|v| !v.is_null()) {
+                        row["pre_stop_ran_at"] = ran.clone();
+                    }
+                    if let Some(w) = m
+                        .get("warnings")
+                        .and_then(Value::as_array)
+                        .filter(|a| !a.is_empty())
+                    {
+                        row["warnings"] = json!(w);
+                    }
+                    row
                 })
                 .collect()
         })

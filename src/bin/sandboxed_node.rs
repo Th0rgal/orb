@@ -10,10 +10,10 @@ use sandboxed_sh::node::{
 };
 use sandboxed_sh::remote_node::{
     bearer_token, node_token_matches, parse_labels, run_lease_command, validate_lease_token,
-    CancelJobResponse, ExecuteResponse, ForceJobRequest, ForceJobResponse, LeaseClaims,
-    LeaseRequest, NodeHeartbeat, NodeJobStatus, RemoteNodeError, SubmitJobRequest,
-    SubmitJobResponse, UpdateNodeCapacityRequest, NODE_PROTOCOL_VERSION, SCOPE_JOB_FORCE,
-    SCOPE_JOB_SUBMIT, SCOPE_NODE_CAPACITY,
+    CancelJobResponse, ExecuteResponse, ForceJobRequest, ForceJobResponse, InterruptJobRequest,
+    InterruptJobResponse, LeaseClaims, LeaseRequest, NodeHeartbeat, NodeJobStatus, RemoteNodeError,
+    SubmitJobRequest, SubmitJobResponse, UpdateNodeCapacityRequest, NODE_PROTOCOL_VERSION,
+    SCOPE_JOB_FORCE, SCOPE_JOB_SUBMIT, SCOPE_NODE_CAPACITY,
 };
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -238,6 +238,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/jobs/:id/files", post(job_files))
         .route("/jobs/:id/log", get(get_job_log))
         .route("/jobs/:id/cancel", post(cancel_job))
+        .route("/jobs/:id/interrupt", post(interrupt_job))
         .route("/jobs/:id/force", post(force_job))
         .with_state(state);
 
@@ -573,13 +574,27 @@ async fn execute(
     // Do not turn an overloaded node into an unbounded set of concurrent
     // child processes. `try_acquire_owned` is atomic and shares permits with
     // async jobs, so both APIs fail closed at the same capacity boundary.
-    let _permit = state.admission.try_acquire_owned().map_err(|_| {
+    // Side-lane requests (`ask_mission` read-only sidecars and out-of-band
+    // reaper hooks) draw from the independent `side` pool instead of `main`.
+    let is_side_lane = request.side_lane;
+    let _permit = if is_side_lane {
+        state.runner.capacity().side.try_acquire_owned()
+    } else {
+        state.admission.try_acquire_owned()
+    }
+    .map_err(|_| {
         (
             StatusCode::TOO_MANY_REQUESTS,
-            "node capacity exhausted".to_string(),
+            if is_side_lane {
+                "node side-lane capacity exhausted".to_string()
+            } else {
+                "node capacity exhausted".to_string()
+            },
         )
     })?;
-    state.active_leases.fetch_add(1, Ordering::AcqRel);
+    if !is_side_lane {
+        state.active_leases.fetch_add(1, Ordering::AcqRel);
+    }
     let result = run_lease_command(
         &state.node_id,
         &signing_secret,
@@ -588,7 +603,9 @@ async fn execute(
         request,
     )
     .await;
-    state.active_leases.fetch_sub(1, Ordering::AcqRel);
+    if !is_side_lane {
+        state.active_leases.fetch_sub(1, Ordering::AcqRel);
+    }
     match result {
         Ok(response) => Ok(Json(response)),
         Err(err) => {
@@ -839,6 +856,24 @@ async fn cancel_job(
         state: record.state.as_str().to_string(),
         cancel_requested,
     }))
+}
+
+/// `POST /jobs/:id/interrupt` — interrupt an in-flight child tool (`interrupt_now`)
+/// or steer immediately after the current tool finishes (`steer_between_tools`).
+async fn interrupt_job(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<Uuid>,
+    Json(request): Json<InterruptJobRequest>,
+) -> Result<Json<InterruptJobResponse>, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    let response = state
+        .runner
+        .interrupt_job(id, request.mode)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("job {id} not found")))?;
+    Ok(Json(response))
 }
 
 /// `POST /jobs/:id/force` — operator force-start for a queued job using the
@@ -1266,6 +1301,7 @@ mod tests {
             node_id: state.node_id.clone(),
             lease_token: create_lease_token(&claims, &state.shared_token).expect("lease token"),
             command: "sleep 0.2".to_string(),
+            side_lane: false,
         };
         let headers = auth_headers(&state.shared_token);
 
@@ -1487,6 +1523,7 @@ mod tests {
             node_id: state.node_id.clone(),
             lease_token: create_lease_token(&claims, &state.shared_token).expect("lease token"),
             command: "true".to_string(),
+            side_lane: false,
         };
         // Hold the shared permit directly. Spawning a shell and polling
         // active_leases made this admission test race with process startup and
@@ -1563,17 +1600,36 @@ mod tests {
         };
         let rejected = execute(
             State(Arc::clone(&state)),
-            headers,
+            headers.clone(),
             Json(LeaseRequest {
                 mission_id,
                 node_id: state.node_id.clone(),
                 lease_token: create_lease_token(&execute_claims, &state.shared_token)
                     .expect("lease token"),
                 command: "true".to_string(),
+                side_lane: false,
             }),
         )
         .await;
         assert_eq!(rejected.unwrap_err().0, StatusCode::TOO_MANY_REQUESTS);
+        // Side-lane execute requests succeed even while the main slot is occupied.
+        let side_ok = execute(
+            State(Arc::clone(&state)),
+            headers,
+            Json(LeaseRequest {
+                mission_id,
+                node_id: state.node_id.clone(),
+                lease_token: create_lease_token(&execute_claims, &state.shared_token)
+                    .expect("lease token"),
+                command: "printf side-ok".to_string(),
+                side_lane: true,
+            }),
+        )
+        .await
+        .expect("side-lane execute should succeed while main capacity is full")
+        .0;
+        assert!(side_ok.accepted);
+        assert_eq!(side_ok.stdout, "side-ok");
         tokio::fs::write(mission_dir.join("release"), b"")
             .await
             .expect("release async job");

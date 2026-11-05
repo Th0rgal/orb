@@ -2,12 +2,41 @@
 
 use super::*;
 
+/// Delivery behavior when targeting a live or parked mission turn.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageDeliveryMode {
+    /// Default FIFO queue behind any currently executing turn.
+    #[default]
+    Queue,
+    /// Inject immediately after the current tool call finishes (mid-turn stdin
+    /// injection on live-stream harnesses, or clean turn-boundary promotion
+    /// right after the active tool completes without waiting for a full multi-tool turn).
+    #[serde(alias = "steer_now")]
+    SteerBetweenTools,
+    /// Send SIGINT to any in-flight child tool process (`bash`, `lake`, `lean`),
+    /// record/surface the interrupted tool context, and deliver the steering
+    /// message immediately.
+    #[serde(alias = "interrupt")]
+    InterruptNow,
+}
+
 /// Message posted by a user to the control session.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ControlMessageRequest {
     /// Accept an ordinary follow-up durably before execution resource admission.
     #[serde(default)]
     pub queue_followup: bool,
+    /// Delivery mode when the target mission is actively running (`queue`,
+    /// `steer_between_tools` / `steer_now`, or `interrupt_now` / `interrupt`).
+    #[serde(default, alias = "delivery")]
+    pub mode: MessageDeliveryMode,
+    /// When `true` and native remote continuation is impossible on a still-online
+    /// remote node, automatically spawn a linked continuation mission
+    /// (`supersedes_mission_id`) sharing the remote workspace instead of failing
+    /// with `409 REMOTE_RESUME_REQUIRES_REPLACEMENT`.
+    #[serde(default)]
+    pub auto_replace_on_same_node: bool,
     /// Explicit same-work assertion, checked against stored identity before dispatch.
     #[serde(default)]
     pub continue_identity: Option<crate::api::writer_recycle::WriterContinuation>,
@@ -55,6 +84,12 @@ pub struct ControlMessageResponse {
     pub message_accepted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mission_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_mode: Option<MessageDeliveryMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted_tool: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced_by_mission_id: Option<Uuid>,
     /// Only populated for an accepted idle wake, not an active queued steer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_execution: Option<MessagePreviousExecution>,

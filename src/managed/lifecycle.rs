@@ -89,6 +89,11 @@ pub struct ReapFacts {
     /// Last time the node was seen busy (or its creation time).
     pub idle_since: DateTime<Utc>,
     pub owner: Owner,
+    /// Optional extended grace window (minutes) to retain an auto-managed child
+    /// VM after its child owner finishes while `parent_alive` is still true, so
+    /// the parent's `schedule_wakeup` can inspect or fork uncommitted files.
+    pub retain_for_parent_minutes: Option<i64>,
+    pub parent_alive: bool,
     /// Reap already scheduled by an earlier pass: (reason, due time). Keeps a
     /// grace that is counted from first observation stable across passes.
     pub scheduled: Option<(String, DateTime<Utc>)>,
@@ -181,7 +186,13 @@ pub fn decide(f: &ReapFacts, p: &LifecyclePolicy) -> ReapDecision {
         ),
         Owner::Mission(Some(OwnerState::Terminal { status })) => {
             let reason = format!("owner_{status}");
-            let due = grace_due(f, &reason, p.ended_grace_minutes);
+            let grace = if f.parent_alive {
+                p.ended_grace_minutes
+                    .max(f.retain_for_parent_minutes.unwrap_or(0))
+            } else {
+                p.ended_grace_minutes
+            };
+            let due = grace_due(f, &reason, grace);
             (VmOwnerClass::TerminalOrMissing, reason, due)
         }
         Owner::Mission(Some(OwnerState::Missing)) => {
@@ -322,6 +333,8 @@ mod tests {
             supports_free_stop: false,
             idle_since: t(-5),
             owner,
+            retain_for_parent_minutes: None,
+            parent_alive: false,
             scheduled: None,
         }
     }
@@ -568,5 +581,47 @@ mod tests {
         ] {
             assert_eq!(mission_of_orb_session(s), None, "{s}");
         }
+    }
+
+    #[test]
+    fn retain_for_parent_minutes_extends_terminal_grace_only_while_parent_alive() {
+        let mut f = facts(Owner::Mission(Some(OwnerState::Terminal {
+            status: "completed",
+        })));
+        f.retain_for_parent_minutes = Some(20);
+        f.parent_alive = true;
+        // Parent alive: grace is extended to 20 minutes instead of 5.
+        assert_eq!(
+            decide(&f, &P),
+            ReapDecision::Schedule {
+                reason: "owner_completed".into(),
+                at: t(20),
+            }
+        );
+        f.now = t(10);
+        f.scheduled = Some(("owner_completed".into(), t(20)));
+        assert_eq!(
+            decide(&f, &P),
+            ReapDecision::Schedule {
+                reason: "owner_completed".into(),
+                at: t(20),
+            }
+        );
+        f.now = t(20);
+        assert_eq!(decide(&f, &P), destroy("owner_completed"));
+
+        // When parent is no longer alive, normal ended_grace_minutes (5m) applies.
+        let mut dead_parent = facts(Owner::Mission(Some(OwnerState::Terminal {
+            status: "completed",
+        })));
+        dead_parent.retain_for_parent_minutes = Some(20);
+        dead_parent.parent_alive = false;
+        assert_eq!(
+            decide(&dead_parent, &P),
+            ReapDecision::Schedule {
+                reason: "owner_completed".into(),
+                at: t(5),
+            }
+        );
     }
 }

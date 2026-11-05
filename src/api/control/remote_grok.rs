@@ -1358,6 +1358,7 @@ impl GrokStream {
                         "rawInput": part["state"]["input"], "status": if part["state"]["status"] == "error" { serde_json::json!("failed") } else { part["state"]["status"].clone() },
                         "error": part["state"]["error"],
                         "output": part["state"]["output"],
+                        "exit_code": part["state"]["metadata"]["exit"],
                     });
                     updates.push(StreamUpdate::Tool {
                         update: update.clone(),
@@ -3068,9 +3069,19 @@ pub(crate) async fn placement(
             live: true,
         }));
     }
-    let unknown = match store.get_mission(mission_id).await? {
+    let mission_opt = store.get_mission(mission_id).await?;
+    let tag_node_id = mission_opt.as_ref().and_then(|m| {
+        m.project
+            .tags
+            .iter()
+            .find_map(|t| t.strip_prefix("remote_node:"))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
+    let unknown = match mission_opt {
         Some(mission) if !mission.requires_local_disk => Some(RemotePlacement {
-            node_id: "unknown".into(),
+            node_id: tag_node_id.clone().unwrap_or_else(|| "unknown".into()),
             job_id: Uuid::nil(),
             live: false,
         }),
@@ -3090,8 +3101,9 @@ pub(crate) async fn placement(
         .scope_unit
         .as_deref()
         .and_then(|scope| scope.strip_prefix("remote-node:"))
-        .unwrap_or("unknown")
-        .to_string();
+        .map(str::to_string)
+        .or(tag_node_id)
+        .unwrap_or_else(|| "unknown".to_string());
     Ok(Some(RemotePlacement {
         node_id,
         job_id,
@@ -3416,7 +3428,7 @@ async fn continue_inner(
     }
     // A job on a managed VM that is provably destroyed cannot still run:
     // settle it as lost instead of refusing resume forever.
-    let (mission, placement) = if placement.live
+    let (mut mission, placement) = if placement.live
         && super::remote_jobs::release_jobs_on_gone_nodes(
             &state.config.working_dir,
             store.as_ref(),
@@ -3480,11 +3492,40 @@ async fn continue_inner(
             ),
         ));
     }
-    // A PR binding needs create admission (PR ownership). A writer on its own
-    // track does not: the track lease below re-admits it, so a follow-up keeps
-    // the native session instead of replaying history into a replacement.
-    if mission.project.github_pr.is_some() {
+    // Re-admit PR capabilities and writer leases so a remote writer mission on
+    // a still-online node can reattach to its persisted remote session directly
+    // instead of failing with `409 REMOTE_RESUME_REQUIRES_REPLACEMENT`.
+    let has_pr_writer = mission.project.tags.iter().any(|tag| tag == "pr-writer");
+    let has_pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
+    if has_pr_writer && has_pr_readonly {
         return Err(replacement());
+    }
+    let mut _pr_writer_guard = None;
+    if let Some(pr) = mission.project.github_pr.as_deref() {
+        if !has_pr_writer && !has_pr_readonly {
+            return Err(replacement());
+        }
+        if has_pr_writer {
+            let guard = super::acquire_durable_pr_writer_lock(&state.control)
+                .await
+                .map_err(internal)?;
+            if let Some(existing) =
+                super::find_existing_pr_writer_global(&state.control, pr, Some(mission_id))
+                    .await
+                    .map_err(internal)?
+            {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!(
+                        "{REMOTE_RESUME_REQUIRES_REPLACEMENT}: PR writer lease for {} is already held by mission {} (status={})",
+                        super::canonical_github_pr(pr),
+                        existing.id,
+                        existing.status
+                    ),
+                ));
+            }
+            _pr_writer_guard = Some(guard);
+        }
     }
     let track_claim = if let Some(track) = mission.project.track.as_deref() {
         let slug = mission.project.project.as_deref().ok_or_else(replacement)?;
@@ -3593,6 +3634,7 @@ async fn continue_inner(
     // Jobs launched before OpenCode streaming was enabled have a placeholder
     // session id. Recover the native identity from that exact job's log.
     let mut native_session = mission.session_id.clone();
+    let mut remote_opencode_workspace_exists = false;
     let transferred = super::machine_transfer::committed(&store, mission_id)
         .await
         .map_err(internal)?
@@ -3608,10 +3650,12 @@ async fn continue_inner(
         let mut stream = GrokStream::default();
         let mut offset = 0;
         for _ in 0..MAX_CHUNKS_PER_TICK {
-            let chunk = client
+            let Ok(chunk) = client
                 .get_job_log(&_node, &token, placement.job_id, offset)
                 .await
-                .map_err(internal)?;
+            else {
+                break;
+            };
             stream.feed(&chunk.data);
             if stream.session_id.is_some() {
                 break;
@@ -3622,6 +3666,97 @@ async fn continue_inner(
             offset = chunk.next_offset;
         }
         native_session = stream.session_id;
+
+        // If the job log did not capture `ses_...` (e.g. rotated log or first
+        // turn interrupted mid-tool), inspect the persisted remote OpenCode
+        // SQLite session directory (`<work_dir>/.local/share/opencode/opencode.db`)
+        // with a refreshed `mission:execute` lease token.
+        if !native_session
+            .as_deref()
+            .is_some_and(|s| s.starts_with("ses_"))
+        {
+            let ws_mid =
+                crate::api::durable_jobs::workspace_mission_id(&mission.project.tags, mission_id);
+            let claims = crate::remote_node::LeaseClaims {
+                mission_id: ws_mid,
+                node_id: _node.id.clone(),
+                scope: crate::remote_node::SCOPE_MISSION_EXECUTE.into(),
+                expires_at: (chrono::Utc::now() + chrono::Duration::minutes(2)).timestamp(),
+                job_id: None,
+            };
+            if let Ok(lease_token) = crate::remote_node::create_lease_token(&claims, &token) {
+                let probe_cmd = format!(
+                    "python3 -c 'import os, sqlite3\n\
+mid = {mid:?}\n\
+cands = [os.getcwd(), f\"/var/lib/orb-node/work/{{mid}}\", f\"/var/lib/sandboxed-node/work/{{mid}}\"]\n\
+ws = any(os.path.isdir(d) for d in cands)\n\
+ses = \"\"\n\
+for d in cands:\n\
+    for rel in [\".local/share/opencode/opencode.db\", \".opencode/opencode.db\"]:\n\
+        p = os.path.join(d, rel)\n\
+        if os.path.isfile(p):\n\
+            try:\n\
+                con = sqlite3.connect(f\"file:{{p}}?mode=ro\", uri=True)\n\
+                cur = con.cursor()\n\
+                cur.execute(\"SELECT id FROM session WHERE id LIKE \\x27ses_%\\x27 ORDER BY rowid DESC LIMIT 1\")\n\
+                row = cur.fetchone()\n\
+                con.close()\n\
+                if row and row[0]:\n\
+                    ses = str(row[0])\n\
+                    break\n\
+            except Exception:\n\
+                pass\n\
+    if ses:\n\
+        break\n\
+print(f\"WS={{1 if ws else 0}}\")\n\
+if ses:\n\
+    print(f\"SES={{ses}}\")\n'",
+                    mid = ws_mid.to_string()
+                );
+                let req = crate::remote_node::LeaseRequest {
+                    mission_id: ws_mid,
+                    node_id: _node.id.clone(),
+                    lease_token,
+                    command: probe_cmd,
+                    side_lane: true,
+                };
+                if let Ok(resp) = client.execute(&_node, &token, &req).await {
+                    if resp.accepted {
+                        for line in resp.stdout.lines() {
+                            if line.trim() == "WS=1" {
+                                remote_opencode_workspace_exists = true;
+                            } else if let Some(ses) = line.trim().strip_prefix("SES=") {
+                                if ses.starts_with("ses_") {
+                                    native_session = Some(ses.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(ref found_ses) = native_session {
+            if found_ses.starts_with("ses_")
+                && mission.session_id.as_deref() != Some(found_ses.as_str())
+            {
+                let latest_fence = store
+                    .get_latest_mission_run(mission_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|r| crate::api::mission_store::SessionUpdateRun::from(&r));
+                let _ = store
+                    .update_mission_session_id(
+                        mission_id,
+                        found_ses,
+                        "opencode",
+                        latest_fence.as_ref(),
+                    )
+                    .await;
+                mission.session_id = Some(found_ses.clone());
+            }
+        }
     }
     let session_id = native_session.filter(|s| !s.trim().is_empty());
     let opencode_switched_history =
@@ -3646,7 +3781,11 @@ async fn continue_inner(
         } else {
             None
         };
-    if session_id.is_none() && !transferred && opencode_switched_history.is_none() {
+    if session_id.is_none()
+        && !transferred
+        && opencode_switched_history.is_none()
+        && !remote_opencode_workspace_exists
+    {
         return Err((
             StatusCode::CONFLICT,
             format!("{REMOTE_RESUME_REQUIRES_REPLACEMENT}: mission {mission_id} has no recorded native session; create a remote replacement with supersedes_mission_id={mission_id}"),

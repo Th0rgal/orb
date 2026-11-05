@@ -62,7 +62,7 @@ impl Operation {
 fn valid_path(path: &str) -> bool {
     path.starts_with('/') && path.len() <= 4096 && !path.contains('\0')
 }
-fn shell_quote(text: &str) -> String {
+pub(super) fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 

@@ -402,6 +402,9 @@ pub struct JobRunner {
     tracked: Mutex<HashMap<Uuid, TrackedJob>>,
     /// First observation of a `running` job without any live process.
     dead_since: Mutex<HashMap<Uuid, Instant>>,
+    /// Active background `steer_between_tools` watchers waiting for in-flight
+    /// child tools to finish before stopping the current turn.
+    steer_watchers: Mutex<HashSet<Uuid>>,
 }
 
 impl JobRunner {
@@ -484,6 +487,7 @@ impl JobRunner {
             managed_auth,
             tracked: Mutex::new(HashMap::new()),
             dead_since: Mutex::new(HashMap::new()),
+            steer_watchers: Mutex::new(HashSet::new()),
         });
         runner.spawn_liveness_sweep();
         // Side questions must be able to inspect a busy main mission. They
@@ -1124,6 +1128,210 @@ impl JobRunner {
             }
         }
         Ok(true)
+    }
+
+    fn tracked_command_target(&self, job_id: Uuid) -> (Option<u32>, Option<String>) {
+        let probe = self
+            .tracked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&job_id)
+            .map(|tracked| {
+                tracked
+                    .probe
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+            });
+        let Some(probe) = probe else {
+            return (None, None);
+        };
+        if !probe.in_command || probe.exit.is_some() {
+            return (None, None);
+        }
+        let pid = probe
+            .pid
+            .filter(|&pid| pid_is_alive(pid, probe.start_ticks));
+        let scope_unit = probe.scope.map(|scope| scope.unit);
+        (pid, scope_unit)
+    }
+
+    /// Interrupt or steer a running/queued job for `send_message_to_mission`
+    /// (`steer_between_tools` / `interrupt_now`). Returns `Ok(None)` when
+    /// `job_id` does not exist on this node.
+    pub async fn interrupt_job(
+        self: &Arc<Self>,
+        job_id: Uuid,
+        mode: crate::remote_node::RemoteInterruptMode,
+    ) -> anyhow::Result<Option<crate::remote_node::InterruptJobResponse>> {
+        let Some(record) = self.store.get(job_id).await? else {
+            return Ok(None);
+        };
+        match record.state {
+            JobState::Queued => {
+                let accepted = self
+                    .cancel_with_reason(
+                        job_id,
+                        "core",
+                        "Cancelled queued job for controller steering",
+                    )
+                    .await?;
+                let state = self
+                    .store
+                    .get(job_id)
+                    .await?
+                    .map(|r| r.state.as_str().to_string())
+                    .unwrap_or_else(|| "cancelled".to_string());
+                return Ok(Some(crate::remote_node::InterruptJobResponse {
+                    job_id,
+                    state,
+                    accepted,
+                    signalled_pids: 0,
+                    deferred_until_tool_finishes: false,
+                }));
+            }
+            JobState::Running => {}
+            other => {
+                return Ok(Some(crate::remote_node::InterruptJobResponse {
+                    job_id,
+                    state: other.as_str().to_string(),
+                    accepted: false,
+                    signalled_pids: 0,
+                    deferred_until_tool_finishes: false,
+                }));
+            }
+        }
+
+        let (pid_opt, scope_unit_opt) = self.tracked_command_target(job_id);
+        match mode {
+            crate::remote_node::RemoteInterruptMode::InterruptNow => {
+                let signalled = if let Some(pid) = pid_opt {
+                    super::tool_interrupt::sigint_inflight_child_tools(
+                        pid,
+                        scope_unit_opt.as_deref(),
+                    )
+                } else {
+                    0
+                };
+                if let Some(pid) = pid_opt {
+                    if signalled > 0 {
+                        for _ in 0..6 {
+                            if !super::tool_interrupt::has_inflight_child_tools(
+                                pid,
+                                scope_unit_opt.as_deref(),
+                            ) {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                        // Allow the harness a brief moment to flush the synthetic/interrupted
+                        // tool_result into its persisted SQLite/session log before the turn stops.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+                let cancelled = self
+                    .cancel_with_reason(
+                        job_id,
+                        "core",
+                        "Interrupted in-flight tool via SIGINT for immediate controller steering",
+                    )
+                    .await?;
+                let accepted = cancelled || signalled > 0;
+                let state = self
+                    .store
+                    .get(job_id)
+                    .await?
+                    .map(|r| r.state.as_str().to_string())
+                    .unwrap_or_else(|| "running".to_string());
+                Ok(Some(crate::remote_node::InterruptJobResponse {
+                    job_id,
+                    state,
+                    accepted,
+                    signalled_pids: signalled,
+                    deferred_until_tool_finishes: false,
+                }))
+            }
+            crate::remote_node::RemoteInterruptMode::SteerBetweenTools => {
+                let inflight = pid_opt.is_some_and(|pid| {
+                    super::tool_interrupt::has_inflight_child_tools(pid, scope_unit_opt.as_deref())
+                });
+                if !inflight {
+                    let accepted = self
+                        .cancel_with_reason(job_id, "core", "Steered between tool calls")
+                        .await?;
+                    let state = self
+                        .store
+                        .get(job_id)
+                        .await?
+                        .map(|r| r.state.as_str().to_string())
+                        .unwrap_or_else(|| "running".to_string());
+                    return Ok(Some(crate::remote_node::InterruptJobResponse {
+                        job_id,
+                        state,
+                        accepted,
+                        signalled_pids: 0,
+                        deferred_until_tool_finishes: false,
+                    }));
+                }
+
+                let inserted = self
+                    .steer_watchers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(job_id);
+                if inserted {
+                    let runner = Arc::clone(self);
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            let still_running = runner
+                                .store
+                                .get(job_id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some_and(|r| r.state == JobState::Running);
+                            if !still_running {
+                                break;
+                            }
+                            let (cur_pid, cur_scope) = runner.tracked_command_target(job_id);
+                            let still_inflight = cur_pid.is_some_and(|pid| {
+                                super::tool_interrupt::has_inflight_child_tools(
+                                    pid,
+                                    cur_scope.as_deref(),
+                                )
+                            });
+                            if !still_inflight {
+                                // Let the harness record the completed tool_result to disk/SQLite
+                                // before stopping the turn so the queued controller steering prompt
+                                // resumes cleanly right after that tool call.
+                                tokio::time::sleep(Duration::from_millis(120)).await;
+                                let _ = runner
+                                    .cancel_with_reason(
+                                        job_id,
+                                        "core",
+                                        "Steered immediately after tool call completed",
+                                    )
+                                    .await;
+                                break;
+                            }
+                        }
+                        runner
+                            .steer_watchers
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&job_id);
+                    });
+                }
+                Ok(Some(crate::remote_node::InterruptJobResponse {
+                    job_id,
+                    state: "running".to_string(),
+                    accepted: true,
+                    signalled_pids: 0,
+                    deferred_until_tool_finishes: true,
+                }))
+            }
+        }
     }
 
     fn is_tracked(&self, job_id: Uuid) -> bool {
@@ -3909,6 +4117,171 @@ mod tests {
         assert!(parse_proc_stat_content(short).is_err());
         assert!(parse_proc_stat_content("no_parens_at_all").is_err());
         assert!(parse_proc_stat_content(") inverted ( 1 2 3").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn interrupt_job_supports_interrupt_now_and_steer_between_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path()).await.unwrap();
+        let runner = JobRunner::spawn(store.clone(), dir.path().to_path_buf(), 2, 30);
+
+        // 1. `InterruptNow`: sends SIGINT to the in-flight child `sleep 30` and cancels the turn immediately.
+        let j_interrupt = Uuid::new_v4();
+        let m_interrupt = Uuid::new_v4();
+        runner
+            .submit(
+                j_interrupt,
+                m_interrupt,
+                JobPayload::RawCommand {
+                    command: "python3 -c 'import subprocess, sys\np = subprocess.Popen([\"sleep\", \"30\"])\nsys.exit(p.wait())'".into(),
+                    companion_of: None,
+                    side_question: false,
+                    coordinator_priority: false,
+                    is_child_worker: true,
+                    native_goal: false,
+                    long_running: true,
+                    timeout_secs: None,
+                    env: None,
+                    managed_auth: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        if tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (pid_opt, scope_opt) = runner.tracked_command_target(j_interrupt);
+                if pid_opt.is_some_and(|pid| {
+                    crate::node::tool_interrupt::collect_inflight_child_tool_pids(
+                        pid,
+                        scope_opt.as_deref(),
+                    )
+                    .len()
+                        >= 1
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_err()
+        {
+            let rec = store.get(j_interrupt).await.unwrap();
+            let tail = read_log_tail(&runner.log_path(j_interrupt))
+                .await
+                .unwrap_or_default();
+            panic!(
+                "child tool should be observed in flight; job={rec:?}, target={:?}, log={tail:?}",
+                runner.tracked_command_target(j_interrupt)
+            );
+        }
+        // Wait until `sleep 30` itself is spawned below `python3`.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (pid_opt, scope_opt) = runner.tracked_command_target(j_interrupt);
+                if pid_opt.is_some_and(|pid| {
+                    !crate::node::tool_interrupt::collect_inflight_child_tool_pids(
+                        pid,
+                        scope_opt.as_deref(),
+                    )
+                    .is_empty()
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let resp = runner
+            .interrupt_job(
+                j_interrupt,
+                crate::remote_node::RemoteInterruptMode::InterruptNow,
+            )
+            .await
+            .unwrap()
+            .expect("job exists");
+        assert!(resp.accepted);
+        assert!(resp.signalled_pids >= 1);
+        assert!(!resp.deferred_until_tool_finishes);
+        let rec = wait_for_terminal(&store, j_interrupt).await;
+        assert!(
+            matches!(rec.state, JobState::Cancelled | JobState::Failed),
+            "unexpected terminal state after SIGINT interrupt: {:?}",
+            rec.state
+        );
+
+        // 2. `SteerBetweenTools`: defers cancellation while a child tool (`sleep 1.2`) is in flight,
+        //    then cancels right after that tool finishes instead of waiting for the rest of the turn.
+        let j_steer = Uuid::new_v4();
+        let m_steer = Uuid::new_v4();
+        let marker = dir.path().join("tool_finished.txt");
+        let mock_harness = dir.path().join("opencode");
+        std::fs::write(
+            &mock_harness,
+            format!(
+                "#!/bin/sh\nsleep 1.2\nprintf done > {:?}\nwhile :; do :; done\n",
+                marker.display().to_string()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_harness, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let cmd = format!("exec {:?}", mock_harness.display().to_string());
+        runner
+            .submit(
+                j_steer,
+                m_steer,
+                JobPayload::RawCommand {
+                    command: cmd,
+                    companion_of: None,
+                    side_question: false,
+                    coordinator_priority: false,
+                    is_child_worker: true,
+                    native_goal: false,
+                    long_running: true,
+                    timeout_secs: None,
+                    env: None,
+                    managed_auth: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (pid_opt, scope_opt) = runner.tracked_command_target(j_steer);
+                if pid_opt.is_some_and(|pid| {
+                    crate::node::tool_interrupt::has_inflight_child_tools(pid, scope_opt.as_deref())
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("short child tool should be observed in flight");
+
+        let resp_steer = runner
+            .interrupt_job(
+                j_steer,
+                crate::remote_node::RemoteInterruptMode::SteerBetweenTools,
+            )
+            .await
+            .unwrap()
+            .expect("job exists");
+        assert!(resp_steer.accepted);
+        assert!(resp_steer.deferred_until_tool_finishes);
+        let rec_steer =
+            tokio::time::timeout(Duration::from_secs(5), wait_for_terminal(&store, j_steer))
+                .await
+                .expect("steer_between_tools should stop turn right after child tool finishes");
+        assert_eq!(rec_steer.state, JobState::Cancelled);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "done");
     }
 }
 
