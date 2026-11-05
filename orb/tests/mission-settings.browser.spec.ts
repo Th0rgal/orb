@@ -14,7 +14,7 @@ for (const theme of ["dark", "light"] as const) {
     await expect(page.getByRole("dialog")).toHaveCount(0);
     const view = page.getByRole("region", { name: "Mission settings" });
     await expect(view).toBeVisible();
-    await expect(view.getByTestId("mission-forecast-card")).toContainText("~4h runway left");
+    await expect(view.getByTestId("mission-forecast-card")).toContainText("~4h 16m runway left");
     await expect(view.getByRole("switch", { name: "Spending budget" })).toHaveAttribute("aria-checked", "true");
     await expect(view.getByText("$6.00 of $10")).toBeVisible();
     await expect(view.getByRole("table", { name: "Subagent budgets" })).toContainText("Sub-budget $2.00");
@@ -55,8 +55,8 @@ test("bandwidth pacing limits shape the forecast runway and save optimistically"
   await view.getByLabel("Compute per minute (vCPU)").fill("24");
   await view.getByLabel("Compute burn ceiling ($/h)").fill("0.75");
 
-  // Forecast card updates live to show extended ~8h runway.
-  await expect(view.getByTestId("mission-forecast-card")).toContainText("~8h runway left");
+  // Forecast card updates live to show extended ~8h 32m runway.
+  await expect(view.getByTestId("mission-forecast-card")).toContainText("~8h 32m runway left");
   await expect(view.getByTestId("mission-forecast-card")).toContainText("from bandwidth cap");
 
   await view.getByRole("button", { name: "Save bandwidth" }).click();

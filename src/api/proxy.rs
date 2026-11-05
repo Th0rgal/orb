@@ -2267,6 +2267,14 @@ fn proxy_usage_record(
     }
 }
 
+fn bandwidth_billed_tokens(tokens: ProxyTokens) -> u64 {
+    tokens
+        .input
+        .saturating_add(tokens.cache_read)
+        .saturating_add(tokens.cache_creation)
+        .saturating_add(tokens.output)
+}
+
 /// Persist one routed /v1 request's token usage into the single-tenant user's
 /// mission store, attributed to its key, provider account and mission. Cost
 /// is a list-price estimate from the upstream model id.
@@ -2285,10 +2293,11 @@ async fn record_proxy_usage(
     }
     let record = proxy_usage_record(target, tokens);
     if let Some(mid) = target.attribution.mission_id {
-        let billed = tokens
-            .input
-            .saturating_add(tokens.output)
-            .saturating_add(tokens.reasoning);
+        // `ProxyTokens.input` excludes `cache_read` and `cache_creation`, while
+        // `ProxyTokens.output` already includes `reasoning`. Charge total prompt
+        // + completion tokens once so cached inputs count toward `tokens_per_min`
+        // and reasoning tokens are never double-counted.
+        let billed = bandwidth_billed_tokens(tokens);
         super::mission_budget::record_mission_inference_tokens(state, mid, billed).await;
     }
     let user = super::auth::implicit_single_tenant_user(&state.config);
@@ -15376,5 +15385,34 @@ mod latency_tests {
         );
         assert_eq!(tok_invalid.reason, CooldownReason::AuthError);
         assert!(tok_invalid.cache_negative);
+    }
+
+    #[test]
+    fn bandwidth_billed_tokens_includes_cached_input_and_counts_reasoning_once() {
+        // OpenAI / Google style: prompt_tokens includes cached_tokens, completion_tokens includes reasoning_tokens.
+        let mut oai = UsageAccumulator::default();
+        oai.observe(&serde_json::json!({
+            "prompt_tokens": 100_000,
+            "prompt_tokens_details": {"cached_tokens": 99_000},
+            "completion_tokens": 9_000,
+            "completion_tokens_details": {"reasoning_tokens": 8_000}
+        }));
+        let oai_tokens = oai.tokens();
+        assert_eq!(oai_tokens.input, 1_000);
+        assert_eq!(oai_tokens.cache_read, 99_000);
+        assert_eq!(oai_tokens.output, 9_000);
+        assert_eq!(oai_tokens.reasoning, 8_000);
+        assert_eq!(bandwidth_billed_tokens(oai_tokens), 109_000);
+
+        // Anthropic style: input_tokens excludes cache_read_input_tokens and cache_creation_input_tokens.
+        let mut anth = UsageAccumulator::default();
+        anth.observe(&serde_json::json!({
+            "input_tokens": 500,
+            "cache_read_input_tokens": 50_000,
+            "cache_creation_input_tokens": 10_000,
+            "output_tokens": 1_500
+        }));
+        let anth_tokens = anth.tokens();
+        assert_eq!(bandwidth_billed_tokens(anth_tokens), 62_000);
     }
 }

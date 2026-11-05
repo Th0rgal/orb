@@ -91,13 +91,25 @@ class OrbMissionBudgetTest {
 
         val base10 = own(10.0)
         val unshaped = base10.computeRunwayForecast(budgetEnabled = true)
-        assertEquals(15_120.0, unshaped.etaSecs ?: 0.0, 1.0)
+        assertEquals(15_480.0, unshaped.etaSecs ?: 0.0, 1.0)
         val shaped = base10.computeRunwayForecast(
             draftComputeUsdPerH = "1.0",
             bandwidthEnabled = true,
             budgetEnabled = true,
         )
-        assertEquals(30_240.0, shaped.etaSecs ?: 0.0, 1.0)
+        assertEquals(30_960.0, shaped.etaSecs ?: 0.0, 1.0)
         assertTrue(shaped.subline.contains("from bandwidth cap"))
+
+        val fullyReserved = OrbMissionBudget.from(
+            OrbJSON.parse(
+                """{"mission_id":"m1","own_budget_usd":1,"pool_id":"m1","mode":"own",
+                "pool":{"budget_usd":1,"spent_usd":0,"reserved_usd":1,"carved_usd":0,"available_usd":0},
+                "effective_bandwidth":{"source":"none","current_compute_usd_per_hour":1.0},
+                "children":[]}"""
+            )
+        )
+        val freshVm = fullyReserved.computeRunwayForecast(budgetEnabled = true)
+        assertEquals(3_600.0, freshVm.etaSecs ?: 0.0, 1.0)
+        assertTrue(freshVm.headline.contains("~1h runway left"))
     }
 }

@@ -1,5 +1,5 @@
-    Finished `test` profile [unoptimized] target(s) in 0.15s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
+    Finished `test` profile [unoptimized] target(s) in 0.41s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/orb_spec-4c486aa5e7ada9e6)
 
 running 40 tests
 test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
@@ -43,9 +43,9 @@ test tests::wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gate
 test tests::wave12_node_disk_pressure_and_placement_kernels_match_specs ... ok
 test tests::writer_reuse_gate_enforces_continuation_and_retag_rules ... ok
 
-test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -217,14 +217,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 35.10s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 3m 44s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test provider_health::tests::subscription_cooldown_classifies_empty_chain_as_retryable ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.01s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -396,14 +397,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.67s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 3m 47s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test provider_health::tests::account_error_cooldown_doubles_from_ten_minutes_to_six_hours ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -575,14 +577,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.17s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 2m 00s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test provider_health::tests::provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -754,14 +757,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.15s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 1m 34s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test cost::tests::test_cost_calculation_basic ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -933,14 +937,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 2m 30s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::control::host_goal::tests::armed_wakeup_gives_paused ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -1112,14 +1117,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 1m 45s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::reconcile::tests::active_mission_with_any_liveness_signal_is_kept ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -1291,14 +1297,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.17s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 1m 44s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::control::tests::queue_snapshot_replays_prepared_parallel_message_until_run_exists ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.01s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -1470,14 +1477,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.15s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 55.02s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::control::dispatch_admission_tests::rejected_actor_dispatch_with_failed_rollback_is_durably_recoverable ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.16s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.23s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -1649,14 +1657,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.16s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 40.40s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::usage_attribution::tests::forged_hints_are_rejected_and_keep_the_principal ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -1828,14 +1837,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 47.28s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::control::automation_scheduler::native_schedule_bounds_tests::native_schedule_stops_after_ttl_or_a_finished_mission ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -2007,14 +2017,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 41.44s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::mission_stats::tests::mission_and_subtree_totals_are_conserved_and_replays_count_once ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.01s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -2186,14 +2197,17 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.13s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 39.96s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::privilege_broker::tests::grant_lifecycle_audit_log_session_reap_and_bunker_lockdown ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.01s
 
+    Blocking waiting for file lock on build directory
+   Compiling lean-mesh v0.1.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup/crates/lean-mesh)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -2365,14 +2379,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 3m 40s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::system::tests::orb_and_sandboxed_service_aliases_map_to_same_deploy_tiers ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -2544,14 +2559,17 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 1m 16s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test managed::tests::budget_and_concurrency_are_hard_refusals ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.02s
 
+    Blocking waiting for file lock on build directory
+   Compiling lean-mesh v0.1.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup/crates/lean-mesh)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -2723,14 +2741,17 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.15s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 51m 37s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test managed::lifecycle::tests::busy_lease_protects_everything_but_ttl ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.00s
 
+    Blocking waiting for file lock on build directory
+   Compiling lean-mesh v0.1.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup/crates/lean-mesh)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -2902,14 +2923,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.13s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 2m 39s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test managed::tests::claim_moves_ownership_to_the_served_mission_only ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.05s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.11s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -3081,14 +3103,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.15s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 35.24s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::secret_broker::tests::compute_secret_confinement_blocks_reserved_keys_and_untrusted_nodes ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -3260,14 +3283,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 31.81s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test node::capacity::tests::shrink_with_jobs_in_flight_never_revokes_and_blocks_until_under_cap ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.03s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -3439,14 +3463,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 35.58s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::runners::stream_guard::tests::matches_exhaustive_oracle_on_unicode_and_partial_repeats ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.03s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -3618,14 +3643,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 41.25s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::control::remote_grok::tests::phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.01s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -3797,14 +3823,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 52.36s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::mission_store::harness_session_tests::phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.04s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.06s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -3976,14 +4003,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.15s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 45.59s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test api::approval_queue::tests::admit_is_the_shared_gate ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.01s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -4155,15 +4183,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+    Finished `test` profile [unoptimized] target(s) in 45.09s
+     Running unittests src/lib.rs (/Users/thomas/work/orb/target/debug/deps/sandboxed_sh-837e61f0670757b6)
 
 running 1 test
 test node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3731 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3734 filtered out; finished in 0.02s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-bw-followup)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -4354,9 +4382,9 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: function `timed_response` is never used
-    --> src/api/proxy.rs:3285:4
+    --> src/api/proxy.rs:3294:4
      |
-3285 | fn timed_response(resp: Response, cell: Arc<super::proxy_timing::Timin...
+3294 | fn timed_response(resp: Response, cell: Arc<super::proxy_timing::Timin...
      |    ^^^^^^^^^^^^^^
 
 warning: function `scope_oom_killed` is never used
@@ -4389,8 +4417,8 @@ warning: function `check_schema` is never used
   |        ^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib) generated 21 warnings (run `cargo fix --lib -p sandboxed_sh` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 3m 54s
-     Running unittests src/bin/palomactl.rs (target/debug/deps/palomactl-53e44ebd4013ceaa)
+    Finished `test` profile [unoptimized] target(s) in 3m 58s
+     Running unittests src/bin/palomactl.rs (/Users/thomas/work/orb/target/debug/deps/palomactl-53e44ebd4013ceaa)
 
 running 1 test
 test tests::pr_103_green_but_conflicting_recommends_conflict_resolution ... ok
