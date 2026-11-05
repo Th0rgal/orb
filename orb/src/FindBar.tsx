@@ -38,11 +38,23 @@ function scrollRangeIntoView(el: HTMLElement, range: Range, barEl?: HTMLElement)
     markScrollIntent(el);
     el.scrollTop = Math.max(0, el.scrollTop + (rect.top - targetY));
   }
-  if (
-    el.scrollWidth > el.clientWidth &&
-    (rect.left < box.left + 16 || rect.right > box.right - 16)
+  for (
+    let node: HTMLElement | null =
+      range.startContainer instanceof HTMLElement
+        ? range.startContainer
+        : range.startContainer.parentElement;
+    node && el.contains(node);
+    node = node.parentElement
   ) {
-    el.scrollLeft = Math.max(0, el.scrollLeft + (rect.left - box.left - 32));
+    const overflowX = getComputedStyle(node).overflowX;
+    if (overflowX === 'hidden' || overflowX === 'clip') continue;
+    if (node !== el && overflowX !== 'auto' && overflowX !== 'scroll') continue;
+    if (node.scrollWidth <= node.clientWidth) continue;
+    const nodeBox = node === el ? box : node.getBoundingClientRect();
+    if (rect.left < nodeBox.left + 16 || rect.right > nodeBox.right - 16) {
+      node.scrollLeft = Math.max(0, node.scrollLeft + (rect.left - nodeBox.left - 32));
+    }
+    break;
   }
 }
 
