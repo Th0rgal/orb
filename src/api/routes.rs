@@ -697,11 +697,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                                     })
                                     .map(str::to_string)
                             });
-                        if let Some(d) = dest_opt {
-                            if !roots.contains(&d) {
-                                roots.push(d);
-                            }
-                            continue;
+                        if let Some(d) = dest_opt.filter(|d| !roots.contains(d)) {
+                            roots.push(d);
                         }
                         let wd_opt = store.get_mission(uuid).await.ok().flatten().and_then(|m| {
                             m.working_directory

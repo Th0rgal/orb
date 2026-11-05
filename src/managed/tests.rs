@@ -5268,6 +5268,55 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
         wip_branches.lines().count() >= 2,
         "expected canonical WIP ref plus per-worktree disambiguated WIP ref, got: {wip_branches}"
     );
+
+    // 4d. Required clean filter failure during `git add -A` must fail closed (`failed=1`, non-zero
+    // exit status) and NEVER serialize/push a stale commit from the copied index!
+    git(&repo_dir, &["config", "filter.failclean.clean", "false"]);
+    git(&repo_dir, &["config", "filter.failclean.required", "true"]);
+    std::fs::write(
+        linked_wt.join(".gitattributes"),
+        "*.filtered filter=failclean\n",
+    )
+    .unwrap();
+    std::fs::write(linked_wt.join("broken.filtered"), "unsaved worker edits\n").unwrap();
+
+    let now3 = Utc::now();
+    m.update(&spawned.id, |row| {
+        row.expires_at = now3 + chrono::Duration::minutes(3);
+    })
+    .await;
+    m.reap_once().await;
+    let stage_fail_script = fake
+        .execs
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|s| s.contains("orb_pre_stop_checkpoint"))
+        .cloned()
+        .expect("stage-fail checkpoint script executed");
+    let stage_fail_run = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(stage_fail_script.replace(
+            "'/var/lib/orb-node/work' '/var/lib/sandboxed-node/work' '/workspace/repo'",
+            &format!("'{}'", work_root.display()),
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        !stage_fail_run.status.success(),
+        "staging failure (`git add -A`) must cause checkpoint script to exit non-zero"
+    );
+    let stage_fail_stdout = String::from_utf8_lossy(&stage_fail_run.stdout);
+    assert!(
+        stage_fail_stdout.contains("dirty_repos=1 pushed=0 failed=1"),
+        "expected staging failure to record pushed=0 failed=1, got: {stage_fail_stdout}"
+    );
+    assert_eq!(
+        git(&bare_origin, &["rev-parse", wip_ref]),
+        linked_wip_sha,
+        "staging failure must not overwrite origin WIP ref with a stale index commit"
+    );
 }
 
 #[tokio::test]

@@ -5314,7 +5314,11 @@ $repo_dir
   ORB_SEEN_TOPS="$ORB_SEEN_TOPS
 $repo_dir"
   cd "$repo_dir" 2>/dev/null || return 0
-  status_out=$(git status --porcelain 2>/dev/null)
+  if ! status_out=$(git status --porcelain 2>/dev/null); then
+    ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+    ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+    return 0
+  fi
   head_sha=$(git rev-parse --verify HEAD 2>/dev/null || true)
   repo_gitdir=$(git rev-parse --git-dir 2>/dev/null || printf '.git')
   common_gitdir=$(git rev-parse --git-common-dir 2>/dev/null || printf '%s' "$repo_gitdir")
@@ -5323,10 +5327,10 @@ $repo_dir"
   unpushed=0
   if [ -z "$status_out" ] && [ -n "$head_sha" ]; then
     if git remote get-url origin >/dev/null 2>&1; then
-      rem_refs=$(git for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null)
+      rem_refs=$(git for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null || true)
       if [ -z "$rem_refs" ]; then
         unpushed=1
-      elif [ -n "$(git rev-list -n 1 HEAD --not --remotes=origin 2>/dev/null)" ]; then
+      elif ! ahead_out=$(git rev-list -n 1 HEAD --not --remotes=origin 2>/dev/null) || [ -n "$ahead_out" ]; then
         unpushed=1
       fi
     else
@@ -5342,26 +5346,35 @@ $repo_dir"
   ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
   commit_sha=""
   if [ -n "$status_out" ]; then
-    tmp_idx=$(mktemp "/tmp/orb-wip-index.XXXXXX")
-    src_index=$(git rev-parse --git-path index 2>/dev/null || printf '%s/index' "$repo_gitdir")
-    cp -f "$src_index" "$tmp_idx" 2>/dev/null || rm -f "$tmp_idx"
-    GIT_INDEX_FILE="$tmp_idx" git add -A >/dev/null 2>&1
-    tree_sha=$(GIT_INDEX_FILE="$tmp_idx" git write-tree 2>/dev/null)
-    rm -f "$tmp_idx"
+    tmp_idx=$(mktemp "/tmp/orb-wip-index.XXXXXX" 2>/dev/null || true)
+    tree_sha=""
+    if [ -n "$tmp_idx" ]; then
+      rm -f "$tmp_idx"
+      src_index=$(git rev-parse --git-path index 2>/dev/null || printf '%s/index' "$repo_gitdir")
+      stage_ok=1
+      if [ -e "$src_index" ] && ! cp -f "$src_index" "$tmp_idx" 2>/dev/null; then
+        stage_ok=0
+      fi
+      if [ "$stage_ok" -eq 1 ] && GIT_INDEX_FILE="$tmp_idx" git add -A >/dev/null 2>&1; then
+        tree_sha=$(GIT_INDEX_FILE="$tmp_idx" git write-tree 2>/dev/null || true)
+      fi
+      rm -f "$tmp_idx"
+    fi
     if [ -n "$tree_sha" ]; then
       if [ -n "$head_sha" ]; then
-        commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" -p "$head_sha" 2>/dev/null)
+        commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" -p "$head_sha" 2>/dev/null || true)
       else
-        commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" 2>/dev/null)
+        commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" 2>/dev/null || true)
       fi
     fi
   else
     commit_sha="$head_sha"
   fi
   if [ -n "$commit_sha" ]; then
-    git update-ref "$latest_ref" "$commit_sha" 2>/dev/null || true
+    local_ok=1
+    git update-ref "$latest_ref" "$commit_sha" 2>/dev/null || local_ok=0
     git update-ref "refs/orb-pre-stop/latest" "$commit_sha" 2>/dev/null || true
-    git bundle create "$bundle_path" "$latest_ref" >/dev/null 2>&1 || true
+    git bundle create "$bundle_path" "$latest_ref" >/dev/null 2>&1 || local_ok=0
     if git remote get-url origin >/dev/null 2>&1; then
       repo_suffix=$(printf '%s' "$repo_dir" | cksum | awk '{{print $1}}')
       if timeout 25s git push --force origin "$commit_sha:$ORB_WIP_REF" "$commit_sha:${{ORB_WIP_REF}}-$repo_suffix" >/dev/null 2>&1; then
@@ -5369,6 +5382,8 @@ $repo_dir"
       else
         ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
       fi
+    elif [ "$local_ok" -ne 1 ]; then
+      ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
     fi
   else
     ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
