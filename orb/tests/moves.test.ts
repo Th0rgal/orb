@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createMemo, createRoot } from "solid-js";
-import { MOVE_CONFIRM_MS, fileMoveKey, filesMovedAway, filesMovedInto, missionMoveKey, missionsMovedInto, moveOptimistically, movedMission, movingOutOf, previewMove, resetMoves, settleMove, withMovedMissions } from "../src/moves";
+import { MOVE_CONFIRM_MS, deleteFileOptimistically, fileMoveKey, filesMovedAway, filesMovedInto, isFilePathPending, missionMoveKey, missionsMovedInto, moveOptimistically, movedMission, movingOutOf, previewMove, resetMoves, settleMove, withMovedMissions } from "../src/moves";
 
 beforeEach(() => resetMoves());
 afterEach(() => { vi.useRealTimers(); resetMoves(); });
@@ -68,4 +68,36 @@ it("moves files and folders between project listings at once", () => {
 it("keeps row identity when nothing is moving", () => {
   const rows = [mission];
   expect(withMovedMissions(rows)).toBe(rows);
+});
+
+it("hides a deleted folder optimistically without projecting a destination and restores it on failure", async () => {
+  const request = deferred();
+  const done = deleteFileOptimistically("alpha", "Audits", true, () => request.promise, "Audits");
+  expect([...filesMovedAway("alpha", "")]).toEqual(["Audits"]);
+  expect(filesMovedInto("alpha", "")).toEqual([]);
+  expect(filesMovedInto("", "")).toEqual([]);
+  request.reject(new Error("Move the agents out of this folder before deleting it."));
+  await expect(done).rejects.toThrow("Move the agents");
+  expect([...filesMovedAway("alpha", "")]).toEqual([]);
+  await Promise.resolve();
+  expect(document.body.textContent).toContain("Couldn’t delete Audits");
+  expect(document.body.textContent).toContain("Move the agents out of this folder before deleting it.");
+});
+
+it("marks pending folder sources, destinations, ancestors, and descendants until settled", async () => {
+  await moveOptimistically(
+    fileMoveKey("alpha", "old/sub"),
+    { kind: "file", fromProject: "alpha", toProject: "alpha", path: "new/sub", fromPath: "old/sub", directory: true },
+    async () => {},
+  );
+  expect(isFilePathPending("alpha", "old/sub")).toBe(true);
+  expect(isFilePathPending("alpha", "old/sub/file.md")).toBe(true);
+  expect(isFilePathPending("alpha", "old")).toBe(true);
+  expect(isFilePathPending("alpha", "new/sub")).toBe(true);
+  expect(isFilePathPending("alpha", "new/sub/file.md")).toBe(true);
+  expect(isFilePathPending("alpha", "new")).toBe(true);
+  expect(isFilePathPending("alpha", "unrelated")).toBe(false);
+  expect(isFilePathPending("beta", "new/sub")).toBe(false);
+  settleMove(fileMoveKey("alpha", "old/sub"));
+  expect(isFilePathPending("alpha", "new/sub")).toBe(false);
 });

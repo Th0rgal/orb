@@ -1,4 +1,4 @@
-import { fileMoveKey, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, withMovedMissions } from "./moves";
+import { deleteFileOptimistically, fileMoveKey, isFilePathPending, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, withMovedMissions } from "./moves";
 import { renameOptimistically } from "./renames";
 import { isArchivable, isReopenable, isRunning, isLive, isWorking, presentedStatus } from "./missionStatus";
 import { swallow } from "./log";
@@ -8,7 +8,7 @@ import {nativeComposerDrop} from "./composerDrop";
 import {importProjectFiles} from "./projectFileImport";
 import {backgroundUploads,cancelBackgroundUpload,formatFileSize,pauseBackgroundUpload,resumeBackgroundUpload,type UploadSource} from "./uploads";
 import {subscribeProjectContext} from "./projectContext";
-import { assertFolderHasNoWork, moveFolderWork, makeFileReference, readFileReference, makeCronReference, readCronReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
+import { assertFolderHasNoWork, folderWorkError, moveFolderWork, makeFileReference, readFileReference, makeCronReference, readCronReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
 import { FolderActivityIcon, folderActivity } from "./FolderActivity";
 import { createSidebarRequests } from "./sidebarRequests";
 import { folderLabel, setFolderLabel } from "./folderLabels";
@@ -585,6 +585,7 @@ export function LiveProjectsSection(p: {
   };
   const beginFileAction = (slug: string, path: string, kind: "rename" | "move" | "delete", directory = false) => {
     setFileMenu(null); setActionMenu(null); setMultiSelectMenu(null);
+    if (isFilePathPending(slug, path)) return;
     // A folder renamed on this device before paths could change keeps that name as the suggestion.
     setFileActionValue(kind === "rename" ? (directory ? folderLabel(slug, path) : fileBaseName(path)) : fileParent(path));
     setFileActionError(null);
@@ -594,8 +595,7 @@ export function LiveProjectsSection(p: {
     await loadDir(slug, fileParent(path), true);
     if (destination && fileParent(destination) !== fileParent(path)) await loadDir(slug, fileParent(destination), true);
   };
-  const folderMoved = async (slug: string, path: string, destination: string, project = slug) => {
-    setFolderLabel(slug, path, fileBaseName(path));
+  const applyOptimisticFolderMove = (slug: string, path: string, destination: string, project = slug) => {
     batch(() => {
       const oldPrefix = `${slug}:${path}`, newPrefix = `${project}:${destination}`;
       for (const key of Object.keys(expanded)) {
@@ -609,35 +609,126 @@ export function LiveProjectsSection(p: {
         }
       }
     });
+  };
+  const openMovedSelection = (slug: string, path: string, destination: string, directory: boolean, project = slug) => {
     const selected = p.selected(), prefix = `pf:${slug}:${path}`;
-    if (selected === prefix || selected?.startsWith(`${prefix}/`)) p.open(`pf:${project}:${destination}${selected.slice(prefix.length)}`);
+    if (selected === prefix || (directory && selected?.startsWith(`${prefix}/`))) {
+      p.open(`pf:${project}:${destination}${selected.slice(prefix.length)}`);
+    }
+  };
+  const folderMoved = async (slug: string, path: string, destination: string, project = slug, alreadyProjected = false) => {
+    setFolderLabel(slug, path, fileBaseName(path));
+    if (!alreadyProjected) applyOptimisticFolderMove(slug, path, destination, project);
+    openMovedSelection(slug, path, destination, true, project);
     try { if (project === slug) await moveFolderWork(slug, path, destination); }
     finally { await Promise.all([loadMissions(slug), loadCrons(slug, true)]); }
   };
+  const clearDeletedFileUi = (slug: string, path: string, directory: boolean) => {
+    const treePrefix = `pf:${slug}:${path}`;
+    const matchesTree = (id: string) => id === treePrefix || (directory && id.startsWith(`${treePrefix}/`));
+    const matchesPath = (candidate: string) => candidate === path || (directory && candidate.startsWith(`${path}/`));
+    batch(() => {
+      const selected = p.selected();
+      if (selected && matchesTree(selected)) p.open(null);
+      setSelectedTreeIds(ids => {
+        if (!ids.some(matchesTree)) return ids;
+        const next = ids.filter(id => !matchesTree(id));
+        if (!next.length) setSelectionActive(false);
+        return next;
+      });
+      const anchor = selectionAnchor();
+      if (anchor && matchesTree(anchor)) setSelectionAnchor(null);
+      const singleClip = readFileReference(fileClipboard());
+      if (singleClip?.slug === slug && matchesPath(singleClip.path)) setFileClipboard("");
+      if (cutItems().some(item => item.kind === "file" && item.slug === slug && matchesPath(item.path))) setFileClipboard("");
+    });
+  };
   const saveFileAction = async () => {
     const target = fileAction(), version = connectionVersion();
-    if (!target || fileBusy()) return;
-    setFileBusy(true); setFileActionError(null);
-    try {
-      const destination = target.kind === "delete" ? undefined : fileDestination(target.path, fileActionValue(), target.kind === "rename");
-      if (destination) {
-        await transferProjectFile(target.slug, target.path, destination);
-        if (target.directory) {
-          setFileAction(null);
-          try { await folderMoved(target.slug, target.path, destination); }
-          finally { await refreshFileParents(target.slug, target.path, destination); }
+    if (!target || isFilePathPending(target.slug, target.path)) return;
+    const moveKey = fileMoveKey(target.slug, target.path);
+    setFileActionError(null);
+    if (target.kind === "delete") {
+      if (target.directory) {
+        const immediateBlock = folderWorkError(target.slug, target.path, allKnownMissions(), crons[target.slug] ?? []);
+        if (immediateBlock) {
+          setFileActionError(immediateBlock);
           return;
         }
-      } else {
-        if (target.directory) await assertFolderHasNoWork(target.slug, target.path);
-        await deleteProjectFile(target.slug, target.path);
       }
-      if (version !== connectionVersion()) return;
-      if (p.selected() === `pf:${target.slug}:${target.path}` || (target.directory && p.selected()?.startsWith(`pf:${target.slug}:${target.path}/`))) p.open(destination ? `pf:${target.slug}:${destination}` : null);
       setFileAction(null);
+      const label = target.directory ? folderLabel(target.slug, target.path) : fileBaseName(target.path);
+      try {
+        await deleteFileOptimistically(target.slug, target.path, !!target.directory, async () => {
+          if (target.directory) await assertFolderHasNoWork(target.slug, target.path);
+          await deleteProjectFile(target.slug, target.path);
+        }, label);
+        if (version !== connectionVersion()) return;
+        clearDeletedFileUi(target.slug, target.path, !!target.directory);
+        try {
+          await refreshFileParents(target.slug, target.path);
+        } finally {
+          settleMove(moveKey);
+        }
+      } catch {
+        // `deleteFileOptimistically` restores the row and surfaces an error toast.
+      }
+      return;
+    }
+    let destination: string;
+    try {
+      destination = fileDestination(target.path, fileActionValue(), target.kind === "rename");
+    } catch (e) {
+      setFileActionError(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    if (target.directory && destination.startsWith(`${target.path}/`)) {
+      setFileActionError("A folder cannot be moved into itself.");
+      return;
+    }
+    const destParentKey = `${target.slug}:${fileParent(destination)}`;
+    if ((dirs[destParentKey] ?? []).some(entry => entry.name.toLowerCase() === fileBaseName(destination).toLowerCase())) {
+      setFileActionError(`"${fileBaseName(destination)}" already exists at the destination.`);
+      return;
+    }
+    if (isFilePathPending(target.slug, destination)) return;
+    const label = target.directory ? folderLabel(target.slug, target.path) : fileBaseName(target.path);
+    setFileAction(null);
+    if (target.directory) {
+      applyOptimisticFolderMove(target.slug, target.path, destination);
+    }
+    try {
+      await moveOptimistically(
+        moveKey,
+        { kind: "file", fromProject: target.slug, toProject: target.slug, path: destination, fromPath: target.path, directory: !!target.directory },
+        () => transferProjectFile(target.slug, target.path, destination),
+        label,
+      );
+    } catch {
+      if (version === connectionVersion() && target.directory) {
+        const newPrefix = `${target.slug}:${destination}`;
+        batch(() => {
+          for (const key of Object.keys(expanded)) if (key === newPrefix || key.startsWith(`${newPrefix}/`)) setExpanded(key, false);
+        });
+      }
+      return;
+    }
+    if (version !== connectionVersion()) return;
+    try {
+      if (target.directory) {
+        try { await folderMoved(target.slug, target.path, destination, target.slug, true); }
+        finally {
+          await refreshFileParents(target.slug, target.path, destination);
+          settleMove(moveKey);
+        }
+        return;
+      }
+      openMovedSelection(target.slug, target.path, destination, false);
       await refreshFileParents(target.slug, target.path, destination);
-    } catch (e) { if (version === connectionVersion()) { if (fileAction()) setFileActionError(String(e)); else setActionError(String(e)); } }
-    finally { setFileBusy(false); }
+      settleMove(moveKey);
+    } catch (e) {
+      if (version === connectionVersion()) setActionError(e instanceof Error ? e.message : String(e));
+    }
   };
   const copyFile = async (slug: string, path: string, copy: boolean, directory = false, clipboardData?: DataTransfer | null) => {
     setFileMenu(null); setActionMenu(null); setMultiSelectMenu(null);
@@ -647,11 +738,12 @@ export function LiveProjectsSection(p: {
   };
   const pasteFile = async (slug: string, path: string, text: string) => {
     const item = readFileReference(text), version = connectionVersion();
-    if (!item || fileBusy() || text === consumedFileClipboard || isClipboardReferenceRetired(text)) return;
+    if (!item || fileBusy() || isFilePathPending(item.slug, item.path) || isFilePathPending(slug, path) || text === consumedFileClipboard || isClipboardReferenceRetired(text)) return;
     setFileBusy(true); setActionMenu(null); setActionError(null);
     try {
       const other = item.slug !== slug;
       const destination = other ? [path, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, path, false);
+      if (!item.copy && isFilePathPending(slug, destination)) return;
       // Agents and crons belong to their project: only documents cross over.
       const transfer = async () => {
         if (other && item.directory && !item.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
@@ -663,12 +755,15 @@ export function LiveProjectsSection(p: {
       else await moveOptimistically(moveKey, { kind: "file", fromProject: item.slug, toProject: slug, path: destination, fromPath: item.path, directory: item.directory }, transfer, fileBaseName(item.path));
       if (version !== connectionVersion()) return;
       if (!item.copy) { consumedFileClipboard = text; retireClipboardReference(text); setFileClipboard(""); }
-      await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(slug, path, true)]);
-      if (!item.copy) settleMove(moveKey);
-      setExpanded(path ? `${slug}:${path}` : slug, true);
-      if (item.copy) return;
-      if (item.directory) await folderMoved(item.slug, item.path, destination, slug);
-      else if (p.selected() === `pf:${item.slug}:${item.path}`) p.open(`pf:${slug}:${destination}`);
+      try {
+        await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(slug, path, true)]);
+        setExpanded(path ? `${slug}:${path}` : slug, true);
+        if (item.copy) return;
+        if (item.directory) await folderMoved(item.slug, item.path, destination, slug);
+        else if (p.selected() === `pf:${item.slug}:${item.path}`) p.open(`pf:${slug}:${destination}`);
+      } finally {
+        if (!item.copy) settleMove(moveKey);
+      }
     } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
     finally { setFileBusy(false); }
   };
@@ -1469,14 +1564,17 @@ export function LiveProjectsSection(p: {
       { kind: "item", label: "New folder", icon: Ic.FolderIcon, onClick: () => beginFolder(slug, path) },
     ];
     for (const entry of pasteMenuEntries(slug, path)) items.push({ kind: "sep" }, entry);
-    if (path) items.push(
-      { kind: "sep" },
-      { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginFileAction(slug, path, "rename", true) },
-      { kind: "item", label: "Move…", icon: Ic.FolderIcon, onClick: () => beginFileAction(slug, path, "move", true) },
-      { kind: "item", label: "Cut", icon: Ic.CutIcon, onClick: () => void copyFile(slug, path, false, true) },
-      { kind: "item", label: "Copy", icon: Ic.CopyIcon, onClick: () => void copyFile(slug, path, true, true) },
-      { kind: "item", label: "Delete…", icon: Ic.TrashIcon, danger: true, onClick: () => beginFileAction(slug, path, "delete", true) },
-    );
+    if (path) {
+      const folderBusy = isFilePathPending(slug, path);
+      items.push(
+        { kind: "sep" },
+        { kind: "item", label: "Rename", icon: Ic.PencilIcon, disabled: folderBusy, onClick: () => beginFileAction(slug, path, "rename", true) },
+        { kind: "item", label: "Move…", icon: Ic.FolderIcon, disabled: folderBusy, onClick: () => beginFileAction(slug, path, "move", true) },
+        { kind: "item", label: "Cut", icon: Ic.CutIcon, disabled: folderBusy, onClick: () => void copyFile(slug, path, false, true) },
+        { kind: "item", label: "Copy", icon: Ic.CopyIcon, disabled: folderBusy, onClick: () => void copyFile(slug, path, true, true) },
+        { kind: "item", label: "Delete…", icon: Ic.TrashIcon, danger: true, disabled: folderBusy, onClick: () => beginFileAction(slug, path, "delete", true) },
+      );
+    }
     if (!path) items.push(
       { kind: "sep" },
       { kind: "item", label: "Project settings", icon: Ic.SlidersIcon, onClick: () => { setActionMenu(null); p.open(`ps:${slug}`); } },
@@ -2414,23 +2512,27 @@ export function LiveProjectsSection(p: {
       }}</Show>
       <Show when={fileMenu()} keyed>{menu => {
         const paste = pasteMenuEntries(menu.slug, fileParent(menu.path));
+        const itemBusy = () => isFilePathPending(menu.slug, menu.path);
         return <PopupMenu x={menu.x} y={menu.y} focus={false} onClose={() => setFileMenu(null)} items={[
           ...(paste.length ? [...paste, { kind: "sep" as const }] : []),
-          { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginFileAction(menu.slug, menu.path, "rename") },
-          { kind: "item", label: "Move…", icon: Ic.FolderIcon, onClick: () => beginFileAction(menu.slug, menu.path, "move") },
+          { kind: "item", label: "Rename", icon: Ic.PencilIcon, disabled: itemBusy(), onClick: () => beginFileAction(menu.slug, menu.path, "rename") },
+          { kind: "item", label: "Move…", icon: Ic.FolderIcon, disabled: itemBusy(), onClick: () => beginFileAction(menu.slug, menu.path, "move") },
           { kind: "sep" },
-          { kind: "item", label: "Cut", icon: Ic.CutIcon, onClick: () => void copyFile(menu.slug, menu.path, false) },
-          { kind: "item", label: "Copy", icon: Ic.CopyIcon, onClick: () => void copyFile(menu.slug, menu.path, true) },
+          { kind: "item", label: "Cut", icon: Ic.CutIcon, disabled: itemBusy(), onClick: () => void copyFile(menu.slug, menu.path, false) },
+          { kind: "item", label: "Copy", icon: Ic.CopyIcon, disabled: itemBusy(), onClick: () => void copyFile(menu.slug, menu.path, true) },
           { kind: "sep" },
-          { kind: "item", label: "Delete…", icon: Ic.TrashIcon, danger: true, onClick: () => beginFileAction(menu.slug, menu.path, "delete") },
+          { kind: "item", label: "Delete…", icon: Ic.TrashIcon, danger: true, disabled: itemBusy(), onClick: () => beginFileAction(menu.slug, menu.path, "delete") },
         ]} />;
       }}</Show>
-      <Show when={fileAction()} keyed>{target => <Show when={target.kind === "delete"} fallback={
-        <NameDialog allowEmpty={target.kind === "move"} title={`${target.kind === "rename" ? "Rename" : "Move"} ${target.directory ? "folder" : "file"}`} hint={target.kind === "move" ? "Destination folder within this project. Leave empty for the project root." : target.directory ? `${target.path} — its files, agents and crons keep their place inside.` : target.path}
-          label={target.kind === "rename" ? (target.directory ? "Folder name" : "File name") : "Destination folder"} value={fileActionValue()} onInput={setFileActionValue}
-          action={target.kind === "rename" ? "Rename" : "Move"} busy={fileBusy()} error={fileActionError()}
-          disabled={target.kind === "rename" && !fileActionValue().trim()} onAction={() => void saveFileAction()} onClose={() => !fileBusy() && setFileAction(null)} />
-      }><ConfirmDialog destructive title={target.directory ? "Delete folder?" : "Delete file?"} description={target.directory ? `Delete ${target.path} and all files and subfolders inside? This cannot be undone.` : `Delete ${target.path}?`} action="Delete" busy={fileBusy()} error={fileActionError()} onConfirm={() => void saveFileAction()} onClose={() => !fileBusy() && setFileAction(null)} /></Show>}</Show>
+      <Show when={fileAction()} keyed>{target => {
+        const actionPending = () => isFilePathPending(target.slug, target.path);
+        return <Show when={target.kind === "delete"} fallback={
+          <NameDialog allowEmpty={target.kind === "move"} title={`${target.kind === "rename" ? "Rename" : "Move"} ${target.directory ? "folder" : "file"}`} hint={target.kind === "move" ? "Destination folder within this project. Leave empty for the project root." : target.directory ? `${target.path} — its files, agents and crons keep their place inside.` : target.path}
+            label={target.kind === "rename" ? (target.directory ? "Folder name" : "File name") : "Destination folder"} value={fileActionValue()} onInput={setFileActionValue}
+            action={target.kind === "rename" ? "Rename" : "Move"} busy={actionPending()} error={fileActionError()}
+            disabled={(target.kind === "rename" && !fileActionValue().trim()) || actionPending()} onAction={() => void saveFileAction()} onClose={() => !actionPending() && setFileAction(null)} />
+        }><ConfirmDialog destructive title={target.directory ? "Delete folder?" : "Delete file?"} description={target.directory ? `Delete ${target.path} and all files and subfolders inside? This cannot be undone.` : `Delete ${target.path}?`} action="Delete" busy={actionPending()} error={fileActionError()} onConfirm={() => void saveFileAction()} onClose={() => !actionPending() && setFileAction(null)} /></Show>;
+      }}</Show>
       <Show when={actionMenu()}>
         {(menu) => <PopupMenu {...menu()} focus={actionFocus()} items={menuItems(menu().slug, menu().path)} onClose={() => setActionMenu(null)} />}
       </Show>
