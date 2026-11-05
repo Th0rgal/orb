@@ -775,6 +775,7 @@ final class OrbCore {
                             continue
                         }
                         if eventType == "mission_placement_changed" {
+                            OrbCore.applyIncomingPlacementEvent(obj)
                             for sub in subscribers.values where sub.kinds == ["presentation"] || sub.missionId != nil || sub.kinds == nil {
                                 sub.onEvent(eventType, obj)
                             }
@@ -896,6 +897,9 @@ final class OrbCore {
         do {
             let parsed = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
             if let obj = parsed as? [String: Any] {
+                if eventType == "mission_placement_changed" {
+                    OrbCore.applyIncomingPlacementEvent(obj)
+                }
                 onEvent(eventType, obj)
             } else {
                 onEvent("parseError", ["raw": payload, "reason": "non-object payload"])
@@ -1107,6 +1111,47 @@ final class OrbCore {
                 userInfo: ["moves": accepted]
             )
         }
+    }
+
+    @discardableResult
+    nonisolated static func applyIncomingPlacementEvent(_ obj: [String: Any]) -> [OrbPlacementCommitItem] {
+        let rawMoves = (obj["moves"] as? [[String: Any]]) ?? (obj["moved"] as? [[String: Any]]) ?? []
+        guard !rawMoves.isEmpty else { return [] }
+        let ackOp = UInt32(max(0, (obj["client_op_id"] as? NSNumber)?.intValue ?? 0))
+        let items: [OrbPlacementCommitItem] = rawMoves.compactMap { m in
+            let mid = ((m["mission_id"] as? String) ?? (m["id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !mid.isEmpty else { return nil }
+            let proj: String?
+            if let s = m["project"] as? String {
+                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                proj = trimmed.isEmpty ? nil : trimmed
+            } else {
+                proj = nil
+            }
+            let targetFolder = (m["folder"] as? String) ?? ""
+            let rev = UInt64(max(0, (m["placement_revision"] as? NSNumber)?.int64Value ?? 0))
+            return OrbPlacementCommitItem(missionID: mid, project: proj, folder: targetFolder, placementRevision: rev)
+        }
+        guard !items.isEmpty else { return [] }
+        let accepted = OrbHierarchy.commitAuthoritativePlacements(items, ackOpID: ackOp)
+        if !accepted.isEmpty {
+            let applyMain = { @MainActor in
+                OrbReadCache.applyPlacementCommit(accepted)
+                NotificationCenter.default.post(
+                    name: Notification.Name("OrbMissionPlacementChanged"),
+                    object: nil,
+                    userInfo: ["moves": accepted]
+                )
+            }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated(applyMain)
+            } else {
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated(applyMain)
+                }
+            }
+        }
+        return accepted
     }
 
     private func advanceMissionDeltaCursor(with items: [OrbJSON]) {

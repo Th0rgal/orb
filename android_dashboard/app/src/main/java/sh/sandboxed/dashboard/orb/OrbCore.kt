@@ -289,7 +289,8 @@ data class OrbPlacementCommitItem(
     val missionId: String,
     val project: String?,
     val folder: String,
-    val placementRevision: Long
+    val placementRevision: Long,
+    val explicitProject: Boolean = false
 )
 
 class OrbApprovalTransferConfirmationException(
@@ -532,14 +533,15 @@ object OrbMissionTree {
                 if (!verdict.admitted) {
                     prev
                 } else {
-                    val effProj = incProj.ifEmpty { prev?.project ?: seenFacts[item.missionId]?.project ?: "" }
+                    val effProj = if (item.explicitProject) incProj else incProj.ifEmpty { prev?.project ?: seenFacts[item.missionId]?.project ?: "" }
                     val nextRev = maxOf(curRev, item.placementRevision, verdict.nextRev32)
                     accepted.add(
                         OrbPlacementCommitItem(
                             missionId = item.missionId,
                             project = effProj.takeIf { it.isNotEmpty() },
                             folder = incFolder,
-                            placementRevision = nextRev
+                            placementRevision = nextRev,
+                            explicitProject = item.explicitProject || effProj.isNotEmpty()
                         )
                     )
                     PlacementState(
@@ -556,9 +558,41 @@ object OrbMissionTree {
                 seenFacts.compute(item.missionId) { _, cur ->
                     (cur ?: Seen()).copy(project = incProj)
                 }
+            } else if (item.explicitProject) {
+                seenFacts.compute(item.missionId) { _, cur ->
+                    cur?.copy(project = null)
+                }
             }
         }
         return accepted
+    }
+
+    /** Parses an incoming `mission_placement_changed` WS/SSE payload and commits authoritative revisions. */
+    fun commitIncomingPlacementEvent(rawEvent: Any?): List<OrbPlacementCommitItem> {
+        val root = OrbJSON.dict(rawEvent) ?: return emptyList()
+        val rawMoves = OrbJSON.dictList(root["moves"]).ifEmpty { OrbJSON.dictList(root["moved"]) }
+        if (rawMoves.isEmpty()) return emptyList()
+        val ackOpId = maxOf(0, (root["client_op_id"] as? Number)?.toInt() ?: 0)
+        val items = rawMoves.mapNotNull { m ->
+            val mid = OrbJSON.str(m, "mission_id", "id") ?: return@mapNotNull null
+            val hasProjectKey = m.containsKey("project") && (m["project"] == null || m["project"] is String)
+            val proj = if (hasProjectKey) {
+                (m["project"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+            } else {
+                OrbJSON.str(m, "project")?.takeIf { it.isNotEmpty() }
+            }
+            val fld = normalizeFolder(m["folder"] as? String)
+            val rev = maxOf(0L, (m["placement_revision"] as? Number)?.toLong() ?: 0L)
+            OrbPlacementCommitItem(
+                missionId = mid,
+                project = proj,
+                folder = fld,
+                placementRevision = rev,
+                explicitProject = hasProjectKey
+            )
+        }
+        if (items.isEmpty()) return emptyList()
+        return commitAuthoritativePlacements(items, ackOpId = ackOpId)
     }
 
     /** Full moving family closure (fork siblings + launched descendants at any depth) for optimistic staging. */
@@ -638,6 +672,7 @@ object OrbMissionTree {
         val incRev = maxOf(0L, (mission.raw["placement_revision"] as? Number)?.toLong() ?: 0L)
         val hasPlacementPayload = hasProjectKey || hasFolderKey || mission.raw.containsKey("placement_revision")
         var resolvedProject = rawProject?.takeIf { it.isNotEmpty() }
+        var clearSeenProject = hasProjectKey && resolvedProject == null
         if (hasPlacementPayload) {
             placements.compute(id) { _, prev ->
                 val curRev = prev?.revision ?: 0L
@@ -662,9 +697,11 @@ object OrbMissionTree {
                     )
                     if (!verdict.admitted) {
                         resolvedProject = (prev.optimisticProject ?: prev.project).takeIf { it.isNotEmpty() }
+                        clearSeenProject = false
                         prev
                     } else {
                         resolvedProject = candProj.takeIf { it.isNotEmpty() }
+                        clearSeenProject = hasProjectKey && resolvedProject == null
                         val nextRev = maxOf(curRev, incRev, verdict.nextRev32)
                         PlacementState(
                             project = candProj,
@@ -688,7 +725,7 @@ object OrbMissionTree {
             val cur = prev ?: Seen()
             Seen(
                 title = rawTitle ?: cur.title,
-                project = resolvedProject ?: cur.project,
+                project = if (clearSeenProject) null else (resolvedProject ?: cur.project),
                 status = rawStatus ?: cur.status,
                 backend = rawBackend ?: cur.backend
             )
@@ -1448,7 +1485,7 @@ object OrbReadCache {
                     continue
                 }
                 val targetProj = item.project?.trim()?.takeIf { it.isNotEmpty() }
-                if (targetProj != null && !targetProj.equals(slug, ignoreCase = true)) {
+                if ((targetProj == null && item.explicitProject) || (targetProj != null && !targetProj.equals(slug, ignoreCase = true))) {
                     changed = true
                     continue
                 }
@@ -1475,7 +1512,11 @@ object OrbReadCache {
 
     fun patchRowPlacement(row: OrbRow, item: OrbPlacementCommitItem): OrbRow {
         val next = LinkedHashMap<String, Any?>(row.raw)
-        if (!item.project.isNullOrBlank()) next["project"] = item.project
+        if (!item.project.isNullOrBlank()) {
+            next["project"] = item.project
+        } else if (item.explicitProject) {
+            next["project"] = null
+        }
         next["folder"] = if (OrbMissionTree.parentId(row) != null) "" else OrbMissionTree.normalizeFolder(item.folder)
         next["placement_revision"] = item.placementRevision
         return OrbRow(row.id, next)
@@ -2478,6 +2519,15 @@ class OrbCore private constructor(context: Context) {
         applyPlacementCommit(accepted)
     }
 
+    /** Commits incoming `mission_placement_changed` WS/SSE payloads into `OrbMissionTree`, caches, and UI state. */
+    fun applyIncomingPlacementEvent(rawEvent: Any?): List<OrbPlacementCommitItem> {
+        val accepted = OrbMissionTree.commitIncomingPlacementEvent(rawEvent)
+        if (accepted.isNotEmpty()) {
+            applyPlacementCommit(accepted)
+        }
+        return accepted
+    }
+
     suspend fun fetchRows(path: String, key: String?): List<OrbRow> {
         val value = request(path)
         if (key != null) {
@@ -2603,6 +2653,7 @@ class OrbCore private constructor(context: Context) {
                         return
                     }
                     if (eventType == "mission_placement_changed") {
+                        applyIncomingPlacementEvent(parsed)
                         for (sub in snapshot) {
                             if (sub.kindFilter == "presentation" || sub.missionId != null || sub.kindFilter == null) {
                                 sub.onEvent(eventType, text)
@@ -2887,6 +2938,9 @@ class OrbCore private constructor(context: Context) {
                     type: String?,
                     data: String
                 ) {
+                    if (type == "mission_placement_changed") {
+                        applyIncomingPlacementEvent(OrbJSON.parse(data))
+                    }
                     onEvent(type, data)
                 }
 
@@ -2970,6 +3024,10 @@ object OrbPresentation {
                 if (type == "status" || type == "stream_lagged") {
                     changed(null)
                     OrbWarmSyncCoordinator.notePresentationStreamDisrupted(core)
+                }
+                if (type == "mission_placement_changed") {
+                    listChanged = true
+                    return@openSSE
                 }
                 if (type == "mission_presentation") {
                     val hint = OrbJSON.dict(OrbJSON.parse(data))

@@ -556,6 +556,7 @@ fun OrbConversationPage(
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val allMissions by core.missions.collectAsState()
+    val placementVersion by core.placementVersion.collectAsState()
     val backends by core.backends.collectAsState()
     val backendModels by core.backendModels.collectAsState()
     val workspaces by core.workspaces.collectAsState()
@@ -565,6 +566,24 @@ fun OrbConversationPage(
 
     var currentMission by remember(initialMission?.id) { mutableStateOf(initialMission) }
     val missionId = currentMission?.id
+
+    LaunchedEffect(placementVersion, missionId) {
+        if (placementVersion <= 0L || missionId == null) return@LaunchedEffect
+        val state = OrbMissionTree.placementOf(missionId) ?: return@LaunchedEffect
+        val cur = currentMission ?: return@LaunchedEffect
+        val effProj = (state.optimisticProject ?: state.project).takeIf { it.isNotEmpty() }
+        val effFolder = state.optimisticFolder ?: state.folder
+        currentMission = OrbReadCache.patchRowPlacement(
+            cur,
+            OrbPlacementCommitItem(
+                missionId = missionId,
+                project = effProj,
+                folder = effFolder,
+                placementRevision = state.revision,
+                explicitProject = true
+            )
+        )
+    }
 
     val messagesCacheKey = remember(missionId) { "mission_msgs_${missionId ?: "new"}" }
     val eventsCacheKey = remember(missionId) { "mission_events_${missionId ?: "new"}" }

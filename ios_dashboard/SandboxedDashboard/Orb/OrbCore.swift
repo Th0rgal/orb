@@ -1472,6 +1472,11 @@ enum OrbReadCache {
                     pending.formUnion(recent)
                     OrbWarmSyncCoordinator.shared.notePresentationStreamDisrupted()
                 }
+                if type == "mission_placement_changed" {
+                    OrbCore.applyIncomingPlacementEvent(data)
+                    listChanged = true
+                    return
+                }
                 guard type == "mission_presentation", let id = data["mission_id"] as? String else { return }
                 let kind = data["kind"] as? String
                 OrbWarmSyncCoordinator.shared.notePresentationHint(

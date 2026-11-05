@@ -319,6 +319,15 @@ struct OrbConversation: View {
                 try? await OrbBtwStore.shared(id).refresh()
             }
             .confirmationDialog("Clone conversation", isPresented: $cloning, titleVisibility: .visible) { cloneActions }
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OrbMissionPlacementChanged"))) { _ in
+                guard let id, !id.isEmpty,
+                      let state = OrbHierarchy.placement(of: id),
+                      case var .object(dict) = mission else { return }
+                dict["project"] = state.project.isEmpty ? .null : .string(state.project)
+                dict["folder"] = .string(state.folder)
+                dict["placement_revision"] = .number(Double(state.revision))
+                mission = .object(dict)
+            }
             .navigationDestination(item: $forkedMission) { OrbConversation(missionID: $0, project: effectiveProjectSlug, folder: OrbRow(mission).folder) }
     }
 

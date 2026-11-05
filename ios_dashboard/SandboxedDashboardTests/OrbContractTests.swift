@@ -256,7 +256,7 @@ final class OrbContractTests: XCTestCase {
         OrbHierarchy.reset()
     }
 
-    func testPlacementMergeMonotoneReconcilerAndRollback() {
+    @MainActor func testPlacementMergeMonotoneReconcilerAndRollback() {
         OrbHierarchy.reset()
         // Seed initial state: mission `9f559751` + subagent `06203bdc` in `assistant` at rev 2.
         let rootInit = OrbRow(.object([
@@ -337,6 +337,59 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(unassignedSnapshot.project, "")
         XCTAssertEqual(unassignedSnapshot.folder, "")
         XCTAssertEqual(unassignedSnapshot.placementRevision, 4)
+
+        // Incoming SSE/WS `mission_placement_changed` commits authoritative moves and clears project on explicit null.
+        var notifiedMoves: [OrbPlacementCommitItem] = []
+        let observer = NotificationCenter.default.addObserver(
+            forName: Notification.Name("OrbMissionPlacementChanged"),
+            object: nil,
+            queue: nil
+        ) { note in
+            if let moves = note.userInfo?["moves"] as? [OrbPlacementCommitItem] {
+                notifiedMoves = moves
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        let remoteMove = OrbCore.applyIncomingPlacementEvent([
+            "type": "mission_placement_changed",
+            "moves": [
+                [
+                    "mission_id": "9f559751",
+                    "project": "ethereum",
+                    "folder": " /Specs/Consensus/ ",
+                    "placement_revision": NSNumber(value: 5),
+                ],
+                [
+                    "mission_id": "06203bdc",
+                    "project": "ethereum",
+                    "folder": "Specs/Consensus",
+                    "placement_revision": NSNumber(value: 5),
+                ],
+            ],
+        ])
+        XCTAssertEqual(remoteMove.count, 2)
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.project, "ethereum")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.folder, "Specs/Consensus")
+        XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.project, "ethereum")
+        XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.folder, "")
+        XCTAssertEqual(notifiedMoves.count, 2)
+
+        let remoteUnassign = OrbCore.applyIncomingPlacementEvent([
+            "type": "mission_placement_changed",
+            "moves": [
+                [
+                    "mission_id": "9f559751",
+                    "project": NSNull(),
+                    "folder": "",
+                    "placement_revision": NSNumber(value: 6),
+                ],
+            ],
+        ])
+        XCTAssertEqual(remoteUnassign.count, 1)
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.project, "")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.folder, "")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.revision, 6)
 
         // Parse 409 approval transfer confirmation error.
         let errJSON = """

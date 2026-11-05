@@ -343,7 +343,26 @@ class OrbMissionTreeTest {
 
         // Snapshot with explicit `project: null` and `folder: ""` at higher revision clears cached project and folder
         val unassignedPoll = m("9f559751", "project" to null, "folder" to "", "placement_revision" to 5L)
-        assertEquals("default", OrbMissionTree.projectSlug(unassignedPoll))
+        assertEquals(null, OrbMissionTree.projectSlug(unassignedPoll))
+        assertEquals(null, OrbMissionTree.folderPath(unassignedPoll))
+
+        // Incoming WS/SSE `mission_placement_changed` commits authoritative moves and handles explicit `project: null`
+        val remoteMoveEvent = OrbJSON.parse(
+            """{"type":"mission_placement_changed","moves":[{"mission_id":"9f559751","project":"ethereum","folder":" /Specs/Consensus/ ","placement_revision":6},{"mission_id":"06203bdc","project":"ethereum","folder":"Specs/Consensus","placement_revision":6}]}"""
+        )
+        val committedFromStream = OrbMissionTree.commitIncomingPlacementEvent(remoteMoveEvent)
+        assertEquals(2, committedFromStream.size)
+        assertEquals("ethereum", OrbMissionTree.projectSlug(stalePoll))
+        assertEquals("Specs/Consensus", OrbMissionTree.folderPath(stalePoll))
+        assertEquals("ethereum", OrbMissionTree.projectSlug(workerBefore))
+        assertEquals(null, OrbMissionTree.folderPath(workerBefore))
+
+        val remoteUnassignEvent = OrbJSON.parse(
+            """{"type":"mission_placement_changed","moves":[{"mission_id":"9f559751","project":null,"folder":"","placement_revision":7}]}"""
+        )
+        val committedUnassign = OrbMissionTree.commitIncomingPlacementEvent(remoteUnassignEvent)
+        assertEquals(1, committedUnassign.size)
+        assertEquals(null, OrbMissionTree.projectSlug(unassignedPoll))
         assertEquals(null, OrbMissionTree.folderPath(unassignedPoll))
 
         val err = OrbError(
