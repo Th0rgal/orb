@@ -1129,17 +1129,29 @@ impl SqliteMissionStore {
         // non-fork child workers and `/btw` side sessions at `folder = ''` so
         // they stay nested under their root mission (`updated_at` preserved).
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, parent_mission_id, COALESCE(folder, ''), tags \
+            "SELECT id, parent_mission_id, title, COALESCE(folder, ''), tags \
              FROM missions WHERE tags LIKE '%\"orb-folder:%'",
         ) {
-            let candidates: Vec<(String, Option<String>, String, Option<String>)> = stmt
+            let candidates: Vec<(
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+                Option<String>,
+            )> = stmt
                 .query_map([], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
                 })
                 .ok()
                 .map(|rows| rows.filter_map(Result::ok).collect())
                 .unwrap_or_default();
-            for (id, parent_id, cur_folder, raw_tags) in candidates {
+            for (id, parent_id, title, cur_folder, raw_tags) in candidates {
                 let Some(raw) = raw_tags else {
                     continue;
                 };
@@ -1148,8 +1160,16 @@ impl SqliteMissionStore {
                 };
                 let extracted =
                     crate::api::mission_store::strip_legacy_orb_folder_tags(&mut parsed);
-                let is_fork = parsed.iter().any(|t| t.starts_with("fork-of:"));
-                let is_btw = parsed.iter().any(|t| t.starts_with("btw-parent:"));
+                let is_fork = parent_id.as_deref().is_some_and(|pid| {
+                    let expected_fork_tag = format!("fork-of:{pid}");
+                    parsed.iter().any(|t| t == &expected_fork_tag)
+                        || title
+                            .as_deref()
+                            .is_some_and(|t| t.to_ascii_lowercase().ends_with(" · fork"))
+                });
+                let is_btw = parsed
+                    .iter()
+                    .any(|t| t.starts_with("btw-parent:") || t == "btw-subagent");
                 let is_nested_child = (parent_id.is_some() && !is_fork) || is_btw;
                 let next_folder = if is_nested_child {
                     String::new()
@@ -1446,5 +1466,70 @@ impl SqliteMissionStore {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn orb_folder_migration_preserves_legacy_title_fork_and_clears_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(dir.path().to_path_buf(), "opencode")
+            .await
+            .unwrap();
+        let root_id = Uuid::new_v4();
+        let legacy_fork_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+
+        {
+            let conn = store.conn.lock().await;
+            for (id, parent, title, tags) in [
+                (
+                    root_id.to_string(),
+                    None::<String>,
+                    "Audit plan",
+                    r#"["orb-folder:Specs/Formal"]"#,
+                ),
+                (
+                    legacy_fork_id.to_string(),
+                    Some(root_id.to_string()),
+                    "Audit plan · fork",
+                    r#"["orb-folder:Specs/Formal"]"#,
+                ),
+                (
+                    worker_id.to_string(),
+                    Some(root_id.to_string()),
+                    "Subagent prover",
+                    r#"["orb-folder:Specs/Formal"]"#,
+                ),
+            ] {
+                conn.execute(
+                    "INSERT INTO missions (id, status, title, workspace_id, backend, created_at, updated_at, parent_mission_id, folder, tags) \
+                     VALUES (?1, 'completed', ?2, ?3, 'opencode', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', ?4, '', ?5)",
+                    params![id, title, Uuid::nil().to_string(), parent, tags],
+                )
+                .unwrap();
+            }
+            SqliteMissionStore::run_migrations(&conn).unwrap();
+        }
+
+        let root = store.get_mission(root_id).await.unwrap().unwrap();
+        let legacy_fork = store.get_mission(legacy_fork_id).await.unwrap().unwrap();
+        let worker = store.get_mission(worker_id).await.unwrap().unwrap();
+
+        assert_eq!(root.project.folder, "Specs/Formal");
+        assert!(root.project.tags.is_empty());
+        assert_eq!(
+            legacy_fork.project.folder, "Specs/Formal",
+            "legacy ` · fork` version must retain its migrated folder"
+        );
+        assert!(legacy_fork.project.tags.is_empty());
+        assert_eq!(
+            worker.project.folder, "",
+            "nested worker subagent must stay at folder == ''"
+        );
+        assert!(worker.project.tags.is_empty());
     }
 }

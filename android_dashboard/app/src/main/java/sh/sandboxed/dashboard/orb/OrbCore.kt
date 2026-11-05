@@ -2320,7 +2320,7 @@ class OrbCore private constructor(context: Context) {
             val message = OrbJSON.str(parsed, "error", "message", "detail")
                 ?: if (raw.isEmpty()) "HTTP $code" else raw.take(240)
             recordErrorLog("$method $path -> HTTP $code\n${raw.take(2000)}", "$method $path -> HTTP $code")
-            throw OrbError(message, status = code, body = raw.take(2000))
+            throw OrbError(message, status = code, body = raw)
         }
         if (bytes.isEmpty()) return@withContext emptyMap<String, Any?>()
         OrbJSON.parse(bytes) ?: emptyMap<String, Any?>()
