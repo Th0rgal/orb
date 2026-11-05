@@ -11,6 +11,7 @@ class OrbMissionBudgetTest {
         OrbJSON.parse(
             """{"mission_id":"m1","own_budget_usd":$budget,"pool_id":"m1","mode":"own","max_grant_usd":${maxGrant ?: "null"},
             "pool":{"budget_usd":$budget,"spent_usd":0.4,"reserved_usd":0.2,"carved_usd":1,"available_usd":${budget - 1.6}},
+            "effective_bandwidth":{"source":"none","current_compute_usd_per_hour":2.0,"current_tokens_per_min":48000,"current_vcpu_per_min":16},
             "children":[{"mission_id":"c1","mode":"sub_budget","budget_usd":1,"spent_usd":0.3}]}"""
         )
     )
@@ -39,20 +40,27 @@ class OrbMissionBudgetTest {
         val globalDefault = OrbMissionBudget.from(root["global_default"])
         assertEquals("none", globalDefault.mode)
         assertEquals("global", globalDefault.vmLimitsMode)
+        assertEquals("none", globalDefault.bandwidthMode)
         assertNull(globalDefault.ownVmLimits)
+        assertNull(globalDefault.ownBandwidthLimits)
         assertEquals(16, globalDefault.effectiveVmLimits?.globalMaxConcurrent)
         assertEquals("Uses the global limit (16 concurrent across Orb).", globalDefault.vmLimitsModeLine)
+        assertEquals("Unthrottled. Requests and spawns run at full speed.", globalDefault.bandwidthModeLine)
         assertFalse(globalDefault.showsSubagents)
         assertTrue(globalDefault.children.all { it.isIdlePooled })
 
         val dedicated = OrbMissionBudget.from(root["dedicated_override"])
         assertEquals("own", dedicated.mode)
         assertEquals("own", dedicated.vmLimitsMode)
+        assertEquals("own", dedicated.bandwidthMode)
         assertEquals(6, dedicated.ownVmLimits?.maxConcurrent)
         assertEquals(mapOf("hetzner" to 0, "vastai" to 2), dedicated.ownVmLimits?.providerMaxConcurrent)
         assertEquals("Hetzner: off · Vast.ai: 2", OrbMissionBudget.providerLimitsSummary(dedicated.ownVmLimits))
+        assertEquals("120k tok/min · 32 vCPU/min · $2.50/h", OrbMissionBudget.bandwidthLimitsSummary(dedicated.ownBandwidthLimits))
         assertEquals(3, dedicated.effectiveVmLimits?.active)
         assertEquals(2, dedicated.effectiveVmLimits?.providerLimits?.size)
+        assertEquals(120_000, dedicated.effectiveBandwidth?.tokensPerMin)
+        assertEquals(true, dedicated.effectiveBandwidth?.protectRoot)
         assertTrue(dedicated.showsSubagents)
         assertFalse(dedicated.children[0].isIdlePooled)
         assertTrue(dedicated.children[1].isIdlePooled)
@@ -61,14 +69,35 @@ class OrbMissionBudgetTest {
         assertEquals("global", cleared.vmLimitsMode)
         assertNull(cleared.ownVmLimits)
         assertEquals(16, cleared.effectiveVmLimits?.maxConcurrent)
+
+        val clearedBw = dedicated.optimisticBandwidthLimits(null)
+        assertEquals("none", clearedBw.bandwidthMode)
+        assertNull(clearedBw.ownBandwidthLimits)
     }
 
-    @Test fun validatesVmLimitsInputs() {
+    @Test fun validatesVmAndBandwidthInputsAndForecast() {
         val ok = OrbMissionBudget.parseVmLimits("8", mapOf("vastai" to "2", "hetzner" to "0")).getOrThrow()
         assertEquals(8, ok.maxConcurrent)
         assertEquals(mapOf("vastai" to 2, "hetzner" to 0), ok.providerMaxConcurrent)
 
         assertTrue(OrbMissionBudget.parseVmLimits("", emptyMap()).isFailure)
         assertTrue(OrbMissionBudget.parseVmLimits("2", mapOf("vastai" to "4")).isFailure)
+
+        val bw = OrbMissionBudget.parseBandwidthLimits("120k", "32", "$2.5", true).getOrThrow()
+        assertEquals(120_000, bw.tokensPerMin)
+        assertEquals(32, bw.computeVcpuPerMin)
+        assertEquals(2.5, bw.computeUsdPerHour ?: 0.0, 1e-9)
+        assertTrue(OrbMissionBudget.parseBandwidthLimits("", "", "", true).isFailure)
+
+        val base10 = own(10.0)
+        val unshaped = base10.computeRunwayForecast(budgetEnabled = true)
+        assertEquals(15_120.0, unshaped.etaSecs ?: 0.0, 1.0)
+        val shaped = base10.computeRunwayForecast(
+            draftComputeUsdPerH = "1.0",
+            bandwidthEnabled = true,
+            budgetEnabled = true,
+        )
+        assertEquals(30_240.0, shaped.etaSecs ?: 0.0, 1.0)
+        assertTrue(shaped.subline.contains("from bandwidth cap"))
     }
 }

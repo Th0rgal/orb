@@ -3,6 +3,12 @@ import SwiftUI
 /// `GET /api/control/missions/:id/budget` (desktop: `orb/src/missionBudget.ts`).
 struct OrbMissionBudget: Equatable {
     static let maxVmConcurrency = 128
+    static let minTokensPerMin = 1_000
+    static let maxTokensPerMin = 100_000_000
+    static let maxComputeVcpuPerMin = 4_096
+    static let minComputeUsdPerHour = 0.01
+    static let maxComputeUsdPerHour = 10_000.0
+
     static let providers: [(id: String, label: String)] = [
         ("boat", "boat.dev"),
         ("boost", "boost.ci"),
@@ -97,6 +103,112 @@ struct OrbMissionBudget: Equatable {
         }
     }
 
+    struct BandwidthLimits: Equatable {
+        var tokensPerMin: Int?
+        var computeVcpuPerMin: Int?
+        var computeUsdPerHour: Double?
+        var protectRoot: Bool
+
+        init(
+            tokensPerMin: Int? = nil,
+            computeVcpuPerMin: Int? = nil,
+            computeUsdPerHour: Double? = nil,
+            protectRoot: Bool = true
+        ) {
+            self.tokensPerMin = tokensPerMin
+            self.computeVcpuPerMin = computeVcpuPerMin
+            self.computeUsdPerHour = computeUsdPerHour
+            self.protectRoot = protectRoot
+        }
+
+        init?(_ j: OrbJSON) {
+            guard case .object(let d) = j else { return nil }
+            tokensPerMin = d["tokens_per_min"]?.doubleValue.map(Int.init)
+            computeVcpuPerMin = d["compute_vcpu_per_min"]?.doubleValue.map(Int.init)
+            computeUsdPerHour = d["compute_usd_per_hour"]?.doubleValue
+            protectRoot = (d["protect_root"] ?? .null).flag
+        }
+
+        func toJSON() -> OrbJSON {
+            .object([
+                "tokens_per_min": tokensPerMin.map { .number(Double($0)) } ?? .null,
+                "compute_vcpu_per_min": computeVcpuPerMin.map { .number(Double($0)) } ?? .null,
+                "compute_usd_per_hour": computeUsdPerHour.map { .number($0) } ?? .null,
+                "protect_root": .bool(protectRoot),
+            ])
+        }
+    }
+
+    struct EffectiveBandwidth: Equatable {
+        var source: String
+        var poolId: String?
+        var tokensPerMin: Int?
+        var computeVcpuPerMin: Int?
+        var computeUsdPerHour: Double?
+        var protectRoot: Bool
+        var currentTokensPerMin: Int
+        var currentVcpuPerMin: Int
+        var currentComputeUsdPerHour: Double
+        var pacingActive: Bool
+        var pacedDelayMs: Int
+        var ancestorTokensPerMin: Int?
+        var ancestorComputeVcpuPerMin: Int?
+        var ancestorComputeUsdPerHour: Double?
+
+        init(
+            source: String, poolId: String?, tokensPerMin: Int?, computeVcpuPerMin: Int?,
+            computeUsdPerHour: Double?, protectRoot: Bool, currentTokensPerMin: Int,
+            currentVcpuPerMin: Int, currentComputeUsdPerHour: Double, pacingActive: Bool,
+            pacedDelayMs: Int, ancestorTokensPerMin: Int?, ancestorComputeVcpuPerMin: Int?,
+            ancestorComputeUsdPerHour: Double?
+        ) {
+            self.source = source; self.poolId = poolId
+            self.tokensPerMin = tokensPerMin; self.computeVcpuPerMin = computeVcpuPerMin
+            self.computeUsdPerHour = computeUsdPerHour; self.protectRoot = protectRoot
+            self.currentTokensPerMin = currentTokensPerMin; self.currentVcpuPerMin = currentVcpuPerMin
+            self.currentComputeUsdPerHour = currentComputeUsdPerHour
+            self.pacingActive = pacingActive; self.pacedDelayMs = pacedDelayMs
+            self.ancestorTokensPerMin = ancestorTokensPerMin
+            self.ancestorComputeVcpuPerMin = ancestorComputeVcpuPerMin
+            self.ancestorComputeUsdPerHour = ancestorComputeUsdPerHour
+        }
+
+        init?(_ j: OrbJSON) {
+            guard case .object = j else { return nil }
+            source = j["source"].text.isEmpty ? "none" : j["source"].text
+            poolId = j["pool_id"].text.isEmpty ? nil : j["pool_id"].text
+            tokensPerMin = j["tokens_per_min"].doubleValue.map(Int.init)
+            computeVcpuPerMin = j["compute_vcpu_per_min"].doubleValue.map(Int.init)
+            computeUsdPerHour = j["compute_usd_per_hour"].doubleValue
+            protectRoot = j["protect_root"].flag
+            currentTokensPerMin = j["current_tokens_per_min"].doubleValue.map(Int.init) ?? 0
+            currentVcpuPerMin = j["current_vcpu_per_min"].doubleValue.map(Int.init) ?? 0
+            currentComputeUsdPerHour = j["current_compute_usd_per_hour"].doubleValue ?? 0
+            pacingActive = j["pacing_active"].flag
+            pacedDelayMs = j["paced_delay_ms"].doubleValue.map(Int.init) ?? 0
+            ancestorTokensPerMin = j["ancestor_tokens_per_min"].doubleValue.map(Int.init)
+            ancestorComputeVcpuPerMin = j["ancestor_compute_vcpu_per_min"].doubleValue.map(Int.init)
+            ancestorComputeUsdPerHour = j["ancestor_compute_usd_per_hour"].doubleValue
+        }
+    }
+
+    struct RunwayForecast: Equatable {
+        enum Tone: String, Equatable { case ok, warning, danger }
+        var hasBudget: Bool
+        var capUsd: Double?
+        var spentUsd: Double
+        var reservedUsd: Double
+        var carvedUsd: Double
+        var availableUsd: Double
+        var observedComputeBurnUsdPerH: Double
+        var shapedComputeBurnUsdPerH: Double
+        var etaSecs: Double?
+        var etaGainSecs: Double?
+        var tone: Tone
+        var headline: String
+        var subline: String
+    }
+
     struct Child: Equatable, Identifiable {
         let id: String
         let mode: String
@@ -105,10 +217,12 @@ struct OrbMissionBudget: Equatable {
         var reserved: Double = 0
         var hasVmLimits: Bool = false
         var vmMaxConcurrent: Int? = nil
+        var hasBandwidthLimits: Bool = false
+        var tokensPerMin: Int? = nil
         var liveMachines: Int = 0
 
         var isIdlePooled: Bool {
-            mode == "pooled" && !hasVmLimits && spent == 0 && reserved == 0 && liveMachines == 0
+            mode == "pooled" && !hasVmLimits && !hasBandwidthLimits && spent == 0 && reserved == 0 && liveMachines == 0
         }
     }
 
@@ -122,6 +236,10 @@ struct OrbMissionBudget: Equatable {
     var vmLimitsMode: String
     var vmLimitsPoolId: String?
     var effectiveVmLimits: EffectiveVmLimits?
+    var ownBandwidthLimits: BandwidthLimits?
+    var bandwidthMode: String
+    var bandwidthPoolId: String?
+    var effectiveBandwidth: EffectiveBandwidth?
     var children: [Child]
 
     init(_ j: OrbJSON) {
@@ -138,6 +256,10 @@ struct OrbMissionBudget: Equatable {
         vmLimitsMode = j["vm_limits_mode"].text.isEmpty ? (ownVmLimits != nil ? "own" : "global") : j["vm_limits_mode"].text
         vmLimitsPoolId = j["vm_limits_pool_id"].text.isEmpty ? nil : j["vm_limits_pool_id"].text
         effectiveVmLimits = EffectiveVmLimits(j["effective_vm_limits"])
+        ownBandwidthLimits = BandwidthLimits(j["own_bandwidth_limits"])
+        bandwidthMode = j["bandwidth_mode"].text.isEmpty ? (ownBandwidthLimits != nil ? "own" : "none") : j["bandwidth_mode"].text
+        bandwidthPoolId = j["bandwidth_pool_id"].text.isEmpty ? nil : j["bandwidth_pool_id"].text
+        effectiveBandwidth = EffectiveBandwidth(j["effective_bandwidth"])
         children = j["children"].items.map {
             Child(
                 id: $0["mission_id"].text,
@@ -147,6 +269,8 @@ struct OrbMissionBudget: Equatable {
                 reserved: $0["reserved_usd"].doubleValue ?? 0,
                 hasVmLimits: $0["has_vm_limits"].flag,
                 vmMaxConcurrent: $0["vm_max_concurrent"].doubleValue.map(Int.init),
+                hasBandwidthLimits: $0["has_bandwidth_limits"].flag,
+                tokensPerMin: $0["tokens_per_min"].doubleValue.map(Int.init),
                 liveMachines: $0["live_machines"].doubleValue.map(Int.init) ?? 0
             )
         }
@@ -221,6 +345,73 @@ struct OrbMissionBudget: Equatable {
         return next
     }
 
+    /// Same derivation as desktop `optimisticBandwidthLimits`.
+    func optimisticBandwidthLimits(_ limits: BandwidthLimits?) -> OrbMissionBudget {
+        var next = self
+        let prev = effectiveBandwidth
+        let ancTpm = prev?.ancestorTokensPerMin
+        let ancVcpu = prev?.ancestorComputeVcpuPerMin
+        let ancUsdH = prev?.ancestorComputeUsdPerHour
+        let curTpm = prev?.currentTokensPerMin ?? 0
+        let curVcpu = prev?.currentVcpuPerMin ?? 0
+        let curUsdH = prev?.currentComputeUsdPerHour ?? 0
+
+        guard let limits else {
+            let inherited = bandwidthMode == "own" && (ancTpm != nil || ancVcpu != nil || ancUsdH != nil)
+            next.ownBandwidthLimits = nil
+            next.bandwidthMode = inherited ? "pooled" : "none"
+            next.bandwidthPoolId = nil
+            next.effectiveBandwidth = EffectiveBandwidth(
+                source: inherited ? "mission" : "none",
+                poolId: nil,
+                tokensPerMin: ancTpm,
+                computeVcpuPerMin: ancVcpu,
+                computeUsdPerHour: ancUsdH,
+                protectRoot: false,
+                currentTokensPerMin: curTpm,
+                currentVcpuPerMin: curVcpu,
+                currentComputeUsdPerHour: curUsdH,
+                pacingActive: false,
+                pacedDelayMs: 0,
+                ancestorTokensPerMin: ancTpm,
+                ancestorComputeVcpuPerMin: ancVcpu,
+                ancestorComputeUsdPerHour: ancUsdH
+            )
+            return next
+        }
+
+        let effTpm = (limits.tokensPerMin != nil && ancTpm != nil)
+            ? min(limits.tokensPerMin!, ancTpm!)
+            : (limits.tokensPerMin ?? ancTpm)
+        let effVcpu = (limits.computeVcpuPerMin != nil && ancVcpu != nil)
+            ? min(limits.computeVcpuPerMin!, ancVcpu!)
+            : (limits.computeVcpuPerMin ?? ancVcpu)
+        let effUsdH = (limits.computeUsdPerHour != nil && ancUsdH != nil)
+            ? min(limits.computeUsdPerHour!, ancUsdH!)
+            : (limits.computeUsdPerHour ?? ancUsdH)
+
+        next.ownBandwidthLimits = limits
+        next.bandwidthMode = "own"
+        next.bandwidthPoolId = missionId
+        next.effectiveBandwidth = EffectiveBandwidth(
+            source: "mission",
+            poolId: missionId,
+            tokensPerMin: effTpm,
+            computeVcpuPerMin: effVcpu,
+            computeUsdPerHour: effUsdH,
+            protectRoot: limits.protectRoot,
+            currentTokensPerMin: curTpm,
+            currentVcpuPerMin: curVcpu,
+            currentComputeUsdPerHour: curUsdH,
+            pacingActive: prev?.pacingActive ?? false,
+            pacedDelayMs: prev?.pacedDelayMs ?? 0,
+            ancestorTokensPerMin: ancTpm,
+            ancestorComputeVcpuPerMin: ancVcpu,
+            ancestorComputeUsdPerHour: ancUsdH
+        )
+        return next
+    }
+
     var modeLine: String {
         switch mode {
         case "own": return maxGrant != nil ? "Own sub-budget, carved from the parent's pool. Its subagents share it." : "Own budget. Subagents share it unless you give one a sub-budget."
@@ -246,10 +437,23 @@ struct OrbMissionBudget: Equatable {
         }
     }
 
+    var bandwidthModeLine: String {
+        switch bandwidthMode {
+        case "own":
+            return (ownBandwidthLimits?.protectRoot ?? false)
+                ? "Smooths bursts by pacing subagent calls and spawns while keeping this root agent unthrottled."
+                : "Smooths inference and machine spawn bursts with pace delays instead of hard errors."
+        case "pooled":
+            return "Shares the bandwidth pace pool of an ancestor agent."
+        default:
+            return "Unthrottled. Requests and spawns run at full speed."
+        }
+    }
+
     var showsSubagents: Bool {
         guard !children.isEmpty else { return false }
-        if mode != "none" || vmLimitsMode != "global" { return true }
-        return children.contains { $0.mode == "sub_budget" || $0.hasVmLimits }
+        if mode != "none" || vmLimitsMode != "global" || bandwidthMode != "none" { return true }
+        return children.contains { $0.mode == "sub_budget" || $0.hasVmLimits || $0.hasBandwidthLimits }
     }
 
     static func providerLabel(_ id: String) -> String {
@@ -264,6 +468,40 @@ struct OrbMissionBudget: Equatable {
         }.joined(separator: " · ")
     }
 
+    static func formatTokensPerMin(_ v: Int) -> String {
+        if v >= 1_000_000 {
+            let m = Double(v) / 1_000_000.0
+            return m == m.rounded() ? String(format: "%.0fM tok/min", m) : String(format: "%.1fM tok/min", m)
+        }
+        if v >= 1_000 {
+            let k = Double(v) / 1_000.0
+            return k == k.rounded() ? String(format: "%.0fk tok/min", k) : String(format: "%.1fk tok/min", k)
+        }
+        return "\(v) tok/min"
+    }
+
+    static func formatDurationEta(_ secs: Double) -> String {
+        if !secs.isFinite || secs <= 0 { return "0m" }
+        if secs < 60 { return "<1m" }
+        let totalMins = Int((secs / 60.0).rounded())
+        if totalMins < 60 { return "~\(totalMins)m" }
+        let hours = totalMins / 60
+        let mins = totalMins % 60
+        if hours < 48 { return mins > 0 ? "~\(hours)h \(mins)m" : "~\(hours)h" }
+        let days = hours / 24
+        let remHours = hours % 24
+        return remHours > 0 ? "~\(days)d \(remHours)h" : "~\(days)d"
+    }
+
+    static func bandwidthLimitsSummary(_ limits: BandwidthLimits?) -> String {
+        guard let limits else { return "" }
+        var parts: [String] = []
+        if let t = limits.tokensPerMin { parts.append(formatTokensPerMin(t)) }
+        if let v = limits.computeVcpuPerMin { parts.append("\(v) vCPU/min") }
+        if let u = limits.computeUsdPerHour { parts.append("\(money(u))/h") }
+        return parts.joined(separator: " · ")
+    }
+
     private static func parseWholeInt(_ raw: String, min: Int, max: Int, label: String) -> Result<Int, ParseError> {
         guard !raw.isEmpty, raw.allSatisfy(\.isNumber) else {
             return .failure(ParseError(message: "\(label) must be a whole number"))
@@ -272,6 +510,34 @@ struct OrbMissionBudget: Equatable {
             return .failure(ParseError(message: "\(label) must be between \(min) and \(max)"))
         }
         return .success(value)
+    }
+
+    private static func parseTokenRate(_ raw: String) -> Result<Int, ParseError> {
+        let cleaned = raw.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: ",", with: "")
+            .replacingOccurrences(of: "_", with: "")
+        guard !cleaned.isEmpty else {
+            return .failure(ParseError(message: "Tokens per minute must be a number"))
+        }
+        var mult = 1.0
+        var numPart = cleaned
+        if let last = cleaned.last {
+            if last == "k" || last == "K" {
+                mult = 1_000.0
+                numPart = String(cleaned.dropLast()).trimmingCharacters(in: .whitespaces)
+            } else if last == "m" || last == "M" {
+                mult = 1_000_000.0
+                numPart = String(cleaned.dropLast()).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        guard let base = Double(numPart), base.isFinite else {
+            return .failure(ParseError(message: "Tokens per minute must be a number (for example 120000 or 120k)"))
+        }
+        let val = Int((base * mult).rounded())
+        guard val >= minTokensPerMin && val <= maxTokensPerMin else {
+            return .failure(ParseError(message: "Tokens per minute must be between \(minTokensPerMin) and \(maxTokensPerMin)"))
+        }
+        return .success(val)
     }
 
     static func parseVmLimits(
@@ -314,11 +580,179 @@ struct OrbMissionBudget: Equatable {
         return .success(VmConcurrencyLimits(maxConcurrent: maxConcurrent, providerMaxConcurrent: provMap))
     }
 
+    static func parseBandwidthLimits(
+        tokensPerMinRaw: String,
+        computeVcpuRaw: String,
+        computeUsdPerHRaw: String,
+        protectRoot: Bool,
+        view: OrbMissionBudget? = nil
+    ) -> Result<BandwidthLimits, ParseError> {
+        let eff = view?.effectiveBandwidth
+        var tokensPerMin: Int? = nil
+        let tpmTrim = tokensPerMinRaw.trimmingCharacters(in: .whitespaces)
+        if !tpmTrim.isEmpty {
+            switch parseTokenRate(tpmTrim) {
+            case .failure(let err): return .failure(err)
+            case .success(let v):
+                if let anc = eff?.ancestorTokensPerMin, v > anc {
+                    return .failure(ParseError(message: "Tokens per minute cannot exceed the parent pool (\(formatTokensPerMin(anc)))"))
+                }
+                tokensPerMin = v
+            }
+        }
+
+        var computeVcpu: Int? = nil
+        let vcpuTrim = computeVcpuRaw.trimmingCharacters(in: .whitespaces)
+        if !vcpuTrim.isEmpty {
+            switch parseWholeInt(vcpuTrim, min: 1, max: maxComputeVcpuPerMin, label: "Compute vCPU/min") {
+            case .failure(let err): return .failure(err)
+            case .success(let v):
+                if let anc = eff?.ancestorComputeVcpuPerMin, v > anc {
+                    return .failure(ParseError(message: "Compute vCPU/min cannot exceed the parent pool (\(anc) vCPU/min)"))
+                }
+                computeVcpu = v
+            }
+        }
+
+        var computeUsdH: Double? = nil
+        let usdTrim = computeUsdPerHRaw.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "$", with: "")
+        if !usdTrim.isEmpty {
+            guard let n = Double(usdTrim), n.isFinite, n >= minComputeUsdPerHour, n <= maxComputeUsdPerHour else {
+                return .failure(ParseError(message: "Compute burn ceiling must be between $\(minComputeUsdPerHour) and $\(Int(maxComputeUsdPerHour))/h"))
+            }
+            let rounded = (n * 10000).rounded() / 10000
+            if let anc = eff?.ancestorComputeUsdPerHour, rounded > anc + 1e-9 {
+                return .failure(ParseError(message: "Compute burn ceiling cannot exceed the parent pool (\(money(anc))/h)"))
+            }
+            computeUsdH = rounded
+        }
+
+        if tokensPerMin == nil && computeVcpu == nil && computeUsdH == nil {
+            return .failure(ParseError(message: "Enter at least one bandwidth limit (tokens/min, vCPU/min, or $/h)"))
+        }
+
+        return .success(BandwidthLimits(
+            tokensPerMin: tokensPerMin,
+            computeVcpuPerMin: computeVcpu,
+            computeUsdPerHour: computeUsdH,
+            protectRoot: protectRoot
+        ))
+    }
+
+    func computeRunwayForecast(
+        draftBudgetUsd: String? = nil,
+        draftComputeUsdPerH: String? = nil,
+        draftComputeVcpu: String? = nil,
+        bandwidthEnabled: Bool? = nil,
+        budgetEnabled: Bool? = nil
+    ) -> RunwayForecast {
+        let budgetOn = budgetEnabled ?? (mode == "own" || mode == "pooled")
+        var capUsd: Double? = pool?.budget ?? ownBudget
+        if budgetOn, let raw = draftBudgetUsd?.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "$", with: ""),
+           let parsed = Double(raw), parsed > 0, parsed <= 100_000 {
+            capUsd = parsed
+        }
+        if !budgetOn { capUsd = nil }
+
+        let spentUsd = pool?.spent ?? 0
+        let reservedUsd = pool?.reserved ?? 0
+        let carvedUsd = pool?.carved ?? 0
+        let committedTotal = spentUsd + reservedUsd + carvedUsd
+        let availableUsd = capUsd.map { max(0, $0 - committedTotal) } ?? 0
+
+        let obsCompute = max(0, effectiveBandwidth?.currentComputeUsdPerHour ?? 0)
+        let curVcpu = effectiveBandwidth?.currentVcpuPerMin ?? 0
+        let curTpm = effectiveBandwidth?.currentTokensPerMin ?? 0
+
+        var shapedCompute = obsCompute
+        let bwOn = bandwidthEnabled ?? (effectiveBandwidth?.source == "mission")
+        if bwOn {
+            var usdCap = effectiveBandwidth?.computeUsdPerHour
+            if let draftComputeUsdPerH {
+                let raw = draftComputeUsdPerH.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "$", with: "")
+                usdCap = Double(raw).flatMap { $0 > 0 ? $0 : nil }
+            }
+            if let usdCap, shapedCompute > usdCap {
+                shapedCompute = usdCap
+            }
+            var vcpuCap = effectiveBandwidth?.computeVcpuPerMin
+            if let draftComputeVcpu {
+                let raw = draftComputeVcpu.trimmingCharacters(in: .whitespaces)
+                vcpuCap = Int(raw).flatMap { $0 > 0 ? $0 : nil }
+            }
+            if let vcpuCap, curVcpu > vcpuCap, curVcpu > 0 {
+                shapedCompute = min(shapedCompute, obsCompute * (Double(vcpuCap) / Double(curVcpu)))
+            }
+        }
+
+        let etaSecs: Double? = {
+            guard let capUsd else { return nil }
+            if availableUsd <= 0 { return 0 }
+            return shapedCompute > 0.005 ? (availableUsd / shapedCompute) * 3600.0 : nil
+        }()
+        let unshapedEtaSecs: Double? = (capUsd != nil && availableUsd > 0 && obsCompute > 0.005)
+            ? (availableUsd / obsCompute) * 3600.0 : nil
+        let etaGainSecs: Double? = {
+            guard let e = etaSecs, let u = unshapedEtaSecs, e > u + 120 else { return nil }
+            return e - u
+        }()
+
+        var tone: RunwayForecast.Tone = .ok
+        if let capUsd {
+            if availableUsd <= 0 || (etaSecs != nil && etaSecs! < 1800) {
+                tone = .danger
+            } else if (etaSecs != nil && etaSecs! < 7200) || (capUsd > 0 && availableUsd < capUsd * 0.15) {
+                tone = .warning
+            }
+        }
+
+        let headline: String
+        let subline: String
+        if let capUsd {
+            if availableUsd <= 0 {
+                headline = "Budget exhausted"
+                subline = "\(Self.money(committedTotal)) committed of \(Self.money(capUsd)) pool"
+            } else if let etaSecs {
+                headline = "\(Self.formatDurationEta(etaSecs)) runway left"
+                var parts = ["\(Self.money(shapedCompute))/h compute burn", "\(Self.money(availableUsd)) left (\(Self.money(capUsd)) cap)"]
+                if let gain = etaGainSecs {
+                    let clean = Self.formatDurationEta(gain).replacingOccurrences(of: "~", with: "")
+                    parts.append("+\(clean) from bandwidth cap")
+                }
+                subline = parts.joined(separator: " · ")
+            } else {
+                headline = "\(Self.money(availableUsd)) available (\(Self.money(capUsd)) cap)"
+                subline = "No active managed-machine burn right now"
+            }
+        } else {
+            headline = obsCompute > 0.005 ? "\(Self.money(obsCompute))/h current compute burn" : "No spending cap"
+            var parts = ["Only the daily managed-machine cap applies"]
+            if curTpm > 0 { parts.append(Self.formatTokensPerMin(curTpm)) }
+            subline = parts.joined(separator: " · ")
+        }
+
+        return RunwayForecast(
+            hasBudget: capUsd != nil,
+            capUsd: capUsd,
+            spentUsd: spentUsd,
+            reservedUsd: reservedUsd,
+            carvedUsd: carvedUsd,
+            availableUsd: availableUsd,
+            observedComputeBurnUsdPerH: obsCompute,
+            shapedComputeBurnUsdPerH: shapedCompute,
+            etaSecs: etaSecs,
+            etaGainSecs: etaGainSecs,
+            tone: tone,
+            headline: headline,
+            subline: subline
+        )
+    }
+
     static func money(_ v: Double) -> String { v < 10 ? String(format: "$%.2f", v) : String(format: "$%.0f", v) }
 }
 
-/// Long-press "Mission settings…" on a mission row: Budget + Machine limit
-/// sections of the desktop sheet. Optimistic, with rollback and Retry on refusal.
+/// Long-press "Mission settings" on a mission row: Runway forecast + Budget +
+/// Bandwidth & pacing + Machine limit sections. Optimistic with rollback & Retry.
 struct OrbMissionSettingsSheet: View {
     let missionId: String
     let title: String
@@ -333,6 +767,12 @@ struct OrbMissionSettingsSheet: View {
     @State private var vmTotalDraft = ""
     @State private var vmProviderDrafts: [String: String] = [:]
     @State private var providersExpanded = false
+    @State private var bwSaveError: String?
+    @State private var pendingBwRetry: OrbMissionBudget.BandwidthLimits??
+    @State private var bwTokensDraft = ""
+    @State private var bwVcpuDraft = ""
+    @State private var bwUsdHDraft = ""
+    @State private var bwProtectRoot = true
     @State private var showIdleChildren = false
     @State private var busy = false
     private let api = OrbCore.shared
@@ -341,6 +781,49 @@ struct OrbMissionSettingsSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                if let v = view {
+                    let fc = v.computeRunwayForecast(
+                        draftBudgetUsd: v.mode == "own" ? draft : nil,
+                        draftComputeUsdPerH: v.bandwidthMode == "own" ? bwUsdHDraft : nil,
+                        draftComputeVcpu: v.bandwidthMode == "own" ? bwVcpuDraft : nil,
+                        bandwidthEnabled: v.bandwidthMode == "own" || v.effectiveBandwidth?.source == "mission",
+                        budgetEnabled: v.mode == "own" || v.mode == "pooled"
+                    )
+                    Section {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(fc.headline)
+                                .font(.headline)
+                                .foregroundStyle(toneColor(fc.tone))
+                            Text(fc.subline)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            if let cap = fc.capUsd, cap > 0 {
+                                GeometryReader { geo in
+                                    let w = max(1, geo.size.width)
+                                    HStack(spacing: 1.5) {
+                                        if fc.spentUsd > 0 {
+                                            Rectangle().fill(Color.blue).frame(width: max(2, w * CGFloat(fc.spentUsd / cap)))
+                                        }
+                                        if fc.reservedUsd > 0 {
+                                            Rectangle().fill(OrbStyle.warning).frame(width: max(2, w * CGFloat(fc.reservedUsd / cap)))
+                                        }
+                                        if fc.carvedUsd > 0 {
+                                            Rectangle().fill(Color.purple.opacity(0.8)).frame(width: max(2, w * CGFloat(fc.carvedUsd / cap)))
+                                        }
+                                        if fc.availableUsd > 0 {
+                                            Rectangle().fill(OrbStyle.success).frame(width: max(2, w * CGFloat(fc.availableUsd / cap)))
+                                        }
+                                    }
+                                }
+                                .frame(height: 8)
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                        }
+                        .padding(.vertical, 4)
+                        .accessibilityIdentifier("mission.settings.forecast")
+                    } header: { Text(title) }
+                }
+
                 Section {
                     if let v = view {
                         Toggle("Spending budget", isOn: Binding(get: { v.mode == "own" }, set: { on in toggle(on) }))
@@ -377,6 +860,67 @@ struct OrbMissionSettingsSheet: View {
                 }
 
                 if let v = view {
+                    Section {
+                        Toggle("Bandwidth limit", isOn: Binding(get: { v.bandwidthMode == "own" }, set: { on in toggleBandwidth(on) }))
+                            .disabled(busy)
+                            .accessibilityIdentifier("mission.settings.bandwidth.toggle")
+                        Text(v.bandwidthModeLine).font(.footnote).foregroundStyle(.secondary)
+                        if let eff = v.effectiveBandwidth, eff.source == "mission" {
+                            let summary = OrbMissionBudget.bandwidthLimitsSummary(OrbMissionBudget.BandwidthLimits(
+                                tokensPerMin: eff.tokensPerMin,
+                                computeVcpuPerMin: eff.computeVcpuPerMin,
+                                computeUsdPerHour: eff.computeUsdPerHour,
+                                protectRoot: eff.protectRoot
+                            ))
+                            if !summary.isEmpty {
+                                LabeledContent("Active ceiling", value: summary)
+                            }
+                            if eff.pacingActive {
+                                LabeledContent("Pacing", value: "Smoothing bursts")
+                            }
+                        }
+                        if v.bandwidthMode == "own" {
+                            HStack {
+                                Text("Tokens / min")
+                                Spacer()
+                                TextField("e.g. 120k", text: $bwTokensDraft)
+                                    .multilineTextAlignment(.trailing)
+                                    .frame(maxWidth: 130)
+                                    .accessibilityIdentifier("mission.settings.bandwidth.tpm")
+                            }
+                            HStack {
+                                Text("Compute (vCPU / min)")
+                                Spacer()
+                                TextField("Optional", text: $bwVcpuDraft)
+                                    .keyboardType(.numberPad)
+                                    .multilineTextAlignment(.trailing)
+                                    .frame(maxWidth: 130)
+                                    .accessibilityIdentifier("mission.settings.bandwidth.vcpu")
+                            }
+                            HStack {
+                                Text("Burn ceiling ($/h)")
+                                Spacer()
+                                TextField("Optional", text: $bwUsdHDraft)
+                                    .keyboardType(.decimalPad)
+                                    .multilineTextAlignment(.trailing)
+                                    .frame(maxWidth: 130)
+                                    .accessibilityIdentifier("mission.settings.bandwidth.usdh")
+                            }
+                            Toggle("Prioritize root agent", isOn: $bwProtectRoot)
+                                .disabled(busy)
+                                .accessibilityIdentifier("mission.settings.bandwidth.protect_root")
+                            Button("Save bandwidth") { saveBandwidth() }
+                                .disabled(busy || !bwDraftDirty(v))
+                                .accessibilityIdentifier("mission.settings.bandwidth.save")
+                        }
+                        if let bwSaveError {
+                            Text("Bandwidth limit not saved: \(bwSaveError)").font(.footnote).foregroundStyle(OrbStyle.warning)
+                            if let retry = pendingBwRetry { Button("Retry") { commitBandwidth(retry) } }
+                        }
+                    } header: { Text("Bandwidth & pacing") } footer: {
+                        Text("Smooths inference and machine spawn bursts with pace delays instead of hard errors.")
+                    }
+
                     Section {
                         Toggle("Machine limit", isOn: Binding(get: { v.vmLimitsMode == "own" }, set: { on in toggleVmLimits(on) }))
                             .disabled(busy)
@@ -458,11 +1002,22 @@ struct OrbMissionSettingsSheet: View {
         }
     }
 
+    private func toneColor(_ tone: OrbMissionBudget.RunwayForecast.Tone) -> Color {
+        switch tone {
+        case .ok: return .primary
+        case .warning: return OrbStyle.warning
+        case .danger: return OrbStyle.error
+        }
+    }
+
     private func childSummary(_ c: OrbMissionBudget.Child) -> String {
         var parts: [String] = []
         parts.append(c.mode == "sub_budget" ? "Sub-budget \(OrbMissionBudget.money(c.budget ?? 0))" : "Pooled")
         if c.hasVmLimits {
             parts.append(c.vmMaxConcurrent.map { "max \($0) VM" } ?? "custom VM cap")
+        }
+        if c.hasBandwidthLimits {
+            parts.append(c.tokensPerMin.map { OrbMissionBudget.formatTokensPerMin($0) } ?? "paced")
         }
         parts.append("\(OrbMissionBudget.money(c.spent)) spent")
         return parts.joined(separator: " · ")
@@ -482,6 +1037,13 @@ struct OrbMissionSettingsSheet: View {
         }
     }
 
+    private func syncBandwidthDrafts(_ v: OrbMissionBudget) {
+        bwTokensDraft = v.ownBandwidthLimits?.tokensPerMin.map(String.init) ?? ""
+        bwVcpuDraft = v.ownBandwidthLimits?.computeVcpuPerMin.map(String.init) ?? ""
+        bwUsdHDraft = format(v.ownBandwidthLimits?.computeUsdPerHour)
+        bwProtectRoot = v.ownBandwidthLimits?.protectRoot ?? true
+    }
+
     private func vmDraftDirty(_ v: OrbMissionBudget) -> Bool {
         let curTotal = v.ownVmLimits?.maxConcurrent.map(String.init) ?? ""
         if vmTotalDraft.trimmingCharacters(in: .whitespaces) != curTotal { return true }
@@ -492,11 +1054,23 @@ struct OrbMissionSettingsSheet: View {
         return false
     }
 
+    private func bwDraftDirty(_ v: OrbMissionBudget) -> Bool {
+        let own = v.ownBandwidthLimits
+        let curT = own?.tokensPerMin.map(String.init) ?? ""
+        let curV = own?.computeVcpuPerMin.map(String.init) ?? ""
+        let curU = format(own?.computeUsdPerHour)
+        let curP = own?.protectRoot ?? true
+        return bwTokensDraft.trimmingCharacters(in: .whitespaces) != curT
+            || bwVcpuDraft.trimmingCharacters(in: .whitespaces) != curV
+            || bwUsdHDraft.trimmingCharacters(in: .whitespaces) != curU
+            || bwProtectRoot != curP
+    }
+
     private func load() async {
         loadError = nil
         do {
             let v = OrbMissionBudget(try await api.call(path))
-            view = v; draft = format(v.ownBudget); syncVmDrafts(v)
+            view = v; draft = format(v.ownBudget); syncVmDrafts(v); syncBandwidthDrafts(v)
         } catch { loadError = error.localizedDescription }
     }
 
@@ -525,7 +1099,7 @@ struct OrbMissionSettingsSheet: View {
             do {
                 let body: OrbJSON = .object(["budget_usd": amount.map { .number($0) } ?? .null])
                 let next = OrbMissionBudget(try await api.call(path, method: "PUT", body: body))
-                view = next; draft = format(next.ownBudget); syncVmDrafts(next)
+                view = next; draft = format(next.ownBudget); syncVmDrafts(next); syncBandwidthDrafts(next)
                 OrbHaptics.selection()
             } catch {
                 view = before; draft = format(before.ownBudget)
@@ -566,12 +1140,55 @@ struct OrbMissionSettingsSheet: View {
             do {
                 let body: OrbJSON = .object(["vm_limits": limits?.toJSON() ?? .null])
                 let next = OrbMissionBudget(try await api.call(path, method: "PUT", body: body))
-                view = next; draft = format(next.ownBudget); syncVmDrafts(next)
+                view = next; draft = format(next.ownBudget); syncVmDrafts(next); syncBandwidthDrafts(next)
                 OrbHaptics.selection()
             } catch {
                 view = before; syncVmDrafts(before)
                 vmSaveError = error.localizedDescription
                 pendingVmRetry = .some(limits)
+            }
+        }
+    }
+
+    private func toggleBandwidth(_ on: Bool) {
+        guard let v = view else { return }
+        if !on { return commitBandwidth(nil) }
+        let ancTpm = v.effectiveBandwidth?.ancestorTokensPerMin
+        let defaultTpm = ancTpm.map { min(120_000, $0) } ?? 120_000
+        commitBandwidth(.init(tokensPerMin: defaultTpm, computeVcpuPerMin: nil, computeUsdPerHour: nil, protectRoot: true))
+    }
+
+    private func saveBandwidth() {
+        switch OrbMissionBudget.parseBandwidthLimits(
+            tokensPerMinRaw: bwTokensDraft,
+            computeVcpuRaw: bwVcpuDraft,
+            computeUsdPerHRaw: bwUsdHDraft,
+            protectRoot: bwProtectRoot,
+            view: view
+        ) {
+        case .failure(let err):
+            bwSaveError = err.message
+        case .success(let limits):
+            commitBandwidth(limits)
+        }
+    }
+
+    private func commitBandwidth(_ limits: OrbMissionBudget.BandwidthLimits?) {
+        guard let before = view, !busy else { return }
+        busy = true; bwSaveError = nil; pendingBwRetry = nil
+        let opt = before.optimisticBandwidthLimits(limits)
+        view = opt; syncBandwidthDrafts(opt)
+        Task {
+            defer { busy = false }
+            do {
+                let body: OrbJSON = .object(["bandwidth_limits": limits?.toJSON() ?? .null])
+                let next = OrbMissionBudget(try await api.call(path, method: "PUT", body: body))
+                view = next; draft = format(next.ownBudget); syncVmDrafts(next); syncBandwidthDrafts(next)
+                OrbHaptics.selection()
+            } catch {
+                view = before; syncBandwidthDrafts(before)
+                bwSaveError = error.localizedDescription
+                pendingBwRetry = .some(limits)
             }
         }
     }

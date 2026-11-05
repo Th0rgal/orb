@@ -89,6 +89,25 @@ pub(crate) async fn cap_pool_for(
     )
 }
 
+/// The bandwidth override pool a mission's VM or inference traffic draws from.
+pub(crate) async fn bandwidth_pool_for(
+    store: &Arc<dyn MissionStore>,
+    mission: Uuid,
+    user_id: &str,
+) -> Option<String> {
+    let manager = crate::managed::global()?;
+    let pools = manager.budget_pools().await;
+    if pools.is_empty() {
+        return None;
+    }
+    let chain = lineage(store, mission).await;
+    crate::managed::budget::nearest_bandwidth_pool(
+        chain.iter().map(String::as_str),
+        &pools,
+        user_id,
+    )
+}
+
 /// Re-attach the calling user's pools at or below `changed` to their
 /// current nearest ancestor pool (after a budget was added or removed at
 /// `changed`). Other users' pools are never touched, and a pool whose
@@ -272,6 +291,98 @@ where
     out
 }
 
+/// Re-attach descendant bandwidth override pools and re-evaluate `bandwidth_pool_id`
+/// on live/stopped machines in `changed`'s subtree after `bandwidth_limits` changed.
+pub(crate) async fn reparent_bandwidth_subtree(
+    store: &Arc<dyn MissionStore>,
+    user_id: &str,
+    changed: Uuid,
+) {
+    let Some(manager) = crate::managed::global() else {
+        return;
+    };
+    let pools = manager.budget_pools().await;
+    let changed_str = changed.to_string();
+    for plan in reparent_bandwidth_plan(&pools, user_id, &changed_str, |id| {
+        let store = store.clone();
+        let id = id.to_string();
+        async move {
+            let uuid = Uuid::parse_str(&id).ok()?;
+            matches!(store.get_mission(uuid).await, Ok(Some(_))).then_some(())?;
+            Some(lineage(&store, uuid).await)
+        }
+    })
+    .await
+    {
+        manager.reparent_bandwidth_pool(&plan.0, plan.1).await;
+    }
+
+    let pools = manager.budget_pools().await;
+    for m in manager.machines_snapshot().await {
+        if !(m.state.is_live() || m.state == crate::managed::MachineState::Stopped) {
+            continue;
+        }
+        if m.owner_user_id.as_deref() != Some(user_id) {
+            continue;
+        }
+        let Some(owner_str) = m
+            .owner_mission_id
+            .as_deref()
+            .or(m.requested_by_mission_id.as_deref())
+        else {
+            continue;
+        };
+        let Ok(owner_uuid) = Uuid::parse_str(owner_str) else {
+            continue;
+        };
+        let chain = lineage(store, owner_uuid).await;
+        if !chain.iter().any(|a| a == &changed_str) {
+            continue;
+        }
+        let next_bw = crate::managed::budget::nearest_bandwidth_pool(
+            chain.iter().map(String::as_str),
+            &pools,
+            user_id,
+        );
+        manager.set_machine_bandwidth_pool(&m.id, next_bw).await;
+    }
+}
+
+/// Pure planning step of [`reparent_bandwidth_subtree`]: `(pool, new parent_bandwidth_pool)` pairs.
+pub(crate) async fn reparent_bandwidth_plan<F, Fut>(
+    pools: &std::collections::HashMap<String, crate::managed::budget::BudgetPool>,
+    user_id: &str,
+    changed: &str,
+    lineage_of: F,
+) -> Vec<(String, Option<String>)>
+where
+    F: Fn(&str) -> Fut,
+    Fut: std::future::Future<Output = Option<Vec<String>>>,
+{
+    let mut out = Vec::new();
+    for (id, pool) in pools {
+        if pool.bandwidth_limits.is_none()
+            || pool.owner_user_id.as_deref() != Some(user_id)
+            || id == changed
+        {
+            continue;
+        }
+        let Some(chain) = lineage_of(id).await else {
+            continue;
+        };
+        if !chain.iter().skip(1).any(|a| a == changed) {
+            continue;
+        }
+        let parent = crate::managed::budget::nearest_bandwidth_pool(
+            chain.iter().skip(1).map(String::as_str),
+            pools,
+            user_id,
+        );
+        out.push((id.clone(), parent));
+    }
+    out
+}
+
 fn error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     (
         status,
@@ -356,6 +467,10 @@ pub struct BudgetBody {
     /// override; an object sets it.
     #[serde(default, deserialize_with = "deserialize_patch")]
     pub vm_limits: Option<Option<crate::managed::budget::VmConcurrencyLimits>>,
+    /// Omit to leave unchanged; `null` removes the mission's bandwidth & pacing
+    /// override; an object sets it.
+    #[serde(default, deserialize_with = "deserialize_patch")]
+    pub bandwidth_limits: Option<Option<crate::managed::budget::BandwidthLimits>>,
 }
 
 async fn put_budget(
@@ -376,6 +491,12 @@ async fn put_budget(
     }
     if let Some(limits) = body.vm_limits {
         if let Err(e) = set_vm_limits(&store, &user, id, limits).await {
+            let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST);
+            return (status, Json(e)).into_response();
+        }
+    }
+    if let Some(bw) = body.bandwidth_limits {
+        if let Err(e) = set_bandwidth_limits(&store, &user, id, bw).await {
             let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST);
             return (status, Json(e)).into_response();
         }
@@ -444,10 +565,163 @@ pub(crate) async fn set_vm_limits(
     Ok(())
 }
 
+/// Set or clear a mission's own bandwidth & pacing override.
+pub(crate) async fn set_bandwidth_limits(
+    store: &Arc<dyn MissionStore>,
+    user: &AuthUser,
+    id: Uuid,
+    limits: Option<crate::managed::budget::BandwidthLimits>,
+) -> Result<(), crate::managed::ManagedError> {
+    let manager = crate::managed::global().ok_or_else(|| crate::managed::ManagedError {
+        error: "disabled",
+        message: "Managed machines are not initialised".into(),
+        status: 503,
+    })?;
+    let chain = lineage(store, id).await;
+    let pools = manager.budget_pools().await;
+    let parent_bw = crate::managed::budget::nearest_bandwidth_pool(
+        chain.iter().skip(1).map(String::as_str),
+        &pools,
+        &user.id,
+    );
+    manager
+        .set_mission_bandwidth_limits(
+            &id.to_string(),
+            limits,
+            &chain,
+            parent_bw,
+            Some(user.id.clone()),
+        )
+        .await?;
+    reparent_bandwidth_subtree(store, &user.id, id).await;
+    Ok(())
+}
+
+/// Pace an attributed LLM proxy request against any governing mission bandwidth
+/// pools (`tokens_per_min`) in `mission_id`'s lineage. Returns the total pacing
+/// delay applied in milliseconds (`0` when unthrottled).
+pub(crate) async fn pace_mission_inference(state: &Arc<AppState>, mission_id: Uuid) -> u64 {
+    let Some(manager) = crate::managed::global() else {
+        return 0;
+    };
+    let pools_initial = manager.budget_pools().await;
+    if !pools_initial.values().any(|p| {
+        p.bandwidth_limits
+            .as_ref()
+            .is_some_and(|b| b.tokens_per_min.is_some())
+    }) {
+        return 0;
+    }
+    let user = super::auth::implicit_single_tenant_user(&state.config);
+    let store = state.control.get_or_spawn(&user).await.mission_store;
+    let chain: Vec<String> = super::usage_attribution::ancestry(&*store, mission_id)
+        .await
+        .into_iter()
+        .map(|u| u.to_string())
+        .collect();
+    if chain.is_empty() {
+        return 0;
+    }
+    let self_str = mission_id.to_string();
+    let user_id = user.id.clone();
+
+    let collect_constraints = |pools: &std::collections::HashMap<
+        String,
+        crate::managed::budget::BudgetPool,
+    >|
+     -> Vec<(String, u64)> {
+        let mut out = Vec::new();
+        for anc in &chain {
+            let Some(p) = pools.get(anc.as_str()) else {
+                continue;
+            };
+            if p.owner_user_id.as_deref() != Some(user_id.as_str()) {
+                continue;
+            }
+            let Some(bw) = p.bandwidth_limits.as_ref() else {
+                continue;
+            };
+            if bw.protect_root && anc == &self_str {
+                continue;
+            }
+            if let Some(tpm) = bw.tokens_per_min {
+                out.push((anc.clone(), tpm));
+            }
+        }
+        out
+    };
+
+    let initial_constraints = collect_constraints(&pools_initial);
+    if crate::managed::pacing::compute_inference_delay_ms(&initial_constraints) == 0 {
+        return 0;
+    }
+
+    let started = std::time::Instant::now();
+    let hard_cap =
+        std::time::Duration::from_millis(crate::managed::pacing::MAX_INFERENCE_PACE_DELAY_MS);
+    loop {
+        let elapsed = started.elapsed();
+        if elapsed >= hard_cap {
+            break;
+        }
+        let pools_now = manager.budget_pools().await;
+        let current = collect_constraints(&pools_now);
+        let needed = crate::managed::pacing::compute_inference_delay_ms(&current);
+        if needed == 0 {
+            break;
+        }
+        let step = std::time::Duration::from_millis(needed)
+            .min(hard_cap.saturating_sub(elapsed))
+            .min(std::time::Duration::from_secs(5));
+        super::proxy_liveness::note_activity(mission_id);
+        crate::managed::pacing::wait_or_notified(step).await;
+    }
+    super::proxy_liveness::note_activity(mission_id);
+    started.elapsed().as_millis() as u64
+}
+
+/// Charge billed LLM tokens (`input + output + reasoning`) to all bandwidth
+/// pools in `mission_id`'s lineage (plus `mission_id` itself for live telemetry).
+pub(crate) async fn record_mission_inference_tokens(
+    state: &Arc<AppState>,
+    mission_id: Uuid,
+    billed_tokens: u64,
+) {
+    if billed_tokens == 0 {
+        return;
+    }
+    let user = super::auth::implicit_single_tenant_user(&state.config);
+    let store = state.control.get_or_spawn(&user).await.mission_store;
+    let chain: Vec<String> = super::usage_attribution::ancestry(&*store, mission_id)
+        .await
+        .into_iter()
+        .map(|u| u.to_string())
+        .collect();
+    if chain.is_empty() {
+        return;
+    }
+    let pools = match crate::managed::global() {
+        Some(manager) => manager.budget_pools().await,
+        None => std::collections::HashMap::new(),
+    };
+    let mut targets: Vec<(String, Option<u64>)> = Vec::new();
+    for anc in &chain {
+        let rate = pools
+            .get(anc.as_str())
+            .filter(|p| p.owner_user_id.as_deref() == Some(user.id.as_str()))
+            .and_then(|p| p.bandwidth_limits.as_ref())
+            .and_then(|b| b.tokens_per_min);
+        if rate.is_some() || anc == &chain[0] || pools.contains_key(anc.as_str()) {
+            targets.push((anc.clone(), rate));
+        }
+    }
+    crate::managed::pacing::record_pool_tokens(&targets, billed_tokens);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::managed::budget::{BudgetPool, VmConcurrencyLimits};
+    use crate::managed::budget::{BandwidthLimits, BudgetPool, VmConcurrencyLimits};
     use std::collections::{BTreeMap, HashMap};
 
     fn pool(id: &str, user: &str, parent: Option<&str>) -> (String, BudgetPool) {
@@ -459,6 +733,8 @@ mod tests {
                 parent_pool_id: parent.map(Into::into),
                 vm_limits: None,
                 parent_cap_pool_id: None,
+                bandwidth_limits: None,
+                parent_bandwidth_pool_id: None,
                 owner_user_id: Some(user.into()),
                 updated_at: chrono::Utc::now(),
             },
@@ -502,10 +778,12 @@ mod tests {
         let only_budget: BudgetBody = serde_json::from_str(r#"{"budget_usd": 12.5}"#).unwrap();
         assert_eq!(only_budget.budget_usd, Some(Some(12.5)));
         assert_eq!(only_budget.vm_limits, None);
+        assert_eq!(only_budget.bandwidth_limits, None);
 
         let clear_budget: BudgetBody = serde_json::from_str(r#"{"budget_usd": null}"#).unwrap();
         assert_eq!(clear_budget.budget_usd, Some(None));
         assert_eq!(clear_budget.vm_limits, None);
+        assert_eq!(clear_budget.bandwidth_limits, None);
 
         let only_limits: BudgetBody = serde_json::from_str(
             r#"{"vm_limits": {"max_concurrent": 4, "provider_max_concurrent": {"vastai": 2}}}"#,
@@ -519,9 +797,29 @@ mod tests {
                 provider_max_concurrent: BTreeMap::from([("vastai".to_string(), 2)]),
             }))
         );
+        assert_eq!(only_limits.bandwidth_limits, None);
 
         let clear_limits: BudgetBody = serde_json::from_str(r#"{"vm_limits": null}"#).unwrap();
         assert_eq!(clear_limits.budget_usd, None);
         assert_eq!(clear_limits.vm_limits, Some(None));
+
+        let only_bw: BudgetBody = serde_json::from_str(
+            r#"{"bandwidth_limits": {"tokens_per_min": 120000, "compute_vcpu_per_min": 64, "compute_usd_per_hour": 3.5, "protect_root": true}}"#,
+        )
+        .unwrap();
+        assert_eq!(only_bw.budget_usd, None);
+        assert_eq!(only_bw.vm_limits, None);
+        assert_eq!(
+            only_bw.bandwidth_limits,
+            Some(Some(BandwidthLimits {
+                tokens_per_min: Some(120_000),
+                compute_vcpu_per_min: Some(64),
+                compute_usd_per_hour: Some(3.5),
+                protect_root: true,
+            }))
+        );
+
+        let clear_bw: BudgetBody = serde_json::from_str(r#"{"bandwidth_limits": null}"#).unwrap();
+        assert_eq!(clear_bw.bandwidth_limits, Some(None));
     }
 }

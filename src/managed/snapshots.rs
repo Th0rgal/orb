@@ -758,6 +758,7 @@ impl ManagedManager {
             .await
             .unwrap_or(m);
         self.ledger("stopped", &m);
+        super::pacing::notify_capacity_changed();
         Ok(m)
     }
 
@@ -820,6 +821,20 @@ impl ManagedManager {
             .unwrap_or(self.settings.default_ttl_minutes)
             .clamp(5, self.settings.max_ttl_minutes.max(5));
         let machine = {
+            let target_mission_for_bw = m
+                .owner_mission_id
+                .as_deref()
+                .or(m.requested_by_mission_id.as_deref());
+            self.pace_compute_bandwidth(super::ComputePacingRequest {
+                cap_lineage,
+                existing_bw_pool_id: m.bandwidth_pool_id.as_deref(),
+                target_mission_id: target_mission_for_bw,
+                user_id: m.owner_user_id.as_deref(),
+                requested_cpu: m.cpu,
+                requested_usd_per_hour: m.usd_per_hour,
+                exclude_machine_id: Some(&m.id),
+            })
+            .await?;
             let _guard = self.admission.lock().await;
             let live_snapshot = self.machines.lock().await.clone();
             let cap_pool_id = self
@@ -835,6 +850,20 @@ impl ManagedManager {
                 )
                 .await?;
             let pools_snapshot = self.budgets.lock().await.clone();
+            let bw_chain = if !cap_lineage.is_empty() {
+                cap_lineage.to_vec()
+            } else {
+                Self::fallback_bandwidth_lineage(
+                    &pools_snapshot,
+                    m.bandwidth_pool_id.as_deref(),
+                    target_mission_for_bw,
+                )
+            };
+            let bandwidth_pool_id = Self::resolve_covering_bandwidth_pool(
+                &pools_snapshot,
+                &bw_chain,
+                m.owner_user_id.as_deref(),
+            );
             let resolved_budget_pool = if !cap_lineage.is_empty() {
                 if let Some(uid) = m.owner_user_id.as_deref() {
                     budget::nearest_pool(
@@ -890,6 +919,7 @@ impl ManagedManager {
                     x.name = name;
                     x.state = MachineState::Provisioning;
                     x.cap_pool_id = cap_pool_id;
+                    x.bandwidth_pool_id = bandwidth_pool_id;
                     x.fork_source_provider_id = Some(pid.clone());
                     x.provider_id = None;
                     x.resumes += 1;

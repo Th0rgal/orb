@@ -93,6 +93,7 @@ import { getPrivilegeAccess } from "./privilegeAccessApi";
 import { listApprovalDevices, localApprovalKey, thisDeviceEnrollment } from "./deviceApproval";
 import { LiveProjectsSection, ProjectFileView, isMissionDeleting } from "./ProjectFiles";
 const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({default:module.ProjectSettings})));
+const MissionSettings=lazy(()=>import("./MissionSettings").then(module=>({default:module.MissionSettings})));
 import {
   bindWorkspace,
   installedIds,
@@ -500,6 +501,20 @@ export default function App() {
     const id = selected();
     return id?.startsWith("rm:") ? id.slice(3) : null;
   });
+  // Per-mission Settings page: `ms:<missionId>`.
+  const currentMissionSettingsId = createMemo(() => {
+    const id = selected();
+    return id?.startsWith("ms:") ? id.slice(3) : null;
+  });
+  const resolveMissionTitle = (id: string): string | undefined => {
+    const found =
+      (openMission()?.id === id ? openMission() : undefined) ??
+      missions().find(m => m.id === id) ??
+      completedMissions().find(m => m.id === id) ??
+      Object.values(projectMissions()).flat().find(m => m.id === id) ??
+      lookupMissionById(id);
+    return displayTitle(renamedTitle("mission", id, found?.title)) || undefined;
+  };
   // Hosted project file: `pf:<slug>:<path>` (path may itself contain slashes).
   const currentProjectFile = createMemo(() => {
     const id = selected();
@@ -565,7 +580,7 @@ export default function App() {
       // Backend views (missions, hosted files) can't render offline — e.g.
       // after a 401 cleared the token mid-session.
       const sel = selected();
-      if (sel && (sel.startsWith("m:") || sel.startsWith("pf:") || sel.startsWith("c:") || sel.startsWith("pc:") || sel.startsWith("ps:") || sel.startsWith("rm:") || sel === "execution")) open(null);
+      if (sel && (sel.startsWith("m:") || sel.startsWith("ms:") || sel.startsWith("pf:") || sel.startsWith("c:") || sel.startsWith("pc:") || sel.startsWith("ps:") || sel.startsWith("rm:") || sel === "execution")) open(null);
       // Keep an explicit machine selection across reconnects.
     }
   }));
@@ -1131,7 +1146,7 @@ export default function App() {
                     selected={selected}
                     onDeleted={ids => {
                       const idSet = new Set(ids);
-                      const removed = new Set(ids.map(id => `m:${id}`));
+                      const removed = new Set(ids.flatMap(id => [`m:${id}`, `ms:${id}`, `rm:${id}`]));
                       batch(() => {
                         setMissions(rows => rows.filter(m => !idSet.has(m.id)));
                         setCompletedMissions(rows => rows.filter(m => !idSet.has(m.id)));
@@ -1244,10 +1259,13 @@ export default function App() {
             <Match when={currentProjectSettings()}>
               {(slug) => <span>{liveProjects().find((x) => x.slug === slug())?.title ?? slug()} · Settings</span>}
             </Match>
+            <Match when={currentMissionSettingsId()}>
+              {(mid) => <span>{resolveMissionTitle(mid()) ?? `Agent ${mid().slice(0, 8)}`} · Settings</span>}
+            </Match>
             <Match when={currentMissionId()}>
               {(id) => (
                 <>
-                  <Show when={sessionPreview().destination === "Paloma"}><ProviderLogo type="hermes" /></Show><SessionPreview data={sessionPreview()} plan={previewPlan()?.id === id() ? previewPlan()?.data : undefined} goal={!!missionGoal(openMission()?.id === id() ? openMission() : missions().find((m) => m.id === id()))} />
+                  <Show when={sessionPreview().destination === "Paloma"}><ProviderLogo type="hermes" /></Show><SessionPreview data={sessionPreview()} plan={previewPlan()?.id === id() ? previewPlan()?.data : undefined} goal={!!missionGoal(openMission()?.id === id() ? openMission() : missions().find((m) => m.id === id()))} onOpenSettings={isConnected() ? () => open(`ms:${id()}`) : undefined} />
                 </>
               )}
             </Match>
@@ -1575,6 +1593,22 @@ export default function App() {
               <Show when={slug()} keyed>
                 {(s) => <ProjectSettings slug={s} onOpenPage={open} onOpenMission={(id) => open(`m:${id}`)} />}
               </Show>
+            )}
+          </Match>
+          <Match when={currentMissionSettingsId()}>
+            {(mid) => (
+              <Suspense>
+                <Show when={mid()} keyed>
+                  {(id) => (
+                    <MissionSettings
+                      missionId={id}
+                      title={resolveMissionTitle(id) ?? `Agent ${id.slice(0, 8)}`}
+                      titleOf={resolveMissionTitle}
+                      onOpen={open}
+                    />
+                  )}
+                </Show>
+              </Suspense>
             )}
           </Match>
           <Match when={currentProjectFile()}>
