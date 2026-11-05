@@ -2,7 +2,7 @@
 
 use super::*;
 
-const INTERRUPTED_TOOL_SYNTHETIC_BANNER: &str =
+pub(super) const INTERRUPTED_TOOL_SYNTHETIC_BANNER: &str =
     "[Interrupted in-flight tool call via SIGINT (interrupt_now) — synthetic tool result: command terminated by controller interrupt before completion.]\n\n";
 
 async fn interrupt_remote_mission_job(
@@ -642,24 +642,6 @@ pub async fn post_message(
     } else {
         content
     };
-    let mut local_interrupted_tool = None;
-    let content = if delivery_mode == MessageDeliveryMode::InterruptNow {
-        if let Some(mid) = target_mission_id {
-            let signalled = crate::api::runners::live_session::interrupt_child_tools(mid);
-            if signalled > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-                local_interrupted_tool = Some(true);
-                format!("{INTERRUPTED_TOOL_SYNTHETIC_BANNER}{content}")
-            } else {
-                local_interrupted_tool = Some(false);
-                content
-            }
-        } else {
-            content
-        }
-    } else {
-        content
-    };
     let (queued_tx, queued_rx) = oneshot::channel();
     tracing::info!(
         user_id = %user.id,
@@ -722,6 +704,8 @@ pub async fn post_message(
         }
         Err(error) => return Err(recv_failed(error)),
     };
+    let mut local_interrupted_tool =
+        (delivery_mode == MessageDeliveryMode::InterruptNow && message_accepted).then_some(false);
     if queued && message_accepted && delivery_mode != MessageDeliveryMode::Queue {
         let (now_tx, now_rx) = oneshot::channel();
         if control
@@ -735,8 +719,19 @@ pub async fn post_message(
             .await
             .is_ok()
         {
-            if let Ok(Ok(SendQueuedNowOutcome::DeliveredLive)) = now_rx.await {
-                queued = false;
+            match now_rx.await {
+                Ok(Ok(SendQueuedNowOutcome::DeliveredLive { interrupted_tool })) => {
+                    queued = false;
+                    if let Some(did) = interrupted_tool {
+                        local_interrupted_tool = Some(did);
+                    }
+                }
+                Ok(Ok(SendQueuedNowOutcome::Promoted { interrupted_tool })) => {
+                    if let Some(did) = interrupted_tool {
+                        local_interrupted_tool = Some(did);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -1198,11 +1193,11 @@ pub async fn send_queued_now(
             "failed to send queued message now".to_string(),
         )
     })? {
-        Ok(SendQueuedNowOutcome::DeliveredLive) => Ok(Json(serde_json::json!({
+        Ok(SendQueuedNowOutcome::DeliveredLive { .. }) => Ok(Json(serde_json::json!({
             "ok": true,
             "delivered": true,
         }))),
-        Ok(SendQueuedNowOutcome::Promoted) => Ok(Json(serde_json::json!({
+        Ok(SendQueuedNowOutcome::Promoted { .. }) => Ok(Json(serde_json::json!({
             "ok": true,
             "delivered": false,
             "promoted": true,

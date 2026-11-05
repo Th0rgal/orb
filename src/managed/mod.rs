@@ -5236,38 +5236,59 @@ ORB_WIP_REF='{wip_ref}'
 ORB_CHECKPOINT_REPOS=0
 ORB_CHECKPOINT_PUSHED=0
 ORB_CHECKPOINT_FAILED=0
-for root in /var/lib/orb-node/work /var/lib/sandboxed-node/work; do
+for root in /var/lib/orb-node/work /var/lib/sandboxed-node/work /workspace/repo; do
   [ -d "$root" ] || continue
   for gitdir in $(find "$root" -maxdepth 4 -name .git -type d 2>/dev/null); do
     repo_dir=$(dirname "$gitdir")
     cd "$repo_dir" 2>/dev/null || continue
     status_out=$(git status --porcelain 2>/dev/null)
-    [ -n "$status_out" ] || continue
-    ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
-    tmp_idx=$(mktemp "/tmp/orb-wip-index.XXXXXX")
-    cp -f "$gitdir/index" "$tmp_idx" 2>/dev/null || true
-    GIT_INDEX_FILE="$tmp_idx" git add -A >/dev/null 2>&1
-    tree_sha=$(GIT_INDEX_FILE="$tmp_idx" git write-tree 2>/dev/null)
-    rm -f "$tmp_idx"
-    if [ -n "$tree_sha" ]; then
-      head_sha=$(git rev-parse --verify HEAD 2>/dev/null || true)
-      if [ -n "$head_sha" ]; then
-        commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" -p "$head_sha" 2>/dev/null)
-      else
-        commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" 2>/dev/null)
-      fi
-      if [ -n "$commit_sha" ]; then
-        git update-ref "refs/orb-pre-stop/latest" "$commit_sha" 2>/dev/null || true
-        git bundle create "$repo_dir/.orb-pre-stop-wip.bundle" "$commit_sha" >/dev/null 2>&1 || true
-        if git remote get-url origin >/dev/null 2>&1; then
-          if timeout 25s git push --force origin "$commit_sha:$ORB_WIP_REF" >/dev/null 2>&1; then
-            ORB_CHECKPOINT_PUSHED=$((ORB_CHECKPOINT_PUSHED + 1))
-          else
-            ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
-          fi
+    head_sha=$(git rev-parse --verify HEAD 2>/dev/null || true)
+    unpushed=0
+    if [ -z "$status_out" ] && [ -n "$head_sha" ]; then
+      if git remote get-url origin >/dev/null 2>&1; then
+        rem_refs=$(git for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null)
+        if [ -z "$rem_refs" ]; then
+          unpushed=1
+        elif [ -n "$(git rev-list -n 1 HEAD --not --remotes=origin 2>/dev/null)" ]; then
+          unpushed=1
         fi
       else
-        ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+        local_saved=$(git rev-parse --verify refs/orb-pre-stop/latest 2>/dev/null || true)
+        if [ "$local_saved" != "$head_sha" ]; then
+          unpushed=1
+        fi
+      fi
+    fi
+    if [ -z "$status_out" ] && [ "$unpushed" -eq 0 ]; then
+      continue
+    fi
+    ORB_CHECKPOINT_REPOS=$((ORB_CHECKPOINT_REPOS + 1))
+    commit_sha=""
+    if [ -n "$status_out" ]; then
+      tmp_idx=$(mktemp "/tmp/orb-wip-index.XXXXXX")
+      cp -f "$gitdir/index" "$tmp_idx" 2>/dev/null || true
+      GIT_INDEX_FILE="$tmp_idx" git add -A >/dev/null 2>&1
+      tree_sha=$(GIT_INDEX_FILE="$tmp_idx" git write-tree 2>/dev/null)
+      rm -f "$tmp_idx"
+      if [ -n "$tree_sha" ]; then
+        if [ -n "$head_sha" ]; then
+          commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" -p "$head_sha" 2>/dev/null)
+        else
+          commit_sha=$(printf 'chore(orb): pre-expiry WIP checkpoint (%s)\n' '{trigger}' | git commit-tree "$tree_sha" 2>/dev/null)
+        fi
+      fi
+    else
+      commit_sha="$head_sha"
+    fi
+    if [ -n "$commit_sha" ]; then
+      git update-ref "refs/orb-pre-stop/latest" "$commit_sha" 2>/dev/null || true
+      git bundle create "$repo_dir/.orb-pre-stop-wip.bundle" refs/orb-pre-stop/latest >/dev/null 2>&1 || true
+      if git remote get-url origin >/dev/null 2>&1; then
+        if timeout 25s git push --force origin "$commit_sha:$ORB_WIP_REF" >/dev/null 2>&1; then
+          ORB_CHECKPOINT_PUSHED=$((ORB_CHECKPOINT_PUSHED + 1))
+        else
+          ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))
+        fi
       fi
     else
       ORB_CHECKPOINT_FAILED=$((ORB_CHECKPOINT_FAILED + 1))

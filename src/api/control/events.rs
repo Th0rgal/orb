@@ -618,8 +618,8 @@ pub enum CancelMissionOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendQueuedNowOutcome {
-    DeliveredLive,
-    Promoted,
+    DeliveredLive { interrupted_tool: Option<bool> },
+    Promoted { interrupted_tool: Option<bool> },
     NotDelivered,
 }
 

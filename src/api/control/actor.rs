@@ -5127,7 +5127,8 @@ pub(super) async fn control_actor_loop(
                                     let _ = respond.send(Err("message not in queue".to_string()));
                                     continue;
                                 }
-                                if let Some((mid, position, message)) = take_queued_by_id(
+                                let mut did_interrupt_tool: Option<bool> = None;
+                                if let Some((mid, position, mut message)) = take_queued_by_id(
                                     message_id,
                                     running_mission_id,
                                     &mut queue,
@@ -5163,6 +5164,22 @@ pub(super) async fn control_actor_loop(
                                             }
                                             let _ = respond.send(Err(error));
                                             continue;
+                                        }
+                                    }
+                                    if interrupt && did_interrupt_tool.is_none() {
+                                        let signalled = super::super::runners::live_session::interrupt_child_tools(mid);
+                                        if signalled > 0 {
+                                            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                                            if !message.content.starts_with(super::message_handlers::INTERRUPTED_TOOL_SYNTHETIC_BANNER) {
+                                                message.content = format!(
+                                                    "{}{}",
+                                                    super::message_handlers::INTERRUPTED_TOOL_SYNTHETIC_BANNER,
+                                                    message.content
+                                                );
+                                            }
+                                            did_interrupt_tool = Some(true);
+                                        } else {
+                                            did_interrupt_tool = Some(false);
                                         }
                                     }
                                     let persisted = persist_control_queue_if_changed(
@@ -5215,7 +5232,9 @@ pub(super) async fn control_actor_loop(
                                             }
                                         }
                                         prune_empty_provisional_runners(&mut parallel_runners);
-                                        let _ = respond.send(Ok(SendQueuedNowOutcome::DeliveredLive));
+                                        let _ = respond.send(Ok(SendQueuedNowOutcome::DeliveredLive {
+                                            interrupted_tool: did_interrupt_tool,
+                                        }));
                                         continue;
                                     }
                                     if let Err(error) = &persisted {
@@ -5257,7 +5276,7 @@ pub(super) async fn control_actor_loop(
                                     continue;
                                 }
 
-                                let Some((target_mid, position, message)) = take_queued_for_promotion(
+                                let Some((target_mid, position, mut message)) = take_queued_for_promotion(
                                     message_id,
                                     running_mission_id,
                                     &mut queue,
@@ -5297,6 +5316,22 @@ pub(super) async fn control_actor_loop(
                                             }
                                             let _ = respond.send(Err(error));
                                             continue;
+                                        }
+                                    }
+                                    if interrupt && did_interrupt_tool.is_none() {
+                                        let signalled = super::super::runners::live_session::interrupt_child_tools(mid);
+                                        if signalled > 0 {
+                                            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                                            if !message.content.starts_with(super::message_handlers::INTERRUPTED_TOOL_SYNTHETIC_BANNER) {
+                                                message.content = format!(
+                                                    "{}{}",
+                                                    super::message_handlers::INTERRUPTED_TOOL_SYNTHETIC_BANNER,
+                                                    message.content
+                                                );
+                                            }
+                                            did_interrupt_tool = Some(true);
+                                        } else {
+                                            did_interrupt_tool = Some(false);
                                         }
                                     }
                                 }
@@ -5380,7 +5415,9 @@ pub(super) async fn control_actor_loop(
                                     }
                                 }
 
-                                let _ = respond.send(Ok(SendQueuedNowOutcome::Promoted));
+                                let _ = respond.send(Ok(SendQueuedNowOutcome::Promoted {
+                                    interrupted_tool: did_interrupt_tool,
+                                }));
                             }
                             ControlCommand::ClearQueue { mission_id, respond } => {
                                 let main_mission_id = if running.is_some() {

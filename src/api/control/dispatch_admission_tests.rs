@@ -19725,3 +19725,68 @@ async fn remote_opencode_writer_reattaches_sqlite_session_and_gateway_fails_sync
         "wiped OpenCode workspace without session DB must require replacement, got: {wiped_text}"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn rejected_interrupt_now_does_not_signal_local_child_tools() {
+    let h = Harness::new().await;
+    let writer = h.writer(MissionStatus::Active, Some("#42")).await;
+
+    // Stand-in local harness process with a live `sleep 30` child tool registered
+    // under `writer.id` in `live_session`.
+    let mut parent = tokio::process::Command::new("bash")
+        .arg("-c")
+        .arg("sleep 30; sleep 5")
+        .spawn()
+        .expect("spawn stand-in harness");
+    let root_pid = parent.id().expect("stand-in harness pid");
+    let _pid_guard = crate::api::runners::live_session::register_harness_pid(writer.id, root_pid);
+
+    for _ in 0..40 {
+        if crate::node::tool_interrupt::has_inflight_child_tools(root_pid, None) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let child_pids_before =
+        crate::node::tool_interrupt::collect_inflight_child_tool_pids(root_pid, None);
+    assert!(
+        !child_pids_before.is_empty(),
+        "expected in-flight child tool PID before post_message"
+    );
+
+    // Send `interrupt_now` with a stale `continue_identity` (`github_pr: "#99"` != `"#42"`).
+    // `AdmitDispatch` must reject with 409 `writer_identity_stale` BEFORE any local
+    // child tool receives SIGINT.
+    let res = h
+        .request(
+            false,
+            writer.id,
+            json!({
+                "content": "Urgent steer with stale identity",
+                "mode": "interrupt_now",
+                "continue_identity": {
+                    "project": "lido",
+                    "track": "trio-reserve1",
+                    "github_pr": "#99"
+                }
+            }),
+        )
+        .await;
+    let status = res.status();
+    let body = res.text().await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.contains("writer_identity_stale"),
+        "expected writer_identity_stale rejection, got: {body}"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let child_pids_after =
+        crate::node::tool_interrupt::collect_inflight_child_tool_pids(root_pid, None);
+    assert_eq!(
+        child_pids_after, child_pids_before,
+        "rejected interrupt_now request must not SIGINT active writer's child tools"
+    );
+    let _ = parent.kill().await;
+}

@@ -5051,6 +5051,115 @@ async fn failed_pre_stop_checkpoint_remains_eligible_for_retry() {
         extended.pre_stop_ran_at.is_none(),
         "extend() must reset pre_stop_ran_at for subsequent expiry/teardown checkpoints"
     );
+
+    // 4. Execute the generated checkpoint script against a real git repo + bare `origin`
+    // to verify clean worktrees with unpushed local commits are preserved and pushed!
+    let git_fixture = tempfile::tempdir().unwrap();
+    let bare_origin = git_fixture.path().join("origin.git");
+    let work_root = git_fixture.path().join("work");
+    let repo_dir = work_root.join("mission-repo");
+    std::fs::create_dir_all(&work_root).unwrap();
+
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    std::fs::create_dir_all(&bare_origin).unwrap();
+    git(&bare_origin, &["init", "--bare", "-b", "main"]);
+    git(
+        git_fixture.path(),
+        &[
+            "clone",
+            bare_origin.to_str().unwrap(),
+            repo_dir.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(
+        repo_dir.join("Proof.lean"),
+        "theorem t1 : True := trivial\n",
+    )
+    .unwrap();
+    git(&repo_dir, &["add", "Proof.lean"]);
+    git(&repo_dir, &["commit", "-m", "initial"]);
+    git(&repo_dir, &["push", "-u", "origin", "HEAD:main"]);
+
+    let rewritten_script = last_script.replace(
+        "for root in /var/lib/orb-node/work /var/lib/sandboxed-node/work /workspace/repo; do",
+        &format!("for root in '{}'; do", work_root.display()),
+    );
+    let wip_ref = after_ok
+        .pre_stop_summary
+        .as_ref()
+        .and_then(|v| v.get("wip_ref"))
+        .and_then(Value::as_str)
+        .expect("wip_ref in summary");
+
+    // 4a. Clean repo whose HEAD is already on `origin/main` is skipped cleanly.
+    let clean_synced = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&rewritten_script)
+        .output()
+        .unwrap();
+    assert!(clean_synced.status.success());
+    let synced_stdout = String::from_utf8_lossy(&clean_synced.stdout);
+    assert!(
+        synced_stdout.contains("dirty_repos=0 pushed=0 failed=0"),
+        "expected synced clean repo to skip, got: {synced_stdout}"
+    );
+
+    // 4b. Worker commits locally (`git status --porcelain` is empty!) without pushing.
+    // Checkpoint must detect the unpushed commit on HEAD, bundle it, and push to `ORB_WIP_REF`!
+    std::fs::write(
+        repo_dir.join("Proof.lean"),
+        "theorem t1 : True := trivial\ntheorem t2 : True := trivial\n",
+    )
+    .unwrap();
+    git(&repo_dir, &["add", "Proof.lean"]);
+    git(&repo_dir, &["commit", "-m", "local unpushed lemma"]);
+    assert!(
+        git(&repo_dir, &["status", "--porcelain"]).is_empty(),
+        "precondition: worktree must be clean"
+    );
+    let local_head = git(&repo_dir, &["rev-parse", "HEAD"]);
+
+    let clean_unpushed = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&rewritten_script)
+        .output()
+        .unwrap();
+    assert!(
+        clean_unpushed.status.success(),
+        "checkpoint script failed: {}",
+        String::from_utf8_lossy(&clean_unpushed.stderr)
+    );
+    let unpushed_stdout = String::from_utf8_lossy(&clean_unpushed.stdout);
+    assert!(
+        unpushed_stdout.contains("dirty_repos=1 pushed=1 failed=0"),
+        "expected clean repo with unpushed commit to push, got: {unpushed_stdout}"
+    );
+    let remote_wip_sha = git(&bare_origin, &["rev-parse", wip_ref]);
+    assert_eq!(
+        remote_wip_sha, local_head,
+        "unpushed HEAD commit must be preserved on origin WIP ref"
+    );
+    assert!(
+        repo_dir.join(".orb-pre-stop-wip.bundle").exists(),
+        "local bundle backup must also be written"
+    );
 }
 
 #[tokio::test]

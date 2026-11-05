@@ -161,6 +161,30 @@ fn resolve_base_work_dir(
     }
 }
 
+fn resolve_remote_ask_cwd(
+    workspace_mission_id: Uuid,
+    transferred_root: Option<String>,
+    working_directory: Option<&str>,
+) -> Result<(Option<String>, String), (StatusCode, String)> {
+    let explicit_remote_wd = match working_directory.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(directory) => {
+            if !std::path::Path::new(directory).is_absolute() {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "Remote working_directory must be absolute".to_string(),
+                ));
+            }
+            Some(directory.to_string())
+        }
+        None => None,
+    };
+    let cwd_override = transferred_root.or(explicit_remote_wd);
+    let display_cwd = cwd_override
+        .clone()
+        .unwrap_or_else(|| format!("/var/lib/orb-node/work/{workspace_mission_id}"));
+    Ok((cwd_override, display_cwd))
+}
+
 /// Resolve a remote `orb-node` (`sandboxed-node`) Ask target when the mission
 /// was placed on a remote or managed VM. Returns `Ok(None)` for ordinary local
 /// host/nspawn missions so they continue using [`resolve_base_work_dir`].
@@ -213,18 +237,11 @@ async fn resolve_remote_ask_target(
             .await
             .map_err(|e| (StatusCode::CONFLICT, e))?
             .and_then(|t| t.destination_root);
-    let explicit_remote_wd = mission
-        .working_directory
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| {
-            p.starts_with("/var/lib/orb-node/") || p.starts_with("/var/lib/sandboxed-node/")
-        })
-        .map(str::to_string);
-    let cwd_override = transferred_root.or(explicit_remote_wd);
-    let display_cwd = cwd_override
-        .clone()
-        .unwrap_or_else(|| format!("/var/lib/orb-node/work/{workspace_mission_id}"));
+    let (cwd_override, display_cwd) = resolve_remote_ask_cwd(
+        workspace_mission_id,
+        transferred_root,
+        mission.working_directory.as_deref(),
+    )?;
     Ok(Some(RemoteAskTarget {
         node,
         secret,
@@ -782,5 +799,40 @@ mod tests {
         assert!(
             crate::workspace::mission_workspace_dir_for_workspace(&workspace, mission).exists()
         );
+    }
+
+    #[test]
+    fn remote_ask_cwd_honors_arbitrary_absolute_working_directory_and_rejects_relative() {
+        let mid = Uuid::parse_str("abcd0000-0000-4000-8000-000000000000").unwrap();
+
+        // Explicit remote directory outside `/var/lib/orb-node/` (e.g. `/home/orb/project`
+        // or `/workspace/repo`) must be preserved as `cwd_override`.
+        let (cwd_override, display_cwd) =
+            resolve_remote_ask_cwd(mid, None, Some("/home/orb/project")).unwrap();
+        assert_eq!(cwd_override.as_deref(), Some("/home/orb/project"));
+        assert_eq!(display_cwd, "/home/orb/project");
+
+        // Transferred root takes precedence over mission.working_directory, matching `remote_jobs.rs`.
+        let (tx_override, tx_display) = resolve_remote_ask_cwd(
+            mid,
+            Some("/var/lib/orb-node/transferred/repo".to_string()),
+            Some("/home/orb/project"),
+        )
+        .unwrap();
+        assert_eq!(
+            tx_override.as_deref(),
+            Some("/var/lib/orb-node/transferred/repo")
+        );
+        assert_eq!(tx_display, "/var/lib/orb-node/transferred/repo");
+
+        // Default (`None`) leaves `cwd_override` as `None` and displays the default remote mission root.
+        let (default_override, default_display) = resolve_remote_ask_cwd(mid, None, None).unwrap();
+        assert_eq!(default_override, None);
+        assert_eq!(default_display, format!("/var/lib/orb-node/work/{mid}"));
+
+        // Relative remote working_directory is rejected with 409 Conflict, matching `remote_jobs.rs`.
+        let (status, err) = resolve_remote_ask_cwd(mid, None, Some("relative/subdir")).unwrap_err();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(err, "Remote working_directory must be absolute");
     }
 }
