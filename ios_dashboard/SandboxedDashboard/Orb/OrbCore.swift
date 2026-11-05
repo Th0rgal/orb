@@ -66,6 +66,7 @@ struct OrbPlacementCommitItem: Equatable, Sendable {
     let project: String?
     let folder: String
     let placementRevision: UInt64
+    var isPreview: Bool = false
 }
 
 struct OrbApprovalTransferConfirmationError: LocalizedError, Equatable, Sendable {
@@ -191,6 +192,11 @@ struct OrbRow: Identifiable, Hashable, Sendable {
                 dict["project"] = resolved.project.isEmpty ? .null : .string(resolved.project)
                 dict["folder"] = .string(resolved.folder)
                 dict["placement_revision"] = .number(Double(resolved.revision))
+                if resolved.projected {
+                    dict["orb_projected_move"] = .bool(true)
+                } else {
+                    dict.removeValue(forKey: "orb_projected_move")
+                }
                 raw = .object(dict)
             } else {
                 raw = value
@@ -202,12 +208,17 @@ struct OrbRow: Identifiable, Hashable, Sendable {
             raw = value
         }
     }
-    func withPatchedPlacement(project nextProject: String, folder nextFolder: String, revision nextRevision: UInt64) -> Self {
+    func withPatchedPlacement(project nextProject: String, folder nextFolder: String, revision nextRevision: UInt64, isPreview: Bool = false) -> Self {
         var nextRaw = raw
         if case var .object(dict) = nextRaw {
             dict["project"] = nextProject.isEmpty ? .null : .string(nextProject)
             dict["folder"] = .string(nextFolder)
             dict["placement_revision"] = .number(Double(nextRevision))
+            if isPreview {
+                dict["orb_projected_move"] = .bool(true)
+            } else {
+                dict.removeValue(forKey: "orb_projected_move")
+            }
             nextRaw = .object(dict)
         }
         return Self(
@@ -350,9 +361,10 @@ enum OrbHierarchy {
         rawTitle: String,
         rawStatus: String,
         rawBackend: String
-    ) -> (project: String, folder: String, revision: UInt64) {
+    ) -> (project: String, folder: String, revision: UInt64, projected: Bool) {
         let payloadParent = OrbRow.extractPayloadParentID(from: value)
         let directBtw = OrbRow.hasDirectBtwTag(in: value)
+        let isProjectedPreview = value["orb_projected_move"].flag
         let hasProjectField: Bool = {
             if case .object(let d) = value { return d["project"] != nil }
             return false
@@ -365,7 +377,7 @@ enum OrbHierarchy {
             if case .object(let d) = value { return d["placement_revision"] != nil }
             return false
         }()
-        let hasPlacement = hasProjectField || hasFolderField || hasRevField
+        let hasPlacement = !isProjectedPreview && (hasProjectField || hasFolderField || hasRevField)
 
         lock.lock()
         defer { lock.unlock() }
@@ -378,12 +390,14 @@ enum OrbHierarchy {
         var resolvedProject = rawProject
         var resolvedFolder = incFolder
         var resolvedRev = rawRev
+        var isProjected = isProjectedPreview
 
         if let cur = placements[id] {
             if !hasPlacement {
                 resolvedProject = cur.project
                 resolvedFolder = isNested ? "" : cur.folder
                 resolvedRev = cur.revision
+                isProjected = cur.pendingOpID != 0
             } else {
                 let effProj = hasProjectField ? rawProject : cur.project
                 let effFolder = isNested ? "" : (hasFolderField ? rawFolder : cur.folder)
@@ -412,10 +426,12 @@ enum OrbHierarchy {
                     resolvedProject = nextState.project
                     resolvedFolder = nextState.folder
                     resolvedRev = nextState.revision
+                    isProjected = nextState.pendingOpID != 0
                 } else {
                     resolvedProject = cur.project
                     resolvedFolder = isNested ? "" : cur.folder
                     resolvedRev = cur.revision
+                    isProjected = cur.pendingOpID != 0
                 }
             }
         } else if hasPlacement {
@@ -426,31 +442,50 @@ enum OrbHierarchy {
                 pendingOpID: 0
             )
             placements[id] = initState
+            isProjected = false
         }
 
         var seen = seenFacts[id] ?? Seen()
         if !rawTitle.isEmpty { seen.title = rawTitle }
-        if !resolvedProject.isEmpty || hasProjectField { seen.project = resolvedProject }
-        seen.folder = resolvedFolder
+        if !isProjectedPreview && (!resolvedProject.isEmpty || hasProjectField) { seen.project = resolvedProject }
+        if !isProjectedPreview { seen.folder = resolvedFolder }
         if !rawStatus.isEmpty && rawStatus != "unknown" { seen.status = rawStatus }
         if !rawBackend.isEmpty { seen.backend = rawBackend }
         seenFacts[id] = seen
 
-        return (resolvedProject, resolvedFolder, resolvedRev)
+        return (resolvedProject, resolvedFolder, resolvedRev, isProjected)
     }
 
     static func observe(_ row: OrbRow) {
         guard !row.id.isEmpty, !row.isPlaceholder else { return }
-        _ = observeAndResolvePlacement(
-            id: row.id,
-            value: row.raw,
-            rawProject: row.project,
-            rawFolder: row.folder,
-            rawRev: row.placementRevision,
-            rawTitle: row.raw["title"].text,
-            rawStatus: row.state,
-            rawBackend: row.backend
-        )
+        // Re-observing an already-constructed `OrbRow` records sticky hierarchy links and
+        // display facts without re-running `placementMergeStep` on reconciled row fields.
+        let payloadParent = OrbRow.extractPayloadParentID(from: row.raw)
+        let directBtw = OrbRow.hasDirectBtwTag(in: row.raw)
+        let isProjectedPreview = row.raw["orb_projected_move"].flag
+        let rawTitle = row.raw["title"].text
+        lock.lock()
+        defer { lock.unlock() }
+        goneIDs.remove(row.id)
+        if let payloadParent { parents[row.id] = payloadParent }
+        if directBtw { btwIDs.insert(row.id) }
+        if isNestedParent(id: row.id), var cur = placements[row.id], !cur.folder.isEmpty {
+            cur.folder = ""
+            placements[row.id] = cur
+        }
+        var seen = seenFacts[row.id] ?? Seen()
+        if !rawTitle.isEmpty { seen.title = rawTitle }
+        if !isProjectedPreview {
+            if !row.project.isEmpty { seen.project = row.project }
+            seen.folder = isNestedParent(id: row.id) ? "" : row.folder
+        }
+        if !row.state.isEmpty && row.state != "unknown" { seen.status = row.state }
+        if !row.backend.isEmpty { seen.backend = row.backend }
+        seenFacts[row.id] = seen
+    }
+
+    private static func isNestedParent(id: String) -> Bool {
+        hasNestedParentLocked(id: id, payloadParent: nil, directBtw: false)
     }
 
     static func stageOptimisticPlacement(

@@ -900,6 +900,33 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderA")
         XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 1)
         XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, 0)
+
+        // Stale list row reconciled during an optimistic move (`OrbRow` -> `openBeyondPage` -> `filterMobile`)
+        // MUST preserve `pendingOpID` and rollback state across repeated `OrbHierarchy.observe` passes:
+        let op3 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "default", toFolder: "TargetFolder", opID: op3)
+        let staleListed = OrbRow(.object([
+            "id": .string("rapid-ios"),
+            "project": .string("assistant"),
+            "folder": .string("FolderA"),
+            "placement_revision": .number(1),
+            "status": .string("active")
+        ]))
+        XCTAssertEqual(staleListed.project, "default")
+        XCTAssertEqual(staleListed.folder, "TargetFolder")
+        XCTAssertTrue(staleListed.raw["orb_projected_move"].flag)
+        _ = OrbMissionTree.openBeyondPage([staleListed], extra: [staleListed])
+        let filtered = OrbMissionTree.filterMobile([staleListed])
+        XCTAssertEqual(filtered.first?.project, "default")
+        XCTAssertEqual(filtered.first?.folder, "TargetFolder")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op3)
+        let redecoded = OrbRow(staleListed.raw)
+        XCTAssertEqual(redecoded.project, "default")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op3)
+        XCTAssertTrue(OrbHierarchy.rollbackOptimisticPlacement(id: "rapid-ios", ackOpID: op3))
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.project, "assistant")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderA")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 1)
         OrbHierarchy.reset()
     }
 }

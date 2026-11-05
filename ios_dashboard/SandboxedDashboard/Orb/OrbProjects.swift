@@ -1628,7 +1628,8 @@ struct OrbProjectPage: View {
             nextMissions.append(row.withPatchedPlacement(
                 project: targetProj,
                 folder: move.folder,
-                revision: move.placementRevision
+                revision: move.placementRevision,
+                isPreview: move.isPreview
             ))
             changed = true
         }
@@ -2164,7 +2165,8 @@ final class OrbMoveClipboard {
                     missionID: mid,
                     project: project,
                     folder: isChild ? "" : normalizedFolder,
-                    placementRevision: rev
+                    placementRevision: rev,
+                    isPreview: true
                 )
             }
             NotificationCenter.default.post(
