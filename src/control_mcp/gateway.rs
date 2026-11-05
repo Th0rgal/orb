@@ -1836,6 +1836,16 @@ async fn handle_fleet_sweep(
         .get("include_completed")
         .and_then(Value::as_bool)
         .unwrap_or(true);
+    let offset = args
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(100_000) as usize;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(128)
+        .clamp(1, 256) as usize;
     let include_machines = args
         .get("include_machines")
         .and_then(Value::as_bool)
@@ -1873,12 +1883,15 @@ async fn handle_fleet_sweep(
         .map_err(|_| ToolError::denied("Mission store unavailable"))?
         .ok_or_else(|| ToolError::invalid("Parent mission not found"))?;
 
-    let mut descendants = Vec::new();
+    const MAX_TRAVERSED_DESCENDANTS: usize = 4096;
+    let mut all_descendants = Vec::new();
+    let mut traversal_truncated = false;
     let seed_roots = fork_lineage(&store, parent_id).await;
     let mut visited: std::collections::HashSet<Uuid> = seed_roots.iter().copied().collect();
     let mut queue: std::collections::VecDeque<Uuid> = seed_roots.into_iter().collect();
     while let Some(cur) = queue.pop_front() {
-        if descendants.len() >= 128 {
+        if all_descendants.len() >= MAX_TRAVERSED_DESCENDANTS {
+            traversal_truncated = true;
             break;
         }
         if let Ok(children) = store.get_child_missions(cur).await {
@@ -1892,8 +1905,11 @@ async fn handle_fleet_sweep(
                     }
                 }
                 queue.push_back(child.id);
-                descendants.push(child);
-                if descendants.len() >= 128 {
+                all_descendants.push(child);
+                if all_descendants.len() >= MAX_TRAVERSED_DESCENDANTS {
+                    if !queue.is_empty() {
+                        traversal_truncated = true;
+                    }
                     break;
                 }
             }
@@ -1910,19 +1926,42 @@ async fn handle_fleet_sweep(
         .map(|info| (info.mission_id, info))
         .collect();
 
-    let mut workers = Vec::with_capacity(descendants.len());
+    let mut matching_descendants = Vec::with_capacity(all_descendants.len());
     let mut workers_active = 0usize;
-    let mut in_flight_count = 0usize;
-    let mut loop_count = 0usize;
-    for worker in descendants {
+    for worker in all_descendants {
         let is_terminal = worker.status.is_terminal()
             || worker.status == crate::api::control::MissionStatus::Acknowledged;
-        if !include_completed && is_terminal {
-            continue;
-        }
         if !is_terminal {
             workers_active += 1;
         }
+        if !include_completed && is_terminal {
+            continue;
+        }
+        matching_descendants.push((worker, is_terminal));
+    }
+
+    let workers_matched = matching_descendants.len();
+    let page_end = offset.saturating_add(limit).min(workers_matched);
+    let has_more_filtered = page_end < workers_matched;
+    let truncated = has_more_filtered || traversal_truncated;
+    let next_offset = if has_more_filtered {
+        Some(page_end)
+    } else {
+        None
+    };
+    let workers_omitted =
+        workers_matched.saturating_sub(page_end.saturating_sub(offset.min(workers_matched)));
+
+    let page_slice = if offset < workers_matched {
+        &matching_descendants[offset..page_end]
+    } else {
+        &[][..]
+    };
+
+    let mut workers = Vec::with_capacity(page_slice.len());
+    let mut in_flight_count = 0usize;
+    let mut loop_count = 0usize;
+    for (worker, _is_terminal) in page_slice {
         let stored_events = store
             .get_latest_events(worker.id, 60)
             .await
@@ -2063,9 +2102,15 @@ async fn handle_fleet_sweep(
     let mut out = json!({
         "parent_mission_id": parent_id,
         "generated_at": now.to_rfc3339(),
+        "truncated": truncated,
+        "next_offset": next_offset,
         "summary": {
-            "workers_total": workers.len(),
+            "workers_total": workers_matched,
+            "workers_returned": workers.len(),
+            "workers_omitted": workers_omitted,
             "workers_active": workers_active,
+            "truncated": truncated,
+            "next_offset": next_offset,
             "tool_call_in_flight": in_flight_count,
             "suspected_loops": loop_count,
             "vms_online": vms_online,

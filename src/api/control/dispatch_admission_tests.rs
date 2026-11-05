@@ -20307,7 +20307,7 @@ async fn fallback_remote_steering_preserves_children_and_fleet_sweep_includes_fo
     };
     let Json(sweep_resp) = crate::control_mcp::gateway::call(
         State(h.state.clone()),
-        Extension(forked_principal),
+        Extension(forked_principal.clone()),
         Json(sweep_call),
     )
     .await;
@@ -20327,4 +20327,128 @@ async fn fallback_remote_steering_preserves_children_and_fleet_sweep_includes_fo
         "fleet sweep from forked coordinator must include its own workers, got: {worker_ids:?}"
     );
     assert_eq!(sweep_resp["result"]["summary"]["workers_active"], json!(2));
+    assert_eq!(sweep_resp["result"]["truncated"], json!(false));
+    assert_eq!(sweep_resp["result"]["next_offset"], Value::Null);
+
+    // 3. Verify `get_fleet_sweep(include_completed=false)` filters BEFORE applying `limit`
+    //    (so >128 terminal children never starve later active children or deeper active
+    //    grandchildren) and exposes `truncated` + `next_offset` pagination.
+    for i in 0..135 {
+        let done = store
+            .create_mission_with_parent(
+                Some(&format!("Terminal Sibling {i}")),
+                None,
+                None,
+                None,
+                None,
+                false,
+                Some("opencode"),
+                None,
+                Some(forked_coord.id),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(done.id, MissionStatus::Completed)
+            .await
+            .unwrap();
+    }
+    let late_active_parent = store
+        .create_mission_with_parent(
+            Some("Late Completed Subcoordinator"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(forked_coord.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(late_active_parent.id, MissionStatus::Completed)
+        .await
+        .unwrap();
+    let deep_active_worker = store
+        .create_mission_with_parent(
+            Some("Deep Active Grandchild Beyond 128"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(late_active_parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(deep_active_worker.id, MissionStatus::Active)
+        .await
+        .unwrap();
+
+    let Json(active_only_page1) = crate::control_mcp::gateway::call(
+        State(h.state.clone()),
+        Extension(forked_principal.clone()),
+        Json(crate::control_mcp::gateway::Call {
+            name: "get_fleet_sweep".into(),
+            arguments: json!({
+                "include_completed": false,
+                "include_machines": false,
+                "limit": 2
+            }),
+        }),
+    )
+    .await;
+    assert_eq!(active_only_page1["ok"], true, "{active_only_page1}");
+    assert_eq!(
+        active_only_page1["result"]["summary"]["workers_active"],
+        json!(3),
+        "all 3 active workers across >128 terminal siblings must be counted"
+    );
+    assert_eq!(
+        active_only_page1["result"]["summary"]["workers_total"],
+        json!(3)
+    );
+    assert_eq!(
+        active_only_page1["result"]["summary"]["workers_returned"],
+        json!(2)
+    );
+    assert_eq!(
+        active_only_page1["result"]["summary"]["workers_omitted"],
+        json!(1)
+    );
+    assert_eq!(active_only_page1["result"]["truncated"], json!(true));
+    assert_eq!(active_only_page1["result"]["next_offset"], json!(2));
+
+    let Json(active_only_page2) = crate::control_mcp::gateway::call(
+        State(h.state.clone()),
+        Extension(forked_principal),
+        Json(crate::control_mcp::gateway::Call {
+            name: "get_fleet_sweep".into(),
+            arguments: json!({
+                "include_completed": false,
+                "include_machines": false,
+                "offset": 2,
+                "limit": 2
+            }),
+        }),
+    )
+    .await;
+    assert_eq!(active_only_page2["ok"], true, "{active_only_page2}");
+    assert_eq!(active_only_page2["result"]["truncated"], json!(false));
+    assert_eq!(active_only_page2["result"]["next_offset"], Value::Null);
+    let page2_ids: Vec<String> = active_only_page2["result"]["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w["mission_id"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(page2_ids, vec![deep_active_worker.id.to_string()]);
 }

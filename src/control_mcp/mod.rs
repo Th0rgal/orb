@@ -212,6 +212,19 @@ pub fn registry() -> Vec<Tool> {
                     "default": true,
                     "description": "Include terminal child missions in `workers` (default true)."
                 },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Offset into the filtered worker list (use `next_offset` from a truncated sweep to paginate)."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 256,
+                    "default": 128,
+                    "description": "Maximum filtered workers returned in `workers` (default 128, max 256)."
+                },
                 "include_machines": {
                     "type": "boolean",
                     "default": true,
