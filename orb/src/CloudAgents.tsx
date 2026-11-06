@@ -106,8 +106,8 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
     if (busy() || !chosen?.available || !rawPrompt || !p.project) return false;
     if (images.length && !canAttach()) { setError(cloudAttachmentBlock(provider(), chosen) ?? ''); return false; }
     const cloud = { provider: provider(), account: chosen.id, ...(model() ? {model: model()} : {}), ...(modelParams().length ? {model_params: modelParams()} : {}), ...(repo() ? {repository: repo()} : {}), ...(ref() ? {git_ref: ref()} : {}) };
-    const tags = p.path ? [`orb-folder:${p.path}`] : [];
-    const signature = JSON.stringify({ prompt: rawPrompt, images: images.map(i => i.id), project: p.project, tags, cloud });
+    const folder = p.path ? p.path.trim() : "";
+    const signature = JSON.stringify({ prompt: rawPrompt, images: images.map(i => i.id), project: p.project, folder, cloud });
     // Show the conversation the mission will open into right away: the prompt
     // as its first bubble, the Working row and the composer in place.
     const seed: CloudLaunchSeed = { prompt: rawPrompt, images, provider: provider(), account: chosen.id };
@@ -118,7 +118,7 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
         const sent = images.length ? imagePrompt(rawPrompt, await stageRemoteImages(images, undefined, "core"), images) : rawPrompt;
         attempt = { signature, key: crypto.randomUUID(), prompt: sent };
       }
-      const m = await launchCloud({ title: rawPrompt.slice(0, 100), prompt: attempt.prompt, project: p.project, tags, cloud, idempotency_key: attempt.key });
+      const m = await launchCloud({ title: rawPrompt.slice(0, 100), prompt: attempt.prompt, project: p.project, ...(folder ? { folder } : {}), cloud, idempotency_key: attempt.key });
       cloudLaunchSeeds.set(m.id, seed);
       attempt = undefined;
       p.onCreated(m);

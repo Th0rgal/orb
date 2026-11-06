@@ -1,4 +1,4 @@
-import { deleteFileOptimistically, fileMoveKey, isFilePathPending, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, waitForFilePathSettled, withMovedMissions } from "./moves";
+import { deleteFileOptimistically, fileMoveKey, isFilePathPending, mergeArrivingMissions, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, upsertMissionPreservingOrder, waitForFilePathSettled, withMovedMissions } from "./moves";
 import { renameOptimistically } from "./renames";
 import { isArchivable, isReopenable, isRunning, isLive, isWorking, presentedStatus } from "./missionStatus";
 import { swallow } from "./log";
@@ -8,7 +8,7 @@ import {nativeComposerDrop} from "./composerDrop";
 import {importProjectFiles} from "./projectFileImport";
 import {backgroundUploads,cancelBackgroundUpload,formatFileSize,pauseBackgroundUpload,resumeBackgroundUpload,type UploadSource} from "./uploads";
 import {subscribeProjectContext} from "./projectContext";
-import { assertFolderHasNoWork, folderWorkError, moveFolderWork, makeFileReference, readFileReference, makeCronReference, readCronReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
+import { assertFolderHasNoWork, didServerCascadeFolderTransfer, folderWorkError, moveFolderWork, makeFileReference, readFileReference, makeCronReference, readCronReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
 import { FolderActivityIcon, folderActivity } from "./FolderActivity";
 import { createSidebarRequests } from "./sidebarRequests";
 import { folderLabel, setFolderLabel } from "./folderLabels";
@@ -20,7 +20,7 @@ import { readProjectFileVersion } from "./projectContext";
 import { makeCutMission, moveMissions, planMissionMoves, readCutMission } from "./missionMove";
 import { RunningWorkers, deleteDescendants, descendantsSentence, pausedMissionIds, requiresDescendantOptIn, runningWorkerIds } from "./deleteRunning";
 import { ForkMission } from "./ForkMission";
-import { For, Show, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch, lazy } from "solid-js";
+import { For, Show, Suspense, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch, lazy } from "solid-js";
 import { mergeById, pollWhileVisible } from "./poll";
 import { createStore, reconcile } from "solid-js/store";
 import * as Ic from "./icons";
@@ -63,6 +63,8 @@ import {
   projectsVersion,
   getProjectController,
   controllerAction,
+  ApprovalTransferConfirmationRequiredError,
+  type ApprovalTransferPolicy,
   type ControllerView as ControllerData,
 } from "./api";
 import { CronGlyph, untilLabel } from "./Controller";
@@ -84,11 +86,12 @@ import { SidebarTree } from "./Tree";
 import { type TreeRow } from "./treeModel";
 import { deletingIds, setDeletingIds, createTreeSelection } from "./tree/selection";
 import { createArchivePager } from "./tree/archivePager";
-import { createMissionMoves } from "./tree/moves";
+import { createMissionMoves, type ApprovalConfirmationPrompt } from "./tree/moves";
+const ApprovalTransferDialog = lazy(() => import("./ApprovalTransferDialog"));
 import { createProjectTree, missionFolder, missionIdFromTreeId, type Node, type RowData } from "./tree/TreeView";
 import { MachineBadge, missionMachine, missionCopyId, rowDetail, ROW_TIP_ID, launchedToggle as launchedToggleView, type RowTipContent } from "./tree/missionRow";
 import { FileSkeleton } from "./Skeleton";
-import { excludeBtwMissions, isBtwMission, isPartialList, mergeMission, reconcileMissionList, type Misses, resolvedParents, withHierarchy } from "./missionHierarchy";
+import { excludeBtwMissions, isBtwMission, isPartialList, mergeMission, type Misses, type PlacementCommitItem, reconcileMissionList, resolvedParents, withHierarchy } from "./missionHierarchy";
 import { forkLeaders, missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "./missionTree";
 
 export { isMissionDeleting } from "./tree/selection";
@@ -158,7 +161,7 @@ export function LiveProjectsSection(p: {
     // Pending moves: rows leave their old project and appear in the new one at once.
     const own = (missions[slug] ?? []).filter(m => !movingOutOf(m.id, slug) && (!m.project || m.project === slug));
     const arriving = pendingPlaceMoves().size ? missionsMovedInto(slug, [...Object.values(missions).flat(), ...(p.activityMissions ?? [])]).filter(m => !own.some(o => o.id === m.id)) : [];
-    const rows = withMovedMissions([...arriving, ...own]).map(withHierarchy);
+    const rows = withMovedMissions(mergeArrivingMissions(own, arriving)).map(withHierarchy);
     const current = currentMission();
     // A paginated project list may not contain an older open conversation, and
     // the open conversation's live status updates ahead of the project poll.
@@ -240,6 +243,8 @@ export function LiveProjectsSection(p: {
   const descendantsConfirmed = new Set<string>();
   const deleteList = (ids: readonly string[]) => deleteDescendants(ids, allKnownMissions());
   const [stopPrompt, setStopPrompt] = createSignal<{ roots: string[]; workers: number } | null>(null);
+  const [approvalTransferPrompt, setApprovalTransferPrompt] = createSignal<ApprovalConfirmationPrompt | null>(null);
+  const listMisses = new Map<string, Misses>();
   let activeDeleteWorkers = 0;
   let pendingRemoved = new Set<string>();
   let pendingUnmark = new Set<string>();
@@ -265,6 +270,7 @@ export function LiveProjectsSection(p: {
     revealDestination: (slug, path) => { setExpanded(slug, true); if (path) setExpanded(`${slug}:${path}`, true); },
     loadMissions: slug => loadMissions(slug),
     setActionError: error => setActionError(error),
+    onApprovalConfirmationRequired: prompt => setApprovalTransferPrompt(prompt),
   });
   const { tree, archiveNodes, controllerRow, controllerLaunched } = createProjectTree({
     projects, expanded, missions, dirs, dirErrors, crons, controllers, cronUnsupported, cronErrors, archiveExpanded,
@@ -294,7 +300,12 @@ export function LiveProjectsSection(p: {
   /** A moved mission leaves its old listings. Unlike `removeRows` it is not
    * remembered as deleted, so the destination still lists it. */
   const leaveProjects = (id: string, keep: string) => batch(() => {
-    for (const slug of Object.keys(missions)) if (slug !== keep && missions[slug]?.some(m => m.id === id)) setMissions(slug, rows => rows.filter(m => m.id !== id));
+    for (const slug of Object.keys(missions)) {
+      if (slug !== keep) {
+        listMisses.get(slug)?.delete(id);
+        if (missions[slug]?.some(m => m.id === id)) setMissions(slug, rows => rows.filter(m => m.id !== id));
+      }
+    }
   });
   const forgetDeleted = (ids: string[]) => {
     const removed = new Set(ids);
@@ -615,11 +626,11 @@ export function LiveProjectsSection(p: {
       p.open(`pf:${project}:${destination}${selected.slice(prefix.length)}`);
     }
   };
-  const folderMoved = async (slug: string, path: string, destination: string, project = slug, alreadyProjected = false) => {
+  const folderMoved = async (slug: string, path: string, destination: string, project = slug, alreadyProjected = false, serverCascaded = false) => {
     setFolderLabel(slug, path, fileBaseName(path));
     if (!alreadyProjected) applyOptimisticFolderMove(slug, path, destination, project);
     openMovedSelection(slug, path, destination, true, project);
-    try { if (project === slug) await moveFolderWork(slug, path, destination); }
+    try { if (project === slug && !serverCascaded) await moveFolderWork(slug, path, destination); }
     finally { await Promise.all([loadMissions(slug), loadCrons(slug, true)]); }
   };
   const clearDeletedFileUi = (slug: string, path: string, directory: boolean) => {
@@ -696,11 +707,15 @@ export function LiveProjectsSection(p: {
     if (target.directory) {
       applyOptimisticFolderMove(target.slug, target.path, destination);
     }
+    let serverCascaded = false;
     try {
       await moveOptimistically(
         moveKey,
         { kind: "file", fromProject: target.slug, toProject: target.slug, path: destination, fromPath: target.path, directory: !!target.directory },
-        () => transferProjectFile(target.slug, target.path, destination),
+        async () => {
+          const res = await transferProjectFile(target.slug, target.path, destination);
+          serverCascaded = didServerCascadeFolderTransfer(res);
+        },
         label,
       );
     } catch {
@@ -715,7 +730,7 @@ export function LiveProjectsSection(p: {
     if (version !== connectionVersion()) return;
     try {
       if (target.directory) {
-        try { await folderMoved(target.slug, target.path, destination, target.slug, true); }
+        try { await folderMoved(target.slug, target.path, destination, target.slug, true, serverCascaded); }
         finally {
           await refreshFileParents(target.slug, target.path, destination);
           settleMove(moveKey);
@@ -751,9 +766,11 @@ export function LiveProjectsSection(p: {
         if (version !== connectionVersion() || text === consumedFileClipboard || isClipboardReferenceRetired(text) || (parent && !parent.some(e => e.name === fileBaseName(item.path) && e.kind === (item.directory ? "dir" : "file")))) return;
       }
       // Agents and crons belong to their project: only documents cross over.
+      let serverCascaded = false;
       const transfer = async () => {
         if (other && item.directory && !item.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
-        await transferProjectFile(item.slug, item.path, destination, item.copy, slug);
+        const res = await transferProjectFile(item.slug, item.path, destination, item.copy, slug);
+        serverCascaded = didServerCascadeFolderTransfer(res);
       };
       const moveKey = fileMoveKey(item.slug, item.path);
       // A move shows at its destination at once; a copy waits for the server.
@@ -765,7 +782,7 @@ export function LiveProjectsSection(p: {
         await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(slug, path, true)]);
         setExpanded(path ? `${slug}:${path}` : slug, true);
         if (item.copy) return;
-        if (item.directory) await folderMoved(item.slug, item.path, destination, slug);
+        if (item.directory) await folderMoved(item.slug, item.path, destination, slug, false, serverCascaded);
         else if (p.selected() === `pf:${item.slug}:${item.path}`) p.open(`pf:${slug}:${destination}`);
       } finally {
         if (!item.copy) settleMove(moveKey);
@@ -905,22 +922,50 @@ export function LiveProjectsSection(p: {
       void loadDir(detail.slug, "");
     };
     window.addEventListener("orb:project-created", onProjectCreated);
-    const onMissionMoved = (event: Event) => {
-      const { id, project, tags } = (event as CustomEvent<{ id: string; project: string; tags?: string[] }>).detail;
-      const prior = allKnownMissions().find(m => m.id === id);
-      if (!prior) return;
-      // Commit the successful write before waiting for any project refresh.
-      // Reads launched before this acknowledgement may still contain A.
-      const nextTags = tags ?? (prior.tags ?? []).filter(t => !t.startsWith("orb-folder:"));
+    const onPlacementChanged = (event: Event) => {
+      const { moves } = (event as CustomEvent<{ moves?: PlacementCommitItem[] }>).detail ?? {};
+      if (!moves?.length) return;
+      const knownById = new Map(allKnownMissions().map(m => [m.id, m]));
       missionRevision++;
       batch(() => {
-        leaveProjects(id, project);
-        const updated = mergeMission(prior, { id, project, tags: nextTags }, "partial");
-        setMissions(project, rows => [updated, ...(rows ?? []).filter(m => m.id !== id)]);
+        for (const item of moves) {
+          const targetSlug = item.project || "default";
+          leaveProjects(item.mission_id, targetSlug);
+          const prior = knownById.get(item.mission_id);
+          if (prior && !isBtwMission(prior)) {
+            const updated = mergeMission(prior, {
+              id: item.mission_id,
+              project: item.project,
+              folder: item.folder,
+              placement_revision: item.placement_revision,
+            }, "partial");
+            if (!isArchived(updated) || (missions[targetSlug] ?? []).some(m => m.id === item.mission_id)) {
+              setMissions(targetSlug, rows => upsertMissionPreservingOrder(rows ?? [], updated));
+            }
+          } else if ((missions[targetSlug] ?? []).some(m => m.id === item.mission_id)) {
+            setMissions(targetSlug, rows => (rows ?? []).map(m => m.id === item.mission_id
+              ? mergeMission(m, { id: item.mission_id, project: item.project, folder: item.folder, placement_revision: item.placement_revision }, "partial")
+              : m));
+          }
+        }
+        const moveById = new Map(moves.map(item => [item.mission_id, item]));
+        setArchivedMissions(prev => {
+          if (!prev.some(m => moveById.has(m.id))) return prev;
+          return prev.map(m => {
+            const item = moveById.get(m.id);
+            if (!item) return m;
+            return mergeMission(m, {
+              id: m.id,
+              project: item.project,
+              folder: item.folder,
+              placement_revision: item.placement_revision,
+            }, "partial");
+          });
+        });
       });
     };
-    window.addEventListener("orb:mission-moved", onMissionMoved);
-    onCleanup(() => window.removeEventListener("orb:mission-moved", onMissionMoved));
+    window.addEventListener("orb:mission-placement-changed", onPlacementChanged);
+    onCleanup(() => window.removeEventListener("orb:mission-placement-changed", onPlacementChanged));
     const onMissionForked = (event: Event) => {
       const { mission } = (event as CustomEvent<{ mission: Mission }>).detail ?? {};
       const slug = mission?.project?.trim();
@@ -1006,7 +1051,6 @@ export function LiveProjectsSection(p: {
     });
   });
 
-  const listMisses = new Map<string, Misses>();
   const newerThan = (a: Mission, b: Mission) => (Date.parse(a.updated_at || "") || 0) > (Date.parse(b.updated_at || "") || 0);
   const loadMissions = (slug: string, opts?: { transcripts?: boolean; cached?: boolean }) => {
     if (!isConnected()) return Promise.resolve();
@@ -1388,7 +1432,7 @@ export function LiveProjectsSection(p: {
     setCutId(null); setPendingMoves([]); setCutCron(null); setFileClipboard(text); setActionError(null);
     await writeClipboardReference(text, clipboardData);
   };
-  const pasteItems = async (targetSlug: string, targetPath: string, text: string) => {
+  const pasteItems = async (targetSlug: string, targetPath: string, text: string, approvalPolicy: ApprovalTransferPolicy = "check") => {
     const bundle = readItemsReference(text), version = connectionVersion();
     if (!bundle || fileBusy() || movingCron() || isMoving() || text === consumedFileClipboard || isClipboardReferenceRetired(text)) return;
     setFileBusy(true); setActionMenu(null); setActionError(null);
@@ -1433,13 +1477,15 @@ export function LiveProjectsSection(p: {
         try {
           const other = item.slug !== targetSlug;
           const destination = other ? [targetPath, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, targetPath, false);
+          let serverCascaded = false;
           await moveFile(item, destination, async () => {
             if (other && !bundle.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
-            await transferProjectFile(item.slug, item.path, destination, bundle.copy, targetSlug);
+            const res = await transferProjectFile(item.slug, item.path, destination, bundle.copy, targetSlug);
+            serverCascaded = didServerCascadeFolderTransfer(res);
           });
           if (!bundle.copy) {
             movedFolders.set(`${item.slug}:${item.path}`, { destSlug: targetSlug, destPath: destination });
-            await folderMoved(item.slug, item.path, destination, targetSlug);
+            await folderMoved(item.slug, item.path, destination, targetSlug, false, serverCascaded);
           }
           await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(targetSlug, targetPath, true)]);
         } catch (err) { failures.push(`${fileBaseName(item.path)}: ${err instanceof Error ? err.message : String(err)}`); }
@@ -1481,7 +1527,23 @@ export function LiveProjectsSection(p: {
           byFolder.set(dest, [...(byFolder.get(dest) ?? []), item.id]);
         }
         const plans = [...byFolder].map(([dest, ids]) => planMissionMoves(ids, targetSlug, dest, allKnownMissions()));
-        const missionFailures = (await Promise.all(plans.map(plan => moveMissions(plan, targetSlug)))).flat();
+        const missionFailures = (await Promise.all(plans.map(plan => moveMissions(plan, targetSlug, { approvalPolicy })))).flat();
+        const approvalErr = missionFailures.find(
+          f => f.error instanceof ApprovalTransferConfirmationRequiredError,
+        )?.error as ApprovalTransferConfirmationRequiredError | undefined;
+        if (approvalErr) {
+          setApprovalTransferPrompt({
+            error: approvalErr,
+            confirm: (chosenPolicy) => {
+              if (version !== connectionVersion()) return;
+              const remainingMissions = [...byFolder.values()].flat().map(id => ({ kind: "mission" as const, id }));
+              const retryRef = makeItemsReference(remainingMissions, false);
+              void pasteItems(targetSlug, targetPath, retryRef, chosenPolicy);
+            },
+            cancel: () => {},
+          });
+          return;
+        }
         for (const f of missionFailures) failures.push(`${f.id.slice(0, 8)}: ${f.error instanceof Error ? f.error.message : String(f.error)}`);
         const failedIds = new Set(missionFailures.map(f => f.id));
         for (const step of plans.flat()) if (!failedIds.has(step.id)) leaveProjects(step.id, targetSlug);
@@ -2266,10 +2328,12 @@ export function LiveProjectsSection(p: {
     if (!current) return undefined;
     // Project listings own placement; the open detail owns live status/content.
     // Its older project/folder must not reinsert a conversation we just moved.
-    return movedMission(listed ? { ...current, project: listed.project, tags: [
-      ...(current.tags ?? []).filter(tag => !tag.startsWith("orb-folder:")),
-      ...(listed.tags ?? []).filter(tag => tag.startsWith("orb-folder:")),
-    ] } : current);
+    return movedMission(listed ? {
+      ...current,
+      project: listed.project,
+      folder: listed.folder,
+      placement_revision: listed.placement_revision,
+    } : current);
   });
   // Observe identity/location, not every polling update. This also runs when a
   // restored conversation's metadata arrives after the initial selection.
@@ -2620,6 +2684,13 @@ export function LiveProjectsSection(p: {
             onClose={() => !makingFile() && setNewFile(null)}
             footer={<span>Markdown by default — a name with no extension gets {REFERENCE_FILE_EXT}.</span>}
           />
+        )}
+      </Show>
+      <Show when={approvalTransferPrompt()}>
+        {(prompt) => (
+          <Suspense>
+            <ApprovalTransferDialog prompt={prompt()} onDismiss={() => setApprovalTransferPrompt(null)} />
+          </Suspense>
         )}
       </Show>
       <Show when={cronInfo()}>{(slug) => <Dialog title="Project crons" onClose={() => setCronInfo(null)} footer={<><DialogButton disabled={cronChecking()} onClick={async () => { if (!isConnected()) return; const version = connectionVersion(); setCronChecking(true); await loadCrons(slug(), true); if (!currentConnection(version)) return; setCronChecking(false); if (!cronUnsupported() && !cronErrors[slug()]) setCronInfo(null); }}>Check again</DialogButton></>}>

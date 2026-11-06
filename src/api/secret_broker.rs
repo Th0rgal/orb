@@ -706,6 +706,145 @@ impl SecretBroker {
         removed
     }
 
+    #[cfg(test)]
+    pub(crate) async fn seed_grant_for_test(&self, grant: Grant) -> Grant {
+        let mut data = self.data.lock().await;
+        data.grants.push(grant.clone());
+        self.save(&data).await;
+        grant
+    }
+
+    /// Inspect live secret grants and pending secret requests owned by or
+    /// inherited by any mission in `moving_ids`. Used as the preflight check
+    /// before moving a mission subtree to another project.
+    pub async fn inspect_mission_transfer(
+        &self,
+        moving_ids: &std::collections::HashSet<Uuid>,
+    ) -> (Vec<Grant>, Vec<Value>) {
+        if moving_ids.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let mut data = self.data.lock().await;
+        let now = Utc::now();
+        Self::prune(&mut data, now);
+        let grants = data
+            .grants
+            .iter()
+            .filter(|g| {
+                g.expires_at > now
+                    && (g
+                        .subject()
+                        .mission_id()
+                        .is_some_and(|m| moving_ids.contains(&m))
+                        || g.root_mission_id.is_some_and(|r| moving_ids.contains(&r)))
+            })
+            .cloned()
+            .collect();
+        let pending = data
+            .requests
+            .iter()
+            .filter(|r| {
+                r.status.is_pending()
+                    && (r
+                        .subject()
+                        .mission_id()
+                        .is_some_and(|m| moving_ids.contains(&m))
+                        || r.root_mission_id.is_some_and(|rm| moving_ids.contains(&rm)))
+            })
+            .map(SecretRequest::public)
+            .collect();
+        (grants, pending)
+    }
+
+    /// Reconcile live grants and pending secret requests for `moving_ids` after
+    /// an authoritative cross-project transfer:
+    /// - `revoke == true`: revoke matching live grants and deny matching pending
+    ///   requests.
+    /// - `revoke == false`: keep live grants and pending requests, rebinding
+    ///   their `paloma_project` label to `target_project`.
+    pub async fn apply_mission_transfer_policy(
+        &self,
+        moving_ids: &std::collections::HashSet<Uuid>,
+        target_project: Option<&str>,
+        revoke: bool,
+    ) {
+        if moving_ids.is_empty() {
+            return;
+        }
+        let _resolving = self.resolving.lock().await;
+        let mut data = self.data.lock().await;
+        let now = Utc::now();
+        Self::prune(&mut data, now);
+        let mut mutated = false;
+        let mut requests_changed = false;
+
+        if revoke {
+            let before = data.grants.len();
+            data.grants.retain(|g| {
+                let matches = g
+                    .subject()
+                    .mission_id()
+                    .is_some_and(|m| moving_ids.contains(&m))
+                    || g.root_mission_id.is_some_and(|r| moving_ids.contains(&r));
+                !matches
+            });
+            if data.grants.len() != before {
+                mutated = true;
+            }
+            for r in &mut data.requests {
+                let matches = r.status.is_pending()
+                    && (r
+                        .subject()
+                        .mission_id()
+                        .is_some_and(|m| moving_ids.contains(&m))
+                        || r.root_mission_id.is_some_and(|rm| moving_ids.contains(&rm)));
+                if matches {
+                    if let Ok(next) = r.status.apply(ApprovalEvent::Deny) {
+                        r.status = next;
+                        r.resolved_at = Some(now);
+                        r.encrypted_value = None;
+                        r.error = Some("Cancelled on project transfer".into());
+                        mutated = true;
+                        requests_changed = true;
+                    }
+                }
+            }
+        } else {
+            let next_proj = target_project.map(str::to_string);
+            for g in &mut data.grants {
+                let matches = g
+                    .subject()
+                    .mission_id()
+                    .is_some_and(|m| moving_ids.contains(&m))
+                    || g.root_mission_id.is_some_and(|r| moving_ids.contains(&r));
+                if matches && g.paloma_project != next_proj {
+                    g.paloma_project = next_proj.clone();
+                    mutated = true;
+                }
+            }
+            for r in &mut data.requests {
+                let matches = r.status.is_pending()
+                    && (r
+                        .subject()
+                        .mission_id()
+                        .is_some_and(|m| moving_ids.contains(&m))
+                        || r.root_mission_id.is_some_and(|rm| moving_ids.contains(&rm)));
+                if matches && r.paloma_project != next_proj {
+                    r.paloma_project = next_proj.clone();
+                    mutated = true;
+                }
+            }
+        }
+
+        if mutated {
+            self.save(&data).await;
+        }
+        drop(data);
+        if requests_changed {
+            self.changed.notify_waiters();
+        }
+    }
+
     pub async fn reject(&self, id: Uuid) -> Result<SecretRequest, String> {
         let _resolving = self.resolving.lock().await;
         let mut data = self.data.lock().await;

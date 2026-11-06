@@ -39,9 +39,24 @@ pub(super) async fn save(
     expected: Option<u64>,
     title: Option<String>,
     project: Option<String>,
-    tags: Vec<String>,
+    folder: Option<String>,
+    mut tags: Vec<String>,
 ) -> Result<Execution, String> {
     let conn = store.conn.clone();
+    let legacy_folder = crate::api::mission_store::strip_legacy_orb_folder_tags(&mut tags);
+    let norm_folder = {
+        let f = folder
+            .as_deref()
+            .map(crate::api::mission_store::normalize_mission_folder)
+            .unwrap_or_default();
+        if execution.parent_mission_id.is_some() {
+            String::new()
+        } else if !f.is_empty() {
+            f
+        } else {
+            legacy_folder.unwrap_or_default()
+        }
+    };
     tokio::task::spawn_blocking(move || {
         let mut c = conn.blocking_lock(); let tx = c.transaction().map_err(err)?;
         let mut new_turn = false;
@@ -68,7 +83,8 @@ pub(super) async fn save(
         } else {
             if expected.is_some() { return Err("Cloud execution not found".into()); }
             let now = now_string();
-            tx.execute("INSERT INTO missions(id,status,title,workspace_id,backend,created_at,updated_at,project,tags,requires_local_disk,resumable,parent_mission_id) VALUES(?1,'active',?2,?3,?4,?5,?5,?6,?7,0,1,?8)", params![execution.mission_id.to_string(),title,Uuid::nil().to_string(),execution.selection.provider.backend(),now,project,serde_json::to_string(&tags).map_err(err)?,execution.parent_mission_id.map(|id| id.to_string())]).map_err(err)?;
+            let tags_json = if tags.is_empty() { None } else { Some(serde_json::to_string(&tags).map_err(err)?) };
+            tx.execute("INSERT INTO missions(id,status,title,workspace_id,backend,created_at,updated_at,project,folder,tags,requires_local_disk,resumable,parent_mission_id) VALUES(?1,'active',?2,?3,?4,?5,?5,?6,?7,?8,0,1,?9)", params![execution.mission_id.to_string(),title,Uuid::nil().to_string(),execution.selection.provider.backend(),now,project,norm_folder,tags_json,execution.parent_mission_id.map(|id| id.to_string())]).map_err(err)?;
         }
         tx.execute("INSERT INTO cloud_executions(mission_id,request_key,revision,data) VALUES(?1,?2,?3,?4) ON CONFLICT(mission_id) DO UPDATE SET revision=excluded.revision,data=excluded.data",params![execution.mission_id.to_string(),execution.request_key,execution.revision,serde_json::to_string(&execution).map_err(err)?]).map_err(err)?;
         // Completion callbacks and digests read the answer from mission_events.
@@ -148,19 +164,21 @@ mod tests {
             .unwrap();
         let one = execution();
         let (a, b) = tokio::join!(
-            store.save_cloud_execution(
+            store.save_cloud_execution_in_folder(
                 one.clone(),
                 None,
                 Some("Test".into()),
                 Some("project".into()),
-                vec!["orb-folder:notes".into()]
+                Some("notes".into()),
+                vec![]
             ),
-            store.save_cloud_execution(
+            store.save_cloud_execution_in_folder(
                 one.clone(),
                 None,
                 Some("Test".into()),
                 Some("project".into()),
-                vec!["orb-folder:notes".into()]
+                Some("notes".into()),
+                vec![]
             )
         );
         assert_eq!(a.unwrap().mission_id, b.unwrap().mission_id);
@@ -195,6 +213,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(mission.project.project.as_deref(), Some("project"));
+        assert_eq!(mission.project.folder, "notes");
         assert!(!mission.requires_local_disk);
         assert_eq!(mission.history[0].content, "Say hello");
     }

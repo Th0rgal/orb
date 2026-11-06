@@ -517,11 +517,12 @@ fun OrbProjectDocumentsPage(
                         if (dest != targetPath) {
                             scope.launch {
                                 try {
-                                    core.request(
+                                    val res = core.request(
                                         "/api/projects/${core.encodeComponent(slug)}/file/transfer",
                                         method = "POST",
                                         body = mapOf("path" to targetPath, "destination" to dest, "copy" to false)
                                     )
+                                    core.applyTransferMovedMissions(res, slug)
                                     load()
                                 } catch (e: Throwable) {
                                     error = e.message ?: "Failed to rename"
@@ -590,11 +591,12 @@ fun OrbProjectDocumentsPage(
                             }
                             scope.launch {
                                 try {
-                                    core.request(
+                                    val res = core.request(
                                         "/api/projects/${core.encodeComponent(slug)}/file/transfer",
                                         method = "POST",
                                         body = mapOf("path" to targetPath, "destination" to dest, "copy" to false)
                                     )
+                                    core.applyTransferMovedMissions(res, slug)
                                     load()
                                 } catch (e: Throwable) {
                                     error = e.message ?: "Failed to move"

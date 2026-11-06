@@ -261,7 +261,7 @@ fn verify_with(state: &AppState, token: &str, renewal: bool) -> Result<Principal
         validation.validate_exp = false;
         validation.required_spec_claims.clear();
     }
-    let principal = jsonwebtoken::decode::<Principal>(
+    let mut principal = jsonwebtoken::decode::<Principal>(
         token,
         &jsonwebtoken::DecodingKey::from_secret(key(state)?.as_bytes()),
         &validation,
@@ -273,22 +273,33 @@ fn verify_with(state: &AppState, token: &str, renewal: bool) -> Result<Principal
         .connection
         .lock()
         .map_err(|_| "Session store unavailable")?;
-    let stored_expires_at: Option<i64> = conn
+    let stored_row: Option<(i64, Option<String>, i64)> = conn
         .query_row(
-            "SELECT expires_at FROM mcp_sessions_v1 WHERE id=?1 AND owner=?2 AND revoked=0 AND expires_at>=?3 AND (hard_expires_at IS NULL OR hard_expires_at>?4)",
+            "SELECT expires_at, project_scope, COALESCE(project_scoped, 0) FROM mcp_sessions_v1 WHERE id=?1 AND owner=?2 AND revoked=0 AND expires_at>=?3 AND (hard_expires_at IS NULL OR hard_expires_at>?4)",
             rusqlite::params![
                 principal.session_id.to_string(),
                 principal.sub,
                 principal.exp as i64,
                 chrono::Utc::now().timestamp()
             ],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()
         .map_err(|_| "Session unavailable")?;
-    let Some(stored_expires_at) = stored_expires_at else {
+    let Some((stored_expires_at, stored_project_scope, stored_project_scoped)) = stored_row else {
         return Err("MCP session revoked".into());
     };
+    let is_project_scoped = stored_project_scoped != 0 || principal.project.is_some();
+    if principal.mission_id.is_some() && is_project_scoped {
+        match stored_project_scope {
+            Some(scope) => principal.project = Some(scope),
+            None => {
+                return Err(
+                    "Project-scoped MCP session cannot operate while mission has no project".into(),
+                );
+            }
+        }
+    }
     if renewal
         && !renewal_within_grace(
             &principal,
@@ -2380,6 +2391,39 @@ pub(crate) fn issue_host_coordinator_session(
     issue_session_with_hard_expiry(state, &principal, None, "host_coordinator")
 }
 
+/// Rebind `mcp_sessions_v1.project_scope` for any active project-scoped MCP
+/// sessions belonging to missions transferred via the authoritative move API.
+/// Raw store edits bypass this so unauthorized scope drift is still rejected.
+pub(crate) fn rebind_moved_mission_sessions(
+    state: &AppState,
+    mission_ids: &[Uuid],
+    target_project: Option<&str>,
+) -> Result<(), String> {
+    if mission_ids.is_empty() {
+        return Ok(());
+    }
+    let conn = state
+        .projects
+        .connection
+        .lock()
+        .map_err(|_| "Session store unavailable".to_string())?;
+    let mut stmt = conn
+        .prepare_cached(
+            "UPDATE mcp_sessions_v1
+             SET project_scope = ?1,
+                 project_scoped = 1
+             WHERE mission_id = ?2
+               AND (project_scoped != 0 OR project_scope IS NOT NULL)
+               AND revoked = 0",
+        )
+        .map_err(|e| e.to_string())?;
+    for id in mission_ids {
+        stmt.execute(rusqlite::params![target_project, id.to_string()])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn issue_session_with_hard_expiry(
     state: &AppState,
     p: &Principal,
@@ -2392,13 +2436,14 @@ fn issue_session_with_hard_expiry(
         &jsonwebtoken::EncodingKey::from_secret(key(state)?.as_bytes()),
     )
     .map_err(|_| "Cannot issue MCP session")?;
+    let project_scoped = i32::from(p.project.is_some());
     state
         .projects
         .connection
         .lock()
         .map_err(|_| "Session store unavailable")?
         .execute(
-            "INSERT INTO mcp_sessions_v1(id,owner,mission_id,expires_at,subject_kind,client_label,host_hint,project_scope,hard_expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET expires_at=excluded.expires_at, client_label=COALESCE(excluded.client_label, mcp_sessions_v1.client_label), host_hint=COALESCE(excluded.host_hint, mcp_sessions_v1.host_hint) WHERE revoked=0",
+            "INSERT INTO mcp_sessions_v1(id,owner,mission_id,expires_at,subject_kind,client_label,host_hint,project_scope,project_scoped,hard_expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET expires_at=excluded.expires_at, client_label=COALESCE(excluded.client_label, mcp_sessions_v1.client_label), host_hint=COALESCE(excluded.host_hint, mcp_sessions_v1.host_hint), project_scope=excluded.project_scope, project_scoped=MAX(mcp_sessions_v1.project_scoped, excluded.project_scoped) WHERE revoked=0",
             rusqlite::params![
                 p.session_id.to_string(),
                 p.sub,
@@ -2408,6 +2453,7 @@ fn issue_session_with_hard_expiry(
                 p.client_label,
                 p.host_hint,
                 p.project,
+                project_scoped,
                 hard_expires_at,
             ],
         )
@@ -2829,6 +2875,9 @@ pub async fn renew(
                 StatusCode::FORBIDDEN,
                 "Mission is not running; reconnect through its launcher".into(),
             ));
+        }
+        if p.project.is_some() {
+            p.project = mission.project.project.clone();
         }
         p.exp = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize;
     } else {

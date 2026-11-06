@@ -90,8 +90,13 @@ async fn save_file_as(name: String, data_base64: String) -> Result<Option<String
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_base64)
         .map_err(|e| e.to_string())?;
+    let title = if name.to_ascii_lowercase().ends_with(".zip") {
+        "Save backup"
+    } else {
+        "Save file"
+    };
     let Some(file) = rfd::AsyncFileDialog::new()
-        .set_title("Save image")
+        .set_title(title)
         .set_file_name(&name)
         .save_file()
         .await
@@ -179,6 +184,7 @@ mod bindings;
 mod biometrics;
 mod client_link;
 mod diagnostics;
+mod github_oauth;
 mod mistral_usage;
 use bindings::local_bindings;
 
@@ -321,6 +327,7 @@ fn main() {
             local_agents::local_agents_write,
             transfers::local_machine_transfer,
             transfers::local_machine_identity,
+            github_oauth::github_oauth_sign_in,
             mistral_usage::mistral_usage_sign_in,
             client_link::client_link_active,
             client_link::client_link_flush,

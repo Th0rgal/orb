@@ -13,7 +13,7 @@ entry:
 ite_then_12.i:                                    ; preds = %entry
   %cmp_eq_20.not.i = icmp eq i8 %a4, 0
   %cmp_eq_35.not.i = icmp eq i8 %a5, 1
-  %spec.select = select i1 %cmp_eq_20.not.i, i1 true, i1 %cmp_eq_35.not.i
+  %spec.select.i = or i1 %cmp_eq_20.not.i, %cmp_eq_35.not.i
   br label %probe_orb_verify_writer_reuse.exit
 
 ite_else_13.i:                                    ; preds = %entry
@@ -21,11 +21,11 @@ ite_else_13.i:                                    ; preds = %entry
   %cmp_eq_69.not.i = icmp eq i8 %a2, 1
   %or.cond.i = and i1 %cmp_eq_53.not.i, %cmp_eq_69.not.i
   %cmp_eq_85.not.i = icmp eq i8 %a3, 0
-  %spec.select1 = select i1 %or.cond.i, i1 %cmp_eq_85.not.i, i1 false
+  %spec.select2.i = and i1 %or.cond.i, %cmp_eq_85.not.i
   br label %probe_orb_verify_writer_reuse.exit
 
 probe_orb_verify_writer_reuse.exit:               ; preds = %ite_else_13.i, %ite_then_12.i
-  %common.ret.op.shrunk.i = phi i1 [ %spec.select, %ite_then_12.i ], [ %spec.select1, %ite_else_13.i ]
+  %common.ret.op.shrunk.i = phi i1 [ %spec.select.i, %ite_then_12.i ], [ %spec.select2.i, %ite_else_13.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
 }
@@ -49,7 +49,7 @@ ite_then_55.i:                                    ; preds = %ite_then_27.i
   %0 = zext i1 %cmp_eq_63.not.i to i8
   br label %probe_orb_verify_lease_mode.exit
 
-probe_orb_verify_lease_mode.exit:                 ; preds = %entry, %ite_then_27.i, %ite_then_55.i
+probe_orb_verify_lease_mode.exit:                 ; preds = %ite_then_55.i, %ite_then_27.i, %entry
   %common.ret.op.i = phi i8 [ %0, %ite_then_55.i ], [ 1, %ite_then_27.i ], [ 0, %entry ]
   ret i8 %common.ret.op.i
 }
@@ -111,7 +111,7 @@ ite_else_81.i:                                    ; preds = %ite_else_17.i
   %or.cond48.i = and i1 %cmp_eq_313.not.i, %cmp_eq_553.not.i
   br label %probe_orb_verify_remote_outbox.exit
 
-probe_orb_verify_remote_outbox.exit:              ; preds = %ite_then_29.i, %ite_else_17.i, %ite_else_94.i, %ite_else_81.i
+probe_orb_verify_remote_outbox.exit:              ; preds = %ite_else_81.i, %ite_else_94.i, %ite_else_17.i, %ite_then_29.i
   %common.ret.op.shrunk.i = phi i1 [ false, %ite_else_17.i ], [ %or.cond47.i, %ite_else_94.i ], [ %or.cond48.i, %ite_else_81.i ], [ %spec.select.i, %ite_then_29.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
@@ -120,12 +120,15 @@ probe_orb_verify_remote_outbox.exit:              ; preds = %ite_then_29.i, %ite
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @orb_verify_board_slots(i32 %a0, i32 %a1, i32 %a2) local_unnamed_addr #0 {
 entry:
+  %ext0 = zext i32 %a0 to i64
+  %ext1 = zext i32 %a1 to i64
+  %ext2 = zext i32 %a2 to i64
   %cmp_le_5.not.not.i = icmp ne i32 %a1, 0
   %cmp_lt_23.not.i = icmp ult i32 %a1, %a0
-  %or.cond.i = and i1 %cmp_le_5.not.not.i, %cmp_lt_23.not.i
-  %alu_40.i.narrow = sub i32 %a0, %a1
-  %cmp_lt_47.not.i = icmp ugt i32 %alu_40.i.narrow, %a2
-  %narrow.i = and i1 %or.cond.i, %cmp_lt_47.not.i
+  %or.cond.i = select i1 %cmp_le_5.not.not.i, i1 %cmp_lt_23.not.i, i1 false
+  %alu_40.i = sub nuw nsw i64 %ext0, %ext1
+  %cmp_lt_47.not.i = icmp ugt i64 %alu_40.i, %ext2
+  %narrow.i = select i1 %or.cond.i, i1 %cmp_lt_47.not.i, i1 false
   %res = zext i1 %narrow.i to i8
   ret i8 %res
 }
@@ -133,11 +136,13 @@ entry:
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @orb_verify_board_retry(i32 %a0, i32 %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4) local_unnamed_addr #0 {
 entry:
+  %cmp_le_5.not.not.i = icmp ne i32 %a1, 0
   %cmp_lt_23.not.i = icmp ult i32 %a0, %a1
+  %or.cond.i = select i1 %cmp_le_5.not.not.i, i1 %cmp_lt_23.not.i, i1 false
   %0 = or i8 %a3, %a2
   %1 = or i8 %0, %a4
   %2 = icmp eq i8 %1, 0
-  %narrow.i = and i1 %cmp_lt_23.not.i, %2
+  %narrow.i = and i1 %or.cond.i, %2
   %res = zext i1 %narrow.i to i8
   ret i8 %res
 }
@@ -145,7 +150,6 @@ entry:
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @orb_verify_job_transition(i8 zeroext %a0, i8 zeroext %a1) local_unnamed_addr #0 {
 entry:
-  %ext1 = zext i8 %a1 to i64
   switch i8 %a0, label %probe_orb_verify_job_transition.exit [
     i8 0, label %ite_else_15.i
     i8 1, label %ite_else_28.i
@@ -157,16 +161,16 @@ ite_else_41.i:                                    ; preds = %entry
   br label %probe_orb_verify_job_transition.exit
 
 ite_else_28.i:                                    ; preds = %entry
-  %0 = add nsw i64 %ext1, -2
-  %or.cond.i = icmp ult i64 %0, 4
+  %0 = add i8 %a1, -2
+  %or.cond.i = icmp ult i8 %0, 4
   br label %probe_orb_verify_job_transition.exit
 
 ite_else_15.i:                                    ; preds = %entry
-  %1 = add nsw i64 %ext1, -1
-  %or.cond29.i = icmp ult i64 %1, 5
+  %1 = add i8 %a1, -1
+  %or.cond29.i = icmp ult i8 %1, 5
   br label %probe_orb_verify_job_transition.exit
 
-probe_orb_verify_job_transition.exit:             ; preds = %entry, %ite_else_41.i, %ite_else_28.i, %ite_else_15.i
+probe_orb_verify_job_transition.exit:             ; preds = %ite_else_15.i, %ite_else_28.i, %ite_else_41.i, %entry
   %common.ret.op.shrunk.i = phi i1 [ false, %entry ], [ %cmp_eq_47.not.i, %ite_else_41.i ], [ %or.cond.i, %ite_else_28.i ], [ %or.cond29.i, %ite_else_15.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
@@ -206,7 +210,7 @@ ite_else_31.i:                                    ; preds = %ite_else_13.i
   %cmp_eq_83.not.i = icmp eq i8 %a4, 1
   br label %probe_orb_verify_token_rotation.exit
 
-probe_orb_verify_token_rotation.exit:             ; preds = %entry, %ite_then_30.i, %ite_else_31.i
+probe_orb_verify_token_rotation.exit:             ; preds = %ite_else_31.i, %ite_then_30.i, %entry
   %common.ret.op.shrunk.i = phi i1 [ false, %entry ], [ %cmp_eq_83.not.i, %ite_else_31.i ], [ %spec.select.i, %ite_then_30.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
@@ -227,15 +231,15 @@ entry:
   br i1 %or.cond3.i, label %ite_else_77.i, label %probe_orb_verify_approval.exit
 
 ite_else_77.i:                                    ; preds = %entry
-  %cmp_lt_85.not.i = icmp ult i8 %a5, 2
-  br i1 %cmp_lt_85.not.i, label %probe_orb_verify_approval.exit, label %ite_then_92.i
+  %cmp_lt_85.i = icmp ugt i8 %a5, 1
+  br i1 %cmp_lt_85.i, label %ite_then_92.i, label %probe_orb_verify_approval.exit
 
 ite_then_92.i:                                    ; preds = %ite_else_77.i
   %cmp_eq_100.not.i = icmp eq i8 %a6, 1
   %0 = zext i1 %cmp_eq_100.not.i to i8
   br label %probe_orb_verify_approval.exit
 
-probe_orb_verify_approval.exit:                   ; preds = %entry, %ite_else_77.i, %ite_then_92.i
+probe_orb_verify_approval.exit:                   ; preds = %ite_then_92.i, %ite_else_77.i, %entry
   %common.ret.op.i = phi i8 [ 0, %entry ], [ %0, %ite_then_92.i ], [ 1, %ite_else_77.i ]
   ret i8 %common.ret.op.i
 }
@@ -243,17 +247,16 @@ probe_orb_verify_approval.exit:                   ; preds = %entry, %ite_else_77
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @orb_verify_log_window(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) local_unnamed_addr #0 {
 entry:
-  %cmp_le_3.not.not.i = icmp ugt i64 %a0, %a4
-  %cmp_le_17.not.not.i = icmp ugt i64 %a1, %a2
-  %or.cond.i = or i1 %cmp_le_17.not.not.i, %cmp_le_3.not.not.i
-  %cmp_le_31.not.not.i = icmp ugt i64 %a2, %a3
-  %or.cond6.i = or i1 %cmp_le_31.not.not.i, %or.cond.i
-  %cmp_le_45.not.not.i = icmp ugt i64 %a5, %a1
-  %or.cond7.i = or i1 %cmp_le_45.not.not.i, %or.cond6.i
+  %cmp_le_3.not.not.i = icmp ule i64 %a0, %a4
+  %cmp_le_17.not.not.i = icmp ule i64 %a1, %a2
+  %or.cond.not9.i = and i1 %cmp_le_17.not.not.i, %cmp_le_3.not.not.i
+  %cmp_le_31.not.not.i = icmp ule i64 %a2, %a3
+  %or.cond6.not8.i = and i1 %cmp_le_31.not.not.i, %or.cond.not9.i
+  %cmp_le_45.not.not.i = icmp ule i64 %a5, %a1
   %alu_58.i = sub i64 %a4, %a0
   %cmp_le_62.not.not.i = icmp uge i64 %alu_58.i, %a5
-  %not.or.cond7.i = xor i1 %or.cond7.i, true
-  %narrow.i = and i1 %cmp_le_62.not.not.i, %not.or.cond7.i
+  %0 = and i1 %cmp_le_45.not.not.i, %cmp_le_62.not.not.i
+  %narrow.i = and i1 %0, %or.cond6.not8.i
   %res = zext i1 %narrow.i to i8
   ret i8 %res
 }
@@ -283,7 +286,7 @@ entry:
   %0 = add i32 %a3, 1
   %cmp_le_90.not.not.i = icmp ult i32 %0, 2
   %sel_112.v.i = select i1 %cmp_le_90.not.not.i, i32 256, i32 66048
-  %narrow13.i = or i1 %cmp_eq_66.not.i, %cmp_lt_77.not.i
+  %narrow13.i = select i1 %cmp_eq_66.not.i, i1 true, i1 %cmp_lt_77.not.i
   %sel_112.i = select i1 %narrow13.i, i32 768, i32 %sel_112.v.i
   %sel_145.v.i = select i1 %cmp_eq_55.not.i, i32 %sel_112.i, i32 0
   %sel_145.i = or disjoint i32 %sel_145.v.i, %sel_49.i
@@ -341,7 +344,7 @@ ite_else_100.i:                                   ; preds = %ite_else_26.i
 ite_else_13.i:                                    ; preds = %entry
   br label %probe_orb_breaker_step.exit
 
-probe_orb_breaker_step.exit:                      ; preds = %entry, %ite_else_65.i, %ite_else_52.i, %ite_else_39.i, %ite_else_26.i, %ite_else_100.i, %ite_else_13.i
+probe_orb_breaker_step.exit:                      ; preds = %ite_else_13.i, %ite_else_100.i, %ite_else_26.i, %ite_else_39.i, %ite_else_52.i, %ite_else_65.i, %entry
   %common.ret.op.i = phi i32 [ 65792, %ite_else_65.i ], [ 65537, %ite_else_52.i ], [ 65793, %ite_else_39.i ], [ 0, %ite_else_13.i ], [ 65536, %entry ], [ 0, %ite_else_26.i ], [ %0, %ite_else_100.i ]
   ret i32 %common.ret.op.i
 }
@@ -353,10 +356,9 @@ entry:
   br i1 %cmp_eq_5.not.i, label %probe_orb_mission_step.exit, label %ite_then_12.i
 
 ite_then_12.i:                                    ; preds = %entry
-  switch i8 %a1, label %ite_then_40.i [
-    i8 1, label %ite_else_28.i
-    i8 2, label %probe_orb_mission_step.exit
-  ]
+  %a1.off = add i8 %a1, -1
+  %switch = icmp ult i8 %a1.off, 2
+  br i1 %switch, label %probe_orb_mission_step.exit, label %ite_then_40.i
 
 ite_then_40.i:                                    ; preds = %ite_then_12.i
   %cmp_eq_48.not.i = icmp eq i8 %a2, 1
@@ -371,7 +373,7 @@ ite_then_70.i:                                    ; preds = %ite_then_55.i
   %cmp_eq_103.not.i = icmp eq i8 %a4, 1
   %1 = add i32 %a5, 1
   %cmp_le_126.not7.i = icmp ult i32 %1, %0
-  %cmp_le_126.not.not.not.i = or i1 %cmp_eq_103.not.i, %cmp_le_126.not7.i
+  %cmp_le_126.not.not.not.i = select i1 %cmp_eq_103.not.i, i1 true, i1 %cmp_le_126.not7.i
   br i1 %cmp_le_126.not.not.not.i, label %ite_then_133.i, label %probe_orb_mission_step.exit
 
 ite_then_133.i:                                   ; preds = %ite_then_70.i
@@ -384,11 +386,8 @@ ite_else_147.i:                                   ; preds = %ite_then_133.i
   %3 = select i1 %cmp_lt_159.not.i, i8 6, i8 7
   br label %probe_orb_mission_step.exit
 
-ite_else_28.i:                                    ; preds = %ite_then_12.i
-  br label %probe_orb_mission_step.exit
-
-probe_orb_mission_step.exit:                      ; preds = %entry, %ite_then_12.i, %ite_then_40.i, %ite_then_55.i, %ite_then_70.i, %ite_then_133.i, %ite_else_147.i, %ite_else_28.i
-  %common.ret.op.i = phi i8 [ 1, %ite_else_28.i ], [ 7, %ite_then_133.i ], [ %3, %ite_else_147.i ], [ 5, %ite_then_70.i ], [ 4, %ite_then_55.i ], [ 3, %ite_then_40.i ], [ %a1, %ite_then_12.i ], [ 0, %entry ]
+probe_orb_mission_step.exit:                      ; preds = %ite_else_147.i, %ite_then_133.i, %ite_then_70.i, %ite_then_55.i, %ite_then_40.i, %ite_then_12.i, %entry
+  %common.ret.op.i = phi i8 [ 7, %ite_then_133.i ], [ %3, %ite_else_147.i ], [ 5, %ite_then_70.i ], [ 4, %ite_then_55.i ], [ 3, %ite_then_40.i ], [ 0, %entry ], [ %a1, %ite_then_12.i ]
   ret i8 %common.ret.op.i
 }
 
@@ -442,7 +441,7 @@ ite_else_212.i:                                   ; preds = %ite_else_88.i
   %.4.i = zext i1 %cmp_eq_220.not.i to i8
   br label %probe_orb_reconcile_step.exit
 
-probe_orb_reconcile_step.exit:                    ; preds = %entry, %ite_then_72.i, %ite_else_114.i, %ite_else_146.i, %ite_else_101.i, %ite_else_179.i, %ite_else_88.i, %ite_else_212.i
+probe_orb_reconcile_step.exit:                    ; preds = %ite_else_212.i, %ite_else_88.i, %ite_else_179.i, %ite_else_101.i, %ite_else_146.i, %ite_else_114.i, %ite_then_72.i, %entry
   %common.ret.op.i = phi i8 [ 0, %ite_then_72.i ], [ 0, %ite_else_114.i ], [ %..i, %ite_else_146.i ], [ 0, %ite_else_101.i ], [ %.3.i, %ite_else_179.i ], [ 0, %ite_else_88.i ], [ %.4.i, %ite_else_212.i ], [ 0, %entry ]
   ret i8 %common.ret.op.i
 }
@@ -463,7 +462,7 @@ ite_else_13.i:                                    ; preds = %entry
   %0 = select i1 %cmp_eq_35.not.i, i32 256, i32 1
   br label %probe_orb_queue_step.exit
 
-probe_orb_queue_step.exit:                        ; preds = %entry, %ite_else_26.i, %ite_else_13.i
+probe_orb_queue_step.exit:                        ; preds = %ite_else_13.i, %ite_else_26.i, %entry
   %common.ret.op.i = phi i32 [ 65537, %ite_else_26.i ], [ 1, %entry ], [ %0, %ite_else_13.i ]
   ret i32 %common.ret.op.i
 }
@@ -485,32 +484,27 @@ ite_then_27.i:                                    ; preds = %ite_then_12.i
 ite_else_43.i:                                    ; preds = %ite_then_27.i
   %cmp_eq_51.not.i = icmp eq i8 %a6, 1
   %cmp_eq_66.not.i = icmp eq i8 %a7, 1
-  %spec.select = select i1 %cmp_eq_51.not.i, i1 true, i1 %cmp_eq_66.not.i
+  %spec.select.i = or i1 %cmp_eq_51.not.i, %cmp_eq_66.not.i
   br label %probe_orb_vm_step.exit
 
 ite_else_13.i:                                    ; preds = %entry
-  %cmp_le_89.not.not.i = icmp ugt i8 %a1, %a2
-  br i1 %cmp_le_89.not.not.i, label %probe_orb_vm_step.exit, label %ite_else_97.i
-
-ite_else_97.i:                                    ; preds = %ite_else_13.i
-  %cmp_lt_109.not.i = icmp uge i32 %a8, %a9
-  %cmp_le_123.not.not.i = icmp ugt i64 %a13, %a14
-  %or.cond.i = or i1 %cmp_lt_109.not.i, %cmp_le_123.not.not.i
-  br i1 %or.cond.i, label %probe_orb_vm_step.exit, label %ite_else_131.i
-
-ite_else_131.i:                                   ; preds = %ite_else_97.i
-  %cmp_le_139.i = icmp ult i32 %a10, 5
-  %cmp_le_157.not.not.i = icmp ugt i32 %a10, %a11
-  %or.cond3.i = or i1 %cmp_le_139.i, %cmp_le_157.not.not.i
-  %cmp_le_173.i = icmp ugt i32 %a12, 90
-  %or.cond4.i = or i1 %or.cond3.i, %cmp_le_173.i
+  %cmp_le_89.not.not.i = icmp ule i8 %a1, %a2
+  %cmp_lt_109.not.i = icmp ult i32 %a8, %a9
+  %or.cond.not7.not12.i = select i1 %cmp_le_89.not.not.i, i1 %cmp_lt_109.not.i, i1 false
+  %cmp_le_123.not.not.i = icmp ule i64 %a13, %a14
+  %or.cond3.not11.i = and i1 %or.cond.not7.not12.i, %cmp_le_123.not.not.i
+  %cmp_le_139.i = icmp ugt i32 %a10, 4
+  %or.cond4.not10.i = select i1 %or.cond3.not11.i, i1 %cmp_le_139.i, i1 false
+  %cmp_le_157.not.not.i = icmp ule i32 %a10, %a11
+  %or.cond5.not9.i = select i1 %or.cond4.not10.i, i1 %cmp_le_157.not.not.i, i1 false
+  %cmp_le_173.i = icmp ult i32 %a12, 91
+  %or.cond6.not.i = select i1 %or.cond5.not9.i, i1 %cmp_le_173.i, i1 false
   %cmp_eq_189.not.i = icmp eq i8 %a3, 0
-  %not.or.cond4.i = xor i1 %or.cond4.i, true
-  %spec.select1 = select i1 %not.or.cond4.i, i1 %cmp_eq_189.not.i, i1 false
+  %spec.select8.i = and i1 %cmp_eq_189.not.i, %or.cond6.not.i
   br label %probe_orb_vm_step.exit
 
-probe_orb_vm_step.exit:                           ; preds = %ite_else_131.i, %ite_else_43.i, %ite_then_12.i, %ite_then_27.i, %ite_else_13.i, %ite_else_97.i
-  %common.ret.op.shrunk.i = phi i1 [ false, %ite_then_27.i ], [ true, %ite_then_12.i ], [ false, %ite_else_13.i ], [ false, %ite_else_97.i ], [ %spec.select, %ite_else_43.i ], [ %spec.select1, %ite_else_131.i ]
+probe_orb_vm_step.exit:                           ; preds = %ite_else_13.i, %ite_else_43.i, %ite_then_27.i, %ite_then_12.i
+  %common.ret.op.shrunk.i = phi i1 [ false, %ite_then_27.i ], [ true, %ite_then_12.i ], [ %spec.select.i, %ite_else_43.i ], [ %spec.select8.i, %ite_else_13.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
 }
@@ -536,7 +530,7 @@ ite_else_120.i:                                   ; preds = %ite_else_92.i
   %0 = select i1 %cmp_eq_126.not.i, i32 257, i32 256
   br label %probe_orb_access_step.exit
 
-probe_orb_access_step.exit:                       ; preds = %entry, %ite_else_19.i, %ite_else_92.i, %ite_else_120.i
+probe_orb_access_step.exit:                       ; preds = %ite_else_120.i, %ite_else_92.i, %ite_else_19.i, %entry
   %common.ret.op.i = phi i32 [ 0, %entry ], [ 0, %ite_else_92.i ], [ %0, %ite_else_120.i ], [ 65793, %ite_else_19.i ]
   ret i32 %common.ret.op.i
 }
@@ -562,7 +556,7 @@ ite_else_120.i:                                   ; preds = %ite_else_92.i
   %0 = select i1 %cmp_eq_126.not.i, i32 257, i32 256
   br label %probe_orb_access_step.exit
 
-probe_orb_access_step.exit:                       ; preds = %entry, %ite_else_19.i, %ite_else_92.i, %ite_else_120.i
+probe_orb_access_step.exit:                       ; preds = %ite_else_120.i, %ite_else_92.i, %ite_else_19.i, %entry
   %common.ret.op.i = phi i32 [ 0, %entry ], [ 0, %ite_else_92.i ], [ %0, %ite_else_120.i ], [ 65793, %ite_else_19.i ]
   ret i32 %common.ret.op.i
 }
@@ -570,8 +564,8 @@ probe_orb_access_step.exit:                       ; preds = %entry, %ite_else_19
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local i32 @orb_workfold_step(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4, i8 zeroext %a5) local_unnamed_addr #0 {
 entry:
-  switch i8 %a0, label %probe_orb_workfold_step.exit.fold.split [
-    i8 3, label %probe_orb_workfold_step.exit
+  switch i8 %a0, label %probe_orb_workfold_step.exit [
+    i8 3, label %ite_else_13.i
     i8 1, label %ite_else_28.i
     i8 2, label %ite_else_41.i
   ]
@@ -598,11 +592,11 @@ ite_else_28.i:                                    ; preds = %entry
   %..i = select i1 %cmp_eq_154.not.i, i32 257, i32 1
   br label %probe_orb_workfold_step.exit
 
-probe_orb_workfold_step.exit.fold.split:          ; preds = %entry
+ite_else_13.i:                                    ; preds = %entry
   br label %probe_orb_workfold_step.exit
 
-probe_orb_workfold_step.exit:                     ; preds = %entry, %probe_orb_workfold_step.exit.fold.split, %ite_else_41.i, %ite_else_89.i, %ite_then_102.i, %ite_else_28.i
-  %common.ret.op.i = phi i32 [ 0, %ite_else_41.i ], [ 257, %ite_else_89.i ], [ %..i, %ite_else_28.i ], [ 257, %entry ], [ %spec.select.i, %ite_then_102.i ], [ 0, %probe_orb_workfold_step.exit.fold.split ]
+probe_orb_workfold_step.exit:                     ; preds = %ite_else_13.i, %ite_else_28.i, %ite_then_102.i, %ite_else_89.i, %ite_else_41.i, %entry
+  %common.ret.op.i = phi i32 [ 257, %ite_else_13.i ], [ 0, %entry ], [ 0, %ite_else_41.i ], [ 257, %ite_else_89.i ], [ %..i, %ite_else_28.i ], [ %spec.select.i, %ite_then_102.i ]
   ret i32 %common.ret.op.i
 }
 
@@ -621,7 +615,7 @@ ite_then_27.i:                                    ; preds = %ite_then_12.i
   %0 = select i1 %cmp_eq_35.not.i, i8 2, i8 3
   br label %probe_orb_taskcard_step.exit
 
-probe_orb_taskcard_step.exit:                     ; preds = %entry, %ite_then_12.i, %ite_then_27.i
+probe_orb_taskcard_step.exit:                     ; preds = %ite_then_27.i, %ite_then_12.i, %entry
   %common.ret.op.i = phi i8 [ %0, %ite_then_27.i ], [ 1, %ite_then_12.i ], [ 0, %entry ]
   ret i8 %common.ret.op.i
 }
@@ -668,7 +662,7 @@ ite_else_57.i:                                    ; preds = %ite_then_25.i
 ite_else_13.i:                                    ; preds = %entry
   br label %probe_orb_admission_step.exit
 
-probe_orb_admission_step.exit:                    ; preds = %entry, %ite_then_25.i, %ite_else_57.i, %ite_else_13.i
+probe_orb_admission_step.exit:                    ; preds = %ite_else_13.i, %ite_else_57.i, %ite_then_25.i, %entry
   %common.ret.op.i = phi i32 [ 256, %ite_else_13.i ], [ 0, %ite_then_25.i ], [ %0, %ite_else_57.i ], [ 65536, %entry ]
   ret i32 %common.ret.op.i
 }
@@ -679,10 +673,10 @@ entry:
   %cmp_le_4.not.not.i = icmp eq i64 %a0, 0
   %sel_13.i = select i1 %cmp_le_4.not.not.i, i64 600, i64 %a0
   %sel_29.i = tail call i64 @llvm.umax.i64(i64 %sel_13.i, i64 %a1)
-  %cmp_lt_37.i = icmp ult i32 %a2, 2
   %0 = add i32 %a2, -1
   %1 = tail call i32 @llvm.umin.i32(i32 %0, i32 20)
-  %narrow = select i1 %cmp_lt_37.i, i32 0, i32 %1
+  %cmp_lt_37.inv.i = icmp ugt i32 %a2, 1
+  %narrow = select i1 %cmp_lt_37.inv.i, i32 %1, i32 0
   %2 = zext nneg i32 %narrow to i64
   %div_raw_8924.i = lshr i64 %sel_29.i, %2
   %cmp_lt_95.not.i = icmp ult i64 %div_raw_8924.i, %sel_13.i
@@ -703,20 +697,20 @@ ite_then_10.i:                                    ; preds = %entry
   br label %probe_orb_cost_cents_step.exit
 
 ite_else_11.i:                                    ; preds = %entry
-  %alu_36.i = sub i64 %a0, %a2
+  %alu_36.i = sub nuw i64 %a0, %a2
   %alu_39.i = mul i64 %alu_36.i, %a4
   %alu_42.i = mul i64 %a5, %a1
   %alu_45.i = add i64 %alu_42.i, %alu_39.i
   %alu_48.i = mul i64 %a6, %a2
   br label %probe_orb_cost_cents_step.exit
 
-probe_orb_cost_cents_step.exit:                   ; preds = %ite_then_10.i, %ite_else_11.i
-  %alu_48.sink.i = phi i64 [ %alu_48.i, %ite_else_11.i ], [ %alu_15.i, %ite_then_10.i ]
-  %alu_45.sink.i = phi i64 [ %alu_45.i, %ite_else_11.i ], [ %alu_19.i, %ite_then_10.i ]
+probe_orb_cost_cents_step.exit:                   ; preds = %ite_else_11.i, %ite_then_10.i
+  %alu_48.i.sink = phi i64 [ %alu_48.i, %ite_else_11.i ], [ %alu_15.i, %ite_then_10.i ]
+  %alu_45.i.sink = phi i64 [ %alu_45.i, %ite_else_11.i ], [ %alu_19.i, %ite_then_10.i ]
+  %alu_51.i = add i64 %alu_45.i.sink, %alu_48.i.sink
   %alu_54.i = mul i64 %a7, %a3
-  %alu_51.i = add i64 %alu_54.i, 5000000
-  %alu_57.i = add i64 %alu_51.i, %alu_48.sink.i
-  %common.ret.op.in.i = add i64 %alu_57.i, %alu_45.sink.i
+  %alu_57.i = add i64 %alu_54.i, 5000000
+  %common.ret.op.in.i = add i64 %alu_57.i, %alu_51.i
   %common.ret.op.i = udiv i64 %common.ret.op.in.i, 10000000
   ret i64 %common.ret.op.i
 }
@@ -725,22 +719,20 @@ probe_orb_cost_cents_step.exit:                   ; preds = %ite_then_10.i, %ite
 define dso_local zeroext i8 @orb_stream_loop_step(i8 zeroext %a0, i8 zeroext %a1, i32 %a2, i32 %a3, i32 %a4, i32 %a5, i32 %a6, i64 %a7, i64 %a8) local_unnamed_addr #0 {
 entry:
   %cmp_eq_5.not.i = icmp eq i8 %a0, 1
-  br i1 %cmp_eq_5.not.i, label %probe_orb_stream_loop_step.exit, label %ite_then_12.i
-
-ite_then_12.i:                                    ; preds = %entry
   %cmp_lt_20.i = icmp ugt i32 %a3, 256
+  %or.cond.not7.i = select i1 %cmp_eq_5.not.i, i1 true, i1 %cmp_lt_20.i
   %cmp_lt_33.not.i = icmp ult i64 %a8, %a7
-  %or.cond.i = or i1 %cmp_lt_20.i, %cmp_lt_33.not.i
-  br i1 %or.cond.i, label %probe_orb_stream_loop_step.exit, label %ite_then_40.i
+  %or.cond5.i = or i1 %or.cond.not7.i, %cmp_lt_33.not.i
+  br i1 %or.cond5.i, label %probe_orb_stream_loop_step.exit, label %ite_then_40.i
 
-ite_then_40.i:                                    ; preds = %ite_then_12.i
+ite_then_40.i:                                    ; preds = %entry
   %cmp_eq_46.not.i = icmp eq i32 %a3, 0
   %cmp_lt_61.i = icmp ult i32 %a4, 2
-  %or.cond.not2 = select i1 %cmp_eq_46.not.i, i1 true, i1 %cmp_lt_61.i
+  %or.cond6.i.not1 = select i1 %cmp_eq_46.not.i, i1 true, i1 %cmp_lt_61.i
   %alu_77.i.narrow = mul i32 %a4, %a3
   %cmp_lt_84.not.i = icmp ugt i32 %alu_77.i.narrow, %a2
-  %or.cond1 = select i1 %or.cond.not2, i1 true, i1 %cmp_lt_84.not.i
-  br i1 %or.cond1, label %probe_orb_stream_loop_step.exit, label %ite_then_91.i
+  %or.cond = select i1 %or.cond6.i.not1, i1 true, i1 %cmp_lt_84.not.i
+  br i1 %or.cond, label %probe_orb_stream_loop_step.exit, label %ite_then_91.i
 
 ite_then_91.i:                                    ; preds = %ite_then_40.i
   %cmp_eq_99.not.i = icmp eq i8 %a1, 1
@@ -751,12 +743,12 @@ ite_then_106.i:                                   ; preds = %ite_then_91.i
   br i1 %cmp_le_116.not.not.i, label %probe_orb_stream_loop_step.exit, label %ite_else_124.i
 
 ite_else_124.i:                                   ; preds = %ite_then_106.i
-  %cmp_le_132.not.not.i = icmp ugt i32 %a6, 1
-  %0 = zext i1 %cmp_le_132.not.not.i to i8
+  %cmp_le_132.i = icmp ugt i32 %a6, 1
+  %0 = zext i1 %cmp_le_132.i to i8
   br label %probe_orb_stream_loop_step.exit
 
-probe_orb_stream_loop_step.exit:                  ; preds = %entry, %ite_then_12.i, %ite_then_40.i, %ite_then_91.i, %ite_then_106.i, %ite_else_124.i
-  %common.ret.op.i = phi i8 [ 0, %ite_then_106.i ], [ %0, %ite_else_124.i ], [ 2, %ite_then_91.i ], [ 0, %ite_then_40.i ], [ 2, %ite_then_12.i ], [ 2, %entry ]
+probe_orb_stream_loop_step.exit:                  ; preds = %ite_else_124.i, %ite_then_106.i, %ite_then_91.i, %ite_then_40.i, %entry
+  %common.ret.op.i = phi i8 [ 0, %ite_then_106.i ], [ %0, %ite_else_124.i ], [ 2, %ite_then_91.i ], [ 0, %ite_then_40.i ], [ 2, %entry ]
   ret i8 %common.ret.op.i
 }
 
@@ -789,7 +781,7 @@ ite_then_12.i:                                    ; preds = %entry
 ite_then_27.i:                                    ; preds = %ite_then_12.i
   %cmp_eq_35.not.i = icmp ne i8 %a2, 1
   %cmp_lt_50.i = icmp ugt i32 %a4, 19
-  %or.cond.i = and i1 %cmp_eq_35.not.i, %cmp_lt_50.i
+  %or.cond.i = select i1 %cmp_eq_35.not.i, i1 %cmp_lt_50.i, i1 false
   br i1 %or.cond.i, label %ite_then_57.i, label %probe_orb_proc_liveness_step.exit
 
 ite_then_57.i:                                    ; preds = %ite_then_27.i
@@ -801,7 +793,7 @@ ite_else_73.i:                                    ; preds = %ite_then_57.i
   %0 = zext i1 %cmp_eq_79.not.i to i8
   br label %probe_orb_proc_liveness_step.exit
 
-probe_orb_proc_liveness_step.exit:                ; preds = %entry, %ite_then_12.i, %ite_then_27.i, %ite_then_57.i, %ite_else_73.i
+probe_orb_proc_liveness_step.exit:                ; preds = %ite_else_73.i, %ite_then_57.i, %ite_then_27.i, %ite_then_12.i, %entry
   %common.ret.op.i = phi i8 [ 1, %ite_then_57.i ], [ %0, %ite_else_73.i ], [ 0, %ite_then_27.i ], [ 2, %ite_then_12.i ], [ 0, %entry ]
   ret i8 %common.ret.op.i
 }
@@ -849,7 +841,7 @@ ite_else_133.i:                                   ; preds = %ite_then_117.i
   %0 = select i1 %cmp_eq_141.not.i, i8 8, i8 9
   br label %probe_orb_pr_gate_step.exit
 
-probe_orb_pr_gate_step.exit:                      ; preds = %entry, %ite_then_12.i, %ite_then_27.i, %ite_then_42.i, %ite_then_57.i, %ite_then_72.i, %ite_then_87.i, %ite_then_102.i, %ite_then_117.i, %ite_else_133.i
+probe_orb_pr_gate_step.exit:                      ; preds = %ite_else_133.i, %ite_then_117.i, %ite_then_102.i, %ite_then_87.i, %ite_then_72.i, %ite_then_57.i, %ite_then_42.i, %ite_then_27.i, %ite_then_12.i, %entry
   %common.ret.op.i = phi i8 [ 9, %ite_then_117.i ], [ %0, %ite_else_133.i ], [ 7, %ite_then_102.i ], [ 6, %ite_then_87.i ], [ 5, %ite_then_72.i ], [ 4, %ite_then_57.i ], [ 3, %ite_then_42.i ], [ 2, %ite_then_27.i ], [ 1, %ite_then_12.i ], [ 0, %entry ]
   ret i8 %common.ret.op.i
 }
@@ -901,20 +893,19 @@ ite_else_39.i:                                    ; preds = %entry
 
 ite_else_68.i:                                    ; preds = %ite_else_39.i
   %alu_72.lhs.trunc.i = trunc i64 %a5 to i16
-  %alu_7253.i = udiv i16 %alu_72.lhs.trunc.i, 60
-  %alu_72.zext.i = zext nneg i16 %alu_7253.i to i64
+  %alu_7254.i = udiv i16 %alu_72.lhs.trunc.i, 60
+  %alu_72.zext.i = zext nneg i16 %alu_7254.i to i64
   %cmp_lt_79.i = icmp ugt i64 %a5, 3599
   %cmp_lt_87.i = icmp ugt i64 %a5, 172799
-  %0 = select i1 %cmp_lt_87.i, i64 12884901890, i64 8589934594
   %sel_117.v.i = select i1 %cmp_lt_87.i, i64 86400, i64 3600
   %sel_117.i = udiv i64 %a5, %sel_117.v.i
   %cmp_le_120.not.i = icmp ult i64 %a5, 60
   %sel_129.i = select i1 %cmp_le_120.not.i, i64 1, i64 %alu_72.zext.i
-  %sel_134.i = select i1 %cmp_lt_79.i, i64 %sel_117.i, i64 %sel_129.i
-  %cmp_lt_141.i = icmp ult i64 %sel_134.i, 16777216
+  %0 = select i1 %cmp_lt_87.i, i64 12884901890, i64 8589934594
   %alu_150.i = select i1 %cmp_lt_79.i, i64 %0, i64 4294967298
-  %alu_152.i = shl i64 %sel_134.i, 40
-  %sel_166.v.i = select i1 %cmp_lt_141.i, i64 %alu_152.i, i64 -1099511627776
+  %1 = tail call i64 @llvm.umin.i64(i64 %sel_117.i, i64 16777215)
+  %2 = select i1 %cmp_lt_79.i, i64 %1, i64 %sel_129.i
+  %sel_166.v.i = shl nuw i64 %2, 40
   %sel_166.i = or disjoint i64 %sel_166.v.i, %alu_150.i
   br label %probe_orb_usage_limit_status.exit
 
@@ -922,19 +913,19 @@ ite_else_26.i:                                    ; preds = %entry
   %ext3 = zext i8 %a3 to i64
   %ext1 = zext i8 %a1 to i64
   %alu_195.i = shl nuw nsw i64 %ext1, 8
-  %1 = add nsw i64 %ext1, -5
-  %narrow.i = icmp ult i64 %1, -4
-  %2 = or disjoint i64 %alu_195.i, 1
-  %3 = add nsw i64 %ext1, -3
-  %narrow50.i = icmp ult i64 %3, -2
-  %cmp_eq_266.not.i = icmp ne i8 %a2, 1
-  %cmp_le_275.i = icmp ugt i8 %a3, 100
-  %narrow51.i = or i1 %cmp_eq_266.not.i, %cmp_le_275.i
-  %sel_307.v.i = or i1 %narrow50.i, %narrow51.i
-  %sel_333.i = select i1 %sel_307.v.i, i64 0, i64 65536
+  %3 = add nsw i64 %ext1, -5
+  %narrow.i = icmp ult i64 %3, -4
+  %4 = add i8 %a1, -1
+  %narrow50.i = icmp ult i8 %4, 2
+  %cmp_eq_266.not.i = icmp eq i8 %a2, 1
+  %cmp_le_275.i = icmp ult i8 %a3, 101
+  %.not53.i = and i1 %narrow50.i, %cmp_eq_266.not.i
+  %sel_307.v.not.i = select i1 %.not53.i, i1 %cmp_le_275.i, i1 false
+  %sel_333.i = select i1 %sel_307.v.not.i, i64 65536, i64 0
   %alu_349.i = shl nuw nsw i64 %ext3, 24
-  %sel_353.i = select i1 %sel_307.v.i, i64 0, i64 %alu_349.i
-  %alu_361.i = select i1 %narrow.i, i64 1, i64 %2
+  %sel_353.i = select i1 %sel_307.v.not.i, i64 %alu_349.i, i64 0
+  %5 = or disjoint i64 %alu_195.i, 1
+  %alu_361.i = select i1 %narrow.i, i64 1, i64 %5
   %alu_364.i = or disjoint i64 %sel_333.i, %alu_361.i
   %alu_367.i = or disjoint i64 %alu_364.i, %sel_353.i
   br label %probe_orb_usage_limit_status.exit
@@ -942,7 +933,7 @@ ite_else_26.i:                                    ; preds = %entry
 ite_else_13.i:                                    ; preds = %entry
   br label %probe_orb_usage_limit_status.exit
 
-probe_orb_usage_limit_status.exit:                ; preds = %entry, %ite_else_39.i, %ite_else_68.i, %ite_else_26.i, %ite_else_13.i
+probe_orb_usage_limit_status.exit:                ; preds = %ite_else_13.i, %ite_else_26.i, %ite_else_68.i, %ite_else_39.i, %entry
   %common.ret.op.i = phi i64 [ %sel_166.i, %ite_else_68.i ], [ %alu_367.i, %ite_else_26.i ], [ 0, %ite_else_13.i ], [ 3, %entry ], [ 2, %ite_else_39.i ]
   ret i64 %common.ret.op.i
 }
@@ -1001,7 +992,7 @@ ite_else_22.i:                                    ; preds = %ite_then_9.i
   %alu_101.i = select i1 %cmp_le_86.not.i, i64 257, i64 %6
   br label %probe_orb_relative_time_bucket.exit
 
-probe_orb_relative_time_bucket.exit:              ; preds = %entry, %ite_then_45.i, %ite_then_59.i, %ite_else_46.i, %ite_else_34.i, %ite_else_22.i
+probe_orb_relative_time_bucket.exit:              ; preds = %ite_else_22.i, %ite_else_34.i, %ite_else_46.i, %ite_then_59.i, %ite_then_45.i, %entry
   %common.ret.op.i = phi i64 [ %alu_65.i, %ite_then_59.i ], [ %alu_73.i, %ite_else_46.i ], [ %alu_80.i, %ite_else_34.i ], [ %alu_101.i, %ite_else_22.i ], [ 1099511627524, %ite_then_45.i ], [ 0, %entry ]
   ret i64 %common.ret.op.i
 }
@@ -1020,16 +1011,16 @@ entry:
   %alu_46.i = xor i64 %ext3, 4294967295
   %cmp_le_53.not.not.i = icmp ult i64 %alu_46.i, %ext0
   %alu_63.i = add nuw nsw i64 %ext3, %ext0
-  %sel_68.i = select i1 %cmp_le_53.not.not.i, i64 4294967295, i64 %alu_63.i
+  %alu_64.i = and i64 %alu_63.i, 4294967295
+  %sel_68.i = select i1 %cmp_le_53.not.not.i, i64 4294967295, i64 %alu_64.i
   %cmp_lt_72.not.not.i = icmp eq i32 %a3, 0
   %sel_82.i = select i1 %cmp_lt_72.not.not.i, i64 %ext0, i64 %ext3
   %sel_87.i = select i1 %cmp_eq_38.not.i, i64 %sel_82.i, i64 %sel_68.i
-  %0 = and i64 %sel_87.i, 4294967295
-  %alu_98.i = select i1 %cmp_eq_27.not.i, i64 0, i64 %0
+  %sel_91.i = select i1 %cmp_eq_27.not.i, i64 0, i64 %sel_87.i
   %cmp_le_102.not.not.i = icmp eq i32 %a1, -1
   %alu_111.i = add i64 %alu_20.i, 4294967296
   %alu_126.i = select i1 %cmp_le_102.not.not.i, i64 -4294967296, i64 %alu_111.i
-  %alu_129.i = or disjoint i64 %alu_98.i, %alu_126.i
+  %alu_129.i = or disjoint i64 %sel_91.i, %alu_126.i
   %sel_134.i = select i1 %cmp_le_9.i, i64 %alu_129.i, i64 %alu_23.i
   ret i64 %sel_134.i
 }
@@ -1047,16 +1038,16 @@ entry:
   %cmp_eq_71.not.i = icmp eq i8 %narrow, 4
   %cmp_eq_80.not.i = icmp eq i8 %narrow, 6
   %sel_113.v.v.i = select i1 %cmp_eq_71.not.i, i64 4, i64 6
-  %0 = add nsw i64 %sel_20.i, -3
-  %1 = icmp ult i64 %0, 2
+  %0 = add i8 %narrow, -3
+  %1 = icmp ult i8 %0, 2
   %narrow49.i = or i1 %cmp_eq_80.not.i, %1
   %sel_128.v.v.i = select i1 %cmp_eq_62.not.i, i64 3, i64 %sel_113.v.v.i
   %cmp_eq_132.not.not.i = icmp eq i8 %a1, 1
-  %2 = add nsw i64 %ext1, -1
-  %narrow.i = icmp ult i64 %2, 2
-  %sel_174.v.v.v.i.v = select i1 %cmp_eq_132.not.not.i, i8 %a2, i8 %a3
-  %3 = add nsw i64 %sel_20.i, -1
-  %4 = icmp ult i64 %3, 2
+  %2 = add i8 %a1, -1
+  %narrow.i = icmp ult i8 %2, 2
+  %sel_174.v.v.i.v = select i1 %cmp_eq_132.not.not.i, i8 %a2, i8 %a3
+  %3 = add i8 %narrow, -1
+  %4 = icmp ult i8 %3, 2
   %sel_245.v.i = select i1 %4, i1 %narrow.i, i1 %narrow49.i
   %5 = add nsw i64 %ext1, -3
   %narrow50.i = icmp ult i64 %5, -2
@@ -1067,7 +1058,7 @@ entry:
   %7 = select i1 %6, i1 true, i1 %sel_cond_314.not5152.i
   %8 = select i1 %cmp_eq_26.not.i, i1 %7, i1 false
   %narrow54.i = xor i1 %8, true
-  %9 = icmp eq i8 %sel_174.v.v.v.i.v, 1
+  %9 = icmp eq i8 %sel_174.v.v.i.v, 1
   %10 = icmp eq i64 %sel_128.v.v.i, %ext1
   %11 = select i1 %4, i1 %9, i1 %10
   %12 = icmp eq i8 %a1, 5
@@ -1116,7 +1107,7 @@ ite_then_120.i:                                   ; preds = %ite_else_31.i
   %.3.i = zext i1 %cmp_eq_126.not.i to i8
   br label %probe_orb_schedule_step.exit
 
-probe_orb_schedule_step.exit:                     ; preds = %entry, %ite_then_30.i, %ite_then_58.i, %ite_else_86.i, %ite_else_31.i, %ite_then_120.i
+probe_orb_schedule_step.exit:                     ; preds = %ite_then_120.i, %ite_else_31.i, %ite_else_86.i, %ite_then_58.i, %ite_then_30.i, %entry
   %common.ret.op.i = phi i8 [ 0, %entry ], [ 4, %ite_then_58.i ], [ %..i, %ite_else_86.i ], [ 0, %ite_then_30.i ], [ %.3.i, %ite_then_120.i ], [ 2, %ite_else_31.i ]
   ret i8 %common.ret.op.i
 }
@@ -1135,29 +1126,29 @@ define dso_local i32 @orb_privilege_step(i8 zeroext %a0, i8 zeroext %a1, i8 zero
 entry:
   %cmp_eq_5.not.i = icmp ne i8 %a1, 0
   %cmp_eq_20.not.i = icmp ne i8 %a6, 1
-  %or.cond.not7.i = and i1 %cmp_eq_5.not.i, %cmp_eq_20.not.i
+  %or.cond.not8.i = and i1 %cmp_eq_5.not.i, %cmp_eq_20.not.i
   %cmp_eq_35.not.i = icmp eq i8 %a5, 0
-  %or.cond3.i = and i1 %cmp_eq_35.not.i, %or.cond.not7.i
+  %or.cond3.i = and i1 %cmp_eq_35.not.i, %or.cond.not8.i
   %cmp_le_49.not.not.i = icmp ugt i64 %a8, %a7
-  %or.cond4.i = and i1 %cmp_le_49.not.not.i, %or.cond3.i
+  %or.cond4.i = and i1 %or.cond3.i, %cmp_le_49.not.not.i
   %cmp_le_62.not.not.i = icmp ugt i64 %a9, %a7
-  %or.cond5.i = and i1 %cmp_le_62.not.not.i, %or.cond4.i
+  %or.cond5.i = and i1 %or.cond4.i, %cmp_le_62.not.not.i
   br i1 %or.cond5.i, label %ite_then_69.i, label %probe_orb_privilege_step.exit
 
 ite_then_69.i:                                    ; preds = %entry
   %cmp_eq_77.not.i = icmp ne i8 %a0, 1
   %cmp_eq_93.not.i = icmp ne i8 %a2, 1
-  %or.cond6.i.not1 = or i1 %cmp_eq_77.not.i, %cmp_eq_93.not.i
+  %or.cond6.not9.i = or i1 %cmp_eq_77.not.i, %cmp_eq_93.not.i
   %cmp_le_113.not.not.i = icmp ugt i8 %a3, %a4
-  %or.cond = select i1 %or.cond6.i.not1, i1 true, i1 %cmp_le_113.not.not.i
-  br i1 %or.cond, label %probe_orb_privilege_step.exit, label %ite_else_121.i
+  %or.cond7.i = select i1 %or.cond6.not9.i, i1 true, i1 %cmp_le_113.not.not.i
+  br i1 %or.cond7.i, label %probe_orb_privilege_step.exit, label %ite_else_121.i
 
 ite_else_121.i:                                   ; preds = %ite_then_69.i
   %cmp_lt_127.i = icmp ugt i8 %a3, 1
   %0 = select i1 %cmp_lt_127.i, i32 1, i32 257
   br label %probe_orb_privilege_step.exit
 
-probe_orb_privilege_step.exit:                    ; preds = %entry, %ite_then_69.i, %ite_else_121.i
+probe_orb_privilege_step.exit:                    ; preds = %ite_else_121.i, %ite_then_69.i, %entry
   %common.ret.op.i = phi i32 [ 0, %ite_then_69.i ], [ %0, %ite_else_121.i ], [ 65536, %entry ]
   ret i32 %common.ret.op.i
 }
@@ -1214,7 +1205,7 @@ ite_else_250.i:                                   ; preds = %ite_else_137.i
   %spec.select.i = and i1 %cmp_eq_272.not.i, %sel_237.v.i
   br label %probe_orb_deploy_gate_step.exit
 
-probe_orb_deploy_gate_step.exit:                  ; preds = %entry, %ite_else_137.i, %ite_else_250.i
+probe_orb_deploy_gate_step.exit:                  ; preds = %ite_else_250.i, %ite_else_137.i, %entry
   %common.ret.op.shrunk.i = phi i1 [ false, %entry ], [ %sel_237.v.i, %ite_else_137.i ], [ %spec.select.i, %ite_else_250.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
@@ -1231,7 +1222,7 @@ entry:
 define dso_local noundef i64 @orb_scroll_clamp_top(i64 %a0, i64 %a1, i64 %a2) local_unnamed_addr #0 {
 entry:
   %sel_15.i = tail call i64 @llvm.usub.sat.i64(i64 %a0, i64 %a1)
-  %sel_31.i = tail call noundef i64 @llvm.umin.i64(i64 %sel_15.i, i64 %a2)
+  %sel_31.i = tail call noundef i64 @llvm.umin.i64(i64 %a2, i64 %sel_15.i)
   ret i64 %sel_31.i
 }
 
@@ -1248,7 +1239,7 @@ define dso_local i64 @orb_scroll_layout_step(i8 zeroext %a0, i64 %a1, i64 %a2, i
 entry:
   %cmp_eq_5.not.i = icmp eq i8 %a0, 1
   %sel_26.i = tail call i64 @llvm.usub.sat.i64(i64 %a1, i64 %a2)
-  %sel_61.i = tail call i64 @llvm.umin.i64(i64 %sel_26.i, i64 %a3)
+  %sel_61.i = tail call i64 @llvm.umin.i64(i64 %a3, i64 %sel_26.i)
   %sel_66.i = select i1 %cmp_eq_5.not.i, i64 %sel_26.i, i64 %sel_61.i
   ret i64 %sel_66.i
 }
@@ -1275,7 +1266,7 @@ define dso_local i64 @orb_scroll_correct(i8 zeroext %a0, i64 %a1, i64 %a2, i64 %
 entry:
   %cmp_eq_5.not.i = icmp eq i8 %a0, 1
   %sel_26.i = tail call i64 @llvm.usub.sat.i64(i64 %a1, i64 %a2)
-  %sel_61.i = tail call i64 @llvm.umin.i64(i64 %sel_26.i, i64 %a3)
+  %sel_61.i = tail call i64 @llvm.umin.i64(i64 %a3, i64 %sel_26.i)
   %sel_66.i = select i1 %cmp_eq_5.not.i, i64 %sel_26.i, i64 %sel_61.i
   ret i64 %sel_66.i
 }
@@ -1283,28 +1274,28 @@ entry:
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @orb_scroll_shows_jump(i8 zeroext %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4) local_unnamed_addr #0 {
 entry:
-  %cmp_eq_5.not.i = icmp eq i8 %a0, 0
-  %cmp_le_18.i = icmp ult i64 %a2, -24
-  %or.cond.not52.i = and i1 %cmp_eq_5.not.i, %cmp_le_18.i
+  %cmp_eq_5.not.i = icmp ne i8 %a0, 0
+  %cmp_le_18.i = icmp ugt i64 %a2, -25
+  %or.cond.not52.not54.i = or i1 %cmp_eq_5.not.i, %cmp_le_18.i
   %alu_30.i = add i64 %a2, 24
-  %cmp_lt_34.not.i = icmp ult i64 %alu_30.i, %a1
-  %or.cond50.i = and i1 %or.cond.not52.i, %cmp_lt_34.not.i
-  %cmp_le_48.not.not.i = icmp ule i64 %a2, %a1
-  %or.cond51.not.i = and i1 %cmp_le_48.not.not.i, %or.cond50.i
-  br i1 %or.cond51.not.i, label %ite_else_56.i, label %probe_orb_scroll_shows_jump.exit
+  %cmp_lt_34.not.i = icmp uge i64 %alu_30.i, %a1
+  %or.cond50.not53.i = or i1 %or.cond.not52.not54.i, %cmp_lt_34.not.i
+  %cmp_le_48.not.not.i = icmp ugt i64 %a2, %a1
+  %or.cond51.i = or i1 %cmp_le_48.not.not.i, %or.cond50.not53.i
+  br i1 %or.cond51.i, label %probe_orb_scroll_shows_jump.exit, label %ite_else_56.i
 
 ite_else_56.i:                                    ; preds = %entry
-  %alu_244.i = sub i64 %a1, %a2
+  %alu_244.i = sub nuw i64 %a1, %a2
   %cmp_le_363.not.not.i = icmp ult i64 %alu_244.i, %a3
   br i1 %cmp_le_363.not.not.i, label %probe_orb_scroll_shows_jump.exit, label %ite_else_429.i
 
 ite_else_429.i:                                   ; preds = %ite_else_56.i
-  %alu_447.i = sub i64 %alu_244.i, %a3
+  %alu_447.i = sub nuw i64 %alu_244.i, %a3
   %cmp_lt_451.not.i = icmp ugt i64 %alu_447.i, %a4
   %0 = zext i1 %cmp_lt_451.not.i to i8
   br label %probe_orb_scroll_shows_jump.exit
 
-probe_orb_scroll_shows_jump.exit:                 ; preds = %entry, %ite_else_56.i, %ite_else_429.i
+probe_orb_scroll_shows_jump.exit:                 ; preds = %ite_else_429.i, %ite_else_56.i, %entry
   %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_else_56.i ], [ %0, %ite_else_429.i ]
   ret i8 %common.ret.op.i
 }
@@ -1322,18 +1313,18 @@ entry:
   %cmp_le_42.not.not.i = icmp ult i64 %alu_35.i, %ext1
   %alu_52.i = add nuw nsw i64 %ext2, %ext1
   %alu_53.i = and i64 %alu_52.i, 4294967295
-  %0 = or disjoint i64 %alu_53.i, -9223372036854775808
   %sel_66.i = select i1 %cmp_eq_18.not.i, i64 %ext1, i64 0
   %narrow.i = and i1 %cmp_eq_18.not.i, %cmp_eq_27.not.i
   %alu_75.i = xor i64 %ext3, 4294967295
   %cmp_le_82.not.not.i = icmp ult i64 %alu_75.i, %ext2
   %alu_92.i = add nuw nsw i64 %ext3, %ext2
-  %1 = shl i64 %alu_92.i, 32
-  %2 = and i64 %1, 9223372032559808512
-  %alu_114.i = select i1 %cmp_le_82.not.not.i, i64 9223372032559808512, i64 %2
+  %0 = shl i64 %alu_92.i, 32
+  %1 = and i64 %0, 9223372032559808512
+  %alu_114.i = select i1 %cmp_le_82.not.not.i, i64 9223372032559808512, i64 %1
   %alu_117.i = or disjoint i64 %alu_114.i, %ext1
   %sel_122.i = select i1 %cmp_eq_9.not.i, i64 %alu_117.i, i64 %sel_66.i
-  %alu_131.i = select i1 %cmp_le_42.not.not.i, i64 -9223372032559808513, i64 %0
+  %2 = or disjoint i64 %alu_53.i, -9223372036854775808
+  %alu_131.i = select i1 %cmp_le_42.not.not.i, i64 -9223372032559808513, i64 %2
   %sel_136.i = select i1 %narrow.i, i64 %alu_131.i, i64 %sel_122.i
   ret i64 %sel_136.i
 }
@@ -1351,11 +1342,11 @@ entry:
   %0 = or i1 %cmp_le_33.not.not.i, %cmp_le_42.i
   %sel_56.i = select i1 %0, i64 %ext0, i64 0
   %sel_61.i = select i1 %cmp_eq_22.not.i, i64 %sel_56.i, i64 %ext0
-  %1 = add nsw i64 %ext2, -1
-  %narrow.i = icmp ult i64 %1, 2
+  %1 = add i8 %a2, -1
+  %narrow.i = icmp ult i8 %1, 2
   %2 = add nsw i64 %ext2, -3
   %narrow42.i = icmp ult i64 %2, -2
-  %3 = or i1 %cmp_le_42.i, %narrow42.i
+  %3 = select i1 %narrow42.i, i1 true, i1 %cmp_le_42.i
   %sel_101.i = select i1 %3, i64 0, i64 %ext2
   %sel_128.i = select i1 %cmp_eq_11.not.i, i64 %sel_101.i, i64 %sel_61.i
   %sel_179.i = select i1 %0, i64 %ext1, i64 0
@@ -1364,8 +1355,8 @@ entry:
   %sel_251.i = zext i32 %narrow to i64
   %sel_224.i = select i1 %narrow.i, i64 %sel_251.i, i64 0
   %sel_266.i = select i1 %cmp_eq_11.not.i, i64 %sel_224.i, i64 %sel_184.i
-  %alu_274.i = shl nuw i64 %sel_266.i, 32
-  %alu_279.i = or disjoint i64 %alu_274.i, %sel_128.i
+  %alu_276.i = shl nuw i64 %sel_266.i, 32
+  %alu_279.i = or disjoint i64 %alu_276.i, %sel_128.i
   ret i64 %alu_279.i
 }
 
@@ -1374,6 +1365,8 @@ define dso_local i64 @orb_stream_commit_step(i8 zeroext %a0, i8 zeroext %a1, i32
 entry:
   %ext1 = zext i8 %a1 to i64
   %ext5 = zext i8 %a5 to i64
+  %ext7 = zext i32 %a7 to i64
+  %ext8 = zext i32 %a8 to i64
   %cmp_eq_21.not.i = icmp eq i8 %a4, 1
   %cmp_eq_30.not.i = icmp eq i8 %a0, 1
   %sel_55.v.i = xor i1 %cmp_eq_30.not.i, %cmp_eq_21.not.i
@@ -1385,20 +1378,19 @@ entry:
   %0 = or i1 %cmp_le_83.not.not.i, %cmp_le_92.i
   %sel_106.i = select i1 %0, i64 %ext1, i64 0
   %sel_111.i = select i1 %cmp_eq_72.not.i, i64 %sel_106.i, i64 %ext1
-  %1 = add nsw i64 %ext5, -1
-  %narrow.i = icmp ult i64 %1, 2
+  %1 = add i8 %a5, -1
+  %narrow.i = icmp ult i8 %1, 2
   %sel_178.i = select i1 %cmp_le_92.i, i64 0, i64 %ext5
   %sel_151.i = select i1 %narrow.i, i64 %sel_178.i, i64 0
   %sel_193.i = select i1 %cmp_eq_61.not.i, i64 %sel_151.i, i64 %sel_111.i
   %cmp_le_201.not.not.i = icmp eq i32 %a7, -1
-  %2 = add i32 %a7, 1
-  %narrow = select i1 %cmp_le_201.not.not.i, i32 -1, i32 %2
+  %alu_209.i = add nuw nsw i64 %ext7, 1
+  %sel_214.i = select i1 %cmp_le_201.not.not.i, i64 4294967295, i64 %alu_209.i
   %cmp_eq_224.not.i = icmp ne i8 %a3, 1
   %cmp_eq_242.not.i = icmp ne i64 %sel_193.i, 0
-  %3 = or i1 %cmp_eq_224.not.i, %sel_55.v.i
-  %narrow75.not.not.i = select i1 %3, i1 true, i1 %cmp_eq_242.not.i
-  %sel_328.i.v = select i1 %narrow75.not.not.i, i32 %a8, i32 %narrow
-  %sel_328.i = zext i32 %sel_328.i.v to i64
+  %2 = or i1 %cmp_eq_224.not.i, %sel_55.v.i
+  %narrow75.not.not.i = select i1 %2, i1 true, i1 %cmp_eq_242.not.i
+  %sel_328.i = select i1 %narrow75.not.not.i, i64 %ext8, i64 %sel_214.i
   %cmp_eq_340.not.i = icmp eq i64 %sel_193.i, 1
   %cmp_eq_349.not.i = icmp eq i64 %sel_193.i, 2
   %sel_357.i = select i1 %cmp_eq_349.not.i, i64 512, i64 0
@@ -1458,7 +1450,7 @@ ite_then_103.i:                                   ; preds = %ite_then_90.i
   %0 = select i1 %cmp_le_109.i, i8 9, i8 8
   br label %probe_orb_mission_state_classify.exit
 
-probe_orb_mission_state_classify.exit:            ; preds = %entry, %ite_then_12.i, %ite_then_25.i, %ite_then_38.i, %ite_then_51.i, %ite_then_64.i, %ite_then_77.i, %ite_then_90.i, %ite_then_103.i
+probe_orb_mission_state_classify.exit:            ; preds = %ite_then_103.i, %ite_then_90.i, %ite_then_77.i, %ite_then_64.i, %ite_then_51.i, %ite_then_38.i, %ite_then_25.i, %ite_then_12.i, %entry
   %common.ret.op.i = phi i8 [ %0, %ite_then_103.i ], [ 7, %ite_then_90.i ], [ 5, %ite_then_77.i ], [ 6, %ite_then_64.i ], [ 2, %ite_then_51.i ], [ 1, %ite_then_38.i ], [ 0, %ite_then_25.i ], [ 4, %ite_then_12.i ], [ 3, %entry ]
   ret i8 %common.ret.op.i
 }
@@ -1502,7 +1494,7 @@ ite_then_103.i:                                   ; preds = %ite_then_90.i
   %0 = select i1 %cmp_le_109.i, i8 9, i8 8
   br label %probe_orb_mission_sort_rank.exit
 
-probe_orb_mission_sort_rank.exit:                 ; preds = %entry, %ite_then_12.i, %ite_then_25.i, %ite_then_38.i, %ite_then_51.i, %ite_then_64.i, %ite_then_77.i, %ite_then_90.i, %ite_then_103.i
+probe_orb_mission_sort_rank.exit:                 ; preds = %ite_then_103.i, %ite_then_90.i, %ite_then_77.i, %ite_then_64.i, %ite_then_51.i, %ite_then_38.i, %ite_then_25.i, %ite_then_12.i, %entry
   %common.ret.op.i = phi i8 [ %0, %ite_then_103.i ], [ 7, %ite_then_90.i ], [ 5, %ite_then_77.i ], [ 6, %ite_then_64.i ], [ 2, %ite_then_51.i ], [ 1, %ite_then_38.i ], [ 0, %ite_then_25.i ], [ 4, %ite_then_12.i ], [ 3, %entry ]
   ret i8 %common.ret.op.i
 }
@@ -1525,38 +1517,38 @@ entry:
   %sel_93.i = select i1 %cmp_eq_59.not.i, i64 5, i64 %sel_89.i
   %sel_97.i = select i1 %cmp_le_50.i, i64 %sel_93.i, i64 6
   %sel_101.i = select i1 %cmp_le_41.i, i64 %sel_97.i, i64 2
-  %0 = select i1 %cmp_eq_32.not.not.i, i64 1, i64 %sel_101.i
-  %1 = select i1 %cmp_le_23.i, i64 %0, i64 0
-  %2 = select i1 %cmp_le_14.i, i64 %1, i64 4
-  %alu_121.i = select i1 %cmp_le_5.i, i64 %2, i64 3
-  %cmp_eq_123.not.i = icmp eq i64 %alu_121.i, 0
-  %cmp_eq_141.not.i = icmp eq i64 %alu_121.i, 2
-  %cmp_eq_159.not.i = icmp eq i64 %alu_121.i, 4
-  %cmp_eq_168.not.i = icmp eq i64 %alu_121.i, 7
-  %cmp_eq_177.not.i = icmp eq i64 %alu_121.i, 6
-  %cmp_eq_186.not.i = icmp eq i64 %alu_121.i, 8
-  %3 = or i1 %cmp_eq_177.not.i, %cmp_eq_186.not.i
-  %sel_198.i = select i1 %3, i32 128, i32 0
+  %sel_105.i = select i1 %cmp_eq_32.not.not.i, i64 1, i64 %sel_101.i
+  %sel_109.i = select i1 %cmp_le_23.i, i64 %sel_105.i, i64 0
+  %sel_113.i = select i1 %cmp_le_14.i, i64 %sel_109.i, i64 4
+  %sel_117.i = select i1 %cmp_le_5.i, i64 %sel_113.i, i64 3
+  %cmp_eq_123.not.i = icmp eq i64 %sel_117.i, 0
+  %cmp_eq_141.not.i = icmp eq i64 %sel_117.i, 2
+  %cmp_eq_159.not.i = icmp eq i64 %sel_117.i, 4
+  %cmp_eq_168.not.i = icmp eq i64 %sel_117.i, 7
+  %cmp_eq_177.not.i = icmp eq i64 %sel_117.i, 6
+  %cmp_eq_186.not.i = icmp eq i64 %sel_117.i, 8
+  %0 = or i1 %cmp_eq_177.not.i, %cmp_eq_186.not.i
+  %sel_198.i = select i1 %0, i32 128, i32 0
   %sel_202.i = select i1 %cmp_eq_168.not.i, i32 194, i32 %sel_198.i
   %sel_206.i = select i1 %cmp_eq_159.not.i, i32 1, i32 %sel_202.i
   %sel_210.i = select i1 %cmp_le_5.i, i32 %sel_206.i, i32 1
   %sel_214.i = select i1 %cmp_eq_141.not.i, i32 166, i32 %sel_210.i
-  %4 = select i1 %cmp_eq_32.not.not.i, i32 36, i32 %sel_214.i
-  %alu_307.i = select i1 %cmp_eq_123.not.i, i32 4, i32 %4
-  %alu_310.i = or i32 %alu_307.i, 24
-  %5 = and i64 %ext0, 253
-  %6 = icmp eq i64 %5, 20
-  %7 = and i64 %ext0, 254
-  %8 = icmp eq i64 %7, 16
-  %9 = or i1 %8, %6
-  %sel_351.i = select i1 %9, i32 %alu_310.i, i32 %alu_307.i
-  %alu_354.i = or i32 %alu_307.i, 8
-  %10 = add nsw i64 %ext0, -24
-  %11 = icmp ult i64 %10, 3
-  %12 = add nsw i64 %ext0, -11
-  %13 = icmp ult i64 %12, 2
-  %14 = select i1 %13, i1 true, i1 %11
-  %sel_406.i = select i1 %14, i32 %alu_354.i, i32 %sel_351.i
+  %sel_218.i = select i1 %cmp_eq_32.not.not.i, i32 36, i32 %sel_214.i
+  %sel_222.i = select i1 %cmp_eq_123.not.i, i32 4, i32 %sel_218.i
+  %alu_310.i = or i32 %sel_222.i, 24
+  %1 = and i64 %ext0, 253
+  %2 = icmp eq i64 %1, 20
+  %3 = and i64 %ext0, 254
+  %4 = icmp eq i64 %3, 16
+  %5 = or i1 %4, %2
+  %sel_351.i = select i1 %5, i32 %alu_310.i, i32 %sel_222.i
+  %alu_354.i = or i32 %sel_222.i, 8
+  %6 = add i8 %a0, -24
+  %7 = icmp ult i8 %6, 3
+  %8 = add i8 %a0, -11
+  %9 = icmp ult i8 %8, 2
+  %10 = or i1 %9, %7
+  %sel_406.i = select i1 %10, i32 %alu_354.i, i32 %sel_351.i
   ret i32 %sel_406.i
 }
 
@@ -1588,7 +1580,7 @@ ite_then_185.i:                                   ; preds = %ite_then_64.i
   %spec.select20.i = select i1 %cmp_eq_191.not.i, i8 2, i8 3
   br label %probe_orb_mission_inbox_section.exit
 
-probe_orb_mission_inbox_section.exit:             ; preds = %entry, %ite_then_25.i, %ite_then_77.i, %ite_then_90.i, %ite_then_185.i
+probe_orb_mission_inbox_section.exit:             ; preds = %ite_then_185.i, %ite_then_90.i, %ite_then_77.i, %ite_then_25.i, %entry
   %common.ret.op.i = phi i8 [ 2, %ite_then_77.i ], [ 1, %ite_then_25.i ], [ 0, %entry ], [ %spec.select.i, %ite_then_90.i ], [ %spec.select20.i, %ite_then_185.i ]
   ret i8 %common.ret.op.i
 }
@@ -1620,7 +1612,7 @@ ite_else_13.i:                                    ; preds = %entry
   %sel_266.i = select i1 %cmp_eq_107.not.i, i32 %alu_258.i, i32 %alu_151.i
   br label %probe_orb_connection_issue_classify.exit
 
-probe_orb_connection_issue_classify.exit:         ; preds = %entry, %ite_else_13.i
+probe_orb_connection_issue_classify.exit:         ; preds = %ite_else_13.i, %entry
   %common.ret.op.i = phi i32 [ %sel_266.i, %ite_else_13.i ], [ 0, %entry ]
   ret i32 %common.ret.op.i
 }
@@ -1675,15 +1667,11 @@ ite_else_34.i:                                    ; preds = %ite_then_21.i
 
 ite_else_22.i:                                    ; preds = %ite_then_9.i
   %alu_90.lhs.trunc.i = trunc i64 %a0 to i16
-  %alu_90.lhs.trunc.i.frozen = freeze i16 %alu_90.lhs.trunc.i
-  %alu_9015.i = udiv i16 %alu_90.lhs.trunc.i.frozen, 60
+  %alu_9015.i = udiv i16 %alu_90.lhs.trunc.i, 60
   %alu_90.zext.i = zext nneg i16 %alu_9015.i to i64
-  %1 = mul i16 %alu_9015.i, 60
-  %alu_9216.i.decomposed = sub i16 %alu_90.lhs.trunc.i.frozen, %1
-  %2 = shl nuw nsw i16 %alu_9216.i.decomposed, 8
-  %alu_94.i = zext nneg i16 %2 to i64
-  %alu_98.i = shl nuw nsw i64 %alu_90.zext.i, 32
-  %alu_96.i = or disjoint i64 %alu_98.i, %alu_94.i
+  %1 = shl nuw nsw i64 %a0, 8
+  %2 = mul nuw nsw i64 %alu_90.zext.i, 4294951936
+  %alu_96.i = add nuw nsw i64 %2, %1
   %alu_101.i = or disjoint i64 %alu_96.i, 1
   br label %probe_orb_worked_duration_bucket.exit
 
@@ -1691,7 +1679,7 @@ ite_else_10.i:                                    ; preds = %entry
   %alu_104.i = shl nuw nsw i64 %a0, 32
   br label %probe_orb_worked_duration_bucket.exit
 
-probe_orb_worked_duration_bucket.exit:            ; preds = %ite_then_49.i, %ite_else_50.i, %ite_else_34.i, %ite_else_22.i, %ite_else_10.i
+probe_orb_worked_duration_bucket.exit:            ; preds = %ite_else_10.i, %ite_else_22.i, %ite_else_34.i, %ite_else_50.i, %ite_then_49.i
   %common.ret.op.i = phi i64 [ %alu_59.i, %ite_then_49.i ], [ %alu_71.i, %ite_else_50.i ], [ %alu_87.i, %ite_else_34.i ], [ %alu_101.i, %ite_else_22.i ], [ %alu_104.i, %ite_else_10.i ]
   ret i64 %common.ret.op.i
 }
@@ -1699,14 +1687,13 @@ probe_orb_worked_duration_bucket.exit:            ; preds = %ite_then_49.i, %ite
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local i32 @orb_turn_outcome_step(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4, i8 zeroext %a5) local_unnamed_addr #0 {
 entry:
-  %switch.i = icmp ult i8 %a2, 2
-  br i1 %switch.i, label %probe_orb_turn_outcome_step.exit, label %ite_then_25.i
+  switch i8 %a2, label %ite_then_42.i [
+    i8 0, label %probe_orb_turn_outcome_step.exit
+    i8 1, label %probe_orb_turn_outcome_step.exit
+    i8 2, label %ite_else_43.i
+  ]
 
-ite_then_25.i:                                    ; preds = %entry
-  %cmp_eq_35.not.i = icmp eq i8 %a2, 2
-  br i1 %cmp_eq_35.not.i, label %ite_else_43.i, label %ite_then_42.i
-
-ite_then_42.i:                                    ; preds = %ite_then_25.i
+ite_then_42.i:                                    ; preds = %entry
   %cmp_eq_48.not.i = icmp eq i8 %a0, 1
   %cmp_eq_74.not.i = icmp eq i8 %a1, 1
   br i1 %cmp_eq_48.not.i, label %ite_else_56.i, label %ite_then_55.i
@@ -1719,7 +1706,7 @@ ite_else_56.i:                                    ; preds = %ite_then_42.i
   %sel_82.i = select i1 %cmp_eq_74.not.i, i32 257, i32 1
   br label %probe_orb_turn_outcome_step.exit
 
-ite_else_43.i:                                    ; preds = %ite_then_25.i
+ite_else_43.i:                                    ; preds = %entry
   %cmp_eq_89.not.i = icmp eq i8 %a3, 1
   br i1 %cmp_eq_89.not.i, label %ite_else_97.i, label %ite_then_96.i
 
@@ -1761,8 +1748,8 @@ ite_else_233.i:                                   ; preds = %ite_else_97.i
   %sel_259.i = select i1 %cmp_eq_251.not.i, i32 257, i32 1
   br label %probe_orb_turn_outcome_step.exit
 
-probe_orb_turn_outcome_step.exit:                 ; preds = %entry, %ite_then_55.i, %ite_else_56.i, %ite_then_96.i, %ite_then_124.i, %ite_else_125.i, %ite_then_178.i, %ite_then_232.i, %ite_else_233.i
-  %common.ret.op.i = phi i32 [ %sel_69.i, %ite_then_55.i ], [ %sel_82.i, %ite_else_56.i ], [ %sel_164.i, %ite_then_124.i ], [ %sel_218.i, %ite_then_178.i ], [ %sel_246.i, %ite_then_232.i ], [ %sel_259.i, %ite_else_233.i ], [ 1, %ite_else_125.i ], [ 256, %ite_then_96.i ], [ 0, %entry ]
+probe_orb_turn_outcome_step.exit:                 ; preds = %ite_else_233.i, %ite_then_232.i, %ite_then_178.i, %ite_else_125.i, %ite_then_124.i, %ite_then_96.i, %ite_else_56.i, %ite_then_55.i, %entry, %entry
+  %common.ret.op.i = phi i32 [ %sel_69.i, %ite_then_55.i ], [ %sel_82.i, %ite_else_56.i ], [ %sel_164.i, %ite_then_124.i ], [ %sel_218.i, %ite_then_178.i ], [ %sel_246.i, %ite_then_232.i ], [ %sel_259.i, %ite_else_233.i ], [ 1, %ite_else_125.i ], [ 256, %ite_then_96.i ], [ 0, %entry ], [ 0, %entry ]
   ret i32 %common.ret.op.i
 }
 
@@ -1789,8 +1776,8 @@ entry:
   %cmp_le_18.not.not.i = icmp ule i32 %a0, %a1
   %cmp_eq_29.not.i = icmp eq i32 %a2, 0
   %cmp_le_40.not.not.i = icmp ule i32 %a1, %a2
-  %narrow.i = or i1 %cmp_eq_29.not.i, %cmp_le_40.not.not.i
-  %narrow6.i = and i1 %cmp_le_18.not.not.i, %narrow.i
+  %narrow.i = select i1 %cmp_eq_29.not.i, i1 true, i1 %cmp_le_40.not.not.i
+  %narrow6.i = select i1 %cmp_le_18.not.not.i, i1 %narrow.i, i1 false
   %alu_61.i = sub nsw i64 %ext1, %ext0
   %alu_65.i = shl i64 %alu_61.i, 32
   %alu_72.i = add i64 %alu_65.i, 4294967297
@@ -1824,7 +1811,6 @@ entry:
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local i32 @orb_send_flow_step(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4, i8 zeroext %a5, i32 %a6) local_unnamed_addr #0 {
 entry:
-  %ext6 = zext i32 %a6 to i64
   %cmp_eq_13.not.i = icmp eq i8 %a1, 0
   %cmp_eq_24.not.i = icmp eq i8 %a0, 0
   %cmp_eq_35.not.i = icmp eq i8 %a2, 1
@@ -1836,12 +1822,12 @@ entry:
   %narrow.i = icmp ne i8 %0, 0
   %narrow43.i = or i1 %cmp_lt_57.not.not.i, %narrow.i
   %sel_125.i = select i1 %narrow43.i, i32 0, i32 256
-  %1 = add nsw i64 %ext6, -200
-  %narrow44.i = icmp ult i64 %1, 100
+  %1 = add i32 %a6, -200
+  %narrow44.i = icmp ult i32 %1, 100
   %cmp_eq_195.not.i = icmp eq i32 %a6, 409
   %sel_203.i = select i1 %cmp_eq_195.not.i, i32 196608, i32 0
-  %2 = and i64 %ext6, 4294967294
-  %narrow47.i = icmp eq i64 %2, 404
+  %2 = and i32 %a6, -2
+  %narrow47.i = icmp eq i32 %2, 404
   %sel_244.i = select i1 %narrow44.i, i32 65536, i32 %sel_203.i
   %sel_273.i = select i1 %narrow47.i, i32 131072, i32 %sel_244.i
   %alu_284.i = or disjoint i32 %sel_125.i, %sel_51.i
@@ -1852,13 +1838,16 @@ entry:
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @orb_wire_validate_frame(i32 %a0, i32 %a1, i32 %a2, i32 %a3, i32 %a4, i32 %a5, i32 %a6, i32 %a7, i32 %a8, i32 %a9, i32 %a10) local_unnamed_addr #0 {
 entry:
+  %ext5 = zext i32 %a5 to i64
+  %ext6 = zext i32 %a6 to i64
+  %ext7 = zext i32 %a7 to i64
   %cmp_eq_5.not.i = icmp eq i32 %a0, 1330790999
   %cmp_eq_21.not.i = icmp eq i32 %a1, 1
   %or.cond.i = and i1 %cmp_eq_5.not.i, %cmp_eq_21.not.i
   br i1 %or.cond.i, label %ite_else_29.i, label %probe_orb_wire_validate_frame.exit
 
 ite_else_29.i:                                    ; preds = %entry
-  %cmp_eq_41.not.i = icmp eq i32 %a3, %a2
+  %cmp_eq_41.not.i = icmp eq i32 %a2, %a3
   br i1 %cmp_eq_41.not.i, label %ite_else_49.i, label %probe_orb_wire_validate_frame.exit
 
 ite_else_49.i:                                    ; preds = %ite_else_29.i
@@ -1873,18 +1862,18 @@ ite_else_83.i:                                    ; preds = %ite_else_65.i
   %0 = add i32 %a4, -24
   %cmp_le_97.not.not.i = icmp ult i32 %0, %a5
   %cmp_le_115.not.not.i = icmp ugt i32 %a6, %a5
-  %or.cond6.i = or i1 %cmp_le_97.not.not.i, %cmp_le_115.not.not.i
-  %alu_132.i.narrow = sub i32 %a5, %a6
-  %cmp_le_139.not.not.i = icmp ult i32 %alu_132.i.narrow, %a7
-  %or.cond = select i1 %or.cond6.i, i1 true, i1 %cmp_le_139.not.not.i
-  br i1 %or.cond, label %probe_orb_wire_validate_frame.exit, label %ite_else_147.i
+  %or.cond6.i = select i1 %cmp_le_97.not.not.i, i1 true, i1 %cmp_le_115.not.not.i
+  %alu_132.i = sub nuw nsw i64 %ext5, %ext6
+  %cmp_le_139.not.not.i = icmp ult i64 %alu_132.i, %ext7
+  %or.cond7.i = select i1 %or.cond6.i, i1 true, i1 %cmp_le_139.not.not.i
+  br i1 %or.cond7.i, label %probe_orb_wire_validate_frame.exit, label %ite_else_147.i
 
 ite_else_147.i:                                   ; preds = %ite_else_83.i
   %cmp_le_159.not.not.i = icmp ugt i32 %a10, %a9
   %1 = select i1 %cmp_le_159.not.not.i, i8 5, i8 0
   br label %probe_orb_wire_validate_frame.exit
 
-probe_orb_wire_validate_frame.exit:               ; preds = %entry, %ite_else_29.i, %ite_else_49.i, %ite_else_65.i, %ite_else_83.i, %ite_else_147.i
+probe_orb_wire_validate_frame.exit:               ; preds = %ite_else_147.i, %ite_else_83.i, %ite_else_65.i, %ite_else_49.i, %ite_else_29.i, %entry
   %common.ret.op.i = phi i8 [ 1, %entry ], [ 2, %ite_else_29.i ], [ 3, %ite_else_49.i ], [ 4, %ite_else_65.i ], [ 3, %ite_else_83.i ], [ %1, %ite_else_147.i ]
   ret i8 %common.ret.op.i
 }
@@ -1896,39 +1885,32 @@ entry:
   %ext1 = zext i8 %a1 to i64
   %ext2 = zext i32 %a2 to i64
   %ext3 = zext i32 %a3 to i64
-  %alu_3.i = shl nuw nsw i64 %ext1, 8
-  %alu_20.i = or disjoint i64 %alu_3.i, %ext0
+  %alu_14.i = shl nuw nsw i64 %ext1, 8
+  %alu_20.i = or disjoint i64 %alu_14.i, %ext0
   %alu_24.i = shl nuw nsw i64 %ext2, 16
   %alu_28.i = and i64 %alu_24.i, 4294901760
   %alu_34.i = or disjoint i64 %alu_28.i, %alu_20.i
-  %alu_7.i = shl nuw i64 %ext3, 32
-  %alu_44.i = or disjoint i64 %alu_34.i, %alu_7.i
+  %alu_41.i = shl nuw i64 %ext3, 32
+  %alu_44.i = or disjoint i64 %alu_34.i, %alu_41.i
   ret i64 %alu_44.i
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @orb_wire_schema_migrate_step(i32 %a0, i32 %a1, i32 %a2, i64 %a3, i64 %a4) local_unnamed_addr #0 {
 entry:
+  %ext0 = zext i32 %a0 to i64
+  %ext1 = zext i32 %a1 to i64
   %cmp_eq_9.not.i = icmp eq i32 %a0, %a2
   %cmp_lt_27.not.i = icmp ult i32 %a0, %a1
-  %or.cond.i = and i1 %cmp_lt_27.not.i, %cmp_eq_9.not.i
-  br i1 %or.cond.i, label %ite_else_35.i, label %probe_orb_wire_schema_migrate_step.exit
-
-ite_else_35.i:                                    ; preds = %entry
-  %alu_42.i.narrow = sub i32 %a1, %a0
-  %cmp_eq_47.not.i = icmp ne i32 %alu_42.i.narrow, 1
-  %cmp_lt_60.not.not.i = icmp eq i64 %a3, 0
-  %or.cond5.i = or i1 %cmp_eq_47.not.i, %cmp_lt_60.not.not.i
-  br i1 %or.cond5.i, label %probe_orb_wire_schema_migrate_step.exit, label %ite_else_68.i
-
-ite_else_68.i:                                    ; preds = %ite_else_35.i
-  %cmp_le_74.not.not.i = icmp ule i64 %a3, %a4
-  %0 = zext i1 %cmp_le_74.not.not.i to i8
-  br label %probe_orb_wire_schema_migrate_step.exit
-
-probe_orb_wire_schema_migrate_step.exit:          ; preds = %entry, %ite_else_35.i, %ite_else_68.i
-  %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_else_35.i ], [ %0, %ite_else_68.i ]
-  ret i8 %common.ret.op.i
+  %or.cond.not8.not10.i = select i1 %cmp_eq_9.not.i, i1 %cmp_lt_27.not.i, i1 false
+  %alu_42.i = sub nuw nsw i64 %ext1, %ext0
+  %cmp_eq_47.not.i = icmp eq i64 %alu_42.i, 1
+  %or.cond5.not7.not9.i = select i1 %or.cond.not8.not10.i, i1 %cmp_eq_47.not.i, i1 false
+  %0 = add i64 %a3, -1
+  %1 = icmp ult i64 %0, %a4
+  %narrow.i = and i1 %or.cond5.not7.not9.i, %1
+  %res = zext i1 %narrow.i to i8
+  ret i8 %res
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
@@ -1938,8 +1920,8 @@ entry:
   br i1 %cmp_eq_5.not.i, label %ite_else_13.i, label %probe_orb_effect_admissible.exit
 
 ite_else_13.i:                                    ; preds = %entry
-  switch i8 %a0, label %probe_orb_effect_admissible.exit.fold.split [
-    i8 0, label %probe_orb_effect_admissible.exit
+  switch i8 %a0, label %probe_orb_effect_admissible.exit [
+    i8 0, label %ite_else_29.i
     i8 1, label %ite_else_48.i
     i8 2, label %ite_else_61.i
     i8 3, label %ite_else_74.i
@@ -1965,10 +1947,9 @@ ite_else_87.i:                                    ; preds = %ite_else_13.i
 
 ite_else_74.i:                                    ; preds = %ite_else_13.i
   %cmp_eq_198.not.i = icmp eq i8 %a6, 1
-  %cmp_eq_214.not.i = icmp eq i8 %a7, 0
-  %or.cond17.i = and i1 %cmp_eq_198.not.i, %cmp_eq_214.not.i
-  %cmp_eq_230.not.i = icmp eq i8 %a8, 0
-  %spec.select = select i1 %or.cond17.i, i1 %cmp_eq_230.not.i, i1 false
+  %0 = or i8 %a8, %a7
+  %1 = icmp eq i8 %0, 0
+  %spec.select22.i = and i1 %cmp_eq_198.not.i, %1
   br label %probe_orb_effect_admissible.exit
 
 ite_else_61.i:                                    ; preds = %ite_else_13.i
@@ -1978,7 +1959,7 @@ ite_else_61.i:                                    ; preds = %ite_else_13.i
   %cmp_eq_277.not.i = icmp eq i8 %a3, 1
   %or.cond19.i = and i1 %or.cond18.i, %cmp_eq_277.not.i
   %cmp_eq_291.not.i = icmp eq i8 %a4, 0
-  %spec.select22.i = and i1 %or.cond19.i, %cmp_eq_291.not.i
+  %spec.select23.i = and i1 %or.cond19.i, %cmp_eq_291.not.i
   br label %probe_orb_effect_admissible.exit
 
 ite_else_48.i:                                    ; preds = %ite_else_13.i
@@ -1986,14 +1967,14 @@ ite_else_48.i:                                    ; preds = %ite_else_13.i
   %cmp_eq_320.not.i = icmp eq i8 %a4, 0
   %or.cond20.i = and i1 %cmp_eq_306.not.i, %cmp_eq_320.not.i
   %cmp_eq_334.not.i = icmp eq i8 %a5, 1
-  %spec.select23.i = and i1 %or.cond20.i, %cmp_eq_334.not.i
+  %spec.select24.i = and i1 %or.cond20.i, %cmp_eq_334.not.i
   br label %probe_orb_effect_admissible.exit
 
-probe_orb_effect_admissible.exit.fold.split:      ; preds = %ite_else_13.i
+ite_else_29.i:                                    ; preds = %ite_else_13.i
   br label %probe_orb_effect_admissible.exit
 
-probe_orb_effect_admissible.exit:                 ; preds = %ite_else_13.i, %probe_orb_effect_admissible.exit.fold.split, %ite_else_74.i, %entry, %ite_else_100.i, %ite_else_87.i, %ite_else_61.i, %ite_else_48.i
-  %common.ret.op.shrunk.i = phi i1 [ false, %entry ], [ true, %ite_else_13.i ], [ %spec.select.i, %ite_else_100.i ], [ %spec.select21.i, %ite_else_87.i ], [ %spec.select22.i, %ite_else_61.i ], [ %spec.select23.i, %ite_else_48.i ], [ %spec.select, %ite_else_74.i ], [ false, %probe_orb_effect_admissible.exit.fold.split ]
+probe_orb_effect_admissible.exit:                 ; preds = %ite_else_29.i, %ite_else_48.i, %ite_else_61.i, %ite_else_74.i, %ite_else_87.i, %ite_else_100.i, %ite_else_13.i, %entry
+  %common.ret.op.shrunk.i = phi i1 [ true, %ite_else_29.i ], [ false, %entry ], [ false, %ite_else_13.i ], [ %spec.select.i, %ite_else_100.i ], [ %spec.select21.i, %ite_else_87.i ], [ %spec.select22.i, %ite_else_74.i ], [ %spec.select23.i, %ite_else_61.i ], [ %spec.select24.i, %ite_else_48.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
 }
@@ -2005,47 +1986,59 @@ entry:
   %cmp_eq_21.i = icmp eq i8 %a4, 1
   %sel_31.i = select i1 %cmp_eq_21.i, i64 65536, i64 0
   %cmp_eq_42.i = icmp eq i8 %a5, 1
-  %narrow154.i = and i1 %cmp_eq_21.i, %cmp_eq_42.i
-  %cmp_eq_56.i = xor i1 %narrow154.i, true
+  %cmp_le_73.not.not.i = icmp eq i32 %a7, 0
   %cmp_lt_84.not.i = icmp uge i32 %a6, %a7
-  %narrow.demorgan.i = and i1 %cmp_eq_42.i, %cmp_lt_84.not.i
-  %narrow.i = xor i1 %narrow.demorgan.i, true
+  %narrow.i = select i1 %cmp_le_73.not.not.i, i1 true, i1 %cmp_lt_84.not.i
+  %narrow157.i = and i1 %cmp_eq_21.i, %cmp_eq_42.i
   %alu_121.i = or disjoint i64 %sel_31.i, 3
-  %narrow158.i = and i1 %narrow.demorgan.i, %cmp_eq_56.i
+  %0 = or i1 %cmp_eq_21.i, %cmp_lt_84.not.i
+  %1 = and i1 %cmp_eq_42.i, %0
+  %narrow159.i = xor i1 %1, true
+  %narrow156161.i = xor i1 %cmp_eq_21.i, true
+  %2 = and i1 %cmp_eq_42.i, %narrow156161.i
+  %narrow160.i = select i1 %2, i1 %narrow.i, i1 false
+  %not.narrow160.i = xor i1 %narrow160.i, true
+  %narrow162.i = and i1 %cmp_lt_84.not.i, %narrow160.i
   %cmp_eq_174.not.i = icmp ne i8 %a0, 1
   %cmp_eq_185.not.i = icmp eq i32 %a2, %a1
-  %narrow161.i = and i1 %cmp_eq_185.not.i, %cmp_eq_56.i
-  %narrow162.i = or i1 %cmp_eq_174.not.i, %narrow161.i
+  %cmp_eq_193.i = xor i1 %narrow157.i, true
+  %narrow164.i = and i1 %cmp_eq_185.not.i, %cmp_eq_193.i
+  %narrow165.i = or i1 %cmp_eq_174.not.i, %narrow164.i
   %cmp_eq_267.not.i = icmp ne i8 %a3, 1
   %cmp_lt_276.not.i = icmp uge i64 %a8, %a9
-  %narrow167.i = or i1 %cmp_eq_267.not.i, %cmp_lt_276.not.i
-  %0 = or i1 %narrow154.i, %narrow.demorgan.i
-  %1 = xor i1 %0, true
-  %2 = and i1 %narrow167.i, %1
-  %sel_cond_320.not.demorgan.i = and i1 %narrow162.i, %2
+  %narrow170.i = or i1 %cmp_eq_267.not.i, %cmp_lt_276.not.i
+  %not.sel_cond_320.not.i = and i1 %narrow165.i, %narrow170.i
+  %narrow173.i = and i1 %1, %not.narrow160.i
   %alu_359.i = or disjoint i64 %sel_31.i, 4
-  %sel_375.i = select i1 %narrow158.i, i64 %alu_359.i, i64 %sel_31.i
+  %sel_375.i = select i1 %narrow162.i, i64 %alu_359.i, i64 %sel_31.i
+  %narrow176.i = and i1 %not.sel_cond_320.not.i, %narrow159.i
   %cmp_eq_404.not.i = icmp ne i32 %a2, 0
-  %narrow175.i = and i1 %cmp_eq_404.not.i, %sel_cond_320.not.demorgan.i
-  %sel_446.i = select i1 %sel_cond_320.not.demorgan.i, i64 %sel_31.i, i64 %sel_375.i
-  %narrow176.i = select i1 %cmp_eq_56.i, i1 %narrow175.i, i1 false
+  %narrow177.i = and i1 %cmp_eq_404.not.i, %narrow176.i
+  %sel_446.i = select i1 %narrow176.i, i64 %sel_31.i, i64 %sel_375.i
+  %not.narrow173.i = xor i1 %narrow173.i, true
+  %narrow178.i = select i1 %not.narrow173.i, i1 %narrow177.i, i1 false
   %alu_474.i = select i1 %cmp_eq_174.not.i, i64 258, i64 257
   %alu_480.i = or disjoint i64 %sel_31.i, %alu_474.i
-  %sel_496.i = select i1 %narrow176.i, i64 %alu_480.i, i64 %sel_446.i
-  %3 = and i1 %narrow162.i, %narrow.i
-  %4 = or i1 %narrow154.i, %3
-  %5 = select i1 %narrow158.i, i1 true, i1 %4
-  %6 = select i1 %1, i1 %5, i1 false
-  %narrow204.i = and i1 %6, %sel_cond_320.not.demorgan.i
-  %7 = shl nuw i64 %ext2, 32
-  %8 = select i1 %0, i1 true, i1 %5
-  %narrow212.i = xor i1 %8, true
-  %sel_939.i = select i1 %narrow154.i, i64 %alu_121.i, i64 %sel_496.i
-  %9 = or i1 %narrow154.i, %narrow212.i
-  %10 = or i1 %narrow.demorgan.i, %9
-  %11 = select i1 %narrow204.i, i64 %7, i64 0
-  %alu_955.i = select i1 %10, i64 0, i64 %11
-  %alu_959.i = or disjoint i64 %sel_939.i, %alu_955.i
+  %sel_496.i = select i1 %narrow178.i, i64 %alu_480.i, i64 %sel_446.i
+  %narrow183.i = select i1 %1, i1 %not.narrow160.i, i1 false
+  %narrow184.i = and i1 %narrow165.i, %narrow159.i
+  %3 = or i1 %narrow183.i, %narrow184.i
+  %not.narrow182189.i = xor i1 %narrow162.i, true
+  %narrow188.i = select i1 %not.narrow182189.i, i1 %narrow184.i, i1 false
+  %narrow199.i = and i1 %narrow170.i, %narrow188.i
+  %narrow202.i = select i1 %not.narrow182189.i, i1 %narrow183.i, i1 false
+  %4 = select i1 %narrow202.i, i1 %narrow173.i, i1 false
+  %sel_882.i = select i1 %4, i64 %alu_121.i, i64 %sel_496.i
+  %5 = select i1 %narrow160.i, i1 %cmp_lt_84.not.i, i1 %1
+  %6 = select i1 %5, i1 true, i1 %3
+  %narrow205.i = xor i1 %6, true
+  %7 = select i1 %narrow205.i, i1 true, i1 %narrow162.i
+  %sel_939.i = select i1 %7, i64 %sel_496.i, i64 %sel_882.i
+  %8 = select i1 %7, i1 true, i1 %narrow183.i
+  %9 = shl nuw i64 %ext2, 32
+  %10 = select i1 %narrow199.i, i64 %9, i64 0
+  %alu_955.i = select i1 %8, i64 0, i64 %10
+  %alu_959.i = or i64 %sel_939.i, %alu_955.i
   ret i64 %alu_959.i
 }
 
@@ -2054,16 +2047,16 @@ define dso_local i64 @orb_route_argmin_step(i8 zeroext %a0, i32 %a1, i64 %a2, i3
 entry:
   %ext1 = zext i32 %a1 to i64
   %ext3 = zext i32 %a3 to i64
-  %cmp_eq_11.i = icmp eq i8 %a5, 1
-  %cmp_eq_20.i = icmp eq i8 %a0, 0
-  %cmp_lt_29.i = icmp ult i64 %a4, %a2
-  %sel_36.v.i = or i1 %cmp_eq_20.i, %cmp_lt_29.i
-  %sel_41.v.i = and i1 %sel_36.v.i, %cmp_eq_11.i
+  %cmp_eq_11.i = icmp ne i8 %a5, 1
+  %cmp_eq_20.i = icmp ne i8 %a0, 0
+  %cmp_lt_29.i = icmp uge i64 %a4, %a2
+  %sel_36.v.not14.i = and i1 %cmp_eq_20.i, %cmp_lt_29.i
+  %sel_41.v.not.i = or i1 %cmp_eq_11.i, %sel_36.v.not14.i
   %cmp_eq_50.not.i = icmp eq i8 %a0, 1
   %sel_58.i = zext i1 %cmp_eq_50.not.i to i64
   %sel_87.i = select i1 %cmp_eq_50.not.i, i64 %ext1, i64 0
-  %sel_96.i = select i1 %sel_41.v.i, i64 257, i64 %sel_58.i
-  %sel_101.i = select i1 %sel_41.v.i, i64 %ext3, i64 %sel_87.i
+  %sel_96.i = select i1 %sel_41.v.not.i, i64 %sel_58.i, i64 257
+  %sel_101.i = select i1 %sel_41.v.not.i, i64 %sel_87.i, i64 %ext3
   %alu_111.i = shl nuw i64 %sel_101.i, 32
   %alu_114.i = or disjoint i64 %alu_111.i, %sel_96.i
   ret i64 %alu_114.i
@@ -2101,11 +2094,10 @@ entry:
   %narrow64.not.i = and i1 %narrow62.i, %cmp_eq_57.not.not.i
   %3 = or i1 %cmp_eq_39.not.i, %narrow64.not.i
   %narrow70.not.i = or i1 %cmp_eq_48.not.i, %3
-  %narrow73.not.i = and i1 %cmp_eq_30.not.i, %narrow70.not.i
-  %4 = xor i1 %cmp_eq_21.not.i, %narrow75.i
-  %narrow79.i = select i1 %4, i1 %narrow73.not.i, i1 false
-  %sel_415.v.i = select i1 %narrow79.i, i1 %cmp_eq_181.not.i, i1 %narrow78.i
+  %4 = and i1 %cmp_eq_21.not.i, %narrow70.not.i
+  %not.narrow76.i = and i1 %cmp_eq_30.not.i, %4
   %not.narrow75.i = xor i1 %narrow75.i, true
+  %sel_415.v.i = select i1 %not.narrow76.i, i1 %cmp_eq_181.not.i, i1 %narrow78.i
   %narrow80.i = select i1 %not.narrow75.i, i1 %sel_415.v.i, i1 false
   %alu_447.i = select i1 %narrow80.i, i64 4294967296, i64 0
   %alu_450.i = or disjoint i64 %alu_447.i, %sel_214.i
@@ -2115,21 +2107,18 @@ entry:
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local i64 @orb_fork_home_step(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4, i8 zeroext %a5, i8 zeroext %a6) local_unnamed_addr #0 {
 entry:
-  %cmp_eq_9.i = icmp eq i8 %a1, 1
-  %cmp_eq_20.i = icmp eq i8 %a2, 0
-  %cmp_eq_31.i = icmp eq i8 %a3, 1
-  %sel_49.v13.i = icmp eq i8 %a4, 1
-  %sel_49.v.i = and i1 %cmp_eq_31.i, %sel_49.v13.i
-  %sel_54.v.i = and i1 %cmp_eq_20.i, %sel_49.v.i
-  %sel_59.v.i = and i1 %cmp_eq_9.i, %sel_54.v.i
+  %cmp_eq_9.i = icmp ne i8 %a1, 1
+  %cmp_eq_20.i = icmp ne i8 %a2, 0
+  %cmp_eq_31.i = icmp ne i8 %a3, 1
+  %sel_49.v13.i = icmp ne i8 %a4, 1
+  %sel_49.v.not15.i = or i1 %cmp_eq_31.i, %sel_49.v13.i
+  %sel_54.v.not14.i = or i1 %cmp_eq_20.i, %sel_49.v.not15.i
+  %sel_59.v.not.i = or i1 %cmp_eq_9.i, %sel_54.v.not14.i
   %cmp_eq_65.not.i = icmp eq i8 %a0, 0
   %cmp_eq_77.not.i = icmp eq i8 %a5, 1
   %sel_85.i = select i1 %cmp_eq_77.not.i, i64 131843, i64 131842
-  %sel_89.i = select i1 %sel_59.v.i, i64 %sel_85.i, i64 131072
-  %sel_93.i = select i1 %cmp_eq_65.not.i, i64 131329, i64 %sel_89.i
-  %0 = or i1 %cmp_eq_65.not.i, %sel_59.v.i
-  %sel_112.i = select i1 %0, i64 0, i64 335007449088
-  %alu_125.i = or disjoint i64 %sel_93.i, %sel_112.i
+  %0 = select i1 %sel_59.v.not.i, i64 335007580160, i64 %sel_85.i
+  %alu_125.i = select i1 %cmp_eq_65.not.i, i64 131329, i64 %0
   ret i64 %alu_125.i
 }
 
@@ -2177,7 +2166,6 @@ entry:
 define dso_local i64 @orb_ssh_identity_step(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4, i8 zeroext %a5, i8 zeroext %a6) local_unnamed_addr #0 {
 entry:
   %cmp_eq_7.i = icmp eq i8 %a2, 0
-  %cmp_eq_12.i = xor i1 %cmp_eq_7.i, true
   %cmp_eq_18.i = icmp eq i8 %a3, 1
   %cmp_eq_29.i = icmp eq i8 %a4, 1
   %cmp_eq_40.i = icmp eq i8 %a5, 1
@@ -2192,40 +2180,38 @@ entry:
   %1 = and i1 %cmp_eq_29.i, %0
   %narrow38.i = and i1 %cmp_eq_29.i, %narrow36.i
   %2 = and i1 %cmp_eq_18.i, %1
-  %3 = xor i1 %2, true
-  %4 = or i1 %cmp_eq_71.not.i, %3
-  %narrow.i = or i1 %cmp_eq_60.not.i, %4
   %narrow39.i = and i1 %cmp_eq_18.i, %narrow38.i
-  %narrow40.i = select i1 %cmp_eq_12.i, i1 true, i1 %narrow.i
-  %sel_146.v.i = and i1 %cmp_eq_7.i, %2
-  %narrow41.i = select i1 %cmp_eq_7.i, i1 %narrow39.i, i1 false
-  %cmp_eq_155.i = xor i1 %sel_146.v.i, true
+  %3 = and i1 %cmp_eq_7.i, %2
+  %4 = xor i1 %3, true
+  %5 = or i1 %cmp_eq_71.not.i, %4
+  %narrow40.i = or i1 %cmp_eq_60.not.i, %5
+  %narrow41.i = and i1 %cmp_eq_7.i, %narrow39.i
   %sel_167.i = select i1 %cmp_eq_60.not.i, i64 1282, i64 1793
-  %sel_186.v.i = select i1 %narrow40.i, i1 %cmp_eq_155.i, i1 %narrow41.i
-  %5 = select i1 %cmp_eq_60.not.i, i64 335007450112, i64 335007450624
-  %alu_246.i = select i1 %sel_186.v.i, i64 %5, i64 %sel_167.i
+  %sel_186.v.i = select i1 %narrow40.i, i1 %4, i1 %narrow41.i
+  %6 = select i1 %cmp_eq_60.not.i, i64 335007450112, i64 335007450624
+  %alu_246.i = select i1 %sel_186.v.i, i64 %6, i64 %sel_167.i
   ret i64 %alu_246.i
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local i64 @orb_agent_event_normalize_step(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i32 %a4, i32 %a5, i32 %a6, i32 %a7) local_unnamed_addr #0 {
 entry:
-  %cmp_le_21.not.not.i = icmp ugt i32 %a6, %a7
-  %cmp_le_27.i = icmp ult i8 %a0, 6
-  %cmp_eq_33.i = icmp eq i32 %a4, 1
+  %cmp_le_21.not.not.not.i = icmp ugt i32 %a6, %a7
+  %cmp_le_27.i = icmp ugt i8 %a0, 5
+  %cmp_eq_33.i = icmp ne i32 %a4, 1
   %cmp_eq_42.not.i = icmp eq i8 %a1, 0
   %cmp_eq_51.not.i = icmp eq i8 %a1, 1
-  %cmp_eq_60.i = icmp eq i8 %a1, 7
-  %0 = icmp ult i8 %a1, 2
-  %cmp_eq_8831.not.i = xor i1 %cmp_eq_60.i, %0
-  %cmp_eq_88.not.i = or i1 %cmp_eq_8831.not.i, %cmp_eq_33.i
-  %cmp_eq_92.not.i = icmp eq i32 %a5, 0
+  %cmp_eq_60.i = icmp ne i8 %a1, 7
+  %0 = icmp ugt i8 %a1, 1
+  %cmp_eq_8831.not.not.i = and i1 %cmp_eq_60.i, %0
+  %cmp_eq_88.not.not37.i = select i1 %cmp_eq_33.i, i1 %cmp_eq_8831.not.not.i, i1 false
+  %cmp_eq_92.not.i = icmp ne i32 %a5, 0
   %cmp_eq_119.not.i = icmp eq i8 %a1, 2
   %cmp_eq_128.not.i = icmp eq i8 %a1, 3
   %cmp_eq_137.not.i = icmp eq i8 %a1, 4
   %cmp_eq_146.not.i = icmp eq i8 %a1, 5
   %cmp_eq_155.not.i = icmp eq i8 %a1, 6
-  %sel_172.i = select i1 %cmp_eq_60.i, i64 3338, i64 2049
+  %sel_172.i = select i1 %cmp_eq_60.i, i64 2049, i64 3338
   %sel_176.i = select i1 %cmp_eq_155.not.i, i64 3337, i64 %sel_172.i
   %sel_180.i = select i1 %cmp_eq_146.not.i, i64 2312, i64 %sel_176.i
   %cmp_eq_184.not.i = icmp eq i8 %a2, 1
@@ -2236,16 +2222,16 @@ entry:
   %sel_214.i = select i1 %cmp_eq_128.not.i, i64 %sel_209.i, i64 %sel_197.i
   %sel_226.i = select i1 %cmp_eq_201.not.i, i64 2820, i64 2049
   %sel_231.i = select i1 %cmp_eq_119.not.i, i64 %sel_226.i, i64 %sel_214.i
-  %1 = select i1 %cmp_eq_51.not.i, i64 2307, i64 %sel_231.i
-  %narrow.i = and i1 %cmp_eq_88.not.i, %cmp_eq_92.not.i
-  %narrow33.i = and i1 %cmp_le_27.i, %narrow.i
-  %2 = select i1 %cmp_eq_42.not.i, i64 2306, i64 %1
-  %3 = select i1 %narrow33.i, i64 %2, i64 2049
-  %4 = tail call i32 @llvm.umin.i32(i32 %a6, i32 %a7)
-  %sel_300.i = zext i32 %4 to i64
-  %alu_306.i = select i1 %cmp_le_21.not.not.i, i64 2048, i64 %3
+  %sel_235.i = select i1 %cmp_eq_51.not.i, i64 2307, i64 %sel_231.i
+  %sel_239.i = select i1 %cmp_eq_42.not.i, i64 2306, i64 %sel_235.i
+  %narrow.not36.i = or i1 %cmp_eq_88.not.not37.i, %cmp_eq_92.not.i
+  %narrow33.not35.i = select i1 %cmp_le_27.i, i1 true, i1 %narrow.not36.i
+  %sel_269.i = select i1 %narrow33.not35.i, i64 2049, i64 %sel_239.i
+  %sel_290.i = select i1 %cmp_le_21.not.not.not.i, i64 2048, i64 %sel_269.i
+  %1 = tail call i32 @llvm.umin.i32(i32 %a6, i32 %a7)
+  %sel_300.i = zext i32 %1 to i64
   %alu_310.i = shl nuw i64 %sel_300.i, 32
-  %alu_313.i = add nuw nsw i64 %alu_306.i, %alu_310.i
+  %alu_313.i = or i64 %sel_290.i, %alu_310.i
   ret i64 %alu_313.i
 }
 
@@ -2258,11 +2244,7 @@ entry:
   %cmp_eq_28.not.i = icmp eq i8 %a2, 1
   %sel_36.i = select i1 %cmp_eq_28.not.i, i64 512, i64 0
   %cmp_eq_40.not.i = icmp eq i8 %a3, 4
-  %cmp_eq_94.not.not.i = icmp eq i8 %a3, 2
-  %cmp_eq_103.not.i = icmp ne i8 %a3, 3
   %cmp_eq_112.not.i = icmp ne i8 %a3, 8
-  %narrow51.demorgan.i = and i1 %cmp_eq_103.not.i, %cmp_eq_112.not.i
-  %narrow51.i = xor i1 %narrow51.demorgan.i, true
   %0 = add nsw i64 %ext3, -4
   %1 = icmp ult i64 %0, -2
   %narrow52.i = and i1 %cmp_eq_112.not.i, %1
@@ -2273,17 +2255,17 @@ entry:
   %6 = select i1 %5, i1 %3, i1 false
   %narrow.i = select i1 %6, i1 %narrow52.i, i1 false
   %sel_218.i = select i1 %cmp_eq_40.not.i, i64 769, i64 %sel_36.i
-  %narrow61.i = or i1 %cmp_eq_94.not.not.i, %narrow51.i
   %7 = or i1 %cmp_lt_7.not.i, %cmp_eq_40.not.i
   %narrow62.i = select i1 %7, i1 true, i1 %narrow.i
   %sel_235.i = select i1 %cmp_lt_7.not.i, i64 %sel_36.i, i64 %sel_218.i
+  %narrow63.not.i = or i1 %cmp_lt_7.not.i, %narrow52.i
+  %8 = select i1 %narrow62.i, i1 true, i1 %narrow63.not.i
   %not.narrow62.i = xor i1 %narrow62.i, true
-  %narrow64.i = and i1 %narrow61.i, %not.narrow62.i
-  %narrow65.demorgan.i = or i1 %narrow61.i, %narrow62.i
+  %narrow65.i = select i1 %not.narrow62.i, i1 %narrow52.i, i1 false
   %sel_277.i = select i1 %cmp_eq_28.not.i, i64 771, i64 259
-  %sel_292.i = select i1 %narrow64.i, i64 %sel_277.i, i64 %sel_235.i
+  %sel_292.i = select i1 %8, i64 %sel_235.i, i64 %sel_277.i
   %sel_312.i = select i1 %cmp_eq_28.not.i, i64 1282, i64 258
-  %sel_327.i = select i1 %narrow65.demorgan.i, i64 %sel_292.i, i64 %sel_312.i
+  %sel_327.i = select i1 %narrow65.i, i64 %sel_312.i, i64 %sel_292.i
   %alu_21.i = shl i64 %sel_17.i, 32
   %alu_340.i = or disjoint i64 %sel_327.i, %alu_21.i
   ret i64 %alu_340.i
@@ -2296,28 +2278,26 @@ entry:
   %cmp_eq_11.not.i = icmp ne i32 %a3, 1
   %cmp_eq_20.not.i = icmp ne i32 %a4, 1
   %cmp_le_29.not.not.i = icmp ugt i64 %a1, %a0
-  %narrow.i = or i1 %cmp_le_29.not.not.i, %cmp_eq_20.not.i
-  %narrow49.i = or i1 %cmp_eq_11.not.i, %narrow.i
+  %narrow.not51.not56.i = or i1 %cmp_le_29.not.not.i, %cmp_eq_20.not.i
+  %narrow49.not50.not55.i = or i1 %cmp_eq_11.not.i, %narrow.not51.not56.i
   %cmp_eq_70.i = icmp eq i32 %a3, 0
   %cmp_lt_79.i = icmp ult i64 %a0, %a2
-  %sel_86.v.i = or i1 %cmp_lt_79.i, %cmp_eq_70.i
+  %sel_86.v.not53.not58.i = or i1 %cmp_lt_79.i, %cmp_eq_70.i
   %cmp_eq_94.i = icmp eq i32 %a4, 0
   %cmp_lt_103.i = icmp ult i64 %a2, %a1
-  %sel_110.v.i = or i1 %cmp_lt_103.i, %cmp_eq_94.i
-  %sel_127.v.i = and i1 %sel_86.v.i, %sel_110.v.i
-  %sel_132.v.i = and i1 %narrow49.i, %sel_127.v.i
+  %sel_110.v.not54.not59.i = or i1 %cmp_lt_103.i, %cmp_eq_94.i
+  %sel_127.v.not52.not57.i = and i1 %sel_86.v.not53.not58.i, %sel_110.v.not54.not59.i
+  %sel_132.v.not.not.i = and i1 %narrow49.not50.not55.i, %sel_127.v.not52.not57.i
   %cmp_eq_140.not.i = icmp eq i32 %a5, 1
   %sel_148.i = select i1 %cmp_eq_140.not.i, i64 1024, i64 0
-  %alu_160.i = or disjoint i64 %sel_148.i, 512
-  %alu_176.i = or disjoint i64 %sel_148.i, 514
-  %alu_180.i = or disjoint i64 %sel_148.i, 769
-  %sel_207.i = select i1 %narrow49.i, i64 %alu_180.i, i64 %alu_160.i
-  %sel_197.i = select i1 %sel_127.v.i, i64 %sel_207.i, i64 %alu_176.i
-  %sel_231.i = select i1 %narrow49.i, i64 %sel_197.i, i64 %alu_160.i
-  %alu_220.i = zext i1 %sel_132.v.i to i64
-  %sel_236.v.i = add nuw nsw i64 %alu_220.i, %ext6
-  %sel_236.i = shl i64 %sel_236.v.i, 32
-  %alu_249.i = or disjoint i64 %sel_231.i, %sel_236.i
+  %alu_220.i = add nuw nsw i64 %ext6, 1
+  %alu_221.i = and i64 %alu_220.i, 4294967295
+  %sel_197.v.i = select i1 %sel_127.v.not52.not57.i, i64 769, i64 514
+  %sel_231.v.i = select i1 %narrow49.not50.not55.i, i64 %sel_197.v.i, i64 512
+  %sel_231.i = or disjoint i64 %sel_148.i, %sel_231.v.i
+  %sel_236.i = select i1 %sel_132.v.not.not.i, i64 %alu_221.i, i64 %ext6
+  %alu_246.i = shl nuw i64 %sel_236.i, 32
+  %alu_249.i = or disjoint i64 %alu_246.i, %sel_231.i
   ret i64 %alu_249.i
 }
 
@@ -2336,7 +2316,7 @@ entry:
   %narrow.i = and i1 %narrow.not.i, %cmp_eq_58.not.i
   %sel_153.v.i = select i1 %narrow.not.i, i64 1795, i64 %sel_76.i
   %sel_193.v.i = select i1 %cmp_eq_58.not.i, i64 %sel_153.v.i, i64 %sel_88.i
-  %sel_193.i = or disjoint i64 %sel_48.i, %sel_193.v.i
+  %sel_193.i = or disjoint i64 %sel_193.v.i, %sel_48.i
   %alu_222.i = select i1 %narrow.i, i64 4294967296, i64 0
   %alu_225.i = or disjoint i64 %sel_193.i, %alu_222.i
   ret i64 %alu_225.i
@@ -2347,24 +2327,18 @@ define dso_local i64 @orb_scroll_epoch_step(i32 %a0, i32 %a1, i8 zeroext %a2, i8
 entry:
   %ext5 = zext i32 %a5 to i64
   %ext6 = zext i32 %a6 to i64
-  %cmp_lt_17.not.i = icmp ult i32 %a1, %a0
-  %cmp_lt_28.not.i = icmp eq i8 %a2, 0
-  %narrow.not.i = or i1 %cmp_lt_17.not.i, %cmp_lt_28.not.i
+  %cmp_lt_17.not.i = icmp uge i32 %a1, %a0
+  %cmp_lt_28.not.i = icmp ne i8 %a2, 0
+  %narrow.not.not.i = and i1 %cmp_lt_17.not.i, %cmp_lt_28.not.i
   %cmp_eq_42.not.i = icmp ne i32 %a5, %a6
   %cmp_eq_58.i = icmp eq i8 %a3, 1
   %cmp_eq_67.i = icmp eq i8 %a4, 0
   %sel_90.v.i = and i1 %cmp_eq_67.i, %cmp_eq_42.not.i
   %sel_103.v.i = and i1 %cmp_eq_58.i, %sel_90.v.i
-  %sel_cond_111.not31.i = xor i1 %narrow.not.i, true
-  %0 = and i1 %cmp_eq_67.i, %sel_cond_111.not31.i
-  %sel_cond_111.not.i = and i1 %cmp_eq_58.i, %0
-  %narrow.i = or i1 %narrow.not.i, %sel_103.v.i
   %sel_138.i = select i1 %sel_103.v.i, i64 1281, i64 0
   %sel_143.i = select i1 %sel_103.v.i, i64 %ext5, i64 %ext6
-  %narrow.not33.i = xor i1 %narrow.i, true
-  %not.narrow32.i = or i1 %sel_cond_111.not.i, %narrow.not33.i
-  %sel_175.i = select i1 %not.narrow32.i, i64 1026, i64 %sel_138.i
-  %sel_180.i = select i1 %not.narrow32.i, i64 %ext6, i64 %sel_143.i
+  %sel_175.i = select i1 %narrow.not.not.i, i64 1026, i64 %sel_138.i
+  %sel_180.i = select i1 %narrow.not.not.i, i64 %ext6, i64 %sel_143.i
   %alu_190.i = shl nuw i64 %sel_180.i, 32
   %alu_193.i = or disjoint i64 %alu_190.i, %sel_175.i
   ret i64 %alu_193.i
@@ -2377,19 +2351,21 @@ entry:
   %ext2 = zext i32 %a2 to i64
   %ext3 = zext i32 %a3 to i64
   %ext4 = zext i32 %a4 to i64
-  %cmp_le_15.not.i = icmp ugt i8 %a0, 3
+  %cmp_le_15.i = icmp ugt i8 %a0, 3
   %0 = add nsw i64 %ext1, -3
   %sel_37.v.i = icmp ult i64 %0, -2
   %cmp_eq_49.not.i = icmp eq i8 %a5, 1
   %sel_57.i = select i1 %cmp_eq_49.not.i, i64 769, i64 257
-  %narrow.i = select i1 %cmp_le_15.not.i, i1 true, i1 %sel_37.v.i
-  %1 = shl i64 %ext4, 56
-  %2 = shl i64 %ext3, 48
-  %3 = shl nuw i64 %ext2, 32
-  %4 = xor i64 %2, %3
-  %5 = xor i64 %4, %1
-  %6 = or disjoint i64 %sel_57.i, %5
-  %alu_133.i = select i1 %narrow.i, i64 0, i64 %6
+  %narrow.i = select i1 %cmp_le_15.i, i1 true, i1 %sel_37.v.i
+  %alu_84.i = shl nuw nsw i64 %ext3, 16
+  %alu_85.i = and i64 %alu_84.i, 4294901760
+  %alu_90.i = xor i64 %alu_85.i, %ext2
+  %alu_94.i = shl nuw nsw i64 %ext4, 24
+  %alu_95.i = and i64 %alu_94.i, 4278190080
+  %alu_100.i = xor i64 %alu_90.i, %alu_95.i
+  %1 = shl nuw i64 %alu_100.i, 32
+  %2 = or disjoint i64 %1, %sel_57.i
+  %alu_133.i = select i1 %narrow.i, i64 0, i64 %2
   ret i64 %alu_133.i
 }
 
@@ -2415,8 +2391,8 @@ entry:
   %sel_134.i = select i1 %cmp_eq_58.not.i, i64 %sel_28.i, i64 %sel_129.i
   %sel_139.i = select i1 %cmp_lt_42.not.i, i64 %sel_134.i, i64 %sel_28.i
   %sel_144.i = select i1 %cmp_le_36.i, i64 %sel_28.i, i64 %sel_139.i
-  %alu_152.i = shl nuw i64 %sel_144.i, 32
-  %alu_157.i = or disjoint i64 %alu_152.i, %sel_93.i
+  %alu_154.i = shl nuw i64 %sel_144.i, 32
+  %alu_157.i = or disjoint i64 %alu_154.i, %sel_93.i
   ret i64 %alu_157.i
 }
 
@@ -2424,25 +2400,27 @@ entry:
 define dso_local i64 @orb_wire_machine_step(i32 %a0, i64 %a1, i64 %a2, i8 zeroext %a3, i8 zeroext %a4, i32 %a5, i32 %a6) local_unnamed_addr #0 {
 entry:
   %ext0 = zext i32 %a0 to i64
+  %alu_11.i = and i64 %a1, 4294967295
   %cmp_le_17.not.not.i = icmp ugt i32 %a6, %a5
   %0 = add nsw i64 %ext0, -3
   %sel_39.v.i = icmp ult i64 %0, -2
   %cmp_lt_45.not.i = icmp ult i64 %a1, %a2
   %cmp_eq_51.i = icmp ne i8 %a4, 1
   %cmp_le_60.i = icmp ugt i8 %a3, 5
-  %sel_67.v.not.i = or i1 %cmp_le_60.i, %cmp_eq_51.i
+  %sel_67.v.not.i = select i1 %cmp_eq_51.i, i1 true, i1 %cmp_le_60.i
   %cmp_eq_77.not.i = icmp eq i8 %a3, 0
   %alu_108.i = select i1 %cmp_eq_77.not.i, i64 257, i64 769
   %sel_113.i = select i1 %sel_67.v.not.i, i64 4, i64 %alu_108.i
   %sel_117.i = select i1 %cmp_lt_45.not.i, i64 %sel_113.i, i64 3
   %sel_121.i = select i1 %sel_39.v.i, i64 2, i64 %sel_117.i
   %sel_125.i = select i1 %cmp_le_17.not.not.i, i64 5, i64 %sel_121.i
-  %sel_152.i = select i1 %sel_67.v.not.i, i64 %a1, i64 %a2
-  %sel_157.i = select i1 %cmp_lt_45.not.i, i64 %sel_152.i, i64 %a1
+  %alu_147.i = and i64 %a2, 4294967295
+  %sel_152.i = select i1 %sel_67.v.not.i, i64 %alu_11.i, i64 %alu_147.i
+  %sel_157.i = select i1 %cmp_lt_45.not.i, i64 %sel_152.i, i64 %alu_11.i
   %1 = select i1 %cmp_le_17.not.not.i, i1 true, i1 %sel_39.v.i
-  %sel_167.i = select i1 %1, i64 %a1, i64 %sel_157.i
-  %alu_175.i = shl i64 %sel_167.i, 32
-  %alu_180.i = or disjoint i64 %sel_125.i, %alu_175.i
+  %sel_167.i = select i1 %1, i64 %alu_11.i, i64 %sel_157.i
+  %alu_177.i = shl nuw i64 %sel_167.i, 32
+  %alu_180.i = or disjoint i64 %sel_125.i, %alu_177.i
   ret i64 %alu_180.i
 }
 
@@ -2483,8 +2461,8 @@ entry:
   %alu_117.i = lshr i64 %alu_110.neg.i, 31
   %alu_129.i = xor i64 %alu_117.i, -1
   %alu_137.i = sub nsw i64 2, %ext6
-  %alu_137.masked.i = lshr i64 %alu_137.i, 31
-  %alu_164.i = xor i64 %alu_137.masked.i, -1
+  %alu_138.i = lshr i64 %alu_137.i, 31
+  %alu_164.i = xor i64 %alu_138.i, -1
   %5 = xor i64 %ext5, 4294967294
   %alu_170.neg.i = add nuw nsw i64 %5, 1
   %alu_177.i = lshr i64 %alu_170.neg.i, 31
@@ -2524,8 +2502,8 @@ entry:
   %8 = or i64 %alu_342.i, %alu_326.i
   %alu_348.i = or i64 %8, %alu_54.i
   %alu_358.i = and i64 %alu_36.i, %alu_23.i
-  %alu_370.i = and i64 %alu_308.i, %alu_92.i
-  %alu_376.i = and i64 %alu_370.i, %alu_276.i
+  %alu_370.i = and i64 %alu_276.i, %alu_92.i
+  %alu_376.i = and i64 %alu_370.i, %alu_308.i
   %.demorgan.i = or i64 %alu_376.i, %alu_358.i
   %9 = xor i64 %.demorgan.i, -1
   %alu_396.i = and i64 %alu_320.i, %9
@@ -2542,31 +2520,30 @@ entry:
   %alu_460.i = and i64 %alu_448.neg.i, %ext7
   %alu_464.i = sub nsw i64 4294967294, %12
   %alu_470.i = and i64 %alu_431.i, %alu_464.i
-  %alu_477.i = or i64 %alu_470.i, %alu_460.i
+  %alu_476.i = or i64 %alu_470.i, %alu_460.i
   %alu_480.i = sub nsw i64 0, %alu_189.i
-  %alu_486.i = and i64 %alu_477.i, %alu_480.i
+  %alu_486.i = and i64 %alu_476.i, %alu_480.i
   %13 = icmp eq i64 %alu_186.i, 0
   %alu_496.i = select i1 %13, i64 0, i64 %alu_431.i
-  %alu_503.i = or i64 %alu_486.i, %alu_496.i
+  %alu_502.i = or i64 %alu_486.i, %alu_496.i
   %alu_506.i = sub nsw i64 0, %alu_396.i
-  %alu_512.i = and i64 %alu_503.i, %alu_506.i
+  %alu_512.i = and i64 %alu_502.i, %alu_506.i
   %alu_516.i = xor i64 %alu_506.i, 4294967295
   %alu_522.i = and i64 %alu_516.i, %ext7
   %alu_528.i = or i64 %alu_522.i, %alu_512.i
   %alu_532.i = and i64 %alu_506.i, 257
   %alu_536.i = and i64 %alu_516.i, 2
+  %alu_542.i = or disjoint i64 %alu_532.i, %alu_536.i
   %alu_546.i = shl nuw nsw i64 %alu_348.i, 9
+  %alu_552.i = or disjoint i64 %alu_542.i, %alu_546.i
   %alu_556.i = shl nuw nsw i64 %alu_54.i, 10
-  %alu_546.masked.i = and i64 %alu_546.i, 4294966784
   %alu_568.i = and i64 %alu_298.i, %alu_79.i
   %alu_574.i = and i64 %alu_568.i, %alu_396.i
   %alu_578.i = shl nuw nsw i64 %alu_574.i, 11
-  %alu_542.i = or disjoint i64 %alu_532.i, %alu_556.i
-  %alu_552.masked.i = or disjoint i64 %alu_536.i, %alu_542.i
-  %alu_563.i = or disjoint i64 %alu_552.masked.i, %alu_578.i
-  %alu_584.i = or i64 %alu_563.i, %alu_546.masked.i
   %alu_591.i = shl nuw i64 %alu_528.i, 32
-  %alu_594.i = add nuw nsw i64 %alu_584.i, %alu_591.i
+  %alu_562.i = or disjoint i64 %alu_578.i, %alu_556.i
+  %alu_584.i = or i64 %alu_552.i, %alu_562.i
+  %alu_594.i = or i64 %alu_584.i, %alu_591.i
   ret i64 %alu_594.i
 }
 
@@ -2587,8 +2564,8 @@ entry:
   %narrow75.i = icmp ult i64 %0, -2
   %1 = and i64 %ext4, 254
   %2 = icmp ne i64 %1, 6
-  %.not81.i = and i1 %cmp_eq_56.not.i, %2
-  %narrow78.i = select i1 %.not81.i, i1 %narrow75.i, i1 false
+  %.not82.i = and i1 %cmp_eq_56.not.i, %2
+  %narrow78.not.i = select i1 %.not82.i, i1 %narrow75.i, i1 false
   %cmp_eq_142.i = icmp ne i8 %a4, 8
   %3 = icmp ne i64 %1, 2
   %narrow80.not.i = and i1 %cmp_eq_142.i, %3
@@ -2599,20 +2576,19 @@ entry:
   %sel_259.v.i = select i1 %cmp_le_23.not.not.i, i64 %sel_228.v.i, i64 2
   %sel_259.i = or disjoint i64 %sel_259.v.i, %sel_17.i
   %not..i = xor i1 %4, true
-  %not.narrow.i = select i1 %not..i, i1 true, i1 %narrow78.i
-  %5 = select i1 %cmp_eq_50.not.i, i1 %narrow78.i, i1 false
-  %sel_cond_283.not83.i = xor i1 %5, true
-  %sel_cond_283.not.i = select i1 %narrow.not.not.i, i1 %sel_cond_283.not83.i, i1 false
+  %not.narrow.i = select i1 %not..i, i1 true, i1 %narrow78.not.i
+  %5 = select i1 %cmp_eq_50.not.i, i1 %narrow78.not.i, i1 false
+  %sel_cond_283.not84.i = xor i1 %5, true
+  %sel_cond_283.not.i = select i1 %narrow.not.not.i, i1 %sel_cond_283.not84.i, i1 false
   %not.sel_cond_283.not.i = xor i1 %sel_cond_283.not.i, true
   %narrow.i = select i1 %sel_cond_283.not.i, i1 %not.narrow.i, i1 false
-  %narrow85.i = select i1 %sel_cond_283.not.i, i1 %narrow78.i, i1 false
-  %sel_318.v.i = select i1 %narrow.i, i1 %narrow85.i, i1 %not.sel_cond_283.not.i
+  %narrow86.i = select i1 %sel_cond_283.not.i, i1 %narrow78.not.i, i1 false
+  %sel_318.v.i = select i1 %narrow.i, i1 %narrow86.i, i1 %not.sel_cond_283.not.i
   %sel_323.i = select i1 %narrow.i, i64 769, i64 %sel_259.i
   %sel_333.i = select i1 %narrow.i, i64 769, i64 %sel_202.i
   %cmp_le_345.not.not.i = icmp eq i32 %a2, -1
   %alu_353.i = add nuw nsw i64 %ext2, 1
-  %alu_354.i = and i64 %alu_353.i, 4294967295
-  %sel_358.i = select i1 %cmp_le_345.not.not.i, i64 4294967295, i64 %alu_354.i
+  %sel_358.i = select i1 %cmp_le_345.not.not.i, i64 4294967295, i64 %alu_353.i
   %sel_368.i = select i1 %sel_318.v.i, i64 %sel_323.i, i64 %sel_333.i
   %sel_373.i = select i1 %sel_318.v.i, i64 %ext2, i64 %sel_358.i
   %alu_383.i = shl nuw i64 %sel_373.i, 32
@@ -2626,13 +2602,15 @@ entry:
   %ext2 = zext i32 %a2 to i64
   %ext5 = zext i32 %a5 to i64
   %ext6 = zext i32 %a6 to i64
-  %cmp_le_15.not.i.not = icmp ugt i32 %a1, %a0
+  %cmp_le_15.not.i = icmp ule i32 %a1, %a0
+  %cmp_eq_20.i = xor i1 %cmp_le_15.not.i, true
   %narrow = tail call i32 @llvm.usub.sat.i32(i32 %a0, i32 %a1)
   %sel_30.i = zext i32 %narrow to i64
   %cmp_eq_36.not.not.i = icmp eq i64 %a3, %a4
   %sel_45.i = select i1 %cmp_eq_36.not.not.i, i64 %ext5, i64 0
   %sel_52.i = select i1 %cmp_eq_36.not.not.i, i64 %ext2, i64 0
   %cmp_lt_67.not.i = icmp ugt i32 %a0, %a1
+  %cmp_eq_72.i = xor i1 %cmp_lt_67.not.i, true
   %cmp_eq_76.not.i = icmp ne i32 %a6, 0
   %cmp_eq_85.not.i = icmp ne i64 %sel_45.i, 0
   %cmp_eq_96.i = icmp eq i64 %sel_45.i, %ext6
@@ -2642,16 +2620,17 @@ entry:
   %narrow97.i = or i1 %cmp_eq_96.i, %not.cmp_eq_85.not.i
   %narrow98.i = and i1 %cmp_eq_76.not.i, %narrow.i
   %narrow99.i = and i1 %cmp_eq_76.not.i, %narrow97.i
+  %narrow100.i = or i1 %narrow98.i, %cmp_eq_72.i
   %sel_135.v.i = and i1 %cmp_lt_67.not.i, %cmp_eq_96.i
   %narrow101.i = and i1 %cmp_lt_67.not.i, %narrow99.i
-  %0 = xor i1 %cmp_lt_67.not.i, true
-  %narrow102.i = or i1 %narrow98.i, %0
+  %narrow102.i = select i1 %cmp_eq_20.i, i1 true, i1 %narrow100.i
+  %sel_152.v.i = select i1 %cmp_le_15.not.i, i1 %sel_135.v.i, i1 false
   %not.narrow102.i = xor i1 %narrow102.i, true
   %narrow104.i = select i1 %not.narrow102.i, i1 %narrow101.i, i1 false
-  %1 = select i1 %narrow102.i, i1 true, i1 %narrow101.i
+  %0 = select i1 %narrow102.i, i1 true, i1 %narrow101.i
   %cmp_lt_194.i = icmp ult i64 %sel_52.i, %sel_30.i
-  %sel_221.v.i = select i1 %narrow104.i, i1 %cmp_lt_194.i, i1 %sel_135.v.i
-  %narrow107.i = select i1 %1, i1 %sel_221.v.i, i1 false
+  %sel_221.v.i = select i1 %narrow104.i, i1 %cmp_lt_194.i, i1 %sel_152.v.i
+  %narrow107.i = select i1 %0, i1 %sel_221.v.i, i1 false
   %sel_267.i = select i1 %narrow107.i, i64 %ext6, i64 %sel_45.i
   %cmp_eq_279.not.i = icmp eq i64 %sel_267.i, 0
   %sel_287.i = select i1 %cmp_eq_279.not.i, i64 0, i64 1024
@@ -2659,10 +2638,10 @@ entry:
   %sel_327.i = select i1 %cmp_lt_67.not.i, i64 3, i64 2
   %alu_330.i = or disjoint i64 %sel_287.i, %sel_301.i
   %alu_336.i = or disjoint i64 %alu_330.i, 257
-  %2 = or disjoint i64 %sel_301.i, %sel_327.i
-  %alu_382.i = or disjoint i64 %2, %sel_287.i
+  %1 = or disjoint i64 %sel_301.i, %sel_327.i
+  %alu_382.i = or disjoint i64 %1, %sel_287.i
   %sel_351.i = select i1 %narrow107.i, i64 %alu_336.i, i64 %alu_382.i
-  %sel_398.i = select i1 %cmp_le_15.not.i.not, i64 0, i64 %sel_351.i
+  %sel_398.i = select i1 %cmp_le_15.not.i, i64 %sel_351.i, i64 0
   %alu_408.i = shl nuw i64 %sel_30.i, 32
   %alu_411.i = or disjoint i64 %sel_398.i, %alu_408.i
   ret i64 %alu_411.i
@@ -2691,21 +2670,21 @@ entry:
   %alu_62.i = or i64 %alu_56.i, %alu_33.i
   %alu_66.i = shl nuw nsw i64 %alu_62.i, 9
   %alu_70.i = sub nsw i64 0, %ext1
-  %alu_355.i = or i64 %alu_70.i, %ext1
-  %alu_76.i = lshr i64 %alu_355.i, 31
+  %alu_76.i = or i64 %ext1, %alu_70.i
+  %alu_80.i = lshr i64 %alu_76.i, 31
   %alu_91.i = sub nsw i64 0, %ext0
-  %alu_156.i = or i64 %alu_91.i, %ext0
-  %alu_97.i = lshr i64 %alu_156.i, 31
-  %alu_101.i = and i64 %alu_97.i, 1
+  %alu_92.i = and i64 %alu_91.i, 2147483648
+  %alu_97.i = or i64 %alu_92.i, %ext0
+  %alu_101.i = lshr i64 %alu_97.i, 31
   %alu_104.i = xor i64 %alu_101.i, 1
-  %alu_357.i = xor i64 %ext1, %ext0
-  %alu_114.i = sub nsw i64 0, %alu_357.i
-  %alu_11058.i = or i64 %alu_357.i, %alu_114.i
-  %alu_120.i = lshr i64 %alu_11058.i, 31
-  %alu_124.i = and i64 %alu_120.i, 1
+  %alu_110.i = xor i64 %ext1, %ext0
+  %alu_114.i = sub nsw i64 0, %alu_110.i
+  %alu_115.i = and i64 %alu_114.i, 2147483648
+  %alu_120.i = or i64 %alu_115.i, %alu_110.i
+  %alu_124.i = lshr i64 %alu_120.i, 31
   %alu_127.i = xor i64 %alu_124.i, 1
   %alu_133.i = or i64 %alu_127.i, %alu_104.i
-  %alu_139.i = and i64 %alu_133.i, %alu_76.i
+  %alu_139.i = and i64 %alu_133.i, %alu_80.i
   %2 = xor i64 %ext5, 4294967293
   %alu_143.neg.i = add nuw nsw i64 %2, 1
   %alu_150.i = lshr i64 %alu_143.neg.i, 31
@@ -2732,31 +2711,30 @@ entry:
   %4 = xor i64 %ext5, 4294967294
   %alu_249.neg.i = add nuw nsw i64 %4, 1
   %alu_256.i = lshr i64 %alu_249.neg.i, 31
-  %alu_265.i = and i64 %alu_256.i, 1
-  %alu_268.i = xor i64 %alu_265.i, 1
-  %alu_274.i = or i64 %alu_268.i, %alu_162.i
+  %alu_268.i = xor i64 %alu_256.i, 1
+  %alu_274.i = or i64 %alu_162.i, %alu_268.i
   %alu_280.i = sub nsw i64 %ext2, %ext3
-  %alu_561.i = xor i64 %ext3, %ext2
-  %alu_28159.i = xor i64 %alu_280.i, %ext3
-  %alu_298.i = or i64 %alu_28159.i, %alu_561.i
+  %alu_281.i = and i64 %alu_280.i, 2147483648
+  %alu_286.i = xor i64 %ext3, %ext2
+  %alu_292.i = xor i64 %alu_281.i, %ext3
+  %alu_298.i = or i64 %alu_292.i, %alu_286.i
   %alu_304.i = xor i64 %alu_298.i, %ext2
-  %alu_305.i = lshr i64 %alu_304.i, 31
-  %alu_308.i = and i64 %alu_305.i, 1
+  %alu_308.i = lshr i64 %alu_304.i, 31
   %alu_313.i = sub nsw i64 %ext3, %ext2
-  %alu_31460.i = xor i64 %alu_313.i, %ext2
-  %alu_331.i = or i64 %alu_31460.i, %alu_561.i
+  %alu_314.i = and i64 %alu_313.i, 2147483648
+  %alu_325.i = xor i64 %alu_314.i, %ext2
+  %alu_331.i = or i64 %alu_325.i, %alu_286.i
   %alu_337.i = xor i64 %alu_331.i, %ext3
-  %alu_338.i = lshr i64 %alu_337.i, 31
-  %alu_341.i = and i64 %alu_338.i, 1
+  %alu_341.i = lshr i64 %alu_337.i, 31
   %alu_344.i = xor i64 %alu_341.i, 1
   %alu_348.i = sub nsw i64 0, %alu_274.i
   %alu_354.i = and i64 %alu_308.i, %alu_348.i
-  %5 = icmp eq i64 %alu_274.i, 0
-  %alu_364.i = select i1 %5, i64 %alu_344.i, i64 0
+  %alu_358.i = xor i64 %alu_348.i, 4294967295
+  %alu_364.i = and i64 %alu_358.i, %alu_344.i
   %alu_370.i = or i64 %alu_364.i, %alu_354.i
   %alu_376.i = and i64 %alu_274.i, %alu_33.i
-  %6 = and i64 %alu_139.i, %alu_21.i
-  %alu_392.i = and i64 %6, %alu_274.i
+  %5 = and i64 %alu_139.i, %alu_21.i
+  %alu_392.i = and i64 %5, %alu_274.i
   %alu_398.i = and i64 %alu_392.i, %alu_195.i
   %alu_404.i = and i64 %alu_398.i, %alu_245.i
   %alu_410.i = and i64 %alu_404.i, %alu_370.i
@@ -2771,12 +2749,14 @@ entry:
   %alu_474.i = add nuw nsw i64 %alu_410.i, 4294967295
   %alu_480.i = and i64 %alu_474.i, %ext2
   %alu_486.i = or i64 %alu_480.i, %alu_470.i
-  %alu_490.neg.i = add nuw nsw i64 %alu_139.i, 7
+  %6 = xor i64 %alu_139.i, 4294967294
+  %alu_490.neg.i = add nuw nsw i64 %6, 1
   %alu_494.neg.i = add nuw nsw i64 %alu_195.i, 7
   %alu_498.neg.i = add nuw nsw i64 %alu_245.i, 7
-  %alu_502.neg.i = add nuw nsw i64 %alu_370.i, 7
+  %7 = xor i64 %alu_370.i, 4294967294
+  %alu_502.neg.i = add nuw nsw i64 %7, 1
   %alu_510.i = and i64 %alu_502.neg.i, 7
-  %alu_514.i = sub nsw i64 0, %alu_370.i
+  %alu_514.i = sub nsw i64 510, %7
   %alu_518.i = and i64 %alu_514.i, 257
   %alu_524.i = or i64 %alu_510.i, %alu_518.i
   %alu_532.i = and i64 %alu_498.neg.i, 6
@@ -2788,17 +2768,18 @@ entry:
   %alu_566.i = and i64 %alu_548.i, %alu_560.i
   %alu_572.i = or i64 %alu_566.i, %alu_556.i
   %alu_580.i = and i64 %alu_490.neg.i, 4
-  %alu_584.i = sub nsw i64 0, %alu_139.i
+  %alu_584.i = sub nsw i64 4294967294, %6
   %alu_590.i = and i64 %alu_572.i, %alu_584.i
+  %alu_596.i = or i64 %alu_590.i, %alu_580.i
   %alu_600.i = sub nsw i64 0, %alu_376.i
+  %alu_601.i = and i64 %alu_600.i, 4294967295
   %alu_604.i = and i64 %alu_600.i, 3
-  %7 = icmp eq i64 %alu_376.i, 0
-  %8 = or i64 %alu_590.i, %alu_580.i
-  %alu_614.masked.i = select i1 %7, i64 %8, i64 0
-  %alu_620.masked.i = or disjoint i64 %alu_604.i, %alu_66.i
-  %alu_627.i = or i64 %alu_614.masked.i, %alu_620.masked.i
+  %alu_608.i = xor i64 %alu_601.i, 4294967295
+  %alu_614.i = and i64 %alu_596.i, %alu_608.i
+  %alu_620.i = or disjoint i64 %alu_604.i, %alu_66.i
+  %alu_626.i = or i64 %alu_620.i, %alu_614.i
   %alu_633.i = shl nuw i64 %alu_486.i, 32
-  %alu_636.i = add nuw nsw i64 %alu_627.i, %alu_633.i
+  %alu_636.i = or disjoint i64 %alu_626.i, %alu_633.i
   ret i64 %alu_636.i
 }
 
@@ -2839,7 +2820,7 @@ ite_then_128.i:                                   ; preds = %ite_else_116.i
   %1 = select i1 %cmp_eq_134.not.i, i32 257, i32 518
   br label %probe_orb_auth_toctou_execute_step.exit
 
-probe_orb_auth_toctou_execute_step.exit:          ; preds = %entry, %ite_else_13.i, %ite_else_43.i, %ite_else_57.i, %ite_else_83.i, %ite_else_116.i, %ite_then_128.i
+probe_orb_auth_toctou_execute_step.exit:          ; preds = %ite_then_128.i, %ite_else_116.i, %ite_else_83.i, %ite_else_57.i, %ite_else_43.i, %ite_else_13.i, %entry
   %common.ret.op.i = phi i32 [ 513, %entry ], [ 514, %ite_else_13.i ], [ 515, %ite_else_43.i ], [ %1, %ite_then_128.i ], [ 518, %ite_else_116.i ], [ 517, %ite_else_83.i ], [ 516, %ite_else_57.i ]
   ret i32 %common.ret.op.i
 }
@@ -2852,20 +2833,20 @@ entry:
   %ext2 = zext i32 %a2 to i64
   %ext3 = zext i32 %a3 to i64
   %alu_12.i = sub nsw i64 %ext3, %ext2
+  %alu_13.i = and i64 %alu_12.i, 2147483648
   %alu_18.i = xor i64 %ext3, %ext2
-  %alu_24.i = xor i64 %alu_12.i, %ext2
+  %alu_24.i = xor i64 %alu_13.i, %ext2
   %alu_30.i = or i64 %alu_24.i, %alu_18.i
   %alu_36.i = xor i64 %alu_30.i, %ext3
-  %alu_37.i = lshr i64 %alu_36.i, 31
-  %alu_40.i = and i64 %alu_37.i, 1
+  %alu_40.i = lshr i64 %alu_36.i, 31
   %alu_43.i = xor i64 %alu_40.i, 1
   %alu_47.i = sub nsw i64 0, %alu_43.i
   %alu_53.i = and i64 %alu_12.i, %alu_47.i
   %alu_59.i = sub nsw i64 %alu_53.i, %ext1
   %alu_65.i = xor i64 %alu_53.i, %ext1
-  %alu_6068.i = xor i64 %alu_59.i, %ext1
-  %alu_78.i = or i64 %alu_6068.i, %alu_65.i
-  %alu_83.i = xor i64 %alu_78.i, %alu_53.i
+  %alu_71.i = xor i64 %alu_59.i, %ext1
+  %alu_77.i = or i64 %alu_71.i, %alu_65.i
+  %alu_83.i = xor i64 %alu_77.i, %alu_53.i
   %alu_87.i = lshr i64 %alu_83.i, 31
   %alu_90.i = xor i64 %alu_87.i, -1
   %alu_94.i = sub i64 %a6, %a4
@@ -2882,17 +2863,18 @@ entry:
   %alu_142.i = xor i64 %alu_136.i, %a5
   %alu_145.i = or i64 %alu_142.i, %alu_139.i
   %alu_148.i = xor i64 %alu_145.i, %alu_133.i
-  %isnotneg69.inv.i = icmp slt i64 %alu_148.i, 0
-  %alu_161.i = select i1 %isnotneg69.inv.i, i64 0, i64 %alu_125.i
+  %isnotneg68.inv.i = icmp slt i64 %alu_148.i, 0
+  %alu_161.i = select i1 %isnotneg68.inv.i, i64 0, i64 %alu_125.i
   %alu_167.i = sub nsw i64 %ext1, %alu_53.i
-  %alu_179.masked.i = xor i64 %alu_167.i, %alu_53.i
-  %alu_186.i = or i64 %alu_179.masked.i, %alu_65.i
-  %alu_191.i = xor i64 %alu_186.i, %ext1
+  %alu_179.i = xor i64 %alu_167.i, %alu_53.i
+  %alu_185.i = or i64 %alu_179.i, %alu_65.i
+  %alu_191.i = xor i64 %alu_185.i, %ext1
   %alu_198.i = sub nsw i64 0, %ext1
-  %alu_371.i = or i64 %alu_198.i, %ext1
-  %alu_210.i = lshr i64 %alu_371.i, 31
+  %alu_199.i = and i64 %alu_198.i, 2147483648
+  %alu_210.i = or i64 %alu_199.i, %ext1
+  %alu_214.i = lshr i64 %alu_210.i, 31
   %alu_217.i = sub nsw i64 0, %ext2
-  %alu_573.i = or i64 %alu_217.i, %ext2
+  %alu_229.i = or i64 %ext2, %alu_217.i
   %alu_236.i = sub i64 %a7, %a8
   %alu_239.i = xor i64 %a8, %a7
   %alu_242.i = xor i64 %alu_236.i, %a8
@@ -2908,12 +2890,12 @@ entry:
   %alu_296.neg.i = add nuw nsw i64 %4, 1
   %alu_303.i = lshr i64 %alu_296.neg.i, 31
   %alu_315.i = xor i64 %alu_303.i, -1
-  %5 = and i64 %alu_210.i, %alu_315.i
+  %5 = and i64 %alu_214.i, %alu_315.i
   %alu_327.i = and i64 %5, %alu_125.i
   %alu_333.i = and i64 %alu_327.i, %alu_250.i
   %6 = xor i64 %ext0, 4294967293
   %7 = sub nsw i64 4294967294, %6
-  %8 = and i64 %alu_573.i, %7
+  %8 = and i64 %alu_229.i, %7
   %9 = lshr i64 %8, 31
   %alu_368.i = and i64 %alu_125.i, %9
   %10 = xor i64 %ext0, 4294967292
@@ -2921,7 +2903,7 @@ entry:
   %alu_379.i = lshr i64 %alu_372.neg.i, 31
   %.demorgan.i = or i64 %alu_250.i, %alu_379.i
   %11 = xor i64 %.demorgan.i, -1
-  %12 = and i64 %alu_210.i, %11
+  %12 = and i64 %alu_214.i, %11
   %alu_409.i = and i64 %12, %alu_125.i
   %alu_413.i = add nuw nsw i64 %ext1, 1
   %alu_419.i = or i64 %alu_333.i, %alu_409.i
@@ -2949,12 +2931,12 @@ entry:
   %alu_529.i = select i1 %16, i64 %alu_509.i, i64 0
   %alu_535.i = or i64 %alu_529.i, %alu_519.i
   %alu_547.i = or i64 %alu_419.i, %alu_368.i
-  %alu_554.i = or i64 %alu_547.i, %alu_292.i
+  %alu_553.i = or i64 %alu_547.i, %alu_292.i
   %alu_561.i = shl nuw nsw i64 %ext0, 1
   %alu_565.i = or i64 %alu_561.i, 257
-  %alu_569.i = sub nsw i64 0, %alu_554.i
+  %alu_569.i = sub nsw i64 0, %alu_553.i
   %alu_575.i = and i64 %alu_565.i, %alu_569.i
-  %alu_579.i = add nuw nsw i64 %alu_554.i, 3
+  %alu_579.i = add nuw nsw i64 %alu_553.i, 3
   %alu_583.i = and i64 %alu_579.i, 2
   %alu_589.i = or i64 %alu_583.i, %alu_575.i
   %alu_593.i = sub nsw i64 0, %alu_125.i
@@ -2973,26 +2955,27 @@ define dso_local i64 @orb_stream_bounded_commit_step(i32 %a0, i32 %a1, i32 %a2, 
 entry:
   %ext2 = zext i32 %a2 to i64
   %cmp_lt_13.not.not.i = icmp eq i32 %a5, 0
-  %cmp_le_21.not.i = icmp ule i32 %a1, %a2
-  %cmp_le_34.not.i = icmp ule i32 %a2, %a0
-  %cmp_le_45.not.i = icmp ule i32 %a0, %a3
-  %sel_52.v.i = and i1 %cmp_le_34.not.i, %cmp_le_45.not.i
-  %sel_57.v.i = and i1 %cmp_le_21.not.i, %sel_52.v.i
+  %cmp_le_21.not.i = icmp ugt i32 %a1, %a2
+  %cmp_le_34.not.i = icmp ugt i32 %a2, %a0
+  %cmp_le_45.not.i = icmp ugt i32 %a0, %a3
   %0 = tail call i32 @llvm.umin.i32(i32 %a4, i32 %a3)
   %1 = tail call i32 @llvm.umax.i32(i32 %a1, i32 %0)
   %sel_95.i = zext i32 %1 to i64
   %sel_115.i = tail call i64 @llvm.umax.i64(i64 %ext2, i64 %sel_95.i)
-  %narrow = tail call i32 @llvm.usub.sat.i32(i32 %a3, i32 %a5)
-  %sel_142.i = zext i32 %narrow to i64
-  %sel_166.i = tail call i64 @llvm.umax.i64(i64 %sel_115.i, i64 %sel_142.i)
+  %cmp_le_127.not.not.i = icmp ugt i32 %a5, %a3
+  %alu_137.i.narrow = sub i32 %a3, %a5
+  %alu_138.i = zext i32 %alu_137.i.narrow to i64
+  %2 = tail call i64 @llvm.umax.i64(i64 %sel_115.i, i64 %alu_138.i)
+  %sel_166.i = select i1 %cmp_le_127.not.not.i, i64 %sel_115.i, i64 %2
   %cmp_lt_178.not.i = icmp ugt i64 %sel_166.i, %sel_95.i
   %alu_201.i = select i1 %cmp_lt_178.not.i, i64 769, i64 257
-  %sel_206.i = select i1 %sel_57.v.i, i64 %alu_201.i, i64 0
-  %sel_211.i = select i1 %sel_57.v.i, i64 %sel_166.i, i64 %ext2
-  %sel_215.i = select i1 %cmp_lt_13.not.not.i, i64 0, i64 %sel_206.i
-  %sel_220.i = select i1 %cmp_lt_13.not.not.i, i64 %ext2, i64 %sel_211.i
-  %alu_228.i = shl nuw i64 %sel_220.i, 32
-  %alu_233.i = or disjoint i64 %sel_215.i, %alu_228.i
+  %3 = select i1 %cmp_lt_13.not.not.i, i1 true, i1 %cmp_le_21.not.i
+  %4 = select i1 %3, i1 true, i1 %cmp_le_34.not.i
+  %5 = select i1 %4, i1 true, i1 %cmp_le_45.not.i
+  %sel_215.i = select i1 %5, i64 0, i64 %alu_201.i
+  %sel_220.i = select i1 %5, i64 %ext2, i64 %sel_166.i
+  %alu_230.i = shl nuw i64 %sel_220.i, 32
+  %alu_233.i = or disjoint i64 %sel_215.i, %alu_230.i
   ret i64 %alu_233.i
 }
 
@@ -3000,9 +2983,9 @@ entry:
 define dso_local zeroext i8 @leansys_verify_slice_bounds(i64 %a0, i64 %a1, i64 %a2) local_unnamed_addr #0 {
 entry:
   %cmp_le_3.not.not.i = icmp ule i64 %a0, %a2
-  %alu_16.i = sub i64 %a2, %a0
+  %alu_16.i = sub nuw i64 %a2, %a0
   %cmp_le_20.not.not.i = icmp uge i64 %alu_16.i, %a1
-  %narrow.i = and i1 %cmp_le_3.not.not.i, %cmp_le_20.not.not.i
+  %narrow.i = select i1 %cmp_le_3.not.not.i, i1 %cmp_le_20.not.not.i, i1 false
   %res = zext i1 %narrow.i to i8
   ret i8 %res
 }
@@ -3010,25 +2993,17 @@ entry:
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @leansys_verify_wal_frame(i32 %a0, i32 %a1, i64 %a2, i64 %a3, i64 %a4) local_unnamed_addr #0 {
 entry:
-  %cmp_eq_5.not.i = icmp eq i32 %a0, 1280530771
-  br i1 %cmp_eq_5.not.i, label %ite_else_13.i, label %probe_leansys_verify_wal_frame.exit
-
-ite_else_13.i:                                    ; preds = %entry
   %ext1 = zext i32 %a1 to i64
-  %0 = add nsw i64 %ext1, -1
-  %or.cond.i = icmp ult i64 %0, 16777216
+  %cmp_eq_5.not.i = icmp eq i32 %a0, 1280530771
+  %0 = add i32 %a1, -1
+  %1 = icmp ult i32 %0, 16777216
+  %or.cond3.not5.i = and i1 %cmp_eq_5.not.i, %1
   %cmp_eq_51.not.i = icmp eq i64 %ext1, %a2
-  %or.cond3.i = and i1 %cmp_eq_51.not.i, %or.cond.i
-  br i1 %or.cond3.i, label %ite_else_59.i, label %probe_leansys_verify_wal_frame.exit
-
-ite_else_59.i:                                    ; preds = %ite_else_13.i
+  %or.cond4.i = and i1 %cmp_eq_51.not.i, %or.cond3.not5.i
   %cmp_eq_65.not.i = icmp eq i64 %a3, %a4
-  %1 = zext i1 %cmp_eq_65.not.i to i8
-  br label %probe_leansys_verify_wal_frame.exit
-
-probe_leansys_verify_wal_frame.exit:              ; preds = %entry, %ite_else_13.i, %ite_else_59.i
-  %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_else_13.i ], [ %1, %ite_else_59.i ]
-  ret i8 %common.ret.op.i
+  %narrow.i = and i1 %or.cond4.i, %cmp_eq_65.not.i
+  %res = zext i1 %narrow.i to i8
+  ret i8 %res
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
@@ -3060,21 +3035,20 @@ entry:
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @leansys_verify_jsonl_tape(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i32 %a5) local_unnamed_addr #0 {
 entry:
-  %cmp_le_3.not.not.i = icmp ugt i64 %a0, %a4
-  %alu_16.i = sub i64 %a4, %a0
-  %cmp_le_20.not.not.i = icmp ult i64 %alu_16.i, %a1
-  %or.cond.i = or i1 %cmp_le_3.not.not.i, %cmp_le_20.not.not.i
-  %cmp_le_34.not.not.i = icmp ugt i64 %a2, %a4
-  %or.cond9.i = or i1 %cmp_le_34.not.not.i, %or.cond.i
-  %alu_47.i = sub i64 %a4, %a2
-  %cmp_le_51.not.not.i = icmp ult i64 %alu_47.i, %a3
-  %or.cond10.i = or i1 %cmp_le_51.not.not.i, %or.cond9.i
+  %cmp_le_3.not.not.i = icmp ule i64 %a0, %a4
+  %alu_16.i = sub nuw i64 %a4, %a0
+  %cmp_le_20.not.not.i = icmp uge i64 %alu_16.i, %a1
+  %or.cond.not14.i = select i1 %cmp_le_3.not.not.i, i1 %cmp_le_20.not.not.i, i1 false
+  %cmp_le_34.not.not.i = icmp ule i64 %a2, %a4
+  %or.cond9.not13.i = and i1 %cmp_le_34.not.not.i, %or.cond.not14.i
+  %alu_47.i = sub nuw i64 %a4, %a2
+  %cmp_le_51.not.not.i = icmp uge i64 %alu_47.i, %a3
+  %or.cond10.not12.i = select i1 %or.cond9.not13.i, i1 %cmp_le_51.not.not.i, i1 false
   %alu_64.i = add i64 %a1, %a0
-  %cmp_le_68.not.not.i = icmp ugt i64 %alu_64.i, %a2
-  %or.cond11.i = or i1 %cmp_le_68.not.not.i, %or.cond10.i
+  %cmp_le_68.not.not.i = icmp ule i64 %alu_64.i, %a2
+  %or.cond11.not.i = and i1 %cmp_le_68.not.not.i, %or.cond10.not12.i
   %cmp_le_84.i = icmp ult i32 %a5, 65
-  %not.or.cond11.i = xor i1 %or.cond11.i, true
-  %narrow.i = and i1 %cmp_le_84.i, %not.or.cond11.i
+  %narrow.i = select i1 %or.cond11.not.i, i1 %cmp_le_84.i, i1 false
   %res = zext i1 %narrow.i to i8
   ret i8 %res
 }
@@ -3088,17 +3062,17 @@ entry:
   br i1 %or.cond.i, label %probe_leansys_verify_ring_cursor.exit, label %ite_else_24.i
 
 ite_else_24.i:                                    ; preds = %entry
-  %alu_29.i = sub i64 %a0, %a1
+  %alu_29.i = sub nuw i64 %a0, %a1
   %cmp_le_33.not.not.i = icmp ugt i64 %alu_29.i, %a2
   br i1 %cmp_le_33.not.not.i, label %probe_leansys_verify_ring_cursor.exit, label %ite_else_41.i
 
 ite_else_41.i:                                    ; preds = %ite_else_24.i
-  %alu_46.i = sub i64 %a2, %alu_29.i
+  %alu_46.i = sub nuw i64 %a2, %alu_29.i
   %cmp_le_50.not.not.i = icmp uge i64 %alu_46.i, %a3
   %0 = zext i1 %cmp_le_50.not.not.i to i8
   br label %probe_leansys_verify_ring_cursor.exit
 
-probe_leansys_verify_ring_cursor.exit:            ; preds = %entry, %ite_else_24.i, %ite_else_41.i
+probe_leansys_verify_ring_cursor.exit:            ; preds = %ite_else_41.i, %ite_else_24.i, %entry
   %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_else_24.i ], [ %0, %ite_else_41.i ]
   ret i8 %common.ret.op.i
 }
@@ -3122,7 +3096,7 @@ ite_then_56.i:                                    ; preds = %ite_else_41.i
   %0 = zext i1 %cmp_eq_61.not.i to i8
   br label %probe_leansys_verify_sst_block.exit
 
-probe_leansys_verify_sst_block.exit:              ; preds = %entry, %ite_else_41.i, %ite_then_56.i
+probe_leansys_verify_sst_block.exit:              ; preds = %ite_then_56.i, %ite_else_41.i, %entry
   %common.ret.op.i = phi i8 [ 0, %entry ], [ %0, %ite_then_56.i ], [ 1, %ite_else_41.i ]
   ret i8 %common.ret.op.i
 }
@@ -3132,12 +3106,12 @@ define dso_local zeroext i8 @leansys_verify_poll_interest(i32 %a0, i32 %a1, i32 
 entry:
   %cmp_le_9.not.not.i = icmp ule i32 %a0, %a1
   %cmp_le_23.i = icmp ult i32 %a1, 1025
-  %or.cond.i.not1 = and i1 %cmp_le_9.not.not.i, %cmp_le_23.i
+  %or.cond.not3.i = and i1 %cmp_le_9.not.not.i, %cmp_le_23.i
   %cmp_lt_43.not.i = icmp ult i32 %a2, %a3
-  %or.cond = select i1 %or.cond.i.not1, i1 %cmp_lt_43.not.i, i1 false
+  %or.cond2.i = select i1 %or.cond.not3.i, i1 %cmp_lt_43.not.i, i1 false
   %cmp_le_63.not.not.i = icmp ule i32 %a4, %a5
-  %narrow = select i1 %or.cond, i1 %cmp_le_63.not.not.i, i1 false
-  %res = zext i1 %narrow to i8
+  %narrow.i = select i1 %or.cond2.i, i1 %cmp_le_63.not.not.i, i1 false
+  %res = zext i1 %narrow.i to i8
   ret i8 %res
 }
 
@@ -3190,7 +3164,7 @@ ite_else_51.i:                                    ; preds = %ite_then_37.i
   %0 = zext i1 %cmp_le_57.not.not.i to i8
   br label %probe_leansys_verify_composite_key_order.exit
 
-probe_leansys_verify_composite_key_order.exit:    ; preds = %entry, %ite_then_10.i, %ite_else_24.i, %ite_then_37.i, %ite_else_51.i
+probe_leansys_verify_composite_key_order.exit:    ; preds = %ite_else_51.i, %ite_then_37.i, %ite_else_24.i, %ite_then_10.i, %entry
   %common.ret.op.i = phi i8 [ 0, %ite_then_10.i ], [ 0, %ite_then_37.i ], [ %0, %ite_else_51.i ], [ 1, %ite_else_24.i ], [ 1, %entry ]
   ret i8 %common.ret.op.i
 }
@@ -3213,7 +3187,7 @@ ite_else_15.i:                                    ; preds = %entry
   %cmp_eq_81.not.i = icmp eq i8 %a3, 1
   br label %probe_leansys_verify_token_auth.exit
 
-probe_leansys_verify_token_auth.exit:             ; preds = %ite_then_14.i, %ite_else_15.i
+probe_leansys_verify_token_auth.exit:             ; preds = %ite_else_15.i, %ite_then_14.i
   %cmp_eq_81.not.sink.i = phi i1 [ %cmp_eq_81.not.i, %ite_else_15.i ], [ %or.cond5.i, %ite_then_14.i ]
   %cmp_lt_95.not.i = icmp ult i64 %a4, %a5
   %spec.select6.i = and i1 %cmp_lt_95.not.i, %cmp_eq_81.not.sink.i
@@ -3224,15 +3198,14 @@ probe_leansys_verify_token_auth.exit:             ; preds = %ite_then_14.i, %ite
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @leansys_verify_log_window(i64 %a0, i64 %a1, i64 %a2, i64 %a3) local_unnamed_addr #0 {
 entry:
-  %cmp_le_3.not.not.i = icmp ugt i64 %a0, %a1
-  %cmp_le_17.not.not.i = icmp ugt i64 %a1, %a2
-  %or.cond.i = or i1 %cmp_le_3.not.not.i, %cmp_le_17.not.not.i
+  %cmp_le_3.not.not.i = icmp ule i64 %a0, %a1
+  %cmp_le_17.not.not.i = icmp ule i64 %a1, %a2
+  %or.cond.not6.i = and i1 %cmp_le_3.not.not.i, %cmp_le_17.not.not.i
   %alu_30.i = sub i64 %a1, %a0
-  %cmp_le_34.not.not.i = icmp ugt i64 %alu_30.i, %a3
-  %or.cond5.i = or i1 %or.cond.i, %cmp_le_34.not.not.i
+  %cmp_le_34.not.not.i = icmp ule i64 %alu_30.i, %a3
   %cmp_le_47.i = icmp ult i64 %a3, 262145
-  %not.or.cond5.i = xor i1 %or.cond5.i, true
-  %narrow.i = and i1 %cmp_le_47.i, %not.or.cond5.i
+  %0 = and i1 %cmp_le_34.not.not.i, %cmp_le_47.i
+  %narrow.i = and i1 %or.cond.not6.i, %0
   %res = zext i1 %narrow.i to i8
   ret i8 %res
 }
@@ -3240,16 +3213,15 @@ entry:
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @leansys_verify_jsonrpc_frame(i8 zeroext %a0, i8 zeroext %a1, i32 %a2, i64 %a3) local_unnamed_addr #0 {
 entry:
-  %ext2 = zext i32 %a2 to i64
   %cmp_eq_5.not.i = icmp eq i8 %a0, 1
-  %cmp_le_21.not.i = icmp ult i8 %a1, 2
-  %or.cond.i.not1.not = and i1 %cmp_eq_5.not.i, %cmp_le_21.not.i
-  %0 = add nsw i64 %ext2, -1
-  %or.cond2.i = icmp ult i64 %0, 128
-  %or.cond = select i1 %or.cond.i.not1.not, i1 %or.cond2.i, i1 false
+  %cmp_le_21.i = icmp ult i8 %a1, 2
+  %or.cond.not5.i = select i1 %cmp_eq_5.not.i, i1 %cmp_le_21.i, i1 false
+  %0 = add i32 %a2, -1
+  %1 = icmp ult i32 %0, 128
+  %or.cond3.not.i = and i1 %or.cond.not5.i, %1
   %cmp_le_64.i = icmp ult i64 %a3, 4194305
-  %narrow = select i1 %or.cond, i1 %cmp_le_64.i, i1 false
-  %res = zext i1 %narrow to i8
+  %narrow.i = and i1 %cmp_le_64.i, %or.cond3.not.i
+  %res = zext i1 %narrow.i to i8
   ret i8 %res
 }
 
@@ -3269,28 +3241,19 @@ entry:
 define dso_local zeroext i8 @leansys_verify_mmap_seqlock(i32 %a0, i32 %a1, i32 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6, i64 %a7, i64 %a8) local_unnamed_addr #0 {
 entry:
   %cmp_eq_5.not.i = icmp eq i32 %a0, 1280527693
-  br i1 %cmp_eq_5.not.i, label %ite_else_13.i, label %probe_leansys_verify_mmap_seqlock.exit
-
-ite_else_13.i:                                    ; preds = %entry
-  %0 = xor i32 %a2, %a1
-  %1 = zext i32 %0 to i64
-  %cmp_eq_39.not.i = icmp ne i64 %a3, %a4
+  %cmp_eq_25.not.i = icmp eq i32 %a1, %a2
+  %or.cond.not7.not10.i = and i1 %cmp_eq_5.not.i, %cmp_eq_25.not.i
+  %cmp_eq_39.not.i = icmp eq i64 %a3, %a4
+  %or.cond2.not6.not9.i = and i1 %or.cond.not7.not10.i, %cmp_eq_39.not.i
   %alu_51.i = and i64 %a3, 1
-  %2 = or i64 %alu_51.i, %1
-  %3 = icmp ne i64 %2, 0
-  %or.cond2.not4.i = or i1 %cmp_eq_39.not.i, %3
-  %cmp_le_68.not.not.i = icmp ugt i64 %a6, %a5
-  %or.cond3.i = or i1 %or.cond2.not4.i, %cmp_le_68.not.not.i
-  br i1 %or.cond3.i, label %probe_leansys_verify_mmap_seqlock.exit, label %ite_else_76.i
-
-ite_else_76.i:                                    ; preds = %ite_else_13.i
+  %cmp_eq_59.not.i = icmp eq i64 %alu_51.i, 0
+  %or.cond3.not5.not8.i = and i1 %cmp_eq_59.not.i, %or.cond2.not6.not9.i
+  %cmp_le_68.not.not.i = icmp ule i64 %a6, %a5
   %cmp_le_82.not.not.i = icmp ule i64 %a7, %a8
-  %4 = zext i1 %cmp_le_82.not.not.i to i8
-  br label %probe_leansys_verify_mmap_seqlock.exit
-
-probe_leansys_verify_mmap_seqlock.exit:           ; preds = %entry, %ite_else_13.i, %ite_else_76.i
-  %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_else_13.i ], [ %4, %ite_else_76.i ]
-  ret i8 %common.ret.op.i
+  %0 = and i1 %cmp_le_68.not.not.i, %cmp_le_82.not.not.i
+  %narrow.i = and i1 %or.cond3.not5.not8.i, %0
+  %res = zext i1 %narrow.i to i8
+  ret i8 %res
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
@@ -3309,16 +3272,16 @@ entry:
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @leansys_sse_frame_scan(i64 %a0, i64 %a1, i64 %a2, i8 zeroext %a3, i8 zeroext %a4, i8 zeroext %a5) local_unnamed_addr #0 {
 entry:
-  %ext3 = zext i8 %a3 to i64
+  %cmp_lt_2.not.not.i = icmp eq i64 %a1, 0
   %cmp_le_16.not.not.i = icmp ugt i64 %a0, %a2
-  %alu_29.i = sub i64 %a2, %a0
-  %0 = add i64 %a1, -1
-  %1 = icmp uge i64 %0, %alu_29.i
-  %or.cond8.i = or i1 %cmp_le_16.not.not.i, %1
-  %2 = add nsw i64 %ext3, -5
-  %or.cond9.i = icmp ult i64 %2, -4
-  %or.cond = select i1 %or.cond8.i, i1 true, i1 %or.cond9.i
-  br i1 %or.cond, label %probe_leansys_sse_frame_scan.exit, label %ite_else_71.i
+  %or.cond.i = or i1 %cmp_lt_2.not.not.i, %cmp_le_16.not.not.i
+  %alu_29.i = sub nuw i64 %a2, %a0
+  %cmp_le_33.not.not.i = icmp ult i64 %alu_29.i, %a1
+  %or.cond8.i = select i1 %or.cond.i, i1 true, i1 %cmp_le_33.not.not.i
+  %0 = add i8 %a3, -5
+  %1 = icmp ult i8 %0, -4
+  %or.cond10.i = or i1 %1, %or.cond8.i
+  br i1 %or.cond10.i, label %probe_leansys_sse_frame_scan.exit, label %ite_else_71.i
 
 ite_else_71.i:                                    ; preds = %entry
   %cmp_lt_81.i = icmp slt i8 %a4, 0
@@ -3327,14 +3290,14 @@ ite_else_71.i:                                    ; preds = %entry
 ite_then_88.i:                                    ; preds = %ite_else_71.i
   %cmp_lt_94.i = icmp ugt i8 %a4, -65
   %cmp_lt_108.i = icmp ult i8 %a5, -64
-  %spec.select.i = and i1 %cmp_lt_94.i, %cmp_lt_108.i
+  %spec.select.i = select i1 %cmp_lt_94.i, i1 %cmp_lt_108.i, i1 false
   br label %probe_leansys_sse_frame_scan.exit
 
 ite_else_89.i:                                    ; preds = %ite_else_71.i
   %cmp_lt_123.i = icmp ult i8 %a5, -64
   br label %probe_leansys_sse_frame_scan.exit
 
-probe_leansys_sse_frame_scan.exit:                ; preds = %entry, %ite_then_88.i, %ite_else_89.i
+probe_leansys_sse_frame_scan.exit:                ; preds = %ite_else_89.i, %ite_then_88.i, %entry
   %common.ret.op.shrunk.i = phi i1 [ false, %entry ], [ %cmp_lt_123.i, %ite_else_89.i ], [ %spec.select.i, %ite_then_88.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
@@ -3343,60 +3306,53 @@ probe_leansys_sse_frame_scan.exit:                ; preds = %entry, %ite_then_88
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @leansys_gfm_pipe_scan(i64 %a0, i64 %a1, i64 %a2, i32 %a3, i32 %a4, i8 zeroext %a5) local_unnamed_addr #0 {
 entry:
-  %cmp_le_16.not.not.i = icmp ugt i64 %a0, %a2
-  %alu_29.i = sub i64 %a2, %a0
-  %0 = add i64 %a1, -1
-  %1 = icmp uge i64 %0, %alu_29.i
-  %or.cond6.i = or i1 %cmp_le_16.not.not.i, %1
-  br i1 %or.cond6.i, label %probe_leansys_gfm_pipe_scan.exit, label %ite_else_41.i
-
-ite_else_41.i:                                    ; preds = %entry
-  %ext3 = zext i32 %a3 to i64
-  %2 = add nsw i64 %ext3, -1
-  %or.cond7.i = icmp ult i64 %2, 64
+  %cmp_lt_2.not.not.i = icmp ne i64 %a1, 0
+  %cmp_le_16.not.not.i = icmp ule i64 %a0, %a2
+  %or.cond.not13.i = and i1 %cmp_lt_2.not.not.i, %cmp_le_16.not.not.i
+  %alu_29.i = sub nuw i64 %a2, %a0
+  %cmp_le_33.not.not.i = icmp uge i64 %alu_29.i, %a1
+  %or.cond6.not12.i = select i1 %or.cond.not13.i, i1 %cmp_le_33.not.not.i, i1 false
+  %0 = add i32 %a3, -1
+  %1 = icmp ult i32 %0, 64
+  %or.cond8.not10.i = and i1 %1, %or.cond6.not12.i
   %cmp_eq_81.not.i = icmp eq i32 %a3, %a4
-  %or.cond8.i = and i1 %cmp_eq_81.not.i, %or.cond7.i
-  br i1 %or.cond8.i, label %ite_else_89.i, label %probe_leansys_gfm_pipe_scan.exit
-
-ite_else_89.i:                                    ; preds = %ite_else_41.i
+  %or.cond9.i = and i1 %cmp_eq_81.not.i, %or.cond8.not10.i
   %cmp_eq_97.not.i = icmp eq i8 %a5, 0
-  %3 = zext i1 %cmp_eq_97.not.i to i8
-  br label %probe_leansys_gfm_pipe_scan.exit
-
-probe_leansys_gfm_pipe_scan.exit:                 ; preds = %entry, %ite_else_41.i, %ite_else_89.i
-  %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_else_41.i ], [ %3, %ite_else_89.i ]
-  ret i8 %common.ret.op.i
+  %narrow.i = and i1 %cmp_eq_97.not.i, %or.cond9.i
+  %res = zext i1 %narrow.i to i8
+  ret i8 %res
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @leansys_tag_scan(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i8 zeroext %a5) local_unnamed_addr #0 {
 entry:
+  %cmp_lt_2.not.not.i = icmp eq i64 %a1, 0
   %cmp_le_16.not.not.i = icmp ugt i64 %a0, %a4
-  %alu_29.i = sub i64 %a4, %a0
-  %0 = add i64 %a1, -1
-  %1 = icmp uge i64 %0, %alu_29.i
-  %or.cond11.i = or i1 %cmp_le_16.not.not.i, %1
+  %or.cond.i = or i1 %cmp_lt_2.not.not.i, %cmp_le_16.not.not.i
+  %alu_29.i = sub nuw i64 %a4, %a0
+  %cmp_le_33.not.not.i = icmp ult i64 %alu_29.i, %a1
+  %or.cond11.i = select i1 %or.cond.i, i1 true, i1 %cmp_le_33.not.not.i
   %cmp_le_47.not.not.i = icmp ugt i64 %a0, %a2
   %or.cond12.i = or i1 %cmp_le_47.not.not.i, %or.cond11.i
   br i1 %or.cond12.i, label %probe_leansys_tag_scan.exit, label %ite_else_55.i
 
 ite_else_55.i:                                    ; preds = %entry
-  %alu_60.i = sub i64 %a2, %a0
+  %alu_60.i = sub nuw i64 %a2, %a0
   %cmp_le_64.not.not.i = icmp ugt i64 %alu_60.i, %a1
-  %alu_77.i = sub i64 %a1, %alu_60.i
+  %alu_77.i = sub nuw i64 %a1, %alu_60.i
   %cmp_le_81.not.not.i = icmp ult i64 %alu_77.i, %a3
-  %or.cond13.i = or i1 %cmp_le_64.not.not.i, %cmp_le_81.not.not.i
+  %or.cond13.i = select i1 %cmp_le_64.not.not.i, i1 true, i1 %cmp_le_81.not.not.i
   %cmp_le_97.not.not.i = icmp eq i8 %a5, 0
-  %or.cond = select i1 %or.cond13.i, i1 true, i1 %cmp_le_97.not.not.i
-  br i1 %or.cond, label %probe_leansys_tag_scan.exit, label %ite_else_105.i
+  %or.cond14.i = or i1 %or.cond13.i, %cmp_le_97.not.not.i
+  br i1 %or.cond14.i, label %probe_leansys_tag_scan.exit, label %ite_else_105.i
 
 ite_else_105.i:                                   ; preds = %ite_else_55.i
   %cmp_le_111.i = icmp ult i8 %a5, 4
-  %2 = zext i1 %cmp_le_111.i to i8
+  %0 = zext i1 %cmp_le_111.i to i8
   br label %probe_leansys_tag_scan.exit
 
-probe_leansys_tag_scan.exit:                      ; preds = %entry, %ite_else_55.i, %ite_else_105.i
-  %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_else_55.i ], [ %2, %ite_else_105.i ]
+probe_leansys_tag_scan.exit:                      ; preds = %ite_else_105.i, %ite_else_55.i, %entry
+  %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_else_55.i ], [ %0, %ite_else_105.i ]
   ret i8 %common.ret.op.i
 }
 
@@ -3414,7 +3370,8 @@ entry:
   %alu_45.i = mul i64 %alu_43.i, -7723592293110705685
   %alu_47.i = lshr i64 %alu_45.i, 31
   %alu_50.i = xor i64 %alu_47.i, %alu_45.i
-  %sel_62.i = tail call i64 @llvm.umax.i64(i64 %alu_50.i, i64 1)
+  %cmp_eq_53.not.i = icmp eq i64 %0, %a1
+  %sel_62.i = select i1 %cmp_eq_53.not.i, i64 1, i64 %alu_50.i
   %1 = add i64 %a1, -1
   %2 = icmp uge i64 %1, %alu_19.i
   %3 = or i1 %cmp_le_11.not.not.i, %2
@@ -3431,7 +3388,7 @@ entry:
   br i1 %or.cond.i, label %probe_leansys_verify_par_chunk.exit, label %ite_else_25.i
 
 ite_else_25.i:                                    ; preds = %entry
-  %alu_30.i = sub i64 %a1, %a0
+  %alu_30.i = sub nuw i64 %a1, %a0
   %cmp_le_34.not.not.i = icmp ult i64 %alu_30.i, %a3
   br i1 %cmp_le_34.not.not.i, label %ite_then_41.i, label %probe_leansys_verify_par_chunk.exit
 
@@ -3440,7 +3397,7 @@ ite_then_41.i:                                    ; preds = %ite_else_25.i
   %0 = zext i1 %cmp_eq_47.not.i to i8
   br label %probe_leansys_verify_par_chunk.exit
 
-probe_leansys_verify_par_chunk.exit:              ; preds = %entry, %ite_else_25.i, %ite_then_41.i
+probe_leansys_verify_par_chunk.exit:              ; preds = %ite_then_41.i, %ite_else_25.i, %entry
   %common.ret.op.i = phi i8 [ 0, %entry ], [ %0, %ite_then_41.i ], [ 1, %ite_else_25.i ]
   ret i8 %common.ret.op.i
 }
@@ -3449,14 +3406,14 @@ probe_leansys_verify_par_chunk.exit:              ; preds = %entry, %ite_else_25
 define dso_local zeroext i8 @leansys_verify_arena_disjoint(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4) local_unnamed_addr #0 {
 entry:
   %cmp_le_3.not.not.i = icmp ugt i64 %a0, %a4
-  %alu_16.i = sub i64 %a4, %a0
+  %alu_16.i = sub nuw i64 %a4, %a0
   %cmp_le_20.not.not.i = icmp ult i64 %alu_16.i, %a1
-  %or.cond.i = or i1 %cmp_le_3.not.not.i, %cmp_le_20.not.not.i
+  %or.cond.i = select i1 %cmp_le_3.not.not.i, i1 true, i1 %cmp_le_20.not.not.i
   %cmp_le_34.not.not.i = icmp ugt i64 %a2, %a4
   %or.cond12.i = or i1 %cmp_le_34.not.not.i, %or.cond.i
-  %alu_47.i = sub i64 %a4, %a2
+  %alu_47.i = sub nuw i64 %a4, %a2
   %cmp_le_51.not.not.i = icmp ult i64 %alu_47.i, %a3
-  %or.cond13.i = or i1 %cmp_le_51.not.not.i, %or.cond12.i
+  %or.cond13.i = select i1 %or.cond12.i, i1 true, i1 %cmp_le_51.not.not.i
   br i1 %or.cond13.i, label %probe_leansys_verify_arena_disjoint.exit, label %ite_else_59.i
 
 ite_else_59.i:                                    ; preds = %entry
@@ -3470,7 +3427,7 @@ ite_then_75.i:                                    ; preds = %ite_else_59.i
   %0 = zext i1 %cmp_le_84.not.not.i to i8
   br label %probe_leansys_verify_arena_disjoint.exit
 
-probe_leansys_verify_arena_disjoint.exit:         ; preds = %entry, %ite_else_59.i, %ite_then_75.i
+probe_leansys_verify_arena_disjoint.exit:         ; preds = %ite_then_75.i, %ite_else_59.i, %entry
   %common.ret.op.i = phi i8 [ 0, %entry ], [ %0, %ite_then_75.i ], [ 1, %ite_else_59.i ]
   ret i8 %common.ret.op.i
 }
@@ -3492,10 +3449,10 @@ entry:
   %cmp_eq_21.not.i = icmp eq i8 %a1, 1
   %or.cond.i = and i1 %cmp_eq_5.not.i, %cmp_eq_21.not.i
   %cmp_lt_41.not.i = icmp ult i32 %a2, %a3
-  %or.cond = select i1 %or.cond.i, i1 %cmp_lt_41.not.i, i1 false
   %cmp_le_55.i = icmp ult i32 %a3, 65
-  %narrow = select i1 %or.cond, i1 %cmp_le_55.i, i1 false
-  %res = zext i1 %narrow to i8
+  %0 = and i1 %cmp_lt_41.not.i, %cmp_le_55.i
+  %narrow.i = select i1 %or.cond.i, i1 %0, i1 false
+  %res = zext i1 %narrow.i to i8
   ret i8 %res
 }
 
@@ -3529,7 +3486,7 @@ ite_else_33.i:                                    ; preds = %ite_else_13.i
   %cmp_eq_207.not.i = icmp eq i8 %a3, 1
   br label %probe_leansys_verify_counterexample_triage.exit
 
-probe_leansys_verify_counterexample_triage.exit:  ; preds = %entry, %ite_else_13.i, %ite_else_46.i, %ite_else_129.i, %ite_else_102.i, %ite_else_33.i
+probe_leansys_verify_counterexample_triage.exit:  ; preds = %ite_else_33.i, %ite_else_102.i, %ite_else_129.i, %ite_else_46.i, %ite_else_13.i, %entry
   %common.ret.op.shrunk.i = phi i1 [ false, %entry ], [ false, %ite_else_13.i ], [ false, %ite_else_46.i ], [ %cmp_eq_135.not.i, %ite_else_129.i ], [ %cmp_eq_150.not.i, %ite_else_102.i ], [ %cmp_eq_207.not.i, %ite_else_33.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
@@ -3538,19 +3495,17 @@ probe_leansys_verify_counterexample_triage.exit:  ; preds = %entry, %ite_else_13
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @leansys_verify_dag_wave_step(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) local_unnamed_addr #0 {
 entry:
-  %cmp_eq_2.not.i = icmp ne i64 %a0, 0
-  %cmp_lt_15.not.not.i = icmp eq i64 %a1, 0
-  %or.cond.i = or i1 %cmp_eq_2.not.i, %cmp_lt_15.not.not.i
-  %cmp_le_29.not.not.i = icmp ugt i64 %a2, %a3
-  %or.cond5.i = or i1 %or.cond.i, %cmp_le_29.not.not.i
-  %alu_42.i = sub i64 %a3, %a2
-  %cmp_le_46.not.not.i = icmp ult i64 %alu_42.i, %a1
-  %or.cond6.i = or i1 %or.cond5.i, %cmp_le_46.not.not.i
-  %cmp_lt_59.not.not.i = icmp eq i64 %a4, 0
-  %or.cond7.i = or i1 %cmp_lt_59.not.not.i, %or.cond6.i
-  %cmp_le_73.not.not.i = icmp ule i64 %a4, %a5
-  %not.or.cond7.i = xor i1 %or.cond7.i, true
-  %narrow.i = and i1 %cmp_le_73.not.not.i, %not.or.cond7.i
+  %cmp_eq_2.not.i = icmp eq i64 %a0, 0
+  %cmp_lt_15.not.not.i = icmp ne i64 %a1, 0
+  %or.cond.not10.i = and i1 %cmp_eq_2.not.i, %cmp_lt_15.not.not.i
+  %cmp_le_29.not.not.i = icmp ule i64 %a2, %a3
+  %or.cond5.not9.i = and i1 %or.cond.not10.i, %cmp_le_29.not.not.i
+  %alu_42.i = sub nuw i64 %a3, %a2
+  %cmp_le_46.not.not.i = icmp uge i64 %alu_42.i, %a1
+  %or.cond6.not8.i = select i1 %or.cond5.not9.i, i1 %cmp_le_46.not.not.i, i1 false
+  %0 = add i64 %a4, -1
+  %1 = icmp ult i64 %0, %a5
+  %narrow.i = and i1 %or.cond6.not8.i, %1
   %res = zext i1 %narrow.i to i8
   ret i8 %res
 }
@@ -3560,15 +3515,15 @@ define dso_local zeroext i8 @leansys_verify_ios_jetsam_budget(i64 %a0, i64 %a1, 
 entry:
   %cmp_lt_2.not.not.i = icmp eq i64 %a1, 0
   %cmp_eq_15.not.i = icmp ne i64 %a3, 16383
-  %or.cond.not8.i = or i1 %cmp_lt_2.not.not.i, %cmp_eq_15.not.i
+  %or.cond.not9.i = or i1 %cmp_lt_2.not.not.i, %cmp_eq_15.not.i
   %cmp_le_29.not.not.i = icmp ugt i64 %a0, %a2
-  %or.cond6.i = or i1 %cmp_le_29.not.not.i, %or.cond.not8.i
-  %alu_42.i = sub i64 %a2, %a0
+  %or.cond6.i = or i1 %cmp_le_29.not.not.i, %or.cond.not9.i
+  %alu_42.i = sub nuw i64 %a2, %a0
   %cmp_le_46.not.not.i = icmp ult i64 %alu_42.i, %a1
-  %or.cond7.i = or i1 %cmp_le_46.not.not.i, %or.cond6.i
+  %or.cond7.i = select i1 %or.cond6.i, i1 true, i1 %cmp_le_46.not.not.i
   %cmp_le_62.i = icmp ugt i8 %a4, 1
-  %or.cond = select i1 %or.cond7.i, i1 true, i1 %cmp_le_62.i
-  br i1 %or.cond, label %probe_leansys_verify_ios_jetsam_budget.exit, label %ite_else_70.i
+  %or.cond8.i = select i1 %or.cond7.i, i1 true, i1 %cmp_le_62.i
+  br i1 %or.cond8.i, label %probe_leansys_verify_ios_jetsam_budget.exit, label %ite_else_70.i
 
 ite_else_70.i:                                    ; preds = %entry
   %cmp_eq_81.i = icmp eq i8 %a4, 1
@@ -3579,7 +3534,7 @@ ite_then_83.i:                                    ; preds = %ite_else_70.i
   %0 = zext i1 %cmp_le_88.i to i8
   br label %probe_leansys_verify_ios_jetsam_budget.exit
 
-probe_leansys_verify_ios_jetsam_budget.exit:      ; preds = %entry, %ite_else_70.i, %ite_then_83.i
+probe_leansys_verify_ios_jetsam_budget.exit:      ; preds = %ite_then_83.i, %ite_else_70.i, %entry
   %common.ret.op.i = phi i8 [ 0, %entry ], [ %0, %ite_then_83.i ], [ 1, %ite_else_70.i ]
   ret i8 %common.ret.op.i
 }
@@ -3599,8 +3554,8 @@ entry:
   %cmp_le_72.not.not.i = icmp ult i64 %alu_68.i, %a2
   %or.cond15.i = select i1 %or.cond14.i, i1 true, i1 %cmp_le_72.not.not.i
   %cmp_le_88.i = icmp ugt i8 %a4, 2
-  %or.cond = select i1 %or.cond15.i, i1 true, i1 %cmp_le_88.i
-  br i1 %or.cond, label %probe_leansys_verify_worker_budget.exit, label %ite_else_96.i
+  %or.cond16.i = select i1 %or.cond15.i, i1 true, i1 %cmp_le_88.i
+  br i1 %or.cond16.i, label %probe_leansys_verify_worker_budget.exit, label %ite_else_96.i
 
 ite_else_96.i:                                    ; preds = %entry
   switch i8 %a4, label %probe_leansys_verify_worker_budget.exit [
@@ -3616,7 +3571,7 @@ ite_else_110.i:                                   ; preds = %ite_else_96.i
   %cmp_le_142.i = icmp ult i64 %a1, 7
   br label %probe_leansys_verify_worker_budget.exit
 
-probe_leansys_verify_worker_budget.exit:          ; preds = %entry, %ite_else_96.i, %ite_else_123.i, %ite_else_110.i
+probe_leansys_verify_worker_budget.exit:          ; preds = %ite_else_110.i, %ite_else_123.i, %ite_else_96.i, %entry
   %common.ret.op.shrunk.i = phi i1 [ false, %entry ], [ true, %ite_else_96.i ], [ %cmp_le_128.i, %ite_else_123.i ], [ %cmp_le_142.i, %ite_else_110.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
@@ -3646,7 +3601,7 @@ ite_else_62.i:                                    ; preds = %ite_else_37.i
   br i1 %or.cond19.i, label %probe_leansys_verify_page_aligned_buffer.exit, label %ite_else_95.i
 
 ite_else_95.i:                                    ; preds = %ite_else_62.i
-  %alu_100.i = sub i64 %a4, %a3
+  %alu_100.i = sub nuw i64 %a4, %a3
   %cmp_le_104.not.not.i = icmp uge i64 %alu_100.i, %a2
   br label %probe_leansys_verify_page_aligned_buffer.exit
 
@@ -3659,11 +3614,11 @@ ite_else_50.i:                                    ; preds = %ite_else_37.i
   br i1 %or.cond20.i, label %probe_leansys_verify_page_aligned_buffer.exit, label %ite_else_146.i
 
 ite_else_146.i:                                   ; preds = %ite_else_50.i
-  %alu_151.i = sub i64 %a4, %a3
+  %alu_151.i = sub nuw i64 %a4, %a3
   %cmp_le_155.not.not.i = icmp uge i64 %alu_151.i, %a2
   br label %probe_leansys_verify_page_aligned_buffer.exit
 
-probe_leansys_verify_page_aligned_buffer.exit:    ; preds = %entry, %ite_else_37.i, %ite_else_62.i, %ite_else_95.i, %ite_else_50.i, %ite_else_146.i
+probe_leansys_verify_page_aligned_buffer.exit:    ; preds = %ite_else_146.i, %ite_else_50.i, %ite_else_95.i, %ite_else_62.i, %ite_else_37.i, %entry
   %common.ret.op.shrunk.i = phi i1 [ false, %entry ], [ false, %ite_else_37.i ], [ false, %ite_else_62.i ], [ %cmp_le_104.not.not.i, %ite_else_95.i ], [ false, %ite_else_50.i ], [ %cmp_le_155.not.not.i, %ite_else_146.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
@@ -3672,16 +3627,15 @@ probe_leansys_verify_page_aligned_buffer.exit:    ; preds = %entry, %ite_else_37
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @leansys_select_isa(i64 %a0, i64 %a1, i8 zeroext %a2, i8 zeroext %a3) local_unnamed_addr #0 {
 entry:
-  %cmp_lt_5.not.not.i = icmp eq i8 %a2, 0
-  br i1 %cmp_lt_5.not.not.i, label %probe_leansys_select_isa.exit, label %ite_else_13.i
-
-ite_else_13.i:                                    ; preds = %entry
-  %cmp_le_23.not.not.i = icmp ugt i8 %a2, %a3
+  %ext2 = zext i8 %a2 to i64
+  %ext3 = zext i8 %a3 to i64
+  %0 = add nsw i64 %ext2, -1
+  %or.cond.i = icmp uge i64 %0, %ext3
   %cmp_le_37.i = icmp ugt i8 %a3, 6
-  %or.cond.i = or i1 %cmp_le_23.not.not.i, %cmp_le_37.i
-  br i1 %or.cond.i, label %probe_leansys_select_isa.exit, label %ite_then_58.i
+  %or.cond54.i = or i1 %cmp_le_37.i, %or.cond.i
+  br i1 %or.cond54.i, label %probe_leansys_select_isa.exit, label %ite_then_58.i
 
-ite_then_58.i:                                    ; preds = %ite_else_13.i
+ite_then_58.i:                                    ; preds = %entry
   switch i8 %a2, label %ite_then_136.i [
     i8 1, label %ite_else_72.i
     i8 2, label %ite_else_85.i
@@ -3697,7 +3651,7 @@ ite_then_136.i:                                   ; preds = %ite_then_58.i
 
 ite_else_149.i:                                   ; preds = %ite_then_136.i
   %cmp_eq_158.not.i = icmp eq i64 %a0, -1
-  %alu_1..i = select i1 %cmp_eq_158.not.i, i8 %a2, i8 0
+  %arg_v2..i = select i1 %cmp_eq_158.not.i, i8 %a2, i8 0
   br label %probe_leansys_select_isa.exit
 
 ite_else_137.i:                                   ; preds = %ite_then_58.i
@@ -3707,7 +3661,7 @@ ite_else_137.i:                                   ; preds = %ite_then_58.i
 ite_else_182.i:                                   ; preds = %ite_else_137.i
   %alu_187.i = and i64 %a0, 64512
   %cmp_eq_191.not.i = icmp eq i64 %alu_187.i, 64512
-  %alu_1.48.i = select i1 %cmp_eq_191.not.i, i8 6, i8 0
+  %arg_v2.48.i = select i1 %cmp_eq_191.not.i, i8 6, i8 0
   br label %probe_leansys_select_isa.exit
 
 ite_else_124.i:                                   ; preds = %ite_then_58.i
@@ -3717,7 +3671,7 @@ ite_else_124.i:                                   ; preds = %ite_then_58.i
 ite_else_215.i:                                   ; preds = %ite_else_124.i
   %alu_220.i = and i64 %a0, 31744
   %cmp_eq_224.not.i = icmp eq i64 %alu_220.i, 31744
-  %alu_1.49.i = select i1 %cmp_eq_224.not.i, i8 5, i8 0
+  %arg_v2.49.i = select i1 %cmp_eq_224.not.i, i8 5, i8 0
   br label %probe_leansys_select_isa.exit
 
 ite_else_111.i:                                   ; preds = %ite_then_58.i
@@ -3727,7 +3681,7 @@ ite_else_111.i:                                   ; preds = %ite_then_58.i
 ite_else_248.i:                                   ; preds = %ite_else_111.i
   %alu_253.i = and i64 %a0, 927
   %cmp_eq_257.not.i = icmp eq i64 %alu_253.i, 927
-  %alu_1.50.i = select i1 %cmp_eq_257.not.i, i8 4, i8 0
+  %arg_v2.50.i = select i1 %cmp_eq_257.not.i, i8 4, i8 0
   br label %probe_leansys_select_isa.exit
 
 ite_else_98.i:                                    ; preds = %ite_then_58.i
@@ -3737,7 +3691,7 @@ ite_else_98.i:                                    ; preds = %ite_then_58.i
 ite_else_281.i:                                   ; preds = %ite_else_98.i
   %alu_286.i = and i64 %a0, 895
   %cmp_eq_290.not.i = icmp eq i64 %alu_286.i, 895
-  %alu_1.51.i = select i1 %cmp_eq_290.not.i, i8 3, i8 0
+  %arg_v2.51.i = select i1 %cmp_eq_290.not.i, i8 3, i8 0
   br label %probe_leansys_select_isa.exit
 
 ite_else_85.i:                                    ; preds = %ite_then_58.i
@@ -3747,7 +3701,7 @@ ite_else_85.i:                                    ; preds = %ite_then_58.i
 ite_else_314.i:                                   ; preds = %ite_else_85.i
   %alu_319.i = and i64 %a0, 799
   %cmp_eq_323.not.i = icmp eq i64 %alu_319.i, 799
-  %alu_1.52.i = select i1 %cmp_eq_323.not.i, i8 2, i8 0
+  %arg_v2.52.i = select i1 %cmp_eq_323.not.i, i8 2, i8 0
   br label %probe_leansys_select_isa.exit
 
 ite_else_72.i:                                    ; preds = %ite_then_58.i
@@ -3757,11 +3711,11 @@ ite_else_72.i:                                    ; preds = %ite_then_58.i
 ite_else_347.i:                                   ; preds = %ite_else_72.i
   %alu_352.i = and i64 %a0, 775
   %cmp_eq_356.not.i = icmp eq i64 %alu_352.i, 775
-  %alu_1.53.i = zext i1 %cmp_eq_356.not.i to i8
+  %arg_v2.53.i = zext i1 %cmp_eq_356.not.i to i8
   br label %probe_leansys_select_isa.exit
 
-probe_leansys_select_isa.exit:                    ; preds = %entry, %ite_else_13.i, %ite_then_136.i, %ite_else_149.i, %ite_else_137.i, %ite_else_182.i, %ite_else_124.i, %ite_else_215.i, %ite_else_111.i, %ite_else_248.i, %ite_else_98.i, %ite_else_281.i, %ite_else_85.i, %ite_else_314.i, %ite_else_72.i, %ite_else_347.i
-  %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_else_13.i ], [ 0, %ite_then_136.i ], [ %alu_1..i, %ite_else_149.i ], [ 0, %ite_else_137.i ], [ %alu_1.48.i, %ite_else_182.i ], [ 0, %ite_else_124.i ], [ %alu_1.49.i, %ite_else_215.i ], [ 0, %ite_else_111.i ], [ %alu_1.50.i, %ite_else_248.i ], [ 0, %ite_else_98.i ], [ %alu_1.51.i, %ite_else_281.i ], [ 0, %ite_else_85.i ], [ %alu_1.52.i, %ite_else_314.i ], [ 0, %ite_else_72.i ], [ %alu_1.53.i, %ite_else_347.i ]
+probe_leansys_select_isa.exit:                    ; preds = %ite_else_347.i, %ite_else_72.i, %ite_else_314.i, %ite_else_85.i, %ite_else_281.i, %ite_else_98.i, %ite_else_248.i, %ite_else_111.i, %ite_else_215.i, %ite_else_124.i, %ite_else_182.i, %ite_else_137.i, %ite_else_149.i, %ite_then_136.i, %entry
+  %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_then_136.i ], [ %arg_v2..i, %ite_else_149.i ], [ 0, %ite_else_137.i ], [ %arg_v2.48.i, %ite_else_182.i ], [ 0, %ite_else_124.i ], [ %arg_v2.49.i, %ite_else_215.i ], [ 0, %ite_else_111.i ], [ %arg_v2.50.i, %ite_else_248.i ], [ 0, %ite_else_98.i ], [ %arg_v2.51.i, %ite_else_281.i ], [ 0, %ite_else_85.i ], [ %arg_v2.52.i, %ite_else_314.i ], [ 0, %ite_else_72.i ], [ %arg_v2.53.i, %ite_else_347.i ]
   ret i8 %common.ret.op.i
 }
 
@@ -3847,7 +3801,7 @@ ite_else_45.i:                                    ; preds = %ite_else_31.i
   %cmp_eq_442.not.i = icmp eq i64 %a1, 263
   br label %probe_leansys_verify_isa_selection.exit
 
-probe_leansys_verify_isa_selection.exit:          ; preds = %entry, %ite_then_122.i, %ite_else_123.i, %ite_then_193.i, %ite_else_110.i, %ite_then_238.i, %ite_else_97.i, %ite_then_283.i, %ite_else_84.i, %ite_then_328.i, %ite_else_71.i, %ite_then_373.i, %ite_else_58.i, %ite_then_418.i, %ite_else_45.i
+probe_leansys_verify_isa_selection.exit:          ; preds = %ite_else_45.i, %ite_then_418.i, %ite_else_58.i, %ite_then_373.i, %ite_else_71.i, %ite_then_328.i, %ite_else_84.i, %ite_then_283.i, %ite_else_97.i, %ite_then_238.i, %ite_else_110.i, %ite_then_193.i, %ite_else_123.i, %ite_then_122.i, %entry
   %common.ret.op.shrunk.i = phi i1 [ false, %entry ], [ false, %ite_else_123.i ], [ %cmp_eq_202.not.i, %ite_then_193.i ], [ false, %ite_else_110.i ], [ %cmp_eq_247.not.i, %ite_then_238.i ], [ false, %ite_else_97.i ], [ %cmp_eq_292.not.i, %ite_then_283.i ], [ false, %ite_else_84.i ], [ %cmp_eq_337.not.i, %ite_then_328.i ], [ false, %ite_else_71.i ], [ %cmp_eq_382.not.i, %ite_then_373.i ], [ false, %ite_else_58.i ], [ %cmp_eq_427.not.i, %ite_then_418.i ], [ %cmp_eq_442.not.i, %ite_else_45.i ], [ %spec.select.i, %ite_then_122.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
@@ -3872,17 +3826,16 @@ entry:
 
 ite_then_14.i:                                    ; preds = %entry
   %cmp_eq_22.not.i = icmp eq i8 %a1, 1
-  %cmp_eq_37.not.i = icmp eq i8 %a0, 0
-  %or.cond.i = or i1 %cmp_eq_37.not.i, %cmp_eq_22.not.i
-  br i1 %or.cond.i, label %probe_orb_vm_lifecycle_step.exit, label %ite_then_44.i
+  br i1 %cmp_eq_22.not.i, label %probe_orb_vm_lifecycle_step.exit, label %ite_then_29.i
 
-ite_then_44.i:                                    ; preds = %ite_then_14.i
+ite_then_29.i:                                    ; preds = %ite_then_14.i
   switch i8 %a0, label %ite_then_72.i [
+    i8 0, label %probe_orb_vm_lifecycle_step.exit
     i8 1, label %ite_else_60.i
     i8 2, label %ite_else_73.i
   ]
 
-ite_then_72.i:                                    ; preds = %ite_then_44.i
+ite_then_72.i:                                    ; preds = %ite_then_29.i
   %cmp_eq_78.not.i = icmp eq i8 %a3, 0
   br i1 %cmp_eq_78.not.i, label %probe_orb_vm_lifecycle_step.exit, label %ite_then_85.i
 
@@ -3891,7 +3844,7 @@ ite_then_85.i:                                    ; preds = %ite_then_72.i
   %..i = select i1 %cmp_eq_91.not.i, i32 65537, i32 259
   br label %probe_orb_vm_lifecycle_step.exit
 
-ite_else_73.i:                                    ; preds = %ite_then_44.i
+ite_else_73.i:                                    ; preds = %ite_then_29.i
   %cmp_eq_107.not.i = icmp eq i8 %a3, 0
   br i1 %cmp_eq_107.not.i, label %probe_orb_vm_lifecycle_step.exit, label %ite_then_114.i
 
@@ -3904,7 +3857,7 @@ ite_then_129.i:                                   ; preds = %ite_then_114.i
   %.8.i = select i1 %cmp_eq_135.not.i, i32 65537, i32 259
   br label %probe_orb_vm_lifecycle_step.exit
 
-ite_else_60.i:                                    ; preds = %ite_then_44.i
+ite_else_60.i:                                    ; preds = %ite_then_29.i
   %cmp_eq_154.not.i = icmp eq i8 %a4, 0
   br i1 %cmp_eq_154.not.i, label %probe_orb_vm_lifecycle_step.exit, label %ite_then_161.i
 
@@ -3922,8 +3875,8 @@ ite_else_15.i:                                    ; preds = %entry
   %.10.i = select i1 %cmp_eq_199.not.i, i32 65537, i32 259
   br label %probe_orb_vm_lifecycle_step.exit
 
-probe_orb_vm_lifecycle_step.exit:                 ; preds = %ite_then_14.i, %ite_then_72.i, %ite_then_85.i, %ite_else_73.i, %ite_then_114.i, %ite_then_129.i, %ite_else_60.i, %ite_then_161.i, %ite_then_174.i, %ite_else_15.i
-  %common.ret.op.i = phi i32 [ %..i, %ite_then_85.i ], [ 1, %ite_then_72.i ], [ %.8.i, %ite_then_129.i ], [ 258, %ite_then_114.i ], [ 1, %ite_else_73.i ], [ %.9.i, %ite_then_174.i ], [ 1, %ite_then_161.i ], [ 0, %ite_else_60.i ], [ 0, %ite_then_14.i ], [ %.10.i, %ite_else_15.i ]
+probe_orb_vm_lifecycle_step.exit:                 ; preds = %ite_else_15.i, %ite_then_174.i, %ite_then_161.i, %ite_else_60.i, %ite_then_129.i, %ite_then_114.i, %ite_else_73.i, %ite_then_85.i, %ite_then_72.i, %ite_then_29.i, %ite_then_14.i
+  %common.ret.op.i = phi i32 [ %..i, %ite_then_85.i ], [ 1, %ite_then_72.i ], [ %.8.i, %ite_then_129.i ], [ 258, %ite_then_114.i ], [ 1, %ite_else_73.i ], [ %.9.i, %ite_then_174.i ], [ 1, %ite_then_161.i ], [ 0, %ite_else_60.i ], [ 0, %ite_then_29.i ], [ 0, %ite_then_14.i ], [ %.10.i, %ite_else_15.i ]
   ret i32 %common.ret.op.i
 }
 
@@ -3944,7 +3897,7 @@ ite_then_44.i:                                    ; preds = %ite_else_29.i
   %0 = select i1 %cmp_eq_52.not.i, i32 257, i32 512
   br label %probe_orb_vm_claim_step.exit
 
-probe_orb_vm_claim_step.exit:                     ; preds = %entry, %ite_else_29.i, %ite_then_44.i
+probe_orb_vm_claim_step.exit:                     ; preds = %ite_then_44.i, %ite_else_29.i, %entry
   %common.ret.op.i = phi i32 [ 512, %entry ], [ %0, %ite_then_44.i ], [ 257, %ite_else_29.i ]
   ret i32 %common.ret.op.i
 }
@@ -3977,7 +3930,7 @@ ite_else_74.i:                                    ; preds = %ite_then_60.i
   %.3.i = select i1 %cmp_eq_80.not.i, i32 512, i32 257
   br label %probe_orb_compute_secret_gate.exit
 
-probe_orb_compute_secret_gate.exit:               ; preds = %ite_then_16.i, %ite_else_30.i, %ite_else_17.i, %ite_then_60.i, %ite_else_74.i
+probe_orb_compute_secret_gate.exit:               ; preds = %ite_else_74.i, %ite_then_60.i, %ite_else_17.i, %ite_else_30.i, %ite_then_16.i
   %common.ret.op.i = phi i32 [ 257, %ite_then_16.i ], [ %..i, %ite_else_30.i ], [ 257, %ite_then_60.i ], [ %.3.i, %ite_else_74.i ], [ 512, %ite_else_17.i ]
   ret i32 %common.ret.op.i
 }
@@ -4011,33 +3964,28 @@ entry:
   %0 = and i1 %cmp_lt_3.i, %not.cmp_lt_102.not.not.not.i
   %narrow97.i = and i1 %0, %cmp_lt_84.not.i
   %1 = or disjoint i1 %narrow96.i, %narrow97.i
-  %not.sel_176.v.i = xor i1 %sel_176.v.i, true
-  %narrow101.i = and i1 %narrow97.i, %not.sel_176.v.i
   %2 = select i1 %sel_176.v.i, i1 true, i1 %1
   %narrow102.i = xor i1 %2, true
-  %narrow104.i = and i1 %cmp_lt_3.i, %sel_176.v.i
-  %narrow105.i = and i1 %cmp_lt_3.i, %narrow96.i
-  %narrow107.i = select i1 %cmp_lt_3.i, i1 %narrow102.i, i1 false
+  %narrow103.i = and i1 %cmp_lt_3.i, %sel_176.v.i
+  %narrow104.i = and i1 %cmp_lt_3.i, %narrow96.i
+  %narrow106.i = select i1 %cmp_lt_3.i, i1 %narrow102.i, i1 false
   %cmp_eq_268.i = xor i1 %narrow.i, true
-  %sel_287.v.i = select i1 %narrow107.i, i1 %cmp_eq_268.i, i1 %narrow105.i
-  %sel_307.i = select i1 %narrow107.i, i64 %sel_160.i, i64 0
-  %narrow106.i = select i1 %2, i1 %narrow101.i, i1 %narrow.i
-  %sel_317.i = select i1 %narrow107.i, i64 %sel_160.i, i64 %sel_5.i
-  %not.narrow104116.i = xor i1 %narrow104.i, true
-  %narrow115.i = select i1 %not.narrow104116.i, i1 %sel_287.v.i, i1 false
+  %sel_287.v.i = select i1 %narrow106.i, i1 %cmp_eq_268.i, i1 %narrow104.i
+  %sel_307.i = select i1 %narrow106.i, i64 %sel_160.i, i64 0
+  %sel_312.v.i = select i1 %narrow106.i, i1 %narrow.i, i1 %narrow97.i
+  %sel_317.i = select i1 %narrow106.i, i64 %sel_160.i, i64 %sel_5.i
   %cmp_eq_393.i = icmp eq i64 %sel_112.i, 0
   %sel_401.i = select i1 %cmp_lt_90.not.not.not.i, i64 2, i64 1
   %sel_406.i = select i1 %cmp_eq_393.i, i64 %sel_401.i, i64 3
-  %3 = or i1 %sel_176.v.i, %sel_287.v.i
+  %3 = or i1 %narrow103.i, %sel_287.v.i
   %4 = xor i1 %3, true
-  %5 = and i1 %cmp_lt_3.i, %4
-  %narrow119.i = select i1 %5, i1 %narrow106.i, i1 false
-  %6 = or i1 %narrow104.i, %narrow115.i
-  %narrow122.i = select i1 %6, i1 true, i1 %narrow119.i
+  %narrow117.i = select i1 %4, i1 %sel_312.v.i, i1 false
+  %5 = select i1 %narrow103.i, i1 true, i1 %sel_287.v.i
+  %narrow119.i = select i1 %5, i1 true, i1 %narrow117.i
   %sel_416.i = select i1 %sel_287.v.i, i64 %sel_307.i, i64 %sel_317.i
-  %sel_464.i = select i1 %narrow104.i, i64 %sel_181.i, i64 %sel_416.i
+  %sel_464.i = select i1 %narrow103.i, i64 %sel_181.i, i64 %sel_416.i
   %sel_436.i = select i1 %sel_287.v.i, i64 5, i64 4
-  %sel_484.i = select i1 %narrow104.i, i64 %sel_406.i, i64 %sel_436.i
+  %sel_484.i = select i1 %narrow103.i, i64 %sel_406.i, i64 %sel_436.i
   %sel_538.i = select i1 %cmp_eq_393.i, i64 0, i64 1024
   %cmp_eq_560.i = icmp eq i64 %sel_464.i, 0
   %sel_565.i = select i1 %cmp_eq_560.i, i64 0, i64 2048
@@ -4045,11 +3993,11 @@ entry:
   %sel_613.i = select i1 %cmp_eq_393.i, i64 25769803776, i64 0
   %alu_502.i = select i1 %cmp_lt_90.not.not.not.i, i64 768, i64 256
   %alu_529.i = or disjoint i64 %sel_538.i, %alu_502.i
-  %alu_557.i = or disjoint i64 %alu_529.i, %sel_590.i
-  %alu_581.i = or disjoint i64 %alu_557.i, %sel_613.i
+  %alu_556.i = or disjoint i64 %alu_529.i, %sel_590.i
+  %alu_581.i = or disjoint i64 %alu_556.i, %sel_613.i
   %alu_604.i = or disjoint i64 %alu_581.i, %sel_484.i
   %alu_631.i = or disjoint i64 %alu_604.i, %sel_565.i
-  %sel_636.i = select i1 %narrow122.i, i64 %alu_631.i, i64 309237645312
+  %sel_636.i = select i1 %narrow119.i, i64 %alu_631.i, i64 309237645312
   ret i64 %sel_636.i
 }
 
@@ -4063,15 +4011,14 @@ entry:
   %alu_64.i = sub i64 %sel_33.i, %sel_15.i
   %cmp_lt_68.i = icmp ult i64 %alu_64.i, %a4
   %narrow.not.i = and i1 %cmp_le_50.not.i, %cmp_eq_41.i
-  %0 = lshr i64 %alu_64.i, 30
   %sel_134.v.i = and i1 %cmp_lt_68.i, %narrow.not.i
-  %alu_144.i = select i1 %narrow.not.i, i64 %0, i64 0
-  %cmp_lt_147.inv.i = icmp ugt i64 %alu_144.i, 4294967295
-  %alu_154.i = shl i64 %alu_144.i, 32
+  %0 = lshr i64 %alu_64.i, 30
+  %1 = tail call i64 @llvm.umin.i64(i64 %0, i64 4294967295)
   %sel_178.i = select i1 %sel_134.v.i, i64 769, i64 257
   %sel_182.i = select i1 %cmp_le_50.not.i, i64 %sel_178.i, i64 0
   %sel_186.i = select i1 %cmp_eq_41.i, i64 %sel_182.i, i64 2
-  %alu_196.i = select i1 %cmp_lt_147.inv.i, i64 -4294967296, i64 %alu_154.i
+  %2 = shl nuw i64 %1, 32
+  %alu_196.i = select i1 %narrow.not.i, i64 %2, i64 0
   %alu_199.i = or disjoint i64 %sel_186.i, %alu_196.i
   ret i64 %alu_199.i
 }
@@ -4102,7 +4049,7 @@ ite_else_28.i:                                    ; preds = %ite_then_12.i
 ite_then_89.i:                                    ; preds = %ite_else_28.i
   %cmp_eq_95.not.i = icmp eq i8 %a2, 1
   %cmp_lt_124.not.i = icmp ult i32 %a9, %a10
-  %or.cond.i = and i1 %cmp_eq_95.not.i, %cmp_lt_124.not.i
+  %or.cond.i = select i1 %cmp_eq_95.not.i, i1 %cmp_lt_124.not.i, i1 false
   br i1 %or.cond.i, label %ite_else_132.i, label %probe_orb_vm_cap_admit.exit
 
 ite_else_132.i:                                   ; preds = %ite_then_89.i
@@ -4132,7 +4079,7 @@ ite_then_267.i:                                   ; preds = %ite_else_90.i
   %.17.i = select i1 %cmp_lt_275.not.i, i32 257, i32 512
   br label %probe_orb_vm_cap_admit.exit
 
-probe_orb_vm_cap_admit.exit:                      ; preds = %entry, %ite_then_27.i, %ite_then_42.i, %ite_then_89.i, %ite_else_132.i, %ite_then_145.i, %ite_then_207.i, %ite_then_236.i, %ite_then_267.i
+probe_orb_vm_cap_admit.exit:                      ; preds = %ite_then_267.i, %ite_then_236.i, %ite_then_207.i, %ite_then_145.i, %ite_else_132.i, %ite_then_89.i, %ite_then_42.i, %ite_then_27.i, %entry
   %common.ret.op.i = phi i32 [ %..i, %ite_then_42.i ], [ 257, %ite_then_27.i ], [ 512, %ite_then_89.i ], [ %.15.i, %ite_then_145.i ], [ 257, %ite_else_132.i ], [ 512, %ite_then_207.i ], [ %.16.i, %ite_then_236.i ], [ %.17.i, %ite_then_267.i ], [ 512, %entry ]
   ret i32 %common.ret.op.i
 }
@@ -4161,7 +4108,7 @@ ite_else_64.i:                                    ; preds = %ite_then_48.i
   %.1.i = select i1 %cmp_lt_76.not.i, i32 258, i32 512
   br label %probe_orb_slot_bypass_step.exit
 
-probe_orb_slot_bypass_step.exit:                  ; preds = %ite_then_12.i, %ite_else_13.i, %ite_then_48.i, %ite_else_64.i
+probe_orb_slot_bypass_step.exit:                  ; preds = %ite_else_64.i, %ite_then_48.i, %ite_else_13.i, %ite_then_12.i
   %common.ret.op.i = phi i32 [ %..i, %ite_then_12.i ], [ 514, %ite_then_48.i ], [ %.1.i, %ite_else_64.i ], [ 513, %ite_else_13.i ]
   ret i32 %common.ret.op.i
 }
@@ -4176,37 +4123,40 @@ entry:
   %ext7 = zext i32 %a7 to i64
   %cmp_eq_17.i = icmp ne i8 %a0, 1
   %cmp_eq_28.not.i = icmp eq i8 %a1, 1
-  %narrow55.not.i = or i1 %cmp_eq_17.i, %cmp_eq_28.not.i
+  %narrow.not.i = or i1 %cmp_eq_17.i, %cmp_eq_28.not.i
   %cmp_eq_48.not.i = icmp ne i8 %a2, 1
   %0 = add nsw i64 %ext6, -1
   %sel_72.v.not.i = icmp uge i64 %0, %ext7
   %cmp_lt_93.not.i = icmp uge i32 %a3, %a6
-  %cmp_lt_104.not.i = icmp uge i32 %a6, %a3
-  %sel_112.i = select i1 %cmp_lt_104.not.i, i64 259, i64 1282
+  %cmp_lt_104.not.not.i = icmp ult i32 %a6, %a3
+  %sel_112.i = select i1 %cmp_lt_104.not.not.i, i64 1282, i64 259
   %sel_116.i = select i1 %cmp_lt_93.not.i, i64 %sel_112.i, i64 1281
   %sel_129.i = select i1 %cmp_eq_48.not.i, i64 514, i64 515
-  %1 = or i1 %narrow55.not.i, %cmp_eq_48.not.i
-  %narrow56.i = select i1 %1, i1 true, i1 %sel_72.v.not.i
-  %sel_141.i = select i1 %narrow55.not.i, i64 513, i64 %sel_129.i
+  %1 = or i1 %narrow.not.i, %cmp_eq_48.not.i
+  %narrow55.i = select i1 %1, i1 true, i1 %sel_72.v.not.i
+  %sel_141.i = select i1 %narrow.not.i, i64 513, i64 %sel_129.i
   %alu_182.i = sub nsw i64 %ext3, %ext6
   %alu_183.i = and i64 %alu_182.i, 4294967295
   %alu_210.i = sub nsw i64 %ext6, %ext3
   %alu_211.i = and i64 %alu_210.i, 4294967295
   %cmp_le_217.not.not.i = icmp ult i64 %alu_211.i, %ext4
   %alu_227.i = sub nsw i64 %ext4, %alu_210.i
-  %sel_232.i = select i1 %cmp_le_217.not.not.i, i64 %alu_227.i, i64 0
-  %sel_258.v.i = or i1 %cmp_lt_104.not.i, %narrow56.i
-  %.not.i = or i1 %cmp_lt_93.not.i, %narrow56.i
+  %alu_228.i = and i64 %alu_227.i, 4294967295
+  %sel_232.i = select i1 %cmp_le_217.not.not.i, i64 %alu_228.i, i64 0
+  %narrow.i = icmp uge i32 %a6, %a3
+  %sel_258.v.not.i = select i1 %narrow55.i, i1 true, i1 %narrow.i
+  %.not.i = select i1 %narrow55.i, i1 true, i1 %cmp_lt_93.not.i
   %sel_268.i = select i1 %.not.i, i64 %ext4, i64 %sel_232.i
   %alu_285.i = tail call i64 @llvm.usub.sat.i64(i64 %alu_183.i, i64 %ext5)
-  %alu_290.i = xor i64 %alu_285.i, 4294967295
-  %cmp_le_296.not.not.i = icmp ult i64 %alu_290.i, %ext4
+  %alu_289.i = xor i64 %alu_285.i, 4294967295
+  %cmp_le_296.not.not.i = icmp ult i64 %alu_289.i, %ext4
   %alu_306.i = add nuw nsw i64 %alu_285.i, %ext4
-  %sel_311.i = select i1 %cmp_le_296.not.not.i, i64 4294967295, i64 %alu_306.i
-  %sel_321.i = select i1 %narrow56.i, i64 %sel_141.i, i64 %sel_116.i
-  %sel_326.i = select i1 %sel_258.v.i, i64 %sel_268.i, i64 %sel_311.i
-  %alu_334.i = shl i64 %sel_326.i, 32
-  %alu_339.i = or disjoint i64 %alu_334.i, %sel_321.i
+  %alu_307.i = and i64 %alu_306.i, 4294967295
+  %sel_311.i = select i1 %cmp_le_296.not.not.i, i64 4294967295, i64 %alu_307.i
+  %sel_321.i = select i1 %narrow55.i, i64 %sel_141.i, i64 %sel_116.i
+  %sel_326.i = select i1 %sel_258.v.not.i, i64 %sel_268.i, i64 %sel_311.i
+  %alu_336.i = shl nuw i64 %sel_326.i, 32
+  %alu_339.i = or disjoint i64 %alu_336.i, %sel_321.i
   ret i64 %alu_339.i
 }
 
@@ -4269,7 +4219,7 @@ ite_else_13.i:                                    ; preds = %entry
   %.15.i = select i1 %cmp_lt_209.not.i, i32 258, i32 514
   br label %probe_orb_node_lane_step.exit
 
-probe_orb_node_lane_step.exit:                    ; preds = %ite_then_50.i, %ite_then_97.i, %ite_then_112.i, %ite_else_98.i, %ite_else_83.i, %ite_else_36.i, %ite_then_179.i, %ite_else_13.i
+probe_orb_node_lane_step.exit:                    ; preds = %ite_else_13.i, %ite_then_179.i, %ite_else_36.i, %ite_else_83.i, %ite_else_98.i, %ite_then_112.i, %ite_then_97.i, %ite_then_50.i
   %common.ret.op.i = phi i32 [ %..i, %ite_then_50.i ], [ %.11.i, %ite_then_112.i ], [ 257, %ite_then_97.i ], [ %.12.i, %ite_else_98.i ], [ %.13.i, %ite_else_83.i ], [ %.14.i, %ite_then_179.i ], [ 260, %ite_else_36.i ], [ %.15.i, %ite_else_13.i ]
   ret i32 %common.ret.op.i
 }
@@ -4314,9 +4264,9 @@ ite_then_185.i:                                   ; preds = %ite_then_93.i
 
 ite_then_198.i:                                   ; preds = %ite_then_185.i
   %cmp_le_204.not.not.i = icmp ugt i64 %a3, %a0
-  %alu_217.i = sub i64 %a0, %a3
+  %alu_217.i = sub nuw i64 %a0, %a3
   %cmp_le_221.not.not.i = icmp ult i64 %alu_217.i, %a2
-  %or.cond1934.i = or i1 %cmp_le_204.not.not.i, %cmp_le_221.not.not.i
+  %or.cond1934.i = select i1 %cmp_le_204.not.not.i, i1 true, i1 %cmp_le_221.not.not.i
   br i1 %or.cond1934.i, label %probe_orb_wire_verify_slice_io.exit, label %ite_else_229.i
 
 ite_else_229.i:                                   ; preds = %ite_then_198.i
@@ -4325,15 +4275,15 @@ ite_else_229.i:                                   ; preds = %ite_then_198.i
   br label %probe_orb_wire_verify_slice_io.exit
 
 ite_else_199.i:                                   ; preds = %ite_then_185.i
-  %alu_249.i = sub i64 %a2, %a1
+  %alu_249.i = sub nuw i64 %a2, %a1
   %cmp_le_253.not.not.i = icmp ult i64 %alu_249.i, %a0
   br i1 %cmp_le_253.not.not.i, label %ite_then_260.i, label %ite_else_261.i
 
 ite_then_260.i:                                   ; preds = %ite_else_199.i
   %cmp_le_266.not.not.i = icmp ugt i64 %a3, %a0
-  %alu_279.i = sub i64 %a0, %a3
+  %alu_279.i = sub nuw i64 %a0, %a3
   %cmp_le_283.not.not.i = icmp ult i64 %alu_279.i, %a2
-  %or.cond1935.i = or i1 %cmp_le_266.not.not.i, %cmp_le_283.not.not.i
+  %or.cond1935.i = select i1 %cmp_le_266.not.not.i, i1 true, i1 %cmp_le_283.not.not.i
   br i1 %or.cond1935.i, label %probe_orb_wire_verify_slice_io.exit, label %ite_else_291.i
 
 ite_else_291.i:                                   ; preds = %ite_then_260.i
@@ -4365,7 +4315,7 @@ ite_then_3351.i:                                  ; preds = %ite_else_75.i
 
 ite_then_3364.i:                                  ; preds = %ite_then_3351.i
   %cmp_le_3370.not.not.i = icmp ugt i64 %a3, %a0
-  %alu_3383.i = sub nsw i64 %a0, %a3
+  %alu_3383.i = sub nuw nsw i64 %a0, %a3
   %cmp_le_3387.not.not.i = icmp ult i64 %alu_3383.i, %a2
   %or.cond1941.i = select i1 %cmp_le_3370.not.not.i, i1 true, i1 %cmp_le_3387.not.not.i
   br i1 %or.cond1941.i, label %probe_orb_wire_verify_slice_io.exit, label %ite_else_3395.i
@@ -4376,13 +4326,13 @@ ite_else_3395.i:                                  ; preds = %ite_then_3364.i
   br label %probe_orb_wire_verify_slice_io.exit
 
 ite_else_3365.i:                                  ; preds = %ite_then_3351.i
-  %alu_3415.i = sub nsw i64 %a2, %a1
+  %alu_3415.i = sub nuw nsw i64 %a2, %a1
   %cmp_le_3419.not.not.i = icmp ult i64 %alu_3415.i, %a0
   br i1 %cmp_le_3419.not.not.i, label %ite_then_3426.i, label %ite_else_3427.i
 
 ite_then_3426.i:                                  ; preds = %ite_else_3365.i
   %cmp_le_3432.not.not.i = icmp ugt i64 %a3, %a0
-  %alu_3445.i = sub nsw i64 %a0, %a3
+  %alu_3445.i = sub nuw nsw i64 %a0, %a3
   %cmp_le_3449.not.not.i = icmp ult i64 %alu_3445.i, %a2
   %or.cond1942.i = select i1 %cmp_le_3432.not.not.i, i1 true, i1 %cmp_le_3449.not.not.i
   br i1 %or.cond1942.i, label %probe_orb_wire_verify_slice_io.exit, label %ite_else_3457.i
@@ -4492,7 +4442,7 @@ ite_else_13735.i:                                 ; preds = %ite_else_10470.i
   %.1933.i = select i1 %cmp_le_13903.not.not.not.i, i8 0, i8 5
   br label %probe_orb_wire_verify_slice_io.exit
 
-probe_orb_wire_verify_slice_io.exit:              ; preds = %entry, %ite_then_25.i, %ite_then_49.i, %ite_then_93.i, %ite_then_198.i, %ite_else_229.i, %ite_then_260.i, %ite_else_291.i, %ite_else_261.i, %ite_else_75.i, %ite_then_3364.i, %ite_else_3395.i, %ite_then_3426.i, %ite_else_3457.i, %ite_else_3427.i, %ite_then_3550.i, %ite_then_3581.i, %ite_else_3532.i, %ite_else_6809.i, %ite_then_6987.i, %ite_then_7931.i, %ite_else_7957.i, %ite_then_8776.i, %ite_else_8802.i, %ite_else_7013.i, %ite_else_10278.i, %ite_then_10469.i, %ite_else_10470.i, %ite_else_13735.i
+probe_orb_wire_verify_slice_io.exit:              ; preds = %ite_else_13735.i, %ite_else_10470.i, %ite_then_10469.i, %ite_else_10278.i, %ite_else_7013.i, %ite_else_8802.i, %ite_then_8776.i, %ite_else_7957.i, %ite_then_7931.i, %ite_then_6987.i, %ite_else_6809.i, %ite_else_3532.i, %ite_then_3581.i, %ite_then_3550.i, %ite_else_3427.i, %ite_else_3457.i, %ite_then_3426.i, %ite_else_3395.i, %ite_then_3364.i, %ite_else_75.i, %ite_else_261.i, %ite_else_291.i, %ite_then_260.i, %ite_else_229.i, %ite_then_198.i, %ite_then_93.i, %ite_then_49.i, %ite_then_25.i, %entry
   %common.ret.op.i = phi i8 [ 6, %entry ], [ 8, %ite_then_93.i ], [ 9, %ite_then_198.i ], [ %..i, %ite_else_229.i ], [ 9, %ite_then_260.i ], [ %.1918.i, %ite_else_291.i ], [ %.1919.i, %ite_else_261.i ], [ 8, %ite_else_75.i ], [ 9, %ite_then_3364.i ], [ %.1920.i, %ite_else_3395.i ], [ 9, %ite_then_3426.i ], [ %.1921.i, %ite_else_3457.i ], [ %.1922.i, %ite_else_3427.i ], [ 7, %ite_then_49.i ], [ 8, %ite_then_3550.i ], [ 8, %ite_else_3532.i ], [ %.1925.i, %ite_else_6809.i ], [ 7, %ite_then_25.i ], [ 8, %ite_then_7931.i ], [ %.1926.i, %ite_else_7957.i ], [ 8, %ite_then_8776.i ], [ %.1927.i, %ite_else_8802.i ], [ 8, %ite_else_7013.i ], [ %.1928.i, %ite_else_10278.i ], [ 7, %ite_then_6987.i ], [ 8, %ite_else_10470.i ], [ %.1933.i, %ite_else_13735.i ], [ %.1924.i, %ite_then_3581.i ], [ %.1932.i, %ite_then_10469.i ]
   ret i8 %common.ret.op.i
 }
@@ -4510,8 +4460,8 @@ entry:
 ite_else_27.i:                                    ; preds = %entry
   %cmp_le_35.i = icmp ugt i32 %a4, 8191
   %cmp_le_51.i = icmp ugt i32 %a5, 65535
-  %or.cond = select i1 %cmp_le_35.i, i1 true, i1 %cmp_le_51.i
-  br i1 %or.cond, label %probe_orb_wire_encode_slice_step.exit, label %ite_else_59.i
+  %or.cond1939.i = select i1 %cmp_le_35.i, i1 true, i1 %cmp_le_51.i
+  br i1 %or.cond1939.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_else_59.i
 
 ite_else_59.i:                                    ; preds = %ite_else_27.i
   %1 = shl nuw nsw i32 %a4, 3
@@ -4550,8 +4500,8 @@ ite_then_191.i:                                   ; preds = %ite_then_159.i
   %cmp_le_201.not.not.i = icmp ugt i64 %ext5, %2
   %3 = sub i64 0, %a1
   %cmp_le_256.not.not.i = icmp ult i64 %3, %a2
-  %or.cond1939.i = or i1 %cmp_le_256.not.not.i, %cmp_le_201.not.not.i
-  br i1 %or.cond1939.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_then_283.i
+  %or.cond1940.i = or i1 %cmp_le_256.not.not.i, %cmp_le_201.not.not.i
+  br i1 %or.cond1940.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_then_283.i
 
 ite_then_283.i:                                   ; preds = %ite_then_191.i
   %cmp_le_289.not.not.i = icmp ugt i64 %ext5, %a1
@@ -4559,10 +4509,10 @@ ite_then_283.i:                                   ; preds = %ite_then_191.i
 
 ite_then_296.i:                                   ; preds = %ite_then_283.i
   %cmp_le_302.not.not.i = icmp ugt i64 %a2, %a0
-  %alu_315.i = sub i64 %a0, %a2
+  %alu_315.i = sub nuw i64 %a0, %a2
   %cmp_le_319.not.not.i = icmp ult i64 %alu_315.i, %a1
-  %or.cond1940.i = or i1 %cmp_le_302.not.not.i, %cmp_le_319.not.not.i
-  br i1 %or.cond1940.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_else_327.i
+  %or.cond1941.i = select i1 %cmp_le_302.not.not.i, i1 true, i1 %cmp_le_319.not.not.i
+  br i1 %or.cond1941.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_else_327.i
 
 ite_else_327.i:                                   ; preds = %ite_then_296.i
   %cmp_le_333.not.not.i = icmp ugt i64 %alu_76.i, %a2
@@ -4570,16 +4520,16 @@ ite_else_327.i:                                   ; preds = %ite_then_296.i
   br label %probe_orb_wire_encode_slice_step.exit
 
 ite_else_297.i:                                   ; preds = %ite_then_283.i
-  %alu_347.i = sub i64 %a1, %ext5
+  %alu_347.i = sub nuw i64 %a1, %ext5
   %cmp_le_351.not.not.i = icmp ult i64 %alu_347.i, %a0
   br i1 %cmp_le_351.not.not.i, label %ite_then_358.i, label %ite_else_359.i
 
 ite_then_358.i:                                   ; preds = %ite_else_297.i
   %cmp_le_364.not.not.i = icmp ugt i64 %a2, %a0
-  %alu_377.i = sub i64 %a0, %a2
+  %alu_377.i = sub nuw i64 %a0, %a2
   %cmp_le_381.not.not.i = icmp ult i64 %alu_377.i, %a1
-  %or.cond1941.i = or i1 %cmp_le_364.not.not.i, %cmp_le_381.not.not.i
-  br i1 %or.cond1941.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_else_389.i
+  %or.cond1942.i = select i1 %cmp_le_364.not.not.i, i1 true, i1 %cmp_le_381.not.not.i
+  br i1 %or.cond1942.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_else_389.i
 
 ite_else_389.i:                                   ; preds = %ite_then_358.i
   %cmp_le_395.not.not.i = icmp ugt i64 %alu_76.i, %a2
@@ -4597,11 +4547,11 @@ ite_else_173.i:                                   ; preds = %ite_then_159.i
   %4 = or i64 %a1, %a0
   %5 = or i64 %4, %a2
   %6 = icmp ugt i64 %5, 4294967295
-  %or.cond1944.i = select i1 %6, i1 true, i1 %cmp_le_2770.i
+  %or.cond1945.i = select i1 %6, i1 true, i1 %cmp_le_2770.i
   %alu_3419.i = add nuw nsw i64 %a2, %a1
   %cmp_le_3422.i = icmp ugt i64 %alu_3419.i, 4294967296
-  %or.cond1945.i = select i1 %or.cond1944.i, i1 true, i1 %cmp_le_3422.i
-  br i1 %or.cond1945.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_then_3449.i
+  %or.cond1946.i = select i1 %or.cond1945.i, i1 true, i1 %cmp_le_3422.i
+  br i1 %or.cond1946.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_then_3449.i
 
 ite_then_3449.i:                                  ; preds = %ite_else_173.i
   %cmp_le_3455.not.not.i = icmp ugt i64 %ext5, %a1
@@ -4609,10 +4559,10 @@ ite_then_3449.i:                                  ; preds = %ite_else_173.i
 
 ite_then_3462.i:                                  ; preds = %ite_then_3449.i
   %cmp_le_3468.not.not.i = icmp ugt i64 %a2, %a0
-  %alu_3481.i = sub nsw i64 %a0, %a2
+  %alu_3481.i = sub nuw nsw i64 %a0, %a2
   %cmp_le_3485.not.not.i = icmp ult i64 %alu_3481.i, %a1
-  %or.cond1946.i = select i1 %cmp_le_3468.not.not.i, i1 true, i1 %cmp_le_3485.not.not.i
-  br i1 %or.cond1946.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_else_3493.i
+  %or.cond1947.i = select i1 %cmp_le_3468.not.not.i, i1 true, i1 %cmp_le_3485.not.not.i
+  br i1 %or.cond1947.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_else_3493.i
 
 ite_else_3493.i:                                  ; preds = %ite_then_3462.i
   %cmp_le_3499.not.not.i = icmp ugt i64 %alu_76.i, %a2
@@ -4620,16 +4570,16 @@ ite_else_3493.i:                                  ; preds = %ite_then_3462.i
   br label %probe_orb_wire_encode_slice_step.exit
 
 ite_else_3463.i:                                  ; preds = %ite_then_3449.i
-  %alu_3513.i = sub nsw i64 %a1, %ext5
+  %alu_3513.i = sub nuw nsw i64 %a1, %ext5
   %cmp_le_3517.not.not.i = icmp ult i64 %alu_3513.i, %a0
   br i1 %cmp_le_3517.not.not.i, label %ite_then_3524.i, label %ite_else_3525.i
 
 ite_then_3524.i:                                  ; preds = %ite_else_3463.i
   %cmp_le_3530.not.not.i = icmp ugt i64 %a2, %a0
-  %alu_3543.i = sub nsw i64 %a0, %a2
+  %alu_3543.i = sub nuw nsw i64 %a0, %a2
   %cmp_le_3547.not.not.i = icmp ult i64 %alu_3543.i, %a1
-  %or.cond1947.i = select i1 %cmp_le_3530.not.not.i, i1 true, i1 %cmp_le_3547.not.not.i
-  br i1 %or.cond1947.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_else_3555.i
+  %or.cond1948.i = select i1 %cmp_le_3530.not.not.i, i1 true, i1 %cmp_le_3547.not.not.i
+  br i1 %or.cond1948.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_else_3555.i
 
 ite_else_3555.i:                                  ; preds = %ite_then_3524.i
   %cmp_le_3561.not.not.i = icmp ugt i64 %alu_76.i, %a2
@@ -4648,7 +4598,7 @@ ite_else_148.i:                                   ; preds = %ite_then_135.i
 ite_then_3648.i:                                  ; preds = %ite_else_148.i
   %7 = sub i64 0, %a0
   %cmp_le_3658.not.not.i = icmp ugt i64 %ext5, %7
-  %spec.select = select i1 %cmp_le_3658.not.not.i, i8 8, i8 5
+  %spec.select1956.i = select i1 %cmp_le_3658.not.not.i, i8 8, i8 5
   br label %probe_orb_wire_encode_slice_step.exit
 
 ite_else_3630.i:                                  ; preds = %ite_else_148.i
@@ -4656,8 +4606,8 @@ ite_else_3630.i:                                  ; preds = %ite_else_148.i
   %cmp_le_6227.i = icmp ugt i64 %alu_6224.i, 4294967296
   %8 = or i64 %a1, %a0
   %9 = icmp ugt i64 %8, 4294967295
-  %or.cond1949.i = select i1 %9, i1 true, i1 %cmp_le_6227.i
-  %spec.select1 = select i1 %or.cond1949.i, i8 8, i8 5
+  %or.cond1950.i = select i1 %9, i1 true, i1 %cmp_le_6227.i
+  %spec.select.i = select i1 %or.cond1950.i, i8 8, i8 5
   br label %probe_orb_wire_encode_slice_step.exit
 
 ite_else_124.i:                                   ; preds = %ite_else_107.i
@@ -4697,11 +4647,11 @@ ite_else_8900.i:                                  ; preds = %ite_then_8874.i
 ite_else_7111.i:                                  ; preds = %ite_then_7097.i
   %11 = or i64 %a1, %a0
   %12 = or i64 %11, %a2
-  %or.cond1951.i = icmp ugt i64 %12, 4294967295
+  %or.cond1952.i = icmp ugt i64 %12, 4294967295
   %alu_10357.i = add nuw nsw i64 %a2, %a1
   %cmp_le_10360.i = icmp ugt i64 %alu_10357.i, 4294967296
-  %or.cond1952.i = select i1 %or.cond1951.i, i1 true, i1 %cmp_le_10360.i
-  br i1 %or.cond1952.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_else_10376.i
+  %or.cond1953.i = select i1 %or.cond1952.i, i1 true, i1 %cmp_le_10360.i
+  br i1 %or.cond1953.i, label %probe_orb_wire_encode_slice_step.exit, label %ite_else_10376.i
 
 ite_else_10376.i:                                 ; preds = %ite_else_7111.i
   %cmp_le_10544.not.not.i = icmp ugt i64 %alu_76.i, %a2
@@ -4714,12 +4664,12 @@ ite_else_7086.i:                                  ; preds = %ite_else_124.i
 
 ite_else_10568.i:                                 ; preds = %ite_else_7086.i
   %13 = or i64 %a1, %a0
-  %or.cond1953.not.i = icmp ult i64 %13, 4294967296
-  %spec.select2 = select i1 %or.cond1953.not.i, i8 5, i8 8
+  %or.cond1954.not.i = icmp ult i64 %13, 4294967296
+  %spec.select1955.i = select i1 %or.cond1954.not.i, i8 5, i8 8
   br label %probe_orb_wire_encode_slice_step.exit
 
-probe_orb_wire_encode_slice_step.exit:            ; preds = %ite_else_7086.i, %ite_else_10568.i, %ite_else_3630.i, %ite_then_3648.i, %entry, %ite_else_27.i, %ite_else_59.i, %ite_else_91.i, %ite_then_123.i, %ite_then_147.i, %ite_then_191.i, %ite_then_296.i, %ite_else_327.i, %ite_then_358.i, %ite_else_389.i, %ite_else_359.i, %ite_else_173.i, %ite_then_3462.i, %ite_else_3493.i, %ite_then_3524.i, %ite_else_3555.i, %ite_else_3525.i, %ite_then_7085.i, %ite_then_8029.i, %ite_else_8055.i, %ite_then_8874.i, %ite_else_8900.i, %ite_else_7111.i, %ite_else_10376.i
-  %common.ret.op.i = phi i8 [ 2, %entry ], [ 3, %ite_else_27.i ], [ 4, %ite_else_59.i ], [ 6, %ite_else_91.i ], [ 8, %ite_then_191.i ], [ 9, %ite_then_296.i ], [ %..i, %ite_else_327.i ], [ 9, %ite_then_358.i ], [ %.1923.i, %ite_else_389.i ], [ %.1924.i, %ite_else_359.i ], [ 8, %ite_else_173.i ], [ 9, %ite_then_3462.i ], [ %.1925.i, %ite_else_3493.i ], [ 9, %ite_then_3524.i ], [ %.1926.i, %ite_else_3555.i ], [ %.1927.i, %ite_else_3525.i ], [ 7, %ite_then_147.i ], [ 7, %ite_then_123.i ], [ 8, %ite_then_8029.i ], [ %.1931.i, %ite_else_8055.i ], [ 8, %ite_then_8874.i ], [ %.1932.i, %ite_else_8900.i ], [ 8, %ite_else_7111.i ], [ %.1933.i, %ite_else_10376.i ], [ 7, %ite_then_7085.i ], [ %spec.select, %ite_then_3648.i ], [ %spec.select1, %ite_else_3630.i ], [ %spec.select2, %ite_else_10568.i ], [ 5, %ite_else_7086.i ]
+probe_orb_wire_encode_slice_step.exit:            ; preds = %ite_else_10568.i, %ite_else_7086.i, %ite_else_10376.i, %ite_else_7111.i, %ite_else_8900.i, %ite_then_8874.i, %ite_else_8055.i, %ite_then_8029.i, %ite_then_7085.i, %ite_else_3630.i, %ite_then_3648.i, %ite_else_3525.i, %ite_else_3555.i, %ite_then_3524.i, %ite_else_3493.i, %ite_then_3462.i, %ite_else_173.i, %ite_else_359.i, %ite_else_389.i, %ite_then_358.i, %ite_else_327.i, %ite_then_296.i, %ite_then_191.i, %ite_then_147.i, %ite_then_123.i, %ite_else_91.i, %ite_else_59.i, %ite_else_27.i, %entry
+  %common.ret.op.i = phi i8 [ 2, %entry ], [ 3, %ite_else_27.i ], [ 4, %ite_else_59.i ], [ 6, %ite_else_91.i ], [ 8, %ite_then_191.i ], [ 9, %ite_then_296.i ], [ %..i, %ite_else_327.i ], [ 9, %ite_then_358.i ], [ %.1923.i, %ite_else_389.i ], [ %.1924.i, %ite_else_359.i ], [ 8, %ite_else_173.i ], [ 9, %ite_then_3462.i ], [ %.1925.i, %ite_else_3493.i ], [ 9, %ite_then_3524.i ], [ %.1926.i, %ite_else_3555.i ], [ %.1927.i, %ite_else_3525.i ], [ 7, %ite_then_147.i ], [ 7, %ite_then_123.i ], [ 8, %ite_then_8029.i ], [ %.1931.i, %ite_else_8055.i ], [ 8, %ite_then_8874.i ], [ %.1932.i, %ite_else_8900.i ], [ 8, %ite_else_7111.i ], [ %.1933.i, %ite_else_10376.i ], [ 7, %ite_then_7085.i ], [ %spec.select.i, %ite_else_3630.i ], [ %spec.select1955.i, %ite_else_10568.i ], [ %spec.select1956.i, %ite_then_3648.i ], [ 5, %ite_else_7086.i ]
   ret i8 %common.ret.op.i
 }
 
@@ -4746,7 +4696,7 @@ entry:
   %sel_122.i = zext i1 %cmp_le_120.i to i64
   %1 = or i64 %a1, %a0
   %narrow46.i = icmp ult i64 %1, 4294967296
-  %narrow47.i = or i1 %narrow46.i, %cmp_eq_62.not.i
+  %narrow47.i = or i1 %cmp_eq_62.not.i, %narrow46.i
   %sel_145.i = select i1 %cmp_eq_62.not.i, i64 %sel_98.i, i64 %sel_122.i
   %cmp_eq_188.i = icmp eq i64 %sel_145.i, 0
   %sel_191.i = select i1 %cmp_eq_188.i, i64 8, i64 0
@@ -4758,40 +4708,41 @@ entry:
 
 ite_then_343.i:                                   ; preds = %entry
   %cmp_eq_218.not.i = icmp eq i32 %a3, 1330790999
-  %cmp_eq_238.not.i = icmp eq i32 %a6, %a5
+  %cmp_eq_227.not.i = icmp eq i32 %a4, 1
+  %2 = and i1 %cmp_eq_218.not.i, %cmp_eq_227.not.i
+  %cmp_eq_238.not.i = icmp eq i32 %a5, %a6
   %cmp_le_247.i = icmp ult i32 %a7, 24
   %cmp_le_258.not.not.i = icmp ugt i32 %a7, %a11
   %alu_266.i = add nuw nsw i64 %ext7, 4294967272
   %alu_267.i = and i64 %alu_266.i, 4294967295
   %cmp_le_273.not.not.i = icmp ult i64 %alu_267.i, %ext8
   %cmp_le_284.not.not.i = icmp ugt i32 %a9, %a8
+  %3 = select i1 %cmp_le_273.not.not.i, i1 true, i1 %cmp_le_284.not.not.i
   %alu_294.i = sub nsw i64 %ext8, %ext9
   %alu_295.i = and i64 %alu_294.i, 4294967295
   %cmp_le_301.not.not.i = icmp ult i64 %alu_295.i, %ext10
-  %2 = or i1 %cmp_le_284.not.not.i, %cmp_le_301.not.not.i
-  %3 = or i1 %cmp_le_273.not.not.i, %2
-  %sel_317.i = select i1 %3, i64 3, i64 0
+  %4 = select i1 %3, i1 true, i1 %cmp_le_301.not.not.i
+  %sel_317.i = select i1 %4, i64 3, i64 0
   %sel_321.i = select i1 %cmp_le_258.not.not.i, i64 4, i64 %sel_317.i
   %sel_325.i = select i1 %cmp_le_247.i, i64 3, i64 %sel_321.i
   %sel_329.i = select i1 %cmp_eq_238.not.i, i64 %sel_325.i, i64 2
-  %cmp_eq_227.not.i = icmp eq i32 %a4, 1
-  %4 = and i1 %cmp_eq_218.not.i, %cmp_eq_227.not.i
-  %sel_337.i = select i1 %4, i64 %sel_329.i, i64 1
+  %sel_337.i = select i1 %2, i64 %sel_329.i, i64 1
   %cmp_eq_351.not.i = icmp eq i64 %sel_337.i, 0
   br i1 %cmp_eq_351.not.i, label %ite_else_359.i, label %probe_orb_wire_decode_slice_step.exit
 
 ite_else_359.i:                                   ; preds = %ite_then_343.i
   %cmp_eq_369.not.i = icmp eq i64 %ext7, %a1
   %alu_382.i = and i64 %ext9, 7
-  %5 = or i64 %ext10, %ext9
-  %6 = and i64 %5, 4294901760
-  %7 = or disjoint i64 %6, %alu_382.i
-  %8 = icmp eq i64 %7, 0
-  %or.cond51.i.not1 = and i1 %cmp_eq_369.not.i, %8
-  %alu_430.i = add i32 %a10, %a9
-  %cmp_eq_437.not.i = icmp eq i32 %alu_430.i, %a8
-  %or.cond = select i1 %or.cond51.i.not1, i1 %cmp_eq_437.not.i, i1 false
-  br i1 %or.cond, label %ite_else_445.i, label %probe_orb_wire_decode_slice_step.exit
+  %cmp_eq_387.not.i = icmp eq i64 %alu_382.i, 0
+  %or.cond.not53.not56.i = and i1 %cmp_eq_369.not.i, %cmp_eq_387.not.i
+  %cmp_le_401.i = icmp ult i32 %a9, 65536
+  %or.cond50.not55.i = select i1 %or.cond.not53.not56.i, i1 %cmp_le_401.i, i1 false
+  %cmp_le_415.i = icmp ult i32 %a10, 65536
+  %or.cond51.not54.i = select i1 %or.cond50.not55.i, i1 %cmp_le_415.i, i1 false
+  %alu_430.i = add nuw nsw i64 %ext10, %ext9
+  %cmp_eq_437.not.i = icmp eq i64 %alu_430.i, %ext8
+  %or.cond52.i = select i1 %or.cond51.not54.i, i1 %cmp_eq_437.not.i, i1 false
+  br i1 %or.cond52.i, label %ite_else_445.i, label %probe_orb_wire_decode_slice_step.exit
 
 ite_else_445.i:                                   ; preds = %ite_else_359.i
   %alu_450.i = add nuw nsw i64 %ext8, 24
@@ -4800,7 +4751,7 @@ ite_else_445.i:                                   ; preds = %ite_else_359.i
   %..i = select i1 %cmp_eq_457.not.i, i64 0, i64 3
   br label %probe_orb_wire_decode_slice_step.exit
 
-probe_orb_wire_decode_slice_step.exit:            ; preds = %entry, %ite_then_343.i, %ite_else_359.i, %ite_else_445.i
+probe_orb_wire_decode_slice_step.exit:            ; preds = %ite_else_445.i, %ite_else_359.i, %ite_then_343.i, %entry
   %common.ret.op.i = phi i64 [ %sel_337.i, %ite_then_343.i ], [ 3, %ite_else_359.i ], [ %..i, %ite_else_445.i ], [ %sel_201.i, %entry ]
   %res = trunc i64 %common.ret.op.i to i8
   ret i8 %res
@@ -4827,22 +4778,22 @@ entry:
   br i1 %cmp_eq_11.not.i, label %probe_leansys_verify_cas_digest256.exit, label %ite_then_18.i
 
 ite_then_18.i:                                    ; preds = %entry
-  %0 = icmp eq i64 %a0, %a4
-  %1 = icmp eq i64 %a1, %a5
-  %2 = and i1 %0, %1
-  %3 = icmp eq i64 %a2, %a6
-  %4 = and i1 %2, %3
-  %5 = icmp eq i64 %a3, %a7
-  %cmp_eq_44.i = and i1 %4, %5
-  br i1 %cmp_eq_44.i, label %ite_else_52.i, label %probe_leansys_verify_cas_digest256.exit
+  %0 = icmp ne i64 %a0, %a4
+  %1 = icmp ne i64 %a1, %a5
+  %.not10.i = or i1 %0, %1
+  %2 = icmp ne i64 %a2, %a6
+  %.not8.i = or i1 %.not10.i, %2
+  %3 = icmp ne i64 %a3, %a7
+  %cmp_eq_44.not.i = or i1 %.not8.i, %3
+  br i1 %cmp_eq_44.not.i, label %probe_leansys_verify_cas_digest256.exit, label %ite_else_52.i
 
 ite_else_52.i:                                    ; preds = %ite_then_18.i
   %cmp_eq_60.not.i = icmp eq i8 %a8, 0
-  %6 = zext i1 %cmp_eq_60.not.i to i8
+  %4 = zext i1 %cmp_eq_60.not.i to i8
   br label %probe_leansys_verify_cas_digest256.exit
 
-probe_leansys_verify_cas_digest256.exit:          ; preds = %entry, %ite_then_18.i, %ite_else_52.i
-  %common.ret.op.i = phi i8 [ 0, %ite_then_18.i ], [ %6, %ite_else_52.i ], [ 0, %entry ]
+probe_leansys_verify_cas_digest256.exit:          ; preds = %ite_else_52.i, %ite_then_18.i, %entry
+  %common.ret.op.i = phi i8 [ 0, %ite_then_18.i ], [ %4, %ite_else_52.i ], [ 0, %entry ]
   ret i8 %common.ret.op.i
 }
 
@@ -4851,30 +4802,21 @@ define dso_local zeroext i8 @leansys_verify_sigv4_envelope(i64 %a0, i64 %a1, i64
 entry:
   %cmp_eq_5.not.i = icmp eq i8 %a4, 1
   %cmp_eq_21.not.i = icmp eq i8 %a5, 1
-  %or.cond.i = and i1 %cmp_eq_5.not.i, %cmp_eq_21.not.i
-  br i1 %or.cond.i, label %ite_else_29.i, label %probe_leansys_verify_sigv4_envelope.exit
-
-ite_else_29.i:                                    ; preds = %entry
-  %ext3 = zext i32 %a3 to i64
-  %0 = add nsw i64 %ext3, -33
-  %or.cond6.i = icmp ult i64 %0, -32
-  %1 = add i64 %a2, -604801
-  %2 = icmp ult i64 %1, -604800
-  %or.cond8.i = or i1 %2, %or.cond6.i
+  %or.cond.not11.not15.i = and i1 %cmp_eq_5.not.i, %cmp_eq_21.not.i
+  %0 = add i32 %a3, -1
+  %1 = icmp ult i32 %0, 32
+  %or.cond7.not13.i = and i1 %1, %or.cond.not11.not15.i
+  %2 = add i64 %a2, -1
+  %3 = icmp ult i64 %2, 604800
+  %or.cond9.not12.i = and i1 %3, %or.cond7.not13.i
   %alu_89.i = xor i64 %a2, -1
-  %cmp_le_93.not.not.i = icmp ult i64 %alu_89.i, %a0
-  %or.cond9.i = or i1 %cmp_le_93.not.not.i, %or.cond8.i
-  br i1 %or.cond9.i, label %probe_leansys_verify_sigv4_envelope.exit, label %ite_else_101.i
-
-ite_else_101.i:                                   ; preds = %ite_else_29.i
+  %cmp_le_93.not.not.i = icmp uge i64 %alu_89.i, %a0
   %alu_106.i = add i64 %a2, %a0
   %cmp_lt_110.not.i = icmp ugt i64 %alu_106.i, %a1
-  %3 = zext i1 %cmp_lt_110.not.i to i8
-  br label %probe_leansys_verify_sigv4_envelope.exit
-
-probe_leansys_verify_sigv4_envelope.exit:         ; preds = %entry, %ite_else_29.i, %ite_else_101.i
-  %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_else_29.i ], [ %3, %ite_else_101.i ]
-  ret i8 %common.ret.op.i
+  %4 = and i1 %cmp_le_93.not.not.i, %cmp_lt_110.not.i
+  %narrow.i = and i1 %4, %or.cond9.not12.i
+  %res = zext i1 %narrow.i to i8
+  ret i8 %res
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
@@ -4922,7 +4864,7 @@ ite_else_95.i:                                    ; preds = %ite_else_69.i
   %2 = zext i1 %cmp_le_111.not.not.i to i8
   br label %probe_leansys_verify_io_uring_ring.exit
 
-probe_leansys_verify_io_uring_ring.exit:          ; preds = %entry, %ite_else_27.i, %ite_else_69.i, %ite_else_95.i
+probe_leansys_verify_io_uring_ring.exit:          ; preds = %ite_else_95.i, %ite_else_69.i, %ite_else_27.i, %entry
   %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_else_27.i ], [ 0, %ite_else_69.i ], [ %2, %ite_else_95.i ]
   ret i8 %common.ret.op.i
 }
@@ -4933,10 +4875,10 @@ entry:
   %0 = sub i64 0, %a0
   %or.cond.i = icmp ugt i64 %0, %a1
   %cmp_le_31.not.not.i = icmp ule i64 %a2, %a1
-  %alu_44.i = sub i64 %a1, %a2
+  %or.cond5.not.i = and i1 %or.cond.i, %cmp_le_31.not.not.i
+  %alu_44.i = sub nuw i64 %a1, %a2
   %cmp_le_48.not.not.i = icmp uge i64 %alu_44.i, %a3
-  %1 = and i1 %cmp_le_31.not.not.i, %cmp_le_48.not.not.i
-  %narrow.i = and i1 %or.cond.i, %1
+  %narrow.i = select i1 %or.cond5.not.i, i1 %cmp_le_48.not.not.i, i1 false
   %res = zext i1 %narrow.i to i8
   ret i8 %res
 }
@@ -4944,17 +4886,16 @@ entry:
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @leansys_verify_step_reactor(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i32 %a4, i32 %a5, i8 zeroext %a6) local_unnamed_addr #0 {
 entry:
-  %cmp_eq_5.not.i = icmp ne i8 %a6, 0
-  %cmp_le_19.not.not.i = icmp ugt i64 %a1, %a0
-  %or.cond.i = or i1 %cmp_le_19.not.not.i, %cmp_eq_5.not.i
-  %cmp_le_33.not.not.i = icmp ugt i64 %a2, %a3
-  %or.cond2.i = or i1 %cmp_le_33.not.not.i, %or.cond.i
+  %cmp_eq_5.not.i = icmp eq i8 %a6, 0
+  %cmp_le_19.not.not.i = icmp ule i64 %a1, %a0
+  %or.cond.not5.i = and i1 %cmp_le_19.not.not.i, %cmp_eq_5.not.i
+  %cmp_le_33.not.not.i = icmp ule i64 %a2, %a3
+  %or.cond2.not4.i = and i1 %cmp_le_33.not.not.i, %or.cond.not5.i
   %cmp_le_53.not.not.i = icmp ule i32 %a4, %a5
-  %not.or.cond2.i = xor i1 %or.cond2.i, true
-  %or.cond = select i1 %not.or.cond2.i, i1 %cmp_le_53.not.not.i, i1 false
   %cmp_le_67.i = icmp ult i32 %a5, 1025
-  %narrow = select i1 %or.cond, i1 %cmp_le_67.i, i1 false
-  %res = zext i1 %narrow to i8
+  %0 = and i1 %cmp_le_53.not.not.i, %cmp_le_67.i
+  %narrow.i = select i1 %or.cond2.not4.i, i1 %0, i1 false
+  %res = zext i1 %narrow.i to i8
   ret i8 %res
 }
 
@@ -5005,7 +4946,7 @@ ite_else_347.i:                                   ; preds = %ite_else_238.i
   %.24.i = select i1 %cmp_eq_352.not.i, i8 1, i8 2
   br label %probe_leansys_verify_stream_relay.exit
 
-probe_leansys_verify_stream_relay.exit:           ; preds = %entry, %ite_then_86.i, %ite_else_100.i, %ite_else_141.i, %ite_else_74.i, %ite_else_238.i, %ite_else_347.i
+probe_leansys_verify_stream_relay.exit:           ; preds = %ite_else_347.i, %ite_else_238.i, %ite_else_74.i, %ite_else_141.i, %ite_else_100.i, %ite_then_86.i, %entry
   %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_then_86.i ], [ 2, %ite_else_100.i ], [ %..i, %ite_else_141.i ], [ 0, %ite_else_74.i ], [ 2, %ite_else_238.i ], [ %.24.i, %ite_else_347.i ]
   ret i8 %common.ret.op.i
 }
@@ -5048,7 +4989,7 @@ ite_then_63.i:                                    ; preds = %ite_then_36.i
   %alu_71.i = add i64 %alu_68.i, %a1
   br label %probe_orb_prefill_deadline_ms.exit
 
-probe_orb_prefill_deadline_ms.exit:               ; preds = %entry, %ite_then_22.i, %ite_then_36.i, %ite_then_63.i
+probe_orb_prefill_deadline_ms.exit:               ; preds = %ite_then_63.i, %ite_then_36.i, %ite_then_22.i, %entry
   %common.ret.op.i = phi i64 [ %alu_71.i, %ite_then_63.i ], [ %a3, %ite_then_36.i ], [ %a1, %ite_then_22.i ], [ %a1, %entry ]
   ret i64 %common.ret.op.i
 }
@@ -5061,19 +5002,13 @@ entry:
   %cmp_eq_26.i = icmp slt i64 %alu_2.i, 0
   %0 = and i64 %alu_2.i, %a2
   %narrow.i = icmp sgt i64 %0, -1
-  %.lobit.i = lshr i64 %0, 63
   %narrow51.i = or i1 %cmp_eq_20.i, %narrow.i
-  %cmp_eq_23.inv.i = icmp slt i64 %a2, 0
-  %not.cmp_eq_20.i = xor i1 %cmp_eq_20.i, true
-  %narrow55.i = or i1 %cmp_eq_23.inv.i, %not.cmp_eq_20.i
-  %narrow56.i = and i1 %narrow55.i, %narrow51.i
-  %sel_94.i = zext i1 %narrow56.i to i64
-  %sel_103.i = select i1 %narrow51.i, i64 %sel_94.i, i64 %.lobit.i
+  %cmp_eq_23.inv.i = icmp sgt i64 %a2, -1
+  %narrow55.not.i = and i1 %cmp_eq_20.i, %cmp_eq_23.inv.i
   %sel_107.i = select i1 %narrow51.i, i64 %alu_2.i, i64 9223372036854775807
   %1 = and i1 %cmp_eq_26.i, %narrow51.i
   %sel_129.i = select i1 %1, i64 %alu_2.i, i64 -9223372036854775808
-  %sel_cond_133.not.not.i = icmp eq i64 %sel_103.i, 0
-  %sel_139.i = select i1 %sel_cond_133.not.not.i, i64 %sel_129.i, i64 %sel_107.i
+  %sel_139.i = select i1 %narrow55.not.i, i64 %sel_129.i, i64 %sel_107.i
   %alu_144.i = sub i64 %sel_139.i, %a1
   %cmp_eq_162.i = icmp slt i64 %sel_139.i, 0
   %cmp_eq_165.i = icmp sgt i64 %a1, -1
@@ -5208,11 +5143,10 @@ entry:
   %alu_39.i = xor i64 %alu_33.i, 1
   %alu_46.i = shl nuw nsw i64 %alu_39.i, 9
   %alu_51.i = xor i64 %a4, -9223372036854775808
-  %1 = add i64 %a4, 9223372036854775807
-  %2 = xor i64 %a4, -1
-  %alu_66.i = and i64 %1, %2
-  %isneg.i = icmp slt i64 %alu_66.i, 0
-  %alu_80.i = select i1 %isneg.i, i64 %a4, i64 0
+  %1 = sub i64 -9223372036854775808, %a4
+  %2 = or i64 %1, %a4
+  %isneg.inv.i = icmp slt i64 %2, 0
+  %alu_80.i = select i1 %isneg.inv.i, i64 0, i64 %a4
   %alu_83.i = sub i64 4294967295, %alu_80.i
   %alu_92.i = or i64 %alu_83.i, %alu_80.i
   %isnotneg.inv.i = icmp slt i64 %alu_92.i, 0
@@ -5220,19 +5154,19 @@ entry:
   %alu_120.i = and i64 %alu_115.i, %alu_80.i
   %alu_126.i = xor i64 %alu_115.i, 4294967295
   %alu_138.i = or i64 %alu_120.i, %alu_126.i
-  %3 = insertelement <4 x i64> poison, i64 %a5, i64 0
-  %4 = insertelement <4 x i64> %3, i64 %a4, i64 1
+  %3 = insertelement <4 x i64> poison, i64 %a4, i64 0
+  %4 = insertelement <4 x i64> %3, i64 %a5, i64 1
   %5 = insertelement <4 x i64> %4, i64 %a6, i64 2
   %6 = insertelement <4 x i64> %5, i64 %a7, i64 3
   %7 = sub <4 x i64> <i64 1073741823, i64 1073741823, i64 1073741823, i64 1073741823>, %6
   %8 = sub <4 x i64> <i64 -1073741825, i64 -1073741825, i64 -1073741825, i64 -1073741825>, %6
   %9 = or <4 x i64> %7, %6
-  %10 = icmp sgt <4 x i64> %9, <i64 -1, i64 -1, i64 -1, i64 -1>
+  %10 = icmp slt <4 x i64> %9, zeroinitializer
   %11 = and <4 x i64> %8, %6
-  %12 = icmp slt <4 x i64> %11, zeroinitializer
-  %13 = or <4 x i1> %12, %10
+  %12 = icmp sgt <4 x i64> %11, <i64 -1, i64 -1, i64 -1, i64 -1>
+  %13 = and <4 x i1> %12, %10
   %14 = bitcast <4 x i1> %13 to i4
-  %15 = icmp eq i4 %14, -1
+  %.not = icmp eq i4 %14, 0
   %alu_400.i = sub i64 %a5, %a6
   %alu_403.i = lshr i64 %a5, 63
   %alu_409.i = lshr i64 %a6, 63
@@ -5242,20 +5176,20 @@ entry:
   %alu_435.i = and i64 %alu_429.i, %alu_415.i
   %alu_441.i = xor i64 %alu_409.i, 1
   %alu_453.i = xor i64 %alu_415.i, -1
-  %16 = and i64 %alu_403.i, %alu_453.i
-  %alu_459.i = and i64 %16, %alu_441.i
+  %15 = and i64 %alu_403.i, %alu_453.i
+  %alu_459.i = and i64 %15, %alu_441.i
   %alu_465.i = sub nsw i64 0, %alu_459.i
   %alu_468.i = and i64 %alu_465.i, -9223372036854775808
-  %17 = icmp eq i64 %alu_459.i, 0
-  %alu_474.i = select i1 %17, i64 %alu_400.i, i64 0
+  %16 = icmp eq i64 %alu_459.i, 0
+  %alu_474.i = select i1 %16, i64 %alu_400.i, i64 0
   %alu_477.i = or i64 %alu_474.i, %alu_468.i
   %alu_482.i = sub nsw i64 0, %alu_435.i
   %alu_485.i = and i64 %alu_482.i, 9223372036854775807
-  %18 = icmp eq i64 %alu_435.i, 0
-  %alu_491.i = select i1 %18, i64 %alu_477.i, i64 0
+  %17 = icmp eq i64 %alu_435.i, 0
+  %alu_491.i = select i1 %17, i64 %alu_477.i, i64 0
   %alu_494.i = or i64 %alu_491.i, %alu_485.i
-  %19 = xor i64 %alu_494.i, 9223372036854775807
-  %alu_497.neg.i = add i64 %19, 1
+  %18 = xor i64 %alu_494.i, 9223372036854775807
+  %alu_497.neg.i = add i64 %18, 1
   %alu_509.i = or i64 %alu_497.neg.i, %alu_491.i
   %isnotneg320.inv.i = icmp slt i64 %alu_509.i, 0
   %alu_526.i = select i1 %isnotneg320.inv.i, i64 0, i64 %alu_494.i
@@ -5268,11 +5202,11 @@ entry:
   %alu_547.i = xor i64 %alu_544.i, %alu_532.i
   %isnotneg321.i = icmp slt i64 %alu_547.i, 0
   %alu_576.i = select i1 %isnotneg321.i, i64 %alu_526.i, i64 %a7
-  %20 = xor i64 %alu_576.i, 9223372036854775807
-  %alu_579.neg.i = add i64 %20, 1
+  %19 = xor i64 %alu_576.i, 9223372036854775807
+  %alu_579.neg.i = add i64 %19, 1
   %alu_591.i = or i64 %alu_579.neg.i, %alu_576.i
-  %isnotneg323.inv.i = icmp slt i64 %alu_591.i, 0
-  %alu_608.i = select i1 %isnotneg323.inv.i, i64 0, i64 %alu_576.i
+  %isnotneg322.inv.i = icmp slt i64 %alu_591.i, 0
+  %alu_608.i = select i1 %isnotneg322.inv.i, i64 0, i64 %alu_576.i
   %alu_611.i = add i64 %a7, %a4
   %alu_614.i = lshr i64 %a4, 63
   %alu_620.i = lshr i64 %a7, 63
@@ -5281,17 +5215,17 @@ entry:
   %alu_646.i = xor i64 %alu_646.demorgan.i, -1
   %alu_652.i = and i64 %alu_626.i, %alu_646.i
   %alu_664.i = xor i64 %alu_626.i, -1
-  %21 = and i64 %alu_614.i, %alu_664.i
-  %alu_670.i = and i64 %21, %alu_620.i
+  %20 = and i64 %alu_614.i, %alu_664.i
+  %alu_670.i = and i64 %20, %alu_620.i
   %alu_676.i = sub nsw i64 0, %alu_670.i
   %alu_679.i = and i64 %alu_676.i, -9223372036854775808
-  %22 = icmp eq i64 %alu_670.i, 0
-  %alu_685.i = select i1 %22, i64 %alu_611.i, i64 0
+  %21 = icmp eq i64 %alu_670.i, 0
+  %alu_685.i = select i1 %21, i64 %alu_611.i, i64 0
   %alu_688.i = or i64 %alu_685.i, %alu_679.i
   %alu_693.i = sub nsw i64 0, %alu_652.i
   %alu_696.i = and i64 %alu_693.i, 9223372036854775807
-  %23 = icmp eq i64 %alu_652.i, 0
-  %alu_702.i = select i1 %23, i64 %alu_688.i, i64 0
+  %22 = icmp eq i64 %alu_652.i, 0
+  %alu_702.i = select i1 %22, i64 %alu_688.i, i64 0
   %alu_705.i = or i64 %alu_702.i, %alu_696.i
   %alu_708.i = xor i64 %alu_705.i, -9223372036854775808
   %alu_711.i = sub i64 %alu_532.i, %alu_708.i
@@ -5299,39 +5233,39 @@ entry:
   %alu_717.i = xor i64 %alu_711.i, %alu_708.i
   %alu_720.i = or i64 %alu_717.i, %alu_714.i
   %alu_723.i = xor i64 %alu_720.i, %alu_532.i
-  %isnotneg324.i = icmp slt i64 %alu_723.i, 0
-  %alu_752.i = select i1 %isnotneg324.i, i64 %alu_526.i, i64 %alu_705.i
-  %24 = xor i64 %alu_752.i, 9223372036854775807
-  %alu_755.neg.i = add i64 %24, 1
+  %isnotneg323.i = icmp slt i64 %alu_723.i, 0
+  %alu_752.i = select i1 %isnotneg323.i, i64 %alu_526.i, i64 %alu_705.i
+  %23 = xor i64 %alu_752.i, 9223372036854775807
+  %alu_755.neg.i = add i64 %23, 1
   %alu_767.i = or i64 %alu_755.neg.i, %alu_752.i
-  %isnotneg326.inv.i = icmp slt i64 %alu_767.i, 0
+  %isnotneg325.inv.i = icmp slt i64 %alu_767.i, 0
   %alu_789.i = sub nsw i64 0, %alu_39.i
   %alu_792.i = and i64 %alu_526.i, %alu_789.i
-  %25 = icmp eq i64 %alu_33.i, 0
-  %26 = select i1 %25, i1 true, i1 %isnotneg326.inv.i
-  %alu_798.i = select i1 %26, i64 0, i64 %alu_752.i
+  %24 = icmp eq i64 %alu_33.i, 0
+  %25 = select i1 %24, i1 true, i1 %isnotneg325.inv.i
+  %alu_798.i = select i1 %25, i64 0, i64 %alu_752.i
   %alu_801.i = or i64 %alu_798.i, %alu_792.i
   %alu_808.i = sub nsw i64 0, %ext0
   %alu_809.i = lshr i64 %alu_808.i, 31
-  %27 = or i64 %alu_809.i, -2
-  %alu_827.neg.i = add nsw i64 %27, 1
-  %28 = insertelement <2 x i64> poison, i64 %ext0, i64 0
-  %29 = shufflevector <2 x i64> %28, <2 x i64> poison, <2 x i32> zeroinitializer
-  %30 = xor <2 x i64> %29, <i64 4294967293, i64 4294967294>
-  %31 = add nuw nsw <2 x i64> %30, <i64 1, i64 1>
-  %32 = lshr <2 x i64> %31, <i64 31, i64 31>
-  %33 = and <2 x i64> %32, <i64 1, i64 1>
-  %34 = xor <2 x i64> %33, <i64 1, i64 1>
-  %35 = extractelement <2 x i64> %34, i64 0
-  %36 = extractelement <2 x i64> %34, i64 1
-  %alu_899.i = or i64 %36, %35
+  %26 = or i64 %alu_809.i, -2
+  %alu_827.neg.i = add nsw i64 %26, 1
+  %27 = insertelement <2 x i64> poison, i64 %ext0, i64 0
+  %28 = shufflevector <2 x i64> %27, <2 x i64> poison, <2 x i32> zeroinitializer
+  %29 = xor <2 x i64> %28, <i64 4294967293, i64 4294967294>
+  %30 = add nuw nsw <2 x i64> %29, <i64 1, i64 1>
+  %31 = lshr <2 x i64> %30, <i64 31, i64 31>
+  %32 = and <2 x i64> %31, <i64 1, i64 1>
+  %33 = xor <2 x i64> %32, <i64 1, i64 1>
+  %34 = extractelement <2 x i64> %33, i64 0
+  %35 = extractelement <2 x i64> %33, i64 1
+  %alu_899.i = or i64 %35, %34
   %alu_905.i = sub nsw i64 0, %alu_899.i
   %alu_908.i = and i64 %alu_608.i, %alu_905.i
-  %37 = icmp eq i64 %alu_899.i, 0
-  %alu_914.i = select i1 %37, i64 %alu_526.i, i64 0
+  %36 = icmp eq i64 %alu_899.i, 0
+  %alu_914.i = select i1 %36, i64 %alu_526.i, i64 0
   %alu_917.i = or i64 %alu_908.i, %alu_914.i
   %alu_925.i = and i64 %alu_801.i, %alu_827.neg.i
-  %alu_928.i = sub nsw i64 4294967294, %27
+  %alu_928.i = sub nsw i64 4294967294, %26
   %alu_931.i = and i64 %alu_917.i, %alu_928.i
   %alu_934.i = or i64 %alu_925.i, %alu_931.i
   %alu_937.i = sub i64 %a5, %alu_608.i
@@ -5340,17 +5274,17 @@ entry:
   %alu_954.i = and i64 %alu_940.i, %alu_423.i
   %alu_960.i = and i64 %alu_954.i, %alu_946.i
   %.demorgan.i = or i64 %alu_946.i, %alu_940.i
-  %38 = xor i64 %.demorgan.i, -1
-  %alu_984.i = and i64 %alu_403.i, %38
+  %37 = xor i64 %.demorgan.i, -1
+  %alu_984.i = and i64 %alu_403.i, %37
   %alu_990.i = sub nsw i64 0, %alu_984.i
   %alu_993.i = and i64 %alu_990.i, -9223372036854775808
-  %39 = icmp eq i64 %alu_984.i, 0
-  %alu_999.i = select i1 %39, i64 %alu_937.i, i64 0
+  %38 = icmp eq i64 %alu_984.i, 0
+  %alu_999.i = select i1 %38, i64 %alu_937.i, i64 0
   %alu_1002.i = or i64 %alu_999.i, %alu_993.i
   %alu_1007.i = sub nsw i64 0, %alu_960.i
   %alu_1010.i = and i64 %alu_1007.i, 9223372036854775807
-  %40 = icmp eq i64 %alu_960.i, 0
-  %alu_1016.i = select i1 %40, i64 %alu_1002.i, i64 0
+  %39 = icmp eq i64 %alu_960.i, 0
+  %alu_1016.i = select i1 %39, i64 %alu_1002.i, i64 0
   %alu_1019.i = or i64 %alu_1016.i, %alu_1010.i
   %alu_1022.i = sub i64 %alu_1019.i, %a6
   %alu_1025.i = lshr i64 %alu_1016.i, 63
@@ -5359,17 +5293,17 @@ entry:
   %alu_1045.i = and i64 %alu_409.i, %alu_1039.i
   %alu_1051.i = and i64 %alu_1045.i, %alu_1031.i
   %alu_1063.i = xor i64 %alu_1031.i, -1
-  %41 = and i64 %alu_441.i, %alu_1063.i
-  %alu_1069.i = and i64 %41, %alu_1025.i
+  %40 = and i64 %alu_441.i, %alu_1063.i
+  %alu_1069.i = and i64 %40, %alu_1025.i
   %alu_1075.i = sub nsw i64 0, %alu_1069.i
   %alu_1078.i = and i64 %alu_1075.i, -9223372036854775808
-  %42 = icmp eq i64 %alu_1069.i, 0
-  %alu_1084.i = select i1 %42, i64 %alu_1022.i, i64 0
+  %41 = icmp eq i64 %alu_1069.i, 0
+  %alu_1084.i = select i1 %41, i64 %alu_1022.i, i64 0
   %alu_1087.i = or i64 %alu_1084.i, %alu_1078.i
   %alu_1092.i = sub nsw i64 0, %alu_1051.i
   %alu_1095.i = and i64 %alu_1092.i, 9223372036854775800
-  %43 = icmp eq i64 %alu_1051.i, 0
-  %alu_1101.i = select i1 %43, i64 %alu_1087.i, i64 0
+  %42 = icmp eq i64 %alu_1051.i, 0
+  %alu_1101.i = select i1 %42, i64 %alu_1087.i, i64 0
   %alu_1104.i = or i64 %alu_1101.i, %alu_1095.i
   %alu_1107.i = xor i64 %alu_608.i, -9223372036854775808
   %alu_1110.i = sub i64 %alu_1107.i, %alu_51.i
@@ -5380,51 +5314,51 @@ entry:
   %alu_1125.i = lshr i64 %alu_1122.i, 63
   %alu_1140.not.i = add i64 %alu_1104.i, -24
   %alu_1146.i = or i64 %alu_1140.not.i, %alu_1101.i
-  %isneg327.i = icmp slt i64 %alu_1146.i, 0
+  %isneg326.i = icmp slt i64 %alu_1146.i, 0
   %alu_1146.i.lobit = lshr i64 %alu_1146.i, 63
   %alu_1181.i = or i64 %alu_1146.i.lobit, %alu_39.i
-  %44 = xor i64 %ext3, 4294967294
-  %alu_1205.neg.i = add nuw nsw i64 %44, 1
+  %43 = xor i64 %ext3, 4294967294
+  %alu_1205.neg.i = add nuw nsw i64 %43, 1
   %alu_1214.i = lshr i64 %alu_1205.neg.i, 31
-  %45 = and i64 %alu_1214.i, %alu_1125.i
-  %alu_1250.i = and i64 %45, %alu_39.i
-  %46 = xor i64 %alu_1250.i, -1
-  %47 = xor i64 %ext2, 4294967294
-  %alu_1286.neg.i = add nuw nsw i64 %47, 1
+  %44 = and i64 %alu_1214.i, %alu_1125.i
+  %alu_1250.i = and i64 %44, %alu_39.i
+  %45 = xor i64 %ext2, 4294967294
+  %alu_1286.neg.i = add nuw nsw i64 %45, 1
   %alu_1295.i = lshr i64 %alu_1286.neg.i, 31
   %alu_1313.i = xor i64 %alu_1295.i, -1
-  %alu_1319.i = and i64 %35, %alu_1313.i
-  %alu_1325.i = or i64 %alu_1319.i, %36
-  %48 = select i1 %isneg327.i, i64 1, i64 %46
-  %49 = and i64 %48, %alu_39.i
-  %50 = extractelement <2 x i64> %33, i64 0
-  %alu_1355.i = or i64 %49, %50
-  %isneg328.inv.i = icmp slt i64 %alu_1122.i, 0
-  %alu_1199.i = select i1 %isneg328.inv.i, i64 0, i64 %alu_1325.i
+  %alu_1319.i = and i64 %34, %alu_1313.i
+  %alu_1325.i = or i64 %alu_1319.i, %35
+  %46 = xor i64 %alu_1250.i, -1
+  %47 = select i1 %isneg326.i, i64 1, i64 %46
+  %48 = and i64 %47, %alu_39.i
+  %49 = extractelement <2 x i64> %32, i64 0
+  %alu_1355.i = or i64 %48, %49
+  %isneg327.inv.i = icmp slt i64 %alu_1122.i, 0
+  %alu_1199.i = select i1 %isneg327.inv.i, i64 0, i64 %alu_1325.i
   %alu_1367.i = and i64 %alu_1181.i, %alu_1199.i
-  %51 = icmp eq i64 %alu_1325.i, 0
-  %alu_1379.i = select i1 %51, i64 %alu_1355.i, i64 0
-  %alu_1386.i = or i64 %alu_1367.i, %alu_1379.i
-  %alu_1392.i = and i64 %alu_827.neg.i, 8388607
+  %50 = icmp eq i64 %alu_1325.i, 0
+  %alu_1379.i = select i1 %50, i64 %alu_1355.i, i64 0
+  %alu_1385.i = or i64 %alu_1379.i, %alu_1367.i
+  %alu_1392.i = and i64 %alu_827.neg.i, 4294967295
   %alu_1397.i = and i64 %alu_39.i, %alu_827.neg.i
-  %alu_1403.i = xor i64 %alu_1392.i, 8388607
-  %alu_1409.i = and i64 %alu_1386.i, %alu_1403.i
+  %alu_1403.i = xor i64 %alu_1392.i, 4294967295
+  %alu_1409.i = and i64 %alu_1385.i, %alu_1403.i
   %alu_1415.i = or i64 %alu_1409.i, %alu_1397.i
   %alu_1422.i = shl nuw nsw i64 %alu_1415.i, 9
   %alu_1434.i = shl i64 %alu_934.i, 32
-  %alu_1429.i = or disjoint i64 %alu_1422.i, %alu_1434.i
+  %alu_1429.i = or i64 %alu_1434.i, %alu_1422.i
   %alu_1443.i = or disjoint i64 %alu_1429.i, 257
   %alu_1456.i = shl nuw i64 %alu_138.i, 32
   %alu_1448.i = or disjoint i64 %alu_1456.i, %alu_46.i
   %alu_1460.i = or disjoint i64 %alu_1448.i, 3
   %alu_1471.i = or disjoint i64 %alu_1448.i, 2
   %alu_1479.i = sub nsw i64 3, %ext0
-  %alu_1497.i = lshr i64 %alu_1479.i, 31
-  %52 = or i64 %alu_1497.i, -2
-  %alu_1516.neg.i = add nsw i64 %52, 1
-  %alu_1534.i = select i1 %15, i64 %alu_1443.i, i64 %alu_1460.i
+  %alu_1480.i = lshr i64 %alu_1479.i, 31
+  %51 = or i64 %alu_1480.i, -2
+  %alu_1516.neg.i = add nsw i64 %51, 1
+  %alu_1534.i = select i1 %.not, i64 %alu_1443.i, i64 %alu_1460.i
   %alu_1542.i = and i64 %alu_1534.i, %alu_1516.neg.i
-  %alu_1545.i = sub nsw i64 -2, %52
+  %alu_1545.i = sub nsw i64 -2, %51
   %alu_1548.i = and i64 %alu_1471.i, %alu_1545.i
   %alu_1551.i = or i64 %alu_1542.i, %alu_1548.i
   ret i64 %alu_1551.i
@@ -5444,51 +5378,55 @@ entry:
   %2 = insertelement <2 x i64> poison, i64 %a1, i64 0
   %3 = insertelement <2 x i64> %2, i64 %a3, i64 1
   %4 = icmp eq <2 x i64> %3, zeroinitializer
-  %5 = insertelement <2 x i64> poison, i64 %a0, i64 0
-  %6 = insertelement <2 x i64> %5, i64 %a2, i64 1
-  %7 = icmp ne <2 x i64> %6, zeroinitializer
-  %8 = sub <2 x i64> <i64 4294967295, i64 4294967295>, %6
-  %9 = sub <2 x i64> <i64 4294967295, i64 4294967295>, %3
-  %10 = add <2 x i64> %3, %6
-  %11 = add <2 x i64> %6, <i64 -1, i64 -1>
-  %12 = xor <2 x i64> %3, <i64 -1, i64 -1>
+  %5 = icmp eq i64 %a1, 0
+  %6 = insertelement <2 x i64> poison, i64 %a0, i64 0
+  %7 = insertelement <2 x i64> %6, i64 %a2, i64 1
+  %8 = icmp ne <2 x i64> %7, zeroinitializer
+  %9 = icmp eq i64 %a3, 0
+  %10 = sub <2 x i64> <i64 4294967295, i64 4294967295>, %7
+  %11 = sub <2 x i64> <i64 4294967295, i64 4294967295>, %3
+  %12 = add <2 x i64> %3, %7
+  %13 = add <2 x i64> %7, <i64 -1, i64 -1>
+  %14 = xor <2 x i64> %3, <i64 -1, i64 -1>
   %alu_288.i = lshr i64 %alu_17.neg.i, 31
   %alu_306.neg.i = add nuw nsw i64 %alu_288.i, 1
-  %13 = and i64 %alu_306.neg.i, 1
+  %15 = and i64 %alu_306.neg.i, 1
   %alu_324.i = xor i64 %alu_306.neg.i, 4294967295
-  %14 = zext <2 x i1> %4 to <2 x i64>
-  %15 = zext <2 x i1> %7 to <2 x i64>
-  %16 = or <2 x i64> %14, %15
-  %17 = or <2 x i64> %14, %15
-  %shift = shufflevector <2 x i64> %17, <2 x i64> poison, <2 x i32> <i32 1, i32 poison>
-  %18 = and <2 x i64> %shift, %16
-  %alu_126.i = extractelement <2 x i64> %18, i64 0
-  %19 = sub <2 x i64> <i64 4294967296, i64 4294967296>, %10
-  %20 = or <2 x i64> %8, %9
-  %21 = or <2 x i64> %20, %19
-  %22 = or <2 x i64> %21, %6
-  %23 = or <2 x i64> %22, %3
-  %24 = or <2 x i64> %23, %10
-  %25 = xor <2 x i64> %15, <i64 1, i64 1>
-  %26 = sub <2 x i64> %12, %11
-  %27 = xor <2 x i64> %11, %12
-  %28 = xor <2 x i64> %26, %11
-  %29 = or <2 x i64> %28, %27
-  %30 = xor <2 x i64> %29, %3
-  %31 = lshr <2 x i64> %30, <i64 63, i64 63>
-  %32 = or <2 x i64> %25, %31
-  %33 = or <2 x i64> %32, %14
-  %34 = icmp slt <2 x i64> %24, zeroinitializer
-  %35 = insertelement <2 x i64> poison, i64 %13, i64 0
-  %36 = shufflevector <2 x i64> %35, <2 x i64> poison, <2 x i32> zeroinitializer
-  %37 = select <2 x i1> %34, <2 x i64> zeroinitializer, <2 x i64> %36
-  %38 = insertelement <2 x i64> poison, i64 %alu_324.i, i64 0
-  %39 = shufflevector <2 x i64> %38, <2 x i64> poison, <2 x i32> zeroinitializer
-  %40 = and <2 x i64> %39, %33
-  %41 = or <2 x i64> %40, %37
-  %shift1 = shufflevector <2 x i64> %41, <2 x i64> poison, <2 x i32> <i32 1, i32 poison>
-  %42 = and <2 x i64> %41, %shift1
-  %alu_507.i = extractelement <2 x i64> %42, i64 0
+  %alu_102.i = zext i1 %9 to i64
+  %16 = zext <2 x i1> %4 to <2 x i64>
+  %alu_66.i = zext i1 %5 to i64
+  %17 = zext <2 x i1> %8 to <2 x i64>
+  %18 = extractelement <2 x i64> %17, i64 0
+  %alu_84.i = or i64 %18, %alu_66.i
+  %19 = extractelement <2 x i64> %17, i64 1
+  %alu_120.i = or i64 %19, %alu_102.i
+  %alu_126.i = and i64 %alu_120.i, %alu_84.i
+  %20 = sub <2 x i64> <i64 4294967296, i64 4294967296>, %12
+  %21 = or <2 x i64> %10, %11
+  %22 = or <2 x i64> %21, %20
+  %23 = or <2 x i64> %22, %7
+  %24 = or <2 x i64> %23, %3
+  %25 = or <2 x i64> %24, %12
+  %26 = xor <2 x i64> %17, <i64 1, i64 1>
+  %27 = sub <2 x i64> %14, %13
+  %28 = xor <2 x i64> %13, %14
+  %29 = xor <2 x i64> %27, %13
+  %30 = or <2 x i64> %29, %28
+  %31 = xor <2 x i64> %30, %3
+  %32 = lshr <2 x i64> %31, <i64 63, i64 63>
+  %33 = or <2 x i64> %26, %16
+  %34 = or <2 x i64> %33, %32
+  %35 = icmp slt <2 x i64> %25, zeroinitializer
+  %36 = insertelement <2 x i64> poison, i64 %15, i64 0
+  %37 = shufflevector <2 x i64> %36, <2 x i64> poison, <2 x i32> zeroinitializer
+  %38 = select <2 x i1> %35, <2 x i64> zeroinitializer, <2 x i64> %37
+  %39 = insertelement <2 x i64> poison, i64 %alu_324.i, i64 0
+  %40 = shufflevector <2 x i64> %39, <2 x i64> poison, <2 x i32> zeroinitializer
+  %41 = and <2 x i64> %40, %34
+  %42 = or <2 x i64> %41, %38
+  %shift = shufflevector <2 x i64> %42, <2 x i64> poison, <2 x i32> <i32 1, i32 poison>
+  %43 = and <2 x i64> %shift, %42
+  %alu_507.i = extractelement <2 x i64> %43, i64 0
   %alu_517.i = sub i64 %a2, %a1
   %alu_520.i = xor i64 %a2, %a1
   %alu_523.i = xor i64 %alu_517.i, %a1
@@ -5499,7 +5437,7 @@ entry:
   %alu_550.i = xor i64 %alu_544.i, %a0
   %alu_553.i = or i64 %alu_550.i, %alu_547.i
   %alu_556.i = xor i64 %alu_553.i, %alu_517.i
-  %43 = or i64 %alu_556.i, %alu_529.i
+  %44 = or i64 %alu_556.i, %alu_529.i
   %alu_583.i = sub i64 %a0, %a3
   %alu_586.i = xor i64 %a3, %a0
   %alu_589.i = xor i64 %alu_583.i, %a3
@@ -5510,29 +5448,26 @@ entry:
   %alu_616.i = xor i64 %alu_610.i, %a2
   %alu_619.i = or i64 %alu_616.i, %alu_613.i
   %alu_622.i = xor i64 %alu_619.i, %alu_583.i
-  %44 = or i64 %alu_622.i, %alu_595.i
-  %45 = and i64 %44, %43
-  %46 = icmp sgt i64 %45, -1
-  %47 = extractelement <2 x i1> %4, i64 1
-  %48 = or i1 %47, %46
-  %49 = extractelement <2 x i1> %4, i64 0
-  %alu_645497.i = or i1 %49, %48
-  %alu_649.i = add i64 %a3, -32
-  %50 = extractelement <2 x i64> %12, i64 1
-  %alu_661.i = and i64 %alu_649.i, %50
+  %45 = or i64 %alu_622.i, %alu_595.i
+  %46 = and i64 %45, %44
+  %47 = icmp sgt i64 %46, -1
+  %48 = or i1 %9, %47
+  %alu_645497.i = or i1 %5, %48
   %alu_684.neg.i = add nuw nsw i64 %alu_126.i, 7
-  %51 = xor i64 %alu_507.i, 4294967294
-  %alu_690.neg.i = add nuw nsw i64 %51, 1
-  %isneg.i = icmp slt i64 %alu_661.i, 0
-  %alu_709.i = select i1 %isneg.i, i64 5, i64 0
+  %49 = xor i64 %alu_507.i, 4294967294
+  %alu_690.neg.i = add nuw nsw i64 %49, 1
+  %50 = sub i64 31, %a3
+  %51 = or i64 %50, %a3
+  %isneg.inv.i = icmp slt i64 %51, 0
+  %alu_709.i = select i1 %isneg.inv.i, i64 0, i64 5
   %alu_721.i = select i1 %alu_645497.i, i64 0, i64 4294967295
   %alu_726.i = and i64 %alu_721.i, 9
   %alu_732.i = xor i64 %alu_721.i, -1
   %alu_738.i = and i64 %alu_709.i, %alu_732.i
   %alu_744.i = or i64 %alu_726.i, %alu_738.i
   %alu_756.i = and i64 %alu_690.neg.i, 8
-  %alu_762.i = sub nsw i64 14, %51
-  %alu_768.i = and i64 %alu_744.i, %alu_762.i
+  %alu_762.i = sub i64 14, %49
+  %alu_768.i = and i64 %alu_762.i, %alu_744.i
   %alu_774.i = or i64 %alu_768.i, %alu_756.i
   %alu_786.i = and i64 %alu_684.neg.i, 7
   %alu_792.i = sub nsw i64 0, %alu_126.i
@@ -5540,9 +5475,9 @@ entry:
   %alu_804.i = or i64 %alu_798.i, %alu_786.i
   %alu_811.i = select i1 %1, i64 4294967295, i64 0
   %alu_816.i = and i64 %alu_811.i, 6
-  %alu_822.i = xor i64 %alu_811.i, -1
+  %alu_822.i = xor i64 %alu_811.i, 4294967295
   %alu_828.i = and i64 %alu_804.i, %alu_822.i
-  %alu_835.i = or disjoint i64 %alu_828.i, %alu_816.i
+  %alu_834.i = or i64 %alu_828.i, %alu_816.i
   %52 = xor i64 %ext6, 4294967294
   %alu_842.neg.i = add nuw nsw i64 %52, 1
   %alu_851.i = lshr i64 %alu_842.neg.i, 31
@@ -5550,11 +5485,10 @@ entry:
   %alu_869.i = xor i64 %alu_863.i, 1
   %alu_876.i = shl nuw nsw i64 %alu_869.i, 9
   %alu_881.i = xor i64 %a9, -9223372036854775808
-  %53 = add i64 %a9, 9223372036854775807
-  %54 = xor i64 %a9, -1
-  %alu_896.i = and i64 %53, %54
-  %isneg498.i = icmp slt i64 %alu_896.i, 0
-  %alu_910.i = select i1 %isneg498.i, i64 %a9, i64 0
+  %53 = sub i64 -9223372036854775808, %a9
+  %54 = or i64 %53, %a9
+  %isneg.inv498.i = icmp slt i64 %54, 0
+  %alu_910.i = select i1 %isneg.inv498.i, i64 0, i64 %a9
   %alu_913.i = sub i64 4294967295, %alu_910.i
   %alu_922.i = or i64 %alu_913.i, %alu_910.i
   %isnotneg.inv.i = icmp slt i64 %alu_922.i, 0
@@ -5564,20 +5498,20 @@ entry:
   %alu_968.i = or i64 %alu_950.i, %alu_956.i
   %alu_982.i = shl nuw i64 %alu_968.i, 32
   %alu_974.i = or disjoint i64 %alu_982.i, %alu_876.i
-  %alu_986.i = or i64 %alu_835.i, %alu_974.i
-  %55 = insertelement <4 x i64> poison, i64 %a10, i64 0
-  %56 = insertelement <4 x i64> %55, i64 %a9, i64 1
+  %alu_986.i = or i64 %alu_834.i, %alu_974.i
+  %55 = insertelement <4 x i64> poison, i64 %a9, i64 0
+  %56 = insertelement <4 x i64> %55, i64 %a10, i64 1
   %57 = insertelement <4 x i64> %56, i64 %a11, i64 2
   %58 = insertelement <4 x i64> %57, i64 %a12, i64 3
   %59 = sub <4 x i64> <i64 1073741823, i64 1073741823, i64 1073741823, i64 1073741823>, %58
   %60 = sub <4 x i64> <i64 -1073741825, i64 -1073741825, i64 -1073741825, i64 -1073741825>, %58
   %61 = or <4 x i64> %59, %58
-  %62 = icmp sgt <4 x i64> %61, <i64 -1, i64 -1, i64 -1, i64 -1>
+  %62 = icmp slt <4 x i64> %61, zeroinitializer
   %63 = and <4 x i64> %60, %58
-  %64 = icmp slt <4 x i64> %63, zeroinitializer
-  %65 = or <4 x i1> %64, %62
+  %64 = icmp sgt <4 x i64> %63, <i64 -1, i64 -1, i64 -1, i64 -1>
+  %65 = and <4 x i1> %64, %62
   %66 = bitcast <4 x i1> %65 to i4
-  %67 = icmp eq i4 %66, -1
+  %.not = icmp eq i4 %66, 0
   %alu_1253.i = sub i64 %a10, %a11
   %alu_1256.i = lshr i64 %a10, 63
   %alu_1262.i = lshr i64 %a11, 63
@@ -5587,20 +5521,20 @@ entry:
   %alu_1288.i = and i64 %alu_1282.i, %alu_1268.i
   %alu_1294.i = xor i64 %alu_1262.i, 1
   %alu_1306.i = xor i64 %alu_1268.i, -1
-  %68 = and i64 %alu_1256.i, %alu_1306.i
-  %alu_1312.i = and i64 %68, %alu_1294.i
+  %67 = and i64 %alu_1256.i, %alu_1306.i
+  %alu_1312.i = and i64 %67, %alu_1294.i
   %alu_1318.i = sub nsw i64 0, %alu_1312.i
   %alu_1321.i = and i64 %alu_1318.i, -9223372036854775808
-  %69 = icmp eq i64 %alu_1312.i, 0
-  %alu_1327.i = select i1 %69, i64 %alu_1253.i, i64 0
+  %68 = icmp eq i64 %alu_1312.i, 0
+  %alu_1327.i = select i1 %68, i64 %alu_1253.i, i64 0
   %alu_1330.i = or i64 %alu_1327.i, %alu_1321.i
   %alu_1335.i = sub nsw i64 0, %alu_1288.i
   %alu_1338.i = and i64 %alu_1335.i, 9223372036854775807
-  %70 = icmp eq i64 %alu_1288.i, 0
-  %alu_1344.i = select i1 %70, i64 %alu_1330.i, i64 0
+  %69 = icmp eq i64 %alu_1288.i, 0
+  %alu_1344.i = select i1 %69, i64 %alu_1330.i, i64 0
   %alu_1347.i = or i64 %alu_1344.i, %alu_1338.i
-  %71 = xor i64 %alu_1347.i, 9223372036854775807
-  %alu_1350.neg.i = add i64 %71, 1
+  %70 = xor i64 %alu_1347.i, 9223372036854775807
+  %alu_1350.neg.i = add i64 %70, 1
   %alu_1362.i = or i64 %alu_1350.neg.i, %alu_1344.i
   %isnotneg509.inv.i = icmp slt i64 %alu_1362.i, 0
   %alu_1379.i = select i1 %isnotneg509.inv.i, i64 0, i64 %alu_1347.i
@@ -5613,11 +5547,11 @@ entry:
   %alu_1400.i = xor i64 %alu_1397.i, %alu_1385.i
   %isnotneg510.i = icmp slt i64 %alu_1400.i, 0
   %alu_1429.i = select i1 %isnotneg510.i, i64 %alu_1379.i, i64 %a12
-  %72 = xor i64 %alu_1429.i, 9223372036854775807
-  %alu_1432.neg.i = add i64 %72, 1
+  %71 = xor i64 %alu_1429.i, 9223372036854775807
+  %alu_1432.neg.i = add i64 %71, 1
   %alu_1444.i = or i64 %alu_1432.neg.i, %alu_1429.i
-  %isnotneg512.inv.i = icmp slt i64 %alu_1444.i, 0
-  %alu_1461.i = select i1 %isnotneg512.inv.i, i64 0, i64 %alu_1429.i
+  %isnotneg511.inv.i = icmp slt i64 %alu_1444.i, 0
+  %alu_1461.i = select i1 %isnotneg511.inv.i, i64 0, i64 %alu_1429.i
   %alu_1464.i = add i64 %a12, %a9
   %alu_1467.i = lshr i64 %a9, 63
   %alu_1473.i = lshr i64 %a12, 63
@@ -5626,17 +5560,17 @@ entry:
   %alu_1499.i = xor i64 %alu_1499.demorgan.i, -1
   %alu_1505.i = and i64 %alu_1479.i, %alu_1499.i
   %alu_1517.i = xor i64 %alu_1479.i, -1
-  %73 = and i64 %alu_1467.i, %alu_1517.i
-  %alu_1523.i = and i64 %73, %alu_1473.i
+  %72 = and i64 %alu_1467.i, %alu_1517.i
+  %alu_1523.i = and i64 %72, %alu_1473.i
   %alu_1529.i = sub nsw i64 0, %alu_1523.i
   %alu_1532.i = and i64 %alu_1529.i, -9223372036854775808
-  %74 = icmp eq i64 %alu_1523.i, 0
-  %alu_1538.i = select i1 %74, i64 %alu_1464.i, i64 0
+  %73 = icmp eq i64 %alu_1523.i, 0
+  %alu_1538.i = select i1 %73, i64 %alu_1464.i, i64 0
   %alu_1541.i = or i64 %alu_1538.i, %alu_1532.i
   %alu_1546.i = sub nsw i64 0, %alu_1505.i
   %alu_1549.i = and i64 %alu_1546.i, 9223372036854775807
-  %75 = icmp eq i64 %alu_1505.i, 0
-  %alu_1555.i = select i1 %75, i64 %alu_1541.i, i64 0
+  %74 = icmp eq i64 %alu_1505.i, 0
+  %alu_1555.i = select i1 %74, i64 %alu_1541.i, i64 0
   %alu_1558.i = or i64 %alu_1555.i, %alu_1549.i
   %alu_1561.i = xor i64 %alu_1558.i, -9223372036854775808
   %alu_1564.i = sub i64 %alu_1385.i, %alu_1561.i
@@ -5644,39 +5578,39 @@ entry:
   %alu_1570.i = xor i64 %alu_1564.i, %alu_1561.i
   %alu_1573.i = or i64 %alu_1570.i, %alu_1567.i
   %alu_1576.i = xor i64 %alu_1573.i, %alu_1385.i
-  %isnotneg513.i = icmp slt i64 %alu_1576.i, 0
-  %alu_1605.i = select i1 %isnotneg513.i, i64 %alu_1379.i, i64 %alu_1558.i
-  %76 = xor i64 %alu_1605.i, 9223372036854775807
-  %alu_1608.neg.i = add i64 %76, 1
+  %isnotneg512.i = icmp slt i64 %alu_1576.i, 0
+  %alu_1605.i = select i1 %isnotneg512.i, i64 %alu_1379.i, i64 %alu_1558.i
+  %75 = xor i64 %alu_1605.i, 9223372036854775807
+  %alu_1608.neg.i = add i64 %75, 1
   %alu_1620.i = or i64 %alu_1608.neg.i, %alu_1605.i
-  %isnotneg515.inv.i = icmp slt i64 %alu_1620.i, 0
+  %isnotneg514.inv.i = icmp slt i64 %alu_1620.i, 0
   %alu_1642.i = sub nsw i64 0, %alu_869.i
   %alu_1645.i = and i64 %alu_1379.i, %alu_1642.i
-  %77 = icmp eq i64 %alu_863.i, 0
-  %78 = select i1 %77, i1 true, i1 %isnotneg515.inv.i
-  %alu_1651.i = select i1 %78, i64 0, i64 %alu_1605.i
+  %76 = icmp eq i64 %alu_863.i, 0
+  %77 = select i1 %76, i1 true, i1 %isnotneg514.inv.i
+  %alu_1651.i = select i1 %77, i64 0, i64 %alu_1605.i
   %alu_1654.i = or i64 %alu_1651.i, %alu_1645.i
   %alu_1661.i = sub nsw i64 0, %ext5
   %alu_1662.i = lshr i64 %alu_1661.i, 31
-  %79 = or i64 %alu_1662.i, -2
-  %alu_1680.neg.i = add nsw i64 %79, 1
-  %80 = insertelement <2 x i64> poison, i64 %ext5, i64 0
-  %81 = shufflevector <2 x i64> %80, <2 x i64> poison, <2 x i32> zeroinitializer
-  %82 = xor <2 x i64> %81, <i64 4294967293, i64 4294967294>
-  %83 = add nuw nsw <2 x i64> %82, <i64 1, i64 1>
-  %84 = lshr <2 x i64> %83, <i64 31, i64 31>
-  %85 = and <2 x i64> %84, <i64 1, i64 1>
-  %86 = xor <2 x i64> %85, <i64 1, i64 1>
-  %87 = extractelement <2 x i64> %86, i64 0
-  %88 = extractelement <2 x i64> %86, i64 1
-  %alu_1752.i = or i64 %88, %87
+  %78 = or i64 %alu_1662.i, -2
+  %alu_1680.neg.i = add nsw i64 %78, 1
+  %79 = insertelement <2 x i64> poison, i64 %ext5, i64 0
+  %80 = shufflevector <2 x i64> %79, <2 x i64> poison, <2 x i32> zeroinitializer
+  %81 = xor <2 x i64> %80, <i64 4294967293, i64 4294967294>
+  %82 = add nuw nsw <2 x i64> %81, <i64 1, i64 1>
+  %83 = lshr <2 x i64> %82, <i64 31, i64 31>
+  %84 = and <2 x i64> %83, <i64 1, i64 1>
+  %85 = xor <2 x i64> %84, <i64 1, i64 1>
+  %86 = extractelement <2 x i64> %85, i64 0
+  %87 = extractelement <2 x i64> %85, i64 1
+  %alu_1752.i = or i64 %87, %86
   %alu_1758.i = sub nsw i64 0, %alu_1752.i
   %alu_1761.i = and i64 %alu_1461.i, %alu_1758.i
-  %89 = icmp eq i64 %alu_1752.i, 0
-  %alu_1767.i = select i1 %89, i64 %alu_1379.i, i64 0
+  %88 = icmp eq i64 %alu_1752.i, 0
+  %alu_1767.i = select i1 %88, i64 %alu_1379.i, i64 0
   %alu_1770.i = or i64 %alu_1761.i, %alu_1767.i
   %alu_1778.i = and i64 %alu_1654.i, %alu_1680.neg.i
-  %alu_1781.i = sub nsw i64 4294967294, %79
+  %alu_1781.i = sub nsw i64 4294967294, %78
   %alu_1784.i = and i64 %alu_1770.i, %alu_1781.i
   %alu_1787.i = or i64 %alu_1778.i, %alu_1784.i
   %alu_1790.i = sub i64 %a10, %alu_1461.i
@@ -5685,17 +5619,17 @@ entry:
   %alu_1807.i = and i64 %alu_1793.i, %alu_1276.i
   %alu_1813.i = and i64 %alu_1807.i, %alu_1799.i
   %.demorgan.i = or i64 %alu_1799.i, %alu_1793.i
-  %90 = xor i64 %.demorgan.i, -1
-  %alu_1837.i = and i64 %alu_1256.i, %90
+  %89 = xor i64 %.demorgan.i, -1
+  %alu_1837.i = and i64 %alu_1256.i, %89
   %alu_1843.i = sub nsw i64 0, %alu_1837.i
   %alu_1846.i = and i64 %alu_1843.i, -9223372036854775808
-  %91 = icmp eq i64 %alu_1837.i, 0
-  %alu_1852.i = select i1 %91, i64 %alu_1790.i, i64 0
+  %90 = icmp eq i64 %alu_1837.i, 0
+  %alu_1852.i = select i1 %90, i64 %alu_1790.i, i64 0
   %alu_1855.i = or i64 %alu_1852.i, %alu_1846.i
   %alu_1860.i = sub nsw i64 0, %alu_1813.i
   %alu_1863.i = and i64 %alu_1860.i, 9223372036854775807
-  %92 = icmp eq i64 %alu_1813.i, 0
-  %alu_1869.i = select i1 %92, i64 %alu_1855.i, i64 0
+  %91 = icmp eq i64 %alu_1813.i, 0
+  %alu_1869.i = select i1 %91, i64 %alu_1855.i, i64 0
   %alu_1872.i = or i64 %alu_1869.i, %alu_1863.i
   %alu_1875.i = sub i64 %alu_1872.i, %a11
   %alu_1878.i = lshr i64 %alu_1869.i, 63
@@ -5704,17 +5638,17 @@ entry:
   %alu_1898.i = and i64 %alu_1262.i, %alu_1892.i
   %alu_1904.i = and i64 %alu_1898.i, %alu_1884.i
   %alu_1916.i = xor i64 %alu_1884.i, -1
-  %93 = and i64 %alu_1294.i, %alu_1916.i
-  %alu_1922.i = and i64 %93, %alu_1878.i
+  %92 = and i64 %alu_1294.i, %alu_1916.i
+  %alu_1922.i = and i64 %92, %alu_1878.i
   %alu_1928.i = sub nsw i64 0, %alu_1922.i
   %alu_1931.i = and i64 %alu_1928.i, -9223372036854775808
-  %94 = icmp eq i64 %alu_1922.i, 0
-  %alu_1937.i = select i1 %94, i64 %alu_1875.i, i64 0
+  %93 = icmp eq i64 %alu_1922.i, 0
+  %alu_1937.i = select i1 %93, i64 %alu_1875.i, i64 0
   %alu_1940.i = or i64 %alu_1937.i, %alu_1931.i
   %alu_1945.i = sub nsw i64 0, %alu_1904.i
   %alu_1948.i = and i64 %alu_1945.i, 9223372036854775800
-  %95 = icmp eq i64 %alu_1904.i, 0
-  %alu_1954.i = select i1 %95, i64 %alu_1940.i, i64 0
+  %94 = icmp eq i64 %alu_1904.i, 0
+  %alu_1954.i = select i1 %94, i64 %alu_1940.i, i64 0
   %alu_1957.i = or i64 %alu_1954.i, %alu_1948.i
   %alu_1960.i = xor i64 %alu_1461.i, -9223372036854775808
   %alu_1963.i = sub i64 %alu_1960.i, %alu_881.i
@@ -5725,58 +5659,58 @@ entry:
   %alu_1978.i = lshr i64 %alu_1975.i, 63
   %alu_1993.not.i = add i64 %alu_1957.i, -24
   %alu_1999.i = or i64 %alu_1993.not.i, %alu_1954.i
-  %isneg516.i = icmp slt i64 %alu_1999.i, 0
+  %isneg515.i = icmp slt i64 %alu_1999.i, 0
   %alu_1999.i.lobit = lshr i64 %alu_1999.i, 63
   %alu_2034.i = or i64 %alu_1999.i.lobit, %alu_869.i
-  %96 = xor i64 %ext8, 4294967294
-  %alu_2058.neg.i = add nuw nsw i64 %96, 1
+  %95 = xor i64 %ext8, 4294967294
+  %alu_2058.neg.i = add nuw nsw i64 %95, 1
   %alu_2067.i = lshr i64 %alu_2058.neg.i, 31
-  %97 = and i64 %alu_2067.i, %alu_1978.i
-  %alu_2103.i = and i64 %97, %alu_869.i
-  %98 = xor i64 %alu_2103.i, -1
-  %99 = xor i64 %ext7, 4294967294
-  %alu_2139.neg.i = add nuw nsw i64 %99, 1
+  %96 = and i64 %alu_2067.i, %alu_1978.i
+  %alu_2103.i = and i64 %96, %alu_869.i
+  %97 = xor i64 %ext7, 4294967294
+  %alu_2139.neg.i = add nuw nsw i64 %97, 1
   %alu_2148.i = lshr i64 %alu_2139.neg.i, 31
   %alu_2166.i = xor i64 %alu_2148.i, -1
-  %alu_2172.i = and i64 %87, %alu_2166.i
-  %alu_2178.i = or i64 %alu_2172.i, %88
-  %100 = select i1 %isneg516.i, i64 1, i64 %98
-  %101 = and i64 %100, %alu_869.i
-  %102 = extractelement <2 x i64> %85, i64 0
-  %alu_2208.i = or i64 %101, %102
-  %isneg517.inv.i = icmp slt i64 %alu_1975.i, 0
-  %alu_2052.i = select i1 %isneg517.inv.i, i64 0, i64 %alu_2178.i
+  %alu_2172.i = and i64 %86, %alu_2166.i
+  %alu_2178.i = or i64 %alu_2172.i, %87
+  %98 = xor i64 %alu_2103.i, -1
+  %99 = select i1 %isneg515.i, i64 1, i64 %98
+  %100 = and i64 %99, %alu_869.i
+  %101 = extractelement <2 x i64> %84, i64 0
+  %alu_2208.i = or i64 %100, %101
+  %isneg516.inv.i = icmp slt i64 %alu_1975.i, 0
+  %alu_2052.i = select i1 %isneg516.inv.i, i64 0, i64 %alu_2178.i
   %alu_2220.i = and i64 %alu_2034.i, %alu_2052.i
-  %103 = icmp eq i64 %alu_2178.i, 0
-  %alu_2232.i = select i1 %103, i64 %alu_2208.i, i64 0
-  %alu_2239.i = or i64 %alu_2220.i, %alu_2232.i
-  %alu_2245.i = and i64 %alu_1680.neg.i, 8388607
+  %102 = icmp eq i64 %alu_2178.i, 0
+  %alu_2232.i = select i1 %102, i64 %alu_2208.i, i64 0
+  %alu_2238.i = or i64 %alu_2232.i, %alu_2220.i
+  %alu_2245.i = and i64 %alu_1680.neg.i, 4294967295
   %alu_2250.i = and i64 %alu_869.i, %alu_1680.neg.i
-  %alu_2256.i = xor i64 %alu_2245.i, 8388607
-  %alu_2262.i = and i64 %alu_2239.i, %alu_2256.i
+  %alu_2256.i = xor i64 %alu_2245.i, 4294967295
+  %alu_2262.i = and i64 %alu_2238.i, %alu_2256.i
   %alu_2268.i = or i64 %alu_2262.i, %alu_2250.i
   %alu_2275.i = shl nuw nsw i64 %alu_2268.i, 9
   %alu_2287.i = shl i64 %alu_1787.i, 32
-  %alu_2282.i = or disjoint i64 %alu_2275.i, %alu_2287.i
+  %alu_2282.i = or i64 %alu_2287.i, %alu_2275.i
   %alu_2296.i = or disjoint i64 %alu_2282.i, 257
   %alu_2307.i = or disjoint i64 %alu_974.i, 3
   %alu_2318.i = or disjoint i64 %alu_974.i, 2
   %alu_2326.i = sub nsw i64 3, %ext5
-  %alu_2344.i = lshr i64 %alu_2326.i, 31
-  %104 = or i64 %alu_2344.i, -2
-  %alu_2363.neg.i = add nsw i64 %104, 1
-  %alu_2381.i = select i1 %67, i64 %alu_2296.i, i64 %alu_2307.i
+  %alu_2327.i = lshr i64 %alu_2326.i, 31
+  %103 = or i64 %alu_2327.i, -2
+  %alu_2363.neg.i = add nsw i64 %103, 1
+  %alu_2381.i = select i1 %.not, i64 %alu_2296.i, i64 %alu_2307.i
   %alu_2389.i = and i64 %alu_2381.i, %alu_2363.neg.i
-  %alu_2392.i = sub nsw i64 -2, %104
+  %alu_2392.i = sub nsw i64 -2, %103
   %alu_2395.i = and i64 %alu_2318.i, %alu_2392.i
   %alu_2398.i = or i64 %alu_2389.i, %alu_2395.i
-  %alu_2403.i = sub nsw i64 0, %alu_835.i
+  %alu_2403.i = sub nsw i64 0, %alu_834.i
   %alu_2409.i = or i64 %alu_828.i, %alu_2403.i
   %alu_2416.i = lshr i64 %alu_2409.i, 31
-  %105 = or i64 %alu_2416.i, -2
-  %alu_2422.neg.i = add nsw i64 %105, 1
+  %104 = or i64 %alu_2416.i, -2
+  %alu_2422.neg.i = add nsw i64 %104, 1
   %alu_2431.i = and i64 %alu_2398.i, %alu_2422.neg.i
-  %alu_2434.i = sub nsw i64 -2, %105
+  %alu_2434.i = sub nsw i64 -2, %104
   %alu_2437.i = and i64 %alu_2434.i, %alu_986.i
   %alu_2440.i = or i64 %alu_2431.i, %alu_2437.i
   ret i64 %alu_2440.i
@@ -5798,51 +5732,55 @@ entry:
   %2 = insertelement <2 x i64> poison, i64 %a1, i64 0
   %3 = insertelement <2 x i64> %2, i64 %a3, i64 1
   %4 = icmp eq <2 x i64> %3, zeroinitializer
-  %5 = insertelement <2 x i64> poison, i64 %a0, i64 0
-  %6 = insertelement <2 x i64> %5, i64 %a2, i64 1
-  %7 = icmp ne <2 x i64> %6, zeroinitializer
-  %8 = sub <2 x i64> <i64 4294967295, i64 4294967295>, %6
-  %9 = sub <2 x i64> <i64 4294967295, i64 4294967295>, %3
-  %10 = add <2 x i64> %3, %6
-  %11 = add <2 x i64> %6, <i64 -1, i64 -1>
-  %12 = xor <2 x i64> %3, <i64 -1, i64 -1>
+  %5 = icmp eq i64 %a1, 0
+  %6 = insertelement <2 x i64> poison, i64 %a0, i64 0
+  %7 = insertelement <2 x i64> %6, i64 %a2, i64 1
+  %8 = icmp ne <2 x i64> %7, zeroinitializer
+  %9 = icmp eq i64 %a3, 0
+  %10 = sub <2 x i64> <i64 4294967295, i64 4294967295>, %7
+  %11 = sub <2 x i64> <i64 4294967295, i64 4294967295>, %3
+  %12 = add <2 x i64> %3, %7
+  %13 = add <2 x i64> %7, <i64 -1, i64 -1>
+  %14 = xor <2 x i64> %3, <i64 -1, i64 -1>
   %alu_288.i = lshr i64 %alu_17.neg.i, 31
   %alu_306.neg.i = add nuw nsw i64 %alu_288.i, 1
-  %13 = and i64 %alu_306.neg.i, 1
+  %15 = and i64 %alu_306.neg.i, 1
   %alu_324.i = xor i64 %alu_306.neg.i, 4294967295
-  %14 = zext <2 x i1> %4 to <2 x i64>
-  %15 = zext <2 x i1> %7 to <2 x i64>
-  %16 = or <2 x i64> %14, %15
-  %17 = or <2 x i64> %14, %15
-  %shift = shufflevector <2 x i64> %17, <2 x i64> poison, <2 x i32> <i32 1, i32 poison>
-  %18 = and <2 x i64> %shift, %16
-  %alu_126.i = extractelement <2 x i64> %18, i64 0
-  %19 = sub <2 x i64> <i64 4294967296, i64 4294967296>, %10
-  %20 = or <2 x i64> %8, %9
-  %21 = or <2 x i64> %20, %19
-  %22 = or <2 x i64> %21, %6
-  %23 = or <2 x i64> %22, %3
-  %24 = or <2 x i64> %23, %10
-  %25 = xor <2 x i64> %15, <i64 1, i64 1>
-  %26 = sub <2 x i64> %12, %11
-  %27 = xor <2 x i64> %11, %12
-  %28 = xor <2 x i64> %26, %11
-  %29 = or <2 x i64> %28, %27
-  %30 = xor <2 x i64> %29, %3
-  %31 = lshr <2 x i64> %30, <i64 63, i64 63>
-  %32 = or <2 x i64> %25, %31
-  %33 = or <2 x i64> %32, %14
-  %34 = icmp slt <2 x i64> %24, zeroinitializer
-  %35 = insertelement <2 x i64> poison, i64 %13, i64 0
-  %36 = shufflevector <2 x i64> %35, <2 x i64> poison, <2 x i32> zeroinitializer
-  %37 = select <2 x i1> %34, <2 x i64> zeroinitializer, <2 x i64> %36
-  %38 = insertelement <2 x i64> poison, i64 %alu_324.i, i64 0
-  %39 = shufflevector <2 x i64> %38, <2 x i64> poison, <2 x i32> zeroinitializer
-  %40 = and <2 x i64> %39, %33
-  %41 = or <2 x i64> %40, %37
-  %shift1 = shufflevector <2 x i64> %41, <2 x i64> poison, <2 x i32> <i32 1, i32 poison>
-  %42 = and <2 x i64> %41, %shift1
-  %alu_507.i = extractelement <2 x i64> %42, i64 0
+  %alu_102.i = zext i1 %9 to i64
+  %16 = zext <2 x i1> %4 to <2 x i64>
+  %alu_66.i = zext i1 %5 to i64
+  %17 = zext <2 x i1> %8 to <2 x i64>
+  %18 = extractelement <2 x i64> %17, i64 0
+  %alu_84.i = or i64 %18, %alu_66.i
+  %19 = extractelement <2 x i64> %17, i64 1
+  %alu_120.i = or i64 %19, %alu_102.i
+  %alu_126.i = and i64 %alu_120.i, %alu_84.i
+  %20 = sub <2 x i64> <i64 4294967296, i64 4294967296>, %12
+  %21 = or <2 x i64> %10, %11
+  %22 = or <2 x i64> %21, %20
+  %23 = or <2 x i64> %22, %7
+  %24 = or <2 x i64> %23, %3
+  %25 = or <2 x i64> %24, %12
+  %26 = xor <2 x i64> %17, <i64 1, i64 1>
+  %27 = sub <2 x i64> %14, %13
+  %28 = xor <2 x i64> %13, %14
+  %29 = xor <2 x i64> %27, %13
+  %30 = or <2 x i64> %29, %28
+  %31 = xor <2 x i64> %30, %3
+  %32 = lshr <2 x i64> %31, <i64 63, i64 63>
+  %33 = or <2 x i64> %26, %16
+  %34 = or <2 x i64> %33, %32
+  %35 = icmp slt <2 x i64> %25, zeroinitializer
+  %36 = insertelement <2 x i64> poison, i64 %15, i64 0
+  %37 = shufflevector <2 x i64> %36, <2 x i64> poison, <2 x i32> zeroinitializer
+  %38 = select <2 x i1> %35, <2 x i64> zeroinitializer, <2 x i64> %37
+  %39 = insertelement <2 x i64> poison, i64 %alu_324.i, i64 0
+  %40 = shufflevector <2 x i64> %39, <2 x i64> poison, <2 x i32> zeroinitializer
+  %41 = and <2 x i64> %40, %34
+  %42 = or <2 x i64> %41, %38
+  %shift = shufflevector <2 x i64> %42, <2 x i64> poison, <2 x i32> <i32 1, i32 poison>
+  %43 = and <2 x i64> %shift, %42
+  %alu_507.i = extractelement <2 x i64> %43, i64 0
   %alu_517.i = sub i64 %a2, %a1
   %alu_520.i = xor i64 %a2, %a1
   %alu_523.i = xor i64 %alu_517.i, %a1
@@ -5853,7 +5791,7 @@ entry:
   %alu_550.i = xor i64 %alu_544.i, %a0
   %alu_553.i = or i64 %alu_550.i, %alu_547.i
   %alu_556.i = xor i64 %alu_553.i, %alu_517.i
-  %43 = or i64 %alu_556.i, %alu_529.i
+  %44 = or i64 %alu_556.i, %alu_529.i
   %alu_583.i = sub i64 %a0, %a3
   %alu_586.i = xor i64 %a3, %a0
   %alu_589.i = xor i64 %alu_583.i, %a3
@@ -5864,29 +5802,26 @@ entry:
   %alu_616.i = xor i64 %alu_610.i, %a2
   %alu_619.i = or i64 %alu_616.i, %alu_613.i
   %alu_622.i = xor i64 %alu_619.i, %alu_583.i
-  %44 = or i64 %alu_622.i, %alu_595.i
-  %45 = and i64 %44, %43
-  %46 = icmp sgt i64 %45, -1
-  %47 = extractelement <2 x i1> %4, i64 1
-  %48 = or i1 %47, %46
-  %49 = extractelement <2 x i1> %4, i64 0
-  %alu_645271.i = or i1 %49, %48
-  %alu_649.i = add i64 %a3, -32
-  %50 = extractelement <2 x i64> %12, i64 1
-  %alu_661.i = and i64 %alu_649.i, %50
+  %45 = or i64 %alu_622.i, %alu_595.i
+  %46 = and i64 %45, %44
+  %47 = icmp sgt i64 %46, -1
+  %48 = or i1 %9, %47
+  %alu_645271.i = or i1 %5, %48
   %alu_684.neg.i = add nuw nsw i64 %alu_126.i, 7
-  %51 = xor i64 %alu_507.i, 4294967294
-  %alu_690.neg.i = add nuw nsw i64 %51, 1
-  %isneg.i = icmp slt i64 %alu_661.i, 0
-  %alu_709.i = select i1 %isneg.i, i64 5, i64 0
+  %49 = xor i64 %alu_507.i, 4294967294
+  %alu_690.neg.i = add nuw nsw i64 %49, 1
+  %50 = sub i64 31, %a3
+  %51 = or i64 %50, %a3
+  %isneg.inv.i = icmp slt i64 %51, 0
+  %alu_709.i = select i1 %isneg.inv.i, i64 0, i64 5
   %alu_721.i = select i1 %alu_645271.i, i64 0, i64 4294967295
   %alu_726.i = and i64 %alu_721.i, 9
   %alu_732.i = xor i64 %alu_721.i, -1
   %alu_738.i = and i64 %alu_709.i, %alu_732.i
   %alu_744.i = or i64 %alu_726.i, %alu_738.i
   %alu_756.i = and i64 %alu_690.neg.i, 8
-  %alu_762.i = sub nsw i64 14, %51
-  %alu_768.i = and i64 %alu_744.i, %alu_762.i
+  %alu_762.i = sub i64 14, %49
+  %alu_768.i = and i64 %alu_762.i, %alu_744.i
   %alu_774.i = or i64 %alu_768.i, %alu_756.i
   %alu_786.i = and i64 %alu_684.neg.i, 7
   %alu_792.i = sub nsw i64 0, %alu_126.i
@@ -5894,120 +5829,124 @@ entry:
   %alu_804.i = or i64 %alu_798.i, %alu_786.i
   %alu_811.i = select i1 %1, i64 4294967295, i64 0
   %alu_816.i = and i64 %alu_811.i, 6
-  %alu_822.i = xor i64 %alu_811.i, -1
+  %alu_822.i = xor i64 %alu_811.i, 4294967295
   %alu_828.i = and i64 %alu_804.i, %alu_822.i
-  %alu_835.i = or disjoint i64 %alu_828.i, %alu_816.i
+  %alu_834.i = or i64 %alu_828.i, %alu_816.i
   %alu_852.i = sub nsw i64 0, %ext10
-  %alu_847273.i = or i64 %alu_852.i, %ext10
+  %alu_853.i = and i64 %alu_852.i, 2147483648
+  %alu_864.i = or i64 %alu_853.i, %ext10
   %alu_877.i = sub nsw i64 %ext7, %ext6
+  %alu_878.i = and i64 %alu_877.i, 2147483648
   %alu_883.i = xor i64 %ext7, %ext6
-  %alu_878274.i = xor i64 %alu_877.i, %ext6
-  %alu_895.i = or i64 %alu_878274.i, %alu_883.i
-  %alu_901.i = xor i64 %alu_895.i, %ext7
+  %alu_889.i = xor i64 %alu_878.i, %ext6
+  %alu_895.i = or i64 %alu_889.i, %alu_883.i
+  %52 = xor i64 %alu_895.i, %ext7
+  %53 = xor i64 %52, 2147483648
+  %54 = and i64 %alu_864.i, %53
   %alu_926.i = sub nsw i64 %ext5, %ext7
+  %alu_927.i = and i64 %alu_926.i, 2147483648
   %alu_932.i = xor i64 %ext7, %ext5
-  %alu_927275.i = xor i64 %alu_926.i, %ext7
-  %alu_944.i = or i64 %alu_927275.i, %alu_932.i
-  %alu_950.i = xor i64 %alu_944.i, %ext5
-  %52 = or i64 %alu_901.i, %alu_950.i
-  %53 = xor i64 %52, -1
-  %54 = and i64 %alu_847273.i, %53
-  %alu_969.i = lshr i64 %54, 31
+  %alu_938.i = xor i64 %alu_927.i, %ext7
+  %alu_944.i = or i64 %alu_938.i, %alu_932.i
+  %55 = xor i64 %alu_944.i, %ext5
+  %56 = xor i64 %55, 2147483648
+  %57 = and i64 %54, %56
   %alu_975.i = sub nsw i64 %ext8, %ext5
-  %alu_843277.i = xor i64 %ext8, %ext5
-  %alu_976276.i = xor i64 %alu_975.i, %ext5
-  %alu_981278.i = or i64 %alu_976276.i, %alu_843277.i
-  %alu_843279.i = xor i64 %alu_981278.i, %ext8
-  %alu_999.i = lshr i64 %alu_843279.i, 31
-  %alu_1006.i = and i64 %alu_999.i, 1
-  %alu_1012.i = xor i64 %alu_1006.i, 1
-  %alu_1018.i = and i64 %alu_1012.i, %alu_969.i
+  %alu_976.i = and i64 %alu_975.i, 2147483648
+  %alu_981.i = xor i64 %ext8, %ext5
+  %alu_987.i = xor i64 %alu_976.i, %ext5
+  %alu_993.i = or i64 %alu_987.i, %alu_981.i
+  %58 = xor i64 %alu_993.i, %ext8
+  %59 = xor i64 %58, 2147483648
+  %60 = and i64 %57, %59
+  %alu_1018.i = lshr i64 %60, 31
   %alu_1024.i = sub nsw i64 %ext8, %ext9
   %alu_1030.i = xor i64 %ext9, %ext8
-  %alu_1025280.i = xor i64 %alu_1024.i, %ext9
-  %alu_1042.i = or i64 %alu_1025280.i, %alu_1030.i
+  %alu_1036.i = xor i64 %alu_1024.i, %ext9
+  %alu_1042.i = or i64 %alu_1036.i, %alu_1030.i
   %alu_1048.i = xor i64 %alu_1042.i, %ext8
-  %alu_1049.i = lshr i64 %alu_1048.i, 31
-  %55 = or i64 %alu_1049.i, 4294967294
-  %alu_1061.neg.i = add nuw nsw i64 %55, 1
+  %alu_1055.i = lshr i64 %alu_1048.i, 31
+  %61 = or i64 %alu_1055.i, 4294967294
+  %alu_1061.neg.i = add nuw nsw i64 %61, 1
   %alu_1073.i = and i64 %alu_1061.neg.i, %ext9
-  %alu_1079.i = sub nsw i64 4294967294, %55
+  %alu_1079.i = sub nsw i64 4294967294, %61
   %alu_1085.i = and i64 %alu_1079.i, %ext8
   %alu_1091.i = or i64 %alu_1085.i, %alu_1073.i
   %alu_1097.i = sub nsw i64 %alu_1091.i, %ext6
-  %alu_1104.i = xor i64 %alu_1091.i, %ext6
-  %alu_1098281.i = xor i64 %alu_1097.i, %ext6
-  %alu_1115.i = or i64 %alu_1098281.i, %alu_1104.i
-  %alu_1115.masked.i = and i64 %alu_1115.i, 2147483648
-  %alu_1122.i = xor i64 %alu_1115.masked.i, %alu_1091.i
-  %alu_1128.i = lshr i64 %alu_1122.i, 31
-  %alu_1134.neg.i = add nuw nsw i64 %alu_1128.i, 4294967295
+  %alu_1098.i = and i64 %alu_1097.i, 2147483648
+  %alu_1103.i = xor i64 %alu_1091.i, %ext6
+  %alu_1109.i = xor i64 %alu_1098.i, %ext6
+  %alu_1115.i = or i64 %alu_1109.i, %alu_1103.i
+  %alu_1121.i = xor i64 %alu_1115.i, %alu_1091.i
+  %alu_1128.i = lshr i64 %alu_1121.i, 31
+  %62 = xor i64 %alu_1128.i, 4294967294
+  %alu_1134.neg.i = add nuw nsw i64 %62, 1
   %alu_1146.i = and i64 %alu_1134.neg.i, %alu_1091.i
-  %alu_1152.i = sub nsw i64 0, %alu_1128.i
+  %alu_1152.i = sub nsw i64 4294967294, %62
   %alu_1158.i = and i64 %alu_1152.i, %ext6
-  %alu_1164.i = or i64 %alu_1146.i, %alu_1158.i
+  %alu_1164.i = or i64 %alu_1158.i, %alu_1146.i
   %alu_1170.i = sub nsw i64 %alu_1164.i, %ext7
-  %alu_1177.i = xor i64 %alu_1164.i, %ext7
-  %alu_1171282.i = xor i64 %alu_1170.i, %ext7
-  %alu_1188.i = or i64 %alu_1171282.i, %alu_1177.i
-  %alu_1188.masked.i = and i64 %alu_1188.i, 2147483648
-  %alu_1195.i = xor i64 %alu_1188.masked.i, %alu_1164.i
-  %alu_1201.i = lshr i64 %alu_1195.i, 31
-  %56 = xor i64 %alu_1201.i, 4294967294
-  %alu_1207.neg.i = add nuw nsw i64 %56, 1
+  %alu_1171.i = and i64 %alu_1170.i, 2147483648
+  %alu_1176.i = xor i64 %alu_1164.i, %ext7
+  %alu_1182.i = xor i64 %alu_1171.i, %ext7
+  %alu_1188.i = or i64 %alu_1182.i, %alu_1176.i
+  %alu_1194.i = xor i64 %alu_1188.i, %alu_1164.i
+  %alu_1201.i = lshr i64 %alu_1194.i, 31
+  %63 = xor i64 %alu_1201.i, 4294967294
+  %alu_1207.neg.i = add nuw nsw i64 %63, 1
   %alu_1219.i = and i64 %alu_1207.neg.i, %alu_1164.i
-  %alu_1225.i = sub nsw i64 4294967294, %56
+  %alu_1225.i = sub nsw i64 4294967294, %63
   %alu_1231.i = and i64 %alu_1225.i, %ext7
   %alu_1237.i = or i64 %alu_1231.i, %alu_1219.i
   %alu_1243.i = sub nsw i64 %ext8, %ext10
-  %alu_843283.i = xor i64 %ext10, %ext8
+  %alu_1249.i = xor i64 %ext10, %ext8
   %alu_1255.i = xor i64 %alu_1243.i, %ext10
-  %alu_1261.i = or i64 %alu_1255.i, %alu_843283.i
+  %alu_1261.i = or i64 %alu_1255.i, %alu_1249.i
   %alu_1267.i = xor i64 %alu_1261.i, %ext8
-  %alu_1268.i = lshr i64 %alu_1267.i, 31
-  %57 = or i64 %alu_1268.i, 4294967294
-  %alu_1280.neg.i = add nuw nsw i64 %57, 1
+  %alu_1274.i = lshr i64 %alu_1267.i, 31
+  %64 = or i64 %alu_1274.i, 4294967294
+  %alu_1280.neg.i = add nuw nsw i64 %64, 1
   %alu_1287.i = and i64 %alu_1243.i, 4294967295
   %alu_1292.i = and i64 %alu_1287.i, %alu_1280.neg.i
   %alu_1298.i = sub nsw i64 %alu_1292.i, %alu_1237.i
+  %alu_1299.i = and i64 %alu_1298.i, 2147483648
   %alu_1304.i = xor i64 %alu_1237.i, %alu_1292.i
-  %alu_1298.masked.i = and i64 %alu_1298.i, 2147483648
-  %alu_1311.i = xor i64 %alu_1298.masked.i, %alu_1237.i
-  %alu_1316.i = or i64 %alu_1311.i, %alu_1304.i
+  %alu_1310.i = xor i64 %alu_1299.i, %alu_1237.i
+  %alu_1316.i = or i64 %alu_1310.i, %alu_1304.i
   %alu_1322.i = xor i64 %alu_1316.i, %alu_1292.i
   %alu_1329.i = lshr i64 %alu_1322.i, 31
-  %58 = xor i64 %alu_1329.i, 4294967294
-  %alu_1335.neg.i = add nuw nsw i64 %58, 1
+  %65 = xor i64 %alu_1329.i, 4294967294
+  %alu_1335.neg.i = add nuw nsw i64 %65, 1
   %alu_1347.i = and i64 %alu_1335.neg.i, %alu_1292.i
-  %alu_1353.i = sub nsw i64 4294967294, %58
+  %alu_1353.i = xor i64 %alu_1335.neg.i, 4294967295
   %alu_1359.i = and i64 %alu_1353.i, %alu_1237.i
-  %alu_1366.i = or i64 %alu_1347.i, %alu_1359.i
-  %alu_1371.i = sub nsw i64 %alu_1164.i, %alu_1366.i
-  %alu_1378.i = xor i64 %alu_1366.i, %alu_1164.i
-  %alu_1383.i = xor i64 %alu_1371.i, %alu_1366.i
-  %alu_1389.i = or i64 %alu_1383.i, %alu_1378.i
-  %alu_1389.masked.i = and i64 %alu_1389.i, 2147483648
-  %alu_1396.i = xor i64 %alu_1389.masked.i, %alu_1164.i
-  %59 = lshr i64 %alu_1396.i, 22
-  %alu_1411.i = and i64 %59, 4294966784
-  %alu_1424.i = shl nuw i64 %alu_1366.i, 32
-  %alu_1416.i = or disjoint i64 %alu_1411.i, %alu_1424.i
+  %alu_1365.i = or i64 %alu_1359.i, %alu_1347.i
+  %alu_1371.i = sub nsw i64 %alu_1164.i, %alu_1365.i
+  %alu_1372.i = and i64 %alu_1371.i, 2147483648
+  %alu_1377.i = xor i64 %alu_1365.i, %alu_1164.i
+  %alu_1383.i = xor i64 %alu_1372.i, %alu_1365.i
+  %alu_1389.i = or i64 %alu_1383.i, %alu_1377.i
+  %alu_1395.i = xor i64 %alu_1389.i, %alu_1164.i
+  %66 = lshr i64 %alu_1395.i, 22
+  %alu_1409.i = and i64 %66, 4398046510592
+  %alu_1424.i = shl nuw i64 %alu_1365.i, 32
+  %alu_1416.i = or i64 %alu_1424.i, %alu_1409.i
   %alu_1428.i = or disjoint i64 %alu_1416.i, 257
-  %alu_841.i = shl nuw i64 %ext7, 32
-  %alu_1437.i = or disjoint i64 %alu_841.i, 3
-  %alu_1442.i = or disjoint i64 %alu_835.i, %alu_841.i
-  %alu_1447.i = sub nsw i64 0, %alu_835.i
+  %alu_1433.i = shl nuw i64 %ext7, 32
+  %alu_1437.i = or disjoint i64 %alu_1433.i, 3
+  %alu_1442.i = or disjoint i64 %alu_834.i, %alu_1433.i
+  %alu_1447.i = sub nsw i64 0, %alu_834.i
   %alu_1453.i = or i64 %alu_828.i, %alu_1447.i
   %alu_1460.i = lshr i64 %alu_1453.i, 31
-  %60 = or i64 %alu_1460.i, -2
-  %alu_1466.neg.i = add nsw i64 %60, 1
+  %67 = or i64 %alu_1460.i, -2
+  %alu_1466.neg.i = add nsw i64 %67, 1
   %alu_1472.i = sub nsw i64 0, %alu_1018.i
   %alu_1475.i = and i64 %alu_1428.i, %alu_1472.i
-  %61 = icmp eq i64 %alu_1018.i, 0
-  %alu_1481.i = select i1 %61, i64 %alu_1437.i, i64 0
+  %68 = icmp ult i64 %60, 2147483648
+  %alu_1481.i = select i1 %68, i64 %alu_1437.i, i64 0
   %alu_1484.i = or i64 %alu_1475.i, %alu_1481.i
   %alu_1492.i = and i64 %alu_1484.i, %alu_1466.neg.i
-  %alu_1495.i = sub nsw i64 -2, %60
+  %alu_1495.i = sub nsw i64 -2, %67
   %alu_1498.i = and i64 %alu_1495.i, %alu_1442.i
   %alu_1501.i = or i64 %alu_1492.i, %alu_1498.i
   ret i64 %alu_1501.i
@@ -6026,51 +5965,55 @@ entry:
   %2 = insertelement <2 x i64> poison, i64 %a1, i64 0
   %3 = insertelement <2 x i64> %2, i64 %a3, i64 1
   %4 = icmp eq <2 x i64> %3, zeroinitializer
-  %5 = insertelement <2 x i64> poison, i64 %a0, i64 0
-  %6 = insertelement <2 x i64> %5, i64 %a2, i64 1
-  %7 = icmp ne <2 x i64> %6, zeroinitializer
-  %8 = sub <2 x i64> <i64 4294967295, i64 4294967295>, %6
-  %9 = sub <2 x i64> <i64 4294967295, i64 4294967295>, %3
-  %10 = add <2 x i64> %3, %6
-  %11 = add <2 x i64> %6, <i64 -1, i64 -1>
-  %12 = xor <2 x i64> %3, <i64 -1, i64 -1>
+  %5 = icmp eq i64 %a1, 0
+  %6 = insertelement <2 x i64> poison, i64 %a0, i64 0
+  %7 = insertelement <2 x i64> %6, i64 %a2, i64 1
+  %8 = icmp ne <2 x i64> %7, zeroinitializer
+  %9 = icmp eq i64 %a3, 0
+  %10 = sub <2 x i64> <i64 4294967295, i64 4294967295>, %7
+  %11 = sub <2 x i64> <i64 4294967295, i64 4294967295>, %3
+  %12 = add <2 x i64> %3, %7
+  %13 = add <2 x i64> %7, <i64 -1, i64 -1>
+  %14 = xor <2 x i64> %3, <i64 -1, i64 -1>
   %alu_288.i = lshr i64 %alu_17.neg.i, 31
   %alu_306.neg.i = add nuw nsw i64 %alu_288.i, 1
-  %13 = and i64 %alu_306.neg.i, 1
+  %15 = and i64 %alu_306.neg.i, 1
   %alu_324.i = xor i64 %alu_306.neg.i, 4294967295
-  %14 = zext <2 x i1> %4 to <2 x i64>
-  %15 = zext <2 x i1> %7 to <2 x i64>
-  %16 = or <2 x i64> %14, %15
-  %17 = or <2 x i64> %14, %15
-  %shift = shufflevector <2 x i64> %17, <2 x i64> poison, <2 x i32> <i32 1, i32 poison>
-  %18 = and <2 x i64> %shift, %16
-  %alu_126.i = extractelement <2 x i64> %18, i64 0
-  %19 = sub <2 x i64> <i64 4294967296, i64 4294967296>, %10
-  %20 = or <2 x i64> %8, %9
-  %21 = or <2 x i64> %20, %19
-  %22 = or <2 x i64> %21, %6
-  %23 = or <2 x i64> %22, %3
-  %24 = or <2 x i64> %23, %10
-  %25 = xor <2 x i64> %15, <i64 1, i64 1>
-  %26 = sub <2 x i64> %12, %11
-  %27 = xor <2 x i64> %11, %12
-  %28 = xor <2 x i64> %26, %11
-  %29 = or <2 x i64> %28, %27
-  %30 = xor <2 x i64> %29, %3
-  %31 = lshr <2 x i64> %30, <i64 63, i64 63>
-  %32 = or <2 x i64> %25, %31
-  %33 = or <2 x i64> %32, %14
-  %34 = icmp slt <2 x i64> %24, zeroinitializer
-  %35 = insertelement <2 x i64> poison, i64 %13, i64 0
-  %36 = shufflevector <2 x i64> %35, <2 x i64> poison, <2 x i32> zeroinitializer
-  %37 = select <2 x i1> %34, <2 x i64> zeroinitializer, <2 x i64> %36
-  %38 = insertelement <2 x i64> poison, i64 %alu_324.i, i64 0
-  %39 = shufflevector <2 x i64> %38, <2 x i64> poison, <2 x i32> zeroinitializer
-  %40 = and <2 x i64> %39, %33
-  %41 = or <2 x i64> %40, %37
-  %shift1 = shufflevector <2 x i64> %41, <2 x i64> poison, <2 x i32> <i32 1, i32 poison>
-  %42 = and <2 x i64> %41, %shift1
-  %alu_507.i = extractelement <2 x i64> %42, i64 0
+  %alu_102.i = zext i1 %9 to i64
+  %16 = zext <2 x i1> %4 to <2 x i64>
+  %alu_66.i = zext i1 %5 to i64
+  %17 = zext <2 x i1> %8 to <2 x i64>
+  %18 = extractelement <2 x i64> %17, i64 0
+  %alu_84.i = or i64 %18, %alu_66.i
+  %19 = extractelement <2 x i64> %17, i64 1
+  %alu_120.i = or i64 %19, %alu_102.i
+  %alu_126.i = and i64 %alu_120.i, %alu_84.i
+  %20 = sub <2 x i64> <i64 4294967296, i64 4294967296>, %12
+  %21 = or <2 x i64> %10, %11
+  %22 = or <2 x i64> %21, %20
+  %23 = or <2 x i64> %22, %7
+  %24 = or <2 x i64> %23, %3
+  %25 = or <2 x i64> %24, %12
+  %26 = xor <2 x i64> %17, <i64 1, i64 1>
+  %27 = sub <2 x i64> %14, %13
+  %28 = xor <2 x i64> %13, %14
+  %29 = xor <2 x i64> %27, %13
+  %30 = or <2 x i64> %29, %28
+  %31 = xor <2 x i64> %30, %3
+  %32 = lshr <2 x i64> %31, <i64 63, i64 63>
+  %33 = or <2 x i64> %26, %16
+  %34 = or <2 x i64> %33, %32
+  %35 = icmp slt <2 x i64> %25, zeroinitializer
+  %36 = insertelement <2 x i64> poison, i64 %15, i64 0
+  %37 = shufflevector <2 x i64> %36, <2 x i64> poison, <2 x i32> zeroinitializer
+  %38 = select <2 x i1> %35, <2 x i64> zeroinitializer, <2 x i64> %37
+  %39 = insertelement <2 x i64> poison, i64 %alu_324.i, i64 0
+  %40 = shufflevector <2 x i64> %39, <2 x i64> poison, <2 x i32> zeroinitializer
+  %41 = and <2 x i64> %40, %34
+  %42 = or <2 x i64> %41, %38
+  %shift = shufflevector <2 x i64> %42, <2 x i64> poison, <2 x i32> <i32 1, i32 poison>
+  %43 = and <2 x i64> %shift, %42
+  %alu_507.i = extractelement <2 x i64> %43, i64 0
   %alu_517.i = sub i64 %a2, %a1
   %alu_520.i = xor i64 %a2, %a1
   %alu_523.i = xor i64 %alu_517.i, %a1
@@ -6081,7 +6024,7 @@ entry:
   %alu_550.i = xor i64 %alu_544.i, %a0
   %alu_553.i = or i64 %alu_550.i, %alu_547.i
   %alu_556.i = xor i64 %alu_553.i, %alu_517.i
-  %43 = or i64 %alu_556.i, %alu_529.i
+  %44 = or i64 %alu_556.i, %alu_529.i
   %alu_583.i = sub i64 %a0, %a3
   %alu_586.i = xor i64 %a3, %a0
   %alu_589.i = xor i64 %alu_583.i, %a3
@@ -6092,29 +6035,26 @@ entry:
   %alu_616.i = xor i64 %alu_610.i, %a2
   %alu_619.i = or i64 %alu_616.i, %alu_613.i
   %alu_622.i = xor i64 %alu_619.i, %alu_583.i
-  %44 = or i64 %alu_622.i, %alu_595.i
-  %45 = and i64 %44, %43
-  %46 = icmp sgt i64 %45, -1
-  %47 = extractelement <2 x i1> %4, i64 1
-  %48 = or i1 %47, %46
-  %49 = extractelement <2 x i1> %4, i64 0
-  %alu_645284.i = or i1 %49, %48
-  %alu_649.i = add i64 %a3, -32
-  %50 = extractelement <2 x i64> %12, i64 1
-  %alu_661.i = and i64 %alu_649.i, %50
+  %45 = or i64 %alu_622.i, %alu_595.i
+  %46 = and i64 %45, %44
+  %47 = icmp sgt i64 %46, -1
+  %48 = or i1 %9, %47
+  %alu_645284.i = or i1 %5, %48
   %alu_684.neg.i = add nuw nsw i64 %alu_126.i, 7
-  %51 = xor i64 %alu_507.i, 4294967294
-  %alu_690.neg.i = add nuw nsw i64 %51, 1
-  %isneg.i = icmp slt i64 %alu_661.i, 0
-  %alu_709.i = select i1 %isneg.i, i64 5, i64 0
+  %49 = xor i64 %alu_507.i, 4294967294
+  %alu_690.neg.i = add nuw nsw i64 %49, 1
+  %50 = sub i64 31, %a3
+  %51 = or i64 %50, %a3
+  %isneg.inv.i = icmp slt i64 %51, 0
+  %alu_709.i = select i1 %isneg.inv.i, i64 0, i64 5
   %alu_721.i = select i1 %alu_645284.i, i64 0, i64 4294967295
   %alu_726.i = and i64 %alu_721.i, 9
   %alu_732.i = xor i64 %alu_721.i, -1
   %alu_738.i = and i64 %alu_709.i, %alu_732.i
   %alu_744.i = or i64 %alu_726.i, %alu_738.i
   %alu_756.i = and i64 %alu_690.neg.i, 8
-  %alu_762.i = sub nsw i64 14, %51
-  %alu_768.i = and i64 %alu_744.i, %alu_762.i
+  %alu_762.i = sub i64 14, %49
+  %alu_768.i = and i64 %alu_762.i, %alu_744.i
   %alu_774.i = or i64 %alu_768.i, %alu_756.i
   %alu_786.i = and i64 %alu_684.neg.i, 7
   %alu_792.i = sub nsw i64 0, %alu_126.i
@@ -6122,9 +6062,9 @@ entry:
   %alu_804.i = or i64 %alu_798.i, %alu_786.i
   %alu_811.i = select i1 %1, i64 4294967295, i64 0
   %alu_816.i = and i64 %alu_811.i, 6
-  %alu_822.i = xor i64 %alu_811.i, -1
+  %alu_822.i = xor i64 %alu_811.i, 4294967295
   %alu_828.i = and i64 %alu_804.i, %alu_822.i
-  %alu_835.i = or disjoint i64 %alu_828.i, %alu_816.i
+  %alu_834.i = or i64 %alu_828.i, %alu_816.i
   %52 = xor i64 %ext8, 4294967294
   %alu_846.neg.i = add nuw nsw i64 %52, 1
   %alu_855.i = lshr i64 %alu_846.neg.i, 31
@@ -6151,66 +6091,68 @@ entry:
   %alu_977.neg.i = add nuw nsw i64 %55, 1
   %56 = insertelement <4 x i64> poison, i64 %ext9, i64 0
   %57 = shufflevector <4 x i64> %56, <4 x i64> poison, <4 x i32> zeroinitializer
-  %58 = xor <4 x i64> %57, <i64 4294967289, i64 4294967290, i64 4294967288, i64 4294967286>
+  %58 = xor <4 x i64> %57, <i64 4294967290, i64 4294967289, i64 4294967288, i64 4294967286>
   %59 = add nuw nsw <4 x i64> %58, <i64 1, i64 1, i64 1, i64 1>
   %60 = lshr <4 x i64> %59, <i64 31, i64 31, i64 31, i64 31>
-  %61 = and <4 x i64> %60, <i64 1, i64 1, i64 1, i64 1>
-  %62 = xor <4 x i64> %61, <i64 1, i64 1, i64 1, i64 1>
-  %63 = xor i64 %ext9, 4294967285
-  %alu_1133.neg.i = add nuw nsw i64 %63, 1
+  %61 = trunc <4 x i64> %60 to <4 x i2>
+  %62 = and <4 x i2> %61, <i2 1, i2 1, i2 1, i2 1>
+  %63 = xor <4 x i2> %62, <i2 1, i2 1, i2 1, i2 1>
+  %64 = xor i64 %ext9, 4294967285
+  %alu_1133.neg.i = add nuw nsw i64 %64, 1
   %alu_1142.i = lshr i64 %alu_1133.neg.i, 31
   %alu_1154.i = and i64 %alu_1142.i, 1
   %alu_1160.i = xor i64 %alu_1154.i, 1
-  %64 = tail call i64 @llvm.vector.reduce.or.v4i64(<4 x i64> %62)
-  %op.rdx = or i64 %64, %alu_1160.i
-  %65 = xor i64 %ext9, 4294967292
-  %alu_1205.neg.i = add nuw nsw i64 %65, 1
+  %65 = tail call i2 @llvm.vector.reduce.or.v4i2(<4 x i2> %63)
+  %66 = zext nneg i2 %65 to i64
+  %op.rdx = or i64 %alu_1160.i, %66
+  %67 = xor i64 %ext9, 4294967292
+  %alu_1205.neg.i = add nuw nsw i64 %67, 1
   %alu_1214.i = lshr i64 %alu_1205.neg.i, 31
   %alu_1226.i = and i64 %alu_1214.i, 1
   %alu_1232.i = xor i64 %alu_1226.i, 1
-  %66 = insertelement <2 x i64> poison, i64 %ext9, i64 0
-  %67 = shufflevector <2 x i64> %66, <2 x i64> poison, <2 x i32> zeroinitializer
-  %68 = xor <2 x i64> %67, <i64 4294967293, i64 4294967287>
-  %69 = add nuw nsw <2 x i64> %68, <i64 1, i64 1>
-  %70 = lshr <2 x i64> %69, <i64 31, i64 31>
-  %71 = and <2 x i64> %70, <i64 1, i64 1>
-  %72 = xor <2 x i64> %71, <i64 1, i64 1>
-  %73 = extractelement <2 x i64> %72, i64 0
-  %alu_1238.i = or i64 %73, %alu_1232.i
-  %74 = extractelement <2 x i64> %72, i64 1
-  %alu_1277.i = or i64 %alu_1238.i, %74
+  %68 = insertelement <2 x i64> poison, i64 %ext9, i64 0
+  %69 = shufflevector <2 x i64> %68, <2 x i64> poison, <2 x i32> zeroinitializer
+  %70 = xor <2 x i64> %69, <i64 4294967293, i64 4294967287>
+  %71 = add nuw nsw <2 x i64> %70, <i64 1, i64 1>
+  %72 = lshr <2 x i64> %71, <i64 31, i64 31>
+  %73 = and <2 x i64> %72, <i64 1, i64 1>
+  %74 = xor <2 x i64> %73, <i64 1, i64 1>
+  %75 = extractelement <2 x i64> %74, i64 0
+  %alu_1238.i = or i64 %75, %alu_1232.i
+  %76 = extractelement <2 x i64> %74, i64 1
+  %alu_1277.i = or i64 %alu_1238.i, %76
   %alu_1283.i = sub nsw i64 0, %alu_873.i
   %alu_1289.i = and i64 %alu_1283.i, 1281
-  %75 = icmp eq i64 %alu_867.i, 0
-  %alu_1301.i = select i1 %75, i64 0, i64 257
+  %77 = icmp eq i64 %alu_867.i, 0
+  %alu_1301.i = select i1 %77, i64 0, i64 257
   %alu_1307.i = or i64 %alu_1289.i, %alu_1301.i
   %alu_1313.i = or disjoint i64 %alu_880.i, 260
   %alu_1319.i = or disjoint i64 %alu_880.i, 4
   %alu_1325.i = sub nsw i64 0, %alu_1277.i
   %alu_1331.i = and i64 %alu_1313.i, %alu_1325.i
-  %76 = icmp eq i64 %alu_1277.i, 0
-  %alu_1343.i = select i1 %76, i64 %alu_1319.i, i64 0
-  %alu_1350.i = or i64 %alu_1343.i, %alu_1331.i
+  %78 = icmp eq i64 %alu_1277.i, 0
+  %alu_1343.i = select i1 %78, i64 %alu_1319.i, i64 0
+  %alu_1349.i = or i64 %alu_1343.i, %alu_1331.i
   %alu_1355.i = sub nsw i64 0, %op.rdx
   %alu_1361.i = and i64 %alu_1307.i, %alu_1355.i
-  %77 = icmp eq i64 %op.rdx, 0
-  %alu_1373.i = select i1 %77, i64 %alu_1350.i, i64 0
+  %79 = icmp eq i64 %op.rdx, 0
+  %alu_1373.i = select i1 %79, i64 %alu_1349.i, i64 0
   %alu_1379.i = or i64 %alu_1373.i, %alu_1361.i
   %alu_1391.i = and i64 %alu_977.neg.i, 769
   %alu_1397.i = sub nsw i64 4294967294, %55
   %alu_1403.i = and i64 %alu_1379.i, %alu_1397.i
-  %alu_1410.i = or i64 %alu_1403.i, %alu_1391.i
+  %alu_1409.i = or i64 %alu_1403.i, %alu_1391.i
   %alu_1415.i = or disjoint i64 %alu_880.i, 2
   %alu_1421.i = or disjoint i64 %alu_880.i, 2051
   %alu_1427.i = sub nsw i64 0, %alu_944.i
-  %alu_1433.i = and i64 %alu_1410.i, %alu_1427.i
-  %78 = icmp eq i64 %alu_944.i, 0
-  %alu_1445.i = select i1 %78, i64 %alu_1421.i, i64 0
-  %alu_1452.i = or i64 %alu_1433.i, %alu_1445.i
+  %alu_1433.i = and i64 %alu_1409.i, %alu_1427.i
+  %80 = icmp eq i64 %alu_944.i, 0
+  %alu_1445.i = select i1 %80, i64 %alu_1421.i, i64 0
+  %alu_1451.i = or i64 %alu_1433.i, %alu_1445.i
   %alu_1458.i = and i64 %alu_908.neg.i, 4294967295
   %alu_1463.i = and i64 %alu_1415.i, %alu_1458.i
   %alu_1469.i = xor i64 %alu_1458.i, 4294967295
-  %alu_1475.i = and i64 %alu_1452.i, %alu_1469.i
+  %alu_1475.i = and i64 %alu_1451.i, %alu_1469.i
   %alu_1481.i = or i64 %alu_1463.i, %alu_1475.i
   %alu_1487.i = and i64 %op.rdx, %alu_944.i
   %alu_1496.i = add nuw nsw i64 %ext7, 1
@@ -6227,18 +6169,76 @@ entry:
   %alu_1592.i = shl nuw i64 %alu_1584.i, 32
   %alu_1596.i = or disjoint i64 %alu_1481.i, %alu_1592.i
   %alu_1607.i = shl nuw i64 %ext7, 32
-  %79 = or disjoint i64 %alu_880.i, %alu_1607.i
-  %alu_1611.i = or i64 %alu_835.i, %79
-  %alu_1616.i = sub nsw i64 0, %alu_835.i
+  %81 = or disjoint i64 %alu_880.i, %alu_1607.i
+  %alu_1611.i = or i64 %alu_834.i, %81
+  %alu_1616.i = sub nsw i64 0, %alu_834.i
   %alu_1622.i = or i64 %alu_828.i, %alu_1616.i
   %alu_1629.i = lshr i64 %alu_1622.i, 31
-  %80 = or i64 %alu_1629.i, -2
-  %alu_1635.neg.i = add nsw i64 %80, 1
+  %82 = or i64 %alu_1629.i, -2
+  %alu_1635.neg.i = add nsw i64 %82, 1
   %alu_1644.i = and i64 %alu_1596.i, %alu_1635.neg.i
-  %alu_1647.i = sub nsw i64 -2, %80
+  %alu_1647.i = sub nsw i64 -2, %82
   %alu_1650.i = and i64 %alu_1647.i, %alu_1611.i
   %alu_1653.i = or i64 %alu_1644.i, %alu_1650.i
   ret i64 %alu_1653.i
+}
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define dso_local i64 @orb_placement_merge_step(i64 %a0, i64 %a1, i32 %a2, i32 %a3, i8 zeroext %a4, i8 zeroext %a5) local_unnamed_addr #0 {
+entry:
+  %ext4 = zext i8 %a4 to i64
+  %cmp_le_11.i = icmp ult i8 %a4, 4
+  %cmp_eq_20.not.not.i = icmp eq i8 %a4, 2
+  %cmp_eq_29.not.not.i = icmp eq i8 %a4, 3
+  %cmp_eq_38.not.i = icmp eq i8 %a5, 1
+  %cmp_eq_47.not.i = icmp eq i32 %a2, 0
+  %cmp_lt_56.not.i = icmp ult i64 %a0, %a1
+  %cmp_eq_65.not.i = icmp eq i8 %a4, 1
+  %cmp_eq_76.not.i = icmp eq i32 %a3, %a2
+  %cmp_le_85.not.not.i = icmp ule i64 %a0, %a1
+  %0 = and i1 %cmp_eq_76.not.i, %cmp_eq_65.not.i
+  %1 = and i1 %cmp_le_85.not.not.i, %0
+  %sel_101.i = select i1 %1, i64 1793, i64 5
+  %cmp_eq_105.not.i = icmp eq i8 %a4, 0
+  %cmp_eq_123.not.i = icmp eq i32 %a3, 0
+  %cmp_lt_134.not.i = icmp ult i32 %a3, %a2
+  %sel_142.i = select i1 %cmp_lt_134.not.i, i64 1281, i64 1793
+  %sel_150.i = select i1 %cmp_eq_65.not.i, i64 %sel_142.i, i64 1793
+  %sel_154.i = select i1 %cmp_eq_105.not.i, i64 1281, i64 %sel_150.i
+  %sel_159.i = select i1 %cmp_lt_56.not.i, i64 %sel_154.i, i64 %sel_101.i
+  %2 = and i1 %cmp_le_85.not.not.i, %cmp_eq_65.not.i
+  %sel_215.i = select i1 %2, i64 1281, i64 4
+  %sel_228.i = select i1 %cmp_eq_47.not.i, i64 %sel_215.i, i64 %sel_159.i
+  %sel_240.i = select i1 %cmp_eq_38.not.i, i64 %sel_228.i, i64 3
+  %sel_267.i = select i1 %cmp_eq_76.not.i, i64 1793, i64 6
+  %sel_271.i = select i1 %cmp_eq_47.not.i, i64 6, i64 %sel_267.i
+  %sel_280.i = select i1 %cmp_eq_29.not.not.i, i64 %sel_271.i, i64 %sel_240.i
+  %sel_305.i = select i1 %cmp_eq_123.not.i, i64 3, i64 1281
+  %sel_309.i = select i1 %cmp_eq_38.not.i, i64 %sel_305.i, i64 3
+  %sel_318.i = select i1 %cmp_eq_20.not.not.i, i64 %sel_309.i, i64 %sel_280.i
+  %3 = add nsw i64 %ext4, -4
+  %4 = icmp ult i64 %3, -2
+  %5 = xor i1 %cmp_eq_65.not.i, %4
+  %6 = and i1 %cmp_le_85.not.not.i, %5
+  %7 = and i1 %cmp_eq_47.not.i, %6
+  %narrow82.i = and i1 %cmp_eq_38.not.i, %7
+  %alu_339.i = select i1 %cmp_lt_56.not.i, i64 1281, i64 257
+  %sel_330.i = select i1 %narrow82.i, i64 %alu_339.i, i64 %sel_318.i
+  %sel_350.i = select i1 %cmp_le_11.i, i64 %sel_330.i, i64 2
+  %8 = tail call i64 @llvm.umin.i64(i64 %a0, i64 4294967295)
+  %9 = tail call i64 @llvm.umin.i64(i64 %a1, i64 4294967295)
+  %sel_478.i = select i1 %cmp_le_85.not.not.i, i64 %9, i64 %8
+  %sel_488.i = select i1 %0, i64 %sel_478.i, i64 %8
+  %sel_493.i = select i1 %cmp_lt_56.not.i, i64 %9, i64 %sel_488.i
+  %sel_512.i = select i1 %cmp_eq_47.not.i, i64 %sel_478.i, i64 %sel_493.i
+  %sel_517.i = select i1 %cmp_eq_38.not.i, i64 %sel_512.i, i64 %8
+  %10 = and i64 %ext4, 254
+  %11 = icmp eq i64 %10, 2
+  %sel_527.i = select i1 %11, i64 %8, i64 %sel_517.i
+  %sel_532.i = select i1 %cmp_le_11.i, i64 %sel_527.i, i64 %8
+  %alu_542.i = shl nuw i64 %sel_532.i, 32
+  %alu_545.i = or i64 %sel_350.i, %alu_542.i
+  ret i64 %alu_545.i
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
@@ -6276,40 +6276,32 @@ entry:
   %ext4 = zext i32 %a4 to i64
   %ext5 = zext i32 %a5 to i64
   %ext6 = zext i32 %a6 to i64
-  %cmp_eq_7.not.i = icmp eq i8 %a0, 1
-  %cmp_eq_18.not.i = icmp eq i8 %a1, 1
-  %cmp_lt_27.not.i = icmp ult i64 %a8, %a7
-  %cmp_eq_38.not.i = icmp eq i32 %a4, 0
+  %cmp_eq_7.not.i = icmp ne i8 %a0, 1
+  %cmp_eq_18.not.i = icmp ne i8 %a1, 1
+  %cmp_lt_27.not.i = icmp uge i64 %a8, %a7
+  %cmp_eq_38.not.i = icmp ne i32 %a4, 0
   %cmp_lt_49.i = icmp ugt i32 %a6, 1
-  %cmp_lt_64.not.i = icmp uge i32 %a2, %a3
+  %cmp_lt_64.not.not.i = icmp ult i32 %a2, %a3
   %alu_78.i = add nuw nsw i64 %ext4, %ext3
   %cmp_le_82.not.not.i = icmp ult i64 %alu_78.i, %ext2
   %cmp_lt_91.not.not.i = icmp eq i32 %a5, -1
   %alu_99.i = add nuw nsw i64 %ext5, 1
-  %alu_100.i = and i64 %alu_99.i, 4294967295
-  %sel_104.i = select i1 %cmp_lt_91.not.not.i, i64 4294967295, i64 %alu_100.i
+  %sel_104.i = select i1 %cmp_lt_91.not.not.i, i64 4294967295, i64 %alu_99.i
   %sel_108.i = select i1 %cmp_le_82.not.not.i, i64 1, i64 %sel_104.i
   %sel_116.i = select i1 %cmp_le_82.not.not.i, i64 512, i64 0
   %alu_120.i = shl nuw i64 %ext5, 32
-  %not.cmp_lt_49.i = xor i1 %cmp_lt_49.i, true
   %cmp_le_140.not.not.i = icmp ult i64 %sel_108.i, %ext6
   %sel_148.i = select i1 %cmp_le_140.not.not.i, i64 1, i64 259
-  %narrow.i = or i1 %cmp_eq_38.not.i, %not.cmp_lt_49.i
-  %narrow26.i = or i1 %narrow.i, %cmp_lt_27.not.i
-  %0 = or i1 %cmp_eq_38.not.i, %cmp_lt_27.not.i
-  %narrow28.i = or i1 %cmp_eq_18.not.i, %narrow26.i
-  %1 = or i1 %cmp_eq_18.not.i, %0
-  %narrow30.i = or i1 %cmp_eq_7.not.i, %narrow28.i
-  %2 = or i1 %cmp_eq_7.not.i, %1
-  %3 = xor i1 %2, true
-  %4 = and i1 %cmp_lt_64.not.i, %3
-  %narrow31.i = and i1 %cmp_lt_49.i, %4
+  %.not35.i = and i1 %cmp_eq_38.not.i, %cmp_lt_27.not.i
+  %.not34.i = and i1 %cmp_eq_18.not.i, %.not35.i
+  %.not33.i = and i1 %cmp_eq_7.not.i, %.not34.i
+  %narrow.not.i = select i1 %.not33.i, i1 %cmp_lt_49.i, i1 false
   %alu_196.i = or disjoint i64 %alu_120.i, 2
-  %sel_201.i = select i1 %narrow30.i, i64 %alu_196.i, i64 %alu_120.i
   %alu_215.i = or disjoint i64 %sel_116.i, %sel_148.i
   %alu_222.i = shl nuw i64 %sel_108.i, 32
   %alu_225.i = or disjoint i64 %alu_215.i, %alu_222.i
-  %sel_230.i = select i1 %narrow31.i, i64 %alu_225.i, i64 %sel_201.i
+  %sel_201.i = select i1 %cmp_lt_64.not.not.i, i64 %alu_120.i, i64 %alu_225.i
+  %sel_230.i = select i1 %narrow.not.i, i64 %sel_201.i, i64 %alu_196.i
   ret i64 %sel_230.i
 }
 
@@ -6333,31 +6325,27 @@ entry:
   %2 = select i1 %cmp_eq_5.not.i, i1 %narrow89.i, i1 false
   %narrow92.i = and i1 %cmp_eq_5.not.i, %narrow90.i
   %narrow93.demorgan.i = and i1 %cmp_eq_5.not.i, %cmp_eq_14.not.not.i
-  %narrow93.i = xor i1 %narrow93.demorgan.i, true
   %3 = or i1 %cmp_eq_5.not.i, %cmp_eq_87.not.i
   %sel_111.i = select i1 %3, i64 2, i64 1
-  %cmp_eq_115.not.i = icmp ne i32 %a0, 529
-  %cmp_eq_124.not.i = icmp ne i32 %a0, 503
   %4 = add nsw i64 %ext0, -600
   %narrow94.i = icmp ult i64 %4, -100
-  %5 = add nsw i64 %ext0, -500
-  %narrow95.i = icmp ult i64 %5, 100
-  %6 = and i1 %cmp_eq_115.not.i, %cmp_eq_124.not.i
-  %7 = and i1 %6, %2
-  %narrow99.i = select i1 %7, i1 %narrow95.i, i1 false
   %sel_205.i = select i1 %2, i64 5, i64 %sel_111.i
-  %sel_201.v.i = select i1 %narrow94.i, i1 true, i1 %narrow99.i
-  %8 = select i1 %2, i1 %sel_201.v.i, i1 %narrow93.i
+  %5 = icmp eq i32 %a0, 529
+  %6 = icmp eq i32 %a0, 503
+  %7 = or i1 %5, %6
+  %8 = select i1 %7, i1 true, i1 %narrow94.i
+  %not.sel_201.v.i = xor i1 %narrow94.i, %8
+  %narrow100.i = select i1 %2, i1 %not.sel_201.v.i, i1 %narrow93.demorgan.i
   %not.narrow90.i = xor i1 %narrow90.i, true
   %9 = and i1 %cmp_eq_5.not.i, %not.narrow90.i
   %10 = select i1 %9, i1 %narrow89.i, i1 false
   %narrow101.i = select i1 %10, i1 %narrow94.i, i1 false
   %sel_246.i = select i1 %narrow92.i, i64 3, i64 %sel_205.i
-  %11 = or i1 %narrow92.i, %narrow101.i
-  %12 = select i1 %11, i1 true, i1 %8
-  %sel_272.i = select i1 %12, i64 %sel_246.i, i64 4
+  %11 = xor i1 %narrow92.i, %narrow101.i
+  %12 = xor i1 %11, true
+  %narrow103.i = select i1 %12, i1 %narrow100.i, i1 false
+  %sel_272.i = select i1 %narrow103.i, i64 4, i64 %sel_246.i
   %sel_287.i = select i1 %narrow101.i, i64 0, i64 %sel_272.i
-  %cmp_eq_298.i = xor i1 %narrow101.i, true
   %cmp_eq_301.not.i = icmp eq i64 %a4, 0
   %sel_310.i = select i1 %cmp_eq_301.not.i, i64 3600, i64 %a4
   %cmp_eq_325.not.i = icmp eq i64 %sel_287.i, 2
@@ -6365,25 +6353,18 @@ entry:
   %cmp_eq_345.not.i = icmp eq i64 %a3, 0
   %sel_355.i = select i1 %cmp_eq_345.not.i, i64 %sel_333.i, i64 %a3
   %sel_378.i = tail call i64 @llvm.umin.i64(i64 %sel_355.i, i64 %sel_310.i)
-  %cmp_le_388.i = icmp ugt i64 %sel_378.i, 4294967295
-  %alu_395.i = shl i64 %sel_378.i, 32
-  %cmp_eq_410.not.i = icmp ne i64 %sel_287.i, 1
-  %narrow104.i = icmp ult i64 %sel_287.i, 4
-  %13 = and i64 %sel_287.i, 6
-  %narrow105.i = icmp eq i64 %13, 4
-  %narrow106.i = and i1 %cmp_eq_410.not.i, %narrow104.i
-  %not.cmp_eq_410.not.i = xor i1 %cmp_eq_410.not.i, true
-  %narrow107.i = or i1 %narrow105.i, %not.cmp_eq_410.not.i
-  %narrow108.i = select i1 %cmp_eq_298.i, i1 %narrow106.i, i1 false
-  %14 = xor i1 %narrow108.i, %cmp_eq_298.i
-  %narrow110.i = select i1 %14, i1 %narrow107.i, i1 false
-  %narrow111.i = or i1 %narrow108.i, %narrow110.i
-  %sel_495.i = select i1 %narrow110.i, i64 512, i64 0
-  %alu_520.i = select i1 %cmp_le_388.i, i64 -4294967296, i64 %alu_395.i
-  %15 = or disjoint i64 %sel_495.i, %alu_520.i
-  %alu_513.i = or disjoint i64 %15, %sel_287.i
-  %alu_523.i = or i64 %alu_513.i, 256
-  %sel_527.i = select i1 %narrow111.i, i64 %alu_523.i, i64 0
+  %13 = tail call i64 @llvm.umin.i64(i64 %sel_378.i, i64 4294967295)
+  %narrow103.not.i = xor i1 %narrow103.i, true
+  %14 = and i64 %sel_287.i, 3
+  %15 = icmp ne i64 %14, 1
+  %narrow106.i = select i1 %15, i1 %narrow103.not.i, i1 false
+  %16 = select i1 %narrow101.i, i1 true, i1 %narrow106.i
+  %sel_495.i = select i1 %16, i64 0, i64 512
+  %alu_520.i = shl nuw i64 %13, 32
+  %17 = or disjoint i64 %alu_520.i, %sel_495.i
+  %alu_513.i = or disjoint i64 %17, %sel_287.i
+  %alu_523.i = or disjoint i64 %alu_513.i, 256
+  %sel_527.i = select i1 %narrow101.i, i64 0, i64 %alu_523.i
   ret i64 %sel_527.i
 }
 
@@ -6876,7 +6857,7 @@ ite_then_1994.i:                                  ; preds = %ite_then_1979.i
   %spec.select248.i = and i1 %cmp_eq_2015.not.i, %cmp_lt_2002.not.i
   br label %probe_orb_fleet_place_argmin_step.exit
 
-probe_orb_fleet_place_argmin_step.exit:           ; preds = %entry, %ite_then_68.i, %ite_then_96.i, %ite_then_137.i, %ite_then_162.i, %ite_then_188.i, %ite_then_201.i, %ite_then_214.i, %ite_then_227.i, %ite_then_242.i, %ite_else_189.i, %ite_then_304.i, %ite_then_317.i, %ite_then_332.i, %ite_else_138.i, %ite_then_389.i, %ite_then_415.i, %ite_then_428.i, %ite_then_441.i, %ite_then_454.i, %ite_then_469.i, %ite_else_416.i, %ite_then_531.i, %ite_then_544.i, %ite_then_559.i, %ite_then_608.i, %ite_then_631.i, %ite_then_657.i, %ite_then_670.i, %ite_then_683.i, %ite_then_696.i, %ite_then_711.i, %ite_else_658.i, %ite_then_773.i, %ite_then_786.i, %ite_then_801.i, %ite_else_609.i, %ite_then_856.i, %ite_then_882.i, %ite_then_895.i, %ite_then_908.i, %ite_then_921.i, %ite_then_936.i, %ite_else_883.i, %ite_then_998.i, %ite_then_1011.i, %ite_then_1026.i, %ite_else_97.i, %ite_then_1105.i, %ite_then_1130.i, %ite_then_1156.i, %ite_then_1169.i, %ite_then_1182.i, %ite_then_1195.i, %ite_then_1210.i, %ite_else_1157.i, %ite_then_1272.i, %ite_then_1285.i, %ite_then_1300.i, %ite_else_1106.i, %ite_then_1357.i, %ite_then_1383.i, %ite_then_1396.i, %ite_then_1409.i, %ite_then_1422.i, %ite_then_1437.i, %ite_else_1384.i, %ite_then_1499.i, %ite_then_1512.i, %ite_then_1527.i, %ite_then_1576.i, %ite_then_1599.i, %ite_then_1625.i, %ite_then_1638.i, %ite_then_1651.i, %ite_then_1664.i, %ite_then_1679.i, %ite_else_1626.i, %ite_then_1741.i, %ite_then_1754.i, %ite_then_1769.i, %ite_else_1577.i, %ite_then_1824.i, %ite_then_1850.i, %ite_then_1863.i, %ite_then_1876.i, %ite_then_1889.i, %ite_then_1904.i, %ite_else_1851.i, %ite_then_1966.i, %ite_then_1979.i, %ite_then_1994.i
+probe_orb_fleet_place_argmin_step.exit:           ; preds = %ite_then_1994.i, %ite_then_1979.i, %ite_then_1966.i, %ite_else_1851.i, %ite_then_1904.i, %ite_then_1889.i, %ite_then_1876.i, %ite_then_1863.i, %ite_then_1850.i, %ite_then_1824.i, %ite_else_1577.i, %ite_then_1769.i, %ite_then_1754.i, %ite_then_1741.i, %ite_else_1626.i, %ite_then_1679.i, %ite_then_1664.i, %ite_then_1651.i, %ite_then_1638.i, %ite_then_1625.i, %ite_then_1599.i, %ite_then_1576.i, %ite_then_1527.i, %ite_then_1512.i, %ite_then_1499.i, %ite_else_1384.i, %ite_then_1437.i, %ite_then_1422.i, %ite_then_1409.i, %ite_then_1396.i, %ite_then_1383.i, %ite_then_1357.i, %ite_else_1106.i, %ite_then_1300.i, %ite_then_1285.i, %ite_then_1272.i, %ite_else_1157.i, %ite_then_1210.i, %ite_then_1195.i, %ite_then_1182.i, %ite_then_1169.i, %ite_then_1156.i, %ite_then_1130.i, %ite_then_1105.i, %ite_else_97.i, %ite_then_1026.i, %ite_then_1011.i, %ite_then_998.i, %ite_else_883.i, %ite_then_936.i, %ite_then_921.i, %ite_then_908.i, %ite_then_895.i, %ite_then_882.i, %ite_then_856.i, %ite_else_609.i, %ite_then_801.i, %ite_then_786.i, %ite_then_773.i, %ite_else_658.i, %ite_then_711.i, %ite_then_696.i, %ite_then_683.i, %ite_then_670.i, %ite_then_657.i, %ite_then_631.i, %ite_then_608.i, %ite_then_559.i, %ite_then_544.i, %ite_then_531.i, %ite_else_416.i, %ite_then_469.i, %ite_then_454.i, %ite_then_441.i, %ite_then_428.i, %ite_then_415.i, %ite_then_389.i, %ite_else_138.i, %ite_then_332.i, %ite_then_317.i, %ite_then_304.i, %ite_else_189.i, %ite_then_242.i, %ite_then_227.i, %ite_then_214.i, %ite_then_201.i, %ite_then_188.i, %ite_then_162.i, %ite_then_137.i, %ite_then_96.i, %ite_then_68.i, %entry
   %common.ret.op.shrunk.i = phi i1 [ true, %ite_then_227.i ], [ false, %ite_then_214.i ], [ true, %ite_then_201.i ], [ false, %ite_then_188.i ], [ true, %ite_else_189.i ], [ true, %ite_then_317.i ], [ false, %ite_then_304.i ], [ false, %ite_then_162.i ], [ true, %ite_then_137.i ], [ true, %ite_then_454.i ], [ false, %ite_then_441.i ], [ true, %ite_then_428.i ], [ false, %ite_then_415.i ], [ true, %ite_else_416.i ], [ true, %ite_then_544.i ], [ false, %ite_then_531.i ], [ false, %ite_then_389.i ], [ true, %ite_else_138.i ], [ true, %ite_then_696.i ], [ false, %ite_then_683.i ], [ true, %ite_then_670.i ], [ false, %ite_then_657.i ], [ true, %ite_else_658.i ], [ true, %ite_then_786.i ], [ false, %ite_then_773.i ], [ false, %ite_then_631.i ], [ true, %ite_then_608.i ], [ true, %ite_then_921.i ], [ false, %ite_then_908.i ], [ true, %ite_then_895.i ], [ false, %ite_then_882.i ], [ true, %ite_else_883.i ], [ true, %ite_then_1011.i ], [ false, %ite_then_998.i ], [ false, %ite_then_856.i ], [ true, %ite_else_609.i ], [ false, %ite_then_96.i ], [ true, %ite_else_97.i ], [ true, %ite_then_1195.i ], [ false, %ite_then_1182.i ], [ true, %ite_then_1169.i ], [ false, %ite_then_1156.i ], [ true, %ite_else_1157.i ], [ true, %ite_then_1285.i ], [ false, %ite_then_1272.i ], [ false, %ite_then_1130.i ], [ true, %ite_then_1105.i ], [ true, %ite_then_1422.i ], [ false, %ite_then_1409.i ], [ true, %ite_then_1396.i ], [ false, %ite_then_1383.i ], [ true, %ite_else_1384.i ], [ true, %ite_then_1512.i ], [ false, %ite_then_1499.i ], [ false, %ite_then_1357.i ], [ true, %ite_else_1106.i ], [ true, %ite_then_1664.i ], [ false, %ite_then_1651.i ], [ true, %ite_then_1638.i ], [ false, %ite_then_1625.i ], [ true, %ite_else_1626.i ], [ true, %ite_then_1754.i ], [ false, %ite_then_1741.i ], [ false, %ite_then_1599.i ], [ true, %ite_then_1576.i ], [ true, %ite_then_1889.i ], [ false, %ite_then_1876.i ], [ true, %ite_then_1863.i ], [ false, %ite_then_1850.i ], [ true, %ite_else_1851.i ], [ true, %ite_then_1979.i ], [ false, %ite_then_1966.i ], [ false, %ite_then_1824.i ], [ true, %ite_else_1577.i ], [ false, %ite_then_68.i ], [ true, %entry ], [ %spec.select.i, %ite_then_242.i ], [ %spec.select234.i, %ite_then_332.i ], [ %spec.select235.i, %ite_then_469.i ], [ %spec.select236.i, %ite_then_559.i ], [ %spec.select237.i, %ite_then_711.i ], [ %spec.select238.i, %ite_then_801.i ], [ %spec.select239.i, %ite_then_936.i ], [ %spec.select240.i, %ite_then_1026.i ], [ %spec.select241.i, %ite_then_1210.i ], [ %spec.select242.i, %ite_then_1300.i ], [ %spec.select243.i, %ite_then_1437.i ], [ %spec.select244.i, %ite_then_1527.i ], [ %spec.select245.i, %ite_then_1679.i ], [ %spec.select246.i, %ite_then_1769.i ], [ %spec.select247.i, %ite_then_1904.i ], [ %spec.select248.i, %ite_then_1994.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
@@ -6891,7 +6872,7 @@ entry:
 ite_then_9.i:                                     ; preds = %entry
   %sel_25.i = tail call i64 @llvm.umin.i64(i64 %a3, i64 100000000000)
   %alu_29.i = mul nuw nsw i64 %sel_25.i, 120000
-  %sel_43.i = tail call i64 @llvm.umin.i64(i64 %alu_29.i, i64 %a1)
+  %sel_43.i = tail call i64 @llvm.umin.i64(i64 %a1, i64 %alu_29.i)
   %sel_61.i = tail call i64 @llvm.umin.i64(i64 %a2, i64 120000)
   %alu_72.i = mul nuw nsw i64 %sel_25.i, %sel_61.i
   %sel_88.i = tail call i64 @llvm.usub.sat.i64(i64 %sel_43.i, i64 %alu_72.i)
@@ -6915,7 +6896,7 @@ ite_then_163.i:                                   ; preds = %ite_then_151.i
   %arg_v5.div_raw_179.i = tail call i64 @llvm.umin.i64(i64 %div_raw_179.i, i64 %a5)
   br label %probe_orb_pool_pacer_step.exit
 
-probe_orb_pool_pacer_step.exit:                   ; preds = %entry, %ite_then_9.i, %ite_then_151.i, %ite_then_163.i
+probe_orb_pool_pacer_step.exit:                   ; preds = %ite_then_163.i, %ite_then_151.i, %ite_then_9.i, %entry
   %common.ret.op.i = phi i64 [ %arg_v5.div_raw_179.i, %ite_then_163.i ], [ 0, %ite_then_151.i ], [ %sel_136.i, %ite_then_9.i ], [ 0, %entry ]
   ret i64 %common.ret.op.i
 }
@@ -6923,13 +6904,9 @@ probe_orb_pool_pacer_step.exit:                   ; preds = %entry, %ite_then_9.
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local i32 @orb_confinement_scan_step(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4, i8 zeroext %a5, i32 %a6, i32 %a7) local_unnamed_addr #0 {
 entry:
-  %ext6 = zext i32 %a6 to i64
-  %ext7 = zext i32 %a7 to i64
-  %cmp_eq_5.not.i = icmp ne i32 %a7, 0
-  %0 = add nsw i64 %ext6, -1
-  %or.cond.not.i = icmp ult i64 %0, %ext7
-  %or.cond = select i1 %cmp_eq_5.not.i, i1 %or.cond.not.i, i1 false
-  br i1 %or.cond, label %ite_then_42.i, label %probe_orb_confinement_scan_step.exit
+  %0 = add i32 %a6, -1
+  %.not = icmp ult i32 %0, %a7
+  br i1 %.not, label %ite_then_42.i, label %probe_orb_confinement_scan_step.exit
 
 ite_then_42.i:                                    ; preds = %entry
   %cmp_eq_50.not.i = icmp eq i8 %a0, 0
@@ -6956,7 +6933,7 @@ ite_else_122.i:                                   ; preds = %ite_else_106.i
   %1 = select i1 %cmp_eq_130.not.i, i32 256, i32 7
   br label %probe_orb_confinement_scan_step.exit
 
-probe_orb_confinement_scan_step.exit:             ; preds = %entry, %ite_then_42.i, %ite_else_58.i, %ite_else_74.i, %ite_else_90.i, %ite_else_106.i, %ite_else_122.i
+probe_orb_confinement_scan_step.exit:             ; preds = %ite_else_122.i, %ite_else_106.i, %ite_else_90.i, %ite_else_74.i, %ite_else_58.i, %ite_then_42.i, %entry
   %common.ret.op.i = phi i32 [ 2, %ite_then_42.i ], [ 3, %ite_else_58.i ], [ 4, %ite_else_74.i ], [ 5, %ite_else_90.i ], [ 6, %ite_else_106.i ], [ %1, %ite_else_122.i ], [ 1, %entry ]
   ret i32 %common.ret.op.i
 }
@@ -6971,14 +6948,14 @@ entry:
   br i1 %cmp_eq_11.not.i, label %probe_orb_job_identity_eq256_step.exit, label %ite_then_18.i
 
 ite_then_18.i:                                    ; preds = %entry
-  %0 = icmp eq i64 %a0, %a4
-  %1 = icmp eq i64 %a1, %a5
-  %2 = and i1 %0, %1
-  %3 = icmp eq i64 %a2, %a6
-  %4 = and i1 %2, %3
-  %5 = icmp eq i64 %a3, %a7
-  %cmp_eq_46.i = and i1 %4, %5
-  br i1 %cmp_eq_46.i, label %ite_else_54.i, label %probe_orb_job_identity_eq256_step.exit
+  %0 = icmp ne i64 %a0, %a4
+  %1 = icmp ne i64 %a1, %a5
+  %.not13.i = or i1 %0, %1
+  %2 = icmp ne i64 %a2, %a6
+  %.not11.i = or i1 %.not13.i, %2
+  %3 = icmp ne i64 %a3, %a7
+  %cmp_eq_46.not.i = or i1 %.not11.i, %3
+  br i1 %cmp_eq_46.not.i, label %probe_orb_job_identity_eq256_step.exit, label %ite_else_54.i
 
 ite_else_54.i:                                    ; preds = %ite_then_18.i
   %cmp_eq_84.not.i = icmp eq i8 %a9, 1
@@ -6986,11 +6963,11 @@ ite_else_54.i:                                    ; preds = %ite_then_18.i
 
 ite_else_99.i:                                    ; preds = %ite_else_54.i
   %cmp_eq_105.not.i = icmp eq i8 %a8, 1
-  %6 = select i1 %cmp_eq_105.not.i, i32 1, i32 256
+  %4 = select i1 %cmp_eq_105.not.i, i32 1, i32 256
   br label %probe_orb_job_identity_eq256_step.exit
 
-probe_orb_job_identity_eq256_step.exit:           ; preds = %entry, %ite_then_18.i, %ite_else_54.i, %ite_else_99.i
-  %common.ret.op.i = phi i32 [ 256, %ite_then_18.i ], [ %6, %ite_else_99.i ], [ 2, %ite_else_54.i ], [ 3, %entry ]
+probe_orb_job_identity_eq256_step.exit:           ; preds = %ite_else_99.i, %ite_else_54.i, %ite_then_18.i, %entry
+  %common.ret.op.i = phi i32 [ 256, %ite_then_18.i ], [ %4, %ite_else_99.i ], [ 2, %ite_else_54.i ], [ 3, %entry ]
   ret i32 %common.ret.op.i
 }
 
@@ -7025,7 +7002,7 @@ ite_else_86.i:                                    ; preds = %ite_then_70.i
   %0 = select i1 %cmp_lt_94.not.i, i32 1, i32 257
   br label %probe_orb_validation_dag_step.exit
 
-probe_orb_validation_dag_step.exit:               ; preds = %entry, %ite_then_25.i, %ite_else_41.i, %ite_else_57.i, %ite_then_70.i, %ite_else_86.i
+probe_orb_validation_dag_step.exit:               ; preds = %ite_else_86.i, %ite_then_70.i, %ite_else_57.i, %ite_else_41.i, %ite_then_25.i, %entry
   %common.ret.op.i = phi i32 [ 4, %ite_then_25.i ], [ 3, %ite_else_41.i ], [ 1, %ite_then_70.i ], [ %0, %ite_else_86.i ], [ 2, %ite_else_57.i ], [ 0, %entry ]
   ret i32 %common.ret.op.i
 }
@@ -7035,11 +7012,12 @@ define dso_local i64 @orb_fts5_lexer_step(i32 %a0, i32 %a1, i32 %a2, i32 %a3, i3
 entry:
   %ext3 = zext i32 %a3 to i64
   %ext4 = zext i32 %a4 to i64
+  %cmp_eq_7.not.i = icmp ne i32 %a3, 0
   %cmp_le_18.not.not.i = icmp ugt i32 %a3, %a4
   %cmp_lt_29.i = icmp ult i32 %a0, 3
   %cmp_lt_40.i = icmp ult i32 %a1, 4
-  %cmp_eq_49.not.not.not.not.i = icmp eq i32 %a0, 0
-  %cmp_eq_60.not.not.i = icmp eq i32 %a0, 1
+  %cmp_eq_49.not.not.not.not.i = icmp ne i32 %a0, 0
+  %cmp_eq_60.not.i = icmp ne i32 %a0, 1
   %cmp_eq_69.not.i = icmp ne i32 %a1, 2
   %cmp_eq_78.i = icmp eq i32 %a1, 1
   %cmp_lt_87.not.not.i = icmp eq i32 %a2, 0
@@ -7047,65 +7025,73 @@ entry:
   %narrow.i = or i1 %cmp_eq_96.not.i, %cmp_lt_87.not.not.i
   %narrow102.i = xor i1 %narrow.i, true
   %narrow103.i = xor i1 %cmp_eq_78.i, %narrow.i
+  %narrow104.i = or i1 %cmp_eq_78.i, %narrow102.i
   %alu_135.i = add nuw nsw i64 %ext4, 1
   %alu_136.i = and i64 %alu_135.i, 4294967295
   %sel_141.i = select i1 %cmp_lt_87.not.not.i, i64 %ext4, i64 %alu_136.i
   %sel_149.i = select i1 %cmp_lt_87.not.not.i, i64 256, i64 261
-  %narrow106.i = or i1 %cmp_eq_78.i, %narrow102.i
-  %cmp_eq_173.not.i = icmp ne i32 %a1, 3
-  %cmp_le_182.i = icmp ult i32 %a2, 2
+  %not.cmp_eq_69.not.i = xor i1 %cmp_eq_69.not.i, true
+  %cmp_eq_173.not.i = icmp eq i32 %a1, 3
+  %cmp_le_182.i = icmp ugt i32 %a2, 1
   %alu_195.i = shl nuw i64 %alu_136.i, 32
   %alu_197.i = or disjoint i64 %alu_195.i, 259
-  %narrow107.i = or i1 %cmp_eq_173.not.i, %cmp_le_182.i
+  %narrow107.not109.i = select i1 %cmp_eq_173.not.i, i1 %cmp_le_182.i, i1 false
   %alu_208.i = shl nuw i64 %ext4, 32
   %alu_210.i = or disjoint i64 %alu_208.i, 65793
   %sel_215.i = select i1 %cmp_eq_78.i, i64 %alu_210.i, i64 %alu_197.i
-  %narrow108.i = xor i1 %cmp_eq_78.i, %narrow107.i
   %cmp_lt_238.i = icmp ult i64 %alu_136.i, %ext3
   %sel_245.v.i = select i1 %cmp_eq_69.not.i, i1 %cmp_eq_78.i, i1 %cmp_lt_238.i
-  %narrow112.i = and i1 %cmp_eq_60.not.not.i, %narrow108.i
+  %0 = or i1 %cmp_eq_60.not.i, %cmp_eq_78.i
+  %1 = select i1 %0, i1 true, i1 %narrow107.not109.i
+  %narrow113.i = xor i1 %1, true
   %sel_299.v.i = select i1 %cmp_eq_69.not.i, i64 256, i64 131332
   %sel_299.i = or disjoint i64 %alu_208.i, %sel_299.v.i
   %sel_310.i = select i1 %cmp_eq_78.i, i64 %alu_210.i, i64 %sel_299.i
-  %sel_315.i = select i1 %cmp_eq_49.not.not.not.not.i, i64 %sel_310.i, i64 %sel_215.i
-  %0 = icmp ugt i32 %a0, 1
-  %1 = and i1 %0, %narrow103.i
-  %narrow113.i = and i1 %cmp_eq_69.not.i, %1
-  %narrow114.i = and i1 %0, %narrow106.i
-  %narrow116.i = and i1 %cmp_lt_40.i, %narrow113.i
-  %narrow117.i = and i1 %cmp_lt_40.i, %narrow114.i
-  %narrow119.i = and i1 %cmp_lt_40.i, %narrow112.i
-  %narrow120.i = and i1 %cmp_lt_29.i, %narrow116.i
-  %narrow121.i = and i1 %cmp_lt_29.i, %narrow117.i
-  %narrow124.demorgan.i = and i1 %cmp_lt_29.i, %cmp_lt_40.i
-  %2 = or i1 %cmp_eq_69.not.i, %narrow121.i
-  %3 = xor i1 %2, true
-  %4 = and i1 %0, %3
-  %5 = and i1 %cmp_lt_40.i, %4
-  %narrow128.i = and i1 %cmp_lt_29.i, %5
-  %not.narrow120145.i = xor i1 %narrow120.i, true
-  %6 = select i1 %narrow116.i, i1 %cmp_lt_29.i, i1 %narrow121.i
+  %sel_315.i = select i1 %cmp_eq_49.not.not.not.not.i, i64 %sel_215.i, i64 %sel_310.i
+  %2 = icmp ugt i32 %a0, 1
+  %3 = and i1 %2, %narrow103.i
+  %narrow114.i = and i1 %cmp_eq_69.not.i, %3
+  %narrow115.i = and i1 %2, %narrow104.i
+  %narrow116.i = and i1 %2, %not.cmp_eq_69.not.i
+  %4 = and i1 %cmp_eq_49.not.not.not.not.i, %cmp_lt_40.i
+  %5 = select i1 %cmp_lt_29.i, i1 %cmp_lt_40.i, i1 false
+  %narrow122.i = select i1 %5, i1 %narrow114.i, i1 false
+  %narrow123.i = select i1 %5, i1 %narrow115.i, i1 false
+  %narrow124.i = select i1 %5, i1 %narrow116.i, i1 false
+  %6 = select i1 %narrow122.i, i1 true, i1 %narrow123.i
   %7 = xor i1 %6, true
-  %narrow153.demorgan.i = and i1 %narrow124.demorgan.i, %cmp_le_18.not.not.i
-  %narrow154.i = and i1 %cmp_le_18.not.not.i, %narrow119.i
-  %narrow155.i = select i1 %cmp_le_18.not.not.i, i1 %narrow120.i, i1 false
-  %8 = select i1 %cmp_le_18.not.not.i, i1 %not.narrow120145.i, i1 false
-  %narrow156.i = select i1 %8, i1 %narrow121.i, i1 false
+  %8 = select i1 %6, i1 true, i1 %narrow124.i
+  %9 = xor i1 %8, true
+  %not.narrow122151.i = xor i1 %narrow122.i, true
+  %10 = select i1 %cmp_eq_7.not.i, i1 %cmp_le_18.not.not.i, i1 false
+  %narrow163.i = select i1 %10, i1 %narrow122.i, i1 false
+  %11 = select i1 %10, i1 %not.narrow122151.i, i1 false
+  %narrow164.i = select i1 %11, i1 %narrow123.i, i1 false
+  %12 = select i1 %10, i1 %7, i1 false
+  %narrow165.i = select i1 %12, i1 %narrow124.i, i1 false
+  %13 = select i1 %10, i1 %5, i1 false
   %alu_552.i = or disjoint i64 %alu_208.i, 131328
-  %sel_557.i = select i1 %narrow155.i, i64 %alu_552.i, i64 %sel_315.i
-  %9 = xor i1 %cmp_le_18.not.not.i, %narrow156.i
-  %10 = select i1 %9, i1 %7, i1 false
-  %narrow163.i = select i1 %10, i1 %narrow128.i, i1 false
+  %sel_557.i = select i1 %narrow163.i, i64 %alu_552.i, i64 %sel_315.i
+  %not.narrow164.i = xor i1 %narrow164.i, true
+  %narrow171.i = select i1 %not.narrow164.i, i1 %narrow165.i, i1 false
+  %14 = select i1 %narrow164.i, i1 true, i1 %narrow165.i
+  %15 = select i1 %14, i1 true, i1 %13
   %alu_599.i = or disjoint i64 %alu_208.i, 131329
-  %sel_604.i = select i1 %narrow156.i, i64 %alu_599.i, i64 %sel_557.i
-  %narrow167.demorgan.i = or i1 %narrow153.demorgan.i, %narrow163.i
-  %sel_634.i = select i1 %narrow167.demorgan.i, i64 %sel_604.i, i64 %alu_208.i
+  %sel_604.i = select i1 %narrow164.i, i64 %alu_599.i, i64 %sel_557.i
+  %not.narrow171.i = xor i1 %narrow171.i, true
+  %sel_634.i = select i1 %15, i64 %sel_604.i, i64 %alu_208.i
+  %16 = xor i1 %14, %15
+  %17 = select i1 %not.narrow171.i, i1 %16, i1 false
+  %18 = select i1 %17, i1 %13, i1 false
+  %19 = select i1 %18, i1 %9, i1 false
+  %20 = select i1 %19, i1 %4, i1 false
+  %narrow179.i = select i1 %20, i1 %narrow113.i, i1 false
   %alu_654.i = shl nuw i64 %sel_141.i, 32
   %alu_657.i = or disjoint i64 %alu_654.i, %sel_149.i
-  %sel_662.i = select i1 %narrow163.i, i64 %alu_657.i, i64 %sel_634.i
+  %sel_662.i = select i1 %narrow171.i, i64 %alu_657.i, i64 %sel_634.i
   %alu_680.i = select i1 %sel_245.v.i, i64 131334, i64 258
   %alu_690.i = or disjoint i64 %alu_680.i, %alu_195.i
-  %sel_695.i = select i1 %narrow154.i, i64 %alu_690.i, i64 %sel_662.i
+  %sel_695.i = select i1 %narrow179.i, i64 %alu_690.i, i64 %sel_662.i
   ret i64 %sel_695.i
 }
 
@@ -7171,7 +7157,7 @@ ite_else_57.i:                                    ; preds = %ite_else_28.i
 ite_else_44.i:                                    ; preds = %ite_else_28.i
   br label %probe_orb_model_account_admit.exit
 
-probe_orb_model_account_admit.exit:               ; preds = %entry, %ite_else_28.i, %ite_else_57.i, %ite_else_44.i
+probe_orb_model_account_admit.exit:               ; preds = %ite_else_44.i, %ite_else_57.i, %ite_else_28.i, %entry
   %common.ret.op.i = phi i8 [ 1, %ite_else_44.i ], [ 0, %ite_else_28.i ], [ %0, %ite_else_57.i ], [ 0, %entry ]
   ret i8 %common.ret.op.i
 }
@@ -7192,8 +7178,8 @@ entry:
   %sel_100.i = select i1 %cmp_eq_33.not.i, i64 0, i64 1125899906842624
   %cmp_eq_113.not.i = icmp eq i8 %a4, 1
   %sel_121.i = select i1 %cmp_eq_113.not.i, i64 0, i64 562949953421312
-  %alu_9.i = shl nuw nsw i64 %ext6, 16
-  %sel_141.i = select i1 %cmp_eq_113.not.i, i64 0, i64 %alu_9.i
+  %alu_137.i = shl nuw nsw i64 %ext6, 16
+  %sel_141.i = select i1 %cmp_eq_113.not.i, i64 0, i64 %alu_137.i
   %0 = tail call i32 @llvm.umin.i32(i32 %a5, i32 65535)
   %sel_165.i = zext nneg i32 %0 to i64
   %alu_179.i = or disjoint i64 %sel_121.i, %sel_100.i
@@ -7203,35 +7189,32 @@ entry:
   ret i64 %sel_189.i
 }
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i64 @llvm.fshl.i64(i64, i64, i64) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i64 @llvm.umax.i64(i64, i64) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i64 @llvm.umin.i64(i64, i64) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i64 @llvm.uadd.sat.i64(i64, i64) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i64 @llvm.usub.sat.i64(i64, i64) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i32 @llvm.umax.i32(i32, i32) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i32 @llvm.umin.i32(i32, i32) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i32 @llvm.usub.sat.i32(i32, i32) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
-declare i64 @llvm.vector.reduce.or.v4i64(<4 x i64>) #1
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare i2 @llvm.vector.reduce.or.v4i2(<4 x i2>) #1
 
 attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable }
-attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
-
-
-!0 = !{!"lean-native LLVM 18 verified backend"}
+attributes #1 = { mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none) }

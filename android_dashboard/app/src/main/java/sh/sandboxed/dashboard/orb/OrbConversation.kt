@@ -556,6 +556,7 @@ fun OrbConversationPage(
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val allMissions by core.missions.collectAsState()
+    val placementVersion by core.placementVersion.collectAsState()
     val backends by core.backends.collectAsState()
     val backendModels by core.backendModels.collectAsState()
     val workspaces by core.workspaces.collectAsState()
@@ -565,6 +566,24 @@ fun OrbConversationPage(
 
     var currentMission by remember(initialMission?.id) { mutableStateOf(initialMission) }
     val missionId = currentMission?.id
+
+    LaunchedEffect(placementVersion, missionId) {
+        if (placementVersion <= 0L || missionId == null) return@LaunchedEffect
+        val state = OrbMissionTree.placementOf(missionId) ?: return@LaunchedEffect
+        val cur = currentMission ?: return@LaunchedEffect
+        val effProj = (state.optimisticProject ?: state.project).takeIf { it.isNotEmpty() }
+        val effFolder = state.optimisticFolder ?: state.folder
+        currentMission = OrbReadCache.patchRowPlacement(
+            cur,
+            OrbPlacementCommitItem(
+                missionId = missionId,
+                project = effProj,
+                folder = effFolder,
+                placementRevision = state.revision,
+                explicitProject = true
+            )
+        )
+    }
 
     val messagesCacheKey = remember(missionId) { "mission_msgs_${missionId ?: "new"}" }
     val eventsCacheKey = remember(missionId) { "mission_events_${missionId ?: "new"}" }
@@ -1467,17 +1486,18 @@ fun OrbConversationPage(
                     core.refreshMissionsQuietly()
                 } else {
                     val slug = project.str("slug", "id") ?: project.id
-                    val tags = mutableListOf("project:$slug")
+                    val tags = mutableListOf<String>()
                     if (composeMode == OrbComposeMode.Goal) tags.add("orb-mode:goal")
-                    if (!initialFolder.isNullOrEmpty()) tags.add("orb-folder:$initialFolder")
+                    val cleanFolder = OrbMissionTree.normalizeFolder(initialFolder)
 
                     val body = mutableMapOf<String, Any?>(
                         "prompt" to finalPrompt,
                         "title" to OrbJSON.cleanTitle(baseText).take(72),
                         "project" to slug,
-                        "backend" to selectedBackend,
-                        "tags" to tags
+                        "folder" to cleanFolder,
+                        "backend" to selectedBackend
                     )
+                    if (tags.isNotEmpty()) body["tags"] = tags
                     if (selectedModel.isNotEmpty()) body["model_override"] = selectedModel
                     if (selectedWorkspaceId.isNotEmpty()) body["workspace_id"] = selectedWorkspaceId
                     val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
@@ -2124,8 +2144,11 @@ fun OrbConversationPage(
                                 leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color.White) },
                                 onClick = {
                                     showHeaderMenu = false
-                                    val projectSlug = project.str("slug", "id") ?: project.id
-                                    OrbMoveClipboard.pick(liveRow, projectSlug)
+                                    val projectSlug = OrbMissionTree.effectiveProject(liveRow).ifEmpty {
+                                        if (OrbMissionTree.hasAuthoritativePlacement(liveRow)) "" else (project.str("slug", "id") ?: project.id)
+                                    }
+                                    val cachedProjectRows = OrbReadCache.readMemoryRows("project_missions_$projectSlug")
+                                    OrbMoveClipboard.pick(liveRow, projectSlug, cachedProjectRows.ifEmpty { core.missions.value })
                                     commandBanner = "Ready to move — open destination project or folder"
                                 }
                             )

@@ -11,9 +11,9 @@ commands.allow = ["set_window_theme"]
 [[permission]]
 identifier = "allow-open-url"
 description = "Open validated external links in the default browser"
-commands.allow = ["open_url", "reveal_download"]
+commands.allow = ["open_url", "reveal_download", "save_file_as", "github_oauth_sign_in", "mistral_usage_sign_in"]
 
 [[permission]]
 identifier = "allow-biometrics"
 description = "Check and request Touch ID / Mac password authentication"
-commands.allow = ["biometric_status", "biometric_authenticate", "approval_key_status", "approval_key_create", "approval_sign"]
+commands.allow = ["biometric_status", "biometric_authenticate", "approval_key_status", "approval_key_create", "approval_sign", "approval_grace_until", "set_approval_grace"]

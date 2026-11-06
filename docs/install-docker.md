@@ -1,6 +1,6 @@
 # Installing the Core Backend for Orb with Docker
 
-Docker is the easiest way to run the Core backend. One command gets you a complete environment with the Rust backend, Next.js dashboard, and the primary AI harness CLIs pre-installed.
+Docker is the easiest way to run the Core backend. One command gets you a complete environment with the Rust backend, Caddy reverse proxy, and the primary AI harness CLIs pre-installed.
 
 ## Prerequisites
 
@@ -17,7 +17,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+Connect Orb Desktop, iOS, or Android to `http://localhost:3000` (verify health at [http://localhost:3000/api/health](http://localhost:3000/api/health)).
 
 ## Configuration
 
@@ -108,9 +108,8 @@ To back up your data, use `docker volume inspect` to find the volume paths, or b
 
 The multi-stage build produces a single image with everything pre-installed:
 
-- **Rust backend** — `sandboxed-sh`, `desktop-mcp`, `workspace-mcp`, `orchestrator-mcp`, `assistant-mcp` binaries
-- **Next.js dashboard** — standalone build served on port 3001 internally
-- **Caddy** — reverse proxy that unifies backend + dashboard on port 80
+- **Rust backend** — `sandboxed-sh`, `desktop-mcp`, `workspace-mcp`, `automation-manager-mcp`, `sandboxed-mcp` binaries
+- **Caddy** — reverse proxy forwarding API, `/v1` proxy, and WebSocket streams on port 80
 - **Claude Code CLI** — installed via npm
 - **OpenCode CLI** — installed from opencode.ai
 - **Grok CLI** — installed via npm when available
@@ -144,12 +143,12 @@ The Docker image serves HTTP on port 80. For production with TLS, use an externa
    JWT_SECRET=<long-random-string>
    ```
 
-### Dashboard options
+### Connecting Orb clients
 
-The Docker image includes the Next.js dashboard, but you can also:
+Point any Orb client at your server URL (`http://localhost:3000` locally or your TLS domain):
 
-- **Deploy the dashboard separately on Vercel** — set `NEXT_PUBLIC_API_URL` to your server's URL
-- **Use the iOS app** — point it at your server URL
+- **Orb Desktop** — enter the server URL in **Settings → Account**
+- **Orb iOS & Android** — enter the server URL in the setup sheet on launch
 
 ## Updating
 
@@ -179,7 +178,7 @@ for shell scripts automatically.
 
 ## Comparison with native installation
 
-Docker wraps the entire stack into a single container — backend, dashboard, reverse proxy, and all AI CLIs. Native installation gives you more control and slightly better performance.
+Docker wraps the entire server stack into a single container — Core backend, reverse proxy, and AI CLIs. Native installation gives you more control and slightly better performance.
 
 For most users, **Docker is the right choice**. Consider native installation when you need maximum performance on a dedicated production server.
 

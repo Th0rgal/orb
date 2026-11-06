@@ -1498,6 +1498,44 @@ pub(super) async fn control_actor_loop(
                                 };
                                 let _ = respond.send(result);
                             }
+                            ControlCommand::MoveMissions { user, request, respond } => {
+                                let any_untargeted_queued = queue.iter().any(|entry| entry.3.is_none());
+                                let bg_busy: std::collections::HashSet<Uuid> = background_tasks
+                                    .read()
+                                    .await
+                                    .iter()
+                                    .filter(|(_, tasks)| !tasks.is_empty())
+                                    .map(|(&mid, _)| mid)
+                                    .collect();
+                                let is_actor_busy = |mid: Uuid| -> bool {
+                                    running_mission_id == Some(mid)
+                                        || parallel_runners.contains_key(&mid)
+                                        || queue_has_pending_target_mission(&queue, mid)
+                                        || any_untargeted_queued
+                                        || bg_busy.contains(&mid)
+                                };
+                                let result = if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade) {
+                                    match dispatch_admission::durable_lock(&state.config).await {
+                                        Ok(_file_guard) => execute_move_missions_locked(
+                                            &is_actor_busy,
+                                            state,
+                                            user,
+                                            request,
+                                        )
+                                        .await,
+                                        Err(error) => Err((
+                                            StatusCode::INTERNAL_SERVER_ERROR,
+                                            serde_json::json!({ "error": error }),
+                                        )),
+                                    }
+                                } else {
+                                    Err((
+                                        StatusCode::SERVICE_UNAVAILABLE,
+                                        serde_json::json!({ "error": "Admission state unavailable" }),
+                                    ))
+                                };
+                                let _ = respond.send(result);
+                            }
                             ControlCommand::AdmitDispatch { .. } => unreachable!("nested admission"),
                             ControlCommand::UserMessage { id, content, agent: msg_agent, target_mission_id, strict, source, respond } => {
                                 if let Some(mid) = target_mission_id {

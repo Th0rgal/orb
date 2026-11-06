@@ -38,9 +38,10 @@ class StateInventoryTests(unittest.TestCase):
                 "fmt",
                 "policy-scripts",
                 "kernel-abi-check",
+                "capability-matrix",
                 "rust-workspace-tests",
+                "harness-contract",
                 "orb-client-unit",
-                "dashboard-unit",
             }.issubset(gate_ids)
         )
 

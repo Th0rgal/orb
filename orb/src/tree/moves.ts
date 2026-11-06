@@ -1,5 +1,13 @@
 import { createSignal } from "solid-js";
-import { bumpProjects, connectionVersion, getApiUrl, isTransientNetworkError, type Mission } from "../api";
+import {
+  ApprovalTransferConfirmationRequiredError,
+  bumpProjects,
+  connectionVersion,
+  getApiUrl,
+  isTransientNetworkError,
+  type ApprovalTransferPolicy,
+  type Mission,
+} from "../api";
 import {
   isClipboardReferenceRetired,
   isUnsyncedClipboard,
@@ -8,6 +16,12 @@ import {
   writeClipboardReference,
 } from "../clipboard";
 import { makeCutMission, moveMissions, planMissionMoves, readCutMission } from "../missionMove";
+
+export type ApprovalConfirmationPrompt = {
+  error: ApprovalTransferConfirmationRequiredError;
+  confirm: (policy: "revoke" | "keep") => void;
+  cancel: () => void;
+};
 
 /**
  * Cut/paste and drag-move of conversations between projects and folders in the sidebar.
@@ -25,6 +39,7 @@ export function createMissionMoves(deps: {
   revealDestination: (slug: string, path: string) => void;
   loadMissions: (slug: string) => Promise<void>;
   setActionError: (error: string | null) => void;
+  onApprovalConfirmationRequired?: (prompt: ApprovalConfirmationPrompt) => void;
 }) {
   const [cutId, setCutIdRaw] = createSignal<string | null>(null);
   const [pendingMoves, setPendingMoves] = createSignal<string[]>([]);
@@ -48,7 +63,7 @@ export function createMissionMoves(deps: {
     cutClipboard = text; consumedCut = ""; setCutIdRaw(id); deps.setActionError(null);
     void writeClipboardReference(text, clipboardData);
   };
-  const moveDirect = (ids: string[], slug: string, path: string) => {
+  const moveDirect = (ids: string[], slug: string, path: string, approvalPolicy: ApprovalTransferPolicy = "check") => {
     if (moving || !ids.length) return;
     moving = true;
     const version = connectionVersion();
@@ -58,7 +73,7 @@ export function createMissionMoves(deps: {
     }
     deps.setActionError(null);
     deps.revealDestination(slug, path);
-    void run(ids, slug, path, version, () => {}).finally(() => { moving = false; });
+    void run(ids, slug, path, version, () => {}, approvalPolicy).finally(() => { moving = false; });
   };
   /** `clipboardText` is what Cmd+V / onPaste already read; without it the in-app cut is used. */
   const pasteMission = (slug: string, path: string, clipboardText?: string) => {
@@ -105,11 +120,35 @@ export function createMissionMoves(deps: {
       });
     })().catch(e => deps.setActionError(`Couldn’t move conversation: ${String(e)}`)).finally(() => { moving = false; });
   };
-  /** Move `ids` (and the missions they launched) in parallel; `done` gets the failed selection ids. */
-  async function run(ids: string[], slug: string, path: string, version: number, done: (failed: string[]) => void) {
+
+  /** Move `ids` (and the missions they launched) atomically; `done` gets the failed selection ids. */
+  async function run(
+    ids: string[],
+    slug: string,
+    path: string,
+    version: number,
+    done: (failed: string[]) => void,
+    approvalPolicy: ApprovalTransferPolicy = "check",
+  ) {
     const plan = planMissionMoves(ids, slug, path, deps.allKnownMissions());
-    const failures = await moveMissions(plan, slug);
+    const failures = await moveMissions(plan, slug, { approvalPolicy });
     if (version !== connectionVersion()) return;
+    const approvalErr = failures.find(
+      f => f.error instanceof ApprovalTransferConfirmationRequiredError,
+    )?.error as ApprovalTransferConfirmationRequiredError | undefined;
+    if (approvalErr && deps.onApprovalConfirmationRequired) {
+      deps.onApprovalConfirmationRequired({
+        error: approvalErr,
+        confirm: (chosenPolicy) => {
+          if (version !== connectionVersion()) return;
+          moveDirect(ids, slug, path, chosenPolicy);
+        },
+        cancel: () => {
+          done(ids);
+        },
+      });
+      return;
+    }
     const failedIds = new Set(failures.map(f => f.id));
     const transientFailedIds = new Set(failures.filter(f => isTransientNetworkError(f.error)).map(f => f.id));
     // Load the destination before leaving the source, so no row blinks out.

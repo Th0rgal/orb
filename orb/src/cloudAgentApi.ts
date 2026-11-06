@@ -74,7 +74,7 @@ export const updateHermesSettings = (patch: HermesSettingsPatch) => api<HermesSe
 export function cloudPhase(phase: string): string { return ({ queued: 'Queued', submitting: 'Starting', submission_uncertain: 'Submission needs verification', running: 'Working', waiting_user: 'Waiting for your reply', reconnect_required: 'Reconnect account', response_complete: 'Response complete', failed: 'Failed', cancel_requested: 'Stopping — awaiting confirmation', cancelled: 'Stopped', incompatible: 'Connector incompatible' } as Record<string, string>)[phase] ?? 'Unknown provider state'; }
 export function cloudCanSend(e: CloudExecution): boolean { return !e.turns.some(t => ['submission_uncertain', 'incompatible', 'reconnect_required'].includes(t.phase)); }
 export function safeCloudUrl(value?: string): string | undefined { try { const u = new URL(value ?? ''); return u.protocol === 'https:' && !u.username && !u.password ? u.href : undefined; } catch { return undefined; } }
-export function launchCloud(body: {title: string; prompt: string; project: string; tags: string[]; idempotency_key: string; cloud: CloudSelection}): Promise<Mission> { return createMission(body); }
+export function launchCloud(body: {title: string; prompt: string; project: string; folder?: string; tags?: string[]; idempotency_key: string; cloud: CloudSelection}): Promise<Mission> { return createMission(body); }
 
 export function cloudAccountLabel(a: CloudAccount): string { return a.label.replace(/^(Cursor Cloud|Grok Bot) · /, ""); }
 

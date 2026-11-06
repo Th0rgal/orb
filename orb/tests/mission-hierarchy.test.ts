@@ -80,7 +80,7 @@ test("the resolver fetches a missing parent, retries transient failures and acce
 // frame ever shows a known child at the root.
 
 const truth: Row[] = [
-  row("P", { tags: ["orb-folder:"] }),
+  row("P", { folder: "" }),
   row("C1", { parent_mission_id: "P", tags: ["worker-dispatch:a"] }),
   row("C2", { callback_parent_mission_id: "P" }),
   row("G", { parent_mission_id: "C1" }),
@@ -192,7 +192,7 @@ test("open missions beyond the page: live always, stopped only while recent, chi
 });
 
 test("excludes /btw side sessions and descendant workers even when resolved asynchronously (incident 0c532a32 -> 23af9c91 -> 6b1abe32)", async () => {
-  const main = row("0c532a32", { title: "evm.fast", project: "verity-core", tags: ["orb-folder:Ethereum"] });
+  const main = row("0c532a32", { title: "evm.fast", project: "verity-core", folder: "Ethereum" });
   const btw = row("23af9c91", { title: "evm.fast · btw", project: "verity-core", tags: ["fork-workspace:52bbf658", "btw-parent:0c532a32"] });
   const worker = row("6b1abe32", { title: "Carbon 4 strategy consult", status: "completed", project: "verity-core", parent_mission_id: "23af9c91", tags: ["consult-model", "origin:mission"] });
   const grandchild = row("9911aa22", { title: "Verifier leaf", status: "completed", project: "verity-core", parent_mission_id: "6b1abe32" });
@@ -218,4 +218,24 @@ test("excludes /btw side sessions and descendant workers even when resolved asyn
   expect(isBtwMission(worker)).toBe(true);
   expect(isBtwMission(grandchild)).toBe(true);
   expect(openBeyondPage([main], [btw, worker, grandchild]).map(m => m.id)).toEqual([]);
+});
+
+test("snapshot with explicit project: null and folder: '' at higher placement_revision clears cached placement when SSE was missed", () => {
+  resetMissionHierarchy();
+  const inFolder = stickHierarchy(row("root-move", { project: "assistant", folder: "Research", placement_revision: 1 }));
+  expect(inFolder.project).toBe("assistant");
+  expect(inFolder.folder).toBe("Research");
+
+  // Another client unassigned `project: null` and moved `root-move` back to root (`folder: ""`, `placement_revision: 2`),
+  // and this client missed the SSE event and observes the authoritative snapshot on poll.
+  const movedToRoot = stickHierarchy(row("root-move", { project: null, folder: "", placement_revision: 2 }));
+  expect(movedToRoot.project).toBeNull();
+  expect(movedToRoot.folder).toBe("");
+  expect(movedToRoot.placement_revision).toBe(2);
+
+  // Subsequent stale poll from before the move (`placement_revision: 1`) cannot revert either project or folder.
+  const stale = stickHierarchy(row("root-move", { project: "assistant", folder: "Research", placement_revision: 1 }));
+  expect(stale.project).toBeNull();
+  expect(stale.folder).toBe("");
+  expect(stale.placement_revision).toBe(2);
 });

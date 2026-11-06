@@ -371,6 +371,11 @@ Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWireTranscriptSliceStep(JNIEnv *env
     return (jlong)orb_wire_transcript_slice_step((uint64_t)inPtr, (uint64_t)inLen, (uint64_t)outPtr, (uint64_t)outCap, (uint8_t)is32Bit, (uint64_t)lastAppliedSeq, (uint64_t)incomingSeq, (uint32_t)entryCount, (uint8_t)thinkingOpen, (uint8_t)normalizedAction, (uint8_t)isReplayFromLog);
 }
 
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbPlacementMergeStep(JNIEnv *env, jclass clazz, jlong curRev, jlong incRev, jint pendingOpId, jint ackOpId, jint sourceKind, jint hasPlacement) {
+    return (jlong)orb_placement_merge_step((uint64_t)curRev, (uint64_t)incRev, (uint32_t)pendingOpId, (uint32_t)ackOpId, (uint8_t)sourceKind, (uint8_t)hasPlacement);
+}
+
 JNIEXPORT jint JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_orbProxySseScanStep(JNIEnv *env, jclass clazz, jint lineKind, jint hasDoneToken, jint inThinkTag, jint nextStartsThink, jint nextEndsThink, jint hasNonEmptyContent) {
     return (jint)orb_proxy_sse_scan_step((uint8_t)lineKind, (uint8_t)hasDoneToken, (uint8_t)inThinkTag, (uint8_t)nextStartsThink, (uint8_t)nextEndsThink, (uint8_t)hasNonEmptyContent);

@@ -13,7 +13,14 @@ pub(super) async fn sync(store: &SqliteMissionStore, snapshot: Snapshot) -> Resu
   let o=&snapshot.origin;let id=o.id.to_string();let run=o.run_id.to_string();let now=now_string();let origin=serde_json::to_string(o).map_err(err)?;
   let old:Option<(String,u64,bool)>=tx.query_row("SELECT origin,sequence,terminal FROM local_origins WHERE mission_id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(err)?;
   if let Some((previous,sequence,terminal))=old {
-   if previous!=origin{return Err("Local mission identity already belongs to another origin".into());}
+   let same_origin = previous == origin
+    || serde_json::from_str::<crate::local_origin::Origin>(&previous)
+     .map(|prev| prev == *o)
+     .unwrap_or(false);
+   if !same_origin{return Err("Local mission identity already belongs to another origin".into());}
+   if previous != origin {
+    tx.execute("UPDATE local_origins SET origin=?2 WHERE mission_id=?1",params![id,origin]).map_err(err)?;
+   }
    if snapshot.sequence<=sequence{
     if !terminal{
      let updated=tx.execute("UPDATE mission_runs SET heartbeat_at=?2 WHERE run_id=?1 AND execution_state<>'terminal' AND generation=1",params![run,now]).map_err(err)?;
@@ -28,8 +35,16 @@ pub(super) async fn sync(store: &SqliteMissionStore, snapshot: Snapshot) -> Resu
   }else{
    // Plain INSERT is intentional: an offline record can NEVER adopt, replace,
    // or restart an existing mission, even when its UUID collides.
-   let tags=serde_json::to_string(&o.tags.iter().cloned().chain(std::iter::once("placement:client".to_owned())).collect::<Vec<_>>()).map_err(err)?;
-   tx.execute("INSERT INTO missions (id,status,title,workspace_id,backend,model_override,model_effort,created_at,updated_at,working_directory,requires_local_disk,project,tags,origin,agent,service_tier) VALUES (?1,'active',?2,?3,?4,?5,?11,?6,?7,?8,0,?9,?10,'orb-client',?12,?13)",params![id,o.title,crate::workspace::DEFAULT_WORKSPACE_ID.to_string(),o.backend,o.model,o.created_at,now,o.cwd,o.project,tags,o.effort,o.initial_agent(),o.service_tier.map(|tier|tier.id().to_string())]).map_err(err)?;
+   let mut raw_tags: Vec<String> = o.tags.iter().cloned().chain(std::iter::once("placement:client".to_owned())).collect();
+   let legacy_folder = crate::api::mission_store::strip_legacy_orb_folder_tags(&mut raw_tags);
+   let explicit_folder = crate::api::mission_store::normalize_mission_folder(&o.folder);
+   let folder = if !explicit_folder.is_empty() {
+    explicit_folder
+   } else {
+    legacy_folder.unwrap_or_default()
+   };
+   let tags = serde_json::to_string(&raw_tags).map_err(err)?;
+   tx.execute("INSERT INTO missions (id,status,title,workspace_id,backend,model_override,model_effort,created_at,updated_at,working_directory,requires_local_disk,project,folder,tags,origin,agent,service_tier) VALUES (?1,'active',?2,?3,?4,?5,?11,?6,?7,?8,0,?9,?14,?10,'orb-client',?12,?13)",params![id,o.title,crate::workspace::DEFAULT_WORKSPACE_ID.to_string(),o.backend,o.model,o.created_at,now,o.cwd,o.project,tags,o.effort,o.initial_agent(),o.service_tier.map(|tier|tier.id().to_string()),folder]).map_err(err)?;
    if let Some(objective)=o.prompt.trim().strip_prefix("/goal").filter(|rest| rest.starts_with(char::is_whitespace)).map(str::trim).filter(|rest| !rest.is_empty()) {
     tx.execute("UPDATE missions SET goal_mode=1,goal_objective=?2 WHERE id=?1",params![id,objective]).map_err(err)?;
    }
@@ -64,6 +79,7 @@ mod tests {
                 client_id: Uuid::new_v4(),
                 title: "Offline task".into(),
                 project: "test".into(),
+                folder: String::new(),
                 backend: "claudecode".into(),
                 model: None,
                 effort: None,
@@ -231,5 +247,32 @@ mod tests {
                 .as_deref(),
             Some("medium")
         );
+    }
+    #[tokio::test]
+    async fn local_origin_accepts_pre_upgrade_stored_json_without_folder_field() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(temp.path().to_path_buf(), "origin-upgrade")
+            .await
+            .unwrap();
+        let mut s = snapshot();
+        let id = s.origin.id;
+        sync(&store, s.clone()).await.unwrap();
+        // Simulate pre-upgrade row in `local_origins.origin` that omitted `"folder"`.
+        {
+            let conn = store.conn.lock().await;
+            let mut raw: serde_json::Value = serde_json::to_value(&s.origin).unwrap();
+            raw.as_object_mut().unwrap().remove("folder");
+            conn.execute(
+                "UPDATE local_origins SET origin = ?2 WHERE mission_id = ?1",
+                params![id.to_string(), serde_json::to_string(&raw).unwrap()],
+            )
+            .unwrap();
+        }
+        s.sequence = 2;
+        s.status = "awaiting_user".into();
+        s.text = "Post-upgrade output".into();
+        sync(&store, s).await.unwrap();
+        let m = store.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(m.history[1].content, "Post-upgrade output");
     }
 }

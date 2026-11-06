@@ -4476,6 +4476,12 @@ async fn assert_startup_identity_recovery(preceding_sweep: bool) {
     })
     .await
     .expect("receipt recovery must not suppress restart of an old Active mission");
+    // Startup recovery immediately enqueues `ControlCommand::ResumeMission` after
+    // emitting `Interrupted`, which briefly writes a transient `preparing`/`pending`
+    // receipt under `DISPATCH_ADMISSION` until `receipt.finish(...)` completes.
+    // Acquire `DISPATCH_ADMISSION` before reading so we observe the settled post-resume
+    // state rather than racing the in-flight auto-resume admission.
+    let _settled = DISPATCH_ADMISSION.lock().await;
     assert!(h
         .state
         .projects
@@ -13561,9 +13567,14 @@ async fn running_mission_moves_project_keeping_run_and_remote_job() {
         .unwrap()
         .unwrap();
     assert_eq!(after.project.project.as_deref(), Some("verity"));
+    assert_eq!(after.project.folder, "docs");
     assert_eq!(after.project.track, m.project.track);
     assert_eq!(after.status, MissionStatus::Active);
-    assert!(after.project.tags.contains(&"orb-folder:docs".to_string()));
+    assert!(!after
+        .project
+        .tags
+        .iter()
+        .any(|t| t.starts_with("orb-folder:")));
     assert!(h
         .control
         .mission_store
@@ -13993,10 +14004,12 @@ async fn project_move_with_include_descendants_moves_entire_subtree_and_strips_c
         .unwrap()
         .unwrap();
     assert_eq!(p_after.project.project.as_deref(), Some("verity"));
-    assert!(p_after
+    assert_eq!(p_after.project.folder, "Audits");
+    assert!(!p_after
         .project
         .tags
-        .contains(&"orb-folder:Audits".to_string()));
+        .iter()
+        .any(|t| t.starts_with("orb-folder:")));
     assert_eq!(c_after.project.project.as_deref(), Some("verity"));
     assert_eq!(
         c_after.project.tags,
@@ -14241,15 +14254,11 @@ async fn project_move_with_include_descendants_rolls_back_subtree_on_descendant_
         .unwrap()
         .unwrap();
     assert_eq!(p_after.project.project.as_deref(), Some("lido"));
-    assert_eq!(
-        p_after.project.tags,
-        vec!["pr-writer".to_string(), "orb-folder:RootOrig".to_string()]
-    );
+    assert_eq!(p_after.project.folder, "RootOrig");
+    assert_eq!(p_after.project.tags, vec!["pr-writer".to_string()]);
     assert_eq!(ok_after.project.project.as_deref(), Some("lido"));
-    assert_eq!(
-        ok_after.project.tags,
-        vec!["pr-writer".to_string(), "orb-folder:ChildOrig".to_string()]
-    );
+    assert_eq!(ok_after.project.folder, "ChildOrig");
+    assert_eq!(ok_after.project.tags, vec!["pr-writer".to_string()]);
     assert_eq!(conflict_after.project.project.as_deref(), Some("lido"));
 
     let parent_leases: Vec<_> = h
@@ -14443,13 +14452,10 @@ async fn project_move_with_include_descendants_recovers_after_mid_subtree_crash(
         .unwrap()
         .unwrap();
     assert_eq!(p_recovered.project.project.as_deref(), Some("lido"));
+    assert_eq!(p_recovered.project.folder, "BeforeCrash");
     assert_eq!(
         p_recovered.project.tags,
-        vec![
-            "pr-writer".to_string(),
-            "worker-initialized-v1".to_string(),
-            "orb-folder:BeforeCrash".to_string(),
-        ]
+        vec!["pr-writer".to_string(), "worker-initialized-v1".to_string(),]
     );
     assert_eq!(c_recovered.project.project.as_deref(), Some("lido"));
     assert_eq!(

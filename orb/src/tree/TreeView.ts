@@ -3,7 +3,7 @@ import { folderLabel } from "../folderLabels";
 import { displayTitle } from "../goal";
 import { isWorking } from "../missionStatus";
 import { countNested, countVersions, forkTitle, holds, missionParent, nestMissions, versionLabel, type NestedMission } from "../missionTree";
-import { excludeBtwMissions, resolveParent, seenMission, trackHierarchyResolution } from "../missionHierarchy";
+import { excludeBtwMissions, normalizeMissionFolder, resolveParent, seenMission, trackHierarchyResolution } from "../missionHierarchy";
 import { filesMovedAway, filesMovedInto } from "../moves";
 import { renamedTitle } from "../renames";
 import type { TreeNode } from "../treeModel";
@@ -31,12 +31,22 @@ export function placeholderParent(slug: string) {
   return (parentId: string, child: Mission): Mission | undefined => {
     if (resolveParent(parentId) === "gone") return undefined;
     const known = seenMission(parentId);
-    return { id: parentId, title: known?.title ?? null, status: known?.status ?? "unknown", project: known?.project ?? slug,
-      tags: (child.tags ?? []).filter(t => t.startsWith("orb-folder:")), history: [], created_at: child.created_at, updated_at: child.updated_at, orb_placeholder: true };
+    return {
+      id: parentId,
+      title: known?.title ?? null,
+      status: known?.status ?? "unknown",
+      project: known?.project ?? slug,
+      folder: known?.folder ?? "",
+      tags: [],
+      history: [],
+      created_at: child.created_at,
+      updated_at: child.updated_at,
+      orb_placeholder: true,
+    };
   };
 }
 
-export const missionFolder = (mission: Mission) => mission.tags?.find(t => t.startsWith("orb-folder:"))?.slice("orb-folder:".length) ?? "";
+export const missionFolder = (mission: Mission) => normalizeMissionFolder(mission.folder);
 
 export function missionTreeId(id: string, placeholderScope?: string): string {
   return placeholderScope !== undefined ? `mp:${placeholderScope}:${id}` : `m:${id}`;

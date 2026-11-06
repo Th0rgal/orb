@@ -179,8 +179,17 @@ pub async fn create(
     {
         return Err(bad("Choose an authorized GitHub repository URL"));
     }
+    let mut tags = req.tags.clone().unwrap_or_default();
+    let legacy_folder = crate::api::mission_store::strip_legacy_orb_folder_tags(&mut tags);
+    let folder = if req.parent_mission_id.is_some() {
+        String::new()
+    } else if let Some(explicit) = req.folder.as_deref() {
+        crate::api::mission_store::normalize_mission_folder(explicit)
+    } else {
+        legacy_folder.unwrap_or_default()
+    };
     use sha2::{Digest, Sha256};
-    let request_signature = format!("{:x}", Sha256::digest(serde_json::to_vec(&json!({"selection": selection, "prompt": prompt, "title": req.title, "project": req.project, "tags": req.tags, "parent_mission_id": req.parent_mission_id})).map_err(|e| bad(e.to_string()))?));
+    let request_signature = format!("{:x}", Sha256::digest(serde_json::to_vec(&json!({"selection": selection, "prompt": prompt, "title": req.title, "project": req.project, "folder": folder, "tags": tags, "parent_mission_id": req.parent_mission_id})).map_err(|e| bad(e.to_string()))?));
     let store = state.control.get_or_spawn(&user).await.mission_store;
     if let Some(parent) = req.parent_mission_id {
         if store.get_mission(parent).await.map_err(bad)?.is_none() {
@@ -239,13 +248,7 @@ pub async fn create(
         turns: vec![first_turn],
     };
     let execution = store
-        .save_cloud_execution(
-            execution,
-            None,
-            req.title,
-            req.project,
-            req.tags.unwrap_or_default(),
-        )
+        .save_cloud_execution_in_folder(execution, None, req.title, req.project, Some(folder), tags)
         .await
         .map_err(bad)?;
     if let Some(origin) = req.origin.as_deref() {

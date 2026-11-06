@@ -12,9 +12,13 @@ for (const action of ['delete', 'move'] as const) test(`sidebar range/toggle sel
       if(id.endsWith('2')) return route.fulfill({status:409,body:'Agent is busy'});
       missions=missions.filter(m=>m.id!==id);return route.fulfill({json:{ok:true}});
     }
-    if(req.method()==='POST' && path.endsWith('/project')) {
-      writes.push(id); const body=req.postDataJSON();missions=missions.map(m=>m.id===id?{...m,project:body.project,tags:body.tags}:m);
-      return route.fulfill({json:{ok:true}});
+    if(req.method()==='POST' && path==='/api/control/missions/move') {
+      const body=req.postDataJSON();
+      const ids:string[]=body.mission_ids??[];
+      writes.push(...ids);
+      const moved=ids.map((mid:string)=>({mission_id:mid,project:body.project,folder:body.folder??'',placement_revision:2}));
+      missions=missions.map(m=>ids.includes(m.id)?{...m,project:body.project,folder:body.folder??'',placement_revision:2}:m);
+      return route.fulfill({json:{moved,client_op_id:body.client_op_id}});
     }
     const json=path==='/api/projects'?{projects:[{slug:'one',title:'One'},{slug:'two',title:'Two'}]}
       :path==='/api/control/missions'?missions.filter(m=>!url.searchParams.has('project')||m.project===url.searchParams.get('project'))

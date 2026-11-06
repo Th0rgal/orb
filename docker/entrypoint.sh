@@ -2,13 +2,13 @@
 set -e
 
 # =============================================================================
-# Open Agent — Docker Entrypoint
-# Starts: Rust backend, Next.js dashboard, Caddy (PID 1)
+# Orb Core — Docker Entrypoint
+# Starts: Rust backend, Caddy (PID 1)
 # =============================================================================
 
 cleanup() {
     echo "[entrypoint] shutting down..."
-    kill "$BACKEND_PID" "$DASHBOARD_PID" 2>/dev/null || true
+    kill "$BACKEND_PID" 2>/dev/null || true
     wait
 }
 trap cleanup SIGTERM SIGINT
@@ -47,7 +47,7 @@ echo "[entrypoint] starting sandboxed-sh backend on ${HOST:-127.0.0.1}:${PORT:-3
 sandboxed-sh &
 BACKEND_PID=$!
 
-# Wait for backend to become healthy before starting dashboard/Caddy
+# Wait for backend to become healthy before starting Caddy
 echo "[entrypoint] waiting for backend health..."
 for i in $(seq 1 30); do
     if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
@@ -64,13 +64,6 @@ for i in $(seq 1 30); do
     fi
     sleep 0.5
 done
-
-# -- Start Next.js dashboard --------------------------------------------------
-echo "[entrypoint] starting Next.js dashboard on port 3001"
-cd /opt/dashboard
-PORT=3001 HOSTNAME=127.0.0.1 node server.js &
-DASHBOARD_PID=$!
-cd /
 
 # -- Start Caddy (foreground — PID 1) ----------------------------------------
 echo "[entrypoint] starting Caddy reverse proxy on :80"

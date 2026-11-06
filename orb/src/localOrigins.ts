@@ -25,7 +25,16 @@ export const localPending=(mission:Mission)=>!!mission.local_sync_pending||(miss
 /** Local output wins while syncing; Core still owns mutable next-turn settings.
  * Otherwise a running journal's launch-time model or effort undoes a successful settings patch. */
 export function withCoreEffort(local:Mission,core?:Mission):Mission {
- return core ? {...local,model_override:core.model_override,model_effort:core.model_effort,service_tier:core.service_tier,fast_mode:core.fast_mode} : local;
+ if(!core)return local;
+ const corePlacementNewer=(core.placement_revision??0)>(local.placement_revision??0);
+ return {
+  ...local,
+  model_override:core.model_override,
+  model_effort:core.model_effort,
+  service_tier:core.service_tier,
+  fast_mode:core.fast_mode,
+  ...(corePlacementNewer?{project:core.project,folder:core.folder,placement_revision:core.placement_revision}:{}),
+ };
 }
 let lastObservation=0;
 /** Orders requests and accepted changes made by this window, even within one millisecond. */

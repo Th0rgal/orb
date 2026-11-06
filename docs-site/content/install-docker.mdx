@@ -1,11 +1,11 @@
 ---
 title: Docker Install
-description: Run the Core backend for Orb clients and web console with Docker Compose
+description: Run the Core backend for Orb clients with Docker Compose
 ---
 
 # Docker Install
 
-Docker is the fastest way to run Core and the web admin console on Linux, macOS, or Windows. The image bundles the Rust backend (`sandboxed-sh`), MCP companions (`sandboxed-mcp`, `workspace-mcp`, `desktop-mcp`), the Next.js web console, Caddy, and primary agent CLIs.
+Docker is the fastest way to run Core on Linux, macOS, or Windows. The image bundles the Rust backend (`sandboxed-sh`), MCP companions (`sandboxed-mcp`, `workspace-mcp`, `desktop-mcp`), Caddy, and primary agent CLIs.
 
 ## Quick Start
 
@@ -17,8 +17,8 @@ cp .env.example .env
 docker compose up -d
 ```
 
-- **Web Console & API**: `http://localhost:3000`
-- **Orb Desktop / iOS**: Connect to `http://localhost:3000` (or your TLS domain) using `DASHBOARD_PASSWORD`.
+- **Core API**: `http://localhost:3000` (`/api/health`)
+- **Orb Desktop / iOS / Android**: Connect to `http://localhost:3000` (or your TLS domain) using `DASHBOARD_PASSWORD`.
 
 ## Essential Configuration (`.env`)
 

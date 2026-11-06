@@ -42,14 +42,34 @@ reuse = true
 timeout_secs = 300
 
 [[gates]]
+id = "capability-matrix"
+description = "Validate capability matrix and surface contract evidence"
+command = ["bash", "scripts/check-capability-matrix.sh"]
+dependencies = ["state-inventory"]
+required = true
+mode = "incremental"
+reuse = true
+timeout_secs = 300
+
+[[gates]]
 id = "rust-workspace-tests"
 description = "Certifying Rust workspace test suite"
 command = ["cargo", "test", "--locked", "-j", "1", "--workspace"]
-dependencies = ["fmt", "policy-scripts", "kernel-abi-check"]
+dependencies = ["fmt", "policy-scripts", "kernel-abi-check", "capability-matrix"]
 required = true
 mode = "clean"
 reuse = false
 timeout_secs = 3600
+
+[[gates]]
+id = "harness-contract"
+description = "Certifying harness contract test suite"
+command = ["bash", "scripts/harness_contract_tests.sh"]
+dependencies = ["fmt", "policy-scripts"]
+required = true
+mode = "clean"
+reuse = false
+timeout_secs = 1800
 
 [[gates]]
 id = "orb-client-unit"
@@ -57,17 +77,6 @@ description = "Certifying Orb desktop unit test suite"
 command = ["pnpm", "test"]
 cwd = "orb"
 dependencies = ["state-inventory", "kernel-abi-check"]
-required = true
-mode = "clean"
-reuse = false
-timeout_secs = 1200
-
-[[gates]]
-id = "dashboard-unit"
-description = "Certifying Next.js dashboard unit test suite"
-command = ["bun", "run", "test:unit"]
-cwd = "dashboard"
-dependencies = ["state-inventory"]
 required = true
 mode = "clean"
 reuse = false

@@ -1,29 +1,52 @@
 import {test, expect, type Page} from '@playwright/test';
 test.use({browserName:'webkit'});
 const P='00000000-0000-0000-0000-0000000000a1', F='00000000-0000-0000-0000-0000000000a2', C='00000000-0000-0000-0000-0000000000a3';
-type M={id:string;title:string;status:string;project:string;tags:string[];history:[];updated_at:string;parent_mission_id?:string};
-async function setup(page:Page, opts:{failMove?:string; deleteRunning?:boolean; crossProject?:boolean; staleDetails?:boolean}={}) {
+type M={id:string;title:string;status:string;project:string;folder?:string;placement_revision?:number;tags:string[];history:[];updated_at:string;parent_mission_id?:string};
+
+async function setup(page:Page, opts:{failMove?:boolean; deleteRunning?:boolean; crossProject?:boolean; staleDetails?:boolean; requireApprovalConfirm?:boolean}={}) {
   await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
   let missions:M[]=[
-    {id:P,title:'Pareto',status:'completed',project:'verity',tags:[],history:[],updated_at:'2026-10-20T07:00:00Z'},
-    {id:F,title:'Fredrik',status:'completed',project:'verity',tags:[],history:[],updated_at:'2026-10-20T06:00:00Z'},
-    {id:C,title:'Deep Audit',status:opts.deleteRunning?'active':'interrupted',project:'verity',tags:[],history:[],updated_at:'2026-10-20T05:00:00Z',parent_mission_id:P},
+    {id:P,title:'Pareto',status:'completed',project:'verity',folder:'',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T07:00:00Z'},
+    {id:F,title:'Fredrik',status:'completed',project:'verity',folder:'',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T06:00:00Z'},
+    {id:C,title:'Deep Audit',status:opts.deleteRunning?'active':'interrupted',project:'verity',folder:'',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T05:00:00Z',parent_mission_id:P},
   ];
   const original=missions.map(m=>({...m}));
-  const writes:string[]=[]; const cancels:string[]=[];
+  const writes:Array<{mission_ids:string[];project?:string;folder?:string;approval_policy?:string}>=[];
+  const cancels:string[]=[];
   let release:()=>void=()=>{}; const gate=new Promise<void>(r=>release=r);
   await page.route('**/api/**',async route=>{
     const req=route.request(),url=new URL(req.url()),path=url.pathname,id=path.split('/')[4];
-    if(req.method()==='POST' && path.endsWith('/project')) {
-      writes.push(id); await gate;
-      if(id===opts.failMove) return route.fulfill({status:409,body:'Mission is locked'});
+    if(req.method()==='POST' && path==='/api/control/missions/move') {
       const body=req.postDataJSON();
+      writes.push(body);
+      await gate;
+      if(opts.failMove) return route.fulfill({status:409,body:'Mission is locked'});
+      if(opts.requireApprovalConfirm && (!body.approval_policy || body.approval_policy==='check')) {
+        return route.fulfill({
+          status:409,
+          contentType:'application/json',
+          body:JSON.stringify({
+            code:'approval_transfer_confirmation_required',
+            error:'Moving across projects affects active secret approvals.',
+            target_project:body.project ?? 'other',
+            grants:[{id:'g1',mission_id:body.mission_ids[0],secret_name:'PROD_API_KEY',source_project:'verity',expires_at:'2026-12-01T00:00:00Z'}],
+            pending_requests:[{id:'r1',mission_id:body.mission_ids[0],secret_name:'PROD_WRITE_TOKEN',operation:'write',source_project:'verity'}],
+          }),
+        });
+      }
+      const rootSet=new Set<string>(body.mission_ids ?? []);
+      const moved:Array<{mission_id:string;project:string;folder:string;placement_revision:number}>=[];
       missions=missions.map(m=>{
-        if(m.id===id) return {...m,project:body.project,tags:body.tags};
-        if(body.include_descendants && m.parent_mission_id===id) return {...m,project:body.project,tags:m.tags.filter((t:string)=>!t.startsWith('orb-folder:'))};
-        return m;
+        const isRoot=rootSet.has(m.id);
+        const isChild=!!m.parent_mission_id && rootSet.has(m.parent_mission_id);
+        if(!isRoot && !isChild) return m;
+        const nextProj=body.project ?? m.project;
+        const nextFolder=isRoot ? (body.folder ?? '') : '';
+        const nextRev=(m.placement_revision ?? 0) + 1;
+        moved.push({mission_id:m.id,project:nextProj,folder:nextFolder,placement_revision:nextRev});
+        return {...m,project:nextProj,folder:nextFolder,placement_revision:nextRev};
       });
-      return route.fulfill({json:{ok:true}});
+      return route.fulfill({json:{moved,client_op_id:body.client_op_id}});
     }
     if(req.method()==='POST' && path.endsWith('/cancel')) { cancels.push(id); missions=missions.map(m=>m.id===id?{...m,status:'interrupted'}:m); return route.fulfill({json:{ok:true}}); }
     if(req.method()==='DELETE') {
@@ -44,6 +67,7 @@ async function setup(page:Page, opts:{failMove?:string; deleteRunning?:boolean; 
   const tree=page.getByRole('tree',{name:'Projects',exact:true});
   return {tree,writes,cancels,release,missions:()=>missions};
 }
+
 async function moveBoth(page:Page, tree:ReturnType<Page['getByRole']>) {
   await tree.getByRole('button',{name:'Pareto',exact:true}).click();
   await tree.getByRole('button',{name:'Fredrik',exact:true}).click({modifiers:['Meta']});
@@ -60,16 +84,18 @@ const folderOf=async(tree:ReturnType<Page['getByRole']>,title:string)=>{
   return level==='3'?'Audits':level==='2'?'Verity':level;
 };
 
-test('multi-move into a subfolder moves every selected mission at once, children stay nested', async ({page}) => {
+test('multi-move into a subfolder sends a single atomic batch request, moves both immediately, and keeps children nested', async ({page}) => {
   const {tree,writes,release,missions}=await setup(page);
   await moveBoth(page,tree);
-  // Both requests are in flight together and both rows are already in Audits, not grayed.
-  await expect.poll(()=>writes.length).toBe(2);
+  // Single atomic batch request is in flight and both rows are already in Audits, not grayed.
+  await expect.poll(()=>writes.length).toBe(1);
+  expect(writes[0]?.mission_ids.sort()).toEqual([P,F].sort());
+  expect(writes[0]?.folder).toBe('Audits');
   await expect.poll(()=>folderOf(tree,'Pareto')).toBe('Audits');
   await expect.poll(()=>folderOf(tree,'Fredrik')).toBe('Audits');
   await expect(tree.locator('.mission-cut')).toHaveCount(0);
   release();
-  await expect.poll(()=>missions().filter(m=>m.tags.includes('orb-folder:Audits')).map(m=>m.title).sort()).toEqual(['Fredrik','Pareto']);
+  await expect.poll(()=>missions().filter(m=>m.folder==='Audits').map(m=>m.title).sort()).toEqual(['Fredrik','Pareto']);
   // After the server confirms and lists refresh, both are still there and the child is not orphaned.
   await page.waitForTimeout(300);
   await expect(tree.getByRole('button',{name:'Pareto',exact:true})).toBeVisible();
@@ -82,15 +108,38 @@ test('multi-move into a subfolder moves every selected mission at once, children
   await expect(tree.getByRole('button',{name:'Deep Audit',exact:true})).toHaveCount(0);
 });
 
-test('a failed move rolls back only that mission, with an inline error', async ({page}) => {
-  const {tree,release}=await setup(page,{failMove:F});
+test('a failed atomic batch move rolls back every selected mission together, with an inline error', async ({page}) => {
+  const {tree,release}=await setup(page,{failMove:true});
   await moveBoth(page,tree);
   await expect.poll(()=>folderOf(tree,'Fredrik')).toBe('Audits');
   release();
   await expect(page.getByText(/Couldn.t move/).first()).toBeVisible();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect.poll(()=>folderOf(tree,'Fredrik')).toBe('Verity');
-  expect(await folderOf(tree,'Pareto')).toBe('Audits');
+  expect(await folderOf(tree,'Pareto')).toBe('Verity');
+});
+
+test('cross-project move with active secret approvals prompts for confirmation and applies chosen policy', async ({page}) => {
+  const {tree,writes,release,missions}=await setup(page,{crossProject:true,requireApprovalConfirm:true});
+  release();
+  const row=tree.getByRole('button',{name:'Pareto',exact:true});
+  await row.click({button:'right'});
+  await page.getByRole('menuitem',{name:'Move',exact:true}).click();
+  await tree.getByRole('button',{name:'Other',exact:true}).click({button:'right'});
+  await page.getByRole('menuitem',{name:'Move here',exact:true}).click();
+
+  const dialog=page.getByRole('dialog');
+  await expect(dialog).toContainText('Move with active secret approvals?');
+  await expect(dialog).toContainText('PROD_API_KEY');
+  await expect(dialog).toContainText('PROD_WRITE_TOKEN');
+  await dialog.getByRole('button',{name:'Move & revoke approvals',exact:true}).click();
+
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(()=>writes.length).toBe(2);
+  expect(writes[0]?.approval_policy).toBe('check');
+  expect(writes[1]?.approval_policy).toBe('revoke');
+  await expect.poll(()=>missions().find(m=>m.id===P)?.project).toBe('other');
+  await expect.poll(()=>missions().find(m=>m.id===C)?.project).toBe('other');
 });
 
 test('deleting a mission with a running worker offers Stop and delete', async ({page}) => {
@@ -123,7 +172,6 @@ test('deleting a mission without children uses the plain wording and no cascade 
   expect(urls).toEqual(['']);
 });
 
-
 test('Cmd+X/Cmd+V moves the open mission once across projects despite stale detail reads', async ({page}) => {
   await page.clock.install();
   const {tree,writes,release,missions}=await setup(page,{crossProject:true,staleDetails:true});
@@ -133,7 +181,7 @@ test('Cmd+X/Cmd+V moves the open mission once across projects despite stale deta
   await expect(tree.locator('.mission-cut')).toHaveCount(1);
   const destination=tree.getByRole('button',{name:'Other',exact:true});
   await destination.click();await destination.focus();await page.keyboard.press('Meta+v');
-  await expect.poll(()=>writes).toEqual([P]); // single atomic root subtree write (no standalone child write)
+  await expect.poll(()=>writes.map(w=>w.mission_ids)).toEqual([[P]]);
   await expect(row).toHaveCount(1);
   await expect(tree.locator('.row.project.contains-current')).toHaveAttribute('data-drop-project','other');
   release();
@@ -150,23 +198,29 @@ test('split cross-project subtree uses distinct placeholder keys and heals via m
   const C2='00000000-0000-0000-0000-0000000000a4', OTHER_M='00000000-0000-0000-0000-0000000000a5';
   await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
   let missions:M[]=[
-    {id:P,title:'evm.fast',status:'active',project:'assistant',tags:[],history:[],updated_at:'2026-10-20T07:00:00Z'},
-    {id:C,title:'Worker 1',status:'completed',project:'assistant',tags:[],history:[],updated_at:'2026-10-20T05:00:00Z',parent_mission_id:P},
-    {id:C2,title:'Worker 2',status:'completed',project:'ethereum',tags:[],history:[],updated_at:'2026-10-20T05:30:00Z',parent_mission_id:P},
-    {id:OTHER_M,title:'snark.fast',status:'completed',project:'ethereum',tags:[],history:[],updated_at:'2026-10-20T06:00:00Z'},
+    {id:P,title:'evm.fast',status:'active',project:'assistant',folder:'',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T07:00:00Z'},
+    {id:C,title:'Worker 1',status:'completed',project:'assistant',folder:'',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T05:00:00Z',parent_mission_id:P},
+    {id:C2,title:'Worker 2',status:'completed',project:'ethereum',folder:'',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T05:30:00Z',parent_mission_id:P},
+    {id:OTHER_M,title:'snark.fast',status:'completed',project:'ethereum',folder:'',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T06:00:00Z'},
   ];
-  const bodies:Array<{id:string;body:Record<string,unknown>}>=[];
+  const bodies:Array<Record<string,unknown>>=[];
   await page.route('**/api/**',async route=>{
     const req=route.request(),url=new URL(req.url()),path=url.pathname,id=path.split('/')[4];
-    if(req.method()==='POST' && path.endsWith('/project')) {
+    if(req.method()==='POST' && path==='/api/control/missions/move') {
       const body=req.postDataJSON();
-      bodies.push({id,body});
+      bodies.push(body);
+      const rootSet=new Set<string>(body.mission_ids ?? []);
+      const moved:Array<{mission_id:string;project:string;folder:string;placement_revision:number}>=[];
       missions=missions.map(m=>{
-        if(m.id===id) return {...m,project:body.project,tags:body.tags};
-        if(body.include_descendants && m.parent_mission_id===id) return {...m,project:body.project,tags:m.tags.filter(t=>!t.startsWith('orb-folder:'))};
-        return m;
+        const isRoot=rootSet.has(m.id);
+        const isChild=!!m.parent_mission_id && rootSet.has(m.parent_mission_id);
+        if(!isRoot && !isChild) return m;
+        const nextRev=(m.placement_revision ?? 0) + 1;
+        const nextFolder=isRoot ? (body.folder ?? '') : '';
+        moved.push({mission_id:m.id,project:body.project,folder:nextFolder,placement_revision:nextRev});
+        return {...m,project:body.project,folder:nextFolder,placement_revision:nextRev};
       });
-      return route.fulfill({json:{ok:true}});
+      return route.fulfill({json:{moved,client_op_id:body.client_op_id}});
     }
     const json=path==='/api/projects'?{projects:[{slug:'assistant',title:'Assistant'},{slug:'ethereum',title:'Ethereum'}]}
       :path==='/api/control/missions'?missions.filter(m=>!url.searchParams.has('project')||m.project===url.searchParams.get('project'))
@@ -203,7 +257,7 @@ test('split cross-project subtree uses distinct placeholder keys and heals via m
     el.dispatchEvent(ev);
   },cutPayload);
 
-  await expect.poll(()=>bodies.some(b=>b.id===P && b.body.project==='ethereum' && b.body.include_descendants===true)).toBe(true);
+  await expect.poll(()=>bodies.some(b=>(b.mission_ids as string[])?.includes(P) && b.project==='ethereum')).toBe(true);
   await expect(tree.locator(`[data-tree-id="mp:ethereum:${P}"]`)).toHaveCount(0);
   await expect(tree.locator(`[data-tree-id="m:${P}"]`)).toHaveCount(1);
   await expect(tree.getByRole('button',{name:'Show the 2 missions launched by evm.fast'})).toBeVisible();
@@ -300,7 +354,7 @@ test('when system clipboard write is refused, paste prefers the active local cut
 test('deleting a parent with unloaded server-side descendants or paused child recovers cleanly without pre-DELETE transcript GETs', async ({page}) => {
   await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
   const HIDDEN_PAUSED='00000000-0000-0000-0000-0000000000a9';
-  let visible=[{id:F,title:'Fredrik',status:'completed',project:'verity',tags:[],history:[],updated_at:'2026-10-20T06:00:00Z'}];
+  let visible=[{id:F,title:'Fredrik',status:'completed',project:'verity',folder:'',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T06:00:00Z'}];
   let hiddenPaused=true;
   const transcriptGets:string[]=[];
   const deleteSearches:string[]=[];

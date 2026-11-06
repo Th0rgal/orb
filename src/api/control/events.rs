@@ -15,6 +15,16 @@ pub struct MissionCompletionSnapshot {
     pub terminal_evidence: Option<String>,
 }
 
+/// Authoritative placement receipt for a single mission after an atomic move
+/// or folder rename cascade.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionPlacementItem {
+    pub mission_id: Uuid,
+    pub project: Option<String>,
+    pub folder: String,
+    pub placement_revision: u64,
+}
+
 /// A structured event emitted by the control session.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -235,6 +245,15 @@ pub enum AgentEvent {
         workspace: Option<String>,
         expires_at: String,
     },
+    /// Atomic batch placement update (project and/or folder) across a mission
+    /// subtree or folder rename cascade.
+    MissionPlacementChanged {
+        moves: Vec<MissionPlacementItem>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_op_id: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,6 +353,7 @@ impl AgentEvent {
             AgentEvent::MissionMetadataUpdated { .. } => "mission_metadata_updated",
             AgentEvent::MissionSettingsUpdated { .. } => "mission_settings_updated",
             AgentEvent::FidoSignRequest { .. } => "fido_sign_request",
+            AgentEvent::MissionPlacementChanged { .. } => "mission_placement_changed",
             AgentEvent::GoalIteration { .. } => "goal_iteration",
             AgentEvent::GoalStatus { .. } => "goal_status",
         }
@@ -360,6 +380,7 @@ impl AgentEvent {
             AgentEvent::MissionMetadataUpdated { mission_id, .. } => Some(*mission_id),
             AgentEvent::MissionSettingsUpdated { mission_id, .. } => Some(*mission_id),
             AgentEvent::FidoSignRequest { .. } => None,
+            AgentEvent::MissionPlacementChanged { .. } => None,
             AgentEvent::GoalIteration { mission_id, .. } => *mission_id,
             AgentEvent::GoalStatus { mission_id, .. } => *mission_id,
         }
@@ -410,6 +431,13 @@ pub enum ControlCommand {
         user: crate::api::auth::AuthUser,
         request: super::UpdateMissionProjectRequest,
         respond: oneshot::Sender<Result<Mission, (axum::http::StatusCode, String)>>,
+    },
+    MoveMissions {
+        user: crate::api::auth::AuthUser,
+        request: super::MoveMissionsRequest,
+        respond: oneshot::Sender<
+            Result<super::MoveMissionsResponse, (axum::http::StatusCode, serde_json::Value)>,
+        >,
     },
     AdmitDispatch {
         admission: Box<super::DispatchAdmission>,

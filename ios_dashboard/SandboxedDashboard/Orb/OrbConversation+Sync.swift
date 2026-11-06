@@ -517,7 +517,15 @@ extension OrbConversation {
                         }
                     }
                     try selection.validate()
-                    body = ["title": .string(OrbStyle.missionTitle(prompt)), "prompt": .string(prompt), "project": .string(project), "tags": .array(folder.isEmpty ? [] : [.string("orb-folder:\(folder)")]), "idempotency_key": .string(UUID().uuidString)]
+                    let normalizedFolder = OrbRow.normalizeFolder(folder)
+                    body = [
+                        "title": .string(OrbStyle.missionTitle(prompt)),
+                        "prompt": .string(prompt),
+                        "project": .string(project),
+                        "folder": .string(normalizedFolder),
+                        "tags": .array([]),
+                        "idempotency_key": .string(UUID().uuidString),
+                    ]
                     if !uploaded.isEmpty { body["attachments"] = .array(uploaded) }
                     if selection.cloud { body["cloud"] = selection.wire }
                     else if selection.backend == "codex" { try await OrbCodexSpeed.require(model: selection.model, tier: selection.serviceTier); body["service_tier"] = .string(selection.serviceTier) }
@@ -600,20 +608,47 @@ extension OrbConversation {
         await refresh(force: true)
     }
 
-    func move() async {
+    func move(approvalPolicy: String = "check") async {
         guard let id, !destinationProject.isEmpty else { return }
-        var tags = mission["tags"].items.filter { !$0.text.hasPrefix("orb-folder:") }
-        if !destinationFolder.isEmpty { tags.append(.string("orb-folder:" + destinationFolder)) }
+        let normalizedFolder = OrbRow.normalizeFolder(destinationFolder)
+        let opID = OrbHierarchy.allocateOpID()
+        _ = OrbHierarchy.stageOptimisticPlacement(
+            rootIDs: [id],
+            project: destinationProject,
+            folder: normalizedFolder,
+            opID: opID
+        )
         do {
-            _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/project", method: "POST", body: .object(["project": .string(destinationProject), "tags": .array(tags)]))
+            let committed = try await api.moveMissions(
+                ids: [id],
+                project: destinationProject,
+                folder: normalizedFolder,
+                approvalPolicy: approvalPolicy,
+                clientOpID: opID
+            )
+            if let mine = committed.first(where: { $0.missionID == id }),
+               case var .object(dict) = mission {
+                dict["project"] = mine.project.map(OrbJSON.string) ?? .null
+                dict["folder"] = .string(mine.folder)
+                dict["placement_revision"] = .number(Double(mine.placementRevision))
+                mission = .object(dict)
+            }
             moving = false
+            pendingMoveApproval = nil
             OrbUsageTelemetry.shared.trackAction(.sidebarMove, surface: "conversation")
             OrbReadCache.invalidate("project:\(project)")
             OrbReadCache.invalidate("project:\(project):all")
             OrbReadCache.invalidate("project:\(destinationProject)")
             OrbReadCache.invalidate("project:\(destinationProject):all")
             await refresh(force: true)
-        } catch { self.error = error.localizedDescription }
+        } catch let confirmation as OrbApprovalTransferConfirmationError {
+            _ = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: [id], opID: opID)
+            moving = false
+            pendingMoveApproval = confirmation
+        } catch {
+            _ = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: [id], opID: opID)
+            self.error = error.localizedDescription
+        }
     }
     func mutate(_ fields: [String: OrbJSON]) async {
         guard let id else { return }

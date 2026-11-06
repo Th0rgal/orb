@@ -524,8 +524,8 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
         }
         return;
       }
-      if (eventType === "mission_presentation") {
-        const ev: StreamEvent = { type: "mission_presentation", data: parsed };
+      if (eventType === "mission_presentation" || eventType === "mission_placement_changed") {
+        const ev: StreamEvent = { type: eventType, data: parsed };
         for (const l of listeners) {
           if (l.missionId === null) l.deliver(ev);
         }

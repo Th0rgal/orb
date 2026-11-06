@@ -39,13 +39,12 @@ export function SettingsShell(p: { page: string; onOpen: (id: string) => void; c
           </div>
         </Show>
         <div class="settings-page-content" role={section().tabs.length > 1 ? "tabpanel" : undefined} aria-labelledby={section().tabs.length > 1 ? `settings-tab-${current()}` : undefined}>
-          {p.children}
+          <Suspense>{p.children}</Suspense>
         </div>
       </div>
     </div>
   );
 }
-
 /** Security → Access: approval devices, Fleet Bunker Mode and privileged access. */
 export function SecuritySettings() {
   const [error, setError] = createSignal("");
