@@ -23,6 +23,17 @@ private opaque rawTlsRoundtrip
     (req : @& ByteArray) (maxResp : USize)
     (verifyPeer : UInt8) (timeoutMs : UInt32) : IO ByteArray
 
+@[extern "orb_net_leaf_touch_excl_0600"]
+private opaque rawTouchExcl0600 (path : @& String) : IO UInt64
+
+/-- Create an exclusive owner-only (`0600`) regular file (`O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC`)
+    so temporary response-header files in `/tmp` are never world-readable or symlink-hijackable. -/
+def createExclFile0600 (path : System.FilePath) : IO (Except String Unit) := do
+  let w ← rawTouchExcl0600 path.toString
+  if (w >>> 63) != 0 then
+    return .error s!"failed to create exclusive 0600 file `{path}`"
+  return .ok ()
+
 structure HttpsResponse where
   status  : Nat
   headers : Array (String × String)
@@ -49,7 +60,8 @@ def hasNoCrLfOrNul (s : String) : UInt8 := Id.run do
   return 1
 
 /-- Check that an HTTP request-target (`origin-form`, starting with `/`) contains only
-    RFC 9112 visible ASCII (`0x21..0x7E` — rejecting spaces, tabs, DEL, CR, LF, NUL, and non-ASCII). -/
+    RFC 9112 visible ASCII without URL fragment `#` (`0x21..0x7E`, `c != 0x23` — rejecting
+    spaces, tabs, `#`, DEL, CR, LF, NUL, and non-ASCII). -/
 def isValidRequestTarget (path : String) : Bool := Id.run do
   if path.isEmpty || !path.startsWith "/" then
     return false
@@ -58,7 +70,7 @@ def isValidRequestTarget (path : String) : Bool := Id.run do
   let mut i : Nat := 0
   while verifySliceBounds i.toUInt64 1 cap == 1 do
     let c := b.get! i
-    if c < 0x21 || c > 0x7E then
+    if c < 0x21 || c > 0x7E || c == 0x23 then
       return false
     i := i + 1
   return true
@@ -400,6 +412,8 @@ def http2Or3RequestViaCurl
     let hex := "0123456789abcdef".toList.toArray
     nonceHex := nonceHex.push (hex[(v / 16) % 16]!) |>.push (hex[v % 16]!)
   let hdrFile : System.FilePath := s!"/tmp/orb_curl_hdr_{nonceHex}.tmp"
+  if let .error e ← createExclFile0600 hdrFile then
+    return .error e
   let isHead := asciiEqIgnoreCase method "HEAD"
   let verFlag := match version with
     | .http2 => "--http2"
@@ -420,6 +434,13 @@ def http2Or3RequestViaCurl
   let urlHost := if host.contains ':' then s!"[{host}]" else host
   let url := s!"https://{urlHost}:{port}{path}"
   args := args.push url
+  let lifeMu ← Std.Mutex.new false
+  let hdrExceededFlag ← IO.mkRef false
+  let mut watchdogOpt : Option (Task (Except IO.Error Unit)) := none
+  let stopWatchdog (wd? : Option (Task (Except IO.Error Unit))) : IO Unit := do
+    lifeMu.atomically (set true)
+    if let some wd := wd? then
+      let _ ← IO.wait wd
   try
     let child ← IO.Process.spawn {
       cmd := "/usr/bin/curl"
@@ -432,24 +453,43 @@ def http2Or3RequestViaCurl
       child.stdin.write body
       child.stdin.flush
     let (_, child') ← child.takeStdin
+    let watchdog ← IO.asTask (prio := .dedicated) do
+      let mut keepPolling := true
+      while keepPolling do
+        let exceeded ← hdrDumpExceedsCap hdrFile 65536
+        keepPolling ← lifeMu.atomically do
+          if ← get then
+            return false
+          if exceeded then
+            hdrExceededFlag.set true
+            child'.kill
+            set true
+            return false
+          return true
+        if keepPolling then
+          IO.sleep 25
+    watchdogOpt := some watchdog
     let stdoutCap := if isHead then 65536 else maxRespBytes
     let mut outBytes := ByteArray.empty
     while true do
-      if ← hdrDumpExceedsCap hdrFile 65536 then
-        child'.kill
-        let _ ← child'.wait
-        try IO.FS.removeFile hdrFile catch _ => pure ()
-        return .error "curl response header dump exceeds 64 KiB cap"
       let chunk ← child'.stdout.read 65536
       if chunk.isEmpty then break
       outBytes := outBytes ++ chunk
       if outBytes.size > stdoutCap then
-        child'.kill
+        lifeMu.atomically do
+          if !(← get) then
+            child'.kill
+            set true
         let _ ← child'.wait
+        stopWatchdog watchdogOpt
         try IO.FS.removeFile hdrFile catch _ => pure ()
         return .error s!"curl ({verFlag}) response exceeded maxRespBytes {maxRespBytes}"
     let errStr ← child'.stderr.readToEnd
     let code ← child'.wait
+    stopWatchdog watchdogOpt
+    if (← hdrExceededFlag.get) || (← hdrDumpExceedsCap hdrFile 65536) then
+      try IO.FS.removeFile hdrFile catch _ => pure ()
+      return .error "curl response header dump exceeds 64 KiB cap"
     if code != 0 then
       try IO.FS.removeFile hdrFile catch _ => pure ()
       return .error s!"curl ({verFlag}) exited with {code}: {errStr.trimAscii.toString}"
@@ -460,6 +500,7 @@ def http2Or3RequestViaCurl
       | .error _ => return .error "curl response header dump exceeds 64 KiB cap"
     return parseCurlDumpHeadersAndBody hdrBytes (if isHead then ByteArray.empty else outBytes) maxRespBytes method
   catch e =>
+    stopWatchdog watchdogOpt
     try IO.FS.removeFile hdrFile catch _ => pure ()
     return .error s!"curl ({verFlag}) execution failed: {e}"
 

@@ -99,6 +99,8 @@ def main : IO Unit := do
   assertTrue "Outbound HTTP builder rejects CR/LF header injection" badHdrReq.isOk.not
   let badSpacePath := buildOutboundHttp11Request "GET" "example.com" "/bad path HTTP/1.1"
   assertTrue "Outbound HTTP builder rejects whitespace in request target" badSpacePath.isOk.not
+  let badFragPath := buildOutboundHttp11Request "GET" "example.com" "/resource#frag"
+  assertTrue "Outbound HTTP builder rejects literal # fragment in request target" badFragPath.isOk.not
   let badClMismatch := buildOutboundHttp11Request "POST" "example.com" "/v1/chat" #[("Content-Length", "0")] ("hello".toUTF8)
   assertTrue "Outbound HTTP builder rejects mismatched Content-Length" badClMismatch.isOk.not
   let badClDup := buildOutboundHttp11Request "POST" "example.com" "/v1/chat"
@@ -188,5 +190,19 @@ def main : IO Unit := do
   let nonDefaultStr := String.fromUTF8! nonDefaultWire
   assertTrue "Non-default port included in outbound Host header"
     ((nonDefaultStr.splitOn "Host: example.com:8443\r\n").length == 2)
+
+  assertTrue "isValidRequestTarget rejects literal # fragment delimiter"
+    (!isValidRequestTarget "/objects/key#suffix" && isValidRequestTarget "/objects/key%23suffix")
+
+  let .ok tmpNonce ← OrbNetLeaf.Crypto.randBytes 6
+    | throw (IO.userError "randBytes for temp file test failed")
+  let tmpPath : System.FilePath :=
+    s!"/tmp/orb_excl_test_{(tmpNonce.get! 0).toNat}_{(tmpNonce.get! 1).toNat}_{(tmpNonce.get! 2).toNat}.tmp"
+  try IO.FS.removeFile tmpPath catch _ => pure ()
+  assertTrue "createExclFile0600 creates new owner-only file" (← createExclFile0600 tmpPath).isOk
+  assertTrue "createExclFile0600 rejects existing path (O_EXCL)" (← createExclFile0600 tmpPath).isOk.not
+  let stOut ← IO.Process.output { cmd := "stat", args := #["-c", "%a", tmpPath.toString] }
+  try IO.FS.removeFile tmpPath catch _ => pure ()
+  assertTrue "createExclFile0600 sets mode 600" (stOut.stdout.trimAscii.toString == "600")
 
   IO.println "[OrbNetLeaf] ALL SELF-TESTS PASSED"

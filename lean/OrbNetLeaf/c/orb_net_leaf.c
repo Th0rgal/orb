@@ -127,6 +127,11 @@ LEAN_EXPORT lean_obj_res orb_net_leaf_pty_resize(uint32_t mfd, uint16_t rows, ui
     return onl_pack(ioctl((int)mfd, TIOCSWINSZ, &ws));
 }
 
+LEAN_EXPORT lean_obj_res orb_net_leaf_touch_excl_0600(b_lean_obj_arg path) {
+    int fd = open(lean_string_cstr(path), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+    return onl_pack(fd < 0 ? -1 : close(fd));
+}
+
 /* Verified WebPKI TLS 1.3/1.2 roundtrip with socket deadlines & strict truncation/EOF/error status byte */
 LEAN_EXPORT lean_obj_res orb_net_leaf_tls_roundtrip(
     b_lean_obj_arg host, uint16_t port, b_lean_obj_arg req,
