@@ -8,8 +8,14 @@ context/**
 reports/
 reports/**
 
-# Rust build artifacts
+# Build artifacts
 /target/
+/linux_shell/build/
+/linux_shell/orb-desktop
+/macos_shell/build/
+/macos_shell/gen/
+/macos_shell/orb-desktop
+/macos_shell/signer/orb-signer
 **/*.rs.bk
 calorily
 

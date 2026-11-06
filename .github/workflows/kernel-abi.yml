@@ -119,12 +119,7 @@ jobs:
             --backend stock-c \
             --rollback-stock
       - name: Native object and archive symbol checks with negative injections
-        env:
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          set -euo pipefail
-          ORB_KERNEL_BACKEND=stock-c cargo test --locked -j 1 -p orb-spec --test artifact_symbols
-          ORB_KERNEL_BACKEND=leannative cargo test --locked -j 1 -p orb-spec --test artifact_symbols
+        run: python3 -m unittest -v scripts/test_p3_qualification.py
       - name: Partial coverage evidence stays source-bound and incomplete
         run: |
           python3 scripts/gen_coverage_registry.py --check
@@ -201,7 +196,7 @@ jobs:
           (cd lean/OrbNetLeaf && lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-net-leaf-test)
           elab_syms=$(nm -u lean/OrbNetLeaf/.lake/build/bin/orb-net-leaf-test | grep -c lean_elab || true)
           test "$elab_syms" -eq 0
-      - name: Build and self-test Wave 1 OrbBin + Wave 2 OrbNode + Wave 3 OrbClient (<= 220 C LOC, zero lean_elab)
+      - name: Build and self-test Wave 1 OrbBin + Wave 2 OrbNode + Wave 3 OrbClient + Wave 4 OrbCore & OrbLocald (<= 220 C LOC, zero lean_elab)
         run: |
           set -euo pipefail
           c_lines=$(wc -l < lean/OrbBin/c/orb_bin_posix.c)
@@ -210,18 +205,30 @@ jobs:
           node_c_lines=$(wc -l < lean/OrbNode/c/orb_node_posix.c)
           echo "orb_node_posix.c LOC: $node_c_lines"
           test "$node_c_lines" -le 220
+          core_c_lines=$(wc -l < lean/OrbCore/c/orb_core_sqlite.c)
+          echo "orb_core_sqlite.c LOC: $core_c_lines"
+          test "$core_c_lines" -le 220
+          shell_c_lines=$(wc -l < linux_shell/main.c)
+          echo "linux_shell/main.c LOC: $shell_c_lines"
+          test "$shell_c_lines" -le 220
           ./scripts/build_orb_bins.sh --out-dir target/debug
           (cd lean/OrbBin && lake build orb-bin-test -- -DwarningAsError=true && ./.lake/build/bin/orb-bin-test)
           (cd lean/OrbNode && lake build orb-node-test -- -DwarningAsError=true && ./.lake/build/bin/orb-node-test)
           (cd lean/OrbClient && lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-client-test)
-          client_elab_syms=$(nm -u lean/OrbClient/.lake/build/bin/orb-client-test | grep -c lean_elab || true)
-          test "$client_elab_syms" -eq 0
+          (cd lean/OrbCore && lake build orb-core-test orb-spec-runner -- -DwarningAsError=true)
+          ./lean/OrbCore/.lake/build/bin/orb-core-test
+          ./lean/OrbCore/.lake/build/bin/orb-spec-runner --fixtures shared/orb-spec/fixtures
+          (cd lean/OrbLocald && lake build orb-locald-test -- -DwarningAsError=true && ./.lake/build/bin/orb-locald-test)
+          for test_bin in lean/OrbBin/.lake/build/bin/orb-bin-test lean/OrbNode/.lake/build/bin/orb-node-test lean/OrbClient/.lake/build/bin/orb-client-test lean/OrbCore/.lake/build/bin/orb-core-test lean/OrbCore/.lake/build/bin/orb-spec-runner lean/OrbLocald/.lake/build/bin/orb-locald-test; do
+            elab_syms=$(nm -u "$test_bin" | grep -c lean_elab || true)
+            test "$elab_syms" -eq 0
+          done
           ax_out=$(printf 'import OrbClient.Reducers\n#print axioms OrbClient.Reducers.parse_encode_orb_client_patch_roundtrip\n' | LEAN_PATH="lean/OrbClient/.lake/build/lib/lean:$(lean --print-prefix)/lib/lean" lean --stdin)
           echo "$ax_out"
           echo "$ax_out" | grep -qF "depends on axioms: [propext, Classical.choice, Quot.sound]"
           out=$(LEAN_PATH="lean/OrbClient/.lake/build/lib/lean:$(lean --print-prefix)/lib/lean" lean --run scripts/gen_client_core_fixtures.lean)
           diff <(printf '%s\n' "$out") shared/orb-spec/fixtures/client-core.json
-          for bin in fido-agent-proxy orb-privd orb-sudo lean-mesh palomactl sandboxed-mcp workspace-mcp desktop-mcp automation-manager-mcp sandboxed-node; do
+          for bin in fido-agent-proxy orb-privd orb-sudo lean-mesh palomactl sandboxed-mcp workspace-mcp desktop-mcp automation-manager-mcp sandboxed-node sandboxed-sh orb-locald; do
             test -x "target/debug/$bin"
             elab_syms=$(nm -u "target/debug/$bin" | grep -c lean_elab || true)
             test "$elab_syms" -eq 0
@@ -261,6 +268,14 @@ jobs:
           python3 scripts/check_spec_audit.py audit-results/orb-client-mutant-audit.json
           .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbClient/OrbClient/Reducers.lean > audit-results/orb-client-reducers-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-client-reducers-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbCore/OrbCore/Spec.lean > audit-results/orb-core-spec-audit.json
+          python3 scripts/check_spec_audit.py audit-results/orb-core-spec-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbCore/OrbCore/MutantSuite.lean > audit-results/orb-core-mutant-audit.json
+          python3 scripts/check_spec_audit.py audit-results/orb-core-mutant-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbLocald/OrbLocald/Spec.lean > audit-results/orb-locald-spec-audit.json
+          python3 scripts/check_spec_audit.py audit-results/orb-locald-spec-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbLocald/OrbLocald/MutantSuite.lean > audit-results/orb-locald-mutant-audit.json
+          python3 scripts/check_spec_audit.py audit-results/orb-locald-mutant-audit.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -288,6 +288,13 @@ def resolve_source(source):
 
 
 def node_version_for(repo, treeish, sha):
+    try:
+        lakefile = git(repo, 'show', f'{treeish}:lean/OrbNode/lakefile.lean')
+        m = re.search(r'version\s*:=\s*v!"([^"]+)"', lakefile)
+        if m:
+            return f'{m.group(1)}+{sha[:9]}'
+    except Exception:
+        pass
     cargo = git(repo, 'show', f'{treeish}:Cargo.toml')
     version = next(line.split('"')[1] for line in cargo.splitlines() if line.startswith('version'))
     return f'{version}+{sha[:9]}'
@@ -332,7 +339,7 @@ def build_node_binary(source, created):
             script = Path(tmp) / 'build.sh'
             script.write_text(BUILD_SCRIPT)
             upload(sid, script, '/home/user/build.sh')
-            code = run_long(sid, 'bash /home/user/build.sh', limit=5400, label='cargo build')
+            code = run_long(sid, 'bash /home/user/build.sh', limit=5400, label='lean build')
             if code != 0:
                 raise RuntimeError(f'node build failed (exit {code}); see /home/user/build.log in {sid}')
             download(sid, '/home/user/sandboxed-node.out', cached)

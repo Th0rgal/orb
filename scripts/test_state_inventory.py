@@ -40,7 +40,7 @@ class StateInventoryTests(unittest.TestCase):
                 "policy-scripts",
                 "kernel-abi-check",
                 "capability-matrix",
-                "rust-workspace-tests",
+                "lean-workspace-tests",
                 "harness-contract",
                 "orb-client-unit",
             }.issubset(gate_ids)
@@ -70,16 +70,16 @@ class StateInventoryTests(unittest.TestCase):
 
     def test_rejects_nonexistent_or_unsafe_file_paths(self) -> None:
         stale_file = self.inventory_text.replace(
-            "src/api/idempotency.rs",
-            "src/api/does_not_exist_idempotency.rs",
+            "lean/OrbCore/OrbCore/Store.lean",
+            "lean/OrbCore/OrbCore/DoesNotExistStore.lean",
             1,
         )
         with self.assertRaisesRegex(ValueError, "file does not exist"):
             checker.validate_inventory_markdown(stale_file, ROOT)
 
         traversal = self.inventory_text.replace(
-            "src/api/idempotency.rs",
-            "../outside_repo.rs",
+            "lean/OrbCore/OrbCore/Store.lean",
+            "../outside_repo.lean",
             1,
         )
         with self.assertRaisesRegex(ValueError, "repository-relative"):
@@ -107,8 +107,8 @@ class StateInventoryTests(unittest.TestCase):
         for placeholder in invalid_closing_prs:
             with self.subTest(placeholder=placeholder):
                 completed_placeholder = self.inventory_text.replace(
-                    "| R1, R2 | OPEN | `src/api/idempotency.rs` | TBD |",
-                    f"| R1, R2 | COMPLETED | `src/api/idempotency.rs` | {placeholder} |",
+                    "| R1, R2 | OPEN | `lean/OrbCore/OrbCore/Store.lean` | TBD |",
+                    f"| R1, R2 | COMPLETED | `lean/OrbCore/OrbCore/Store.lean` | {placeholder} |",
                     1,
                 )
                 with self.assertRaisesRegex(
@@ -133,8 +133,8 @@ class StateInventoryTests(unittest.TestCase):
         for duplicate_ref in ("#1578, #1578", "#1578, Th0rgal/orb#1578"):
             with self.subTest(duplicate_ref=duplicate_ref):
                 completed_duplicate = self.inventory_text.replace(
-                    "| R1, R2 | OPEN | `src/api/idempotency.rs` | TBD |",
-                    f"| R1, R2 | COMPLETED | `src/api/idempotency.rs` | {duplicate_ref} |",
+                    "| R1, R2 | OPEN | `lean/OrbCore/OrbCore/Store.lean` | TBD |",
+                    f"| R1, R2 | COMPLETED | `lean/OrbCore/OrbCore/Store.lean` | {duplicate_ref} |",
                     1,
                 )
                 with self.assertRaisesRegex(
@@ -144,8 +144,8 @@ class StateInventoryTests(unittest.TestCase):
                     checker.validate_inventory_markdown(completed_duplicate, ROOT)
 
         completed_missing_gate = self.inventory_text.replace(
-            "| R1, R2 | OPEN | `src/api/idempotency.rs` | TBD |",
-            "| R1, R2 | COMPLETED | `src/api/missing_gate_test.rs` | #1501 |",
+            "| R1, R2 | OPEN | `lean/OrbCore/OrbCore/Store.lean` | TBD |",
+            "| R1, R2 | COMPLETED | `lean/OrbCore/OrbCore/MissingGateTest.lean` | #1501 |",
             1,
         )
         with self.assertRaisesRegex(ValueError, "file does not exist"):
@@ -160,8 +160,8 @@ class StateInventoryTests(unittest.TestCase):
         for token in valid_tokens:
             with self.subTest(token=token):
                 valid_single_completed = self.inventory_text.replace(
-                    "| R1, R2 | OPEN | `src/api/idempotency.rs` | TBD |",
-                    f"| R1, R2 | COMPLETED | `src/api/idempotency.rs` | {token} |",
+                    "| R1, R2 | OPEN | `lean/OrbCore/OrbCore/Store.lean` | TBD |",
+                    f"| R1, R2 | COMPLETED | `lean/OrbCore/OrbCore/Store.lean` | {token} |",
                     1,
                 )
                 sm_rows, _ = checker.validate_inventory_markdown(valid_single_completed, ROOT)
@@ -171,31 +171,31 @@ class StateInventoryTests(unittest.TestCase):
     def test_parse_semicolon_paths_handles_multi_span_backticks(self) -> None:
         self.assertEqual(
             checker.parse_semicolon_paths(
-                "`src/api/idempotency.rs`; `src/uploads.rs`",
+                "`lean/OrbCore/OrbCore/Store.lean`; `lean/OrbCore/OrbCore/Control.lean`",
                 "SM-12.current_files",
             ),
-            ["src/api/idempotency.rs", "src/uploads.rs"],
+            ["lean/OrbCore/OrbCore/Store.lean", "lean/OrbCore/OrbCore/Control.lean"],
         )
         self.assertEqual(
             checker.parse_semicolon_paths(
-                "`src/api/idempotency.rs`; `src/uploads.rs`; `src/concurrency.rs`",
+                "`lean/OrbCore/OrbCore/Store.lean`; `lean/OrbCore/OrbCore/Control.lean`; `lean/OrbCore/OrbCore/Proxy.lean`",
                 "SM-21.current_files",
             ),
-            ["src/api/idempotency.rs", "src/uploads.rs", "src/concurrency.rs"],
+            ["lean/OrbCore/OrbCore/Store.lean", "lean/OrbCore/OrbCore/Control.lean", "lean/OrbCore/OrbCore/Proxy.lean"],
         )
         self.assertEqual(
             checker.parse_semicolon_paths(
-                "`src/api/idempotency.rs; src/uploads.rs`",
+                "`lean/OrbCore/OrbCore/Store.lean; lean/OrbCore/OrbCore/Control.lean`",
                 "SM-12.current_files",
             ),
-            ["src/api/idempotency.rs", "src/uploads.rs"],
+            ["lean/OrbCore/OrbCore/Store.lean", "lean/OrbCore/OrbCore/Control.lean"],
         )
         with self.assertRaisesRegex(ValueError, "expected non-empty ';'-separated file list"):
-            checker.parse_semicolon_paths("`src/api/idempotency.rs; `src/uploads.rs`", "broken")
+            checker.parse_semicolon_paths("`lean/OrbCore/OrbCore/Store.lean; `lean/OrbCore/OrbCore/Control.lean`", "broken")
 
         multi_span_inventory = self.inventory_text.replace(
-            "`src/api/control/control_queue.rs; src/api/control/types.rs`",
-            "`src/api/control/control_queue.rs`; `src/api/control/types.rs`",
+            "`lean/OrbCore/OrbCore/Control.lean; lean/OrbCore/OrbCore/Spec.lean`",
+            "`lean/OrbCore/OrbCore/Control.lean`; `lean/OrbCore/OrbCore/Spec.lean`",
             1,
         )
         sm_rows, _ = checker.validate_inventory_markdown(multi_span_inventory, ROOT)
@@ -225,7 +225,7 @@ class StateInventoryTests(unittest.TestCase):
         cyclic = copy.deepcopy(self.validation_matrix)
         for gate in cyclic["gates"]:
             if gate["id"] == "state-inventory":
-                gate["dependencies"] = ["rust-workspace-tests"]
+                gate["dependencies"] = ["lean-workspace-tests"]
         with self.assertRaisesRegex(ValueError, "dependency cycle"):
             checker.validate_validation_matrix(cyclic, ROOT)
 
@@ -244,7 +244,7 @@ class StateInventoryTests(unittest.TestCase):
             }
         )
         for gate in optional_dep["gates"]:
-            if gate["id"] == "rust-workspace-tests":
+            if gate["id"] == "lean-workspace-tests":
                 gate["dependencies"] = list(gate.get("dependencies", [])) + ["optional-smoke"]
         with self.assertRaisesRegex(ValueError, "depends on optional gate"):
             checker.validate_validation_matrix(optional_dep, ROOT)

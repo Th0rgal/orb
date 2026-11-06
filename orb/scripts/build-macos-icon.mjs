@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
 // Compile with Apple's tools so macOS can render the native icon material.
-const root = fileURLToPath(new URL("../src-tauri/", import.meta.url));
+const root = fileURLToPath(new URL("../../macos_shell/", import.meta.url));
 const output = resolve(root, "gen/app-icon");
 mkdirSync(output, { recursive: true });
 execFileSync("xcrun", ["actool", resolve(root, "icons/Orb.icon"),

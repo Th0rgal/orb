@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build all Wave 1 + Wave 2 native Lean 4 binaries (`lean/OrbBin` + `lean/OrbNode`)
-# and stage them into `--out-dir <dir>` (repeatable) or by default into Cargo's
+# Build all native Lean 4 binaries (`lean/OrbBin`, `lean/OrbNode`, `lean/OrbCore`, `lean/OrbLocald`)
+# and stage them into `--out-dir <dir>` (repeatable) or by default into
 # `target/debug` and `target/release` directories.
 #
 # Usage:
@@ -88,6 +88,8 @@ ALL_BINS=(
   "desktop-mcp"
   "automation-manager-mcp"
   "sandboxed-node"
+  "sandboxed-sh"
+  "orb-locald"
 )
 
 if [[ ${#ONLY_BINS[@]} -gt 0 ]]; then
@@ -98,9 +100,15 @@ fi
 
 ORB_BIN_TARGETS=()
 BUILD_ORB_NODE=0
+BUILD_ORB_CORE=0
+BUILD_ORB_LOCALD=0
 for bin in "${BINS_TO_STAGE[@]}"; do
   if [[ "$bin" == "sandboxed-node" ]]; then
     BUILD_ORB_NODE=1
+  elif [[ "$bin" == "sandboxed-sh" ]]; then
+    BUILD_ORB_CORE=1
+  elif [[ "$bin" == "orb-locald" ]]; then
+    BUILD_ORB_LOCALD=1
   elif [[ "$bin" == "lean-mesh" ]]; then
     ORB_BIN_TARGETS+=("lean-mesh-cli")
   else
@@ -122,6 +130,20 @@ if [[ "$BUILD_ORB_NODE" == "1" ]]; then
   )
 fi
 
+if [[ "$BUILD_ORB_CORE" == "1" ]]; then
+  (
+    cd "$ROOT_DIR/lean/OrbCore"
+    SANDBOXED_ALLOW_RAW_LAKE=1 lake build sandboxed-sh -- -DwarningAsError=true
+  )
+fi
+
+if [[ "$BUILD_ORB_LOCALD" == "1" ]]; then
+  (
+    cd "$ROOT_DIR/lean/OrbLocald"
+    SANDBOXED_ALLOW_RAW_LAKE=1 lake build orb-locald -- -DwarningAsError=true
+  )
+fi
+
 if [[ ${#OUT_DIRS[@]} -eq 0 ]]; then
   target_base="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
   OUT_DIRS=("$target_base/debug" "$target_base/release")
@@ -129,11 +151,17 @@ fi
 
 LAKE_BIN_DIR="$ROOT_DIR/lean/OrbBin/.lake/build/bin"
 LAKE_NODE_BIN_DIR="$ROOT_DIR/lean/OrbNode/.lake/build/bin"
+LAKE_CORE_BIN_DIR="$ROOT_DIR/lean/OrbCore/.lake/build/bin"
+LAKE_LOCALD_BIN_DIR="$ROOT_DIR/lean/OrbLocald/.lake/build/bin"
 for out_dir in "${OUT_DIRS[@]}"; do
   mkdir -p "$out_dir"
   for bin in "${BINS_TO_STAGE[@]}"; do
     if [[ "$bin" == "sandboxed-node" ]]; then
       src="$LAKE_NODE_BIN_DIR/sandboxed-node"
+    elif [[ "$bin" == "sandboxed-sh" ]]; then
+      src="$LAKE_CORE_BIN_DIR/sandboxed-sh"
+    elif [[ "$bin" == "orb-locald" ]]; then
+      src="$LAKE_LOCALD_BIN_DIR/orb-locald"
     else
       src="$LAKE_BIN_DIR/$bin"
     fi

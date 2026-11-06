@@ -6,8 +6,11 @@ import sqlite3
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SQL = (ROOT / 'src/api/mission_store/transfer_cleanup.sql').read_text()
-SCHEMA = re.search(r'const SCHEMA:&str="([^"]+)";', (ROOT / 'src/api/mission_store/sqlite_transfer.rs').read_text()).group(1)
+SQL = (ROOT / 'lean/OrbCore/Store/transfer_cleanup.sql').read_text()
+SCHEMA = (ROOT / 'lean/OrbCore/Store/transfer_schema.sql').read_text().strip()
+STORE_LEAN = (ROOT / 'lean/OrbCore/OrbCore/Store.lean').read_text()
+assert SCHEMA in STORE_LEAN, 'transfer_schema.sql out of sync with Store.lean'
+assert "cancel_machine_transfers_after_mission_delete" in STORE_LEAN, 'transfer_cleanup.sql trigger missing in Store.lean'
 
 class TransferCleanup(unittest.TestCase):
     def setUp(self):
