@@ -149,6 +149,8 @@ struct SessionMeta {
     total_chunks: usize,
     #[serde(default)]
     receipt: Option<Receipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finalizing: Option<Receipt>,
     /// Never holds `batch_token`; see `batch_token_digest`.
     #[serde(flatten)]
     placement: Placement,
@@ -253,6 +255,110 @@ fn session_dir(root: &Path, upload_id: &str) -> Result<PathBuf, String> {
     Ok(sessions.join(upload_id))
 }
 
+struct SessionLock(fs::File);
+
+impl Drop for SessionLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
+fn lock_session(dir: &Path) -> Result<SessionLock, String> {
+    use std::os::unix::fs::MetadataExt;
+    for _ in 0..8 {
+        let lock_path = dir.join("session.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| format!("Open session lock: {e}"))?;
+        fs2::FileExt::lock_exclusive(&file).map_err(|e| format!("Lock upload session: {e}"))?;
+        if let (Ok(open_meta), Ok(path_meta)) = (file.metadata(), fs::metadata(&lock_path)) {
+            if open_meta.dev() == path_meta.dev() && open_meta.ino() == path_meta.ino() {
+                return Ok(SessionLock(file));
+            }
+        }
+        if !dir.is_dir() {
+            let _ = fs2::FileExt::unlock(&file);
+            return Err("Upload session not found; reinitialize the upload".into());
+        }
+        let _ = fs2::FileExt::unlock(&file);
+    }
+    Err("Contended upload session lock; retry the upload".into())
+}
+
+fn lock_existing_session(dir: &Path) -> Result<SessionLock, String> {
+    if !dir.is_dir() {
+        return Err("Upload session not found; reinitialize the upload".into());
+    }
+    lock_session(dir)
+}
+
+fn sync_directory(dir: &Path) -> Result<(), String> {
+    fs::File::open(dir)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| format!("Sync upload directory: {e}"))
+}
+
+fn write_session_meta(dir: &Path, meta: &SessionMeta) -> Result<(), String> {
+    let bytes = serde_json::to_vec(meta).map_err(|e| e.to_string())?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(dir.join("meta.json.tmp"))
+        .map_err(|e| format!("Stage session metadata: {e}"))?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("Persist session metadata: {e}"))?;
+    fs::rename(dir.join("meta.json.tmp"), dir.join("meta.json"))
+        .map_err(|e| format!("Commit session metadata: {e}"))?;
+    sync_directory(dir)
+}
+
+fn payload_digest(path: &Path, size: u64) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|e| format!("Open upload payload: {e}"))?;
+    if file.metadata().map_err(|e| e.to_string())?.len() != size {
+        return Err("Upload payload size mismatch".into());
+    }
+    file.sync_all()
+        .map_err(|e| format!("Sync upload payload: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("Hash upload payload: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn verify_receipt(receipt: &Receipt, size: u64) -> Result<(), String> {
+    if receipt.size as u64 != size
+        || payload_digest(Path::new(&receipt.path), size)? != receipt.sha256
+    {
+        return Err("Final upload digest mismatch".into());
+    }
+    Ok(())
+}
+
+fn cleanup_session_payload(dir: &Path) -> Result<(), String> {
+    for name in ["payload.part", "bitmap.bin"] {
+        match fs::remove_file(dir.join(name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Clean upload session: {e}")),
+        }
+    }
+    sync_directory(dir)
+}
+
 fn read_bitmap(dir: &Path, total_chunks: usize) -> Vec<usize> {
     let Ok(bytes) = fs::read(dir.join("bitmap.bin")) else {
         return Vec::new();
@@ -318,6 +424,7 @@ pub fn init_or_status_session(root: &Path, req: SessionInit) -> Result<SessionSt
     };
     let dir = session_dir(root, &req.upload_id)?;
     fs::create_dir_all(&dir).map_err(|e| format!("Create upload session: {e}"))?;
+    let _lock = lock_session(&dir)?;
     let meta_path = dir.join("meta.json");
     if meta_path.is_file() {
         let existing: SessionMeta = serde_json::from_slice(
@@ -334,7 +441,7 @@ pub fn init_or_status_session(root: &Path, req: SessionInit) -> Result<SessionSt
         {
             return Err("Upload session parameters do not match existing session".into());
         }
-        let received_chunks = if existing.receipt.is_some() {
+        let received_chunks = if existing.receipt.is_some() || existing.finalizing.is_some() {
             (0..existing.total_chunks).collect()
         } else {
             read_bitmap(&dir, existing.total_chunks)
@@ -368,14 +475,11 @@ pub fn init_or_status_session(root: &Path, req: SessionInit) -> Result<SessionSt
         chunk_size,
         total_chunks,
         receipt: None,
+        finalizing: None,
         placement: stored_placement(&req.placement)?.0,
         batch_token_digest: stored_placement(&req.placement)?.1,
     };
-    fs::write(
-        &meta_path,
-        serde_json::to_vec(&meta).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| format!("Write session metadata: {e}"))?;
+    write_session_meta(&dir, &meta)?;
     Ok(SessionStatus {
         upload_id: meta.upload_id,
         name: meta.name,
@@ -394,6 +498,7 @@ pub fn write_session_chunk(
     bytes: &[u8],
 ) -> Result<SessionStatus, String> {
     let dir = session_dir(root, upload_id)?;
+    let _lock = lock_existing_session(&dir)?;
     let meta_path = dir.join("meta.json");
     let meta: SessionMeta = serde_json::from_slice(
         &fs::read(&meta_path).map_err(|_| "Upload session not found; reinitialize the upload")?,
@@ -409,6 +514,9 @@ pub fn write_session_chunk(
             received_chunks: (0..meta.total_chunks).collect(),
             receipt: Some(receipt),
         });
+    }
+    if meta.finalizing.is_some() {
+        return Err("Upload session is finalizing".into());
     }
     if index >= meta.total_chunks {
         return Err("Chunk index out of bounds".into());
@@ -453,16 +561,126 @@ pub fn write_session_chunk(
     })
 }
 
+fn commit_session_receipt(
+    dir: &Path,
+    meta: &mut SessionMeta,
+    receipt: Receipt,
+) -> Result<Receipt, String> {
+    meta.receipt = Some(receipt.clone());
+    meta.finalizing = None;
+    write_session_meta(dir, meta)?;
+    cleanup_session_payload(dir)?;
+    Ok(receipt)
+}
+
 pub fn complete_session(root: &Path, upload_id: &str) -> Result<Receipt, String> {
+    complete_session_with_hook(root, upload_id, || Ok(()))
+}
+
+fn complete_session_with_hook<F>(
+    root: &Path,
+    upload_id: &str,
+    before_meta_commit: F,
+) -> Result<Receipt, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
     let dir = session_dir(root, upload_id)?;
+    let _lock = lock_existing_session(&dir)?;
     let meta_path = dir.join("meta.json");
     let mut meta: SessionMeta = serde_json::from_slice(
         &fs::read(&meta_path).map_err(|_| "Upload session not found; reinitialize the upload")?,
     )
     .map_err(|e| format!("Invalid session metadata: {e}"))?;
-    if let Some(receipt) = meta.receipt {
+
+    if let Some(receipt) = meta.receipt.clone() {
+        verify_receipt(&receipt, meta.size)?;
+        cleanup_session_payload(&dir)?;
         return Ok(receipt);
     }
+
+    let part_path = dir.join("payload.part");
+    let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
+
+    if let Some(pending) = meta.finalizing.clone() {
+        let final_path = Path::new(&pending.path);
+        let parent = final_path.parent().ok_or("Invalid upload path")?;
+        if final_path.is_file() {
+            let canonical = parent.canonicalize().map_err(|e| e.to_string())?;
+            if !canonical.starts_with(&canonical_root) || canonical != parent {
+                return Err("Invalid upload path".into());
+            }
+            verify_receipt(&pending, meta.size)?;
+            sync_directory(parent)?;
+            before_meta_commit()?;
+            return commit_session_receipt(&dir, &mut meta, pending);
+        }
+        let received = read_bitmap(&dir, meta.total_chunks);
+        if received.len() != meta.total_chunks {
+            return Err(format!(
+                "Upload incomplete: received {}/{} chunks",
+                received.len(),
+                meta.total_chunks
+            ));
+        }
+        let sha256 = payload_digest(&part_path, meta.size)?;
+        if sha256 != pending.sha256 {
+            return Err("Staged upload digest mismatch".into());
+        }
+        let parent = final_path.parent().ok_or("Invalid upload path")?;
+        fs::create_dir_all(parent).map_err(|e| format!("Create upload folder: {e}"))?;
+        let canonical = parent.canonicalize().map_err(|e| e.to_string())?;
+        if !canonical.starts_with(&canonical_root) || canonical != parent {
+            return Err("Invalid upload path".into());
+        }
+        publish_final_payload(&part_path, final_path, &canonical_root, &meta.placement)?;
+        before_meta_commit()?;
+        return commit_session_receipt(&dir, &mut meta, pending);
+    }
+
+    if let (Some(batch), Some(relative)) = (&meta.placement.batch_id, &meta.placement.relative_path)
+    {
+        if let (Ok(batch_uuid), Ok(norm_rel)) = (
+            uuid::Uuid::parse_str(batch),
+            validate_relative_upload_path(relative),
+        ) {
+            if let Some(digest) = meta.batch_token_digest.as_deref() {
+                claim_batch(
+                    &canonical_root,
+                    &batch_uuid.hyphenated().to_string(),
+                    digest,
+                )?;
+            } else {
+                return Err("Folder uploads need a batch token".into());
+            }
+            let candidate = canonical_root
+                .join(batch_uuid.hyphenated().to_string())
+                .join(norm_rel);
+            let valid_parent = candidate
+                .parent()
+                .and_then(|p| p.canonicalize().ok().map(|c| (p, c)))
+                .is_some_and(|(p, c)| c.starts_with(&canonical_root) && c == p);
+            if valid_parent
+                && candidate.is_file()
+                && !part_path.exists()
+                && !dir.join("bitmap.bin").exists()
+            {
+                let sha256 = payload_digest(&candidate, meta.size)?;
+                if let Some(parent) = candidate.parent() {
+                    sync_directory(parent)?;
+                }
+                let receipt = Receipt {
+                    name: nfc(&meta.name),
+                    path: candidate.to_string_lossy().into_owned(),
+                    size: meta.size as usize,
+                    sha256,
+                };
+                before_meta_commit()?;
+                return commit_session_receipt(&dir, &mut meta, receipt);
+            }
+        }
+    }
+
     let received = read_bitmap(&dir, meta.total_chunks);
     if received.len() != meta.total_chunks {
         return Err(format!(
@@ -471,67 +689,94 @@ pub fn complete_session(root: &Path, upload_id: &str) -> Result<Receipt, String>
             meta.total_chunks
         ));
     }
-    let part_path = dir.join("payload.part");
-    let mut part = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&part_path)
-        .map_err(|e| format!("Open staged upload: {e}"))?;
-    part.sync_all()
-        .map_err(|e| format!("Sync staged upload: {e}"))?;
-    let actual_size = part.metadata().map_err(|e| e.to_string())?.len();
-    if actual_size != meta.size {
-        return Err("Staged upload size mismatch".into());
-    }
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 256 * 1024];
-    loop {
-        let n = part
-            .read(&mut buf)
-            .map_err(|e| format!("Hash staged upload: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    let sha256 = hex::encode(hasher.finalize());
-    drop(part);
-
-    let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
+    let sha256 = payload_digest(&part_path, meta.size)?;
     let final_path = destination(
         &canonical_root,
         &meta.name,
         &meta.placement,
         meta.batch_token_digest.as_deref(),
     )?;
-    // link() fails if the target exists: an atomic no-replace placement, so a
-    // concurrent upload of the same path can never overwrite the other.
-    if let Err(e) = fs::hard_link(&part_path, &final_path) {
-        if meta.placement.batch_id.is_none() {
-            let _ = fs::remove_dir(final_path.parent().unwrap_or(&canonical_root));
-        }
-        return Err(if e.kind() == std::io::ErrorKind::AlreadyExists {
-            "A file with this path was already uploaded".into()
-        } else {
-            format!("Finalize uploaded file: {e}")
-        });
-    }
-    let _ = fs::remove_file(&part_path);
-    let _ = fs::remove_file(dir.join("bitmap.bin"));
     let receipt = Receipt {
         name: nfc(&meta.name),
         path: final_path.to_string_lossy().into_owned(),
         size: meta.size as usize,
         sha256,
     };
-    meta.receipt = Some(receipt.clone());
-    let _ = fs::write(&meta_path, serde_json::to_vec(&meta).unwrap_or_default());
-    Ok(receipt)
+    meta.finalizing = Some(receipt.clone());
+    if let Err(e) = write_session_meta(&dir, &meta) {
+        if meta.placement.batch_id.is_none() {
+            let _ = fs::remove_dir(final_path.parent().unwrap_or(&canonical_root));
+        }
+        return Err(e);
+    }
+    if let Err(e) = publish_final_payload(&part_path, &final_path, &canonical_root, &meta.placement)
+    {
+        meta.finalizing = None;
+        let _ = write_session_meta(&dir, &meta);
+        return Err(e);
+    }
+    before_meta_commit()?;
+    commit_session_receipt(&dir, &mut meta, receipt)
+}
+
+fn publish_final_payload(
+    part_path: &Path,
+    final_path: &Path,
+    canonical_root: &Path,
+    placement: &Placement,
+) -> Result<(), String> {
+    match fs::hard_link(part_path, final_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if placement.batch_id.is_none() {
+                let _ = fs::remove_dir(final_path.parent().unwrap_or(canonical_root));
+            }
+            return Err("A file with this path was already uploaded".into());
+        }
+        Err(_) => {
+            let mut dst = match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(final_path)
+            {
+                Ok(file) => file,
+                Err(e) => {
+                    if placement.batch_id.is_none() {
+                        let _ = fs::remove_dir(final_path.parent().unwrap_or(canonical_root));
+                    }
+                    return Err(if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        "A file with this path was already uploaded".into()
+                    } else {
+                        format!("Finalize uploaded file: {e}")
+                    });
+                }
+            };
+            let mut src =
+                fs::File::open(part_path).map_err(|e| format!("Open staged upload: {e}"))?;
+            if let Err(e) = std::io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all()) {
+                let _ = fs::remove_file(final_path);
+                if placement.batch_id.is_none() {
+                    let _ = fs::remove_dir(final_path.parent().unwrap_or(canonical_root));
+                }
+                return Err(format!("Finalize uploaded file: {e}"));
+            }
+        }
+    }
+    let final_file =
+        fs::File::open(final_path).map_err(|e| format!("Open finalized upload: {e}"))?;
+    final_file
+        .sync_all()
+        .map_err(|e| format!("Sync finalized upload: {e}"))?;
+    if let Some(parent) = final_path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
 }
 
 pub fn cancel_session(root: &Path, upload_id: &str) -> Result<(), String> {
     let dir = session_dir(root, upload_id)?;
-    if dir.exists() {
+    if dir.is_dir() {
+        let _lock = lock_session(&dir)?;
         fs::remove_dir_all(&dir).map_err(|e| format!("Remove upload session: {e}"))?;
     }
     Ok(())
@@ -946,6 +1191,157 @@ mod tests {
         // Idempotent complete returns same receipt
         let again = complete_session(root.path(), "sess_12345").unwrap();
         assert_eq!(again, receipt);
+    }
+
+    #[test]
+    fn complete_session_recovers_after_interrupted_meta_commit() {
+        let root = tempfile::tempdir().unwrap();
+        init_or_status_session(
+            root.path(),
+            SessionInit {
+                upload_id: "sess_recover_single".into(),
+                name: "archive.tar".into(),
+                size: 8,
+                chunk_size: Some(4),
+                placement: Placement::default(),
+            },
+        )
+        .unwrap();
+        write_session_chunk(root.path(), "sess_recover_single", 0, b"abcd").unwrap();
+        write_session_chunk(root.path(), "sess_recover_single", 1, b"efgh").unwrap();
+
+        let err = complete_session_with_hook(root.path(), "sess_recover_single", || {
+            Err("simulated crash before meta.json commit".into())
+        })
+        .unwrap_err();
+        assert_eq!(err, "simulated crash before meta.json commit");
+
+        let session = root.path().join(".sessions/sess_recover_single");
+        assert!(session.join("payload.part").is_file());
+        assert!(session.join("bitmap.bin").is_file());
+
+        let receipt = complete_session(root.path(), "sess_recover_single").unwrap();
+        assert_eq!(fs::read(&receipt.path).unwrap(), b"abcdefgh");
+        assert!(!session.join("payload.part").exists());
+        assert!(!session.join("bitmap.bin").exists());
+
+        init_or_status_session(
+            root.path(),
+            SessionInit {
+                upload_id: "sess_recover_unlinked".into(),
+                name: "weights.bin".into(),
+                size: 6,
+                chunk_size: Some(4),
+                placement: Placement::default(),
+            },
+        )
+        .unwrap();
+        write_session_chunk(root.path(), "sess_recover_unlinked", 0, b"0123").unwrap();
+        write_session_chunk(root.path(), "sess_recover_unlinked", 1, b"45").unwrap();
+        let err = complete_session_with_hook(root.path(), "sess_recover_unlinked", || {
+            Err("simulated crash after publish".into())
+        })
+        .unwrap_err();
+        assert_eq!(err, "simulated crash after publish");
+        let unlinked_session = root.path().join(".sessions/sess_recover_unlinked");
+        fs::remove_file(unlinked_session.join("payload.part")).unwrap();
+        fs::remove_file(unlinked_session.join("bitmap.bin")).unwrap();
+
+        let recovered_single = complete_session(root.path(), "sess_recover_unlinked").unwrap();
+        assert_eq!(fs::read(&recovered_single.path).unwrap(), b"012345");
+        assert_eq!(
+            recovered_single.sha256,
+            hex::encode(Sha256::digest(b"012345"))
+        );
+
+        init_or_status_session(
+            root.path(),
+            SessionInit {
+                upload_id: "sess_recover_folder".into(),
+                name: "dataset.bin".into(),
+                size: 6,
+                chunk_size: Some(4),
+                placement: folder(BATCH, "Set/dataset.bin"),
+            },
+        )
+        .unwrap();
+        write_session_chunk(root.path(), "sess_recover_folder", 0, b"0123").unwrap();
+        write_session_chunk(root.path(), "sess_recover_folder", 1, b"45").unwrap();
+
+        let folder_session = root.path().join(".sessions/sess_recover_folder");
+        let target = root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join(BATCH)
+            .join("Set/dataset.bin");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::rename(folder_session.join("payload.part"), &target).unwrap();
+        fs::remove_file(folder_session.join("bitmap.bin")).unwrap();
+
+        let recovered = complete_session(root.path(), "sess_recover_folder").unwrap();
+        assert_eq!(Path::new(&recovered.path), target);
+        assert_eq!(fs::read(&recovered.path).unwrap(), b"012345");
+        assert_eq!(recovered.sha256, hex::encode(Sha256::digest(b"012345")));
+    }
+
+    #[test]
+    fn complete_session_retry_is_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        init_or_status_session(
+            root.path(),
+            SessionInit {
+                upload_id: "sess_idempotent".into(),
+                name: "notes.txt".into(),
+                size: 5,
+                chunk_size: Some(4),
+                placement: Placement::default(),
+            },
+        )
+        .unwrap();
+        write_session_chunk(root.path(), "sess_idempotent", 0, b"hell").unwrap();
+        write_session_chunk(root.path(), "sess_idempotent", 1, b"o").unwrap();
+
+        let first = complete_session(root.path(), "sess_idempotent").unwrap();
+        let second = complete_session(root.path(), "sess_idempotent").unwrap();
+        let third = complete_session(root.path(), "sess_idempotent").unwrap();
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+        assert_eq!(fs::read(&first.path).unwrap(), b"hello");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_complete_session_calls_return_identical_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        init_or_status_session(
+            root.path(),
+            SessionInit {
+                upload_id: "sess_concurrent_complete".into(),
+                name: "model.weights".into(),
+                size: 9,
+                chunk_size: Some(4),
+                placement: Placement::default(),
+            },
+        )
+        .unwrap();
+        write_session_chunk(root.path(), "sess_concurrent_complete", 0, b"1234").unwrap();
+        write_session_chunk(root.path(), "sess_concurrent_complete", 1, b"5678").unwrap();
+        write_session_chunk(root.path(), "sess_concurrent_complete", 2, b"9").unwrap();
+
+        let p1 = root.path().to_path_buf();
+        let p2 = root.path().to_path_buf();
+        let p3 = root.path().to_path_buf();
+        let (r1, r2, r3) = tokio::join!(
+            tokio::task::spawn_blocking(move || complete_session(&p1, "sess_concurrent_complete")),
+            tokio::task::spawn_blocking(move || complete_session(&p2, "sess_concurrent_complete")),
+            tokio::task::spawn_blocking(move || complete_session(&p3, "sess_concurrent_complete")),
+        );
+        let r1 = r1.unwrap().unwrap();
+        let r2 = r2.unwrap().unwrap();
+        let r3 = r3.unwrap().unwrap();
+        assert_eq!(r1, r2);
+        assert_eq!(r2, r3);
+        assert_eq!(fs::read(&r1.path).unwrap(), b"123456789");
     }
 
     #[test]
