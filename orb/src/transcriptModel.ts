@@ -6,6 +6,7 @@ import {
   orbKernelScratchSliceStep,
   orbWireTranscriptSliceStep,
 } from "./orbKernel";
+import { projectTranscriptCounts } from "./clientCore";
 import { isCancellationRequestedNotice, isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
 
 export type StreamItem =
@@ -249,6 +250,13 @@ export class TranscriptReducer {
     const nextFoldSeq = prevFoldSeq + 1n;
     const thinkingOpen = last?.kind === "think" && !last.done;
     const isReplayFromLog = ev.storedId !== undefined;
+    const projectedCounts = projectTranscriptCounts(
+      this.users.size,
+      this.tools.size,
+      thinkingOpen,
+      isReplayFromLog,
+    );
+    if (!projectedCounts) return;
     const eventBytes = TRANSCRIPT_EVENT_ENCODER.encode(identity ?? channel);
     const scratch = orbKernelScratchSliceStep(eventBytes.byteLength);
     if (eventBytes.byteLength > 0) {

@@ -278,3 +278,119 @@ enum OrbTranscriptGates {
         return a < c ? (true, a + 1) : (false, a)
     }
 }
+
+/// Verified cross-client reducers and binary patch framing (`lean/OrbClient/{Spec,Reducers}.lean`,
+/// checked against `shared/orb-spec/fixtures/client-core.json`).
+enum OrbClientCore {
+    nonisolated static let patchMaxPayloadBytes = 65_535
+    nonisolated static let patchHeaderBytes = 8
+    nonisolated static let transcriptStableMaxTurns: UInt32 = 65_536
+
+    struct SyncCursorState: Equatable, Hashable, Sendable {
+        var epoch: UInt64 = 0
+        var seq: UInt64 = 0
+    }
+
+    struct TranscriptProjection: Equatable, Hashable, Sendable {
+        let visibleEntries: UInt32
+        let thinkingActive: Bool
+    }
+
+    struct PatchFrame: Equatable, Sendable {
+        let schema: UInt16
+        let payload: Data
+    }
+
+    nonisolated static func verifyClientSyncCursor(
+        localEpoch: UInt64,
+        incomingEpoch: UInt64,
+        localSeq: UInt64,
+        incomingSeq: UInt64,
+        frameValid: Bool,
+        authOk: Bool
+    ) -> Bool {
+        frameValid &&
+            authOk &&
+            incomingEpoch > 0 &&
+            (localEpoch < incomingEpoch || (localEpoch == incomingEpoch && localSeq < incomingSeq))
+    }
+
+    nonisolated static func stepSyncCursor(
+        _ cur: SyncCursorState,
+        incomingEpoch: UInt64,
+        incomingSeq: UInt64,
+        frameValid: Bool,
+        authOk: Bool
+    ) -> (stepped: Bool, state: SyncCursorState) {
+        if verifyClientSyncCursor(
+            localEpoch: cur.epoch,
+            incomingEpoch: incomingEpoch,
+            localSeq: cur.seq,
+            incomingSeq: incomingSeq,
+            frameValid: frameValid,
+            authOk: authOk
+        ) {
+            return (true, SyncCursorState(epoch: incomingEpoch, seq: incomingSeq))
+        }
+        return (false, cur)
+    }
+
+    nonisolated static func validTranscriptProjInput(userTurns: UInt32, toolTurns: UInt32) -> Bool {
+        userTurns <= transcriptStableMaxTurns && toolTurns <= transcriptStableMaxTurns
+    }
+
+    nonisolated static func projectTranscriptCounts(
+        userTurns: UInt32,
+        toolTurns: UInt32,
+        thinkingOpen: Bool,
+        isReplayFromLog _: Bool
+    ) -> TranscriptProjection {
+        TranscriptProjection(
+            visibleEntries: userTurns &+ toolTurns,
+            thinkingActive: thinkingOpen
+        )
+    }
+
+    nonisolated static func verifyBundleBudget(
+        eagerBytes: UInt64,
+        budgetBytes: UInt64,
+        singleAppEntry: Bool,
+        hasEagerHeavyVendor: Bool
+    ) -> Bool {
+        singleAppEntry && !hasEagerHeavyVendor && budgetBytes > 0 && eagerBytes <= budgetBytes
+    }
+
+    nonisolated static func encodeOrbClientPatch(schema: UInt16, payload: Data) -> Data? {
+        guard schema >= 1, schema <= 255, payload.count >= 1, payload.count <= patchMaxPayloadBytes else {
+            return nil
+        }
+        let len = payload.count
+        var out = Data(capacity: patchHeaderBytes + len)
+        out.append(contentsOf: [
+            0x4F, 0x52, 0x42, 0x50,
+            UInt8((schema >> 8) & 0xFF),
+            UInt8(schema & 0xFF),
+            UInt8((len >> 8) & 0xFF),
+            UInt8(len & 0xFF)
+        ])
+        out.append(payload)
+        return out
+    }
+
+    nonisolated static func parseOrbClientPatch(_ raw: Data) -> PatchFrame? {
+        guard raw.count >= 9 else { return nil }
+        let b0 = raw[raw.startIndex]
+        let b1 = raw[raw.startIndex + 1]
+        let b2 = raw[raw.startIndex + 2]
+        let b3 = raw[raw.startIndex + 3]
+        guard b0 == 0x4F, b1 == 0x52, b2 == 0x42, b3 == 0x50 else { return nil }
+        let schema = (UInt16(raw[raw.startIndex + 4]) << 8) | UInt16(raw[raw.startIndex + 5])
+        let payLen = (Int(raw[raw.startIndex + 6]) << 8) | Int(raw[raw.startIndex + 7])
+        guard schema >= 1, schema <= 255, payLen >= 1, payLen <= patchMaxPayloadBytes,
+              patchHeaderBytes + payLen == raw.count else {
+            return nil
+        }
+        let payload = raw.subdata(in: (raw.startIndex + patchHeaderBytes)..<(raw.startIndex + patchHeaderBytes + payLen))
+        return PatchFrame(schema: schema, payload: payload)
+    }
+}
