@@ -23,7 +23,13 @@ export type SharedInboxPreferences = {
   model: string;
 };
 export type SharedInboxState = Record<string, unknown> & { preferences?: SharedInboxPreferences };
-type OutboxEntry = { body: unknown; serial: number; rebased?: boolean; conflict?: boolean; failed?: boolean };
+type OutboxEntry = { body: unknown; serial: number; minServerVersion: number; rebased?: boolean; conflict?: boolean; failed?: boolean };
+function nextMutationSeq(floor = 0): number {
+  const stored = Number(localStorage.getItem("orb.inbox.sequence.v1") ?? 0);
+  const sequence = Math.max(Number.isSafeInteger(stored) && stored >= 0 ? stored : 0, floor) + 1;
+  localStorage.setItem("orb.inbox.sequence.v1", String(sequence));
+  return sequence;
+}
 let mutation = 0;
 const writes = new Map<string, Promise<void>>();
 let loadedKey = "";
@@ -34,7 +40,24 @@ function loadOutbox(): string {
   const key = sideQuestionKey("inbox-state:outbox:v1");
   if (key !== loadedKey) {
     loadedKey = key; outbox = {}; versions = {}; local = {};
-    outbox = { ...readJson<typeof outbox>(key, {}, isRecord) };
+    const stored = readJson<Record<string, unknown>>(key, {}, isRecord);
+    for (const [path, raw] of Object.entries(stored)) {
+      if (!record(raw) || !record(raw.body) || !Number.isSafeInteger(raw.serial) || (raw.serial as number) < 0
+        || ![raw.rebased, raw.conflict, raw.failed].every(value => value === undefined || typeof value === "boolean")
+        || raw.failed) continue;
+      const body = raw.body;
+      if (typeof body.clientId !== "string" || !body.clientId || !Number.isSafeInteger(body.mutationSeq) || (body.mutationSeq as number) <= 0
+        || !Number.isSafeInteger(body.expectedVersion) || (body.expectedVersion as number) < 0) continue;
+      if (path === "preferences") {
+        if (typeof body.aiSummary !== "boolean" || typeof body.includeAutonomous !== "boolean" || typeof body.model !== "string") continue;
+      } else if (path.startsWith("seen/")) {
+        try { decodeURIComponent(path.slice(5)); } catch { continue; }
+        if (!Number.isSafeInteger(body.stamp) || body.stamp === 0) continue;
+      } else continue;
+      const entry = { ...raw, body, serial: raw.serial as number, minServerVersion: (body.expectedVersion as number) + 1 };
+      outbox[path] = entry; local[path] = entry;
+    }
+    persist();
   }
   return key;
 }
@@ -73,7 +96,8 @@ function reconcile(path: string, entry: OutboxEntry, state: SharedInboxState): v
     delete outbox[path];
   } else {
     versions[name] = Math.max(versions[name] ?? 0, revision);
-    entry.body = { ...body, expectedVersion: versions[name] };
+    entry.body = { ...body, expectedVersion: versions[name], mutationSeq: nextMutationSeq(typeof body.mutationSeq === "number" ? body.mutationSeq : 0) };
+    entry.minServerVersion = versions[name] + 1;
     entry.rebased = true;
     entry.conflict = false;
   }
@@ -141,14 +165,13 @@ export function writeInboxState(path: string, input: unknown): void {
     delete fields.mutationAt;
     if (!fields.clientId || !fields.mutationSeq) {
       const clientId = localStorage.getItem("orb.inbox.client.v1") ?? crypto.randomUUID();
-      const sequence = Number(localStorage.getItem("orb.inbox.sequence.v1") ?? 0) + 1;
+      const sequence = nextMutationSeq();
       localStorage.setItem("orb.inbox.client.v1", clientId);
-      localStorage.setItem("orb.inbox.sequence.v1", String(sequence));
       Object.assign(fields, { clientId, mutationSeq: sequence, expectedVersion: versions[entryKey(path)] ?? 0 });
     }
     body = fields;
   }
-  const entry = { body, serial };
+  const entry = { body, serial, minServerVersion: (record(body) && typeof body.expectedVersion === "number" ? body.expectedVersion : 0) + 1 };
   outbox[path] = entry; local[path] = entry; persist();
   flush(path, entry);
 }
@@ -163,7 +186,11 @@ export async function readInboxState(): Promise<SharedInboxState | undefined> {
       if (entry.conflict && !writes.has(`${version}:${key}:${path}`)) reconcile(path, entry, state);
     }
     const overlay = { ...outbox };
-    for (const [path, entry] of Object.entries(local)) if (entry.serial > serial && !entry.failed) overlay[path] = entry;
+    for (const [path, entry] of Object.entries(local)) {
+      const revision = record(state._versions) && typeof state._versions[entryKey(path)] === "number" ? state._versions[entryKey(path)] as number : 0;
+      if (!entry.failed && (entry.serial > serial || revision < entry.minServerVersion)) overlay[path] = entry;
+      if (!outbox[path] && (entry.failed || revision >= entry.minServerVersion)) delete local[path];
+    }
     for (const [path, entry] of Object.entries(overlay)) {
       if (!record(entry.body)) continue;
       const { clientId, mutationSeq, expectedVersion, mutationAt, ...value } = entry.body;

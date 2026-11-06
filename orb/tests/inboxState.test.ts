@@ -124,6 +124,128 @@ it("refreshes _versions on 409 conflict, rebases entry A once, and converges wit
   expect(putACount).toBe(2);
 });
 
+it("keeps overlaying a committed local write over a stale in-flight GET until server _versions catches up", async () => {
+  let releaseGet!: (r: Response) => void;
+  let serverVersion = 3;
+  let serverStamp = 100;
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "PUT" && url.endsWith("/seen/m")) {
+      serverVersion = 4;
+      serverStamp = 900;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    if (!init?.method && fetcher.mock.calls.filter(c => !c[1]?.method).length === 2) {
+      return new Promise<Response>(r => { releaseGet = r; });
+    }
+    return Promise.resolve(new Response(JSON.stringify({
+      "seen:m": serverStamp,
+      "seen:other": 55,
+      _versions: { "seen:m": serverVersion, "seen:other": 2 },
+    })));
+  });
+  vi.stubGlobal("fetch", fetcher);
+  const { readInboxState, writeInboxState } = await import("../src/inboxState");
+
+  await readInboxState();
+  writeInboxState("seen/m", { stamp: 900 });
+  const staleReading = readInboxState();
+
+  await vi.waitFor(() => expect(fetcher.mock.calls.some(c => c[1]?.method === "PUT")).toBe(true));
+  await new Promise(resolve => setTimeout(resolve, 0));
+
+  releaseGet(new Response(JSON.stringify({
+    "seen:m": 100,
+    "seen:other": 55,
+    _versions: { "seen:m": 3, "seen:other": 2 },
+  })));
+  expect(await staleReading).toMatchObject({ "seen:m": 900, "seen:other": 55 });
+
+  serverVersion = 5;
+  serverStamp = 1200;
+  expect(await readInboxState()).toMatchObject({ "seen:m": 1200, "seen:other": 55 });
+});
+
+it("discards malformed, null, or non-object localStorage outbox entries without throwing", async () => {
+  const { sideQuestionKey } = await import("../src/sideQuestionStorage");
+  localStorage.setItem(sideQuestionKey("inbox-state:outbox:v1"), JSON.stringify({
+    "seen/null-entry": null,
+    "seen/primitive": "corrupt",
+    "seen/array": [1, 2, 3],
+    "seen/bad-flags": { body: { stamp: 10, clientId: "00000000-0000-0000-0000-000000000001", mutationSeq: 1, expectedVersion: 0 }, serial: 1, conflict: "yes" },
+    "seen/zero-stamp": { body: { stamp: 0, clientId: "00000000-0000-0000-0000-000000000001", mutationSeq: 1, expectedVersion: 0 }, serial: 1 },
+    "unknown/path": { body: { stamp: 10, clientId: "00000000-0000-0000-0000-000000000001", mutationSeq: 1, expectedVersion: 0 }, serial: 1 },
+    preferences: { body: { aiSummary: "invalid", includeAutonomous: false, model: "builtin/fast", clientId: "00000000-0000-0000-0000-000000000001", mutationSeq: 1, expectedVersion: 0 }, serial: 1 },
+    "seen/valid": {
+      body: { stamp: 777, clientId: "00000000-0000-0000-0000-000000000001", mutationSeq: 2, expectedVersion: 1 },
+      serial: 2,
+    },
+  }));
+  const puts: string[] = [];
+  const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+    if (init?.method === "PUT") {
+      puts.push(url);
+      return new Response(null, { status: 204 });
+    }
+    return new Response(JSON.stringify({ "seen:valid": 100, _versions: { "seen:valid": 1 } }));
+  });
+  vi.stubGlobal("fetch", fetcher);
+  const { readInboxState } = await import("../src/inboxState");
+
+  const state = await readInboxState();
+  expect(state).toMatchObject({ "seen:valid": 777 });
+  await vi.waitFor(() => expect(puts).toHaveLength(1));
+  expect(puts[0]).toContain("/seen/valid");
+});
+
+it("generates a fresh mutationSeq when rebasing on 409 so shared multi-tab clientId never drops the retry", async () => {
+  localStorage.setItem("orb.inbox.client.v1", "00000000-0000-0000-0000-000000000009");
+  localStorage.setItem("orb.inbox.sequence.v1", "1");
+  let serverVersion = 2;
+  let serverSeq = 5;
+  let serverModel = "builtin/fast";
+  let putCount = 0;
+  const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+    if (init?.method === "PUT" && url.endsWith("/preferences")) {
+      putCount++;
+      const body = JSON.parse(init.body as string);
+      if (putCount === 1) {
+        localStorage.setItem("orb.inbox.sequence.v1", String(serverSeq));
+        return new Response(JSON.stringify({
+          preferences: { aiSummary: false, includeAutonomous: true, model: serverModel },
+          _versions: { preferences: serverVersion },
+        }), { status: 409, headers: { "Content-Type": "application/json" } });
+      }
+      if (body.expectedVersion !== serverVersion) {
+        return new Response(JSON.stringify({ _versions: { preferences: serverVersion } }), { status: 409 });
+      }
+      if (body.mutationSeq > serverSeq) {
+        serverVersion++;
+        serverSeq = body.mutationSeq;
+        serverModel = body.model;
+      }
+      return new Response(null, { status: 204 });
+    }
+    return new Response(JSON.stringify({
+      preferences: { aiSummary: true, includeAutonomous: false, model: serverModel },
+      _versions: { preferences: serverVersion },
+    }));
+  });
+  vi.stubGlobal("fetch", fetcher);
+  const { readInboxState, writeInboxState } = await import("../src/inboxState");
+
+  writeInboxState("preferences", { aiSummary: true, includeAutonomous: false, model: "builtin/smart" });
+  await vi.waitFor(() => expect(putCount).toBe(2));
+  await new Promise(resolve => setTimeout(resolve, 0));
+
+  const puts = fetcher.mock.calls.filter(c => String(c[0]).endsWith("/preferences") && c[1]?.method === "PUT");
+  const firstBody = JSON.parse(puts[0][1]!.body as string);
+  const rebasedBody = JSON.parse(puts[1][1]!.body as string);
+  expect(firstBody).toMatchObject({ expectedVersion: 0, mutationSeq: 2 });
+  expect(rebasedBody).toMatchObject({ expectedVersion: 2, mutationSeq: 6 });
+  expect(serverModel).toBe("builtin/smart");
+  expect((await readInboxState())?.preferences?.model).toBe("builtin/smart");
+});
+
 it("retires a subsumed monotonic seen update on 409 without redundant write loops", async () => {
   let putCount = 0;
   const fetcher = vi.fn(async (url: string, init?: RequestInit) => {

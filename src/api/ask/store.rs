@@ -60,6 +60,18 @@ pub struct OperatorNote {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveInboxStateOutcome {
+    Applied {
+        revision: i64,
+    },
+    DuplicateOrOlder,
+    Conflict {
+        revision: i64,
+        current_value: Option<serde_json::Value>,
+    },
+}
+
 /// SQLite-backed Ask store.
 pub struct AskStore {
     conn: Arc<Mutex<Connection>>,
@@ -126,6 +138,7 @@ impl AskStore {
             .unwrap_or(0);
         self.save_inbox_state_versioned(user, key, value, revision, "test", revision + 1)
             .await
+            .map(|_| ())
     }
     pub async fn save_inbox_state_versioned(
         &self,
@@ -135,7 +148,7 @@ impl AskStore {
         expected_version: i64,
         client_id: &str,
         sequence: i64,
-    ) -> Result<(), String> {
+    ) -> Result<SaveInboxStateOutcome, String> {
         let conn = self.conn.clone();
         let (user, key, raw, client) = (
             user.to_string(),
@@ -146,18 +159,61 @@ impl AskStore {
         tokio::task::spawn_blocking(move || {
             let mut conn = conn.blocking_lock();
             let tx = conn.transaction().map_err(|e| e.to_string())?;
-            let previous: Option<(i64, String, i64)> = tx.query_row("SELECT revision, client_id, mutation_seq FROM inbox_state_revisions WHERE user_id = ?1 AND entry_key = ?2", params![user, key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional().map_err(|e| e.to_string())?;
+            let previous: Option<(i64, String, i64)> = tx
+                .query_row(
+                    "SELECT revision, client_id, mutation_seq FROM inbox_state_revisions WHERE user_id = ?1 AND entry_key = ?2",
+                    params![user, key],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
             let revision = previous.as_ref().map(|p| p.0).unwrap_or(0);
             let same_client = previous.as_ref().is_some_and(|p| p.1 == client);
-            let duplicate_or_older = same_client && previous.as_ref().is_some_and(|p| sequence <= p.2);
+            let duplicate_or_older =
+                same_client && previous.as_ref().is_some_and(|p| sequence <= p.2);
             // Core revisions order different devices; a persisted per-device
             // counter orders that device's own serialized/offline writes.
-            if !duplicate_or_older && (expected_version == revision || same_client) {
-                tx.execute("INSERT INTO inbox_state (user_id, entry_key, value_json) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, entry_key) DO UPDATE SET value_json = excluded.value_json", params![user, key, raw]).map_err(|e| e.to_string())?;
-                tx.execute("INSERT INTO inbox_state_revisions (user_id, entry_key, revision, client_id, mutation_seq) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(user_id, entry_key) DO UPDATE SET revision = excluded.revision, client_id = excluded.client_id, mutation_seq = excluded.mutation_seq", params![user, key, revision + 1, client, sequence]).map_err(|e| e.to_string())?;
-            }
-            tx.commit().map_err(|e| e.to_string())
-        }).await.map_err(|e| e.to_string())?
+            let outcome = if duplicate_or_older {
+                SaveInboxStateOutcome::DuplicateOrOlder
+            } else if expected_version == revision || same_client {
+                let next_revision = revision + 1;
+                tx.execute(
+                    "INSERT INTO inbox_state (user_id, entry_key, value_json) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, entry_key) DO UPDATE SET value_json = excluded.value_json",
+                    params![user, key, raw],
+                )
+                .map_err(|e| e.to_string())?;
+                tx.execute(
+                    "INSERT INTO inbox_state_revisions (user_id, entry_key, revision, client_id, mutation_seq) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(user_id, entry_key) DO UPDATE SET revision = excluded.revision, client_id = excluded.client_id, mutation_seq = excluded.mutation_seq",
+                    params![user, key, next_revision, client, sequence],
+                )
+                .map_err(|e| e.to_string())?;
+                SaveInboxStateOutcome::Applied {
+                    revision: next_revision,
+                }
+            } else {
+                let current_raw: Option<String> = tx
+                    .query_row(
+                        "SELECT value_json FROM inbox_state WHERE user_id = ?1 AND entry_key = ?2",
+                        params![user, key],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                let current_value = current_raw
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .map_err(|e| e.to_string())?;
+                SaveInboxStateOutcome::Conflict {
+                    revision,
+                    current_value,
+                }
+            };
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(outcome)
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     /// Open (and create/migrate) the Ask database at `db_path`.
@@ -640,5 +696,70 @@ mod tests {
         // Second take returns nothing — notes flush exactly once.
         let second = store.take_pending_operator_notes(mission).await.unwrap();
         assert!(second.is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_inbox_state_versioned_reports_conflict_for_other_client_and_keeps_same_client_idempotent(
+    ) {
+        let store = temp_store().await;
+        assert_eq!(
+            store
+                .save_inbox_state_versioned(
+                    "alice",
+                    "seen:m1",
+                    &serde_json::json!(100),
+                    0,
+                    "client-a",
+                    1,
+                )
+                .await
+                .unwrap(),
+            SaveInboxStateOutcome::Applied { revision: 1 }
+        );
+        assert_eq!(
+            store
+                .save_inbox_state_versioned(
+                    "alice",
+                    "seen:m1",
+                    &serde_json::json!(100),
+                    0,
+                    "client-a",
+                    1,
+                )
+                .await
+                .unwrap(),
+            SaveInboxStateOutcome::DuplicateOrOlder
+        );
+        assert_eq!(
+            store
+                .save_inbox_state_versioned(
+                    "alice",
+                    "seen:m1",
+                    &serde_json::json!(200),
+                    0,
+                    "client-b",
+                    1,
+                )
+                .await
+                .unwrap(),
+            SaveInboxStateOutcome::Conflict {
+                revision: 1,
+                current_value: Some(serde_json::json!(100)),
+            }
+        );
+        assert_eq!(
+            store
+                .save_inbox_state_versioned(
+                    "alice",
+                    "seen:m1",
+                    &serde_json::json!(200),
+                    1,
+                    "client-b",
+                    2,
+                )
+                .await
+                .unwrap(),
+            SaveInboxStateOutcome::Applied { revision: 2 }
+        );
     }
 }
