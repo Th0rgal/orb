@@ -437,6 +437,7 @@ def http2Or3RequestViaCurl
   let lifeMu ← Std.Mutex.new false
   let hdrExceededFlag ← IO.mkRef false
   let mut watchdogOpt : Option (Task (Except IO.Error Unit)) := none
+  let mut childOpt : Option (IO.Process.Child ⟨.null, .piped, .piped⟩) := none
   let stopWatchdog (wd? : Option (Task (Except IO.Error Unit))) : IO Unit := do
     lifeMu.atomically (set true)
     if let some wd := wd? then
@@ -449,10 +450,16 @@ def http2Or3RequestViaCurl
       stdout := .piped
       stderr := .piped
     }
-    if !isHead && !body.isEmpty then
-      child.stdin.write body
-      child.stdin.flush
+    try
+      if !isHead && !body.isEmpty then
+        child.stdin.write body
+        child.stdin.flush
+    catch _ =>
+      let (_, childErr) ← child.takeStdin
+      childOpt := some childErr
+      throw (IO.userError "failed writing request body to curl stdin")
     let (_, child') ← child.takeStdin
+    childOpt := some child'
     let watchdog ← IO.asTask (prio := .dedicated) do
       let mut keepPolling := true
       while keepPolling do
@@ -480,13 +487,15 @@ def http2Or3RequestViaCurl
           if !(← get) then
             child'.kill
             set true
-        let _ ← child'.wait
         stopWatchdog watchdogOpt
+        let _ ← child'.wait
+        childOpt := none
         try IO.FS.removeFile hdrFile catch _ => pure ()
         return .error s!"curl ({verFlag}) response exceeded maxRespBytes {maxRespBytes}"
     let errStr ← child'.stderr.readToEnd
-    let code ← child'.wait
     stopWatchdog watchdogOpt
+    let code ← child'.wait
+    childOpt := none
     if (← hdrExceededFlag.get) || (← hdrDumpExceedsCap hdrFile 65536) then
       try IO.FS.removeFile hdrFile catch _ => pure ()
       return .error "curl response header dump exceeds 64 KiB cap"
@@ -500,7 +509,14 @@ def http2Or3RequestViaCurl
       | .error _ => return .error "curl response header dump exceeds 64 KiB cap"
     return parseCurlDumpHeadersAndBody hdrBytes (if isHead then ByteArray.empty else outBytes) maxRespBytes method
   catch e =>
+    lifeMu.atomically do
+      if !(← get) then
+        if let some c := childOpt then
+          c.kill
+        set true
     stopWatchdog watchdogOpt
+    if let some c := childOpt then
+      try let _ ← c.wait catch _ => pure ()
     try IO.FS.removeFile hdrFile catch _ => pure ()
     return .error s!"curl ({verFlag}) execution failed: {e}"
 
