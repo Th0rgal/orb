@@ -104,7 +104,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
   let alive = true;
   let root!: HTMLDivElement;
   let client: string | undefined;
-  const requestKey = crypto.randomUUID();
+  let requestKey = crypto.randomUUID();
   createEffect(() => {
     const node = missionNode(p.mission);
     if (node && p.mission.id) rememberMissionNode(p.mission.id, node);
@@ -160,7 +160,12 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       setDestinations(rows);
       setReady(true);
       const previous=selected();
-      if(previous)setSelected(rows.find(row=>sameMachine(row.machine,previous.machine)));
+      if(previous){
+        const prevNodeId=previous.machine.kind==="node"?previous.machine.id:undefined;
+        if(!isAutoManagedTarget(prevNodeId)){
+          setSelected(rows.find(row=>sameMachine(row.machine,previous.machine)));
+        }
+      }
       queueMicrotask(() => {if(!root?.contains(document.activeElement))root?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();});
       const pending = [...view.actions].reverse().find(activeTransfer);
       if (pending) {
@@ -174,10 +179,17 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
     void load();
     void refreshManagedCatalog();
   });
-  const cleanupSpawnedVm = () => {
+  let previousCloudSelection: { target: Destination; spec: { provider: ManagedProviderInfo; size: ManagedSize } } | undefined;
+  const cleanupSpawnedVm = (restoreSelection = false) => {
     if (!spawnedVmId) return;
     const id = spawnedVmId;
     spawnedVmId = undefined;
+    if (restoreSelection && previousCloudSelection && alive) {
+      requestKey = crypto.randomUUID();
+      setPendingCloudSpec(previousCloudSelection.spec);
+      setSelected(previousCloudSelection.target);
+    }
+    previousCloudSelection = undefined;
     void destroyManagedMachine(id).catch(swallow("changeMachine.destroySpawnedVm", { id }));
   };
   onCleanup(() => { alive = false; cancelled = true; });
@@ -197,9 +209,10 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       throw new Error(managedError(e));
     });
     spawnedVmId = spawned.id;
+    previousCloudSelection = { target, spec };
     void refreshManagedCatalog(true);
     if (cancelled) {
-      cleanupSpawnedVm();
+      cleanupSpawnedVm(true);
       throw new Error("Transfer cancelled before preparation.");
     }
     const resolved: Destination = {
@@ -252,7 +265,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       if (found) { setChoice({}); setInventory(found); }
       else { a = await snapshotTransfer(a); setAction(a); }
       setStage("");
-    } catch (e) { fail(e); if (!action()) cleanupSpawnedVm(); } finally { if (cancelled && action()) await cancel(); setBusy(false); }
+    } catch (e) { fail(e); if (!action()) cleanupSpawnedVm(true); } finally { if (cancelled && action()) await cancel(); setBusy(false); }
   };
   const fits = () => { const found = inventory(); if (!found) return true; const t = selectionTotals(found, choice()); return t.bytes <= found.limits.bytes && t.files <= found.limits.files; };
   const snapshot = async () => {
@@ -292,7 +305,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       await finishMove(a);
     } catch (e) {
       fail(e);
-      if (!action()) cleanupSpawnedVm();
+      if (!action()) cleanupSpawnedVm(true);
       if (cancelled && action()) await cancel();
     } finally { setBusy(false); }
   };
@@ -317,7 +330,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
   const STEPS = ["Prepare", "Copy", "Verify", "Activate"];
   // The step in hand: preparing until an inventory exists, then the stage of the move.
   const step = () => !action()?.manifest ? 0 : stage().startsWith("Verifying") ? 2 : stage().startsWith("Activating") ? 3 : 1;
-  const back = () => { setPendingCloudSpec(null); setSelected(undefined); setError(""); queueMicrotask(() => root.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()); };
+  const back = () => { cleanupSpawnedVm(); previousCloudSelection = undefined; setPendingCloudSpec(null); setSelected(undefined); setError(""); queueMicrotask(() => root.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()); };
   const renderDestinationRow = (d: Destination) => (
     <button
       class="menu-item"

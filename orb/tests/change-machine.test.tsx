@@ -361,3 +361,118 @@ it("collapses agent-spawned VMs and provisions a new Cloud VM only when Move is 
     light: true,
   }));
 });
+
+it("restores cloud target on failed preparation so retrying Move provisions a fresh VM, and preserves cloud selection across destination loading", async () => {
+  managedModel.resetManagedCatalog();
+  let resolveInspect!: (v: transfers.TransferView) => void;
+  vi.spyOn(transfers, "inspectTransfer").mockImplementation(
+    () => new Promise(r => { resolveInspect = r; }),
+  );
+  let spawnedSeq = 0;
+  const destroyedIds: string[] = [];
+  vi.spyOn(api, "api").mockImplementation((async (path: string, init?: RequestInit) => {
+    if (path === "/api/managed-machines" && init?.method === "POST") {
+      const idx = ++spawnedSeq;
+      return {
+        id: `vm${idx}`,
+        name: `large-${idx}`,
+        provider: "boat",
+        provider_id: `p${idx}`,
+        node_id: `managed-vm${idx}`,
+        image: "img",
+        size: "large",
+        cpu: 8,
+        ram_gb: 16,
+        state: "online",
+        created_at: "",
+        expires_at: "",
+        cost_usd: 0,
+        usd_per_hour: 0.288,
+        ledger_closed: false,
+      };
+    }
+    if (path.startsWith("/api/managed-machines/vm") && init?.method === "DELETE") {
+      destroyedIds.push(path.split("/").pop()!);
+      return {};
+    }
+    if (path === "/api/managed-machines") {
+      return {
+        enabled: true,
+        provider: "boat",
+        machines: [],
+        budget: { spent_today_usd: 0, daily_cap_usd: null, active: 0, max_concurrent: null, default_ttl_minutes: 120, max_ttl_minutes: 720 },
+        sizes: [],
+        providers: [
+          {
+            provider: "boat",
+            display_name: "boat.dev",
+            configured: true,
+            enabled: true,
+            supports_snapshots: true,
+            supports_free_stop: true,
+            sizes: [{ size: "large", cpu: 8, ram_gb: 16, disk_gb: 80, usd_per_hour: 0.288 }],
+          },
+        ],
+      };
+    }
+    if (path === "/api/managed-machines/settings") return { antigravity_on_managed: true };
+    return {};
+  }) as any);
+
+  const okAction: transfers.TransferAction = {
+    id: "cloud-move-2",
+    mission_id: "source",
+    phase: "copying",
+    light: true,
+    source: { kind: "core" },
+    destination: { kind: "node", id: "managed-vm2" },
+    backend: "codex",
+    model: "model",
+    created_at: "",
+    manifest: { bytes: 0, files: [], excluded: [] },
+  };
+  let prepareCalls = 0;
+  const prepare = vi.spyOn(transfers, "transferRequest").mockImplementation(async () => {
+    prepareCalls++;
+    if (prepareCalls === 1) throw new Error("Temporary relay hiccup");
+    return okAction as any;
+  });
+  vi.spyOn(transfers, "copyTransfer").mockResolvedValue(okAction);
+  vi.spyOn(transfers, "verifyTransfer").mockResolvedValue({ ...okAction, phase: "verified" });
+  const movedMission: Mission = { ...mission, machine_transfer: { ...okAction, phase: "activated" } };
+  vi.spyOn(transfers, "activateTransfer").mockResolvedValue(movedMission);
+  const moved = vi.fn();
+
+  render(() => <ChangeMachine mission={mission} choices={choices} onClose={() => {}} onMoved={moved} />);
+
+  // Select Cloud VM BEFORE inspectTransfer resolves!
+  await waitFor(() => expect(screen.getByRole("menuitem", { name: /boat\.dev/ })).toBeTruthy());
+  fireEvent.click(screen.getByRole("menuitem", { name: /boat\.dev/ }));
+  await waitFor(() => expect(screen.getByRole("menuitem", { name: /large/ })).toBeTruthy());
+  fireEvent.click(screen.getByRole("menuitem", { name: /large/ }));
+  expect(screen.getByText(/Continue on boat\.dev · large/)).toBeTruthy();
+
+  // Now resolve inspectTransfer — synthetic Cloud VM selection MUST stay intact!
+  resolveInspect({
+    version: 1,
+    features: ["links", "selection", "light", "bulk_copy"],
+    actions: [],
+    destinations: [{ machine: { kind: "core" }, label: "Core", available: true }],
+  });
+  await waitFor(() => expect((screen.getByRole("button", { name: /Move to boat\.dev · large/ }) as HTMLButtonElement).disabled).toBe(false));
+
+  // Attempt 1: VM1 spawns, prepare fails -> VM1 is destroyed AND synthetic cloud target is restored!
+  fireEvent.click(screen.getByRole("button", { name: /Move to boat\.dev · large/ }));
+  await waitFor(() => expect(screen.getByText(/Temporary relay hiccup/)).toBeTruthy());
+  expect(destroyedIds).toEqual(["vm1"]);
+  expect(screen.getByRole("button", { name: /Move to boat\.dev · large/ })).toBeTruthy();
+
+  // Attempt 2: clicking Move again provisions VM2 (not destroyed VM1!) and succeeds!
+  fireEvent.click(screen.getByRole("button", { name: /Move to boat\.dev · large/ }));
+  await waitFor(() => expect(moved).toHaveBeenCalledWith(movedMission));
+  expect(spawnedSeq).toBe(2);
+  expect(prepare).toHaveBeenLastCalledWith("source", expect.objectContaining({
+    op: "prepare",
+    destination: { kind: "node", id: "managed-vm2" },
+  }));
+});
