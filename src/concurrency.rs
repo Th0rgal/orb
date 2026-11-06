@@ -337,6 +337,10 @@ impl CoalescedAsyncWriter {
             return;
         };
         self.notify.notify_one();
+        self.spawn_worker(&handle);
+    }
+
+    fn spawn_worker(&self, handle: &tokio::runtime::Handle) {
         if self
             .running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -352,9 +356,21 @@ impl CoalescedAsyncWriter {
             let _guard = guard;
             let mut backoff = Duration::from_millis(25);
             loop {
-                notify.notified().await;
-                if !interval.is_zero() {
-                    tokio::time::sleep(interval).await;
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let Some(writer) = weak.upgrade() else {
+                    return;
+                };
+                let already_flushed = writer.flushed_seq.load(Ordering::Acquire)
+                    >= writer.requested_seq.load(Ordering::Acquire);
+                drop(writer);
+                if already_flushed {
+                    notified.await;
+                    if !interval.is_zero() {
+                        tokio::time::sleep(interval).await;
+                    }
+                    continue;
                 }
                 loop {
                     let Some(writer) = weak.upgrade() else {
@@ -588,6 +604,65 @@ mod tests {
         wait_until_flushed(&writer, 1).await;
         assert_eq!(attempts.load(Ordering::Acquire), 2);
         assert_eq!(writer.requested_seq.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn coalesced_newly_spawned_worker_flushes_preexisting_dirty_sequence_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let writer = CoalescedAsyncWriter::spawn(path.clone(), Duration::from_secs(3600), || {
+            Some(b"preexisting-dirty".to_vec())
+        });
+        writer.mark_dirty();
+        assert_eq!(writer.requested_seq.load(Ordering::Acquire), 1);
+        assert_eq!(writer.flushed_seq.load(Ordering::Acquire), 0);
+        assert!(!writer.running.load(Ordering::Acquire));
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            writer.spawn_worker(&tokio::runtime::Handle::current());
+            wait_until_flushed(&writer, 1).await;
+        });
+        assert_eq!(std::fs::read(&path).unwrap(), b"preexisting-dirty");
+
+        drop(runtime);
+        assert!(!writer.running.load(Ordering::Acquire));
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let release = Arc::new(Notify::new());
+        let aborted_writer = CoalescedAsyncWriter::spawn_with_flush(Duration::from_secs(3600), {
+            let release = Arc::clone(&release);
+            let entered_tx = std::sync::Mutex::new(Some(entered_tx));
+            let path = path.clone();
+            move || {
+                let release = Arc::clone(&release);
+                let tx = entered_tx.lock().unwrap().take();
+                let path = path.clone();
+                async move {
+                    if let Some(tx) = tx {
+                        let _ = tx.send(());
+                        release.notified().await;
+                    }
+                    write_atomic_async(&path, b"after-abort", None).await
+                }
+            }
+        });
+        let runtime2 = tokio::runtime::Runtime::new().unwrap();
+        runtime2.block_on(async {
+            aborted_writer.mark_dirty();
+            entered_rx.recv().unwrap();
+        });
+        drop(runtime2);
+        assert!(!aborted_writer.running.load(Ordering::Acquire));
+        assert_eq!(aborted_writer.requested_seq.load(Ordering::Acquire), 1);
+        assert_eq!(aborted_writer.flushed_seq.load(Ordering::Acquire), 0);
+
+        let runtime3 = tokio::runtime::Runtime::new().unwrap();
+        runtime3.block_on(async {
+            aborted_writer.trigger();
+            wait_until_flushed(&aborted_writer, 1).await;
+        });
+        assert_eq!(std::fs::read(&path).unwrap(), b"after-abort");
     }
 
     #[test]
