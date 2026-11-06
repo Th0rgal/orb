@@ -57,6 +57,7 @@ async fn drain_and_inject_from_store<F, Fut>(
     F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
+    let _delivery_guard = store.lock_operator_note_delivery(mission_id).await;
     let notes = match store.peek_unflushed_operator_notes(mission_id).await {
         Ok(notes) if !notes.is_empty() => notes,
         Ok(_) => return,
@@ -321,5 +322,115 @@ mod tests {
         })
         .await;
         assert!(!*third_called.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn concurrent_midturn_inject_and_turn_prep_take_never_double_deliver() {
+        let store = temp_store().await;
+        let mission_id = Uuid::new_v4();
+        store
+            .enqueue_operator_note(mission_id, "initial-note", None)
+            .await
+            .unwrap();
+
+        let (events_tx, mut events_rx) = broadcast::channel(8);
+        let (inject_entered_tx, inject_entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (allow_finish_tx, allow_finish_rx) = tokio::sync::oneshot::channel::<bool>();
+
+        let store_for_midturn = Arc::clone(&store);
+        let events_for_midturn = events_tx.clone();
+        let midturn_delivered = Arc::new(Mutex::new(Vec::<String>::new()));
+        let midturn_delivered_clone = Arc::clone(&midturn_delivered);
+        let midturn_task = tokio::spawn(async move {
+            drain_and_inject_from_store(
+                store_for_midturn,
+                mission_id,
+                &events_for_midturn,
+                |block| async move {
+                    let _ = inject_entered_tx.send(());
+                    let ok = allow_finish_rx.await.unwrap();
+                    if ok {
+                        midturn_delivered_clone.lock().unwrap().push(block);
+                    }
+                    ok
+                },
+            )
+            .await;
+        });
+
+        inject_entered_rx.await.unwrap();
+
+        let take = store.take_pending_operator_notes(mission_id);
+        tokio::pin!(take);
+        assert!(futures::poll!(&mut take).is_pending());
+
+        store
+            .enqueue_operator_note(mission_id, "late-note", None)
+            .await
+            .unwrap();
+
+        allow_finish_tx.send(true).unwrap();
+        midturn_task.await.unwrap();
+        let taken = take.await.unwrap();
+
+        let midturn_blocks = midturn_delivered.lock().unwrap().clone();
+        assert_eq!(
+            midturn_blocks,
+            vec!["<operator-note>\ninitial-note\n</operator-note>".to_string()]
+        );
+        assert!(events_rx.try_recv().is_ok());
+        assert_eq!(
+            taken.iter().map(|n| n.body.as_str()).collect::<Vec<_>>(),
+            vec!["late-note"]
+        );
+        assert!(store
+            .take_pending_operator_notes(mission_id)
+            .await
+            .unwrap()
+            .is_empty());
+
+        store
+            .enqueue_operator_note(mission_id, "preserved-on-fail", None)
+            .await
+            .unwrap();
+        let (entered2_tx, entered2_rx) = tokio::sync::oneshot::channel::<()>();
+        let (finish2_tx, finish2_rx) = tokio::sync::oneshot::channel::<bool>();
+        let store_for_fail = Arc::clone(&store);
+        let events_for_fail = events_tx.clone();
+        let fail_task = tokio::spawn(async move {
+            drain_and_inject_from_store(
+                store_for_fail,
+                mission_id,
+                &events_for_fail,
+                |_| async move {
+                    let _ = entered2_tx.send(());
+                    finish2_rx.await.unwrap()
+                },
+            )
+            .await;
+        });
+
+        entered2_rx.await.unwrap();
+        let take2 = store.take_pending_operator_notes(mission_id);
+        tokio::pin!(take2);
+        assert!(futures::poll!(&mut take2).is_pending());
+
+        finish2_tx.send(false).unwrap();
+        fail_task.await.unwrap();
+        assert!(events_rx.try_recv().is_err());
+
+        let taken_after_fail = take2.await.unwrap();
+        assert_eq!(
+            taken_after_fail
+                .iter()
+                .map(|n| n.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["preserved-on-fail"]
+        );
+        assert!(store
+            .take_pending_operator_notes(mission_id)
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

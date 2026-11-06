@@ -35,98 +35,7 @@ use crate::workspace::{use_nspawn_for_workspace, SharedWorkspaceStore, Workspace
 use crate::workspace_exec::WorkspaceExec;
 
 pub use client::AskClient;
-pub use store::{AskMessage, AskThread, OperatorNote};
-
-#[derive(Debug)]
-pub struct AskStore {
-    inner: store::AskStore,
-    notes_conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>,
-}
-
-impl std::ops::Deref for AskStore {
-    type Target = store::AskStore;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl AskStore {
-    pub async fn open(db_path: PathBuf) -> Result<Self, String> {
-        let inner = store::AskStore::open(db_path.clone()).await?;
-        let conn = tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
-            conn.busy_timeout(std::time::Duration::from_secs(10))
-                .map_err(|e| e.to_string())?;
-            Ok::<_, String>(conn)
-        })
-        .await
-        .map_err(|e| e.to_string())??;
-        Ok(Self {
-            inner,
-            notes_conn: Arc::new(tokio::sync::Mutex::new(conn)),
-        })
-    }
-
-    pub async fn peek_unflushed_operator_notes(
-        &self,
-        mission_id: Uuid,
-    ) -> Result<Vec<OperatorNote>, String> {
-        let conn = Arc::clone(&self.notes_conn);
-        tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, body, source_thread_id, created_at FROM operator_notes \
-                 WHERE mission_id = ?1 AND flushed_at IS NULL ORDER BY created_at ASC, rowid ASC",
-                )
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map([mission_id.to_string()], |row| {
-                    let id: String = row.get(0)?;
-                    let source: Option<String> = row.get(2)?;
-                    Ok(OperatorNote {
-                        id: Uuid::parse_str(&id).unwrap_or_default(),
-                        mission_id,
-                        body: row.get(1)?,
-                        source_thread_id: source.and_then(|id| Uuid::parse_str(&id).ok()),
-                        created_at: row.get(3)?,
-                    })
-                })
-                .map_err(|e| e.to_string())?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())
-        })
-        .await
-        .map_err(|e| e.to_string())?
-    }
-
-    pub async fn mark_operator_notes_flushed(
-        &self,
-        mission_id: Uuid,
-        note_ids: &[Uuid],
-        flushed_at: &str,
-    ) -> Result<(), String> {
-        let conn = Arc::clone(&self.notes_conn);
-        let ids = note_ids.to_vec();
-        let flushed_at = flushed_at.to_string();
-        tokio::task::spawn_blocking(move || {
-            let mut conn = conn.blocking_lock();
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
-            for id in ids {
-                tx.execute(
-                    "UPDATE operator_notes SET flushed_at = ?3 \
-                     WHERE mission_id = ?1 AND id = ?2 AND flushed_at IS NULL",
-                    rusqlite::params![mission_id.to_string(), id.to_string(), flushed_at],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-            tx.commit().map_err(|e| e.to_string())
-        })
-        .await
-        .map_err(|e| e.to_string())?
-    }
-}
+pub use store::{AskMessage, AskStore, AskThread, OperatorNote};
 
 /// Hard cap on tool-calling iterations per turn — keeps cost/latency bounded.
 /// When the cap is hit mid-investigation, a final tools-disabled pass still
@@ -170,54 +79,247 @@ fn finalize_answer(raw: &str) -> String {
 }
 
 static ASK_STORE: OnceCell<Arc<AskStore>> = OnceCell::const_new();
+static ASK_WORKING_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 static SANDBOX_GC: OnceCell<()> = OnceCell::const_new();
-static LIVE_SANDBOXES: std::sync::OnceLock<std::sync::Mutex<HashSet<PathBuf>>> =
+static LIVE_SANDBOXES: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, SandboxLockGuard>>> =
     std::sync::OnceLock::new();
 
-fn live_sandboxes() -> &'static std::sync::Mutex<HashSet<PathBuf>> {
-    LIVE_SANDBOXES.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+struct SandboxLockGuard {
+    lock_path: PathBuf,
+    file: std::fs::File,
 }
 
-fn gc_stale_sandboxes_excluding(root: &Path, live: &HashSet<PathBuf>) -> Result<(), String> {
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err.to_string()),
-    };
-    for entry in entries {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with("ask-sandbox-")
-            && entry.file_type().map_err(|e| e.to_string())?.is_dir()
-            && !live.contains(&path)
-        {
-            if let Err(err) = std::fs::remove_dir_all(&path) {
-                tracing::warn!(path = %path.display(), %err, "Failed to GC stale Ask sandbox");
-            }
+impl Drop for SandboxLockGuard {
+    fn drop(&mut self) {
+        if !self.lock_path.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.lock_path);
         }
+        let _ = fs2::FileExt::unlock(&self.file);
     }
+}
+
+fn live_sandboxes() -> &'static std::sync::Mutex<HashMap<PathBuf, SandboxLockGuard>> {
+    LIVE_SANDBOXES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn sandbox_lock_path(sandbox: &Path) -> PathBuf {
+    let mut os = sandbox.as_os_str().to_os_string();
+    os.push(".lock");
+    PathBuf::from(os)
+}
+
+fn acquire_sandbox_lock(sandbox: &Path) -> std::io::Result<SandboxLockGuard> {
+    if let Some(parent) = sandbox.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock_path = sandbox_lock_path(sandbox);
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        options.mode(0o666);
+        let file = options.open(&lock_path)?;
+        let _ = std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o666));
+        fs2::FileExt::try_lock_exclusive(&file)?;
+        if !same_file_inode(&file, &lock_path) {
+            return Err(std::io::Error::other("Ask sandbox lock was replaced"));
+        }
+        Ok(SandboxLockGuard { lock_path, file })
+    }
+    #[cfg(not(unix))]
+    {
+        let file = options.open(&lock_path)?;
+        fs2::FileExt::try_lock_exclusive(&file)?;
+        Ok(SandboxLockGuard { lock_path, file })
+    }
+}
+
+fn register_live_sandbox(sandbox: &Path) -> std::io::Result<()> {
+    let guard = acquire_sandbox_lock(sandbox)?;
+    live_sandboxes()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(sandbox.to_path_buf(), guard);
     Ok(())
 }
 
-async fn gc_stale_sandboxes(root: &Path) -> Result<(), String> {
-    let root = root.to_path_buf();
-    let live = live_sandboxes()
+fn release_live_sandbox(sandbox: &Path) {
+    let guard = live_sandboxes()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    tokio::task::spawn_blocking(move || gc_stale_sandboxes_excluding(&root, &live))
-        .await
-        .map_err(|e| e.to_string())?
+        .remove(sandbox);
+    drop(guard);
 }
 
-async fn initialize_sandbox_gc() -> Result<(), String> {
+#[cfg(unix)]
+fn same_file_inode(file: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), std::fs::symlink_metadata(path)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_file_inode(_file: &std::fs::File, path: &Path) -> bool {
+    path.exists()
+}
+
+fn try_lock_stale_sandbox_for_gc(lock_path: &Path) -> Option<SandboxLockGuard> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        options.mode(0o666);
+        let file = match options.open(lock_path) {
+            Ok(f) => f,
+            Err(err) => {
+                tracing::warn!(
+                    lock_path = %lock_path.display(),
+                    %err,
+                    "Skipping Ask sandbox GC candidate: failed to open lock file"
+                );
+                return None;
+            }
+        };
+        let _ = std::fs::set_permissions(lock_path, std::fs::Permissions::from_mode(0o666));
+        if fs2::FileExt::try_lock_exclusive(&file).is_err() {
+            return None;
+        }
+        if !same_file_inode(&file, lock_path) {
+            let _ = fs2::FileExt::unlock(&file);
+            return None;
+        }
+        Some(SandboxLockGuard {
+            lock_path: lock_path.to_path_buf(),
+            file,
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let file = options.open(lock_path).ok()?;
+        if fs2::FileExt::try_lock_exclusive(&file).is_err() {
+            return None;
+        }
+        Some(SandboxLockGuard {
+            lock_path: lock_path.to_path_buf(),
+            file,
+        })
+    }
+}
+
+fn gc_stale_sandboxes_sync(root: &Path) {
+    let live: HashSet<PathBuf> = live_sandboxes()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .keys()
+        .cloned()
+        .collect();
+    gc_stale_sandboxes_with_observer(root, &live, |_| {});
+}
+
+fn gc_stale_sandboxes_with_observer<F>(root: &Path, live: &HashSet<PathBuf>, mut before_inspect: F)
+where
+    F: FnMut(&Path),
+{
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(err) => {
+            tracing::warn!(root = %root.display(), %err, "Failed to read sandbox root during Ask GC");
+            return;
+        }
+    };
+    let mut lock_candidates = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                tracing::warn!(root = %root.display(), %err, "Skipping unreadable entry during Ask sandbox GC");
+                continue;
+            }
+        };
+        let path = entry.path();
+        before_inspect(&path);
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.starts_with("ask-sandbox-") {
+            continue;
+        }
+        if name_str.ends_with(".lock") {
+            lock_candidates.push(path);
+            continue;
+        }
+        if live.contains(&path) {
+            continue;
+        }
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                tracing::warn!(path = %path.display(), %err, "Failed to inspect entry during Ask sandbox GC");
+                continue;
+            }
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let lock_path = sandbox_lock_path(&path);
+        let Some(mut lock_guard) = try_lock_stale_sandbox_for_gc(&lock_path) else {
+            continue;
+        };
+        if live_sandboxes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&path)
+        {
+            continue;
+        }
+        if let Err(err) = std::fs::remove_dir_all(&path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(path = %path.display(), %err, "Failed to GC stale Ask sandbox");
+                lock_guard.lock_path.clear();
+            }
+        }
+    }
+
+    for lock_path in lock_candidates {
+        let Some(stem) = lock_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|s| s.strip_suffix(".lock"))
+        else {
+            continue;
+        };
+        let sandbox_path = root.join(stem);
+        if live.contains(&sandbox_path) || sandbox_path.exists() {
+            continue;
+        }
+        let Some(mut lock_guard) = try_lock_stale_sandbox_for_gc(&lock_path) else {
+            continue;
+        };
+        if sandbox_path.exists() {
+            lock_guard.lock_path.clear();
+            continue;
+        }
+    }
+}
+
+async fn gc_stale_sandboxes(root: &Path) {
+    let root = root.to_path_buf();
+    if let Err(err) = tokio::task::spawn_blocking(move || gc_stale_sandboxes_sync(&root)).await {
+        tracing::warn!(%err, "Ask sandbox GC task panicked");
+    }
+}
+
+async fn initialize_sandbox_gc() {
     SANDBOX_GC
-        .get_or_try_init(|| gc_stale_sandboxes(Path::new("/tmp")))
-        .await
-        .map(|_| ())
+        .get_or_init(|| gc_stale_sandboxes(Path::new("/tmp")))
+        .await;
 }
 
 async fn initialize_ask_store(
@@ -234,8 +336,8 @@ pub(crate) async fn ask_store_in_cell(
 ) -> Result<Arc<AskStore>, String> {
     cell.get_or_try_init(|| async {
         match sandbox_root {
-            Some(root) if root == Path::new("/tmp") => initialize_sandbox_gc().await?,
-            Some(root) => gc_stale_sandboxes(root).await?,
+            Some(root) if root == Path::new("/tmp") => initialize_sandbox_gc().await,
+            Some(root) => gc_stale_sandboxes(root).await,
             None => {}
         }
         let base = working_dir.join(".sandboxed-sh/missions");
@@ -251,20 +353,33 @@ pub(crate) async fn ask_store_in_cell(
 /// Get (lazily initializing) the global Ask store, placed next to the mission
 /// databases under the working directory.
 pub async fn ask_store(config: &crate::config::Config) -> Result<Arc<AskStore>, String> {
+    let _ = ASK_WORKING_DIR.set(config.working_dir.clone());
     initialize_ask_store(&ASK_STORE, &config.working_dir).await
 }
 
-pub(crate) async fn initialize_on_startup(config: &crate::config::Config) -> anyhow::Result<()> {
-    ask_store(config).await.map_err(anyhow::Error::msg)?;
-    Ok(())
+pub(crate) async fn initialize_on_startup(config: &crate::config::Config) {
+    let _ = ASK_WORKING_DIR.set(config.working_dir.clone());
+    if let Err(err) = ask_store(config).await {
+        tracing::warn!(%err, "Failed to eagerly initialize Ask store on startup; will retry lazily");
+    }
 }
 
 pub async fn ask_store_for_midturn() -> Result<Arc<AskStore>, String> {
-    if let Some(store) = ASK_STORE.get() {
+    ask_store_for_midturn_in(&ASK_STORE, ASK_WORKING_DIR.get().map(PathBuf::as_path)).await
+}
+
+async fn ask_store_for_midturn_in(
+    cell: &OnceCell<Arc<AskStore>>,
+    configured_working_dir: Option<&Path>,
+) -> Result<Arc<AskStore>, String> {
+    if let Some(store) = cell.get() {
         return Ok(Arc::clone(store));
     }
+    if let Some(working_dir) = configured_working_dir {
+        return initialize_ask_store(cell, working_dir).await;
+    }
     let config = crate::config::Config::from_env().map_err(|err| err.to_string())?;
-    ask_store(&config).await
+    initialize_ask_store(cell, &config.working_dir).await
 }
 
 pub fn ask_store_if_initialized() -> Option<Arc<AskStore>> {
@@ -1783,13 +1898,22 @@ pub async fn prepend_pending_operator_notes(
 /// `None` for an explicit sandbox request as an error rather than silently
 /// running against the live tree.
 pub async fn prepare_sandbox(exec: &WorkspaceExec, base_work_dir: &Path) -> Option<PathBuf> {
-    let _ = initialize_sandbox_gc().await;
+    initialize_sandbox_gc().await;
     let sandbox_guest = PathBuf::from(format!("/tmp/ask-sandbox-{}", Uuid::new_v4()));
     let sandbox_host = sandbox_host_path(exec, &sandbox_guest);
-    live_sandboxes()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(sandbox_host.clone());
+    let sandbox_for_lock = sandbox_host.clone();
+    let lock_res = tokio::task::spawn_blocking(move || register_live_sandbox(&sandbox_for_lock))
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))
+        .and_then(|r| r);
+    if let Err(err) = lock_res {
+        tracing::warn!(
+            sandbox = %sandbox_host.display(),
+            %err,
+            "Failed to acquire cross-process lock for Ask sandbox"
+        );
+        return None;
+    }
     // Shell snippets execute in the workspace context. For nspawn workspaces,
     // interpolating host paths here makes both `git -C` and `test -d` point at
     // paths that do not exist in the guest, so every sandbox request fails.
@@ -1914,10 +2038,6 @@ fn log_sandbox_command_failure(stage: &str, output: &std::process::Output) {
 /// Tear down a sandbox created by [`prepare_sandbox`]. Best-effort: removes the
 /// git worktree if it is one, otherwise `rm -rf`s the copy.
 pub async fn cleanup_sandbox(exec: &WorkspaceExec, base_work_dir: &Path, sandbox: &Path) {
-    live_sandboxes()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(sandbox);
     let base_str = exec.translate_path_for_container(base_work_dir);
     let sandbox_str = exec.translate_path_for_container(sandbox);
     // `prune` matters for the failure path: a `worktree add` that died partway
@@ -1934,6 +2054,8 @@ pub async fn cleanup_sandbox(exec: &WorkspaceExec, base_work_dir: &Path, sandbox
     let _ = exec
         .output(base_work_dir, "/bin/bash", &args, HashMap::new())
         .await;
+    let sandbox_owned = sandbox.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || release_live_sandbox(&sandbox_owned)).await;
 }
 
 fn single_quote(s: &str) -> String {
@@ -2131,10 +2253,7 @@ mod tests {
         tokio::fs::create_dir_all(&keep_dir).await.unwrap();
         tokio::fs::write(&keep_file, "keep").await.unwrap();
 
-        live_sandboxes()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(live.clone());
+        let live_guard = acquire_sandbox_lock(&live).unwrap();
 
         let cell = OnceCell::new();
         let work_dir = tempfile::tempdir().unwrap();
@@ -2142,27 +2261,129 @@ mod tests {
             .await
             .unwrap();
 
-        live_sandboxes()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&live);
-
         assert!(!stale.exists());
         assert!(live.exists());
+        assert!(sandbox_lock_path(&live).exists());
         assert!(keep_dir.exists());
         assert!(keep_file.exists());
+        drop(live_guard);
+        gc_stale_sandboxes(root.path()).await;
+        assert!(!live.exists());
+        assert!(!sandbox_lock_path(&live).exists());
+    }
+
+    #[tokio::test]
+    async fn cross_handle_flock_prevents_gc_of_other_process_sandbox() {
+        let root = tempfile::tempdir().unwrap();
+        let remote_live = root.path().join("ask-sandbox-other-proc");
+        let stale_unlocked = root.path().join("ask-sandbox-crashed-proc");
+        let stale_orphan_lock = root.path().join("ask-sandbox-orphan.lock");
+
+        tokio::fs::create_dir_all(remote_live.join("sub"))
+            .await
+            .unwrap();
+        tokio::fs::write(remote_live.join("sub/data.txt"), "active")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(stale_unlocked.join("sub"))
+            .await
+            .unwrap();
+        tokio::fs::write(stale_unlocked.join("sub/data.txt"), "crashed")
+            .await
+            .unwrap();
+
+        let crashed_lock_path = sandbox_lock_path(&stale_unlocked);
+        tokio::fs::write(&crashed_lock_path, "").await.unwrap();
+        tokio::fs::write(&stale_orphan_lock, "").await.unwrap();
+
+        let external_lock_path = sandbox_lock_path(&remote_live);
+        let external_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&external_lock_path)
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&external_file).unwrap();
+        assert!(!live_sandboxes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&remote_live));
+
+        gc_stale_sandboxes(root.path()).await;
+
+        assert!(remote_live.join("sub/data.txt").exists());
+        assert!(external_lock_path.exists());
+        assert!(!stale_unlocked.exists());
+        assert!(!crashed_lock_path.exists());
+        assert!(!stale_orphan_lock.exists());
+
+        fs2::FileExt::unlock(&external_file).unwrap();
+        drop(external_file);
+        gc_stale_sandboxes(root.path()).await;
+        assert!(!remote_live.exists());
+        assert!(!external_lock_path.exists());
+    }
+
+    #[test]
+    fn gc_tolerates_disappearing_entries_during_scan() {
+        let root = tempfile::tempdir().unwrap();
+        let vanishing = root.path().join("ask-sandbox-vanishing");
+        let stale = root.path().join("ask-sandbox-stale-survivor");
+        std::fs::create_dir_all(vanishing.join("inner")).unwrap();
+        std::fs::create_dir_all(stale.join("inner")).unwrap();
+
+        let empty_live = HashSet::new();
+        gc_stale_sandboxes_with_observer(root.path(), &empty_live, |seen_path| {
+            if seen_path == vanishing {
+                let _ = std::fs::remove_dir_all(seen_path);
+            }
+        });
+
+        assert!(!vanishing.exists());
+        assert!(!stale.exists());
+    }
+
+    #[tokio::test]
+    async fn midturn_store_uses_configured_working_dir_without_env_divergence() {
+        let configured_dir = tempfile::tempdir().unwrap();
+        let cell = OnceCell::new();
+
+        let store = ask_store_for_midturn_in(&cell, Some(configured_dir.path()))
+            .await
+            .unwrap();
+        let mission = Uuid::new_v4();
+        store
+            .enqueue_operator_note(mission, "configured-dir-note", None)
+            .await
+            .unwrap();
+
+        assert!(configured_dir
+            .path()
+            .join(".sandboxed-sh/missions/ask.db")
+            .exists());
+
+        let same_store = ask_store_for_midturn_in(&cell, None).await.unwrap();
+        assert!(Arc::ptr_eq(&store, &same_store));
+        let notes = same_store
+            .take_pending_operator_notes(mission)
+            .await
+            .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].body, "configured-dir-note");
     }
 
     #[tokio::test]
     async fn peek_and_mark_operator_notes_preserve_identity_and_order() {
-        let store = temp_store().await;
+        let db_path = std::env::temp_dir().join(format!("ask-order-{}.db", Uuid::new_v4()));
+        let store = Arc::new(AskStore::open(db_path.clone()).await.unwrap());
         let mission = Uuid::new_v4();
         let id1 = Uuid::new_v4();
         let id2 = Uuid::new_v4();
         let ts1 = "2026-11-06T09:00:00Z";
         let ts2 = "2026-11-06T09:00:01Z";
         {
-            let conn = store.notes_conn.lock().await;
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
             for (id, body, ts) in [(id1, "first", ts1), (id2, "second", ts2)] {
                 conn.execute(
                     "INSERT INTO operator_notes (id, mission_id, body, source_thread_id, created_at, flushed_at) \
