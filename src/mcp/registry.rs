@@ -133,13 +133,20 @@ enum McpStdioCommand {
 struct McpStdioHandle {
     cmd_tx: mpsc::Sender<McpStdioCommand>,
     cancel_token: CancellationToken,
+    generation: u64,
+    stopped: CancellationToken,
 }
 
 impl McpStdioHandle {
-    async fn request(&self, id: u64, payload: String) -> anyhow::Result<serde_json::Value> {
+    async fn request_with_timeout(
+        &self,
+        id: u64,
+        payload: String,
+        timeout: Duration,
+    ) -> anyhow::Result<serde_json::Value> {
         let (resp_tx, resp_rx) = oneshot::channel();
         tokio::time::timeout(
-            MCP_REQUEST_TIMEOUT,
+            timeout,
             self.cmd_tx.send(McpStdioCommand::Request {
                 id,
                 payload,
@@ -150,11 +157,16 @@ impl McpStdioHandle {
         .map_err(|_| anyhow::anyhow!("Timeout queueing MCP request"))?
         .map_err(|_| anyhow::anyhow!("MCP stdio actor closed"))?;
 
-        match tokio::time::timeout(MCP_REQUEST_TIMEOUT, resp_rx).await {
+        match tokio::time::timeout(timeout, resp_rx).await {
             Ok(Ok(res)) => res,
             Ok(Err(_)) => anyhow::bail!("MCP process closed before responding"),
             Err(_) => anyhow::bail!("Timeout waiting for MCP response"),
         }
+    }
+
+    async fn request(&self, id: u64, payload: String) -> anyhow::Result<serde_json::Value> {
+        self.request_with_timeout(id, payload, MCP_REQUEST_TIMEOUT)
+            .await
     }
 
     async fn notify(&self, payload: String) -> anyhow::Result<()> {
@@ -169,6 +181,13 @@ impl McpStdioHandle {
     #[inline]
     fn kill(&self) {
         self.cancel_token.cancel();
+    }
+
+    async fn kill_and_wait(&self) -> anyhow::Result<()> {
+        self.kill();
+        tokio::time::timeout(MCP_STDIO_REAP_TIMEOUT, self.stopped.cancelled())
+            .await
+            .map_err(|_| anyhow::anyhow!("Timeout reaping MCP stdio process"))
     }
 }
 
@@ -237,7 +256,7 @@ async fn run_mcp_stdio_actor(
     stderr_task: Option<tokio::task::JoinHandle<()>>,
     mut cmd_rx: mpsc::Receiver<McpStdioCommand>,
     cancel_token: CancellationToken,
-) {
+) -> String {
     let mut stdout_reader = BufReader::new(stdout);
     let mut line = String::new();
     let mut pending: HashMap<u64, oneshot::Sender<anyhow::Result<serde_json::Value>>> =
@@ -249,6 +268,7 @@ async fn run_mcp_stdio_actor(
             _ = cancel_token.cancelled() => {
                 break "MCP server killed";
             }
+            _ = child.wait() => break "MCP child exited",
             read_res = stdout_reader.read_line(&mut line) => {
                 match read_res {
                     Ok(0) => break "MCP process closed stdout",
@@ -348,14 +368,28 @@ async fn run_mcp_stdio_actor(
         }
     };
 
+    drop(stdin);
+    drop(stdout_reader);
     cancel_token.cancel();
     for (_, tx) in pending.drain() {
         let _ = tx.send(Err(anyhow::anyhow!("{}", exit_reason)));
     }
-    let _ = child.start_kill();
-    let _ = child.kill().await;
+    let exit_status = match child.try_wait() {
+        Ok(Some(status)) => Some(status),
+        _ => {
+            let _ = child.start_kill();
+            tokio::time::timeout(MCP_STDIO_REAP_TIMEOUT, child.wait())
+                .await
+                .ok()
+                .and_then(Result::ok)
+        }
+    };
     if let Some(task) = stderr_task {
         task.abort();
+    }
+    match exit_status {
+        Some(status) => format!("{exit_reason} ({status})"),
+        None => exit_reason.to_string(),
     }
 }
 
@@ -364,19 +398,21 @@ pub struct McpRegistry {
     /// Persistent configuration store
     config_store: Arc<McpConfigStore>,
     /// Runtime state for each MCP (keyed by ID)
-    states: DashMap<Uuid, McpServerState>,
+    states: Arc<DashMap<Uuid, McpServerState>>,
     /// HTTP client for HTTP MCP requests
     http_client: reqwest::Client,
     /// Stdio actor handles for stdio MCPs (keyed by ID)
-    stdio_processes: DashMap<Uuid, McpStdioHandle>,
+    stdio_processes: Arc<DashMap<Uuid, McpStdioHandle>>,
     /// Disabled tools (by name)
     disabled_tools: DashSet<String>,
     /// Request ID counter for JSON-RPC
     request_id: AtomicU64,
+    process_generation: AtomicU64,
 }
 
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MCP_STDIO_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl McpRegistry {
     /// Create a new MCP registry.
@@ -400,11 +436,12 @@ impl McpRegistry {
 
         Self {
             config_store,
-            states,
+            states: Arc::new(states),
             http_client,
-            stdio_processes: DashMap::new(),
+            stdio_processes: Arc::new(DashMap::new()),
             disabled_tools: DashSet::new(),
             request_id: AtomicU64::new(1),
+            process_generation: AtomicU64::new(1),
         }
     }
 
@@ -817,6 +854,47 @@ impl McpRegistry {
         self.request_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    fn next_process_generation(&self) -> u64 {
+        self.process_generation.fetch_add(1, Ordering::SeqCst)
+    }
+
+    async fn cleanup_failed_stdio_process(
+        &self,
+        id: Uuid,
+        process: &McpStdioHandle,
+        error: String,
+    ) -> anyhow::Result<()> {
+        Self::reconcile_stdio_exit(
+            &self.states,
+            &self.stdio_processes,
+            id,
+            process.generation,
+            error,
+        );
+        process.kill_and_wait().await
+    }
+
+    fn reconcile_stdio_exit(
+        states: &DashMap<Uuid, McpServerState>,
+        stdio_processes: &DashMap<Uuid, McpStdioHandle>,
+        id: Uuid,
+        generation: u64,
+        exit_diagnostic: String,
+    ) {
+        if let dashmap::mapref::entry::Entry::Occupied(entry) = stdio_processes.entry(id) {
+            if entry.get().generation != generation {
+                return;
+            }
+            if let Some(mut state) = states.get_mut(&id) {
+                if state.status != McpStatus::Disabled {
+                    state.status = McpStatus::Error;
+                    state.error = Some(exit_diagnostic);
+                }
+            }
+            entry.remove();
+        }
+    }
+
     /// Send a JSON-RPC request via HTTP
     async fn send_jsonrpc_http(
         &self,
@@ -854,7 +932,21 @@ impl McpRegistry {
             .ok_or_else(|| anyhow::anyhow!("No result in response"))
     }
 
-    /// Send a JSON-RPC request via stdio actor without holding any process mutex.
+    async fn send_jsonrpc_stdio_with_timeout(
+        &self,
+        process: &McpStdioHandle,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> anyhow::Result<serde_json::Value> {
+        let id = self.next_request_id();
+        let request = JsonRpcRequest::new(id, method, params);
+        let request_json = serde_json::to_string(&request)?;
+        process
+            .request_with_timeout(id, request_json, timeout)
+            .await
+    }
+
     async fn send_jsonrpc_stdio(
         &self,
         process: &McpStdioHandle,
@@ -863,13 +955,13 @@ impl McpRegistry {
     ) -> anyhow::Result<serde_json::Value> {
         let id = self.next_request_id();
         let request = JsonRpcRequest::new(id, method, params);
-        let request_json = serde_json::to_string(&request)?;
-        process.request(id, request_json).await
+        process.request(id, serde_json::to_string(&request)?).await
     }
 
     /// Spawn a stdio MCP process managed by a bounded per-server [`McpStdioActor`].
     async fn spawn_stdio_process(
         &self,
+        id: Uuid,
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
@@ -898,7 +990,9 @@ impl McpRegistry {
             .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout"))?;
         let stderr = child.stderr.take();
 
+        let generation = self.next_process_generation();
         let cancel_token = CancellationToken::new();
+        let stopped = CancellationToken::new();
         let server_label = command.to_string();
         let stderr_cancel = cancel_token.clone();
         let stderr_task = stderr
@@ -906,19 +1000,36 @@ impl McpRegistry {
 
         let (cmd_tx, cmd_rx) = mpsc::channel(MCP_STDIO_CHANNEL_CAPACITY);
         let actor_cancel = cancel_token.clone();
-        tokio::spawn(run_mcp_stdio_actor(
-            child,
-            stdin,
-            stdout,
-            stderr_task,
-            cmd_rx,
-            actor_cancel,
-        ));
-
-        Ok(McpStdioHandle {
+        let actor_stopped = stopped.clone();
+        let states = Arc::downgrade(&self.states);
+        let stdio_processes = Arc::downgrade(&self.stdio_processes);
+        let handle = McpStdioHandle {
             cmd_tx,
             cancel_token,
-        })
+            generation,
+            stopped,
+        };
+        if let Some(previous) = self.stdio_processes.insert(id, handle.clone()) {
+            previous.kill();
+        }
+        tokio::spawn(async move {
+            let exit_diagnostic =
+                run_mcp_stdio_actor(child, stdin, stdout, stderr_task, cmd_rx, actor_cancel).await;
+            if let (Some(states), Some(stdio_processes)) =
+                (states.upgrade(), stdio_processes.upgrade())
+            {
+                Self::reconcile_stdio_exit(
+                    &states,
+                    &stdio_processes,
+                    id,
+                    generation,
+                    exit_diagnostic,
+                );
+            }
+            actor_stopped.cancel();
+        });
+
+        Ok(handle)
     }
 
     /// Initialize connection with an MCP server (HTTP)
@@ -983,18 +1094,22 @@ impl McpRegistry {
         };
 
         let result = self
-            .send_jsonrpc_stdio(process, "initialize", Some(serde_json::to_value(params)?))
+            .send_jsonrpc_stdio_with_timeout(
+                process,
+                "initialize",
+                Some(serde_json::to_value(params)?),
+                MCP_CONNECT_TIMEOUT,
+            )
             .await?;
 
         let init_result: InitializeResult = serde_json::from_value(result)?;
 
-        // Send initialized notification
         let notification = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "notifications/initialized"
         });
         let notification_json = serde_json::to_string(&notification)?;
-        let _ = process.notify(notification_json).await;
+        process.notify(notification_json).await?;
 
         Ok(init_result)
     }
@@ -1295,13 +1410,11 @@ impl McpRegistry {
         args: Vec<String>,
         env: HashMap<String, String>,
     ) -> anyhow::Result<McpServerState> {
-        // Kill existing process immediately without waiting on in-flight requests
         if let Some((_, handle)) = self.stdio_processes.remove(&id) {
             handle.kill();
         }
 
-        // Spawn new process actor
-        let process = match self.spawn_stdio_process(&command, &args, &env).await {
+        let process = match self.spawn_stdio_process(id, &command, &args, &env).await {
             Ok(p) => p,
             Err(e) => {
                 self.update_state_error(id, format!("Failed to spawn process: {}", e))
@@ -1313,24 +1426,19 @@ impl McpRegistry {
             }
         };
 
-        // Store process handle
-        self.stdio_processes.insert(id, process.clone());
-
-        // Step 1: Initialize the MCP connection
-        let init_result = match self.initialize_mcp_stdio(&process).await {
-            Ok(result) => result,
-            Err(e) => {
-                self.update_state_error(id, format!("Initialize failed: {}", e))
-                    .await;
-                if let Some((_, handle)) = self.stdio_processes.remove(&id) {
-                    handle.kill();
+        let init_result =
+            match tokio::time::timeout(MCP_CONNECT_TIMEOUT, self.initialize_mcp_stdio(&process))
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Initialize timeout")))
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    let error = format!("Initialize failed: {e}");
+                    self.cleanup_failed_stdio_process(id, &process, error.clone())
+                        .await?;
+                    anyhow::bail!(error);
                 }
-                return self
-                    .get(id)
-                    .await
-                    .ok_or_else(|| anyhow::anyhow!("MCP not found"));
-            }
-        };
+            };
 
         // Extract server version if available
         let server_version = init_result
@@ -1338,39 +1446,60 @@ impl McpRegistry {
             .as_ref()
             .and_then(|s| s.version.clone());
 
-        // Step 2: List tools
-        match self.send_jsonrpc_stdio(&process, "tools/list", None).await {
-            Ok(result) => {
-                match serde_json::from_value::<McpToolsResponse>(result) {
-                    Ok(tools_response) => {
-                        let tool_descriptors = tools_response.tools;
-                        let tool_names: Vec<String> =
-                            tool_descriptors.iter().map(|t| t.name.clone()).collect();
-
-                        // Update config with discovered tools
-                        let _ = self
-                            .config_store
-                            .update(id, |c| {
-                                c.tools = tool_names.clone();
-                                c.tool_descriptors = tool_descriptors.clone();
-                                c.version = server_version.clone();
-                                c.last_connected_at = Some(chrono::Utc::now());
-                            })
-                            .await;
-
-                        // Update runtime state
-                        self.update_state_success(id, tool_descriptors, server_version)
-                            .await;
+        match self
+            .send_jsonrpc_stdio_with_timeout(&process, "tools/list", None, MCP_CONNECT_TIMEOUT)
+            .await
+        {
+            Ok(result) => match serde_json::from_value::<McpToolsResponse>(result) {
+                Ok(tools_response) => {
+                    let still_current = self
+                        .stdio_processes
+                        .get(&id)
+                        .is_some_and(|entry| entry.generation == process.generation);
+                    if !still_current {
+                        let _ = process.kill_and_wait().await;
+                        anyhow::bail!("MCP stdio process exited or was superseded during refresh");
                     }
-                    Err(e) => {
-                        self.update_state_error(id, format!("Failed to parse tools: {}", e))
-                            .await;
+
+                    let tool_descriptors = tools_response.tools;
+                    let tool_names: Vec<String> =
+                        tool_descriptors.iter().map(|t| t.name.clone()).collect();
+
+                    let _ = self
+                        .config_store
+                        .update(id, |c| {
+                            c.tools = tool_names.clone();
+                            c.tool_descriptors = tool_descriptors.clone();
+                            c.version = server_version.clone();
+                            c.last_connected_at = Some(chrono::Utc::now());
+                        })
+                        .await;
+
+                    if let Some(entry) = self.stdio_processes.get(&id) {
+                        if entry.generation == process.generation {
+                            self.update_state_success(id, tool_descriptors, server_version)
+                                .await;
+                        } else {
+                            drop(entry);
+                            let _ = process.kill_and_wait().await;
+                            anyhow::bail!("MCP stdio process superseded during refresh");
+                        }
+                    } else {
+                        anyhow::bail!("MCP stdio process exited during refresh");
                     }
                 }
-            }
+                Err(e) => {
+                    let error = format!("Failed to parse tools: {e}");
+                    self.cleanup_failed_stdio_process(id, &process, error.clone())
+                        .await?;
+                    anyhow::bail!(error);
+                }
+            },
             Err(e) => {
-                self.update_state_error(id, format!("tools/list failed: {}", e))
-                    .await;
+                let error = format!("tools/list failed: {e}");
+                self.cleanup_failed_stdio_process(id, &process, error.clone())
+                    .await?;
+                anyhow::bail!(error);
             }
         }
 
@@ -1580,6 +1709,15 @@ impl McpRegistry {
     }
 }
 
+impl Drop for McpRegistry {
+    fn drop(&mut self) {
+        for entry in self.stdio_processes.iter() {
+            entry.value().kill();
+        }
+        self.stdio_processes.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1663,6 +1801,7 @@ for line in sys.stdin:
 "#;
         let handle = registry
             .spawn_stdio_process(
+                Uuid::new_v4(),
                 "python3",
                 &["-u".to_string(), "-c".to_string(), script.to_string()],
                 &HashMap::new(),
@@ -1704,5 +1843,320 @@ for line in sys.stdin:
             .expect("inflight resolves promptly on kill")
             .unwrap();
         assert!(aborted.is_err());
+    }
+
+    fn pid_is_alive_or_zombie(pid: u32) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            std::path::Path::new(&format!("/proc/{pid}")).exists()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .is_ok_and(|s| s.success())
+        }
+    }
+
+    async fn add_python_stdio_mcp(
+        registry: &McpRegistry,
+        name: &str,
+        script: &str,
+        env: HashMap<String, String>,
+    ) -> Uuid {
+        let added = registry
+            .add(AddMcpRequest {
+                name: name.to_string(),
+                transport: McpTransport::Stdio {
+                    command: "python3".to_string(),
+                    args: vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+                    env,
+                },
+                description: None,
+                scope: Some(McpScope::Global),
+                default_enabled: Some(false),
+                workspace_env_allowlist: Vec::new(),
+            })
+            .await
+            .unwrap();
+        added.config.id
+    }
+
+    #[tokio::test]
+    async fn unexpected_stdio_child_exit_transitions_state_and_removes_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("child.pid");
+        let registry = McpRegistry::new(dir.path()).await;
+
+        let script = r#"
+import json, os, sys
+with open(os.environ["PID_FILE"], "w") as f:
+    f.write(str(os.getpid()))
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    req_id = msg.get("id")
+    if method == "initialize":
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "mock", "version": "1.0.0"}
+            }
+        }) + "\n")
+        sys.stdout.flush()
+    elif method == "tools/list":
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"tools": [{"name": "ping", "description": "ping", "inputSchema": {}}]}
+        }) + "\n")
+        sys.stdout.flush()
+    elif method == "tools/call":
+        sys.exit(42)
+"#;
+
+        let mut env = HashMap::new();
+        env.insert(
+            "PID_FILE".to_string(),
+            pid_file.to_string_lossy().to_string(),
+        );
+        let id = add_python_stdio_mcp(&registry, "exit-watch", script, env).await;
+
+        let connected = registry.refresh(id).await.unwrap();
+        assert_eq!(connected.status, McpStatus::Connected);
+        assert!(registry.stdio_processes.contains_key(&id));
+
+        let pid: u32 = tokio::fs::read_to_string(&pid_file)
+            .await
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        let call_res = registry.call_tool(id, "ping", serde_json::json!({})).await;
+        assert!(call_res.is_err());
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let state = registry.get(id).await.unwrap();
+                if state.status != McpStatus::Connected
+                    && !registry.stdio_processes.contains_key(&id)
+                    && !pid_is_alive_or_zombie(pid)
+                {
+                    assert_eq!(state.status, McpStatus::Error);
+                    assert!(state.error.as_deref().unwrap_or_default().contains("42"));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dead stdio child reconciled out of Connected and reaped");
+    }
+
+    #[tokio::test]
+    async fn stale_stdio_generation_exit_does_not_clobber_reconnected_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_log = dir.path().join("pids.log");
+        let registry = McpRegistry::new(dir.path()).await;
+
+        let script = r#"
+import json, os, signal, sys, time
+signal.signal(signal.SIGTERM, lambda *_: None)
+with open(os.environ["PID_LOG"], "a") as f:
+    f.write(str(os.getpid()) + "\n")
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    req_id = msg.get("id")
+    if method == "initialize":
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "mock", "version": "1.0.0"}
+            }
+        }) + "\n")
+        sys.stdout.flush()
+    elif method == "tools/list":
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"tools": [{"name": "whoami", "description": "pid", "inputSchema": {}}]}
+        }) + "\n")
+        sys.stdout.flush()
+    elif method == "tools/call":
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"content": [{"type": "text", "text": str(os.getpid())}]}
+        }) + "\n")
+        sys.stdout.flush()
+time.sleep(0.15)
+"#;
+
+        let mut env = HashMap::new();
+        env.insert("PID_LOG".to_string(), pid_log.to_string_lossy().to_string());
+        let id = add_python_stdio_mcp(&registry, "gen-fence", script, env).await;
+
+        let state1 = registry.refresh(id).await.unwrap();
+        assert_eq!(state1.status, McpStatus::Connected);
+        let gen1_handle = registry.stdio_processes.get(&id).unwrap().value().clone();
+        assert_eq!(gen1_handle.generation, 1);
+
+        let state2 = registry.refresh(id).await.unwrap();
+        assert_eq!(state2.status, McpStatus::Connected);
+        let gen2_handle = registry.stdio_processes.get(&id).unwrap().value().clone();
+        assert_eq!(gen2_handle.generation, 2);
+
+        tokio::time::timeout(Duration::from_secs(2), gen1_handle.stopped.cancelled())
+            .await
+            .expect("gen=1 actor exited and ran reconcile_stdio_exit");
+
+        let after = registry.get(id).await.unwrap();
+        assert_eq!(after.status, McpStatus::Connected);
+        assert_eq!(registry.stdio_processes.get(&id).unwrap().generation, 2);
+
+        let pids: Vec<u32> = tokio::fs::read_to_string(&pid_log)
+            .await
+            .unwrap()
+            .lines()
+            .map(|l| l.trim().parse().unwrap())
+            .collect();
+        assert_eq!(pids.len(), 2);
+        assert!(!pid_is_alive_or_zombie(pids[0]));
+
+        let whoami = registry
+            .call_tool(id, "whoami", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(whoami.trim().parse::<u32>().unwrap(), pids[1]);
+    }
+
+    #[tokio::test]
+    async fn refresh_stdio_tools_list_failure_reaps_child_and_clears_process_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("bad_tools.pid");
+        let registry = McpRegistry::new(dir.path()).await;
+
+        let bad_schema_script = r#"
+import json, os, sys, time
+with open(os.environ["PID_FILE"], "w") as f:
+    f.write(str(os.getpid()))
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    req_id = msg.get("id")
+    if method == "initialize":
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "broken", "version": "1.0.0"}
+            }
+        }) + "\n")
+        sys.stdout.flush()
+    elif method == "tools/list":
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"tools": "not-an-array"}
+        }) + "\n")
+        sys.stdout.flush()
+        time.sleep(60)
+"#;
+
+        let mut env = HashMap::new();
+        env.insert(
+            "PID_FILE".to_string(),
+            pid_file.to_string_lossy().to_string(),
+        );
+        let id = add_python_stdio_mcp(&registry, "bad-tools-parse", bad_schema_script, env).await;
+
+        let err = registry
+            .refresh(id)
+            .await
+            .expect_err("refresh_stdio should fail when tools/list payload is malformed");
+        assert!(err.to_string().contains("Failed to parse tools"));
+        assert!(!registry.stdio_processes.contains_key(&id));
+
+        let state = registry.get(id).await.unwrap();
+        assert_eq!(state.status, McpStatus::Error);
+        assert!(state
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Failed to parse tools"));
+
+        let pid: u32 = tokio::fs::read_to_string(&pid_file)
+            .await
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!pid_is_alive_or_zombie(pid));
+
+        let rpc_err_pid_file = dir.path().join("rpc_err_tools.pid");
+        let rpc_err_script = r#"
+import json, os, sys, time
+with open(os.environ["PID_FILE"], "w") as f:
+    f.write(str(os.getpid()))
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    req_id = msg.get("id")
+    if method == "initialize":
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "broken-rpc", "version": "1.0.0"}
+            }
+        }) + "\n")
+        sys.stdout.flush()
+    elif method == "tools/list":
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32603, "message": "boom"}
+        }) + "\n")
+        sys.stdout.flush()
+        time.sleep(60)
+"#;
+
+        let mut env2 = HashMap::new();
+        env2.insert(
+            "PID_FILE".to_string(),
+            rpc_err_pid_file.to_string_lossy().to_string(),
+        );
+        let id2 = add_python_stdio_mcp(&registry, "bad-tools-rpc", rpc_err_script, env2).await;
+
+        let err2 = registry
+            .refresh(id2)
+            .await
+            .expect_err("refresh_stdio should fail when tools/list returns JSON-RPC error");
+        assert!(err2.to_string().contains("tools/list failed"));
+        assert!(!registry.stdio_processes.contains_key(&id2));
+
+        let state2 = registry.get(id2).await.unwrap();
+        assert_eq!(state2.status, McpStatus::Error);
+
+        let pid2: u32 = tokio::fs::read_to_string(&rpc_err_pid_file)
+            .await
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!pid_is_alive_or_zombie(pid2));
     }
 }
