@@ -2,6 +2,11 @@ import { api, type MissionResourcesResponse } from "./api";
 
 export type BudgetResetPeriod = "total" | "daily" | "weekly";
 
+export type LiveLease = {
+  remaining_secs: number;
+  usd_per_hour: number;
+};
+
 /** One pool's derived usage (`crate::managed::budget::PoolUsage`). */
 export type PoolUsage = {
   pool_id: string;
@@ -12,6 +17,7 @@ export type PoolUsage = {
   carved_usd: number;
   available_usd: number;
   live_machines: number;
+  live_leases?: LiveLease[];
   reset_period?: BudgetResetPeriod;
   period_started_at?: string | null;
   period_resets_at?: string | null;
@@ -704,6 +710,80 @@ function latestNonNull(arr: Array<number | null> | undefined): number | null {
   return null;
 }
 
+type SimLease = { remainingSecs: number; usdPerHour: number };
+
+function buildSimulatedLeases(
+  pool: PoolUsage | null,
+  reservedUsd: number,
+  shapedComputeBurnUsdPerH: number,
+): SimLease[] {
+  const raw = pool?.live_leases?.filter((l) => l.usd_per_hour > 0) ?? [];
+  if (raw.length > 0) {
+    const rawSum = raw.reduce((acc, l) => acc + l.usd_per_hour, 0);
+    const scale = rawSum > 0.005 && shapedComputeBurnUsdPerH > 0 ? shapedComputeBurnUsdPerH / rawSum : 1;
+    return raw
+      .map((l) => ({
+        remainingSecs: Math.max(0, l.remaining_secs),
+        usdPerHour: l.usd_per_hour * scale,
+      }))
+      .sort((a, b) => a.remainingSecs - b.remainingSecs);
+  }
+  if (shapedComputeBurnUsdPerH <= 0.005) return [];
+  const count = Math.max(1, pool?.live_machines ?? 1);
+  const perVmUsdPerH = shapedComputeBurnUsdPerH / count;
+  const avgRemainingSecs = Math.max(0, Math.round((reservedUsd / shapedComputeBurnUsdPerH) * 3600));
+  return Array.from({ length: count }, () => ({
+    remainingSecs: avgRemainingSecs,
+    usdPerHour: perVmUsdPerH,
+  }));
+}
+
+/**
+ * Discrete simulation of `ManagedManager::auto_extend` (`<= 600s` trigger,
+ * `1,800s` extension step). Multiple VMs hitting `<= 600s` together attempt
+ * extensions in the same reaper sweep rather than staggering across 30m.
+ */
+function simulateLeaseCliffSecs(leases: SimLease[], availableUsd: number): number | null {
+  if (leases.length === 0) return null;
+  const remSecs = leases.map((l) => l.remainingSecs);
+  let remAvail = Math.max(0, availableUsd);
+  let elapsed = 0;
+  const maxSteps = Math.min(4096, Math.max(64, leases.length * 16));
+  for (let step = 0; step < maxSteps; step++) {
+    let bestIdx = 0;
+    let bestWait = Math.max(0, remSecs[0] - 600);
+    for (let i = 1; i < remSecs.length; i++) {
+      const w = Math.max(0, remSecs[i] - 600);
+      if (w < bestWait) {
+        bestWait = w;
+        bestIdx = i;
+      }
+    }
+    if (bestWait > 0) {
+      for (let i = 0; i < remSecs.length; i++) {
+        // Above the 60m (`3,600s`) reservation cap, burn reduces `availableUsd`;
+        // once `<= 3,600s`, shrinking reservation offsets incurred spend 1:1.
+        const unreservedSecs = Math.max(0, Math.min(bestWait, remSecs[i] - 3600));
+        if (unreservedSecs > 0) {
+          remAvail -= (unreservedSecs / 3600) * leases[i].usdPerHour;
+        }
+        remSecs[i] = Math.max(0, remSecs[i] - bestWait);
+      }
+      elapsed += bestWait;
+    }
+    if (elapsed > 86_400) return elapsed;
+    const stepUsd = leases[bestIdx].usdPerHour * 0.5;
+    if (remAvail + 1e-6 < stepUsd) {
+      return elapsed;
+    }
+    // Extending by 1,800s (`30m`) from `<= 600s` lands at `<= 2,400s` (`<= 60m`),
+    // so `machine_reserved` increases by the full `stepUsd`.
+    remAvail = Math.max(0, remAvail - stepUsd);
+    remSecs[bestIdx] += 1800;
+  }
+  return elapsed;
+}
+
 /**
  * Pure forecast derivation for the compact Runway & Spend chart at the top of
  * Mission Settings. Reacts live to draft budget and bandwidth edits so the user
@@ -845,31 +925,24 @@ export function computeRunwayForecast(opts: {
       (etaSecs == null || etaSecs >= resetsInSecs),
   );
 
-  // `ManagedManager::auto_extend` runs when a live VM has `<= 10m` remaining on
-  // its lease and requests a `30m` extension (`0.5h * perVmUsdPerH`), which
-  // `extend()` checks against `available_usd` (`reservation_for(30, usd_per_hour)`).
-  // Spend and shrinking reservation offset 1:1 while running (`availableUsd` stays
-  // constant between extensions), and each admitted 30m extension increases total
-  // reservation by `extensionStepUsd` and advances the next trigger by 30m (1,800s).
-  // The first rejected extension occurs after `floor(availableUsd / extensionStepUsd)`
-  // admitted triggers across the live fleet (`1,800s / liveMachineCount` per step).
-  const liveMachineCount = Math.max(1, pool?.live_machines ?? 1);
-  const perVmUsdPerH = shapedComputeBurnUsdPerH / liveMachineCount;
-  const extensionStepUsd = perVmUsdPerH * 0.5;
-  const admittedExtensions =
-    extensionStepUsd > 0 ? Math.floor((availableUsd + 1e-6) / extensionStepUsd) : 0;
-  const avgReservedHours =
-    shapedComputeBurnUsdPerH > 0.005 ? reservedUsd / shapedComputeBurnUsdPerH : 0;
-  const timeToExtendTriggerSecs = Math.max(0, (avgReservedHours - 10 / 60) * 3600);
+  // `ManagedManager::auto_extend` runs when a live VM has `<= 10m` (600s) remaining
+  // on its lease and requests a `30m` (1,800s) extension (`0.5h * usd_per_hour`),
+  // checked against `available_usd` (`reservation_for(30, usd_per_hour)`).
+  // When multiple VMs reach the `<= 10m` threshold together, the reaper attempts
+  // their extensions in the same sweep rather than spacing them across 30 minutes.
+  const simLeases = buildSimulatedLeases(pool, reservedUsd, shapedComputeBurnUsdPerH);
+  const liveMachineCount = Math.max(1, simLeases.length || (pool?.live_machines ?? 1));
+  const minExtensionStepUsd =
+    simLeases.length > 0
+      ? Math.min(...simLeases.map((l) => l.usdPerHour * 0.5))
+      : (shapedComputeBurnUsdPerH / liveMachineCount) * 0.5;
   const leaseCliffSecs =
     capUsd != null &&
     runwayUsd > 0 &&
     reservedUsd > 0.005 &&
     shapedComputeBurnUsdPerH > 0.005 &&
     availableUsd < runwayUsd - 0.005
-      ? admittedExtensions <= 0
-        ? 0
-        : timeToExtendTriggerSecs + admittedExtensions * (1800 / liveMachineCount)
+      ? simulateLeaseCliffSecs(simLeases, availableUsd)
       : null;
 
   const unshapedEtaSecs =
@@ -934,7 +1007,9 @@ export function computeRunwayForecast(opts: {
           leaseCliffSecs <= 0
             ? availableUsd <= 0.005
               ? "VM auto-extensions paused (0 unallocated)"
-              : `VM auto-extensions paused (${money(availableUsd)} < ${money(extensionStepUsd)} 30m step)`
+              : availableUsd + 1e-6 < minExtensionStepUsd
+                ? `VM auto-extensions paused (${money(availableUsd)} < ${money(minExtensionStepUsd)} 30m step)`
+                : `VM auto-extensions paused (${money(availableUsd)} left across ${liveMachineCount} VMs)`
             : `VM extensions pause in ${formatDurationEta(leaseCliffSecs)}`,
         );
       }

@@ -47,6 +47,11 @@ struct OrbMissionBudget: Equatable {
         var errorDescription: String? { message }
     }
 
+    struct LiveLease: Equatable {
+        var remainingSecs: Double
+        var usdPerHour: Double
+    }
+
     struct Pool: Equatable {
         var budget: Double
         var spent: Double
@@ -55,6 +60,7 @@ struct OrbMissionBudget: Equatable {
         var carved: Double
         var available: Double
         var liveMachines: Int = 0
+        var liveLeases: [LiveLease] = []
         var resetPeriod: BudgetResetPeriod = .total
         var periodStartedAt: String? = nil
         var periodResetsAt: String? = nil
@@ -313,6 +319,12 @@ struct OrbMissionBudget: Equatable {
             carved: p["carved_usd"].doubleValue ?? 0,
             available: p["available_usd"].doubleValue ?? 0,
             liveMachines: p["live_machines"].doubleValue.map(Int.init) ?? 0,
+            liveLeases: p["live_leases"].items.map {
+                LiveLease(
+                    remainingSecs: $0["remaining_secs"].doubleValue ?? 0,
+                    usdPerHour: $0["usd_per_hour"].doubleValue ?? 0
+                )
+            },
             resetPeriod: BudgetResetPeriod(wire: p["reset_period"].text),
             periodStartedAt: p["period_started_at"].text.isEmpty ? nil : p["period_started_at"].text,
             periodResetsAt: p["period_resets_at"].text.isEmpty ? nil : p["period_resets_at"].text
@@ -868,19 +880,19 @@ struct OrbMissionBudget: Equatable {
             guard let e = etaSecs else { return true }
             return e >= rSecs
         }()
-        let liveMachineCount = max(1, pool?.liveMachines ?? 1)
-        let extensionStepUsd = (shapedCompute / Double(liveMachineCount)) * 0.5
-        let admittedExtensions = extensionStepUsd > 0
-            ? Int(floor((availableUsd + 1e-6) / extensionStepUsd))
-            : 0
-        let avgReservedHours = shapedCompute > 0.005 ? (reservedUsd / shapedCompute) : 0
-        let timeToExtendTriggerSecs = max(0, (avgReservedHours - 10.0 / 60.0) * 3600.0)
+        let simLeases = Self.buildSimulatedLeases(pool: pool, reservedUsd: reservedUsd, shapedCompute: shapedCompute)
+        let liveMachineCount = max(1, simLeases.isEmpty ? (pool?.liveMachines ?? 1) : simLeases.count)
+        let minExtensionStepUsd: Double = {
+            if let minUsdH = simLeases.map(\.usdPerHour).min() {
+                return minUsdH * 0.5
+            }
+            return (shapedCompute / Double(liveMachineCount)) * 0.5
+        }()
         let leaseCliffSecs: Double? = {
             guard capUsd != nil, runwayUsd > 0, reservedUsd > 0.005, shapedCompute > 0.005, availableUsd < runwayUsd - 0.005 else {
                 return nil
             }
-            if admittedExtensions <= 0 { return 0 }
-            return timeToExtendTriggerSecs + Double(admittedExtensions) * (1800.0 / Double(liveMachineCount))
+            return Self.simulateLeaseCliffSecs(leases: simLeases, availableUsd: availableUsd)
         }()
         let unshapedEtaSecs: Double? = (capUsd != nil && runwayUsd > 0 && obsCompute > 0.005)
             ? (runwayUsd / obsCompute) * 3600.0 : nil
@@ -926,11 +938,13 @@ struct OrbMissionBudget: Equatable {
                 }
                 if let cliff = leaseCliffSecs, cliff < 3600 {
                     if cliff <= 0 {
-                        parts.append(
-                            availableUsd <= 0.005
-                                ? "VM auto-extensions paused (0 unallocated)"
-                                : "VM auto-extensions paused (\(Self.money(availableUsd)) < \(Self.money(extensionStepUsd)) 30m step)"
-                        )
+                        if availableUsd <= 0.005 {
+                            parts.append("VM auto-extensions paused (0 unallocated)")
+                        } else if availableUsd + 1e-6 < minExtensionStepUsd {
+                            parts.append("VM auto-extensions paused (\(Self.money(availableUsd)) < \(Self.money(minExtensionStepUsd)) 30m step)")
+                        } else {
+                            parts.append("VM auto-extensions paused (\(Self.money(availableUsd)) left across \(liveMachineCount) VMs)")
+                        }
                     } else {
                         parts.append("VM extensions pause in \(Self.formatDurationEta(cliff))")
                     }
@@ -980,6 +994,59 @@ struct OrbMissionBudget: Equatable {
     }
 
     static func money(_ v: Double) -> String { v < 10 ? String(format: "$%.2f", v) : String(format: "$%.0f", v) }
+
+    private static func buildSimulatedLeases(pool: Pool?, reservedUsd: Double, shapedCompute: Double) -> [LiveLease] {
+        let raw = (pool?.liveLeases ?? []).filter { $0.usdPerHour > 0 }
+        if !raw.isEmpty {
+            let rawSum = raw.reduce(0.0) { $0 + $1.usdPerHour }
+            let scale = (rawSum > 0.005 && shapedCompute > 0) ? (shapedCompute / rawSum) : 1.0
+            return raw.map {
+                LiveLease(remainingSecs: max(0, $0.remainingSecs), usdPerHour: $0.usdPerHour * scale)
+            }.sorted { $0.remainingSecs < $1.remainingSecs }
+        }
+        guard shapedCompute > 0.005 else { return [] }
+        let count = max(1, pool?.liveMachines ?? 1)
+        let perVmUsdPerH = shapedCompute / Double(count)
+        let avgRemainingSecs = max(0, ((reservedUsd / shapedCompute) * 3600.0).rounded())
+        return Array(repeating: LiveLease(remainingSecs: avgRemainingSecs, usdPerHour: perVmUsdPerH), count: count)
+    }
+
+    private static func simulateLeaseCliffSecs(leases: [LiveLease], availableUsd: Double) -> Double? {
+        guard !leases.isEmpty else { return nil }
+        var remSecs = leases.map(\.remainingSecs)
+        var remAvail = max(0.0, availableUsd)
+        var elapsed = 0.0
+        let maxSteps = min(4096, max(64, leases.count * 16))
+        for _ in 0..<maxSteps {
+            var bestIdx = 0
+            var bestWait = max(0.0, remSecs[0] - 600.0)
+            for i in 1..<remSecs.count {
+                let w = max(0.0, remSecs[i] - 600.0)
+                if w < bestWait {
+                    bestWait = w
+                    bestIdx = i
+                }
+            }
+            if bestWait > 0 {
+                for i in 0..<remSecs.count {
+                    let unreservedSecs = max(0.0, min(bestWait, remSecs[i] - 3600.0))
+                    if unreservedSecs > 0 {
+                        remAvail -= (unreservedSecs / 3600.0) * leases[i].usdPerHour
+                    }
+                    remSecs[i] = max(0.0, remSecs[i] - bestWait)
+                }
+                elapsed += bestWait
+            }
+            if elapsed > 86_400.0 { return elapsed }
+            let stepUsd = leases[bestIdx].usdPerHour * 0.5
+            if remAvail + 1e-6 < stepUsd {
+                return elapsed
+            }
+            remAvail = max(0.0, remAvail - stepUsd)
+            remSecs[bestIdx] += 1800.0
+        }
+        return elapsed
+    }
 }
 
 /// Long-press "Mission settings" on a mission row: Runway forecast + Budget +

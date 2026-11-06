@@ -441,11 +441,11 @@ it("matches the shared cross-client mission-budget fixture", () => {
     budget: dailySust,
     budgetEnabled: true,
     bandwidthEnabled: true,
-    nowMs: Date.parse("2026-11-05T20:00:00Z"),
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
   });
   expect(fc.resetPeriod).toBe("daily");
   expect(fc.sustainsUntilReset).toBe(true);
-  expect(fc.resetsInSecs).toBe(14_400);
+  expect(fc.resetsInSecs).toBe(900);
   expect(fc.leaseCliffSecs).toBe(0);
   expect(fc.headline).toBe("Sustains until daily reset");
   expect(fc.subline).toContain("VM auto-extensions paused ($2.00 < $2.50 30m step)");
@@ -463,34 +463,62 @@ it("matches the shared cross-client mission-budget fixture", () => {
   const pooledFc = computeRunwayForecast({
     budget: pooledChild,
     bandwidthEnabled: true,
-    nowMs: Date.parse("2026-11-05T20:00:00Z"),
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
   });
   expect(pooledFc.resetPeriod).toBe("daily");
   expect(pooledFc.sustainsUntilReset).toBe(true);
   expect(pooledFc.headline).toBe("Sustains until daily reset");
 
-  // With 10 live VMs at $10/h total ($1/h each -> $0.50 30m step), $2.50 available, and $1.6667 reserved (10m left),
-  // 5 discrete 30m extensions are admitted (5 * 180s = 900s = ~15m) before the 6th extension is rejected!
-  const upcomingCliff: MissionBudget = {
+  // Ten $1/h VMs all at 10m remaining (`<= 600s`) with $2.50 available ($0.50 30m step):
+  // five VMs extend in the immediate reaper sweep and the sixth is rejected immediately (`0s`).
+  const immediateFleetBatch: MissionBudget = {
     ...dailySust,
     pool: {
       ...dailySust.pool!,
       live_machines: 10,
+      live_leases: undefined,
       reserved_usd: 1.6667,
       available_usd: 2.5,
       spent_usd: 255.8333,
       carved_usd: 40.0,
     },
   };
-  const upcomingFc = computeRunwayForecast({
-    budget: upcomingCliff,
+  const immediateFleetFc = computeRunwayForecast({
+    budget: immediateFleetBatch,
     budgetEnabled: true,
     bandwidthEnabled: true,
     nowMs: Date.parse("2026-11-05T23:45:00Z"),
   });
-  expect(upcomingFc.sustainsUntilReset).toBe(true);
-  expect(upcomingFc.leaseCliffSecs).toBeCloseTo(900, 0);
-  expect(upcomingFc.subline).toContain("VM extensions pause in ~15m");
+  expect(immediateFleetFc.sustainsUntilReset).toBe(true);
+  expect(immediateFleetFc.leaseCliffSecs).toBe(0);
+  expect(immediateFleetFc.subline).toContain("VM auto-extensions paused ($2.50 left across 10 VMs)");
+
+  // Two staggered $5/h VMs with per-VM `live_leases` (15m and 25m remaining) and $2.50 available:
+  // VM 0 extends at 5m (300s), consuming the $2.50, and VM 1 hits the cliff at 15m (900s).
+  const staggeredCliff: MissionBudget = {
+    ...dailySust,
+    pool: {
+      ...dailySust.pool!,
+      live_machines: 2,
+      live_leases: [
+        { remaining_secs: 900, usd_per_hour: 5.0 },
+        { remaining_secs: 1500, usd_per_hour: 5.0 },
+      ],
+      reserved_usd: 3.3333,
+      available_usd: 2.5,
+      spent_usd: 254.1667,
+      carved_usd: 40.0,
+    },
+  };
+  const staggeredFc = computeRunwayForecast({
+    budget: staggeredCliff,
+    budgetEnabled: true,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+  });
+  expect(staggeredFc.sustainsUntilReset).toBe(true);
+  expect(staggeredFc.leaseCliffSecs).toBeCloseTo(900, 0);
+  expect(staggeredFc.subline).toContain("VM extensions pause in ~15m");
 
   // Single $10/h VM, 30m left ($5 reserved), $5 available ($5 30m step):
   // first trigger in 20m (1,200s) is admitted (+1,800s) and the first rejected trigger is at 50m (3,000s).
@@ -499,6 +527,7 @@ it("matches the shared cross-client mission-budget fixture", () => {
     pool: {
       ...dailySust.pool!,
       live_machines: 1,
+      live_leases: [{ remaining_secs: 1800, usd_per_hour: 10.0 }],
       reserved_usd: 5.0,
       available_usd: 5.0,
       spent_usd: 290.0,

@@ -88,6 +88,11 @@ data class OrbMissionBudget(
         }
     }
 
+    data class LiveLease(
+        val remainingSecs: Double,
+        val usdPerHour: Double,
+    )
+
     data class Pool(
         val budget: Double,
         val spent: Double,
@@ -95,6 +100,7 @@ data class OrbMissionBudget(
         val carved: Double,
         val available: Double,
         val liveMachines: Int = 0,
+        val liveLeases: List<LiveLease> = emptyList(),
         val lifetimeSpent: Double = spent,
         val resetPeriod: BudgetResetPeriod = BudgetResetPeriod.TOTAL,
         val periodStartedAt: String? = null,
@@ -494,15 +500,10 @@ data class OrbMissionBudget(
             resetsInSecs != null &&
             runwayUsd > 0.0 &&
             (etaSecs == null || etaSecs >= resetsInSecs)
-        val liveMachineCount = maxOf(1, pool?.liveMachines ?: 1)
-        val extensionStepUsd = (shapedCompute / liveMachineCount.toDouble()) * 0.5
-        val admittedExtensions = if (extensionStepUsd > 0.0) {
-            kotlin.math.floor((availableUsd + 1e-6) / extensionStepUsd).toInt()
-        } else {
-            0
-        }
-        val avgReservedHours = if (shapedCompute > 0.005) reservedUsd / shapedCompute else 0.0
-        val timeToExtendTriggerSecs = maxOf(0.0, (avgReservedHours - 10.0 / 60.0) * 3600.0)
+        val simLeases = buildSimulatedLeases(pool, reservedUsd, shapedCompute)
+        val liveMachineCount = maxOf(1, if (simLeases.isEmpty()) (pool?.liveMachines ?: 1) else simLeases.size)
+        val minExtensionStepUsd = simLeases.minOfOrNull { it.usdPerHour * 0.5 }
+            ?: ((shapedCompute / liveMachineCount.toDouble()) * 0.5)
         val leaseCliffSecs: Double? = if (
             capUsd != null &&
             runwayUsd > 0.0 &&
@@ -510,11 +511,7 @@ data class OrbMissionBudget(
             shapedCompute > 0.005 &&
             availableUsd < runwayUsd - 0.005
         ) {
-            if (admittedExtensions <= 0) {
-                0.0
-            } else {
-                timeToExtendTriggerSecs + admittedExtensions.toDouble() * (1800.0 / liveMachineCount.toDouble())
-            }
+            simulateLeaseCliffSecs(simLeases, availableUsd)
         } else {
             null
         }
@@ -576,10 +573,12 @@ data class OrbMissionBudget(
                 if (leaseCliffSecs != null && leaseCliffSecs < 3600.0) {
                     parts.add(
                         if (leaseCliffSecs <= 0.0) {
-                            if (availableUsd <= 0.005) {
-                                "VM auto-extensions paused (0 unallocated)"
-                            } else {
-                                "VM auto-extensions paused (${money(availableUsd)} < ${money(extensionStepUsd)} 30m step)"
+                            when {
+                                availableUsd <= 0.005 -> "VM auto-extensions paused (0 unallocated)"
+                                availableUsd + 1e-6 < minExtensionStepUsd ->
+                                    "VM auto-extensions paused (${money(availableUsd)} < ${money(minExtensionStepUsd)} 30m step)"
+                                else ->
+                                    "VM auto-extensions paused (${money(availableUsd)} left across $liveMachineCount VMs)"
                             }
                         } else {
                             "VM extensions pause in ${formatDurationEta(leaseCliffSecs)}"
@@ -721,6 +720,63 @@ data class OrbMissionBudget(
         private fun parseIso8601Ms(raw: String): Long? =
             runCatching { Instant.parse(raw).toEpochMilli() }.getOrNull()
 
+        private fun buildSimulatedLeases(
+            pool: Pool?,
+            reservedUsd: Double,
+            shapedCompute: Double,
+        ): List<LiveLease> {
+            val raw = pool?.liveLeases?.filter { it.usdPerHour > 0.0 } ?: emptyList()
+            if (raw.isNotEmpty()) {
+                val rawSum = raw.sumOf { it.usdPerHour }
+                val scale = if (rawSum > 0.005 && shapedCompute > 0.0) shapedCompute / rawSum else 1.0
+                return raw.map {
+                    LiveLease(remainingSecs = maxOf(0.0, it.remainingSecs), usdPerHour = it.usdPerHour * scale)
+                }.sortedBy { it.remainingSecs }
+            }
+            if (shapedCompute <= 0.005) return emptyList()
+            val count = maxOf(1, pool?.liveMachines ?: 1)
+            val perVmUsdPerH = shapedCompute / count.toDouble()
+            val avgRemainingSecs = maxOf(0.0, ((reservedUsd / shapedCompute) * 3600.0).roundToLong().toDouble())
+            return List(count) { LiveLease(remainingSecs = avgRemainingSecs, usdPerHour = perVmUsdPerH) }
+        }
+
+        private fun simulateLeaseCliffSecs(leases: List<LiveLease>, availableUsd: Double): Double? {
+            if (leases.isEmpty()) return null
+            val remSecs = DoubleArray(leases.size) { leases[it].remainingSecs }
+            var remAvail = maxOf(0.0, availableUsd)
+            var elapsed = 0.0
+            val maxSteps = minOf(4096, maxOf(64, leases.size * 16))
+            for (step in 0 until maxSteps) {
+                var bestIdx = 0
+                var bestWait = maxOf(0.0, remSecs[0] - 600.0)
+                for (i in 1 until remSecs.size) {
+                    val w = maxOf(0.0, remSecs[i] - 600.0)
+                    if (w < bestWait) {
+                        bestWait = w
+                        bestIdx = i
+                    }
+                }
+                if (bestWait > 0.0) {
+                    for (i in remSecs.indices) {
+                        val unreservedSecs = maxOf(0.0, min(bestWait, remSecs[i] - 3600.0))
+                        if (unreservedSecs > 0.0) {
+                            remAvail -= (unreservedSecs / 3600.0) * leases[i].usdPerHour
+                        }
+                        remSecs[i] = maxOf(0.0, remSecs[i] - bestWait)
+                    }
+                    elapsed += bestWait
+                }
+                if (elapsed > 86_400.0) return elapsed
+                val stepUsd = leases[bestIdx].usdPerHour * 0.5
+                if (remAvail + 1e-6 < stepUsd) {
+                    return elapsed
+                }
+                remAvail = maxOf(0.0, remAvail - stepUsd)
+                remSecs[bestIdx] += 1800.0
+            }
+            return elapsed
+        }
+
         fun from(raw: Any?): OrbMissionBudget {
             val d = OrbJSON.dict(raw)
             val p = OrbJSON.dict(d?.get("pool"))
@@ -789,6 +845,12 @@ data class OrbMissionBudget(
             }
             val poolObj = p?.let {
                 val spent = OrbJSON.double(it, "spent_usd") ?: 0.0
+                val leases = OrbJSON.dictList(it["live_leases"]).map { l ->
+                    LiveLease(
+                        remainingSecs = OrbJSON.double(l, "remaining_secs") ?: 0.0,
+                        usdPerHour = OrbJSON.double(l, "usd_per_hour") ?: 0.0,
+                    )
+                }
                 Pool(
                     budget = OrbJSON.double(it, "budget_usd") ?: 0.0,
                     spent = spent,
@@ -796,6 +858,7 @@ data class OrbMissionBudget(
                     carved = OrbJSON.double(it, "carved_usd") ?: 0.0,
                     available = OrbJSON.double(it, "available_usd") ?: 0.0,
                     liveMachines = OrbJSON.int(it, "live_machines") ?: 0,
+                    liveLeases = leases,
                     lifetimeSpent = OrbJSON.double(it, "lifetime_spent_usd") ?: spent,
                     resetPeriod = BudgetResetPeriod.fromWire(OrbJSON.str(it, "reset_period")),
                     periodStartedAt = OrbJSON.str(it, "period_started_at"),

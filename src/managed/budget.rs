@@ -195,6 +195,12 @@ impl BudgetPool {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LiveLease {
+    pub remaining_secs: u64,
+    pub usd_per_hour: f64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PoolUsage {
     pub pool_id: String,
@@ -208,6 +214,10 @@ pub struct PoolUsage {
     pub carved_usd: f64,
     pub available_usd: f64,
     pub live_machines: usize,
+    /// Per-VM lease horizons for live machines charged directly to this pool,
+    /// sorted by `remaining_secs` ascending so clients forecast exact `auto_extend` sweeps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_leases: Vec<LiveLease>,
     pub reset_period: BudgetResetPeriod,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub period_started_at: Option<DateTime<Utc>>,
@@ -397,6 +407,7 @@ fn pool_usage_depth(
     let mut window_spent = 0.0;
     let mut reserved = 0.0;
     let mut live = 0;
+    let mut live_leases = Vec::new();
     for m in machines {
         lifetime_spent += machine_pool_spent_in_window(m, pool_id, now, None);
         window_spent += machine_pool_spent_in_window(m, pool_id, now, window_start);
@@ -404,9 +415,14 @@ fn pool_usage_depth(
             reserved += machine_reserved(m, now);
             if m.state.is_live() {
                 live += 1;
+                live_leases.push(LiveLease {
+                    remaining_secs: (m.expires_at - now).num_seconds().max(0) as u64,
+                    usd_per_hour: round4(m.usd_per_hour),
+                });
             }
         }
     }
+    live_leases.sort_by_key(|l| l.remaining_secs);
     let mut carved = 0.0;
     if depth < 32 {
         for child in pools.values().filter(|p| {
@@ -442,6 +458,7 @@ fn pool_usage_depth(
         carved_usd: round4(carved),
         available_usd: round4(budget_usd - window_spent - reserved - carved),
         live_machines: live,
+        live_leases,
         reset_period: effective_period,
         period_started_at: bounds.map(|(s, _)| s),
         period_resets_at: bounds.map(|(_, e)| e),
@@ -852,4 +869,80 @@ pub fn exceeded_message(u: &PoolUsage, needed: f64, what: &str) -> String {
         u.reserved_usd,
         u.carved_usd,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::managed::MachineState;
+
+    #[test]
+    fn pool_usage_sorts_live_leases_by_remaining_ttl_and_skips_empty_in_json() {
+        let now = Utc::now();
+        let mut pools = HashMap::new();
+        pools.insert(
+            "root".to_string(),
+            BudgetPool {
+                mission_id: "root".to_string(),
+                budget_usd: Some(50.0),
+                budget_reset_period: BudgetResetPeriod::Total,
+                parent_pool_id: None,
+                vm_limits: None,
+                parent_cap_pool_id: None,
+                bandwidth_limits: None,
+                parent_bandwidth_pool_id: None,
+                owner_user_id: Some("u1".to_string()),
+                updated_at: now,
+            },
+        );
+        let mk = |id: &str, rem_mins: i64, rate: f64, state: MachineState| {
+            let mut m: ManagedMachine = serde_json::from_value(serde_json::json!({
+                "id": id,
+                "node_id": id,
+                "name": id,
+                "provider": "boat",
+                "size": "small",
+                "cpu": 2,
+                "ram_gb": 4,
+                "disk_gb": 20,
+                "image": "ubuntu",
+                "state": "online",
+                "budget_pool_id": "root",
+                "created_at": now,
+                "expires_at": now + ChronoDuration::minutes(rem_mins),
+                "usd_per_hour": rate,
+                "cost_usd": 0.0,
+                "cost_is_metered": true,
+                "ledger_closed": false,
+            }))
+            .unwrap();
+            m.state = state;
+            m
+        };
+
+        let empty_usage = pool_usage("root", &pools, &[], now, &|_| true).unwrap();
+        assert!(empty_usage.live_leases.is_empty());
+        let empty_json = serde_json::to_value(&empty_usage).unwrap();
+        assert!(empty_json.get("live_leases").is_none());
+
+        let machines = vec![
+            mk("m-late", 25, 5.0, MachineState::Online),
+            mk("m-early", 10, 2.5, MachineState::Online),
+            mk("m-stopped", 5, 8.0, MachineState::Stopped),
+        ];
+        let usage = pool_usage("root", &pools, &machines, now, &|_| true).unwrap();
+        assert_eq!(
+            usage.live_leases,
+            vec![
+                LiveLease {
+                    remaining_secs: 600,
+                    usd_per_hour: 2.5,
+                },
+                LiveLease {
+                    remaining_secs: 1500,
+                    usd_per_hour: 5.0,
+                },
+            ]
+        );
+    }
 }
