@@ -44,9 +44,7 @@ VALID_STATUSES = {"OPEN", "IN_PROGRESS", "COMPLETED"}
 VALID_PHASES = {f"R{index}" for index in range(1, 9)}
 VALID_MODES = {"incremental", "clean"}
 GATE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
-CLOSING_PR_TOKEN_RE = re.compile(
-    r"^(?:(?:[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*)?#[1-9][0-9]*|[0-9a-fA-F]{7,64})$"
-)
+CLOSING_PR_TOKEN_RE = re.compile(r"^(?:Th0rgal/orb)?#([1-9][0-9]*)$")
 
 MATRIX_KEYS = {"version", "project", "profile", "gates"}
 GATE_KEYS = {
@@ -267,16 +265,19 @@ def parse_semicolon_paths(raw: str, context: str) -> list[str]:
 def parse_closing_pr_refs(raw: str, context: str) -> list[str]:
     parts = [strip_code(part) for part in re.split(r"[;,]", strip_code(raw))]
     tokens = [part for part in parts if part]
-    if (
-        not tokens
-        or len(tokens) != len(parts)
-        or any("`" in token or not CLOSING_PR_TOKEN_RE.fullmatch(token) for token in tokens)
-    ):
+    normalized: list[str] = []
+    for token in tokens:
+        match = CLOSING_PR_TOKEN_RE.fullmatch(token) if "`" not in token else None
+        if match is None:
+            normalized = []
+            break
+        normalized.append(f"#{int(match.group(1))}")
+    if not tokens or len(tokens) != len(parts) or len(normalized) != len(tokens):
         raise ValueError(
-            f"{context}: COMPLETED row must specify concrete closing_pr PR/commit token "
-            f"(e.g. '#123', 'Th0rgal/orb#123', or >=7-hex SHA), got {raw!r}"
+            f"{context}: COMPLETED row must specify concrete closing_pr PR reference "
+            f"('#<positive_int>' or 'Th0rgal/orb#<positive_int>'), got {raw!r}"
         )
-    if len(set(tokens)) != len(tokens):
+    if len(set(normalized)) != len(normalized):
         raise ValueError(f"{context}: duplicate closing_pr reference in {tokens!r}")
     return tokens
 

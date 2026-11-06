@@ -86,7 +86,25 @@ class StateInventoryTests(unittest.TestCase):
             checker.validate_inventory_markdown(traversal, ROOT)
 
     def test_completed_status_requires_concrete_pr_and_existing_reproducer(self) -> None:
-        for placeholder in ("TBD", "-", "N/A", "none", "#0", "abc123", "#1501, none"):
+        invalid_closing_prs = (
+            "TBD",
+            "-",
+            "N/A",
+            "none",
+            "#0",
+            "Th0rgal/orb#0",
+            "#01501",
+            "abc123",
+            "09405d1",
+            "deadbee",
+            "09405d18b34cf7a49acad061b55d803a27218fe4",
+            "Other/repository#123",
+            "th0rgal/orb#123",
+            "#1501, none",
+            "#1501, 09405d1",
+            "#1501, Other/repository#123",
+        )
+        for placeholder in invalid_closing_prs:
             with self.subTest(placeholder=placeholder):
                 completed_placeholder = self.inventory_text.replace(
                     "| R1, R2 | OPEN | `src/api/idempotency.rs` | TBD |",
@@ -112,6 +130,19 @@ class StateInventoryTests(unittest.TestCase):
                         require_all_completed=True,
                     )
 
+        for duplicate_ref in ("#1578, #1578", "#1578, Th0rgal/orb#1578"):
+            with self.subTest(duplicate_ref=duplicate_ref):
+                completed_duplicate = self.inventory_text.replace(
+                    "| R1, R2 | OPEN | `src/api/idempotency.rs` | TBD |",
+                    f"| R1, R2 | COMPLETED | `src/api/idempotency.rs` | {duplicate_ref} |",
+                    1,
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "duplicate closing_pr reference",
+                ):
+                    checker.validate_inventory_markdown(completed_duplicate, ROOT)
+
         completed_missing_gate = self.inventory_text.replace(
             "| R1, R2 | OPEN | `src/api/idempotency.rs` | TBD |",
             "| R1, R2 | COMPLETED | `src/api/missing_gate_test.rs` | #1501 |",
@@ -121,11 +152,9 @@ class StateInventoryTests(unittest.TestCase):
             checker.validate_inventory_markdown(completed_missing_gate, ROOT)
 
         valid_tokens = (
-            "#1501",
-            "Th0rgal/orb#1576",
-            "09405d1",
-            "09405d18b34cf7a49acad061b55d803a27218fe4",
-            "#1501, Th0rgal/orb#1576; 09405d1",
+            "#1578",
+            "Th0rgal/orb#1578",
+            "#1578, Th0rgal/orb#1582",
             "`#1501`; `Th0rgal/orb#1576`",
         )
         for token in valid_tokens:
