@@ -1168,9 +1168,10 @@ export function FilePanelProvider(p: {
                   action={{
                     label: "Retry",
                     run: () => {
+                      setError(undefined);
                       rootPromise = undefined;
-                      void ensureRoots().catch(swallow("filePanel.ensureRoots"));
-                      return readSelected();
+                      if (selected()) return readSelected();
+                      return ensureRoots().catch((e) => setError(e instanceof Error ? e.message : String(e)));
                     },
                   }}
                 />

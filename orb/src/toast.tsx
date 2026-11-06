@@ -233,8 +233,8 @@ function ToastItem(p: { toast: Toast }) {
     const result = a.run();
     if (a.dismiss !== false) {
       dismissToast(t().id);
-      if (list.some(o => o.background)) {
-        void Promise.resolve(result).finally(() => list.forEach(o => { if (o.background) o.rebump(); }));
+      if (list.length) {
+        void Promise.resolve(result).finally(() => list.forEach(o => o.rebump()));
       }
     }
   };

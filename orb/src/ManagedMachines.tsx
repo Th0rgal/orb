@@ -649,6 +649,7 @@ export function placeholder(x: Pending, now = Date.now()): ManagedMachine {
 export function ManagedSnapshots(p: { load?: typeof listManagedSnapshots; remove?: typeof deleteManagedSnapshot } = {}) {
   const [snaps, setSnaps] = createSignal<ManagedSnapshot[] | null>(null);
   const [error, setError] = createSignal<string | null>(null);
+  const [deleteError, setDeleteError] = createSignal<string | null>(null);
   const [confirm, setConfirm] = createSignal<ManagedSnapshot | null>(null);
   const [open, setOpen] = createSignal<boolean | null>(null);
   const isOpen = () => open() ?? ((snaps()?.length ?? 0) <= MANAGED_GROUP_PREVIEW_LIMIT);
@@ -657,24 +658,26 @@ export function ManagedSnapshots(p: { load?: typeof listManagedSnapshots; remove
     catch (e) {
       // A Core without snapshot support answers 404: nothing to show.
       const message = managedError(e);
-      if (/\b404\b|not found/i.test(message)) setSnaps([]); else setError(message);
+      if (/\b404\b|not found/i.test(message)) { setSnaps([]); setError(null); } else setError(message);
     }
   };
   onMount(() => void load());
   const remove = async (s: ManagedSnapshot) => {
     setConfirm(null);
+    setDeleteError(null);
     const before = snaps();
     setSnaps(l => (l ?? []).filter(x => x.name !== s.name));
     try { await (p.remove ?? deleteManagedSnapshot)(s); }
-    catch (e) { setSnaps(before); setError(`Couldn’t delete ${s.label}: ${managedError(e)}`); }
+    catch (e) { setSnaps(before); setDeleteError(`Couldn’t delete ${s.label}: ${managedError(e)}`); }
   };
-  return <Show when={(snaps()?.length ?? 0) > 0 || error()}>
+  return <Show when={(snaps()?.length ?? 0) > 0 || error() || deleteError()}>
     <Show when={(snaps()?.length ?? 0) > 0} fallback={<div class="m-note managed-stopped-head">Snapshots · warm images agents start children from</div>}>
       <button type="button" class="s-btn sm quiet managed-recent-toggle managed-snapshots-toggle" aria-expanded={isOpen()} onClick={() => setOpen(!isOpen())}>
         <span class={`chev p-acc-chev ${isOpen() ? "open" : ""}`}>›</span>Snapshots · warm images agents start children from ({snaps()?.length ?? 0})
       </button>
     </Show>
     <ErrorToast error={error()} onDismiss={() => setError(null)} action={{ label: "Retry", run: () => load() }} />
+    <ErrorToast error={deleteError()} onDismiss={() => setDeleteError(null)} />
     <Show when={isOpen() && (snaps()?.length ?? 0) > 0}>
       <div class="m-list s-card managed-list managed-snapshots managed-bounded-scroll" aria-label="Managed snapshots">
         <For each={snaps() ?? []}>{s => <div class="managed-row" data-state={s.status}>

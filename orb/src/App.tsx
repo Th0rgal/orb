@@ -1504,8 +1504,8 @@ export default function App() {
                 />
                 <Show when={newMachine() === "local" && localAgentsScanning()}><div class="local-scan-status" role="status"><Ic.Spinner size={12} /> Checking local agents…</div></Show>
                 <ErrorToast error={createError()} title="Couldn’t start the mission" onDismiss={() => setCreateError(null)}
-                  action={/GiB required.*GiB is free/.test(createError() ?? "") ? { label: "Choose machine", run: () => setEnvOpen("machine") }
-                    : createRefusal()?.project ? { label: "Open project settings", run: () => open(`ps:${createRefusal()!.project}`) } : undefined} />
+                  action={/GiB required.*GiB is free/.test(createError() ?? "") ? { label: "Choose machine", run: () => { setCreateError(null); setEnvOpen("machine"); } }
+                    : createRefusal()?.project ? { label: "Open project settings", run: () => { const project = createRefusal()!.project; setCreateError(null); open(`ps:${project}`); } } : undefined} />
                 </div>
               </div>
             </div>
