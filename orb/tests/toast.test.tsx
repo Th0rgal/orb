@@ -119,4 +119,31 @@ describe("unified workspace ErrorToast & Toaster", () => {
       filePanel.remove();
     }
   });
+
+  it("runs toast actions before dismissing so owner state like Inbox undoItem remains intact", () => {
+    let undoItem: { id: string } | null = { id: "mission-1" };
+    let reopened: string | null = null;
+    const onDismiss = vi.fn(() => {
+      undoItem = null;
+    });
+    notify({
+      key: "inbox-undo",
+      kind: "info",
+      title: "Marked done",
+      actions: [{
+        label: "Undo",
+        run: () => {
+          if (!undoItem) return;
+          reopened = undoItem.id;
+          undoItem = null;
+        },
+      }],
+      onDismiss,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Undo/ }));
+    expect(reopened).toBe("mission-1");
+    expect(onDismiss).not.toHaveBeenCalled();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
 });

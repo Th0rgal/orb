@@ -43,7 +43,7 @@ export type Toast = {
   actions?: ToastAction[];
   /** Auto-hide after this many ms. Errors default to staying until closed. */
   timeout?: number;
-  onDismiss?: (reason?: "dismiss" | "action" | "timeout") => void;
+  onDismiss?: () => void;
 };
 
 const MAX_VISIBLE = 3;
@@ -90,10 +90,10 @@ export function clearToasts() {
   setToasts([]);
 }
 
-/** User closed it (button, Escape, action, or timeout). */
-function close(t: Toast, reason: "dismiss" | "action" | "timeout" = "dismiss") {
+/** User closed it (button, Escape, or timeout). */
+function close(t: Toast) {
   dismissToast(t.id);
-  t.onDismiss?.(reason);
+  t.onDismiss?.();
 }
 
 function clearTimer(id: number) {
@@ -106,7 +106,7 @@ function startTimer(id: number, ms: number) {
   clearTimer(id);
   timers.set(id, setTimeout(() => {
     const t = toasts().find(x => x.id === id);
-    if (t) close(t, "timeout");
+    if (t) close(t);
   }, ms));
 }
 
@@ -203,18 +203,12 @@ export function ErrorToast(p: {
       actions,
       // Closing a merged toast clears non-background errors everywhere they came from,
       // and latches background pollers quiet until recovery or explicit action.
-      onDismiss: reason => {
+      onDismiss: () => {
         const current = owners.get(next);
         owners.delete(next);
         current?.forEach(o => {
-          if (reason === "action") {
-            o.suppress(null);
-            if (!o.background) o.onDismiss?.();
-          } else if (o.background) {
-            o.suppress(next);
-          } else {
-            o.onDismiss?.();
-          }
+          if (o.background) o.suppress(next);
+          else o.onDismiss?.();
         });
       },
     });
@@ -235,10 +229,13 @@ function ToastItem(p: { toast: Toast }) {
   const runAction = (a: ToastAction) => {
     const ownersSnapshot = owners.get(t().key);
     const list = ownersSnapshot ? [...ownersSnapshot.values()] : [];
-    if (a.dismiss !== false) close(t(), "action");
+    if (a.dismiss !== false) list.forEach(o => o.suppress(null));
     const result = a.run();
-    if (a.dismiss !== false && list.some(o => o.background)) {
-      void Promise.resolve(result).finally(() => list.forEach(o => { if (o.background) o.rebump(); }));
+    if (a.dismiss !== false) {
+      dismissToast(t().id);
+      if (list.some(o => o.background)) {
+        void Promise.resolve(result).finally(() => list.forEach(o => { if (o.background) o.rebump(); }));
+      }
     }
   };
   const content = t().content;
@@ -268,7 +265,7 @@ function ToastItem(p: { toast: Toast }) {
         <Show when={copied()} fallback={<CopyIcon size={13} />}><CheckIcon size={13} /></Show>
       </button>
     </Show>
-    <button type="button" class="icon-btn toast-icon-btn" aria-label="Dismiss" onClick={() => close(t(), "dismiss")}><CloseIcon size={13} /></button>
+    <button type="button" class="icon-btn toast-icon-btn" aria-label="Dismiss" onClick={() => close(t())}><CloseIcon size={13} /></button>
   </div>;
 }
 
@@ -313,7 +310,7 @@ export function Toaster() {
       if (e.key !== "Escape" || !toasts().length || hasInteractiveOverlay()) return;
       const active = document.activeElement;
       if (active && active !== document.body && !active.closest(".toaster")) return;
-      close(toasts()[toasts().length - 1], "dismiss");
+      close(toasts()[toasts().length - 1]);
     };
     window.addEventListener("resize", place);
     window.addEventListener("keydown", onKey);

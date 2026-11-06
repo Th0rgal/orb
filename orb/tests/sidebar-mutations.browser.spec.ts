@@ -102,8 +102,8 @@ test('folder rename retains expanded descendants and surfaces work migration err
   await page.getByRole('menuitem',{name:'Rename',exact:true}).click();
   await page.getByLabel('Folder name',{exact:true}).fill('Archive');
   await page.getByRole('dialog').getByRole('button',{name:'Rename',exact:true}).click();
-  await expect(page.getByRole('dialog')).toContainText('Nightly audit');
-  await expect(page.getByRole('dialog')).toContainText('could not follow');
+  await expect(page.getByRole('alert')).toContainText('Nightly audit');
+  await expect(page.getByRole('alert')).toContainText('could not follow');
 });
 
 test('folder delete dismisses dialog immediately and rolls back cleanly on failure', async ({page}) => {
