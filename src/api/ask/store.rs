@@ -77,6 +77,22 @@ pub enum SaveInboxStateOutcome {
 pub struct AskStore {
     conn: Arc<Mutex<Connection>>,
     delivery_locks: DashMap<Uuid, Arc<Mutex<()>>>,
+    turn_locks: DashMap<Uuid, Arc<Mutex<()>>>,
+}
+
+pub struct AskTurnGuard {
+    guard: Option<OwnedMutexGuard<()>>,
+    store: Arc<AskStore>,
+    thread_id: Uuid,
+}
+
+impl Drop for AskTurnGuard {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        self.store
+            .turn_locks
+            .remove_if(&self.thread_id, |_, arc| Arc::strong_count(arc) == 1);
+    }
 }
 
 pub struct OperatorNoteDeliveryGuard<'a> {
@@ -252,7 +268,23 @@ impl AskStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             delivery_locks: DashMap::new(),
+            turn_locks: DashMap::new(),
         })
+    }
+
+    pub fn try_lock_turn(self: &Arc<Self>, thread_id: Uuid) -> Option<AskTurnGuard> {
+        let mutex = self
+            .turn_locks
+            .entry(thread_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let mut guard = AskTurnGuard {
+            guard: None,
+            store: Arc::clone(self),
+            thread_id,
+        };
+        guard.guard = Some(mutex.try_lock_owned().ok()?);
+        Some(guard)
     }
 
     pub async fn lock_operator_note_delivery(
@@ -271,6 +303,11 @@ impl AskStore {
         };
         guard.guard = Some(mutex.lock_owned().await);
         guard
+    }
+
+    #[cfg(test)]
+    pub(crate) fn turn_locks_len(&self) -> usize {
+        self.turn_locks.len()
     }
 
     #[cfg(test)]
@@ -323,9 +360,19 @@ impl AskStore {
         mission_id: Uuid,
         model: Option<String>,
     ) -> Result<AskThread, String> {
+        self.create_thread_with_id(Uuid::new_v4(), mission_id, model)
+            .await
+    }
+
+    pub async fn create_thread_with_id(
+        &self,
+        id: Uuid,
+        mission_id: Uuid,
+        model: Option<String>,
+    ) -> Result<AskThread, String> {
         let conn = self.conn.clone();
         let thread = AskThread {
-            id: Uuid::new_v4(),
+            id,
             mission_id,
             title: None,
             model,
@@ -911,5 +958,28 @@ mod tests {
                 .unwrap(),
             SaveInboxStateOutcome::Applied { revision: 2 }
         );
+    }
+
+    #[tokio::test]
+    async fn turn_locks_reject_concurrent_turns_and_evict_when_idle() {
+        let store = Arc::new(temp_store().await);
+        let thread_id = Uuid::new_v4();
+
+        let guard = Arc::new(store.try_lock_turn(thread_id).expect("first turn locks"));
+        assert_eq!(store.turn_locks_len(), 1);
+        assert!(store.try_lock_turn(thread_id).is_none());
+        assert_eq!(store.turn_locks_len(), 1);
+
+        let stream_clone = Arc::clone(&guard);
+        drop(guard);
+        assert!(store.try_lock_turn(thread_id).is_none());
+        assert_eq!(store.turn_locks_len(), 1);
+
+        drop(stream_clone);
+        assert_eq!(store.turn_locks_len(), 0);
+
+        let next = store.try_lock_turn(thread_id).expect("re-locks after drop");
+        drop(next);
+        assert_eq!(store.turn_locks_len(), 0);
     }
 }
