@@ -121,7 +121,7 @@ fn acquire_sandbox_lock(sandbox: &Path) -> std::io::Result<SandboxLockGuard> {
         options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
         options.mode(0o666);
         let file = options.open(&lock_path)?;
-        let _ = std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o666));
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o666));
         fs2::FileExt::try_lock_exclusive(&file)?;
         if !same_file_inode(&file, &lock_path) {
             return Err(std::io::Error::other("Ask sandbox lock was replaced"));
@@ -272,20 +272,21 @@ fn same_file_inode(_file: &std::fs::File, path: &Path) -> bool {
     path.exists()
 }
 
-const REMOTE_SANDBOX_LEASE_SECS: u64 = 300;
-
 fn remote_sandbox_lease_is_live(file: &std::fs::File) -> bool {
-    use std::io::Read;
-    let mut marker = String::new();
-    file.take(32).read_to_string(&mut marker).is_ok()
-        && marker.trim() == "ask-remote-lease"
-        && file
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .is_some_and(|mtime| {
-                mtime.elapsed().unwrap_or_default().as_secs() < REMOTE_SANDBOX_LEASE_SECS
-            })
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        let mut marker = [0; 32];
+        match file.read_at(&mut marker, 0) {
+            Ok(len) => marker[..len].trim_ascii() == b"ask-remote-lease",
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        true
+    }
 }
 
 fn try_lock_stale_sandbox_for_gc(lock_path: &Path) -> Option<SandboxLockGuard> {
@@ -307,7 +308,7 @@ fn try_lock_stale_sandbox_for_gc(lock_path: &Path) -> Option<SandboxLockGuard> {
                 return None;
             }
         };
-        let _ = std::fs::set_permissions(lock_path, std::fs::Permissions::from_mode(0o666));
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o666));
         if fs2::FileExt::try_lock_exclusive(&file).is_err() {
             return None;
         }
@@ -1783,6 +1784,44 @@ pub async fn prepare_remote_sandbox(target: &RemoteAskTarget) -> Option<SandboxC
         .flatten()
 }
 
+const REMOTE_SANDBOX_LEASE_HELPER: &str = r#"import fcntl, os, stat, subprocess, sys
+mode, path = sys.argv[1:3]
+flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+if mode == 'setup':
+    flags |= os.O_CREAT | os.O_EXCL
+fd = os.open(path, flags, 0o666)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    opened = os.fstat(fd)
+    named = os.lstat(path)
+    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+        raise RuntimeError('Ask sandbox lock was replaced')
+    if mode == 'setup':
+        os.fchmod(fd, 0o666)
+        os.write(fd, b'ask-remote-lease\n')
+        result = subprocess.run(['/bin/bash', '-c', sys.argv[3]], pass_fds=(fd,))
+        if result.returncode:
+            sys.exit(result.returncode)
+    elif os.read(fd, 32).strip() != b'ask-remote-lease':
+        raise RuntimeError('Invalid Ask sandbox lease')
+    os.utime(fd, None)
+    named = os.lstat(path)
+    if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+        raise RuntimeError('Ask sandbox lock was replaced')
+finally:
+    os.close(fd)
+"#;
+
+fn remote_sandbox_lease_command(lock_path: &str, setup: Option<&str>) -> String {
+    format!(
+        "python3 -c {} {} {} {}",
+        single_quote(REMOTE_SANDBOX_LEASE_HELPER),
+        if setup.is_some() { "setup" } else { "refresh" },
+        single_quote(lock_path),
+        single_quote(setup.unwrap_or_default()),
+    )
+}
+
 async fn prepare_remote_sandbox_in(
     target: &RemoteAskTarget,
     sandbox_root: &Path,
@@ -1799,36 +1838,34 @@ async fn prepare_remote_sandbox_in(
         target: Some(SandboxCleanupTarget::Remote(target.clone())),
         heartbeat: None,
     };
-    let script = format!(
-        "set -e; s={s}; l=\"$s.lock\"; \
-         exec 9<>\"$l\"; flock -x 9; test \"$l\" -ef /proc/self/fd/9; \
-         printf 'ask-remote-lease\\n' > \"$l\"; chmod 0666 \"$l\" 2>/dev/null || true; rm -rf \"$s\"; \
+    let lock_dir = format!("{sandbox_dir}.lock");
+    let setup = "set -e; rm -rf -- \"$s\"; \
          if git rev-parse --git-dir >/dev/null 2>&1; then \
            git worktree add --detach \"$s\" HEAD >/dev/null; \
          else \
-           mkdir -p \"$s\"; \
+           mkdir -p -- \"$s\"; \
            if command -v rsync >/dev/null 2>&1; then \
              rsync -a --exclude .git --exclude .lake --exclude node_modules --exclude target --exclude .next -- ./ \"$s\"/; \
            else \
-             tar --exclude .git --exclude .lake --exclude node_modules --exclude target --exclude .next -cf - . | (cd \"$s\" && tar -xf -); \
+             tar --exclude .git --exclude .lake --exclude node_modules --exclude target --exclude .next -cf - . | (cd -- \"$s\" && tar -xf -); \
            fi; \
-         fi; touch \"$l\"; echo SANDBOX_OK",
+         fi";
+    let script = format!(
+        "set -e; export s={s}; python3 -c 'import fcntl, os, stat, subprocess; assert hasattr(os, \"O_NOFOLLOW\") and os.utime in os.supports_fd' >/dev/null 2>&1; \
+         {lease}; echo SANDBOX_OK",
         s = single_quote(&sandbox_dir),
+        lease = remote_sandbox_lease_command(&lock_dir, Some(setup)),
     );
     match exec_remote_ask_command(target, &script).await {
         Ok((0, stdout, _)) if stdout.contains("SANDBOX_OK") => {
             let hb_target = target.clone();
-            let hb_lock = format!("{sandbox_dir}.lock");
+            let hb_cmd = remote_sandbox_lease_command(&lock_dir, None);
             guard.heartbeat = Some(tokio::spawn(async move {
-                let cmd = format!(
-                    "if [ -f {l} ]; then touch -- {l}; fi",
-                    l = single_quote(&hb_lock)
-                );
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                 interval.tick().await;
                 loop {
                     interval.tick().await;
-                    let _ = exec_remote_ask_command(&hb_target, &cmd).await;
+                    let _ = exec_remote_ask_command(&hb_target, &hb_cmd).await;
                 }
             }));
             Some(guard)
@@ -1843,8 +1880,8 @@ async fn prepare_remote_sandbox_in(
 /// Clean up a remote sandbox created by [`prepare_remote_sandbox`].
 pub async fn cleanup_remote_sandbox(base_target: &RemoteAskTarget, sandbox_dir: &str) {
     let cmd = format!(
-        "git worktree remove --force {s} 2>/dev/null || rm -rf {s}; \
-         rm -f {l}; git worktree prune 2>/dev/null || true",
+        "git worktree remove --force {s} 2>/dev/null || rm -rf -- {s}; \
+         rm -f -- {l}; git worktree prune 2>/dev/null || true",
         s = single_quote(sandbox_dir),
         l = single_quote(&format!("{sandbox_dir}.lock")),
     );
@@ -2984,5 +3021,206 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains_key(&sandbox_path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_sandbox_lease_reads_are_idempotent_across_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease_path = dir.path().join("ask-sandbox-lease.lock");
+        std::fs::write(&lease_path, "ask-remote-lease\n").unwrap();
+        let file = std::fs::File::open(&lease_path).unwrap();
+        assert!(remote_sandbox_lease_is_live(&file));
+        assert!(remote_sandbox_lease_is_live(&file));
+        assert!(remote_sandbox_lease_is_live(&file));
+
+        let plain_path = dir.path().join("ask-sandbox-plain.lock");
+        std::fs::write(&plain_path, "").unwrap();
+        let plain = std::fs::File::open(&plain_path).unwrap();
+        assert!(!remote_sandbox_lease_is_live(&plain));
+        assert!(!remote_sandbox_lease_is_live(&plain));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_lock_and_gc_reject_symlinks_without_touching_victim() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, "untouched-secret").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let sandbox = dir.path().join("ask-sandbox-symlink-local");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        let lock_path = sandbox_lock_path(&sandbox);
+        std::os::unix::fs::symlink(&victim, &lock_path).unwrap();
+
+        assert!(acquire_sandbox_lock(&sandbox).is_err());
+        assert!(try_lock_stale_sandbox_for_gc(&lock_path).is_none());
+        gc_stale_sandboxes_with_observer(dir.path(), &HashSet::new(), |_| {});
+
+        assert!(sandbox.exists());
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "untouched-secret"
+        );
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_lease_setup_and_refresh_reject_symlink_attacks_and_preserve_victim() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, "victim-original").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let victim_mtime_before = std::fs::metadata(&victim).unwrap().mtime();
+
+        let pre_symlink_sandbox = dir.path().join("ask-sandbox-pre-symlink");
+        let pre_symlink_lock = sandbox_lock_path(&pre_symlink_sandbox);
+        std::os::unix::fs::symlink(&victim, &pre_symlink_lock).unwrap();
+        let pre_cmd = remote_sandbox_lease_command(
+            &pre_symlink_lock.to_string_lossy(),
+            Some("mkdir -p -- \"$s\""),
+        );
+        let pre_out = std::process::Command::new("/bin/bash")
+            .arg("-lc")
+            .arg(&pre_cmd)
+            .env("s", &pre_symlink_sandbox)
+            .output()
+            .unwrap();
+        assert!(!pre_out.status.success());
+        assert!(!pre_symlink_sandbox.exists());
+
+        let swap_sandbox = dir.path().join("ask-sandbox-mid-swap");
+        let swap_lock = sandbox_lock_path(&swap_sandbox);
+        let swap_setup = format!(
+            "mkdir -p -- \"$s\"; rm -f -- {l}; ln -s -- {v} {l}",
+            l = single_quote(&swap_lock.to_string_lossy()),
+            v = single_quote(&victim.to_string_lossy()),
+        );
+        let swap_cmd =
+            remote_sandbox_lease_command(&swap_lock.to_string_lossy(), Some(&swap_setup));
+        let swap_out = std::process::Command::new("/bin/bash")
+            .arg("-lc")
+            .arg(&swap_cmd)
+            .env("s", &swap_sandbox)
+            .output()
+            .unwrap();
+        assert!(!swap_out.status.success());
+
+        let ok_sandbox = dir.path().join("ask-sandbox-valid");
+        let ok_lock = sandbox_lock_path(&ok_sandbox);
+        let ok_cmd = remote_sandbox_lease_command(
+            &ok_lock.to_string_lossy(),
+            Some("mkdir -p -- \"$s\"; printf 'ok' > \"$s/probe.txt\""),
+        );
+        let ok_out = std::process::Command::new("/bin/bash")
+            .arg("-lc")
+            .arg(&ok_cmd)
+            .env("s", &ok_sandbox)
+            .output()
+            .unwrap();
+        assert!(ok_out.status.success());
+        assert_eq!(
+            std::fs::read_to_string(&ok_lock).unwrap(),
+            "ask-remote-lease\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&ok_lock).unwrap().permissions().mode() & 0o777,
+            0o666
+        );
+        let old_ts = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import os, sys; os.utime(sys.argv[1], (1577836800, 1577836800), follow_symlinks=False)",
+            ])
+            .arg(&ok_lock)
+            .status()
+            .unwrap();
+        assert!(old_ts.success());
+        let stale_mtime = std::fs::metadata(&ok_lock).unwrap().mtime();
+
+        gc_stale_sandboxes_with_observer(dir.path(), &HashSet::new(), |_| {});
+        assert!(ok_sandbox.join("probe.txt").exists());
+
+        let refresh_cmd = remote_sandbox_lease_command(&ok_lock.to_string_lossy(), None);
+        let refresh_out = std::process::Command::new("/bin/bash")
+            .arg("-lc")
+            .arg(&refresh_cmd)
+            .output()
+            .unwrap();
+        assert!(refresh_out.status.success());
+        assert!(std::fs::metadata(&ok_lock).unwrap().mtime() > stale_mtime);
+
+        std::fs::remove_file(&ok_lock).unwrap();
+        std::os::unix::fs::symlink(&victim, &ok_lock).unwrap();
+        let symlink_refresh_out = std::process::Command::new("/bin/bash")
+            .arg("-lc")
+            .arg(&refresh_cmd)
+            .output()
+            .unwrap();
+        assert!(!symlink_refresh_out.status.success());
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "victim-original");
+        let victim_meta = std::fs::metadata(&victim).unwrap();
+        assert_eq!(victim_meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(victim_meta.mtime(), victim_mtime_before);
+    }
+
+    #[tokio::test]
+    async fn remote_sandbox_setup_fails_closed_when_python_probe_fails() {
+        use crate::remote_node::{ExecuteResponse, LeaseRequest, RemoteNodeConfig};
+        use axum::{routing::post, Json, Router};
+
+        let root = tempfile::tempdir().unwrap();
+        let app = Router::new().route(
+            "/execute",
+            post(|Json(req): Json<LeaseRequest>| async move {
+                let rewritten = format!("python3() {{ return 1; }}; {}", req.command);
+                let out = tokio::process::Command::new("/bin/bash")
+                    .arg("-lc")
+                    .arg(&rewritten)
+                    .output()
+                    .await
+                    .unwrap();
+                Json(ExecuteResponse {
+                    accepted: true,
+                    exit_code: out.status.code(),
+                    stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let target = RemoteAskTarget {
+            node: RemoteNodeConfig {
+                id: "no-python".into(),
+                base_url: format!("http://{address}"),
+                token_env: "ASK_TEST_TOKEN".into(),
+                labels: None,
+            },
+            secret: "test-secret".into(),
+            workspace_mission_id: Uuid::new_v4(),
+            cwd_override: Some(root.path().to_string_lossy().into_owned()),
+            display_cwd: root.path().to_string_lossy().into_owned(),
+            live: false,
+        };
+
+        assert!(prepare_remote_sandbox_in(&target, root.path())
+            .await
+            .is_none());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        server.abort();
     }
 }
