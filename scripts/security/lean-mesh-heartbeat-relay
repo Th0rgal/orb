@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Lean-Mesh Sovereign Heartbeat Local Relay (10.88.0.1:51889 -> 127.0.0.1:3000 & 3002).
+
+Caches backend JWTs per port (refreshing on expiry or 401/403), logs relay errors to
+stderr for journald visibility (without secrets), and returns HTTP 502 if production
+(:3000) fails to admit the heartbeat so dgx-spark surfaces failures immediately.
+"""
+import http.server
+import json
+import pathlib
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+
+TARGETS: tuple[tuple[int, tuple[str, ...], bool], ...] = (
+    (3000, ("/etc/open_agent/open_agent.env", "/etc/sandboxed-sh/sandboxed-sh.env"), True),
+    (3002, ("/etc/open_agent/open_agent_dev.env", "/etc/sandboxed-sh/sandboxed-sh-dev.env"), False),
+)
+TOKEN_TTL_SECS = 3600.0
+_lock = threading.Lock()
+_jwt_cache: dict[int, tuple[str, float]] = {}
+
+
+def read_env_password(paths: tuple[str, ...]) -> str:
+    last_err: Exception | None = None
+    for p in paths:
+        path = pathlib.Path(p)
+        if not path.exists():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("DASHBOARD_PASSWORD="):
+                    return line.split("=", 1)[1].strip().strip("\"'")
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    if last_err is not None:
+        raise last_err
+    raise FileNotFoundError(f"none of {paths} exist")
+
+
+def get_jwt(port: int, paths: tuple[str, ...], *, force_refresh: bool = False) -> str:
+    now = time.time()
+    if not force_refresh:
+        with _lock:
+            cached = _jwt_cache.get(port)
+            if cached and (now - cached[1]) < TOKEN_TTL_SECS:
+                return cached[0]
+    pw = read_env_password(paths)
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/auth/login",
+        data=json.dumps({"password": pw}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=3) as resp:
+        tok = json.loads(resp.read().decode("utf-8"))["token"]
+    with _lock:
+        _jwt_cache[port] = (tok, time.time())
+    return tok
+
+
+def forward_heartbeat(port: int, paths: tuple[str, ...], body: bytes) -> dict:
+    for attempt in range(2):
+        tok = get_jwt(port, paths, force_refresh=(attempt > 0))
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/mesh/heartbeat",
+            data=body,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {tok}"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403) and attempt == 0:
+                continue
+            detail = e.read().decode("utf-8", errors="replace")[:240]
+            raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+    raise RuntimeError("unreachable")
+
+
+def relay_heartbeat_payload(
+    body: bytes,
+    targets: tuple[tuple[int, tuple[str, ...], bool], ...] = TARGETS,
+) -> tuple[int, dict[str, dict]]:
+    results: dict[str, dict] = {}
+    prod_ok = False
+    for port, paths, required in targets:
+        try:
+            res = forward_heartbeat(port, paths, body)
+            results[str(port)] = res
+            if required and res.get("admitted") is True:
+                prod_ok = True
+        except Exception as e:  # noqa: BLE001
+            err_msg = str(e)
+            results[str(port)] = {"error": err_msg}
+            if required:
+                print(
+                    f"[lean-mesh-heartbeat-relay] ERROR port={port}: {err_msg}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+    return (200 if prod_ok else 502), results
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        if self.path != "/api/mesh/heartbeat":
+            self.send_response(404)
+            self.end_headers()
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        status, results = relay_heartbeat_payload(body)
+        out = json.dumps(results).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
+    def log_message(self, fmt: str, *args: object) -> None:  # noqa: A002
+        return
+
+
+def main() -> None:
+    srv = http.server.ThreadingHTTPServer(("10.88.0.1", 51889), Handler)
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

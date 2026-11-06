@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Create/mount the 2 GiB LUKS2 volume and bind four credential directories into PID 1's mount namespace.
+
+IMPORTANT: Services hardened with systemd `ReadWritePaths=` (such as `sandboxed-sh-prod.service`
+via `95-orb-software.conf`) run inside a slave mount namespace (`propagation: slave`).
+Any `mount` executed directly by a child process of such a service stays trapped inside that
+service's slave mount namespace and is invisible to PID 1 and sibling services (such as
+`lean-mesh-heartbeat-relay.service`, `lean-mesh.service`, and `sandboxed-sh-dev.service`).
+All mount checks and mount mutations MUST therefore execute inside PID 1's mount namespace via
+`nsenter -t 1 -m -- ...`.
+"""
+import os
+import subprocess
+import sys
+
+CRYPTSETUP_KEYS_DIR = "/etc/cryptsetup-keys.d"
+VAULT_KEY_PATH = "/etc/cryptsetup-keys.d/paloma-vault.key"
+VAULT_LUKS_IMG = "/var/lib/paloma-vault.luks"
+VAULT_MAPPER_NAME = "paloma_vault"
+VAULT_MAPPER_DEV = "/dev/mapper/paloma_vault"
+VAULT_MOUNTPOINT = "/mnt/paloma-vault"
+BIND_TARGETS = (
+    "/etc/paloma",
+    "/etc/lean-mesh",
+    "/etc/open_agent",
+    "/etc/sandboxed-sh/development-identity",
+)
+
+
+def nsenter_pid1_cmd(cmd: list[str]) -> list[str]:
+    return ["nsenter", "-t", "1", "-m", "--", *cmd]
+
+
+def run(cmd: list[str]) -> None:
+    print("+", " ".join(cmd), flush=True)
+    p = subprocess.run(cmd, text=True)
+    if p.returncode != 0:
+        sys.exit(p.returncode)
+
+
+def host_ismount(path: str) -> bool:
+    return subprocess.run(nsenter_pid1_cmd(["mountpoint", "-q", path])).returncode == 0
+
+
+def host_run(cmd: list[str]) -> None:
+    run(nsenter_pid1_cmd(cmd))
+
+
+def format_bind_fstab_entry(dest: str, target: str, mountpoint: str = VAULT_MOUNTPOINT) -> str:
+    return (
+        f"{dest} {target} none "
+        f"bind,nofail,x-systemd.requires={mountpoint},x-systemd.after={mountpoint} 0 0\n"
+    )
+
+
+def main() -> None:
+    os.makedirs(CRYPTSETUP_KEYS_DIR, mode=0o700, exist_ok=True)
+    if not os.path.exists(VAULT_KEY_PATH):
+        run(["dd", "if=/dev/urandom", "of=" + VAULT_KEY_PATH, "bs=64", "count=1", "status=none"])
+        os.chmod(VAULT_KEY_PATH, 0o400)
+
+    if not os.path.exists(VAULT_LUKS_IMG):
+        run(["truncate", "-s", "2G", VAULT_LUKS_IMG])
+        run([
+            "cryptsetup",
+            "luksFormat",
+            "--batch-mode",
+            "--type",
+            "luks2",
+            "--cipher",
+            "aes-xts-plain64",
+            "--key-size",
+            "512",
+            "--hash",
+            "sha256",
+            "--key-file",
+            VAULT_KEY_PATH,
+            VAULT_LUKS_IMG,
+        ])
+
+    if not os.path.exists(VAULT_MAPPER_DEV):
+        run(["cryptsetup", "open", "--key-file", VAULT_KEY_PATH, VAULT_LUKS_IMG, VAULT_MAPPER_NAME])
+        run(["mkfs.ext4", "-L", "paloma-vault", VAULT_MAPPER_DEV])
+
+    host_run(["mkdir", "-p", "-m", "0700", VAULT_MOUNTPOINT])
+    if not host_ismount(VAULT_MOUNTPOINT):
+        host_run(["mount", VAULT_MAPPER_DEV, VAULT_MOUNTPOINT])
+    host_run(["chmod", "0700", VAULT_MOUNTPOINT])
+
+    with open("/etc/crypttab", encoding="utf-8") as fh:
+        ct = fh.read()
+    if VAULT_MAPPER_NAME not in ct:
+        with open("/etc/crypttab", "a", encoding="utf-8") as fh:
+            fh.write(f"{VAULT_MAPPER_NAME} {VAULT_LUKS_IMG} {VAULT_KEY_PATH} luks,nofail\n")
+
+    with open("/etc/fstab", encoding="utf-8") as fh:
+        fstab = fh.read()
+    if f"{VAULT_MOUNTPOINT} " not in fstab:
+        with open("/etc/fstab", "a", encoding="utf-8") as fh:
+            fh.write(f"{VAULT_MAPPER_DEV} {VAULT_MOUNTPOINT} ext4 defaults,nofail 0 2\n")
+
+    host_run(["mkdir", "-p", "-m", "0700", f"{VAULT_MOUNTPOINT}/archive"])
+    for d in BIND_TARGETS:
+        name = d.strip("/").replace("/", "-")
+        dest = f"{VAULT_MOUNTPOINT}/{name}"
+        if not host_ismount(d):
+            host_run(["mkdir", "-p", "-m", "0700", dest])
+            host_run(["rsync", "-aHAX", d.rstrip("/") + "/", dest + "/"])
+            host_run(["mount", "--bind", dest, d])
+        entry = format_bind_fstab_entry(dest, d)
+        with open("/etc/fstab", encoding="utf-8") as fh:
+            fstab = fh.read()
+        if f" {d} " not in fstab:
+            with open("/etc/fstab", "a", encoding="utf-8") as fh:
+                fh.write(entry)
+
+    print("PALOMA_VAULT_READY")
+
+
+if __name__ == "__main__":
+    main()
