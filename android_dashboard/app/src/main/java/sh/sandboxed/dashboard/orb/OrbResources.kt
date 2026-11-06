@@ -8,11 +8,14 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -21,11 +24,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -53,11 +55,13 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -91,6 +95,26 @@ object OrbResourcesModel {
         companion object {
             fun parse(raw: String): Metric = if (raw == "usd") Usd else Raw
         }
+    }
+
+    enum class HeaderTier {
+        FullSingleRow,
+        CompactSingleRow,
+        TwoClusterWrap,
+        IndividualWrap,
+    }
+
+    fun chooseHeaderTier(
+        availableWidthPx: Int,
+        minGapPx: Int,
+        leftWidthPx: Int,
+        rightFullWidthPx: Int,
+        rightCompactWidthPx: Int,
+    ): HeaderTier = when {
+        leftWidthPx + minGapPx + rightFullWidthPx <= availableWidthPx -> HeaderTier.FullSingleRow
+        leftWidthPx + minGapPx + rightCompactWidthPx <= availableWidthPx -> HeaderTier.CompactSingleRow
+        max(leftWidthPx, rightCompactWidthPx) <= availableWidthPx -> HeaderTier.TwoClusterWrap
+        else -> HeaderTier.IndividualWrap
     }
 
     data class SankeyInputNode(
@@ -128,6 +152,8 @@ object OrbResourcesModel {
         var y0: Double,
         var y1: Double,
         var showLabel: Boolean = true,
+        var showSublabel: Boolean = false,
+        var labelY: Double = 0.0,
     )
 
     data class SankeyLayoutLink(
@@ -307,14 +333,14 @@ object OrbResourcesModel {
         density: Double = 1.0,
     ): SankeyLayoutResult {
         val scale = max(0.5, density)
-        val effMarginX = marginX ?: (80.0 * scale)
-        val effMarginY = marginY ?: (10.0 * scale)
-        val nodeWidth = 10.0 * scale
+        val effMarginX = marginX ?: (6.0 * scale)
+        val effMarginY = marginY ?: (8.0 * scale)
+        val nodeWidth = 8.0 * scale
         val nodePadding = 10.0 * scale
         val minNodeH = 6.0 * scale
         val minDrawnNodeH = 4.0 * scale
-        val singleLabelHalfH = 8.0 * scale
-        val twoLineLabelHalfH = 12.0 * scale
+        val singleLabelHalfH = 9.0 * scale
+        val twoLineLabelHalfH = 15.0 * scale
         val labelGap = 3.0 * scale
         val maxCol = inputNodes.maxOfOrNull { it.column } ?: 1
         val columns = max(2, maxCol + 1)
@@ -414,14 +440,21 @@ object OrbResourcesModel {
             var lastLabelBottom = Double.NEGATIVE_INFINITY
             for (i in col.indices) {
                 val h = max(minDrawnNodeH, heights[i] * compress)
-                val midY = cursorY + h / 2.0
-                val hasSub = (c == 0 || c == columns - 1) && h >= 24.0 * scale
+                val rawMidY = cursorY + h / 2.0
+                val hasSub = (c == 0 || c == columns - 1) && h >= 32.0 * scale
                 val labelHalfH = if (hasSub) twoLineLabelHalfH else singleLabelHalfH
-                if (midY - labelHalfH >= lastLabelBottom + labelGap) {
+                val minCenterY = effMarginY + labelHalfH
+                val maxCenterY = max(minCenterY, height - effMarginY - labelHalfH)
+                val clampedY = min(maxCenterY, max(minCenterY, rawMidY))
+                if (clampedY - labelHalfH >= lastLabelBottom + labelGap) {
                     col[i].showLabel = true
-                    lastLabelBottom = midY + labelHalfH
+                    col[i].showSublabel = hasSub
+                    col[i].labelY = clampedY
+                    lastLabelBottom = clampedY + labelHalfH
                 } else {
                     col[i].showLabel = false
+                    col[i].showSublabel = false
+                    col[i].labelY = clampedY
                 }
                 col[i].y0 = cursorY
                 col[i].y1 = cursorY + h
@@ -717,10 +750,12 @@ fun OrbResourcesSettingsPage(
 
     val config = LocalConfiguration.current
     val isCompactHeight = config.screenHeightDp < 480
-    val sankeyHeightDp = max(
-        if (isCompactHeight) 210 else 280,
-        min(420, (config.screenHeightDp * (if (isCompactHeight) 0.62f else 0.42f)).roundToInt()),
-    ).dp
+    val sankeyHeightDp = if (isCompactHeight) {
+        max(220, min(320, config.screenHeightDp - 82)).dp
+    } else {
+        val ratio = if (selectedMissionId != null) 0.54f else 0.48f
+        max(330, min(460, (config.screenHeightDp * ratio).roundToInt())).dp
+    }
     var timelineMenuOpen by remember { mutableStateOf(false) }
 
     val activeTimelineShort = if (selectedMissionId != null) {
@@ -731,80 +766,187 @@ fun OrbResourcesSettingsPage(
         range
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(OrbStyle.background),
-    ) {
-        // Compact header bar with inline Timeline selector pill (replaces persistent bottom bar)
+    val backButton: @Composable () -> Unit = {
         Row(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OrbCircle(
-                icon = Icons.AutoMirrored.Filled.ArrowBack,
-                size = 32.dp,
-                iconSize = 15.dp,
-                contentDescription = "Back",
-                modifier = Modifier.orbPressClickable {
+                .heightIn(min = 28.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .orbPressClickable {
                     if (selectedMissionId != null) {
                         selectedMissionId = null
                         detail = null
                     } else {
                         onBack()
                     }
-                },
+                }
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                contentDescription = "Back",
+                tint = OrbStyle.textSecondary,
+                modifier = Modifier.size(18.dp),
             )
             Text(
-                text = if (selectedMissionId == null) {
-                    "Resources"
-                } else {
-                    OrbJSON.str(OrbJSON.dict(detail?.get("mission")), "title")?.ifEmpty { null } ?: "Mission Flow"
-                },
+                text = if (selectedMissionId != null) "Fleet" else "Resources",
                 color = Color.White,
-                fontSize = 16.sp,
+                fontSize = if (selectedMissionId != null) 14.sp else 15.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 8.dp),
-                textAlign = TextAlign.Center,
             )
-            Box {
-                Row(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.07f))
-                        .border(1.dp, OrbStyle.border, CircleShape)
-                        .orbPressClickable { timelineMenuOpen = true }
-                        .padding(horizontal = 9.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Schedule,
-                        contentDescription = null,
-                        tint = OrbStyle.textSecondary,
-                        modifier = Modifier.size(12.dp),
-                    )
-                    Text(
-                        text = activeTimelineShort,
-                        color = Color.White,
-                        fontSize = 11.5.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                    )
-                    Icon(
-                        imageVector = Icons.Default.KeyboardArrowDown,
-                        contentDescription = "Timeline window",
-                        tint = OrbStyle.textSecondary,
-                        modifier = Modifier.size(13.dp),
-                    )
-                }
+        }
+    }
+
+    val submodeGroup: @Composable () -> Unit = {
+        CompactPillGroup(
+            options = listOf("flow" to "Flow", "dag" to "DAG"),
+            selected = submode,
+            onSelect = { submode = it },
+        )
+    }
+
+    val lensGroup: @Composable (Boolean) -> Unit = { fullLabels ->
+        CompactPillGroup(
+            options = listOf(
+                OrbResourcesModel.Lens.Inference to if (fullLabels) "Inference" else "Inf",
+                OrbResourcesModel.Lens.Compute to if (fullLabels) "Compute" else "CPU",
+            ),
+            selected = lens,
+            onSelect = { lens = it },
+        )
+    }
+
+    val metricGroup: @Composable () -> Unit = {
+        CompactPillGroup(
+            options = listOf(
+                OrbResourcesModel.Metric.Raw to if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "tok",
+                OrbResourcesModel.Metric.Usd to "$",
+            ),
+            selected = metric,
+            onSelect = { metric = it },
+        )
+    }
+
+    val timelinePill: @Composable () -> Unit = {
+        Row(
+            modifier = Modifier
+                .heightIn(min = 28.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(OrbStyle.surface)
+                .border(1.dp, OrbStyle.border, RoundedCornerShape(8.dp))
+                .orbPressClickable { timelineMenuOpen = true }
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = activeTimelineShort,
+                color = Color.White,
+                fontSize = 11.5.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowDown,
+                contentDescription = "Timeline window",
+                tint = OrbStyle.textSecondary,
+                modifier = Modifier.size(13.dp),
+            )
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(OrbStyle.background),
+    ) {
+        // Measured adaptive header: single row (full or compact lens labels) when controls fit,
+        // wrapping cleanly via FlowRow at large font scales or narrow widths so controls never clip.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 6.dp, vertical = 6.dp),
+        ) {
+            AdaptiveResourcesHeader(
+                leftCluster = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        backButton()
+                        if (selectedMissionId != null) {
+                            submodeGroup()
+                        }
+                    }
+                },
+                rightFullCluster = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        lensGroup(true)
+                        metricGroup()
+                        timelinePill()
+                    }
+                },
+                rightCompactCluster = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        lensGroup(false)
+                        metricGroup()
+                        timelinePill()
+                    }
+                },
+                wrappedContent = {
+                    @OptIn(ExperimentalLayoutApi::class)
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            backButton()
+                            if (selectedMissionId != null) {
+                                submodeGroup()
+                            }
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            lensGroup(false)
+                            metricGroup()
+                            timelinePill()
+                        }
+                    }
+                },
+                ultraNarrowWrappedContent = {
+                    @OptIn(ExperimentalLayoutApi::class)
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        backButton()
+                        if (selectedMissionId != null) {
+                            submodeGroup()
+                        }
+                        lensGroup(false)
+                        metricGroup()
+                        timelinePill()
+                    }
+                },
+            )
+
+            Box(modifier = Modifier.align(Alignment.BottomEnd)) {
                 DropdownMenu(
                     expanded = timelineMenuOpen,
                     onDismissRequest = { timelineMenuOpen = false },
@@ -882,8 +1024,8 @@ fun OrbResourcesSettingsPage(
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState())
-                    .padding(horizontal = if (isCompactHeight) 10.dp else 12.dp, vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(if (isCompactHeight) 8.dp else 10.dp),
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 error?.let {
                     Row(
@@ -892,7 +1034,7 @@ fun OrbResourcesSettingsPage(
                             .clip(RoundedCornerShape(10.dp))
                             .background(OrbStyle.surface)
                             .border(1.dp, OrbStyle.warning.copy(alpha = 0.35f), RoundedCornerShape(10.dp))
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(it, color = OrbStyle.warning, fontSize = 12.sp, modifier = Modifier.weight(1f))
@@ -900,78 +1042,17 @@ fun OrbResourcesSettingsPage(
                 }
 
                 if (selectedMissionId != null) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        SegmentedPillRow(
-                            options = listOf(
-                                "flow" to "Flow",
-                                "dag" to "DAG",
-                            ),
-                            selected = submode,
-                            onSelect = { submode = it },
-                            modifier = Modifier.weight(1f),
-                        )
-                        if (submode == "flow") {
-                            SegmentedPillRow(
-                                options = listOf(
-                                    OrbResourcesModel.Lens.Inference to "Inf",
-                                    OrbResourcesModel.Lens.Compute to "CPU",
-                                ),
-                                selected = lens,
-                                onSelect = { lens = it },
-                                modifier = Modifier.width(92.dp),
-                            )
-                            SegmentedPillRow(
-                                options = listOf(
-                                    OrbResourcesModel.Metric.Raw to if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "tok",
-                                    OrbResourcesModel.Metric.Usd to "$",
-                                ),
-                                selected = metric,
-                                onSelect = { metric = it },
-                                modifier = Modifier.width(84.dp),
-                            )
-                        }
-                    }
                     if (submode == "flow") {
                         MissionFlowCard(
                             detail = detail,
                             lens = lens,
                             metric = metric,
-                            canvasHeight = max(sankeyHeightDp.value, 260f).dp,
+                            canvasHeight = sankeyHeightDp,
                         )
                     } else {
                         MissionFastDagCard(detail = detail)
                     }
                 } else {
-                    // Single compact Lens + Unit [vCPU / B tok/h | $] Toggle Row
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        SegmentedPillRow(
-                            options = listOf(
-                                OrbResourcesModel.Lens.Inference to "Inference",
-                                OrbResourcesModel.Lens.Compute to "Compute",
-                            ),
-                            selected = lens,
-                            onSelect = { lens = it },
-                            modifier = Modifier.weight(1f),
-                        )
-                        SegmentedPillRow(
-                            options = listOf(
-                                OrbResourcesModel.Metric.Raw to if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h",
-                                OrbResourcesModel.Metric.Usd to "$",
-                            ),
-                            selected = metric,
-                            onSelect = { metric = it },
-                            modifier = Modifier.width(108.dp),
-                        )
-                    }
-
                     FleetSankeyCard(
                         overview = overview,
                         lens = lens,
@@ -989,21 +1070,82 @@ fun OrbResourcesSettingsPage(
                     overview = overview,
                     detail = detail,
                     isMission = selectedMissionId != null,
-                    showInlineControls = selectedMissionId != null && submode == "dag",
                     isCompactHeight = isCompactHeight,
                     lens = lens,
                     metric = metric,
-                    onSelectLens = { lens = it },
-                    onSelectMetric = { metric = it },
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(10.dp))
             }
         }
     }
 }
 
 @Composable
-private fun <T> SegmentedPillRow(
+private fun AdaptiveResourcesHeader(
+    leftCluster: @Composable () -> Unit,
+    rightFullCluster: @Composable () -> Unit,
+    rightCompactCluster: @Composable () -> Unit,
+    wrappedContent: @Composable () -> Unit,
+    ultraNarrowWrappedContent: @Composable () -> Unit,
+) {
+    SubcomposeLayout(modifier = Modifier.fillMaxWidth()) { constraints ->
+        val unbounded = Constraints()
+        val leftPlaceable = subcompose("left", leftCluster).first().measure(unbounded)
+        val rightFullPlaceable = subcompose("rightFull", rightFullCluster).first().measure(unbounded)
+        val rightCompactPlaceable = subcompose("rightCompact", rightCompactCluster).first().measure(unbounded)
+        val minGapPx = 6.dp.roundToPx()
+
+        val tier = OrbResourcesModel.chooseHeaderTier(
+            availableWidthPx = constraints.maxWidth,
+            minGapPx = minGapPx,
+            leftWidthPx = leftPlaceable.width,
+            rightFullWidthPx = rightFullPlaceable.width,
+            rightCompactWidthPx = rightCompactPlaceable.width,
+        )
+
+        when (tier) {
+            OrbResourcesModel.HeaderTier.FullSingleRow -> {
+                val h = max(leftPlaceable.height, rightFullPlaceable.height)
+                layout(constraints.maxWidth, h) {
+                    leftPlaceable.placeRelative(0, (h - leftPlaceable.height) / 2)
+                    rightFullPlaceable.placeRelative(
+                        constraints.maxWidth - rightFullPlaceable.width,
+                        (h - rightFullPlaceable.height) / 2,
+                    )
+                }
+            }
+            OrbResourcesModel.HeaderTier.CompactSingleRow -> {
+                val h = max(leftPlaceable.height, rightCompactPlaceable.height)
+                layout(constraints.maxWidth, h) {
+                    leftPlaceable.placeRelative(0, (h - leftPlaceable.height) / 2)
+                    rightCompactPlaceable.placeRelative(
+                        constraints.maxWidth - rightCompactPlaceable.width,
+                        (h - rightCompactPlaceable.height) / 2,
+                    )
+                }
+            }
+            OrbResourcesModel.HeaderTier.TwoClusterWrap -> {
+                val wrapped = subcompose("wrapped", wrappedContent).first().measure(
+                    constraints.copy(minWidth = constraints.maxWidth, minHeight = 0),
+                )
+                layout(constraints.maxWidth, wrapped.height) {
+                    wrapped.placeRelative(0, 0)
+                }
+            }
+            OrbResourcesModel.HeaderTier.IndividualWrap -> {
+                val ultra = subcompose("ultra", ultraNarrowWrappedContent).first().measure(
+                    constraints.copy(minWidth = constraints.maxWidth, minHeight = 0),
+                )
+                layout(constraints.maxWidth, ultra.height) {
+                    ultra.placeRelative(0, 0)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun <T> CompactPillGroup(
     options: List<Pair<T, String>>,
     selected: T,
     onSelect: (T) -> Unit,
@@ -1011,28 +1153,30 @@ private fun <T> SegmentedPillRow(
 ) {
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(9.dp))
+            .heightIn(min = 28.dp)
+            .clip(RoundedCornerShape(8.dp))
             .background(OrbStyle.surface)
-            .border(1.dp, OrbStyle.border, RoundedCornerShape(9.dp))
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(8.dp))
             .padding(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         options.forEach { (value, label) ->
             val active = value == selected
             Box(
                 modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(7.dp))
-                    .background(if (active) Color.White.copy(alpha = 0.11f) else Color.Transparent)
+                    .heightIn(min = 24.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (active) Color.White.copy(alpha = 0.12f) else Color.Transparent)
                     .orbPressClickable { onSelect(value) }
-                    .padding(vertical = 6.dp),
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     text = label,
                     color = if (active) Color.White else OrbStyle.textSecondary,
                     fontSize = 11.5.sp,
-                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
                     maxLines = 1,
                 )
             }
@@ -1040,11 +1184,21 @@ private fun <T> SegmentedPillRow(
     }
 }
 
+private fun fitPaintText(raw: String, paint: Paint, maxWidth: Float): Pair<String, Float> {
+    val fullW = paint.measureText(raw)
+    if (fullW <= maxWidth || raw.length <= 4) return raw to min(fullW, maxWidth)
+    val ellipsis = "…"
+    val ellW = paint.measureText(ellipsis)
+    val count = paint.breakText(raw, true, (maxWidth - ellW).coerceAtLeast(4f), null)
+    val prefix = raw.take(count.coerceAtLeast(1)).trimEnd()
+    val fitted = "$prefix$ellipsis"
+    return fitted to min(maxWidth, paint.measureText(fitted))
+}
+
 private fun DrawScope.drawSankeyDiagram(
     layout: OrbResourcesModel.SankeyLayoutResult,
     lens: OrbResourcesModel.Lens,
     metric: OrbResourcesModel.Metric,
-    maxLabelChars: Int,
 ) {
     for (link in layout.links) {
         val mx = ((link.sourceX + link.targetX) / 2.0).toFloat()
@@ -1079,16 +1233,39 @@ private fun DrawScope.drawSankeyDiagram(
     val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.WHITE
         textSize = 11.dp.toPx()
-        typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
     }
     val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = android.graphics.Color.rgb(155, 155, 155)
+        color = android.graphics.Color.rgb(162, 162, 170)
         textSize = 9.5f.dp.toPx()
         typeface = Typeface.MONOSPACE
     }
-    val lastCol = max(1, layout.columns - 1)
-    val padPx = 6.dp.toPx()
 
+    val columns = max(2, layout.columns)
+    val lastCol = columns - 1
+    val nodeW = layout.nodes.firstOrNull()?.let { max(6.dp.toPx().toDouble(), it.x1 - it.x0) } ?: 8.dp.toPx().toDouble()
+    val leftEdge = layout.nodes.filter { it.column == 0 }.maxOfOrNull { it.x1 } ?: (6.dp.toPx().toDouble() + nodeW)
+    val rightEdge = layout.nodes.filter { it.column == lastCol }.minOfOrNull { it.x0 }
+        ?: max(leftEdge + 80.dp.toPx().toDouble(), size.width.toDouble() - 6.dp.toPx().toDouble() - nodeW)
+    val totalSpan = max(80.dp.toPx().toDouble(), rightEdge - leftEdge)
+    val segGap = if (columns <= 2) {
+        totalSpan
+    } else {
+        max(60.dp.toPx().toDouble(), (totalSpan / (columns - 1).toDouble()) - nodeW)
+    }
+    val midMaxPillW = max(48.dp.toPx().toDouble(), segGap * 0.48).toFloat()
+    val outerMaxPillW = (if (columns <= 2) {
+        max(64.dp.toPx().toDouble(), totalSpan * 0.46)
+    } else {
+        max(56.dp.toPx().toDouble(), segGap - midMaxPillW / 2.0 - 14.dp.toPx().toDouble())
+    }).toFloat()
+
+    val padFromBar = 5.dp.toPx()
+    val pillPadX = 6.dp.toPx()
+    val pillBg = Color(0xFF111115).copy(alpha = 0.84f)
+    val pillBorder = Color.White.copy(alpha = 0.10f)
+
+    // Draw node bars first, then draw inward frosted-dark label badges above bars & ribbons
     for (node in layout.nodes) {
         val nodeH = max(4.dp.toPx(), (node.y1 - node.y0).toFloat())
         drawRoundRect(
@@ -1097,60 +1274,76 @@ private fun DrawScope.drawSankeyDiagram(
             size = Size((node.x1 - node.x0).toFloat(), nodeH),
             cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx()),
         )
-        if (!node.showLabel) continue
+    }
 
+    for (node in layout.nodes) {
+        if (!node.showLabel) continue
         val isLeft = node.column == 0
         val isRight = node.column == lastCol
-        val trimmed = if (node.label.length > maxLabelChars) {
-            node.label.take(maxLabelChars - 1) + "…"
-        } else {
-            node.label
-        }
-        val midY = (node.y0.toFloat() + nodeH / 2f)
+        val maxPillW = if (isLeft || isRight) outerMaxPillW else midMaxPillW
+        val maxTextW = max(28.dp.toPx(), maxPillW - pillPadX * 2f)
 
-        labelPaint.textAlign = when {
-            isLeft -> Paint.Align.RIGHT
-            isRight -> Paint.Align.LEFT
-            else -> Paint.Align.CENTER
-        }
-        subPaint.textAlign = labelPaint.textAlign
-
-        val tx = when {
-            isLeft -> node.x0.toFloat() - padPx
-            isRight -> node.x1.toFloat() + padPx
-            else -> ((node.x0 + node.x1) / 2.0).toFloat()
-        }
-
-        if (!isLeft && !isRight) {
-            val textW = labelPaint.measureText(trimmed)
-            val pillW = textW + 12.dp.toPx()
-            val pillH = 16.dp.toPx()
-            drawRoundRect(
-                color = OrbStyle.surface.copy(alpha = 0.9f),
-                topLeft = Offset(tx - pillW / 2f, midY - pillH / 2f),
-                size = Size(pillW, pillH),
-                cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
-            )
-            drawRoundRect(
-                color = OrbStyle.border,
-                topLeft = Offset(tx - pillW / 2f, midY - pillH / 2f),
-                size = Size(pillW, pillH),
-                cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
-                style = Stroke(width = 1.dp.toPx()),
-            )
-        }
-
-        val showSub = (isLeft || isRight) && nodeH >= 24.dp.toPx()
+        val (fittedTitle, titleW) = fitPaintText(node.label, labelPaint, maxTextW)
+        val showSub = (isLeft || isRight) && node.showSublabel
+        var fittedSub = ""
+        var subW = 0f
         if (showSub) {
-            val rateText = OrbResourcesModel.formatResourceRate(
+            val rateStr = OrbResourcesModel.formatResourceRate(
                 if (metric == OrbResourcesModel.Metric.Usd) node.usdValue else node.rawValue,
                 lens,
                 metric,
             )
-            drawContext.canvas.nativeCanvas.drawText(trimmed, tx, midY - 2.dp.toPx(), labelPaint)
-            drawContext.canvas.nativeCanvas.drawText(rateText, tx, midY + 9.dp.toPx(), subPaint)
+            val (fs, sw) = fitPaintText(rateStr, subPaint, maxTextW)
+            fittedSub = fs
+            subW = sw
+        }
+
+        val pillW = min(maxPillW, max(titleW, subW) + pillPadX * 2f)
+        val pillH = if (showSub) 30.dp.toPx() else 18.dp.toPx()
+        val nodeH = max(4.dp.toPx(), (node.y1 - node.y0).toFloat())
+        val centerY = if (node.labelY > 0.0) node.labelY.toFloat() else (node.y0.toFloat() + nodeH / 2f)
+
+        val pillX: Float
+        val textX: Float
+        when {
+            isLeft -> {
+                pillX = node.x1.toFloat() + padFromBar
+                textX = pillX + pillPadX
+                labelPaint.textAlign = Paint.Align.LEFT
+            }
+            isRight -> {
+                pillX = node.x0.toFloat() - padFromBar - pillW
+                textX = node.x0.toFloat() - padFromBar - pillPadX
+                labelPaint.textAlign = Paint.Align.RIGHT
+            }
+            else -> {
+                val midX = ((node.x0 + node.x1) / 2.0).toFloat()
+                pillX = midX - pillW / 2f
+                textX = midX
+                labelPaint.textAlign = Paint.Align.CENTER
+            }
+        }
+        subPaint.textAlign = labelPaint.textAlign
+
+        drawRoundRect(
+            color = pillBg,
+            topLeft = Offset(pillX, centerY - pillH / 2f),
+            size = Size(pillW, pillH),
+            cornerRadius = CornerRadius(5.dp.toPx(), 5.dp.toPx()),
+        )
+        drawRoundRect(
+            color = pillBorder,
+            topLeft = Offset(pillX, centerY - pillH / 2f),
+            size = Size(pillW, pillH),
+            cornerRadius = CornerRadius(5.dp.toPx(), 5.dp.toPx()),
+            style = Stroke(width = 0.75f.dp.toPx()),
+        )
+
+        if (showSub) {
+            drawContext.canvas.nativeCanvas.drawText(fittedTitle, textX, centerY - 2.dp.toPx(), labelPaint)
+            drawContext.canvas.nativeCanvas.drawText(fittedSub, textX, centerY + 9.5f.dp.toPx(), subPaint)
         } else {
-            drawContext.canvas.nativeCanvas.drawText(trimmed, tx, midY + 3.5f.dp.toPx(), labelPaint)
+            drawContext.canvas.nativeCanvas.drawText(fittedTitle, textX, centerY + 3.8f.dp.toPx(), labelPaint)
         }
     }
 }
@@ -1174,9 +1367,9 @@ private fun FleetSankeyCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(10.dp))
             .background(OrbStyle.surface)
-            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp)),
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp)),
     ) {
         if (overview == null) {
             Box(
@@ -1401,26 +1594,23 @@ private fun FleetSankeyCard(
             Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                    .padding(vertical = 2.dp)
                     .height(canvasHeight),
             ) {
-                val edgeMargin = min(116.dp.toPx().toDouble(), max(90.dp.toPx().toDouble(), size.width * 0.27))
                 val layout = OrbResourcesModel.computeSankeyLayout(
                     inputNodes = inputNodes,
                     inputLinks = inputLinks,
                     width = size.width.toDouble(),
                     height = size.height.toDouble(),
                     metric = metric,
-                    marginX = edgeMargin,
-                    marginY = 12.dp.toPx().toDouble(),
+                    marginX = 6.dp.toPx().toDouble(),
+                    marginY = 8.dp.toPx().toDouble(),
                     density = density.toDouble(),
                 )
-                val wide = size.width > 500.dp.toPx()
                 drawSankeyDiagram(
                     layout = layout,
                     lens = lens,
                     metric = metric,
-                    maxLabelChars = if (wide) 22 else 16,
                 )
             }
         }
@@ -1501,9 +1691,9 @@ private fun MissionFlowCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(10.dp))
             .background(OrbStyle.surface)
-            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp)),
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp)),
     ) {
         if (detail == null) {
             Box(
@@ -1518,6 +1708,7 @@ private fun MissionFlowCard(
         }
 
         val mission = OrbJSON.dict(detail["mission"]) ?: emptyMap()
+        val missionTitle = OrbJSON.str(mission, "title").orEmpty()
         val flow = OrbJSON.dict(detail["flow"]) ?: emptyMap()
         val etaSecs = OrbJSON.double(mission, "eta_remaining_secs")
         val elapsedSecs = OrbJSON.double(mission, "elapsed_secs")
@@ -1525,10 +1716,26 @@ private fun MissionFlowCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 9.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            if (missionTitle.isNotEmpty()) {
+                Text(
+                    text = missionTitle,
+                    color = Color.White,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                Text(
+                    text = "·",
+                    color = OrbStyle.textMuted,
+                    fontSize = 11.sp,
+                )
+            }
             Text(
                 text = if (lens == OrbResourcesModel.Lens.Compute) {
                     "MACHINES → TRACKS → SUBAGENTS"
@@ -1536,9 +1743,11 @@ private fun MissionFlowCard(
                     "POOLS → TRACKS → SUBAGENTS"
                 },
                 color = OrbStyle.textSecondary,
-                fontSize = 10.5.sp,
+                fontSize = 10.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
             val stamp = if (etaSecs != null && etaSecs > 0.0) {
                 "ETA ~${OrbResourcesModel.formatDurationCompact(etaSecs)}"
@@ -1553,6 +1762,7 @@ private fun MissionFlowCard(
                     color = OrbStyle.textSecondary,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
                 )
             }
         }
@@ -1693,26 +1903,23 @@ private fun MissionFlowCard(
             Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                    .padding(vertical = 2.dp)
                     .height(canvasHeight),
             ) {
-                val edgeMargin = min(96.dp.toPx().toDouble(), max(68.dp.toPx().toDouble(), size.width * 0.21))
                 val layout = OrbResourcesModel.computeSankeyLayout(
                     inputNodes = inputNodes,
                     inputLinks = inputLinks,
                     width = size.width.toDouble(),
                     height = size.height.toDouble(),
                     metric = metric,
-                    marginX = edgeMargin,
-                    marginY = 12.dp.toPx().toDouble(),
+                    marginX = 6.dp.toPx().toDouble(),
+                    marginY = 8.dp.toPx().toDouble(),
                     density = density.toDouble(),
                 )
-                val wide = size.width > 500.dp.toPx()
                 drawSankeyDiagram(
                     layout = layout,
                     lens = lens,
                     metric = metric,
-                    maxLabelChars = if (wide) 18 else 13,
                 )
             }
         }
@@ -1726,9 +1933,9 @@ private fun MissionFastDagCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(10.dp))
             .background(OrbStyle.surface)
-            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp)),
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp)),
     ) {
         if (detail == null) {
             Box(
@@ -1767,25 +1974,42 @@ private fun MissionFastDagCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 9.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            val missionTitle = OrbJSON.str(mission, "title").orEmpty()
+            if (missionTitle.isNotEmpty()) {
+                Text(
+                    text = missionTitle,
+                    color = Color.White,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                Text(
+                    text = "·",
+                    color = OrbStyle.textMuted,
+                    fontSize = 11.sp,
+                )
+            }
             Text(
                 text = if (laneCount > 0 && spanCount > laneCount) {
-                    "FAST-DAG · ${OrbResourcesModel.formatLargeNumber(laneCount.toDouble())} LANES · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} SPANS"
+                    "${OrbResourcesModel.formatLargeNumber(laneCount.toDouble())} LANES · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} SPANS"
                 } else {
-                    "FAST-DAG · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} SPANS"
+                    "${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} SPANS"
                 },
                 color = OrbStyle.textSecondary,
-                fontSize = 10.5.sp,
+                fontSize = 10.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 modifier = Modifier.weight(1f),
             )
             if (etaSecs != null && etaSecs > 0.0) {
                 Text(
-                    text = "ETA ~${OrbResourcesModel.formatDurationCompact(etaSecs)}",
+                    text = "~${OrbResourcesModel.formatDurationCompact(etaSecs)}",
                     color = OrbStyle.textSecondary,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
@@ -1895,12 +2119,9 @@ private fun ConsumptionCurveCard(
     overview: OrbDict?,
     detail: OrbDict?,
     isMission: Boolean,
-    showInlineControls: Boolean = false,
     isCompactHeight: Boolean = false,
     lens: OrbResourcesModel.Lens,
     metric: OrbResourcesModel.Metric,
-    onSelectLens: (OrbResourcesModel.Lens) -> Unit = {},
-    onSelectMetric: (OrbResourcesModel.Metric) -> Unit = {},
 ) {
     val values: List<Double> = remember(overview, detail, isMission, lens, metric) {
         if (isMission) {
@@ -1972,14 +2193,14 @@ private fun ConsumptionCurveCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(10.dp))
             .background(OrbStyle.surface)
-            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp)),
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp)),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 10.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1990,35 +2211,12 @@ private fun ConsumptionCurveCard(
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
             )
-            if (showInlineControls) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    SegmentedPillRow(
-                        options = listOf(
-                            OrbResourcesModel.Lens.Inference to "Inf",
-                            OrbResourcesModel.Lens.Compute to "CPU",
-                        ),
-                        selected = lens,
-                        onSelect = onSelectLens,
-                        modifier = Modifier.width(88.dp),
-                    )
-                    SegmentedPillRow(
-                        options = listOf(
-                            OrbResourcesModel.Metric.Raw to if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "tok",
-                            OrbResourcesModel.Metric.Usd to "$",
-                        ),
-                        selected = metric,
-                        onSelect = onSelectMetric,
-                        modifier = Modifier.width(80.dp),
-                    )
-                }
-            } else {
-                Text(
-                    text = "Peak ${OrbResourcesModel.formatResourceRate(peak, lens, metric)}",
-                    color = OrbStyle.textSecondary,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
+            Text(
+                text = "Peak ${OrbResourcesModel.formatResourceRate(peak, lens, metric)}",
+                color = OrbStyle.textSecondary,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+            )
         }
 
         HorizontalDivider(color = OrbStyle.border, thickness = 1.dp)

@@ -14,6 +14,31 @@ enum OrbResourcesModel {
         var id: String { rawValue }
     }
 
+    enum HeaderTier: Equatable {
+        case fullSingleRow
+        case compactSingleRow
+        case twoClusterWrap
+        case individualWrap
+    }
+
+    static func chooseHeaderTier(
+        availableWidthPx: Int,
+        minGapPx: Int,
+        leftWidthPx: Int,
+        rightFullWidthPx: Int,
+        rightCompactWidthPx: Int
+    ) -> HeaderTier {
+        if leftWidthPx + minGapPx + rightFullWidthPx <= availableWidthPx {
+            return .fullSingleRow
+        } else if leftWidthPx + minGapPx + rightCompactWidthPx <= availableWidthPx {
+            return .compactSingleRow
+        } else if max(leftWidthPx, rightCompactWidthPx) <= availableWidthPx {
+            return .twoClusterWrap
+        } else {
+            return .individualWrap
+        }
+    }
+
     struct SankeyInputNode: Equatable {
         var id: String
         var column: Int
@@ -49,6 +74,8 @@ enum OrbResourcesModel {
         var y0: Double
         var y1: Double
         var showLabel: Bool = true
+        var showSublabel: Bool = false
+        var labelY: Double = 0
     }
 
     struct SankeyLayoutLink: Identifiable, Equatable {
@@ -225,10 +252,10 @@ enum OrbResourcesModel {
         width: Double,
         height: Double,
         metric: Metric,
-        marginX: Double = 88,
-        marginY: Double = 10
+        marginX: Double = 6,
+        marginY: Double = 8
     ) -> SankeyLayoutResult {
-        let nodeWidth = 10.0
+        let nodeWidth = 8.0
         let nodePadding = 10.0
         let maxCol = inputNodes.map(\.column).max() ?? 1
         let columns = max(2, maxCol + 1)
@@ -316,14 +343,21 @@ enum OrbResourcesModel {
             let labelGap = 3.0
             for i in 0..<cols[c].count {
                 let h = max(4.0, heights[i] * compress)
-                let midY = cursorY + h / 2.0
-                let hasSub = (c == 0 || c == columns - 1) && h >= 24.0
-                let labelHalfH = hasSub ? 12.0 : 8.0
-                if midY - labelHalfH >= lastLabelBottom + labelGap {
+                let rawMidY = cursorY + h / 2.0
+                let hasSub = (c == 0 || c == columns - 1) && h >= 32.0
+                let labelHalfH = hasSub ? 15.0 : 9.0
+                let minCenterY = marginY + labelHalfH
+                let maxCenterY = max(minCenterY, height - marginY - labelHalfH)
+                let clampedY = min(maxCenterY, max(minCenterY, rawMidY))
+                if clampedY - labelHalfH >= lastLabelBottom + labelGap {
                     cols[c][i].showLabel = true
-                    lastLabelBottom = midY + labelHalfH
+                    cols[c][i].showSublabel = hasSub
+                    cols[c][i].labelY = clampedY
+                    lastLabelBottom = clampedY + labelHalfH
                 } else {
                     cols[c][i].showLabel = false
+                    cols[c][i].showSublabel = false
+                    cols[c][i].labelY = clampedY
                 }
                 cols[c][i].y0 = cursorY
                 cols[c][i].y1 = cursorY + h
@@ -575,6 +609,7 @@ enum OrbResourcesModel {
 }
 
 struct OrbResourcesView: View {
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     enum MissionSubmode: String {
@@ -601,65 +636,70 @@ struct OrbResourcesView: View {
     private var isCompactHeight: Bool { verticalSizeClass == .compact }
 
     private func sankeyCanvasHeight(for viewportHeight: CGFloat, isMission: Bool) -> CGFloat {
-        let base = max(isCompactHeight ? 210 : 280, min(430, viewportHeight * (isCompactHeight ? 0.64 : 0.44)))
-        return isMission ? max(base, 260) : base
+        if isCompactHeight {
+            return max(220, min(320, viewportHeight - 82))
+        }
+        let base = max(330, min(460, viewportHeight * (isMission ? 0.54 : 0.48)))
+        return base
     }
 
     var body: some View {
         GeometryReader { viewport in
-            ScrollView {
-                VStack(spacing: isCompactHeight ? 8 : 10) {
-                    if !error.isEmpty {
-                        HStack(spacing: 8) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.caption)
-                                .foregroundStyle(OrbStyle.warning)
-                            Text(error)
-                                .font(.caption)
-                                .foregroundStyle(OrbStyle.warning)
-                                .lineLimit(2)
-                            Spacer()
-                            Button("Retry") { Task { await load() } }
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.white)
+            VStack(spacing: 0) {
+                headerBar
+                    .padding(.horizontal, 6)
+                    .padding(.top, isCompactHeight ? 4 : 16)
+                    .padding(.bottom, 6)
+
+                ScrollView {
+                    VStack(spacing: 8) {
+                        if !error.isEmpty {
+                            HStack(spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(OrbStyle.warning)
+                                Text(error)
+                                    .font(.caption)
+                                    .foregroundStyle(OrbStyle.warning)
+                                    .lineLimit(2)
+                                Spacer()
+                                Button("Retry") { Task { await load() } }
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(OrbStyle.warning.opacity(0.35)))
+                            .accessibilityIdentifier("settings.error")
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(OrbStyle.warning.opacity(0.35)))
-                        .accessibilityIdentifier("settings.error")
-                    }
 
-                    topControlsBar
-
-                    if let mid = selectedMissionId {
-                        if submode == .flow {
-                            missionFlowCard(missionId: mid, canvasHeight: sankeyCanvasHeight(for: viewport.size.height, isMission: true))
+                        if let mid = selectedMissionId {
+                            if submode == .flow {
+                                missionFlowCard(missionId: mid, canvasHeight: sankeyCanvasHeight(for: viewport.size.height, isMission: true))
+                            } else {
+                                missionDagCard(missionId: mid)
+                            }
                         } else {
-                            missionDagCard(missionId: mid)
+                            fleetFlowCard(canvasHeight: sankeyCanvasHeight(for: viewport.size.height, isMission: false))
                         }
-                    } else {
-                        fleetFlowCard(canvasHeight: sankeyCanvasHeight(for: viewport.size.height, isMission: false))
-                    }
 
-                    consumptionCard
+                        consumptionCard
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.top, 2)
+                    .padding(.bottom, 14)
                 }
-                .padding(.horizontal, isCompactHeight ? 10 : 12)
-                .padding(.top, 6)
-                .padding(.bottom, 16)
+                .refreshable { await load() }
             }
             .background(OrbStyle.background.ignoresSafeArea())
         }
         .background(OrbStyle.background.ignoresSafeArea())
-        .navigationTitle(selectedMissionId == nil ? "Resources" : (detail?["mission"]["title"].text.isEmpty == false ? detail!["mission"]["title"].text : "Mission Flow"))
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                timelineMenuPill
-            }
+        .toolbarVisibility(.hidden, for: .navigationBar)
+        .navigationDestination(item: $openedTranscriptMissionId) {
+            OrbConversation(missionID: $0, project: "", folder: "")
+                .toolbarVisibility(.visible, for: .navigationBar)
         }
-        .navigationDestination(item: $openedTranscriptMissionId) { OrbConversation(missionID: $0, project: "", folder: "") }
-        .refreshable { await load() }
         .task(id: "\(selectedMissionId ?? "fleet"):\(range):\(horizon)") {
             await load()
             await Poller.run(every: .seconds(12), immediately: false, while: { scenePhase == .active }) {
@@ -668,6 +708,9 @@ struct OrbResourcesView: View {
             }
         }
     }
+
+    @ScaledMetric(relativeTo: .caption2) private var pillFontSize: CGFloat = 11.5
+    @ScaledMetric(relativeTo: .subheadline) private var navTitleFontSize: CGFloat = 15
 
     private var timelineMenuPill: some View {
         Menu {
@@ -708,22 +751,21 @@ struct OrbResourcesView: View {
                 }
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "clock")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(OrbStyle.textSecondary)
+            HStack(spacing: 3) {
                 Text(activeTimelineShortLabel)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .font(.system(size: min(17, pillFontSize), weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 8.5, weight: .bold))
                     .foregroundStyle(OrbStyle.textSecondary)
             }
-            .padding(.horizontal, 9)
-            .frame(height: 28)
-            .background(Color.white.opacity(0.07), in: Capsule())
-            .overlay(Capsule().stroke(OrbStyle.border))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .frame(minHeight: 28)
+            .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(OrbStyle.border))
         }
+        .fixedSize(horizontal: true, vertical: false)
         .accessibilityIdentifier("resources.timeline")
         .accessibilityLabel("Timeline window \(activeTimelineShortLabel)")
     }
@@ -740,128 +782,152 @@ struct OrbResourcesView: View {
         return range
     }
 
-    @ViewBuilder private var topControlsBar: some View {
-        HStack(spacing: 6) {
+    @ViewBuilder private var headerLeftCluster: some View {
+        HStack(spacing: 5) {
             if selectedMissionId != nil {
                 Button {
                     selectedMissionId = nil
                     detail = nil
                 } label: {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 3) {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 10, weight: .semibold))
-                        Text("Fleet")
                             .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(OrbStyle.textSecondary)
+                        Text("Fleet")
+                            .font(.system(size: min(20, navTitleFontSize - 1), weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
                     }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 10)
-                    .frame(height: 30)
-                    .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(OrbStyle.border))
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 4)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: false)
                 .accessibilityIdentifier("resources.backFleet")
 
                 compactSegmentGroup(
-                    options: [(MissionSubmode.flow, "Flow"), (MissionSubmode.dag, "DAG")],
+                    options: [(MissionSubmode.flow, "Flow", "Flow"), (MissionSubmode.dag, "DAG", "DAG")],
                     selection: $submode,
                     idPrefix: "resources.submode"
                 )
-
-                if submode == .flow {
-                    Spacer(minLength: 2)
-                    lensAndUnitPills(compact: true)
-                } else {
-                    Spacer()
-                }
             } else {
-                lensAndUnitPills(compact: false)
+                Button {
+                    dismiss()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(OrbStyle.textSecondary)
+                        Text("Resources")
+                            .font(.system(size: min(21, navTitleFontSize), weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 4)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: false)
+                .accessibilityIdentifier("resources.back")
             }
         }
     }
 
-    @ViewBuilder private func lensAndUnitPills(compact: Bool) -> some View {
-        if compact {
-            compactSegmentGroup(
-                options: [
-                    (OrbResourcesModel.Lens.inference, "Inf"),
-                    (OrbResourcesModel.Lens.compute, "CPU"),
-                ],
-                selection: $lens,
-                idPrefix: "resources.lens",
-                expand: false
-            )
-            compactSegmentGroup(
-                options: [
-                    (OrbResourcesModel.Metric.raw, lens == .compute ? "vCPU" : "tok"),
-                    (OrbResourcesModel.Metric.usd, "$"),
-                ],
-                selection: $metric,
-                idPrefix: "resources.metric",
-                expand: false
-            )
-        } else {
-            compactSegmentGroup(
-                options: [
-                    (OrbResourcesModel.Lens.inference, "Inference"),
-                    (OrbResourcesModel.Lens.compute, "Compute"),
-                ],
-                selection: $lens,
-                idPrefix: "resources.lens",
-                expand: true
-            )
-            compactSegmentGroup(
-                options: [
-                    (OrbResourcesModel.Metric.raw, lens == .compute ? "vCPU" : "B tok/h"),
-                    (OrbResourcesModel.Metric.usd, "$"),
-                ],
-                selection: $metric,
-                idPrefix: "resources.metric",
-                expand: false
-            )
+    @ViewBuilder private var headerBar: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 5) {
+                headerLeftCluster
+                Spacer(minLength: 4)
+                lensSegmentGroup(compact: false)
+                unitSegmentGroup
+                timelineMenuPill
+            }
+            HStack(spacing: 5) {
+                headerLeftCluster
+                Spacer(minLength: 4)
+                lensSegmentGroup(compact: true)
+                unitSegmentGroup
+                timelineMenuPill
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 5) {
+                    headerLeftCluster
+                    Spacer(minLength: 4)
+                    timelineMenuPill
+                }
+                HStack(spacing: 5) {
+                    Spacer(minLength: 0)
+                    lensSegmentGroup(compact: true)
+                    unitSegmentGroup
+                }
+            }
         }
     }
 
+    private func lensSegmentGroup(compact: Bool) -> some View {
+        compactSegmentGroup(
+            options: [
+                (OrbResourcesModel.Lens.inference, compact ? "Inf" : "Inference", "Inference"),
+                (OrbResourcesModel.Lens.compute, compact ? "CPU" : "Compute", "Compute"),
+            ],
+            selection: $lens,
+            idPrefix: "resources.lens"
+        )
+    }
+
+    private var unitSegmentGroup: some View {
+        compactSegmentGroup(
+            options: [
+                (OrbResourcesModel.Metric.raw, lens == .compute ? "vCPU" : "tok", "Raw"),
+                (OrbResourcesModel.Metric.usd, "$", "USD"),
+            ],
+            selection: $metric,
+            idPrefix: "resources.metric"
+        )
+    }
+
     private func compactSegmentGroup<T: Hashable>(
-        options: [(T, String)],
+        options: [(T, String, String)],
         selection: Binding<T>,
-        idPrefix: String,
-        expand: Bool = true
+        idPrefix: String
     ) -> some View {
         HStack(spacing: 2) {
-            ForEach(Array(options.enumerated()), id: \.offset) { _, pair in
-                let active = selection.wrappedValue == pair.0
+            ForEach(Array(options.enumerated()), id: \.offset) { _, item in
+                let active = selection.wrappedValue == item.0
                 Button {
-                    selection.wrappedValue = pair.0
+                    selection.wrappedValue = item.0
                 } label: {
-                    Text(pair.1)
-                        .font(.system(size: 12, weight: active ? .semibold : .medium))
+                    Text(item.1)
+                        .font(.system(size: min(17, pillFontSize), weight: active ? .semibold : .medium))
                         .foregroundStyle(active ? Color.white : OrbStyle.textSecondary)
                         .lineLimit(1)
-                        .padding(.horizontal, expand ? 8 : 9)
-                        .frame(maxWidth: expand ? .infinity : nil)
-                        .frame(height: 26)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .frame(minHeight: 24)
                         .background(
                             active ? Color.white.opacity(0.12) : Color.clear,
                             in: RoundedRectangle(cornerRadius: 6, style: .continuous)
                         )
                 }
                 .buttonStyle(.plain)
-                .accessibilityIdentifier("\(idPrefix).\(pair.1)")
+                .accessibilityIdentifier("\(idPrefix).\(item.2)")
                 .accessibilityAddTraits(active ? .isSelected : [])
             }
         }
         .padding(2)
         .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(OrbStyle.border))
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private func cardContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             content()
         }
-        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(OrbStyle.border))
+        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(OrbStyle.border))
     }
 
     @ViewBuilder private func fleetFlowCard(canvasHeight: CGFloat) -> some View {
@@ -886,8 +952,8 @@ struct OrbResourcesView: View {
                     }
                     .lineLimit(1)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
 
                 Divider().overlay(OrbStyle.border)
 
@@ -909,24 +975,23 @@ struct OrbResourcesView: View {
                     .padding(.vertical, 36)
                 } else {
                     GeometryReader { geo in
-                        let w = max(260, geo.size.width)
-                        let edgeMargin = min(116.0, max(90.0, Double(w) * 0.27))
+                        let w = max(240, geo.size.width)
                         let layout = OrbResourcesModel.computeSankeyLayout(
                             nodes: sankeyInput.nodes,
                             links: sankeyInput.links,
                             width: Double(w),
                             height: Double(canvasHeight),
                             metric: metric,
-                            marginX: edgeMargin,
-                            marginY: 12
+                            marginX: 6,
+                            marginY: 8
                         )
-                        Canvas { ctx, _ in
-                            drawSankey(ctx: &ctx, layout: layout, maxLabelChars: w > 500 ? 22 : 16)
+                        Canvas { ctx, size in
+                            drawSankey(ctx: &ctx, layout: layout, canvasWidth: Double(size.width))
                         }
                     }
                     .frame(height: canvasHeight)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
                     .accessibilityIdentifier("resources.fleetSankey")
                 }
 
@@ -936,7 +1001,7 @@ struct OrbResourcesView: View {
                     VStack(spacing: 0) {
                         ForEach(Array(missions.enumerated()), id: \.offset) { idx, m in
                             if idx > 0 {
-                                Divider().overlay(OrbStyle.border).padding(.leading, 12)
+                                Divider().overlay(OrbStyle.border).padding(.leading, 10)
                             }
                             let mid = m["id"].text
                             let val = lens == .compute
@@ -966,8 +1031,8 @@ struct OrbResourcesView: View {
                                         .font(.system(size: 10, weight: .semibold))
                                         .foregroundStyle(OrbStyle.textMuted)
                                 }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 9)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
@@ -986,7 +1051,7 @@ struct OrbResourcesView: View {
                         .fill(Color.white.opacity(0.05))
                         .frame(height: canvasHeight - 24)
                 }
-                .padding(12)
+                .padding(10)
                 .orbShimmer(active: true)
             }
         }
@@ -995,10 +1060,20 @@ struct OrbResourcesView: View {
     @ViewBuilder private func missionFlowCard(missionId: String, canvasHeight: CGFloat) -> some View {
         cardContainer {
             if let det = detail {
+                let missionTitle = det["mission"]["title"].text
                 HStack(spacing: 6) {
+                    if !missionTitle.isEmpty {
+                        Text(missionTitle)
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Text("·")
+                            .font(.system(size: 11))
+                            .foregroundStyle(OrbStyle.textMuted)
+                    }
                     Text(lens == .compute ? "MACHINES → TRACKS → SUBAGENTS" : "POOLS → TRACKS → SUBAGENTS")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .tracking(0.4)
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(0.3)
                         .foregroundStyle(OrbStyle.textSecondary)
                         .lineLimit(1)
                     Spacer(minLength: 6)
@@ -1006,10 +1081,12 @@ struct OrbResourcesView: View {
                         Text("ETA ~\(OrbResourcesModel.formatDurationCompact(eta))")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(OrbStyle.textSecondary)
+                            .fixedSize(horizontal: true, vertical: false)
                     } else if let el = det["mission"]["elapsed_secs"].doubleValue {
                         Text("\(OrbResourcesModel.formatDurationCompact(el))")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(OrbStyle.textSecondary)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                     Button {
                         openedTranscriptMissionId = missionId
@@ -1019,9 +1096,10 @@ struct OrbResourcesView: View {
                             .foregroundStyle(.tint)
                     }
                     .buttonStyle(.plain)
+                    .fixedSize(horizontal: true, vertical: false)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
 
                 Divider().overlay(OrbStyle.border)
 
@@ -1034,40 +1112,71 @@ struct OrbResourcesView: View {
                         .padding(.vertical, 32)
                 } else {
                     GeometryReader { geo in
-                        let w = max(260, geo.size.width)
-                        let edgeMargin = min(96.0, max(68.0, Double(w) * 0.21))
+                        let w = max(240, geo.size.width)
                         let layout = OrbResourcesModel.computeSankeyLayout(
                             nodes: sankeyInput.nodes,
                             links: sankeyInput.links,
                             width: Double(w),
                             height: Double(canvasHeight),
                             metric: metric,
-                            marginX: edgeMargin,
-                            marginY: 12
+                            marginX: 6,
+                            marginY: 8
                         )
-                        Canvas { ctx, _ in
-                            drawSankey(ctx: &ctx, layout: layout, maxLabelChars: w > 500 ? 18 : 13)
+                        Canvas { ctx, size in
+                            drawSankey(ctx: &ctx, layout: layout, canvasWidth: Double(size.width))
                         }
                     }
                     .frame(height: canvasHeight)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
                     .accessibilityIdentifier("resources.missionSankey")
                 }
             } else {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color.white.opacity(0.05))
                     .frame(height: canvasHeight)
-                    .padding(12)
+                    .padding(10)
                     .orbShimmer(active: true)
             }
         }
     }
 
+    private func fitResolvedText(
+        _ raw: String,
+        font: Font,
+        color: Color,
+        maxWidth: Double,
+        in ctx: GraphicsContext
+    ) -> (GraphicsContext.ResolvedText, CGSize) {
+        let full = ctx.resolve(Text(raw).font(font).foregroundStyle(color))
+        let fullSize = full.measure(in: CGSize(width: Double.infinity, height: Double.infinity))
+        if fullSize.width <= maxWidth || raw.count <= 4 {
+            return (full, fullSize)
+        }
+        var lo = 1
+        var hi = raw.count - 1
+        var best = ctx.resolve(Text(String(raw.prefix(1)) + "…").font(font).foregroundStyle(color))
+        var bestSize = best.measure(in: CGSize(width: Double.infinity, height: Double.infinity))
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            let candStr = String(raw.prefix(mid)).trimmingCharacters(in: .whitespaces) + "…"
+            let cand = ctx.resolve(Text(candStr).font(font).foregroundStyle(color))
+            let sz = cand.measure(in: CGSize(width: Double.infinity, height: Double.infinity))
+            if sz.width <= maxWidth {
+                best = cand
+                bestSize = sz
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return (best, bestSize)
+    }
+
     private func drawSankey(
         ctx: inout GraphicsContext,
         layout: OrbResourcesModel.SankeyLayoutResult,
-        maxLabelChars: Int
+        canvasWidth: Double
     ) {
         for link in layout.links {
             var p = Path()
@@ -1099,41 +1208,98 @@ struct OrbResourcesView: View {
                 )
             }
         }
-        let lastCol = max(1, layout.columns - 1)
+
+        let columns = max(2, layout.columns)
+        let lastCol = columns - 1
+        let nodeW = layout.nodes.first.map { max(6.0, $0.x1 - $0.x0) } ?? 8.0
+        let leftEdge = layout.nodes.filter { $0.column == 0 }.map(\.x1).max() ?? (6.0 + nodeW)
+        let rightEdge = layout.nodes.filter { $0.column == lastCol }.map(\.x0).min() ?? max(leftEdge + 80.0, canvasWidth - 6.0 - nodeW)
+        let totalSpan = max(80.0, rightEdge - leftEdge)
+        let segGap = columns <= 2
+            ? totalSpan
+            : max(60.0, (totalSpan / Double(columns - 1)) - nodeW)
+        let midMaxPillW = max(48.0, segGap * 0.48)
+        let outerMaxPillW = columns <= 2
+            ? max(64.0, totalSpan * 0.46)
+            : max(56.0, segGap - midMaxPillW / 2.0 - 14.0)
+
+        let padFromBar = 5.0
+        let pillPadX = 6.0
+        let pillBg = Color(red: 0.065, green: 0.065, blue: 0.08).opacity(0.84)
+        let pillBorder = Color.white.opacity(0.10)
+
+        // Draw all node bars first, then draw inward label badges cleanly above bars & ribbons
         for node in layout.nodes {
             let rect = CGRect(x: node.x0, y: node.y0, width: node.x1 - node.x0, height: max(4, node.y1 - node.y0))
             ctx.fill(Path(roundedRect: rect, cornerRadius: 3), with: .color(OrbResourcesModel.hexColor(node.colorHex)))
-            guard node.showLabel else { continue }
+        }
+
+        for node in layout.nodes where node.showLabel {
             let isLeft = node.column == 0
             let isRight = node.column == lastCol
-            let trimmed = node.label.count > maxLabelChars
-                ? String(node.label.prefix(maxLabelChars - 1)) + "…"
-                : node.label
-            let tx = isLeft ? node.x0 - 6 : (isRight ? node.x1 + 6 : rect.midX)
-            let anchor: UnitPoint = isLeft ? .trailing : (isRight ? .leading : .center)
-            if !isLeft && !isRight {
-                let pillW = Double(trimmed.count) * 6.2 + 12
-                let pillRect = CGRect(x: rect.midX - pillW / 2, y: rect.midY - 8, width: pillW, height: 16)
-                ctx.fill(Path(roundedRect: pillRect, cornerRadius: 4), with: .color(OrbStyle.surface.opacity(0.9)))
-                ctx.stroke(Path(roundedRect: pillRect, cornerRadius: 4), with: .color(OrbStyle.border), lineWidth: 1)
-            }
-            let rateText = OrbResourcesModel.formatResourceRate(
-                metric == .usd ? node.usdValue : node.rawValue,
-                lens: lens,
-                metric: metric
+            let maxPillW = (isLeft || isRight) ? outerMaxPillW : midMaxPillW
+            let maxTextW = max(28.0, maxPillW - pillPadX * 2.0)
+
+            let (titleResolved, titleSize) = fitResolvedText(
+                node.label,
+                font: .system(size: 11, weight: .medium),
+                color: .white,
+                maxWidth: maxTextW,
+                in: ctx
             )
-            let showSub = (isLeft || isRight) && rect.height >= 24
-            let labelView = Text(trimmed)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.white)
+
+            let showSub = (isLeft || isRight) && node.showSublabel
+            var subResolved: GraphicsContext.ResolvedText?
+            var subWidth = 0.0
             if showSub {
-                ctx.draw(labelView, at: CGPoint(x: tx, y: rect.midY - 6), anchor: anchor)
-                let subView = Text(rateText)
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(OrbStyle.textSecondary)
-                ctx.draw(subView, at: CGPoint(x: tx, y: rect.midY + 6), anchor: anchor)
+                let rateStr = OrbResourcesModel.formatResourceRate(
+                    metric == .usd ? node.usdValue : node.rawValue,
+                    lens: lens,
+                    metric: metric
+                )
+                let (sr, ss) = fitResolvedText(
+                    rateStr,
+                    font: .system(size: 9.5, design: .monospaced),
+                    color: OrbStyle.textSecondary,
+                    maxWidth: maxTextW,
+                    in: ctx
+                )
+                subResolved = sr
+                subWidth = ss.width
+            }
+
+            let pillW = min(maxPillW, max(titleSize.width, subWidth) + pillPadX * 2.0)
+            let pillH = showSub ? 30.0 : 18.0
+            let centerY = node.labelY > 0 ? node.labelY : (node.y0 + max(4, node.y1 - node.y0) / 2.0)
+
+            let pillX: Double
+            let textX: Double
+            let anchor: UnitPoint
+            if isLeft {
+                pillX = node.x1 + padFromBar
+                textX = pillX + pillPadX
+                anchor = .leading
+            } else if isRight {
+                pillX = node.x0 - padFromBar - pillW
+                textX = node.x0 - padFromBar - pillPadX
+                anchor = .trailing
             } else {
-                ctx.draw(labelView, at: CGPoint(x: tx, y: rect.midY), anchor: anchor)
+                let midX = (node.x0 + node.x1) / 2.0
+                pillX = midX - pillW / 2.0
+                textX = midX
+                anchor = .center
+            }
+
+            let pillRect = CGRect(x: pillX, y: centerY - pillH / 2.0, width: pillW, height: pillH)
+            let pillPath = Path(roundedRect: pillRect, cornerRadius: 5)
+            ctx.fill(pillPath, with: .color(pillBg))
+            ctx.stroke(pillPath, with: .color(pillBorder), lineWidth: 0.75)
+
+            if let sr = subResolved {
+                ctx.draw(titleResolved, at: CGPoint(x: textX, y: centerY - 6.0), anchor: anchor)
+                ctx.draw(sr, at: CGPoint(x: textX, y: centerY + 6.0), anchor: anchor)
+            } else {
+                ctx.draw(titleResolved, at: CGPoint(x: textX, y: centerY), anchor: anchor)
             }
         }
     }
@@ -1141,6 +1307,7 @@ struct OrbResourcesView: View {
     @ViewBuilder private func missionDagCard(missionId: String) -> some View {
         cardContainer {
             if let det = detail {
+                let missionTitle = det["mission"]["title"].text
                 let bars = parseDagBars(det)
                 let horizonSecs = det["dag"]["horizon_secs"].doubleValue ?? 21600
                 let rows = OrbResourcesModel.layoutDagRows(bars, horizonSecs: horizonSecs)
@@ -1148,17 +1315,27 @@ struct OrbResourcesView: View {
                 let spanCount = rows.reduce(0) { $0 + $1.spans.count }
 
                 HStack(spacing: 6) {
+                    if !missionTitle.isEmpty {
+                        Text(missionTitle)
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Text("·")
+                            .font(.system(size: 11))
+                            .foregroundStyle(OrbStyle.textMuted)
+                    }
                     Text(laneCount > 0 && spanCount > laneCount
-                         ? "FAST-DAG · \(OrbResourcesModel.formatLargeNumber(Double(laneCount))) LANES · \(OrbResourcesModel.formatLargeNumber(Double(spanCount))) SPANS"
-                         : "FAST-DAG · \(OrbResourcesModel.formatLargeNumber(Double(spanCount))) SPANS")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .tracking(0.4)
+                         ? "\(OrbResourcesModel.formatLargeNumber(Double(laneCount))) LANES · \(OrbResourcesModel.formatLargeNumber(Double(spanCount))) SPANS"
+                         : "\(OrbResourcesModel.formatLargeNumber(Double(spanCount))) SPANS")
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(0.3)
                         .foregroundStyle(OrbStyle.textSecondary)
                         .lineLimit(1)
                     if let eta = det["mission"]["eta_remaining_secs"].doubleValue, eta > 0 {
-                        Text("· ETA ~\(OrbResourcesModel.formatDurationCompact(eta))")
+                        Text("· ~\(OrbResourcesModel.formatDurationCompact(eta))")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(OrbStyle.textSecondary)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                     Spacer(minLength: 6)
                     Button {
@@ -1169,9 +1346,10 @@ struct OrbResourcesView: View {
                             .foregroundStyle(.tint)
                     }
                     .buttonStyle(.plain)
+                    .fixedSize(horizontal: true, vertical: false)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
 
                 Divider().overlay(OrbStyle.border)
 
@@ -1242,13 +1420,13 @@ struct OrbResourcesView: View {
                             .buttonStyle(.plain)
                         }
                     }
-                    .padding(12)
+                    .padding(10)
                 }
             } else {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color.white.opacity(0.05))
                     .frame(height: 200)
-                    .padding(12)
+                    .padding(10)
                     .orbShimmer(active: true)
             }
         }
@@ -1267,15 +1445,13 @@ struct OrbResourcesView: View {
                     .foregroundStyle(OrbStyle.textSecondary)
                     .lineLimit(1)
                 Spacer(minLength: 6)
-                if selectedMissionId != nil && submode == .dag {
-                    lensAndUnitPills(compact: true)
-                } else if isLoaded {
+                if isLoaded {
                     Text("Peak \(OrbResourcesModel.formatResourceRate(peak, lens: lens, metric: metric))")
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(OrbStyle.textSecondary)
                 }
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 10)
             .padding(.vertical, 8)
 
             Divider().overlay(OrbStyle.border)
