@@ -285,9 +285,13 @@ it("collapses agent-spawned VMs and provisions a new Cloud VM only when Move is 
     usd_per_hour: 0.288,
     ledger_closed: false,
   });
+  const claimOwner = vi.fn().mockResolvedValue({});
   vi.spyOn(api, "api").mockImplementation((async (path: string, init?: RequestInit) => {
     if (path === "/api/managed-machines" && init?.method === "POST") {
       return createVm(JSON.parse(String(init.body ?? "{}")));
+    }
+    if (path === "/api/managed-machines/vm99/owner" && init?.method === "POST") {
+      return claimOwner(JSON.parse(String(init.body ?? "{}")));
     }
     if (path === "/api/managed-machines") {
       return {
@@ -353,8 +357,9 @@ it("collapses agent-spawned VMs and provisions a new Cloud VM only when Move is 
     provider: "boat",
     size: "large",
     wait: true,
-    owner_mission_id: "source",
   }));
+  expect(createVm.mock.calls[0]?.[0]?.owner_mission_id).toBeUndefined();
+  expect(claimOwner).toHaveBeenCalledWith({ owner_mission_id: "source" });
   expect(prepare).toHaveBeenCalledWith("source", expect.objectContaining({
     op: "prepare",
     destination: { kind: "node", id: "managed-vm99" },

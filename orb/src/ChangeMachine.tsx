@@ -8,6 +8,7 @@ import {
   nodeLabel,
 } from "./machines/nodes";
 import {
+  claimManagedMachineOwner,
   createManagedMachine,
   destroyManagedMachine,
   is24hCommitmentSize,
@@ -202,7 +203,6 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       provider: spec.provider.provider,
       size: spec.size.size,
       wait: true,
-      owner_mission_id: p.mission.id,
       reason: `change_machine: ${p.mission.title || p.mission.id.slice(0, 8)}`,
       ...(is24hCommitmentSize(spec.size) ? { allow_24h_commitment: true } : {}),
     }).catch(e => {
@@ -283,7 +283,14 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
     setStage("Verifying destination…"); a = await verifyTransfer(a); setAction(a);
     if (cancelled) throw new Error("Transfer cancelled before activation.");
     setStage("Activating destination…"); const mission = await activateTransfer(a);
+    const claimedVmId = spawnedVmId;
     spawnedVmId = undefined;
+    previousCloudSelection = undefined;
+    if (claimedVmId) {
+      await claimManagedMachineOwner(claimedVmId, p.mission.id)
+        .then(() => refreshManagedCatalog(true))
+        .catch(swallow("changeMachine.claimSpawnedVm", { id: claimedVmId }));
+    }
     p.onMoved(mission); p.onClose();
   };
   const moveLight = async () => {

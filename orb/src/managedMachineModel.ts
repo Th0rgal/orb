@@ -141,6 +141,8 @@ export async function listManagedMachines(): Promise<ManagedMachinesResponse | n
 }
 const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 export const createManagedMachine = (body: CreateManagedMachine) => api<ManagedMachine>("/api/managed-machines", json(body));
+export const claimManagedMachineOwner = (id: string, owner_mission_id: string) =>
+  api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/owner`, json({ owner_mission_id }));
 export const destroyManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}`, { method: "DELETE" });
 export const stopManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/stop`, json({}));
 export const resumeManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/resume`, json({}));
