@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
@@ -115,6 +116,43 @@ object OrbAdminFormatting {
 
     fun normalizeSkillName(raw: String): String =
         raw.trim().lowercase().replace(Regex("[^a-z0-9-_]+"), "-").trim('-')
+
+    fun isDivergedError(e: Throwable): Boolean {
+        val orbErr = e as? OrbError
+        if (orbErr?.status == 409 && (orbErr.body?.contains("DIVERGED", ignoreCase = true) == true || orbErr.message.contains("diverged", ignoreCase = true))) {
+            return true
+        }
+        return e.message?.contains("DIVERGED_HISTORY", ignoreCase = true) == true
+    }
+
+    fun isUnconfiguredError(e: Throwable): Boolean =
+        (e as? OrbError)?.status == 503
+
+    fun libraryRemoteUpdateError(res: OrbDict?): String? =
+        OrbJSON.str(res, "library_error")?.takeIf { it.isNotEmpty() }
+
+    fun normalizeLibraryRemote(remote: String?): String {
+        var s = remote.orEmpty().trim().lowercase()
+        while (s.endsWith("/")) s = s.dropLast(1)
+        if (s.endsWith(".git")) s = s.dropLast(4)
+        return s
+    }
+
+    fun sameLibraryRemote(a: String?, b: String?): Boolean {
+        val na = normalizeLibraryRemote(a)
+        val nb = normalizeLibraryRemote(b)
+        return na.isNotEmpty() && na == nb
+    }
+
+    fun needsLibraryRemoteInit(
+        nextRemote: String?,
+        activeRepoRemote: String?,
+        failedInitRemote: String?
+    ): Boolean {
+        if (nextRemote.isNullOrBlank()) return false
+        if (failedInitRemote != null && sameLibraryRemote(nextRemote, failedInitRemote)) return true
+        return !sameLibraryRemote(nextRemote, activeRepoRemote)
+    }
 
     fun hermesRuntime(runtime: OrbDict?): List<Pair<String, String>> {
         if (runtime == null) return listOf("Status" to "Unavailable")
@@ -1050,12 +1088,20 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var search by remember { mutableStateOf("") }
     var isRefreshing by remember { mutableStateOf(false) }
     var pulling by remember { mutableStateOf(false) }
+    var unconfigured by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var creating by remember { mutableStateOf(false) }
     var createBusy by remember { mutableStateOf(false) }
     var createError by remember { mutableStateOf<String?>(null) }
     var newName by remember { mutableStateOf("") }
     var openedSkill by remember { mutableStateOf<String?>(null) }
+    var repoDialogOpen by remember { mutableStateOf(false) }
+    var repoRemoteDraft by remember { mutableStateOf("") }
+    var repoBusy by remember { mutableStateOf(false) }
+    var repoError by remember { mutableStateOf<String?>(null) }
+    var failedRepoRemote by remember(core.baseURL, core.token) { mutableStateOf<String?>(null) }
+    var divergedMessage by remember { mutableStateOf<String?>(null) }
+    var divergedBusy by remember { mutableStateOf(false) }
 
     suspend fun load() {
         try {
@@ -1071,17 +1117,92 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 skills = skillsTask.await().getOrThrow()
                 repoStatus = statusTask.await().onFailure { if (it is CancellationException) throw it }.getOrNull()
             }
+            unconfigured = false
             error = null
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            error = e.message
+            if (OrbAdminFormatting.isUnconfiguredError(e)) {
+                skills = emptyList()
+                repoStatus = runCatching { core.fetchDict("/api/library/status") }.getOrNull()
+                unconfigured = true
+                error = null
+            } else {
+                error = e.message
+            }
         }
     }
 
     suspend fun commitAndPush(message: String) {
         core.request("/api/library/commit", "POST", body = mapOf("message" to message))
         core.request("/api/library/push", "POST")
+    }
+
+    suspend fun saveRepoRemote(remote: String?) {
+        val normalizedNext = remote?.trim()?.takeIf { it.isNotEmpty() }
+        val needsInit = OrbAdminFormatting.needsLibraryRemoteInit(
+            nextRemote = normalizedNext,
+            activeRepoRemote = OrbJSON.str(repoStatus, "remote"),
+            failedInitRemote = failedRepoRemote
+        )
+        repoBusy = true
+        repoError = null
+        try {
+            val payload = if (needsInit) {
+                mapOf("library_remote" to normalizedNext, "force_reinitialize" to true)
+            } else {
+                mapOf("library_remote" to normalizedNext)
+            }
+            val res = OrbJSON.dict(
+                core.request(
+                    "/api/settings/library-remote",
+                    "PUT",
+                    body = payload
+                )
+            )
+            val libErr = OrbAdminFormatting.libraryRemoteUpdateError(res)
+            if (libErr != null) {
+                if (normalizedNext != null) failedRepoRemote = normalizedNext
+                repoError = libErr
+                return
+            }
+            if (normalizedNext != null && needsInit && res?.get("library_reinitialized") != true) {
+                val status = core.fetchDict("/api/library/status")
+                if (!OrbAdminFormatting.sameLibraryRemote(OrbJSON.str(status, "remote"), normalizedNext)) {
+                    failedRepoRemote = normalizedNext
+                    repoError = "Library repository was not initialized for this remote. Check the URL and retry."
+                    return
+                }
+                repoStatus = status
+            }
+            failedRepoRemote = null
+            repoDialogOpen = false
+            load()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            if (normalizedNext != null) failedRepoRemote = normalizedNext
+            repoError = e.message ?: "Couldn’t update Library repository."
+        } finally {
+            repoBusy = false
+        }
+    }
+
+    suspend fun resolveDiverged(forcePush: Boolean) {
+        divergedBusy = true
+        try {
+            val path = if (forcePush) "/api/library/force-push" else "/api/library/force-sync"
+            core.request(path, "POST")
+            divergedMessage = null
+            load()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            error = e.message
+            divergedMessage = null
+        } finally {
+            divergedBusy = false
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -1116,20 +1237,29 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             onBack = onBack,
             trailing = {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OrbAdminCircleAction(Icons.Default.Refresh, "Pull from repo", enabled = !pulling) {
+                    OrbAdminCircleAction(Icons.Default.Link, "Library repository") {
+                        repoRemoteDraft = failedRepoRemote ?: OrbJSON.str(repoStatus, "remote").orEmpty()
+                        repoError = null
+                        repoDialogOpen = true
+                    }
+                    OrbAdminCircleAction(Icons.Default.Refresh, "Pull from repo", enabled = !pulling && !unconfigured) {
                         pulling = true
                         scope.launch {
                             try {
                                 core.request("/api/library/sync", "POST")
                                 load()
                             } catch (e: Throwable) {
-                                error = "Couldn’t pull the Library: ${e.message}"
+                                if (OrbAdminFormatting.isDivergedError(e)) {
+                                    divergedMessage = "Local and remote Library commits have diverged. Reset Core's copy to the remote branch, or overwrite the remote branch with Core's commits."
+                                } else {
+                                    error = "Couldn’t pull the Library: ${e.message}"
+                                }
                             } finally {
                                 pulling = false
                             }
                         }
                     }
-                    OrbAdminCircleAction(Icons.Default.Add, "New skill") {
+                    OrbAdminCircleAction(Icons.Default.Add, "New skill", enabled = !unconfigured) {
                         newName = ""
                         createError = null
                         creating = true
@@ -1154,6 +1284,36 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 error?.let { err -> item { Text(err, color = OrbStyle.error, fontSize = 13.sp) } }
+
+                if (unconfigured) {
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(OrbStyle.surface)
+                                .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text("No Library repository configured", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Connect a Git repository to sync shared skills across missions and agents.",
+                                color = OrbStyle.textMuted,
+                                fontSize = 13.sp
+                            )
+                            TextButton(
+                                onClick = {
+                                    repoRemoteDraft = failedRepoRemote.orEmpty()
+                                    repoError = null
+                                    repoDialogOpen = true
+                                }
+                            ) {
+                                Text("Configure repository…")
+                            }
+                        }
+                    }
+                }
 
                 item {
                     OutlinedTextField(
@@ -1224,6 +1384,81 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
         }
     }
 
+    if (repoDialogOpen) {
+        val currentRemote = OrbJSON.str(repoStatus, "remote").orEmpty()
+        val retryingFailed = failedRepoRemote != null && OrbAdminFormatting.sameLibraryRemote(repoRemoteDraft, failedRepoRemote)
+        AlertDialog(
+            onDismissRequest = { if (!repoBusy) repoDialogOpen = false },
+            containerColor = OrbStyle.elevated,
+            title = { Text("Library repository", color = Color.White) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = repoRemoteDraft,
+                        onValueChange = { repoRemoteDraft = it; repoError = null },
+                        enabled = !repoBusy,
+                        singleLine = true,
+                        label = { Text("Git remote URL (git@... or https://...)") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (currentRemote.isNotEmpty()) {
+                        TextButton(
+                            enabled = !repoBusy,
+                            onClick = { scope.launch { saveRepoRemote(null) } }
+                        ) {
+                            Text("Disconnect repository", color = OrbStyle.error)
+                        }
+                    }
+                    repoError?.let { Text(it, color = OrbStyle.error, fontSize = 12.sp) }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = repoRemoteDraft.isNotBlank() && !repoBusy,
+                    onClick = { scope.launch { saveRepoRemote(repoRemoteDraft.trim()) } }
+                ) {
+                    Text(
+                        if (repoBusy) {
+                            if (retryingFailed) "Retrying…" else "Saving…"
+                        } else if (retryingFailed) {
+                            "Retry"
+                        } else {
+                            "Save"
+                        }
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(enabled = !repoBusy, onClick = { repoDialogOpen = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    divergedMessage?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { if (!divergedBusy) divergedMessage = null },
+            containerColor = OrbStyle.elevated,
+            title = { Text("Library history diverged", color = Color.White) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(msg, color = OrbStyle.textSecondary, fontSize = 13.sp)
+                    TextButton(
+                        enabled = !divergedBusy,
+                        onClick = { scope.launch { resolveDiverged(forcePush = false) } }
+                    ) { Text("Reset to remote", color = OrbStyle.error) }
+                    TextButton(
+                        enabled = !divergedBusy,
+                        onClick = { scope.launch { resolveDiverged(forcePush = true) } }
+                    ) { Text("Overwrite remote", color = OrbStyle.error) }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(enabled = !divergedBusy, onClick = { divergedMessage = null }) { Text("Cancel") }
+            }
+        )
+    }
+
     if (creating) {
         AlertDialog(
             onDismissRequest = { if (!createBusy) creating = false },
@@ -1277,7 +1512,13 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                 creating = false
                                 newName = ""
                             } catch (e: Throwable) {
-                                createError = e.message
+                                if (OrbAdminFormatting.isDivergedError(e)) {
+                                    creating = false
+                                    newName = ""
+                                    divergedMessage = "Skill saved on Core, but local and remote Library commits have diverged. Reset to remote or overwrite remote."
+                                } else {
+                                    createError = e.message
+                                }
                             } finally {
                                 createBusy = false
                             }
@@ -1302,8 +1543,9 @@ private fun OrbSkillDetailView(core: OrbCore, name: String, onBack: () -> Unit) 
     var saving by remember(name) { mutableStateOf(false) }
     var error by remember(name) { mutableStateOf<String?>(null) }
     var confirmDelete by remember(name) { mutableStateOf(false) }
+    var divergedMessage by remember(name) { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(name) {
+    suspend fun reloadSkill() {
         try {
             val d = core.fetchDict("/api/library/skill/${core.encodeComponent(name)}")
             content = OrbJSON.str(d, "content").orEmpty()
@@ -1313,6 +1555,10 @@ private fun OrbSkillDetailView(core: OrbCore, name: String, onBack: () -> Unit) 
         } catch (e: Throwable) {
             error = e.message
         }
+    }
+
+    LaunchedEffect(name) {
+        reloadSkill()
     }
 
     Column(modifier = Modifier.fillMaxSize().background(OrbStyle.background)) {
@@ -1339,7 +1585,11 @@ private fun OrbSkillDetailView(core: OrbCore, name: String, onBack: () -> Unit) 
                                     }
                                     error = null
                                 } catch (e: Throwable) {
-                                    error = "Couldn’t save: ${e.message}"
+                                    if (OrbAdminFormatting.isDivergedError(e)) {
+                                        divergedMessage = "Your edit was committed on Core, but pushing failed because local and remote Library history diverged."
+                                    } else {
+                                        error = "Couldn’t save: ${e.message}"
+                                    }
                                 } finally {
                                     saving = false
                                 }
@@ -1391,6 +1641,60 @@ private fun OrbSkillDetailView(core: OrbCore, name: String, onBack: () -> Unit) 
                 }
             }
         }
+    }
+
+    divergedMessage?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { if (!saving) divergedMessage = null },
+            containerColor = OrbStyle.elevated,
+            title = { Text("Library history diverged", color = Color.White) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(msg, color = OrbStyle.textSecondary, fontSize = 13.sp)
+                    TextButton(
+                        enabled = !saving,
+                        onClick = {
+                            saving = true
+                            scope.launch {
+                                try {
+                                    core.request("/api/library/force-sync", "POST")
+                                    divergedMessage = null
+                                    reloadSkill()
+                                } catch (e: Throwable) {
+                                    error = e.message
+                                    divergedMessage = null
+                                } finally {
+                                    saving = false
+                                }
+                            }
+                        }
+                    ) { Text("Reset to remote", color = OrbStyle.error) }
+                    TextButton(
+                        enabled = !saving,
+                        onClick = {
+                            saving = true
+                            scope.launch {
+                                try {
+                                    core.request("/api/library/force-push", "POST")
+                                    divergedMessage = null
+                                    editing = false
+                                    reloadSkill()
+                                } catch (e: Throwable) {
+                                    error = e.message
+                                    divergedMessage = null
+                                } finally {
+                                    saving = false
+                                }
+                            }
+                        }
+                    ) { Text("Overwrite remote", color = OrbStyle.error) }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(enabled = !saving, onClick = { divergedMessage = null }) { Text("Cancel") }
+            }
+        )
     }
 
     if (confirmDelete) {

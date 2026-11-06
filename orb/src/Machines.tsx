@@ -24,7 +24,7 @@ import { pollWhileVisible } from "./poll";
 import * as Ic from "./icons";
 import { readPalomaPub } from "./pubKey";
 import { recordFleet } from "./machineLoad";
-import { connectionVersion, getRemoteNodes, getApiUrl, getJwt, isConnected, updateRemoteNodeCapacity, type RemoteNodeView } from "./api";
+import { connectionVersion, getRemoteNodes, getApiUrl, getJwt, isConnected, setRemoteNodeCordoned, updateRemoteNodeCapacity, type RemoteNodeView } from "./api";
 
 export { MACHINES, type Machine };
 
@@ -52,6 +52,8 @@ function FleetRow(p: {
   const [capDirty, setCapDirty] = createSignal(false);
   const [capSaving, setCapSaving] = createSignal(false);
   const [capError, setCapError] = createSignal<string | null>(null);
+  const [cordonBusy, setCordonBusy] = createSignal(false);
+  const [cordonError, setCordonError] = createSignal<string | null>(null);
   const cacheScope = historyScope();
   const [nodeHistory, setNodeHistory] = createSignal<ResourceSample[]>(readHistory(p.node ? `node:${p.node.id}` : "core", cacheScope));
   createEffect(() => {
@@ -92,6 +94,24 @@ function FleetRow(p: {
       setCapError(e instanceof Error ? e.message : String(e));
     } finally {
       setCapSaving(false);
+    }
+  };
+  const toggleCordon = async () => {
+    const node = p.node;
+    if (!node || cordonBusy()) return;
+    const nextCordoned = !node.cordoned;
+    const previous = { ...node };
+    setCordonBusy(true);
+    setCordonError(null);
+    p.onCapacitySaved?.({ ...node, cordoned: nextCordoned });
+    try {
+      const res = await setRemoteNodeCordoned(node.id, nextCordoned);
+      p.onCapacitySaved?.({ ...node, cordoned: res.cordoned });
+    } catch (e) {
+      p.onCapacitySaved?.(previous);
+      setCordonError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCordonBusy(false);
     }
   };
   return <div class="p-acc-wrap"><button class="s-row p-acc-btn" aria-expanded={open()} onClick={() => setOpen(!open())}>
@@ -142,6 +162,29 @@ function FleetRow(p: {
             title="Couldn’t update slot limit"
             onDismiss={() => setCapError(null)}
             action={{ label: "Retry", run: () => saveCapacity() }}
+          />
+          <SettingsRow
+            title="Scheduling"
+            desc={p.node!.cordoned
+              ? "Cordoned — excluded from automatic mission placement while running work finishes."
+              : "Active — eligible for automatic mission placement."}
+          >
+            <button
+              type="button"
+              class="s-btn"
+              disabled={cordonBusy()}
+              onClick={() => void toggleCordon()}
+            >
+              {cordonBusy()
+                ? (p.node!.cordoned ? "Uncordoning…" : "Cordoning…")
+                : (p.node!.cordoned ? "Uncordon" : "Cordon")}
+            </button>
+          </SettingsRow>
+          <ErrorToast
+            error={cordonError()}
+            title="Couldn’t update node scheduling"
+            onDismiss={() => setCordonError(null)}
+            action={{ label: "Retry", run: () => toggleCordon() }}
           />
         </div>
       </Show>

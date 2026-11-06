@@ -4,11 +4,48 @@ import { ErrorToast } from "./toast";
 import { ExecutionSettings } from "./ExecutionSettings";
 import { MachineProvidersCard } from "./ManagedMachines";
 import { Select } from "./Select";
-import { For, Show, createEffect, createSignal, on, onMount, type JSX } from "solid-js";
+import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
+import { For, Show, createEffect, createSignal, on, onCleanup, onMount, type JSX } from "solid-js";
 import * as Ic from "./icons";
-import { clearConnection, connectionVersion, getApiUrl, getJwt, isConnected, login, setApiUrl } from "./api";
+import {
+  clearConnection,
+  connectionVersion,
+  getApiUrl,
+  getGlobalSettings,
+  getJwt,
+  isConnected,
+  login,
+  probeHealth,
+  setApiUrl,
+  setConnection,
+  updateGlobalSettings,
+  type ServerHealthInfo,
+} from "./api";
+import {
+  DEFAULT_CLEANUP_RETENTION_DAYS,
+  authorizeGitHubIntegration,
+  changeServerPassword,
+  disconnectGitHubIntegration,
+  downloadSettingsBackup,
+  effectiveCleanupDays,
+  getAuthStatus,
+  getGitHubIntegrationStatus,
+  interpretRestoreResponse,
+  parseCleanupDays,
+  restoreSettingsBackup,
+  type AuthStatusInfo,
+  type GitHubIntegrationStatus,
+} from "./accountAdmin";
+import { ApprovalCancelled } from "./deviceApproval";
+import {
+  loadPendingGitHubOAuthAttempt,
+  signInWithGitHubDesktop,
+  verifyGitHubOAuthCallback,
+  verifyIssuedAuthToken,
+} from "./githubSignIn";
 import { localInstalled, pathOverrides, refreshLocalAgents, setPathOverride, tauriInvoke } from "./localAgents";
 import { nativeInvoke } from "./native";
+import { pollWhileVisible } from "./poll";
 import { DebugInfoPanel } from "./DebugInfo";
 import { SettingsCard as Card, SettingsRow as Row } from "./SettingsCard";
 import { Toggle } from "./Toggle";
@@ -26,6 +63,15 @@ const THEME_LABELS: Record<ThemePref, string> = { auto: "Auto", light: "Light", 
 const THEME_PREFS: Record<string, ThemePref> = { Auto: "auto", Light: "light", Dark: "dark" };
 const BG_SYNC_LABELS: Record<BackgroundSyncMode, string> = { auto: "Auto", on: "On", off: "Off" };
 const BG_SYNC_MODES: Record<string, BackgroundSyncMode> = { Auto: "auto", On: "on", Off: "off" };
+
+function openExternalUrl(url: string) {
+  const invoke = nativeInvoke();
+  if (invoke) {
+    void invoke("open_url", { url }).catch(() => window.open(url, "_blank", "noopener,noreferrer"));
+  } else {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
 
 function CloudAccountsCard(p: { onOpenPage?: (id: string) => void }) {
   const [accounts, setAccounts] = createSignal<CloudAccount[]>([]);
@@ -59,6 +105,164 @@ function CloudAccountsCard(p: { onOpenPage?: (id: string) => void }) {
   </Card>;
 }
 
+function GitHubIntegrationCard() {
+  const [status, setStatus] = createSignal<GitHubIntegrationStatus | null>(null);
+  const [busy, setBusy] = createSignal(false);
+  const [copied, setCopied] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const [confirmDisconnect, setConfirmDisconnect] = createSignal(false);
+  const [disconnectBusy, setDisconnectBusy] = createSignal(false);
+  const [disconnectError, setDisconnectError] = createSignal<string | null>(null);
+
+  const refresh = async () => {
+    if (!isConnected()) return;
+    const version = connectionVersion();
+    try {
+      const next = await getGitHubIntegrationStatus();
+      if (connectionVersion() === version) {
+        setStatus(next);
+        setError(null);
+      }
+    } catch (e) {
+      if (connectionVersion() === version) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    }
+  };
+
+  createEffect(on(connectionVersion, () => {
+    setStatus(null);
+    setError(null);
+    if (isConnected()) void refresh();
+  }));
+
+  createEffect(() => {
+    if (!isConnected() || !status()?.pending) return;
+    const stop = pollWhileVisible(() => refresh(), 3000);
+    onCleanup(stop);
+  });
+
+  const startConnect = async () => {
+    if (busy()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const auth = await authorizeGitHubIntegration();
+      setStatus({
+        configured: true,
+        connected: false,
+        pending: true,
+        user_code: auth.user_code,
+        verification_uri: auth.verification_uri_complete ?? auth.verification_uri,
+        scopes: [],
+      });
+      openExternalUrl(auth.verification_uri_complete ?? auth.verification_uri);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyCode = async () => {
+    const code = status()?.user_code;
+    if (!code) return;
+    await navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1400);
+  };
+
+  const runDisconnect = async () => {
+    if (disconnectBusy()) return;
+    setDisconnectBusy(true);
+    setDisconnectError(null);
+    try {
+      await disconnectGitHubIntegration();
+      setConfirmDisconnect(false);
+      await refresh();
+    } catch (e) {
+      setDisconnectError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDisconnectBusy(false);
+    }
+  };
+
+  return (
+    <Show when={isConnected()}>
+      <Card title="GitHub">
+        <Show
+          when={status()?.connected}
+          fallback={
+            <Show
+              when={status()?.pending && status()?.user_code}
+              fallback={
+                <Row
+                  title="Mission git & gh credentials"
+                  desc={
+                    status()?.configured === false
+                      ? "Configure GITHUB_OAUTH_CLIENT_ID on Core to connect."
+                      : "Authorize a GitHub account via device flow so server missions can push branches and open pull requests."
+                  }
+                >
+                  <button
+                    type="button"
+                    class="s-btn"
+                    disabled={busy() || status()?.configured === false}
+                    onClick={() => void startConnect()}
+                  >
+                    {busy() ? "Starting…" : "Connect GitHub"}
+                  </button>
+                </Row>
+              }
+            >
+              <Row
+                title={`One-time code: ${status()!.user_code}`}
+                desc="Enter this code on GitHub to finish connecting. Waiting for approval…"
+              >
+                <button type="button" class="s-btn" onClick={() => void copyCode()}>
+                  {copied() ? "Copied" : "Copy code"}
+                </button>
+                <button
+                  type="button"
+                  class="s-btn primary"
+                  onClick={() => openExternalUrl(status()!.verification_uri || "https://github.com/login/device")}
+                >
+                  Open GitHub
+                </button>
+              </Row>
+            </Show>
+          }
+        >
+          <Row
+            title={`@${status()!.login}`}
+            desc={[
+              status()!.name || status()!.email,
+              status()!.scopes.length ? `Scopes: ${status()!.scopes.join(", ")}` : null,
+            ].filter(Boolean).join(" · ") || "Injected into server mission workspaces for git push and gh."}
+          >
+            <button type="button" class="s-btn" onClick={() => { setDisconnectError(null); setConfirmDisconnect(true); }}>
+              Disconnect…
+            </button>
+          </Row>
+        </Show>
+      </Card>
+      <ErrorToast error={error()} title="Couldn’t load GitHub integration" background onDismiss={() => setError(null)} />
+      <Show when={confirmDisconnect()}>
+        <ConfirmDialog
+          title="Disconnect GitHub?"
+          description="New server missions will no longer receive stored GitHub git-push credentials."
+          action={disconnectError() ? "Retry" : "Disconnect"}
+          destructive
+          busy={disconnectBusy()}
+          error={disconnectError()}
+          onClose={() => setConfirmDisconnect(false)}
+          onConfirm={() => void runDisconnect()}
+        />
+      </Show>
+    </Show>
+  );
+}
+
 type ContextWorker = { project: string; connected: boolean; running: boolean };
 /** Project context workers keep each project's local replica fresh, even after Orb quits. */
 function BackgroundSyncCard() {
@@ -89,6 +293,247 @@ function BackgroundSyncCard() {
       </Row>}</For>
     </Card>
   </Show>;
+}
+
+function WorkspaceCleanupCard() {
+  const [loaded, setLoaded] = createSignal(false);
+  const [enabled, setEnabled] = createSignal(false);
+  const [baseEnabled, setBaseEnabled] = createSignal(false);
+  const [rawDays, setRawDays] = createSignal<number | null>(null);
+  const [daysDraft, setDaysDraft] = createSignal(String(DEFAULT_CLEANUP_RETENTION_DAYS));
+  const [daysEdited, setDaysEdited] = createSignal(false);
+  const [dirty, setDirty] = createSignal(false);
+  const [saving, setSaving] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const [notice, setNotice] = createSignal<string | null>(null);
+
+  let saveSeq = 0;
+
+  const load = async () => {
+    saveSeq += 1;
+    setSaving(false);
+    setLoaded(false);
+    setDirty(false);
+    setDaysEdited(false);
+    setError(null);
+    setNotice(null);
+    if (!isConnected()) return;
+    const version = connectionVersion();
+    try {
+      const s = await getGlobalSettings();
+      if (connectionVersion() !== version) return;
+      const isOn = Boolean(s.auto_cleanup_enabled);
+      const configuredDays =
+        typeof s.auto_cleanup_days === "number" && s.auto_cleanup_days >= 1
+          ? s.auto_cleanup_days
+          : null;
+      setEnabled(isOn);
+      setBaseEnabled(isOn);
+      setRawDays(configuredDays);
+      setDaysDraft(String(effectiveCleanupDays(configuredDays)));
+      setDaysEdited(false);
+      setDirty(false);
+      setLoaded(true);
+    } catch (e) {
+      if (connectionVersion() === version) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    }
+  };
+
+  createEffect(on(connectionVersion, () => {
+    void load();
+  }));
+
+  const save = async () => {
+    if (saving() || !loaded()) return;
+    const days = parseCleanupDays(daysDraft(), 1, 365);
+    if (days == null) {
+      setError("Retention days must be a whole number between 1 and 365.");
+      return;
+    }
+    const includeDays = daysEdited() || rawDays() !== null;
+    if (!includeDays && enabled() === baseEnabled()) {
+      setDirty(false);
+      return;
+    }
+    const version = connectionVersion();
+    const seq = ++saveSeq;
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const updated = await updateGlobalSettings({
+        auto_cleanup_enabled: enabled(),
+        ...(includeDays ? { auto_cleanup_days: days } : {}),
+      });
+      if (seq !== saveSeq || connectionVersion() !== version) return;
+      const isOn = Boolean(updated.auto_cleanup_enabled);
+      const nextRawDays =
+        typeof updated.auto_cleanup_days === "number" && updated.auto_cleanup_days >= 1
+          ? updated.auto_cleanup_days
+          : includeDays
+            ? days
+            : null;
+      setEnabled(isOn);
+      setBaseEnabled(isOn);
+      setRawDays(nextRawDays);
+      setDaysDraft(String(effectiveCleanupDays(nextRawDays)));
+      setDaysEdited(false);
+      setDirty(false);
+      setNotice("Saved workspace cleanup policy.");
+    } catch (e) {
+      if (seq === saveSeq && connectionVersion() === version) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      if (seq === saveSeq && connectionVersion() === version) {
+        setSaving(false);
+      }
+    }
+  };
+
+  return (
+    <Show when={isConnected()}>
+      <Card title="Workspace cleanup">
+        <Row title="Terminal workspace retention sweep" desc="Periodically audit terminal mission workspaces past retention (resumable, failed, and unmatched directories are always kept).">
+          <Toggle
+            on={enabled()}
+            label="Automatic mission workspace GC"
+            disabled={!loaded() || saving()}
+            onClick={() => { if (!loaded()) return; setEnabled(!enabled()); setDirty(true); setNotice(null); }}
+          />
+        </Row>
+        <Row title="Completed retention (days)" desc="Days before terminal mission workspaces become cleanup candidates (1–365, default 1).">
+          <input
+            class="s-input ps-cap-input"
+            inputmode="numeric"
+            aria-label="Completed retention days"
+            value={daysDraft()}
+            disabled={!loaded() || saving()}
+            onInput={(e) => { setDaysDraft(e.currentTarget.value); setDaysEdited(true); setDirty(true); setNotice(null); }}
+          />
+        </Row>
+        <Row title="Policy changes" desc={notice() ?? "Changes apply on the next scheduled retention sweep."}>
+          <button type="button" class="s-btn primary" disabled={!loaded() || saving() || !dirty()} onClick={() => void save()}>
+            {saving() ? "Saving…" : "Save"}
+          </button>
+        </Row>
+      </Card>
+      <ErrorToast
+        error={error()}
+        title="Couldn’t save workspace cleanup"
+        onDismiss={() => setError(null)}
+        action={{ label: "Retry", run: () => (loaded() ? save() : load()) }}
+      />
+    </Show>
+  );
+}
+
+function BackupRestoreCard() {
+  let fileInput: HTMLInputElement | undefined;
+  const [downloading, setDownloading] = createSignal(false);
+  const [restoring, setRestoring] = createSignal(false);
+  const [pendingArchive, setPendingArchive] = createSignal<{ name: string; bytes: Uint8Array } | null>(null);
+  const [error, setError] = createSignal<string | null>(null);
+  const [notice, setNotice] = createSignal<string | null>(null);
+
+  const download = async () => {
+    if (downloading()) return;
+    setDownloading(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const saved = await downloadSettingsBackup();
+      if (saved) setNotice("Backup archive downloaded.");
+    } catch (e) {
+      if (!(e instanceof ApprovalCancelled)) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const onFilePicked = async (file: File | undefined) => {
+    if (!file) return;
+    setError(null);
+    setNotice(null);
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      setPendingArchive({ name: file.name, bytes });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const confirmRestore = async () => {
+    const item = pendingArchive();
+    if (!item || restoring()) return;
+    setRestoring(true);
+    setError(null);
+    try {
+      const res = await restoreSettingsBackup(item.bytes, item.name);
+      setPendingArchive(null);
+      const outcome = interpretRestoreResponse(res);
+      if (!outcome.ok) {
+        setError(outcome.message);
+      } else {
+        setNotice(outcome.message);
+      }
+    } catch (e) {
+      if (!(e instanceof ApprovalCancelled)) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setRestoring(false);
+    }
+  };
+
+  return (
+    <Show when={isConnected()}>
+      <Card title="Backup & restore">
+        <Row title="Download backup" desc="Export Core settings, provider configs, and encryption keys as a .zip archive.">
+          <button type="button" class="s-btn" disabled={downloading()} onClick={() => void download()}>
+            {downloading() ? "Preparing…" : "Download backup"}
+          </button>
+        </Row>
+        <Row title="Restore from backup" desc={notice() ?? "Upload a .zip backup archive to restore Core configuration."}>
+          <input
+            ref={fileInput}
+            type="file"
+            accept=".zip,application/zip"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.currentTarget.files?.[0];
+              e.currentTarget.value = "";
+              void onFilePicked(f);
+            }}
+          />
+          <button type="button" class="s-btn" disabled={restoring()} onClick={() => fileInput?.click()}>
+            Restore backup…
+          </button>
+        </Row>
+      </Card>
+      <Show when={!pendingArchive()}>
+        <ErrorToast error={error()} title="Backup operation failed" onDismiss={() => setError(null)} />
+      </Show>
+      <Show when={pendingArchive()}>
+        {(item) => (
+          <ConfirmDialog
+            title={`Restore ${item().name}?`}
+            description="Restoring overwrites Core settings, provider configurations, and keys stored in .sandboxed-sh."
+            action="Restore backup"
+            destructive
+            busy={restoring()}
+            error={error()}
+            onClose={() => setPendingArchive(null)}
+            onConfirm={() => void confirmRestore()}
+          />
+        )}
+      </Show>
+    </Show>
+  );
 }
 
 function LocalAgentsCard() {
@@ -141,22 +586,151 @@ function LocalAgentsCard() {
 
 function BackendTab() {
   const [url, setUrl] = createSignal(getApiUrl());
+  const [username, setUsername] = createSignal("");
   const [password, setPassword] = createSignal("");
   const [busy, setBusy] = createSignal(false);
+  const [githubBusy, setGithubBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [notice, setNotice] = createSignal<string | null>(null);
+  const [health, setHealth] = createSignal<ServerHealthInfo | null>(null);
+  const [authStatus, setAuthStatus] = createSignal<AuthStatusInfo | null>(null);
+  const [passwordDialog, setPasswordDialog] = createSignal(false);
+  const [currentPw, setCurrentPw] = createSignal("");
+  const [newPw, setNewPw] = createSignal("");
+  const [confirmPw, setConfirmPw] = createSignal("");
+  const [pwBusy, setPwBusy] = createSignal(false);
+  const [pwError, setPwError] = createSignal<string | null>(null);
+
+  createEffect(() => {
+    const target = url().trim();
+    if (!target) {
+      setHealth(null);
+      return;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      void probeHealth(target, ctrl.signal)
+        .then((info) => { if (!ctrl.signal.aborted) setHealth(info); })
+        .catch(() => { if (!ctrl.signal.aborted) setHealth(null); });
+    }, 250);
+    onCleanup(() => {
+      clearTimeout(timer);
+      ctrl.abort();
+    });
+  });
+
+  createEffect(on(connectionVersion, () => {
+    setAuthStatus(null);
+    if (!isConnected()) return;
+    const version = connectionVersion();
+    void getAuthStatus()
+      .then((st) => { if (connectionVersion() === version) setAuthStatus(st); })
+      .catch(() => {});
+  }));
+
+  onMount(() => {
+    if (typeof window === "undefined") return;
+    if (!window.location.pathname.endsWith("/auth/callback")) return;
+    const pending = loadPendingGitHubOAuthAttempt();
+    if (!pending) return;
+    const verified = verifyGitHubOAuthCallback(window.location.href, pending);
+    window.history.replaceState({}, "", "/");
+    if (!verified.ok) {
+      setError(verified.error);
+      return;
+    }
+    setGithubBusy(true);
+    void verifyIssuedAuthToken(verified.baseUrl, verified.token)
+      .then(() => {
+        setUrl(verified.baseUrl);
+        setConnection(verified.baseUrl, verified.token);
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setGithubBusy(false));
+  });
+
+  const isMultiUser = () => health()?.auth_mode === "multi_user";
+  const authNotRequired = () => health()?.auth_required === false;
+  const canConnect = () => {
+    if (busy() || githubBusy()) return false;
+    if (authNotRequired()) return true;
+    if (!password().trim()) return false;
+    if (isMultiUser() && !username().trim()) return false;
+    return true;
+  };
 
   const connect = async () => {
-    if (busy()) return;
+    if (!canConnect()) return;
     setApiUrl(url());
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
-      await login(password());
-      setPassword("");
+      if (authNotRequired() && !password().trim()) {
+        setConnection(url(), "dev-mode");
+      } else {
+        await login(password(), isMultiUser() ? username() : undefined);
+        setPassword("");
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const signInGitHub = async () => {
+    if (busy() || githubBusy()) return;
+    setApiUrl(url());
+    setGithubBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const h = health();
+      await signInWithGitHubDesktop(
+        url(),
+        h ? h.github_oauth_client_state === true : undefined,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGithubBusy(false);
+    }
+  };
+
+  const requiresCurrentPassword = () => {
+    const st = authStatus();
+    return Boolean(st && !st.dev_mode && st.password_source !== "none");
+  };
+
+  const submitPasswordChange = async () => {
+    if (pwBusy()) return;
+    if (requiresCurrentPassword() && !currentPw().trim()) {
+      setPwError("Enter your current server password.");
+      return;
+    }
+    if (newPw().trim().length < 8) {
+      setPwError("New password must be at least 8 characters.");
+      return;
+    }
+    if (newPw() !== confirmPw()) {
+      setPwError("New password and confirmation do not match.");
+      return;
+    }
+    setPwBusy(true);
+    setPwError(null);
+    try {
+      await changeServerPassword(requiresCurrentPassword() ? currentPw() : undefined, newPw());
+      setPasswordDialog(false);
+      setCurrentPw("");
+      setNewPw("");
+      setConfirmPw("");
+      setNotice("Server password updated.");
+      void getAuthStatus().then(setAuthStatus).catch(() => {});
+    } catch (e) {
+      setPwError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPwBusy(false);
     }
   };
 
@@ -171,7 +745,19 @@ function BackendTab() {
             onInput={(e) => setUrl(e.currentTarget.value)}
           />
         </Row>
-        <Show when={!isConnected()}>
+        <Show when={!isConnected() && isMultiUser()}>
+          <Row title="Username" desc="Multi-user account configured on Core.">
+            <input
+              class="s-input"
+              aria-label="Username"
+              autocomplete="username"
+              value={username()}
+              onInput={(e) => setUsername(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === "Enter" && void connect()}
+            />
+          </Row>
+        </Show>
+        <Show when={!isConnected() && !authNotRequired()}>
           <Row title="Password" desc="Dashboard password. The returned JWT is stored in localStorage.">
             <input
               class="s-input"
@@ -184,14 +770,21 @@ function BackendTab() {
         </Show>
         <Row
           title={isConnected() ? "Connected" : "Not connected"}
-          desc={isConnected() ? `Signed in to ${getApiUrl()}.` : "Connect to enable live Machines, Inference and missions."}
+          desc={notice() ?? (isConnected() ? `Signed in to ${getApiUrl()}.` : "Connect to enable live Machines, Inference and missions.")}
         >
           <Show
             when={isConnected()}
             fallback={
-              <button class="s-btn primary" disabled={busy() || !password()} onClick={() => void connect()}>
-                {busy() ? "Connecting…" : "Connect"}
-              </button>
+              <>
+                <Show when={health()?.github_enabled}>
+                  <button type="button" class="s-btn" disabled={busy() || githubBusy()} onClick={() => void signInGitHub()}>
+                    {githubBusy() ? "Signing in…" : "Sign in with GitHub"}
+                  </button>
+                </Show>
+                <button class="s-btn primary" disabled={!canConnect()} onClick={() => void connect()}>
+                  {busy() ? "Connecting…" : "Connect"}
+                </button>
+              </>
             }
           >
             <button class="s-btn" onClick={() => clearConnection()}>
@@ -199,8 +792,80 @@ function BackendTab() {
             </button>
           </Show>
         </Row>
+        <Show when={isConnected() && authStatus()?.auth_mode === "single_tenant"}>
+          <Row
+            title="Server password"
+            desc={authStatus()?.password_source === "dashboard" ? "Managed in Core settings." : "Override the environment password with a stored hash."}
+          >
+            <button
+              type="button"
+              class="s-btn"
+              onClick={() => {
+                setCurrentPw("");
+                setNewPw("");
+                setConfirmPw("");
+                setPwError(null);
+                setPasswordDialog(true);
+              }}
+            >
+              Change password…
+            </button>
+          </Row>
+        </Show>
       </Card>
-      <ErrorToast error={error()} title="Couldn’t connect to the backend" onDismiss={() => setError("")} />
+      <ErrorToast error={error()} title="Couldn’t connect to the backend" onDismiss={() => setError(null)} />
+      <Show when={passwordDialog()}>
+        <Dialog
+          size="compact"
+          title="Change server password"
+          description="Updates the single-tenant login password on Core."
+          busy={pwBusy()}
+          dirty={Boolean(currentPw() || newPw() || confirmPw())}
+          onClose={() => setPasswordDialog(false)}
+          footer={(close) => (
+            <>
+              <DialogButton disabled={pwBusy()} onClick={close}>Cancel</DialogButton>
+              <DialogButton variant="primary" disabled={pwBusy() || !newPw().trim()} onClick={() => void submitPasswordChange()}>
+                {pwBusy() ? "Saving…" : "Update password"}
+              </DialogButton>
+            </>
+          )}
+        >
+          <Show when={requiresCurrentPassword()}>
+            <Field label="Current password">
+              <input
+                class="s-input"
+                type="password"
+                autocomplete="current-password"
+                value={currentPw()}
+                disabled={pwBusy()}
+                onInput={(e) => setCurrentPw(e.currentTarget.value)}
+              />
+            </Field>
+          </Show>
+          <Field label="New password" description="At least 8 characters.">
+            <input
+              class="s-input"
+              type="password"
+              autocomplete="new-password"
+              value={newPw()}
+              disabled={pwBusy()}
+              onInput={(e) => setNewPw(e.currentTarget.value)}
+            />
+          </Field>
+          <Field label="Confirm new password" error={pwError()}>
+            <input
+              class="s-input"
+              type="password"
+              autocomplete="new-password"
+              value={confirmPw()}
+              disabled={pwBusy()}
+              onInput={(e) => setConfirmPw(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === "Enter" && void submitPasswordChange()}
+            />
+          </Field>
+        </Dialog>
+      </Show>
     </>
   );
 }
@@ -252,6 +917,7 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
       <div class="s-inner">
         <h2>Account</h2>
         <BackendTab />
+        <GitHubIntegrationCard />
         <CloudAccountsCard onOpenPage={p.onOpenPage} />
         <Card title="Appearance">
           <Row title="Theme" desc="Auto follows your desktop appearance.">
@@ -272,6 +938,8 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
         <details class="settings-advanced" onToggle={e => { if (e.currentTarget.open) setAdvancedMounted(true); }}>
           <summary>Advanced <Ic.ChevronDown size={14} /></summary>
           <Show when={advancedMounted()}>
+            <WorkspaceCleanupCard />
+            <BackupRestoreCard />
             <BackgroundSyncCard />
             <DiagnosticsCard />
           </Show>

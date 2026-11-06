@@ -436,12 +436,36 @@ impl AuthConfig {
         })
     }
 
-    /// True iff `redirect_uri` is on the redirect allowlist.
+    /// True iff `redirect_uri` is on the redirect allowlist, or is an RFC 8252 §7.3
+    /// native loopback callback (`http://127.0.0.1:<port>/auth/callback`) when the
+    /// native `sandboxed://auth/callback` scheme is allowed.
     pub fn github_redirect_allowed(&self, redirect_uri: &str) -> bool {
-        self.github_oauth_redirect_allowlist
+        let candidate = redirect_uri.trim();
+        if self
+            .github_oauth_redirect_allowlist
             .iter()
-            .any(|allowed| allowed.trim() == redirect_uri.trim())
+            .any(|allowed| allowed.trim() == candidate)
+        {
+            return true;
+        }
+        let native_scheme_allowed = self
+            .github_oauth_redirect_allowlist
+            .iter()
+            .any(|allowed| allowed.trim() == "sandboxed://auth/callback");
+        native_scheme_allowed && is_loopback_auth_callback(candidate)
     }
+}
+
+fn is_loopback_auth_callback(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("http://127.0.0.1:") else {
+        return false;
+    };
+    let Some(port_str) = rest.strip_suffix("/auth/callback") else {
+        return false;
+    };
+    !port_str.is_empty()
+        && port_str.bytes().all(|b| b.is_ascii_digit())
+        && port_str.parse::<u16>().is_ok_and(|port| port > 0)
 }
 
 impl Config {
@@ -983,5 +1007,24 @@ mod tests {
             ..AuthConfig::default()
         };
         assert!(validate_auth_and_bind(&valid, "0.0.0.0", false).is_ok());
+    }
+
+    #[test]
+    fn github_redirect_allowlist_supports_rfc8252_loopback_callbacks() {
+        let cfg = AuthConfig::default();
+        assert!(cfg.github_redirect_allowed("sandboxed://auth/callback"));
+        assert!(cfg.github_redirect_allowed("http://127.0.0.1:54321/auth/callback"));
+        assert!(!cfg.github_redirect_allowed("http://127.0.0.1:0/auth/callback"));
+        assert!(!cfg.github_redirect_allowed("http://127.0.0.1:70000/auth/callback"));
+        assert!(!cfg.github_redirect_allowed("http://127.0.0.1.evil.example:8080/auth/callback"));
+        assert!(!cfg.github_redirect_allowed("http://127.0.0.1:8080/other"));
+        assert!(!cfg.github_redirect_allowed("https://evil.example/auth/callback"));
+
+        let web_only = AuthConfig {
+            github_oauth_redirect_allowlist: vec!["https://app.example.com/callback".to_string()],
+            ..AuthConfig::default()
+        };
+        assert!(web_only.github_redirect_allowed("https://app.example.com/callback"));
+        assert!(!web_only.github_redirect_allowed("http://127.0.0.1:54321/auth/callback"));
     }
 }

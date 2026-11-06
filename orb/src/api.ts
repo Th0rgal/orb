@@ -288,11 +288,33 @@ export function clearConnection() {
   bumpConnectionVersion(v => v + 1);
 }
 
-export async function login(password: string): Promise<void> {
+export interface ServerHealthInfo {
+  status?: string;
+  version?: string;
+  dev_mode?: boolean;
+  auth_required?: boolean;
+  auth_mode?: "disabled" | "single_tenant" | "multi_user" | string;
+  github_enabled?: boolean;
+  github_oauth_client_state?: boolean;
+}
+
+export async function probeHealth(baseUrl?: string, signal?: AbortSignal): Promise<ServerHealthInfo> {
+  const res = await transportFetch(
+    "/api/health",
+    { method: "GET", signal: signal ?? AbortSignal.timeout(8_000) },
+    baseUrl,
+  );
+  if (!res.ok) throw new Error(`Health check failed (${res.status})`);
+  return (await res.json()) as ServerHealthInfo;
+}
+
+export async function login(password: string, username?: string): Promise<void> {
+  const cleanUser = username?.trim();
+  const payload = cleanUser ? { password, username: cleanUser } : { password };
   const res = await transportFetch("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) {
     const text = (await res.text().catch(() => "")).trim();
@@ -350,11 +372,11 @@ export function isTransientNetworkError(error: unknown): boolean {
   return error instanceof TypeError && /load failed|failed to fetch|networkerror|network connection|internet connection|could not connect/i.test(error.message);
 }
 
-export function api<T>(path: string, init?: RequestInit): Promise<T> {
+export function api<T>(path: string, init?: RequestInit, explicitBase?: string): Promise<T> {
   // Explicit signals/options retain independent cancellation semantics.
-  if (!init) return sharedRead(`${connectionVersion()}:${getApiUrl()}:${path}`, () => apiRequest<T>(path));
-  if (init.method && init.method.toUpperCase() !== 'GET') invalidateReads();
-  return apiRequest<T>(path, init);
+  if (!init && !explicitBase) return sharedRead(`${connectionVersion()}:${getApiUrl()}:${path}`, () => apiRequest<T>(path));
+  if (init?.method && init.method.toUpperCase() !== 'GET') invalidateReads();
+  return apiRequest<T>(path, init, false, explicitBase);
 }
 /** Like `api`, for endpoints that answer with plain text (e.g. Library save receipts). */
 export function apiText(path: string, init?: RequestInit): Promise<string> {
@@ -365,10 +387,10 @@ function redactDiagnosticPath(path: string): string {
   return path.replace(/([?&](?:q|query)=)[^&]*/gi, "$1[redacted]");
 }
 
-async function apiRequest<T>(path: string, init?: RequestInit, text = false): Promise<T> {
+async function apiRequest<T>(path: string, init?: RequestInit, text = false, explicitBase?: string): Promise<T> {
   const from = performance.now(), label = `${init?.method?.toUpperCase() ?? "GET"} ${redactDiagnosticPath(path)}`;
   try {
-    const result = await sendRequest<T>(path, init, text);
+    const result = await sendRequest<T>(path, init, text, explicitBase);
     requestDone(label, performance.now() - from, true);
     return text ? result : stickMissionRows(path, result);
   } catch (error) {
@@ -393,29 +415,33 @@ function isFastRetryableError(error: unknown, init?: RequestInit): boolean {
   return error instanceof TypeError && /load failed|failed to fetch|networkerror|network connection|internet connection|could not connect/i.test(error.message);
 }
 
-async function sendRequest<T>(path: string, init?: RequestInit, text = false): Promise<T> {
+async function sendRequest<T>(path: string, init?: RequestInit, text = false, explicitBase?: string): Promise<T> {
   try {
-    return await sendRequestOnce<T>(path, init, text);
+    return await sendRequestOnce<T>(path, init, text, explicitBase);
   } catch (error) {
     if (!isFastRetryableError(error, init)) throw error;
     const delayMs = 200 + Math.floor(Math.random() * 200);
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     if (init?.signal?.aborted) throw error;
-    return sendRequestOnce<T>(path, init, text);
+    return sendRequestOnce<T>(path, init, text, explicitBase);
   }
 }
 
-async function sendRequestOnce<T>(path: string, init?: RequestInit, text = false): Promise<T> {
+async function sendRequestOnce<T>(path: string, init?: RequestInit, text = false, explicitBase?: string): Promise<T> {
   const version = connectionVersion();
   const jwt = getJwt();
   const headers: Record<string, string> = {
-    ...((init?.headers as Record<string, string> | undefined) ?? {}),
     ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+    ...((init?.headers as Record<string, string> | undefined) ?? {}),
   };
   const started = performance.now();
   let res: Response;
   try {
-    res = await transportFetch(path, { ...init, headers, signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    res = await transportFetch(
+      path,
+      { ...init, headers, signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+      explicitBase,
+    );
   } catch (error) {
     if (!isAbortError(error)) throw error;
     const reason = abortReason(init?.signal);
@@ -426,6 +452,10 @@ async function sendRequestOnce<T>(path: string, init?: RequestInit, text = false
     throw error;
   }
   if (res.status === 401) {
+    const detail = (await res.text().catch(() => "")).trim();
+    if (path === "/api/auth/change-password" && /current password/i.test(detail)) {
+      throw new ApiError(401, detail);
+    }
     if (connectionVersion() === version) clearConnection();
     throw new Error("401 Unauthorized — reconnect in Settings → Backend");
   }
@@ -751,6 +781,16 @@ export async function updateRemoteNodeCapacity(name: string, capacity: number): 
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ capacity }),
+  });
+}
+
+/** Cordon or uncordon a static remote runner node (`POST /api/nodes/:name/{cordon,uncordon}`). */
+export async function setRemoteNodeCordoned(
+  name: string,
+  cordoned: boolean,
+): Promise<{ node: string; cordoned: boolean; changed: boolean }> {
+  return api(`/api/nodes/${encodeURIComponent(name)}/${cordoned ? "cordon" : "uncordon"}`, {
+    method: "POST",
   });
 }
 
@@ -1923,11 +1963,16 @@ export async function setProjectLimit(slug: string, parallel_missions: number): 
 
 /** Backend-global execution settings (`GET|PUT /api/settings`). */
 export interface GlobalSettings {
+  library_remote?: string | null;
   /** Backend-wide mission concurrency. Distinct from a project's grant cap. */
   max_parallel_missions?: number | null;
   max_concurrent_tasks?: number | null;
   /** Live per-account OrbRouter concurrency cap for Google & Antigravity accounts (1–128). */
   google_max_concurrency?: number | null;
+  auto_cleanup_enabled?: boolean | null;
+  auto_cleanup_days?: number | null;
+  auto_cleanup_stopped_days?: number | null;
+  auto_cleanup_orphans_enabled?: boolean | null;
 }
 
 export async function getGlobalSettings(): Promise<GlobalSettings> {

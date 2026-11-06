@@ -31,7 +31,6 @@ secrets.json
 .open_agent/
 .open_agent_calibration/
 /tmp/
-/dashboard/console.log
 /.playwright-console.log
 /automations-*.png
 /control-bubbles.png
@@ -57,11 +56,7 @@ Thumbs.db
 
 # Playwright MCP local data
 .playwright-mcp/
-dashboard/playwright-report/
-dashboard/output/
 
-# npm lockfile (we use bun)
-dashboard/package-lock.json
 .openagent/
 library-template/
 
@@ -90,6 +85,5 @@ orb/playwright-report/
 # Python bytecode
 __pycache__/
 *.pyc
-.vercel
 .env*.local
 /ios_dashboard/OrbModelPackage/.build/

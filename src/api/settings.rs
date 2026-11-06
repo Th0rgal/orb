@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::settings::Settings;
 use crate::util::internal_error;
-use crate::workspace;
 
 use super::routes::AppState;
 
@@ -108,6 +107,9 @@ pub struct UpdateSettingsRequest {
 pub struct UpdateLibraryRemoteRequest {
     /// Git remote URL. Set to null or empty string to clear.
     pub library_remote: Option<String>,
+    /// Force repository reinitialization even if `library_remote` matches the stored setting.
+    #[serde(default)]
+    pub force_reinitialize: bool,
 }
 
 /// Response after updating library remote.
@@ -333,73 +335,81 @@ async fn update_library_remote(
     Json(req): Json<UpdateLibraryRemoteRequest>,
 ) -> Result<Json<UpdateLibraryRemoteResponse>, (StatusCode, String)> {
     // Normalize empty string to None
-    let new_remote = req.library_remote.filter(|s| !s.trim().is_empty());
+    let new_remote = req
+        .library_remote
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
-    // Update the setting
-    let (changed, _previous) = state
-        .settings
-        .set_library_remote(new_remote.clone())
-        .await
-        .map_err(internal_error)?;
+    // Hold the library write lock across checkout initialization + settings update
+    // so concurrent `/api/library/*` callers (`ensure_library`) never observe the
+    // new `LibraryStore` paired with the old `settings.library_remote` (or vice versa).
+    let mut library_guard = state.library.write().await;
+    let configured_remote = state.settings.get_library_remote().await;
+    let active_remote = library_guard.as_ref().map(|lib| lib.remote().to_string());
 
-    // If the value actually changed, reinitialize the library
-    let (library_reinitialized, library_error) = if changed {
-        if let Some(ref remote) = new_remote {
-            // Reinitialize with new remote
-            match reinitialize_library(&state, remote).await {
-                Ok(()) => (true, None),
-                Err(e) => (false, Some(e)),
-            }
-        } else {
-            // Clear the library
-            *state.library.write().await = None;
-            tracing::info!("Library cleared (remote set to None)");
-            (true, None)
-        }
-    } else {
-        // No change in value
-        (false, None)
-    };
+    if let Some(ref remote) = new_remote {
+        let needs_reinit = req.force_reinitialize
+            || configured_remote.as_deref() != Some(remote.as_str())
+            || active_remote.as_deref() != Some(remote.as_str());
+        if needs_reinit {
+            match crate::library::LibraryStore::new(state.config.library_path.clone(), remote).await
+            {
+                Ok(store) => {
+                    tracing::info!("Skills library reinitialized from {}", remote);
+                    let library = Arc::new(store);
+                    *library_guard = Some(Arc::clone(&library));
+                    state
+                        .settings
+                        .set_library_remote(new_remote.clone())
+                        .await
+                        .map_err(internal_error)?;
+                    drop(library_guard);
 
-    Ok(Json(UpdateLibraryRemoteResponse {
-        library_remote: new_remote,
-        library_reinitialized,
-        library_error,
-    }))
-}
+                    super::library::sync_all_workspaces(&state, &library).await;
 
-/// Reinitialize the library with a new remote URL.
-async fn reinitialize_library(state: &Arc<AppState>, remote: &str) -> Result<(), String> {
-    let library_path = state.config.library_path.clone();
-
-    match crate::library::LibraryStore::new(library_path, remote).await {
-        Ok(store) => {
-            tracing::info!("Skills library reinitialized from {}", remote);
-            let library = Arc::new(store);
-            *state.library.write().await = Some(Arc::clone(&library));
-
-            // Sync skills/tools to all workspaces
-            let workspaces = state.workspaces.list().await;
-            for ws in workspaces {
-                let is_default_host = ws.id == workspace::DEFAULT_WORKSPACE_ID
-                    && ws.workspace_type == workspace::WorkspaceType::Host;
-
-                if is_default_host || !ws.skills.is_empty() {
-                    if let Err(e) = workspace::sync_workspace_skills(&ws, &library).await {
-                        tracing::warn!(
-                            workspace = %ws.name,
-                            error = %e,
-                            "Failed to sync skills after library reinit"
-                        );
-                    }
+                    Ok(Json(UpdateLibraryRemoteResponse {
+                        library_remote: new_remote,
+                        library_reinitialized: true,
+                        library_error: None,
+                    }))
+                }
+                Err(e) => {
+                    tracing::error!("Failed to reinitialize library from {}: {}", remote, e);
+                    Ok(Json(UpdateLibraryRemoteResponse {
+                        library_remote: configured_remote,
+                        library_reinitialized: false,
+                        library_error: Some(e.to_string()),
+                    }))
                 }
             }
-
-            Ok(())
+        } else {
+            Ok(Json(UpdateLibraryRemoteResponse {
+                library_remote: new_remote,
+                library_reinitialized: false,
+                library_error: None,
+            }))
         }
-        Err(e) => {
-            tracing::error!("Failed to reinitialize library from {}: {}", remote, e);
-            Err(e.to_string())
+    } else {
+        let (changed, _) = state
+            .settings
+            .set_library_remote(None)
+            .await
+            .map_err(internal_error)?;
+        let had_active = active_remote.is_some();
+        if changed || had_active || req.force_reinitialize {
+            *library_guard = None;
+            tracing::info!("Library cleared (remote set to None)");
+            Ok(Json(UpdateLibraryRemoteResponse {
+                library_remote: None,
+                library_reinitialized: true,
+                library_error: None,
+            }))
+        } else {
+            Ok(Json(UpdateLibraryRemoteResponse {
+                library_remote: None,
+                library_reinitialized: false,
+                library_error: None,
+            }))
         }
     }
 }

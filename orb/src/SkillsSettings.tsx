@@ -12,6 +12,7 @@ import { readJson, writeJson } from "./storage";
 import { PopupMenu, type MenuEntry } from "./Menu";
 import {
   connectionVersion,
+  getGlobalSettings,
   getRemoteNodes,
   isConnected,
   listLibrarySkills,
@@ -37,7 +38,7 @@ import {
 import { refreshSoftware, softwareMachines } from "./softwareInventory";
 import { effectiveAudience, newSkillTemplate, normalizeSkillName, parseSkillMeta, setSandboxedMeta } from "./skillModel";
 import { SKILL_BADGE_LABEL, buildSkillRows, isOldCopy, needsAttention, skillBadge, type ProjectContextSkill, type SkillRow } from "./skillRows";
-import { commitAndPush, deleteLibrarySkill, fetchLibrarySkill, getLibraryStatus, putLibrarySkill, putSkillFile, readSkillFile, repoLabel, syncLibrary, type LibraryStatus } from "./skillsApi";
+import { commitAndPush, deleteLibrarySkill, fetchLibrarySkill, forcePushLibrary, forceSyncLibrary, getLibraryStatus, isDivergedLibraryError, needsLibraryRemoteInit, putLibrarySkill, putSkillFile, readSkillFile, repoLabel, sameLibraryRemote, syncLibrary, updateLibraryRemote, type LibraryStatus } from "./skillsApi";
 import { orbRelativeTimeString } from "./orbKernel";
 import { cachedSkillsReport, rememberSkillsReport } from "./skillCache";
 import { deleteMessage, dropsSandboxedMetadata, middleTruncate } from "./SkillPage";
@@ -160,6 +161,15 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [rowDeleteBusy, setRowDeleteBusy] = createSignal(false);
   const [rowDeleteError, setRowDeleteError] = createSignal<string | null>(null);
   const [repo, setRepo] = createSignal<LibraryStatus | null>(null);
+  const [configuredRemote, setConfiguredRemote] = createSignal<string>("");
+  const [editingRemote, setEditingRemote] = createSignal(false);
+  const [remoteDraft, setRemoteDraft] = createSignal("");
+  const [remoteBusy, setRemoteBusy] = createSignal(false);
+  const [remoteError, setRemoteError] = createSignal<string | null>(null);
+  const [failedRemoteInit, setFailedRemoteInit] = createSignal<string | null>(null);
+  const [divergedDetail, setDivergedDetail] = createSignal<string | null>(null);
+  const [divergedBusy, setDivergedBusy] = createSignal<"sync" | "push" | null>(null);
+  const [divergedError, setDivergedError] = createSignal<string | null>(null);
   const [pulling, setPulling] = createSignal(false);
   const [creating, setCreating] = createSignal(false);
   const [newName, setNewName] = createSignal("");
@@ -219,7 +229,8 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     try {
       const side: Promise<unknown>[] = [refreshLocalAgents(force).catch(() => []), refreshSoftware(force).catch(swallow("skills.refreshSoftware"))];
       if (isConnected()) {
-        void getLibraryStatus().then(setRepo).catch(() => setRepo(null));
+        void getLibraryStatus().then((st) => { setRepo(st); if (st.remote) setConfiguredRemote(st.remote); }).catch(() => setRepo(null));
+        void getGlobalSettings().then((s) => { if (s.library_remote != null) setConfiguredRemote(s.library_remote); }).catch(() => {});
         side.push(getRemoteNodes().then((res) => setRemoteNodes(res.nodes ?? [])).catch(swallow("skills.remoteNodes")));
         side.push(loadProjectSkills());
         const { bodies } = await loadLibrary().catch((e) => {
@@ -282,7 +293,10 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   });
 
   // The one load on open (and on reconnect); online it also reads the Library.
-  createEffect(on(connectionVersion, () => void loadAll(false)));
+  createEffect(on(connectionVersion, () => {
+    setFailedRemoteInit(null);
+    void loadAll(false);
+  }));
 
   const machineOptions = createMemo(() => {
     const opts = [{ id: "local", label: "This Mac (Local Harnesses)" }];
@@ -474,9 +488,79 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       await loadAll(true);
       await syncNow(false);
     } catch (e) {
-      setSyncError(`Couldn’t pull the Library: ${errorText(e)}`);
+      if (isDivergedLibraryError(e)) {
+        setDivergedError(null);
+        setDivergedDetail(errorText(e).replace(/^409\s+/, "").replace(/^DIVERGED_HISTORY:\s*/i, ""));
+      } else {
+        setSyncError(`Couldn’t pull the Library: ${errorText(e)}`);
+      }
     } finally {
       setPulling(false);
+    }
+  };
+
+  const openRemoteEditor = () => {
+    setRemoteDraft(failedRemoteInit() ?? repo()?.remote ?? configuredRemote() ?? "");
+    setRemoteError(null);
+    setEditingRemote(true);
+  };
+
+  const retryingFailedRemote = () =>
+    Boolean(failedRemoteInit() && sameLibraryRemote(remoteDraft(), failedRemoteInit()));
+
+  const saveRemoteUrl = async (clear = false) => {
+    if (remoteBusy()) return;
+    const next = clear ? null : remoteDraft().trim() || null;
+    const needsInit = needsLibraryRemoteInit(next, repo()?.remote, failedRemoteInit());
+    setRemoteBusy(true);
+    setRemoteError(null);
+    try {
+      const res = await updateLibraryRemote(next, needsInit);
+      if (res.library_error) {
+        if (next) setFailedRemoteInit(next);
+        setRemoteError(res.library_error);
+        return;
+      }
+      // Older Core builds persist `library_remote` before initializing and only
+      // reinitialize when the stored setting changes, returning `library_reinitialized: false`
+      // on a retry. Calling `/api/library/status` drives `ensure_library` to initialize
+      // or surface the underlying clone/fetch error.
+      if (next && needsInit && !res.library_reinitialized) {
+        const status = await getLibraryStatus();
+        if (!sameLibraryRemote(status.remote, next)) {
+          setFailedRemoteInit(next);
+          setRemoteError("Library repository was not initialized for this remote. Check the URL and retry.");
+          return;
+        }
+        setRepo(status);
+      }
+      setFailedRemoteInit(null);
+      setConfiguredRemote(res.library_remote ?? next ?? "");
+      setEditingRemote(false);
+      await loadAll(true);
+      setSyncNotice(next ? `Library connected to ${repoLabel(res.library_remote ?? next)}.` : "Library repository disconnected.");
+    } catch (e) {
+      if (next) setFailedRemoteInit(next);
+      setRemoteError(errorText(e));
+    } finally {
+      setRemoteBusy(false);
+    }
+  };
+
+  const resolveDivergedRepo = async (mode: "sync" | "push") => {
+    if (divergedBusy()) return;
+    setDivergedBusy(mode);
+    setDivergedError(null);
+    try {
+      if (mode === "sync") await forceSyncLibrary();
+      else await forcePushLibrary();
+      setDivergedDetail(null);
+      await loadAll(true);
+      await syncNow(false, mode === "sync" ? "Reset Core’s Library to match remote." : "Overwrote remote Library with Core’s commits.");
+    } catch (e) {
+      setDivergedError(errorText(e));
+    } finally {
+      setDivergedBusy(null);
     }
   };
 
@@ -658,6 +742,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
               <button type="button" class="icon-btn settings-refresh" classList={{ spinning: pulling() || syncing() }} aria-label="Pull from the repo" title="Pull from the repo and update every agent" disabled={pulling()} onClick={() => void pull()}>
                 <Ic.RefreshIcon size={14} />
               </button>
+              <button type="button" class="s-btn sm" onClick={openRemoteEditor}>Repo…</button>
             </Show>
             <input type="search" aria-label="Filter skills" class="s-input skills-search" placeholder="Search skills…" value={search()} onInput={(e) => setSearch(e.currentTarget.value)} />
             <Show when={isConnected()}>
@@ -672,7 +757,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
             </div>
           </Show>
 
-          <Show when={libraryError()}>{(err) => <p class="skills-sub-note">Core Library unavailable: {err()}. Showing this Mac only.</p>}</Show>
+          <Show when={libraryError()}>{(err) => <p class="skills-sub-note">Core Library unavailable: {err()}. Showing this Mac only. <Show when={isConnected()}><button type="button" class="link-btn" onClick={openRemoteEditor}>Configure Library repository…</button></Show></p>}</Show>
 
           <div class="s-card skills-catalog-card">
             <Show when={!(loading() && !rows().length)} fallback={<For each={[0, 1, 2, 3, 4, 5]}>{() => <div class="skills-item skeleton" aria-hidden="true"><div class="skills-item-head"><span class="spend-skel skills-skel-name" /><span class="spend-skel skills-skel-desc" /></div></div>}</For>}>
@@ -901,6 +986,54 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
             <input class="s-input" value={newDesc()} disabled={createBusy()} onInput={(e) => setNewDesc(e.currentTarget.value)} />
           </Field>
         </NameDialog>
+      </Show>
+      <Show when={editingRemote()}>
+        <NameDialog
+          title="Library repository"
+          description="Git remote URL cloned by Core to sync shared skills across machines."
+          label="Git remote URL"
+          placeholder="git@github.com:your-org/agent-library.git"
+          value={remoteDraft()}
+          onInput={setRemoteDraft}
+          allowEmpty
+          action={retryingFailedRemote() ? "Retry" : "Save"}
+          busy={remoteBusy()}
+          error={remoteError()}
+          onAction={() => void saveRemoteUrl(false)}
+          onClose={() => setEditingRemote(false)}
+          footer={
+            <Show when={(repo()?.remote ?? configuredRemote()).trim().length > 0}>
+              <DialogButton variant="destructive" disabled={remoteBusy()} onClick={() => void saveRemoteUrl(true)}>
+                Disconnect
+              </DialogButton>
+            </Show>
+          }
+        />
+      </Show>
+      <Show when={divergedDetail()}>
+        {(detail) => (
+          <Dialog
+            size="compact"
+            title="Library history diverged"
+            description="Core’s local Library branch and the remote repository have diverged commits. Choose which history to keep."
+            busy={divergedBusy() !== null}
+            onClose={() => setDivergedDetail(null)}
+            footer={(close) => (
+              <>
+                <DialogButton disabled={divergedBusy() !== null} onClick={close}>Cancel</DialogButton>
+                <DialogButton variant="destructive" disabled={divergedBusy() !== null} onClick={() => void resolveDivergedRepo("push")}>
+                  {divergedBusy() === "push" ? "Pushing…" : "Overwrite remote"}
+                </DialogButton>
+                <DialogButton variant="primary" disabled={divergedBusy() !== null} onClick={() => void resolveDivergedRepo("sync")}>
+                  {divergedBusy() === "sync" ? "Resetting…" : "Reset to remote"}
+                </DialogButton>
+              </>
+            )}
+          >
+            <p class="skills-sub-note">{detail()}</p>
+            <Show when={divergedError()}>{(e) => <ErrorNotice error={e()} />}</Show>
+          </Dialog>
+        )}
       </Show>
     </div>
   );
