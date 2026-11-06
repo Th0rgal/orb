@@ -443,8 +443,36 @@ private def runRound3RegressionTests
   ]
   check "groupAntigravityModels deduplicates Carbon/Argon effort tiers matching shared/antigravity.rs"
     (groupedModels == #[("agy-model", "Carbon"), ("agy-demo", "Argon"), ("custom-v1", "Custom Model")])
-  check "JobState.lost confirmsTermination for log drain while remaining cancellable"
-    (JobState.lost.confirmsTermination && !JobState.lost.isTerminal)
+  check "JobState.lost does not prematurely confirm process termination until scope stop succeeds"
+    (!JobState.lost.confirmsTermination && !JobState.lost.isTerminal && JobState.cancelled.confirmsTermination)
+  let lostFenceJid := "00000000-0000-0000-0000-000000000099"
+  let lostFenceRec : JobRecord := {
+    jobId := lostFenceJid
+    missionId := "00000000-0000-0000-0000-000000000001"
+    payloadJson := "{}"
+    state := .queued
+    createdAt := "2026-01-01T00:00:00Z"
+  }
+  let rtCur ← mtx.atomically get
+  let .ok lQueued ← rtCur.ledger.insertQueued lostFenceRec
+    | throw (IO.userError "insertQueued lostFenceRec failed")
+  let .ok (lLost, _) ← lQueued.updateJob lostFenceJid (fun r => .ok { r with state := .lost })
+    | throw (IO.userError "updateJob .lost failed")
+  let rtWithLost := { rtCur with ledger := lLost }
+  let .ok (rtStillLost, stillLostRec, unverifiedCancelReq) ← cancelJob rtWithLost lostFenceJid "core" "test-unverified" (some false)
+    | throw (IO.userError "cancelJob lost (some false) failed")
+  check "cancelJob preserves .lost fence when scope stop is unverified"
+    (stillLostRec.state == .lost && !unverifiedCancelReq)
+  let .ok (rtVerifiedCancel, verifiedRec, verifiedCancelReq) ← cancelJob rtStillLost lostFenceJid "core" "test-verified" (some true)
+    | throw (IO.userError "cancelJob lost (some true) failed")
+  check "cancelJob retires .lost -> .cancelled once scope stop is verified"
+    (verifiedRec.state == .cancelled && verifiedCancelReq)
+  let .ok (_, stayCancelled, dupCancelReq) ← lQueued.updateJob lostFenceJid (fun _ => .ok verifiedRec) >>= fun _ =>
+    cancelJob rtVerifiedCancel lostFenceJid "core" "dup" (some true)
+    | throw (IO.userError "cancelJob already cancelled failed")
+  check "cancelJob returns cancel_requested=false on already cancelled job"
+    (stayCancelled.state == .cancelled && !dupCancelReq)
+  mtx.atomically (set rtVerifiedCancel)
 
   let qDir := System.FilePath.mk tmpRoot / "quarantine-test"
   IO.FS.createDirAll (qDir / "sub" / ".turbo-lean")

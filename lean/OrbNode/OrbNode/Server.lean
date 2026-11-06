@@ -510,7 +510,7 @@ private def discoverAntigravityModels (ma : ManagedAuthConfig) (slot? : Option S
         return .error (503, "Antigravity CLI is not installed")
     let res ← (IO.Process.output {
       cmd := "timeout"
-      args := #["15s", agyBin, "models"]
+      args := #["-k", "2", "15s", agyBin, "models"]
       env := #[("HOME", some tmpHome)]
     }).toBaseIO
     let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpHome] }
@@ -1317,6 +1317,54 @@ def handleRequestConcurrent
       match ← executeFileBrowser (area / "workspace").toString opVal with
       | .ok res => return jsonResp 200 res
       | .error msg => return textResp 409 msg
+  else if req.method == "POST" && segs.length == 3 && segs[0]? == some "jobs" && segs[2]? == some "cancel" then
+    let jid := segs[1]!
+    let key := (parseUuidCanonical? jid).getD jid
+    let actor := (req.header? "x-sandboxed-cancel-actor").getD "unknown"
+    let reason := (req.header? "x-sandboxed-cancel-reason").getD "Cancellation requested without reason"
+    let (preRes, preLaunches) ← mtx.atomically do
+      let (rt, preL) ← tickRuntimeReserve (← get)
+      set rt
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return (Except.error (textResp 401 "invalid node token"), preL)
+      let some cur := rt.ledger.jobs.get? key
+        | return (Except.error (textResp 404 s!"job {key} not found"), preL)
+      if cur.state == .lost then
+        return (Except.ok (Except.error (rt.cfg.nodeId, rt.cfg.workDir)), preL)
+      match ← cancelJob rt key actor reason with
+      | .error "not_found" => return (Except.error (textResp 404 s!"job {key} not found"), preL)
+      | .error msg => return (Except.error (textResp 500 msg), preL)
+      | .ok (rt', updated, cancelRequested) =>
+        let (rtTicked, postL) ← tickRuntimeReserve rt'
+        set rtTicked
+        return (Except.ok (Except.ok (jsonResp 200 (.obj #[
+          ("job_id", .str key),
+          ("state", .str updated.state.asString),
+          ("cancel_requested", .bool cancelRequested)
+        ]))), preL ++ postL)
+    if !preLaunches.isEmpty then
+      spawnAsyncLaunches mtx preLaunches
+    match preRes with
+    | .error errResp => return errResp
+    | .ok (.ok fastResp) => return fastResp
+    | .ok (.error (nodeId, workDir)) =>
+      let scopeStopped ← stopLostJobScopeOutsideLock nodeId workDir key
+      let (resp, postLaunches) ← mtx.atomically do
+        let rt ← get
+        match ← cancelJob rt key actor reason (some scopeStopped) with
+        | .error "not_found" => return (textResp 404 s!"job {key} not found", (#[] : Array PendingAsyncLaunch))
+        | .error msg => return (textResp 500 msg, #[])
+        | .ok (rt', updated, cancelRequested) =>
+          let (rtTicked, postL) ← tickRuntimeReserve rt'
+          set rtTicked
+          return (jsonResp 200 (.obj #[
+            ("job_id", .str key),
+            ("state", .str updated.state.asString),
+            ("cancel_requested", .bool cancelRequested)
+          ]), postL)
+      if !postLaunches.isEmpty then
+        spawnAsyncLaunches mtx postLaunches
+      return resp
   else
     let (resp, launches, watchers) ← mtx.atomically do
       let rt ← get

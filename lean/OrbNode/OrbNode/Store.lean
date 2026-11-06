@@ -50,9 +50,11 @@ def JobState.isTerminal : JobState → Bool
   | .succeeded | .failed | .cancelled => true
   | .queued | .running | .lost        => false
 
+/-- Matches `src/remote_node/protocol.rs::job_state_confirms_termination`:
+    `lost` does NOT confirm process termination until explicit scope stop succeeds. -/
 def JobState.confirmsTermination : JobState → Bool
-  | .succeeded | .failed | .cancelled | .lost => true
-  | .queued | .running                        => false
+  | .succeeded | .failed | .cancelled => true
+  | .queued | .running | .lost        => false
 
 def canTransitionTo (fromState toState : JobState) : Bool :=
   Orb.Kernel.verifyJobTransition fromState.code toState.code == 1
@@ -288,8 +290,13 @@ private def jobUpsertSql (r : JobRecord) : String :=
     match r.cancellation? with
     | some c => sqlEsc (renderCompact c.toJson)
     | none => "NULL"
-  "INSERT OR REPLACE INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json) VALUES (" ++
-  s!"{sqlEsc r.jobId}, {sqlEsc r.missionId}, {sqlEsc r.payloadJson}, {sqlEsc r.state.asString}, {exitSql}, {sqlEsc r.createdAt}, {sqlOptStr r.startedAt?}, {sqlOptStr r.finishedAt?}, {sqlOptStr r.logPath?}, {sqlOptStr r.error?}, {artsSql}, {cancSql});"
+  "INSERT INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json) VALUES (" ++
+  s!"{sqlEsc r.jobId}, {sqlEsc r.missionId}, {sqlEsc r.payloadJson}, {sqlEsc r.state.asString}, {exitSql}, {sqlEsc r.createdAt}, {sqlOptStr r.startedAt?}, {sqlOptStr r.finishedAt?}, {sqlOptStr r.logPath?}, {sqlOptStr r.error?}, {artsSql}, {cancSql}) " ++
+  "ON CONFLICT(id) DO UPDATE SET " ++
+  "state = excluded.state, exit_code = excluded.exit_code, started_at = excluded.started_at, " ++
+  "finished_at = excluded.finished_at, log_path = excluded.log_path, error = excluded.error, " ++
+  "artifacts_json = excluded.artifacts_json, cancellation_json = excluded.cancellation_json " ++
+  "WHERE jobs.state NOT IN ('succeeded', 'failed', 'cancelled');"
 
 private def syncJobToLegacySqlite
     (workDir : String) (backend : SqliteBackend) (r : JobRecord)
@@ -435,7 +442,7 @@ def flushPendingSqlite (l : Ledger) : IO Ledger := do
     sql := sql ++ jobUpsertSql rec ++ " "
   sql := sql ++ "COMMIT;"
   let dbPath := (System.FilePath.mk l.workDir / "jobs.db").toString
-  match ← runSqliteStdin l.sqliteBackend dbPath sql 2500 with
+  match ← runSqliteStdin l.sqliteBackend dbPath sql 500 with
   | .ok () => return { l with pendingSqliteSync := {} }
   | .error _ => return l
 
@@ -475,18 +482,9 @@ def updateJob
     match ← LeanSys.Store.putString l.store (jobKey jobId) serialized with
     | .error e => return .error s!"WAL write failed: {repr e}"
     | .ok h' =>
-      let nextPending ← match ← syncJobToLegacySqlite l.workDir l.sqliteBackend next 5000 3 with
+      let nextPending ← match ← syncJobToLegacySqlite l.workDir l.sqliteBackend next 500 1 with
         | .ok () => pure (l.pendingSqliteSync.erase jobId)
-        | .error _ =>
-          let workDir := l.workDir
-          let backend := l.sqliteBackend
-          discard <| IO.asTask (do
-            for step in [0 : 10] do
-              IO.sleep ((step + 1) * 500).toUInt32
-              if (← syncJobToLegacySqlite workDir backend next 5000 1) matches .ok () then
-                break
-          ) Task.Priority.dedicated
-          pure (l.pendingSqliteSync.insert jobId next)
+        | .error _ => pure (l.pendingSqliteSync.insert jobId next)
       return .ok ({
         l with
         store := h'

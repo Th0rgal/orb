@@ -632,6 +632,58 @@ def stopSystemdScope (scope? : Option SystemdScope) : IO Unit := do
     cmd := "systemctl", args := baseArgs ++ #["reset-failed", sc.unit], env := envMods
   }).toBaseIO
 
+/-- Stop and verify retirement of a post-restart `.lost` job's systemd scope (`src/node/runner.rs:2245-2290`).
+    Returns `true` ONLY when `systemctl stop` + `reset-failed` succeeded OR `systemctl show --property=LoadState`
+    confirmed `"not-found"`, so Core never retires a workspace ownership fence while D-Bus/systemctl failed! -/
+def stopSystemdScopeVerified (sc : SystemdScope) : IO Bool := do
+  let mut baseArgs : Array String := #[]
+  let mut envMods : Array (String × Option String) := #[]
+  if sc.mode == .user then
+    baseArgs := baseArgs.push "--user"
+    if let some rtDir := sc.userRuntimeDir then
+      envMods := #[
+        ("XDG_RUNTIME_DIR", some rtDir),
+        ("DBUS_SESSION_BUS_ADDRESS", some s!"unix:path={rtDir}/bus")
+      ]
+  discard <| (IO.Process.output {
+    cmd := "timeout"
+    args := #["-k", "2", "10s", "systemctl"] ++ baseArgs ++ #["kill", "--kill-who=all", "--signal=SIGKILL", sc.unit]
+    env := envMods
+  }).toBaseIO
+  let stopRes ← (IO.Process.output {
+    cmd := "timeout"
+    args := #["-k", "2", "10s", "systemctl"] ++ baseArgs ++ #["stop", sc.unit]
+    env := envMods
+  }).toBaseIO
+  if let .ok so := stopRes then
+    if so.exitCode == 0 then
+      let resetRes ← (IO.Process.output {
+        cmd := "timeout"
+        args := #["-k", "2", "10s", "systemctl"] ++ baseArgs ++ #["reset-failed", sc.unit]
+        env := envMods
+      }).toBaseIO
+      if let .ok ro := resetRes then
+        if ro.exitCode == 0 then
+          return true
+  let showRes ← (IO.Process.output {
+    cmd := "timeout"
+    args := #["-k", "2", "10s", "systemctl"] ++ baseArgs ++ #["show", "--property=LoadState", "--value", sc.unit]
+    env := envMods
+  }).toBaseIO
+  if let .ok sho := showRes then
+    if sho.exitCode == 0 && sho.stdout.trimAscii.toString == "not-found" then
+      return true
+  return false
+
+/-- Stop a post-restart `.lost` job's transient systemd scope outside `Std.Mutex NodeRuntime`.
+    On non-systemd hosts (`detectSystemdScopeMode == none`), returns `true`. -/
+def stopLostJobScopeOutsideLock (nodeId workDir jid : String) : IO Bool := do
+  let some (mode, userRt?) ← detectSystemdScopeMode
+    | return true
+  let cleanHex := (jid.splitOn "-").foldl (· ++ ·) ""
+  let unit := s!"{nodeScopePrefix nodeId workDir}-job-{cleanHex}.scope"
+  stopSystemdScopeVerified { unit := unit, mode := mode, userRuntimeDir := userRt? }
+
 /-- Detach `stopSystemdScope` and `cleanupIsolatedCheckout` onto a background worker so callers holding
     `Std.Mutex NodeRuntime` never block on `systemctl` D-Bus / `rm -rf` subprocess I/O! -/
 def teardownJobResourcesAsync (scope? : Option SystemdScope) (iso? : Option String) : IO Unit := do
@@ -1131,6 +1183,9 @@ def tickRuntimeReserve
     (rt0 : NodeRuntime) (payloadHints : Std.HashMap String JVal := {}) :
     IO (NodeRuntime × Array PendingAsyncLaunch) := do
   let mut rt := rt0
+  if !rt.ledger.pendingSqliteSync.isEmpty then
+    let lFlushed ← rt.ledger.flushPendingSqlite
+    rt := { rt with ledger := lFlushed }
   let nowEp ← OrbNode.Posix.nowEpoch
   for (jid, lp) in rt.liveProcs.toList do
     let w ← OrbNode.Posix.pollPid lp.pid
@@ -1255,7 +1310,9 @@ def tickRuntime
     rt ← commitPreparedJob rt item.jid prepRes
   return rt
 
-def cancelJob (rt : NodeRuntime) (jid actor reason : String) : IO (Except String (NodeRuntime × JobRecord × Bool)) := do
+def cancelJob
+    (rt : NodeRuntime) (jid actor reason : String)
+    (lostScopeVerified? : Option Bool := none) : IO (Except String (NodeRuntime × JobRecord × Bool)) := do
   let some cur := rt.ledger.jobs.get? jid
     | return .error "not_found"
   if cur.state.isTerminal then
@@ -1266,6 +1323,16 @@ def cancelJob (rt : NodeRuntime) (jid actor reason : String) : IO (Except String
     if actor == "core" || actor == "operator" || actor == "startup_watchdog" || actor == "provider_error" then actor
     else "unknown"
   let cInfo : JobCancellation := { actor := cleanActor, reason := cleanReason, requestedAt := nowTs }
+  if cur.state == .lost then
+    let scopeStopped ← match lostScopeVerified? with
+      | some ok => pure ok
+      | none => stopLostJobScopeOutsideLock rt.cfg.nodeId rt.cfg.workDir jid
+    if !scopeStopped then
+      match ← rt.ledger.updateJob jid (fun r =>
+        if r.state != .lost then .ok r
+        else .ok { r with cancellation? := some cInfo }) with
+      | .error e => return .error e
+      | .ok (l', updated) => return .ok ({ rt with ledger := l' }, updated, false)
   let mut releasedRegular := false
   if let some lp := rt.liveProcs.get? jid then
     OrbNode.Posix.killPgrp lp.pid 15
@@ -1274,11 +1341,6 @@ def cancelJob (rt : NodeRuntime) (jid actor reason : String) : IO (Except String
     teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout
     if !lp.forced && !lp.sideLane && !lp.coordLane then
       releasedRegular := true
-  else if cur.state == .lost then
-    if let some (mode, userRt?) ← detectSystemdScopeMode then
-      let cleanHex := (jid.splitOn "-").foldl (· ++ ·) ""
-      let unit := s!"{nodeScopePrefix rt.cfg.nodeId rt.cfg.workDir}-job-{cleanHex}.scope"
-      stopSystemdScope (some { unit := unit, mode := mode, userRuntimeDir := userRt? })
   if let some sl := rt.launching.get? jid then
     if !sl.forced && !sl.sideLane && !sl.coordLane then
       releasedRegular := true
