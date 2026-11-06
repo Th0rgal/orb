@@ -293,7 +293,7 @@ fn remote_sandbox_lease_is_live(file: &std::fs::File) -> bool {
         };
         match mtime.elapsed() {
             Ok(age) => age <= std::time::Duration::from_secs(REMOTE_SANDBOX_LEASE_SECS),
-            Err(_) => true,
+            Err(_) => false,
         }
     }
     #[cfg(not(unix))]
@@ -1860,7 +1860,7 @@ def reclaim_lock(lock_path, remove_dir):
         marker = os.read(fd, 32).strip()
         if marker == b'ask-remote-lease':
             age = now - opened.st_mtime
-            if age < 0 or age <= lease_secs:
+            if 0 <= age <= lease_secs:
                 return False
         if remove_dir is not None:
             try:
@@ -3420,5 +3420,92 @@ mod tests {
             .is_none());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
         server.abort();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn future_mtime_remote_sandbox_lease_is_reclaimed_by_same_host_and_remote_gc() {
+        let set_mtime = |path: &Path, offset_secs: i64| {
+            let status = std::process::Command::new("python3")
+                .args([
+                    "-c",
+                    "import os, sys, time; ts = int(time.time()) + int(sys.argv[2]); os.utime(sys.argv[1], (ts, ts), follow_symlinks=False)",
+                ])
+                .arg(path)
+                .arg(offset_secs.to_string())
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+
+        let local_root = tempfile::tempdir().unwrap();
+        let future_local = local_root.path().join("ask-sandbox-future-local");
+        let future_local_lock = sandbox_lock_path(&future_local);
+        std::fs::create_dir_all(&future_local).unwrap();
+        std::fs::write(future_local.join("probe.txt"), "future").unwrap();
+        std::fs::write(&future_local_lock, "ask-remote-lease\n").unwrap();
+        set_mtime(&future_local_lock, 3600);
+
+        let future_orphan_lock = local_root
+            .path()
+            .join("ask-sandbox-future-orphan-local.lock");
+        std::fs::write(&future_orphan_lock, "ask-remote-lease\n").unwrap();
+        set_mtime(&future_orphan_lock, 3600);
+
+        let within_ttl_local = local_root.path().join("ask-sandbox-within-ttl-local");
+        let within_ttl_local_lock = sandbox_lock_path(&within_ttl_local);
+        std::fs::create_dir_all(&within_ttl_local).unwrap();
+        std::fs::write(within_ttl_local.join("probe.txt"), "live").unwrap();
+        std::fs::write(&within_ttl_local_lock, "ask-remote-lease\n").unwrap();
+        set_mtime(&within_ttl_local_lock, -120);
+
+        let future_file = std::fs::File::open(&future_local_lock).unwrap();
+        assert!(!remote_sandbox_lease_is_live(&future_file));
+        drop(future_file);
+
+        let within_ttl_file = std::fs::File::open(&within_ttl_local_lock).unwrap();
+        assert!(remote_sandbox_lease_is_live(&within_ttl_file));
+        drop(within_ttl_file);
+
+        gc_stale_sandboxes_with_observer(local_root.path(), &HashSet::new(), |_| {});
+        assert!(!future_local.exists());
+        assert!(!future_local_lock.exists());
+        assert!(!future_orphan_lock.exists());
+        assert!(within_ttl_local.join("probe.txt").exists());
+        assert!(within_ttl_local_lock.exists());
+
+        let remote_root = tempfile::tempdir().unwrap();
+        let future_remote = remote_root.path().join("ask-sandbox-future-remote");
+        let future_remote_lock = sandbox_lock_path(&future_remote);
+        std::fs::create_dir_all(&future_remote).unwrap();
+        std::fs::write(future_remote.join("probe.txt"), "future").unwrap();
+        std::fs::write(&future_remote_lock, "ask-remote-lease\n").unwrap();
+        set_mtime(&future_remote_lock, 3600);
+
+        let future_remote_orphan_lock = remote_root
+            .path()
+            .join("ask-sandbox-future-orphan-remote.lock");
+        std::fs::write(&future_remote_orphan_lock, "ask-remote-lease\n").unwrap();
+        set_mtime(&future_remote_orphan_lock, 3600);
+
+        let within_ttl_remote = remote_root.path().join("ask-sandbox-within-ttl-remote");
+        let within_ttl_remote_lock = sandbox_lock_path(&within_ttl_remote);
+        std::fs::create_dir_all(&within_ttl_remote).unwrap();
+        std::fs::write(within_ttl_remote.join("probe.txt"), "live").unwrap();
+        std::fs::write(&within_ttl_remote_lock, "ask-remote-lease\n").unwrap();
+        set_mtime(&within_ttl_remote_lock, -120);
+
+        let gc_cmd = remote_sandbox_gc_command(&remote_root.path().to_string_lossy());
+        let gc_out = std::process::Command::new("/bin/bash")
+            .arg("-lc")
+            .arg(&gc_cmd)
+            .output()
+            .unwrap();
+        assert!(gc_out.status.success());
+        assert!(!future_remote.exists());
+        assert!(!future_remote_lock.exists());
+        assert!(!future_remote_orphan_lock.exists());
+        assert!(within_ttl_remote.join("probe.txt").exists());
+        assert!(within_ttl_remote_lock.exists());
     }
 }
