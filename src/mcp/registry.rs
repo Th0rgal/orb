@@ -261,6 +261,7 @@ async fn run_mcp_stdio_actor(
     let mut line = String::new();
     let mut pending: HashMap<u64, oneshot::Sender<anyhow::Result<serde_json::Value>>> =
         HashMap::new();
+    let mut child_exited: Option<std::io::Result<std::process::ExitStatus>> = None;
 
     let exit_reason: &'static str = loop {
         tokio::select! {
@@ -268,7 +269,10 @@ async fn run_mcp_stdio_actor(
             _ = cancel_token.cancelled() => {
                 break "MCP server killed";
             }
-            _ = child.wait() => break "MCP child exited",
+            status = child.wait() => {
+                child_exited = Some(status);
+                break "MCP child exited";
+            }
             read_res = stdout_reader.read_line(&mut line) => {
                 match read_res {
                     Ok(0) => break "MCP process closed stdout",
@@ -336,26 +340,46 @@ async fn run_mcp_stdio_actor(
                         if pending.len() >= 64 {
                             pending.retain(|_, tx| !tx.is_closed());
                         }
-                        if let Err(err) = async {
-                            stdin.write_all(payload.as_bytes()).await?;
-                            stdin.write_all(b"\n").await?;
-                            stdin.flush().await
-                        }
-                        .await
-                        {
+                        let write_outcome = tokio::select! {
+                            biased;
+                            _ = cancel_token.cancelled() => {
+                                let _ = resp_tx.send(Err(anyhow::anyhow!("MCP server killed")));
+                                break "MCP server killed";
+                            }
+                            status = child.wait() => {
+                                child_exited = Some(status);
+                                let _ = resp_tx.send(Err(anyhow::anyhow!("MCP child exited")));
+                                break "MCP child exited";
+                            }
+                            res = async {
+                                stdin.write_all(payload.as_bytes()).await?;
+                                stdin.write_all(b"\n").await?;
+                                stdin.flush().await
+                            } => res,
+                        };
+                        if let Err(err) = write_outcome {
                             let _ = resp_tx.send(Err(anyhow::anyhow!("Stdin write error: {}", err)));
                             break "MCP stdin write error";
                         }
                         pending.insert(id, resp_tx);
                     }
                     Some(McpStdioCommand::Notify { payload }) => {
-                        if let Err(err) = async {
-                            stdin.write_all(payload.as_bytes()).await?;
-                            stdin.write_all(b"\n").await?;
-                            stdin.flush().await
-                        }
-                        .await
-                        {
+                        let write_outcome = tokio::select! {
+                            biased;
+                            _ = cancel_token.cancelled() => {
+                                break "MCP server killed";
+                            }
+                            status = child.wait() => {
+                                child_exited = Some(status);
+                                break "MCP child exited";
+                            }
+                            res = async {
+                                stdin.write_all(payload.as_bytes()).await?;
+                                stdin.write_all(b"\n").await?;
+                                stdin.flush().await
+                            } => res,
+                        };
+                        if let Err(err) = write_outcome {
                             tracing::debug!(error = %err, "MCP stdio notification write failed");
                             break "MCP stdin write error";
                         }
@@ -374,14 +398,18 @@ async fn run_mcp_stdio_actor(
     for (_, tx) in pending.drain() {
         let _ = tx.send(Err(anyhow::anyhow!("{}", exit_reason)));
     }
-    let exit_status = match child.try_wait() {
-        Ok(Some(status)) => Some(status),
-        _ => {
-            let _ = child.start_kill();
-            tokio::time::timeout(MCP_STDIO_REAP_TIMEOUT, child.wait())
-                .await
-                .ok()
-                .and_then(Result::ok)
+    let exit_status = if let Some(wait_res) = child_exited {
+        wait_res.ok()
+    } else {
+        match child.try_wait() {
+            Ok(Some(status)) => Some(status),
+            _ => {
+                let _ = child.start_kill();
+                tokio::time::timeout(MCP_STDIO_REAP_TIMEOUT, child.wait())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+            }
         }
     };
     if let Some(task) = stderr_task {
@@ -863,7 +891,7 @@ impl McpRegistry {
         id: Uuid,
         process: &McpStdioHandle,
         error: String,
-    ) -> anyhow::Result<()> {
+    ) {
         Self::reconcile_stdio_exit(
             &self.states,
             &self.stdio_processes,
@@ -871,7 +899,9 @@ impl McpRegistry {
             process.generation,
             error,
         );
-        process.kill_and_wait().await
+        if let Err(error) = process.kill_and_wait().await {
+            tracing::warn!(%id, generation = process.generation, %error, "Failed to reap MCP stdio process");
+        }
     }
 
     fn reconcile_stdio_exit(
@@ -886,7 +916,7 @@ impl McpRegistry {
                 return;
             }
             if let Some(mut state) = states.get_mut(&id) {
-                if state.status != McpStatus::Disabled {
+                if state.config.enabled && state.status != McpStatus::Disabled {
                     state.status = McpStatus::Error;
                     state.error = Some(exit_diagnostic);
                 }
@@ -959,13 +989,15 @@ impl McpRegistry {
     }
 
     /// Spawn a stdio MCP process managed by a bounded per-server [`McpStdioActor`].
+    /// Returns `Ok(None)` if the server was concurrently disabled or removed before
+    /// the spawned process could be published into `stdio_processes`.
     async fn spawn_stdio_process(
         &self,
         id: Uuid,
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
-    ) -> anyhow::Result<McpStdioHandle> {
+    ) -> anyhow::Result<Option<McpStdioHandle>> {
         let mut cmd = Command::new(command);
         cmd.args(args)
             .stdin(Stdio::piped())
@@ -1009,9 +1041,6 @@ impl McpRegistry {
             generation,
             stopped,
         };
-        if let Some(previous) = self.stdio_processes.insert(id, handle.clone()) {
-            previous.kill();
-        }
         tokio::spawn(async move {
             let exit_diagnostic =
                 run_mcp_stdio_actor(child, stdin, stdout, stderr_task, cmd_rx, actor_cancel).await;
@@ -1029,7 +1058,41 @@ impl McpRegistry {
             actor_stopped.cancel();
         });
 
-        Ok(handle)
+        let published = {
+            let entry = self.stdio_processes.entry(id);
+            let active = self
+                .states
+                .get(&id)
+                .is_some_and(|s| s.config.enabled && s.status != McpStatus::Disabled);
+            if active {
+                match entry {
+                    dashmap::mapref::entry::Entry::Occupied(mut occ) => {
+                        let prev = occ.insert(handle.clone());
+                        prev.kill();
+                    }
+                    dashmap::mapref::entry::Entry::Vacant(vac) => {
+                        vac.insert(handle.clone());
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        };
+
+        if !published {
+            if let Err(error) = handle.kill_and_wait().await {
+                tracing::warn!(
+                    %id,
+                    generation = handle.generation,
+                    %error,
+                    "Failed to reap unpublished MCP stdio process"
+                );
+            }
+            return Ok(None);
+        }
+
+        Ok(Some(handle))
     }
 
     /// Initialize connection with an MCP server (HTTP)
@@ -1174,8 +1237,19 @@ impl McpRegistry {
         // Remove from persistent store
         self.config_store.remove(id).await?;
 
-        // Remove from states
-        self.states.remove(&id);
+        // Remove from states under stdio_processes -> states lock order so an
+        // in-flight spawn_stdio_process cannot leave a live handle after removal.
+        let late_handle = {
+            let entry = self.stdio_processes.entry(id);
+            self.states.remove(&id);
+            match entry {
+                dashmap::mapref::entry::Entry::Occupied(occ) => Some(occ.remove()),
+                dashmap::mapref::entry::Entry::Vacant(_) => None,
+            }
+        };
+        if let Some(handle) = late_handle {
+            handle.kill();
+        }
 
         Ok(())
     }
@@ -1208,11 +1282,22 @@ impl McpRegistry {
         // Update persistent config
         let config = self.config_store.disable(id).await?;
 
-        // Update runtime state
-        if let Some(mut state) = self.states.get_mut(&id) {
-            state.config = config;
-            state.status = McpStatus::Disabled;
-            state.error = None;
+        // Update runtime state under stdio_processes -> states lock order so an
+        // in-flight spawn_stdio_process cannot leave a live handle while Disabled.
+        let late_handle = {
+            let entry = self.stdio_processes.entry(id);
+            if let Some(mut state) = self.states.get_mut(&id) {
+                state.config = config;
+                state.status = McpStatus::Disabled;
+                state.error = None;
+            }
+            match entry {
+                dashmap::mapref::entry::Entry::Occupied(occ) => Some(occ.remove()),
+                dashmap::mapref::entry::Entry::Vacant(_) => None,
+            }
+        };
+        if let Some(handle) = late_handle {
+            handle.kill();
         }
 
         self.get(id)
@@ -1227,8 +1312,8 @@ impl McpRegistry {
         id: Uuid,
         req: super::types::UpdateMcpRequest,
     ) -> anyhow::Result<McpServerState> {
-        // Kill existing stdio process if transport might change
-        if req.transport.is_some() {
+        // Kill existing stdio process if transport might change or MCP is being disabled
+        if req.transport.is_some() || req.enabled == Some(false) {
             if let Some((_, handle)) = self.stdio_processes.remove(&id) {
                 handle.kill();
             }
@@ -1262,18 +1347,32 @@ impl McpRegistry {
             })
             .await?;
 
-        // Update runtime state
-        if let Some(mut state) = self.states.get_mut(&id) {
-            state.config = config;
-            // Reset status if transport changed
-            if req.transport.is_some() {
-                state.status = if state.config.enabled {
-                    McpStatus::Disconnected
-                } else {
-                    McpStatus::Disabled
-                };
-                state.error = None;
+        // Update runtime state under stdio_processes -> states lock order
+        let late_handle = {
+            let entry = self.stdio_processes.entry(id);
+            if let Some(mut state) = self.states.get_mut(&id) {
+                state.config = config;
+                if !state.config.enabled {
+                    state.status = McpStatus::Disabled;
+                    state.error = None;
+                } else if req.transport.is_some()
+                    || (req.enabled == Some(true) && state.status == McpStatus::Disabled)
+                {
+                    state.status = McpStatus::Disconnected;
+                    state.error = None;
+                }
             }
+            if req.transport.is_some() || req.enabled == Some(false) {
+                match entry {
+                    dashmap::mapref::entry::Entry::Occupied(occ) => Some(occ.remove()),
+                    dashmap::mapref::entry::Entry::Vacant(_) => None,
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(handle) = late_handle {
+            handle.kill();
         }
 
         self.get(id)
@@ -1281,15 +1380,17 @@ impl McpRegistry {
             .ok_or_else(|| anyhow::anyhow!("MCP not found"))
     }
 
-    /// Helper to update state with error
+    /// Helper to update state with error without overwriting a concurrently disabled server.
     async fn update_state_error(&self, id: Uuid, error_msg: String) {
         if let Some(mut state) = self.states.get_mut(&id) {
-            state.status = McpStatus::Error;
-            state.error = Some(error_msg);
+            if state.config.enabled && state.status != McpStatus::Disabled {
+                state.status = McpStatus::Error;
+                state.error = Some(error_msg);
+            }
         }
     }
 
-    /// Helper to update state with success
+    /// Helper to update state with success without overwriting a concurrently disabled server.
     async fn update_state_success(
         &self,
         id: Uuid,
@@ -1298,12 +1399,14 @@ impl McpRegistry {
     ) {
         let tool_names: Vec<String> = tool_descriptors.iter().map(|t| t.name.clone()).collect();
         if let Some(mut state) = self.states.get_mut(&id) {
-            state.config.tools = tool_names;
-            state.config.tool_descriptors = tool_descriptors;
-            state.config.version = server_version;
-            state.config.last_connected_at = Some(chrono::Utc::now());
-            state.status = McpStatus::Connected;
-            state.error = None;
+            if state.config.enabled && state.status != McpStatus::Disabled {
+                state.config.tools = tool_names;
+                state.config.tool_descriptors = tool_descriptors;
+                state.config.version = server_version;
+                state.config.last_connected_at = Some(chrono::Utc::now());
+                state.status = McpStatus::Connected;
+                state.error = None;
+            }
         }
     }
 
@@ -1415,7 +1518,13 @@ impl McpRegistry {
         }
 
         let process = match self.spawn_stdio_process(id, &command, &args, &env).await {
-            Ok(p) => p,
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return self
+                    .get(id)
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("MCP not found"));
+            }
             Err(e) => {
                 self.update_state_error(id, format!("Failed to spawn process: {}", e))
                     .await;
@@ -1434,9 +1543,11 @@ impl McpRegistry {
                 Ok(result) => result,
                 Err(e) => {
                     let error = format!("Initialize failed: {e}");
-                    self.cleanup_failed_stdio_process(id, &process, error.clone())
-                        .await?;
-                    anyhow::bail!(error);
+                    self.cleanup_failed_stdio_process(id, &process, error).await;
+                    return self
+                        .get(id)
+                        .await
+                        .ok_or_else(|| anyhow::anyhow!("MCP not found"));
                 }
             };
 
@@ -1452,13 +1563,24 @@ impl McpRegistry {
         {
             Ok(result) => match serde_json::from_value::<McpToolsResponse>(result) {
                 Ok(tools_response) => {
-                    let still_current = self
-                        .stdio_processes
-                        .get(&id)
-                        .is_some_and(|entry| entry.generation == process.generation);
-                    if !still_current {
-                        let _ = process.kill_and_wait().await;
-                        anyhow::bail!("MCP stdio process exited or was superseded during refresh");
+                    let still_active_before_persist = {
+                        let proc_guard = self.stdio_processes.get(&id);
+                        proc_guard.is_some_and(|entry| entry.generation == process.generation)
+                            && self.states.get(&id).is_some_and(|s| {
+                                s.config.enabled && s.status != McpStatus::Disabled
+                            })
+                    };
+                    if !still_active_before_persist {
+                        self.cleanup_failed_stdio_process(
+                            id,
+                            &process,
+                            "MCP stdio process exited or was superseded during refresh".to_string(),
+                        )
+                        .await;
+                        return self
+                            .get(id)
+                            .await
+                            .ok_or_else(|| anyhow::anyhow!("MCP not found"));
                     }
 
                     let tool_descriptors = tools_response.tools;
@@ -1468,38 +1590,58 @@ impl McpRegistry {
                     let _ = self
                         .config_store
                         .update(id, |c| {
-                            c.tools = tool_names.clone();
-                            c.tool_descriptors = tool_descriptors.clone();
-                            c.version = server_version.clone();
-                            c.last_connected_at = Some(chrono::Utc::now());
+                            if c.enabled {
+                                c.tools = tool_names.clone();
+                                c.tool_descriptors = tool_descriptors.clone();
+                                c.version = server_version.clone();
+                                c.last_connected_at = Some(chrono::Utc::now());
+                            }
                         })
                         .await;
 
-                    if let Some(entry) = self.stdio_processes.get(&id) {
-                        if entry.generation == process.generation {
-                            self.update_state_success(id, tool_descriptors, server_version)
-                                .await;
+                    let transitioned = {
+                        let proc_guard = self.stdio_processes.get(&id);
+                        if proc_guard
+                            .as_ref()
+                            .is_some_and(|entry| entry.generation == process.generation)
+                        {
+                            if let Some(mut state) = self.states.get_mut(&id) {
+                                if state.config.enabled && state.status != McpStatus::Disabled {
+                                    state.config.tools = tool_names;
+                                    state.config.tool_descriptors = tool_descriptors;
+                                    state.config.version = server_version;
+                                    state.config.last_connected_at = Some(chrono::Utc::now());
+                                    state.status = McpStatus::Connected;
+                                    state.error = None;
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
                         } else {
-                            drop(entry);
-                            let _ = process.kill_and_wait().await;
-                            anyhow::bail!("MCP stdio process superseded during refresh");
+                            false
                         }
-                    } else {
-                        anyhow::bail!("MCP stdio process exited during refresh");
+                    };
+
+                    if !transitioned {
+                        self.cleanup_failed_stdio_process(
+                            id,
+                            &process,
+                            "MCP stdio process exited or was superseded during refresh".to_string(),
+                        )
+                        .await;
                     }
                 }
                 Err(e) => {
                     let error = format!("Failed to parse tools: {e}");
-                    self.cleanup_failed_stdio_process(id, &process, error.clone())
-                        .await?;
-                    anyhow::bail!(error);
+                    self.cleanup_failed_stdio_process(id, &process, error).await;
                 }
             },
             Err(e) => {
                 let error = format!("tools/list failed: {e}");
-                self.cleanup_failed_stdio_process(id, &process, error.clone())
-                    .await?;
-                anyhow::bail!(error);
+                self.cleanup_failed_stdio_process(id, &process, error).await;
             }
         }
 
@@ -1799,14 +1941,16 @@ sys.stdout.flush()
 for line in sys.stdin:
     pass
 "#;
+        let id = add_python_stdio_mcp(&registry, "multiplex-test", script, HashMap::new()).await;
         let handle = registry
             .spawn_stdio_process(
-                Uuid::new_v4(),
+                id,
                 "python3",
                 &["-u".to_string(), "-c".to_string(), script.to_string()],
                 &HashMap::new(),
             )
             .await
+            .unwrap()
             .unwrap();
 
         let h1 = handle.clone();
@@ -2081,16 +2225,20 @@ for line in sys.stdin:
         );
         let id = add_python_stdio_mcp(&registry, "bad-tools-parse", bad_schema_script, env).await;
 
-        let err = registry
-            .refresh(id)
-            .await
-            .expect_err("refresh_stdio should fail when tools/list payload is malformed");
-        assert!(err.to_string().contains("Failed to parse tools"));
-        assert!(!registry.stdio_processes.contains_key(&id));
-
-        let state = registry.get(id).await.unwrap();
+        let state = registry.refresh(id).await.expect(
+            "refresh_stdio should return Ok(Error state) when tools/list payload is malformed",
+        );
         assert_eq!(state.status, McpStatus::Error);
         assert!(state
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Failed to parse tools"));
+        assert!(!registry.stdio_processes.contains_key(&id));
+
+        let fetched_state = registry.get(id).await.unwrap();
+        assert_eq!(fetched_state.status, McpStatus::Error);
+        assert!(fetched_state
             .error
             .as_deref()
             .unwrap_or_default()
@@ -2141,15 +2289,19 @@ for line in sys.stdin:
         );
         let id2 = add_python_stdio_mcp(&registry, "bad-tools-rpc", rpc_err_script, env2).await;
 
-        let err2 = registry
-            .refresh(id2)
-            .await
-            .expect_err("refresh_stdio should fail when tools/list returns JSON-RPC error");
-        assert!(err2.to_string().contains("tools/list failed"));
+        let state2 = registry.refresh(id2).await.expect(
+            "refresh_stdio should return Ok(Error state) when tools/list returns JSON-RPC error",
+        );
+        assert_eq!(state2.status, McpStatus::Error);
+        assert!(state2
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("tools/list failed"));
         assert!(!registry.stdio_processes.contains_key(&id2));
 
-        let state2 = registry.get(id2).await.unwrap();
-        assert_eq!(state2.status, McpStatus::Error);
+        let fetched_state2 = registry.get(id2).await.unwrap();
+        assert_eq!(fetched_state2.status, McpStatus::Error);
 
         let pid2: u32 = tokio::fs::read_to_string(&rpc_err_pid_file)
             .await
@@ -2158,5 +2310,477 @@ for line in sys.stdin:
             .parse()
             .unwrap();
         assert!(!pid_is_alive_or_zombie(pid2));
+    }
+
+    #[tokio::test]
+    async fn wedged_stdin_write_all_cancels_and_reaps_promptly() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("wedged_stdin.pid");
+        let registry = McpRegistry::new(dir.path()).await;
+
+        let script = r#"
+import os, time
+with open(os.environ["PID_FILE"], "w") as f:
+    f.write(str(os.getpid()))
+time.sleep(60)
+"#;
+        let mut env = HashMap::new();
+        env.insert(
+            "PID_FILE".to_string(),
+            pid_file.to_string_lossy().to_string(),
+        );
+        let id = add_python_stdio_mcp(&registry, "wedged-stdin", script, env.clone()).await;
+        let handle = registry
+            .spawn_stdio_process(
+                id,
+                "python3",
+                &["-u".to_string(), "-c".to_string(), script.to_string()],
+                &env,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !pid_file.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("wedged child wrote pid");
+
+        let pid: u32 = tokio::fs::read_to_string(&pid_file)
+            .await
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        let huge_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "flood",
+            "params": { "blob": "X".repeat(2 * 1024 * 1024) }
+        })
+        .to_string();
+
+        let req_handle = handle.clone();
+        let inflight = tokio::spawn(async move { req_handle.request(1, huge_payload).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let started = std::time::Instant::now();
+        handle
+            .kill_and_wait()
+            .await
+            .expect("kill_and_wait must interrupt backpressured stdin write_all and reap child");
+        assert!(started.elapsed() < MCP_STDIO_REAP_TIMEOUT);
+        assert!(!pid_is_alive_or_zombie(pid));
+
+        let req_res = tokio::time::timeout(Duration::from_secs(1), inflight)
+            .await
+            .expect("inflight request resolves after kill_and_wait")
+            .unwrap();
+        assert!(req_res.is_err());
+    }
+
+    #[tokio::test]
+    async fn wedged_child_exit_during_stdin_write_all_unblocks_and_reaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("wedged_exit.pid");
+        let registry = McpRegistry::new(dir.path()).await;
+
+        let script = r#"
+import os, sys, time
+with open(os.environ["PID_FILE"], "w") as f:
+    f.write(str(os.getpid()))
+time.sleep(0.1)
+os._exit(17)
+"#;
+        let mut env = HashMap::new();
+        env.insert(
+            "PID_FILE".to_string(),
+            pid_file.to_string_lossy().to_string(),
+        );
+        let id = add_python_stdio_mcp(&registry, "wedged-exit", script, env.clone()).await;
+        let handle = registry
+            .spawn_stdio_process(
+                id,
+                "python3",
+                &["-u".to_string(), "-c".to_string(), script.to_string()],
+                &env,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let huge_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "flood",
+            "params": { "blob": "Y".repeat(2 * 1024 * 1024) }
+        })
+        .to_string();
+
+        let res = tokio::time::timeout(Duration::from_secs(2), handle.request(1, huge_payload))
+            .await
+            .expect("actor unblocks promptly when child exits during backpressured write_all");
+        assert!(res.is_err());
+
+        tokio::time::timeout(Duration::from_secs(2), handle.stopped.cancelled())
+            .await
+            .expect("actor stops cleanly without double-waiting child");
+
+        let pid: u32 = tokio::fs::read_to_string(&pid_file)
+            .await
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!pid_is_alive_or_zombie(pid));
+    }
+
+    #[tokio::test]
+    async fn concurrent_disable_and_remove_during_refresh_stdio_reap_child_without_clobbering() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(McpRegistry::new(dir.path()).await);
+
+        // Case 1: disable(id) races while refresh_stdio is in flight (with SIGTERM ignored so tools/list reply succeeds after disable)
+        let sigterm_ignore_script = r#"
+import json, os, signal, sys, time
+signal.signal(signal.SIGTERM, lambda *_: None)
+with open(os.environ["PID_FILE"], "w") as f:
+    f.write(str(os.getpid()))
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    req_id = msg.get("id")
+    if method == "initialize":
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "slow-refresh", "version": "1.0.0"}
+            }
+        }) + "\n")
+        sys.stdout.flush()
+    elif method == "tools/list":
+        with open(os.environ["READY_FILE"], "w") as f:
+            f.write("ready")
+        while not os.path.exists(os.environ["RELEASE_FILE"]):
+            time.sleep(0.01)
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"tools": [{"name": "ping", "description": "ping", "inputSchema": {}}]}
+        }) + "\n")
+        sys.stdout.flush()
+        time.sleep(60)
+"#;
+        let pid_file_1 = dir.path().join("disable_race.pid");
+        let ready_file_1 = dir.path().join("disable_race.ready");
+        let release_file_1 = dir.path().join("disable_race.release");
+        let mut env1 = HashMap::new();
+        env1.insert(
+            "PID_FILE".to_string(),
+            pid_file_1.to_string_lossy().to_string(),
+        );
+        env1.insert(
+            "READY_FILE".to_string(),
+            ready_file_1.to_string_lossy().to_string(),
+        );
+        env1.insert(
+            "RELEASE_FILE".to_string(),
+            release_file_1.to_string_lossy().to_string(),
+        );
+        let id1 =
+            add_python_stdio_mcp(&registry, "disable-race", sigterm_ignore_script, env1).await;
+
+        let reg_refresh = Arc::clone(&registry);
+        let refresh_task = tokio::spawn(async move { reg_refresh.refresh(id1).await });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !ready_file_1.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("refresh reached tools/list");
+
+        let disabled = registry.disable(id1).await.unwrap();
+        assert_eq!(disabled.status, McpStatus::Disabled);
+        assert!(!disabled.config.enabled);
+
+        // Wait for refresh_task directly: disable(id1) cancelled the actor so
+        // refresh_stdio's tools/list unblocks immediately with an error and must
+        // preserve McpStatus::Disabled instead of clobbering it with Error.
+        let refresh_res = tokio::time::timeout(Duration::from_secs(3), refresh_task)
+            .await
+            .expect("refresh finished promptly after disable")
+            .unwrap()
+            .unwrap();
+        assert_eq!(refresh_res.status, McpStatus::Disabled);
+        assert!(!refresh_res.config.enabled);
+        assert!(!registry.stdio_processes.contains_key(&id1));
+
+        let final_state = registry.get(id1).await.unwrap();
+        assert_eq!(final_state.status, McpStatus::Disabled);
+        assert!(!final_state.config.enabled);
+
+        let pid1: u32 = tokio::fs::read_to_string(&pid_file_1)
+            .await
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while pid_is_alive_or_zombie(pid1) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("disabled server child process reaped");
+
+        // Case 1b: disable(id) races AFTER tools/list returned Ok(...) while refresh_stdio is persisting config
+        let fast_tools_script = r#"
+import json, os, signal, sys, time
+signal.signal(signal.SIGTERM, lambda *_: None)
+with open(os.environ["PID_FILE"], "w") as f:
+    f.write(str(os.getpid()))
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    req_id = msg.get("id")
+    if method == "initialize":
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "fast-refresh", "version": "1.0.0"}
+            }
+        }) + "\n")
+        sys.stdout.flush()
+    elif method == "tools/list":
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"tools": [{"name": "ping", "description": "ping", "inputSchema": {}}]}
+        }) + "\n")
+        sys.stdout.flush()
+        with open(os.environ["LISTED_FILE"], "w") as f:
+            f.write("listed")
+        time.sleep(60)
+"#;
+        let pid_file_1b = dir.path().join("disable_after_list.pid");
+        let listed_file_1b = dir.path().join("disable_after_list.listed");
+        let mut env1b = HashMap::new();
+        env1b.insert(
+            "PID_FILE".to_string(),
+            pid_file_1b.to_string_lossy().to_string(),
+        );
+        env1b.insert(
+            "LISTED_FILE".to_string(),
+            listed_file_1b.to_string_lossy().to_string(),
+        );
+        let id1b =
+            add_python_stdio_mcp(&registry, "disable-after-list", fast_tools_script, env1b).await;
+
+        // Hold config_store write lock so refresh_stdio parks right after tools/list Ok(...)
+        let reg_refresh_1b = Arc::clone(&registry);
+        let refresh_task_1b = tokio::spawn(async move { reg_refresh_1b.refresh(id1b).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !listed_file_1b.exists() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("tools/list response flushed");
+        let disabled_1b = registry.disable(id1b).await.unwrap();
+        assert_eq!(disabled_1b.status, McpStatus::Disabled);
+        let refresh_res_1b = tokio::time::timeout(Duration::from_secs(3), refresh_task_1b)
+            .await
+            .expect("refresh 1b finished")
+            .unwrap()
+            .unwrap();
+        let after_1b = registry.get(id1b).await.unwrap();
+        assert_eq!(after_1b.status, McpStatus::Disabled);
+        assert!(!after_1b.config.enabled);
+        assert!(!registry.stdio_processes.contains_key(&id1b));
+        let _ = refresh_res_1b;
+        let pid1b: u32 = tokio::fs::read_to_string(&pid_file_1b)
+            .await
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while pid_is_alive_or_zombie(pid1b) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("disabled 1b child reaped");
+
+        // Case 2: spawn_stdio_process sees an already-disabled server and refuses to publish
+        let pid_file_unpub = dir.path().join("disabled_spawn.pid");
+        let mut env_unpub = HashMap::new();
+        env_unpub.insert(
+            "PID_FILE".to_string(),
+            pid_file_unpub.to_string_lossy().to_string(),
+        );
+        let unpublished = registry
+            .spawn_stdio_process(
+                id1,
+                "python3",
+                &[
+                    "-u".to_string(),
+                    "-c".to_string(),
+                    "import os, time; open(os.environ['PID_FILE'], 'w').write(str(os.getpid())); time.sleep(60)".to_string(),
+                ],
+                &env_unpub,
+            )
+            .await
+            .unwrap();
+        assert!(unpublished.is_none());
+        assert!(!registry.stdio_processes.contains_key(&id1));
+        assert_eq!(registry.get(id1).await.unwrap().status, McpStatus::Disabled);
+        if let Ok(pid_str) = tokio::fs::read_to_string(&pid_file_unpub).await {
+            if let Ok(pid_unpub) = pid_str.trim().parse::<u32>() {
+                assert!(!pid_is_alive_or_zombie(pid_unpub));
+            }
+        }
+
+        // Case 3: remove(id) races while refresh_stdio is in flight (with SIGTERM ignored so tools/list completes)
+        let pid_file_2 = dir.path().join("remove_race.pid");
+        let ready_file_2 = dir.path().join("remove_race.ready");
+        let release_file_2 = dir.path().join("remove_race.release");
+        let mut env2 = HashMap::new();
+        env2.insert(
+            "PID_FILE".to_string(),
+            pid_file_2.to_string_lossy().to_string(),
+        );
+        env2.insert(
+            "READY_FILE".to_string(),
+            ready_file_2.to_string_lossy().to_string(),
+        );
+        env2.insert(
+            "RELEASE_FILE".to_string(),
+            release_file_2.to_string_lossy().to_string(),
+        );
+        let id2 = add_python_stdio_mcp(&registry, "remove-race", sigterm_ignore_script, env2).await;
+
+        let reg_refresh_2 = Arc::clone(&registry);
+        let refresh_task_2 = tokio::spawn(async move { reg_refresh_2.refresh(id2).await });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !ready_file_2.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("refresh 2 reached tools/list");
+
+        registry.remove(id2).await.unwrap();
+        assert!(registry.get(id2).await.is_none());
+        tokio::fs::write(&release_file_2, "go").await.unwrap();
+
+        let refresh_res_2 = tokio::time::timeout(Duration::from_secs(3), refresh_task_2)
+            .await
+            .expect("refresh 2 finished promptly after remove")
+            .unwrap();
+        assert!(refresh_res_2.is_err());
+        assert!(registry.get(id2).await.is_none());
+        assert!(!registry.stdio_processes.contains_key(&id2));
+
+        let pid2: u32 = tokio::fs::read_to_string(&pid_file_2)
+            .await
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while pid_is_alive_or_zombie(pid2) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("removed server child process reaped");
+
+        // Case 4: refresh_stdio initialize failure with wedged stdin preserves primary diagnostic and reaps child
+        let wedged_init_script = r#"
+import os, time
+with open(os.environ["PID_FILE"], "w") as f:
+    f.write(str(os.getpid()))
+time.sleep(60)
+"#;
+        let pid_file_3 = dir.path().join("wedged_init.pid");
+        let mut env3 = HashMap::new();
+        env3.insert(
+            "PID_FILE".to_string(),
+            pid_file_3.to_string_lossy().to_string(),
+        );
+        let id3 =
+            add_python_stdio_mcp(&registry, "wedged-init", wedged_init_script, env3.clone()).await;
+        let proc3 = registry
+            .spawn_stdio_process(
+                id3,
+                "python3",
+                &[
+                    "-u".to_string(),
+                    "-c".to_string(),
+                    wedged_init_script.to_string(),
+                ],
+                &env3,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !pid_file_3.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("wedged init child wrote pid");
+
+        let flood_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 999,
+            "method": "flood",
+            "params": { "blob": "Z".repeat(2 * 1024 * 1024) }
+        })
+        .to_string();
+        let proc3_flood = proc3.clone();
+        let _flood_task =
+            tokio::spawn(async move { proc3_flood.request(999, flood_payload).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        registry
+            .cleanup_failed_stdio_process(
+                id3,
+                &proc3,
+                "Initialize failed: synthetic init error".to_string(),
+            )
+            .await;
+
+        let state3 = registry.get(id3).await.unwrap();
+        assert_eq!(state3.status, McpStatus::Error);
+        assert_eq!(
+            state3.error.as_deref(),
+            Some("Initialize failed: synthetic init error")
+        );
+        assert!(!registry.stdio_processes.contains_key(&id3));
+
+        let pid3: u32 = tokio::fs::read_to_string(&pid_file_3)
+            .await
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!pid_is_alive_or_zombie(pid3));
     }
 }
