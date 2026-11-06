@@ -569,7 +569,201 @@ pub struct WorkspaceStore {
     working_dir: PathBuf,
 }
 
+fn workspace_build_lock_directory(workspace_path: &Path) -> PathBuf {
+    let mut path = workspace_path.to_path_buf().into_os_string();
+    path.push(".build");
+    PathBuf::from(path)
+}
+
+pub fn workspace_build_lock_path(workspace_path: &Path) -> PathBuf {
+    workspace_build_lock_directory(workspace_path).join("build.lock")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildConflict {
+    pub status: axum::http::StatusCode,
+    pub message: String,
+}
+
+pub struct BuildClaimGuard {
+    store: Arc<WorkspaceStore>,
+    pub workspace: Workspace,
+    generation: u64,
+    lock: Option<std::fs::File>,
+}
+
+impl BuildClaimGuard {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub async fn settle(mut self, built: Workspace) -> Result<(), std::io::Error> {
+        self.store
+            .settle_workspace_build(&built, self.generation)
+            .await?;
+        self.lock.take();
+        Ok(())
+    }
+}
+
+impl Drop for BuildClaimGuard {
+    fn drop(&mut self) {
+        let Some(lock) = self.lock.take() else {
+            return;
+        };
+        let mut built = self.workspace.clone();
+        built.status = WorkspaceStatus::Error;
+        built.error_message = Some("Workspace build aborted before completion".into());
+        let store = Arc::clone(&self.store);
+        let generation = self.generation;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _lock = lock;
+                if let Err(error) = store.settle_workspace_build(&built, generation).await {
+                    tracing::error!(%error, "Failed to settle aborted workspace build");
+                }
+            });
+        } else {
+            std::thread::spawn(move || {
+                let _lock = lock;
+                if let Ok(runtime) = tokio::runtime::Builder::new_current_thread().build() {
+                    let _ = runtime.block_on(store.settle_workspace_build(&built, generation));
+                }
+            });
+        }
+    }
+}
+
 impl WorkspaceStore {
+    pub async fn try_claim_workspace_build(
+        self: &Arc<Self>,
+        id: Uuid,
+        distro: Option<String>,
+    ) -> Result<BuildClaimGuard, BuildConflict> {
+        use axum::http::StatusCode;
+        use fs2::FileExt;
+        use std::io::{Read, Seek, Write};
+
+        let conflict = |status: StatusCode, message: String| BuildConflict { status, message };
+        let io_error =
+            |error: std::io::Error| conflict(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        let _writer = self.workspaces.lock_writer().await;
+        let mut next = (*self.workspaces.load_full()).clone();
+        let workspace = next
+            .get_mut(&id)
+            .ok_or_else(|| conflict(StatusCode::NOT_FOUND, "Workspace not found".into()))?;
+        if workspace.status == WorkspaceStatus::Building {
+            return Err(conflict(
+                StatusCode::CONFLICT,
+                "Workspace build already in progress".into(),
+            ));
+        }
+        if workspace.workspace_type != WorkspaceType::Container {
+            return Err(conflict(
+                StatusCode::BAD_REQUEST,
+                "Workspace is not a container type".into(),
+            ));
+        }
+        let directory = workspace_build_lock_directory(&workspace.path);
+        std::fs::create_dir_all(&directory).map_err(io_error)?;
+        let mut lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(directory.join("build.lock"))
+            .map_err(io_error)?;
+        lock.try_lock_exclusive().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                conflict(
+                    StatusCode::CONFLICT,
+                    "Workspace build already in progress".into(),
+                )
+            } else {
+                io_error(error)
+            }
+        })?;
+        let mut previous = String::new();
+        lock.read_to_string(&mut previous).map_err(io_error)?;
+        let generation = previous
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0)
+            .max(workspace.config["build_generation"].as_u64().unwrap_or(0))
+            .checked_add(1)
+            .ok_or_else(|| {
+                conflict(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Build generation exhausted".into(),
+                )
+            })?;
+        lock.rewind().map_err(io_error)?;
+        lock.set_len(0).map_err(io_error)?;
+        write!(lock, "{generation}").map_err(io_error)?;
+        lock.sync_data().map_err(io_error)?;
+        workspace.config["build_generation"] = generation.into();
+        workspace.status = WorkspaceStatus::Building;
+        workspace.error_message = None;
+        if let Some(distro) = distro {
+            workspace.distro = Some(distro);
+        }
+        let claimed = workspace.clone();
+        self.persist_build_snapshot(&next).await.map_err(io_error)?;
+        self.workspaces.store(Arc::new(next));
+        Ok(BuildClaimGuard {
+            store: Arc::clone(self),
+            workspace: claimed,
+            generation,
+            lock: Some(lock),
+        })
+    }
+
+    async fn persist_build_snapshot(
+        &self,
+        next: &HashMap<Uuid, Workspace>,
+    ) -> Result<(), std::io::Error> {
+        let contents = serde_json::to_vec_pretty(&next.values().collect::<Vec<_>>())?;
+        crate::concurrency::write_atomic_async(&self.storage_path, &contents, None).await
+    }
+
+    pub async fn settle_for_generation(
+        &self,
+        built: &Workspace,
+        generation: u64,
+    ) -> Result<(), std::io::Error> {
+        self.settle_workspace_build(built, generation).await
+    }
+
+    async fn settle_workspace_build(
+        &self,
+        built: &Workspace,
+        generation: u64,
+    ) -> Result<(), std::io::Error> {
+        let _writer = self.workspaces.lock_writer().await;
+        let mut next = (*self.workspaces.load_full()).clone();
+        let Some(latest) = next.get_mut(&built.id) else {
+            return Ok(());
+        };
+        if latest.status != WorkspaceStatus::Building
+            || latest.config["build_generation"].as_u64() != Some(generation)
+        {
+            return Ok(());
+        }
+        latest.status = if built.status == WorkspaceStatus::Ready {
+            WorkspaceStatus::Ready
+        } else {
+            WorkspaceStatus::Error
+        };
+        latest.error_message = built.error_message.clone();
+        latest.distro = built.distro.clone();
+        if built.harness_versions.is_some() {
+            latest.harness_versions = built.harness_versions.clone();
+        }
+        let persisted = self.persist_build_snapshot(&next).await;
+        self.workspaces.store(Arc::new(next));
+        persisted
+    }
+
     /// Create a new workspace store, loading existing data from disk.
     ///
     /// This also scans for orphaned container directories and restores them.
@@ -612,6 +806,10 @@ impl WorkspaceStore {
         // while it is still reachable; if it is not, write an empty control
         // registry so first-use is distinguishable from a lost file.
         for workspace in workspaces.values_mut() {
+            if workspace.status == WorkspaceStatus::Building {
+                workspace.status = WorkspaceStatus::Error;
+                workspace.error_message = Some("Workspace build interrupted by restart".into());
+            }
             stamp_custom_workspace_control_registry(workspace, &working_dir);
         }
 
@@ -653,6 +851,7 @@ impl WorkspaceStore {
 
     /// Save workspaces to disk.
     async fn save_to_disk(&self) -> Result<(), std::io::Error> {
+        let _writer = self.workspaces.lock_writer().await;
         let contents = {
             let workspaces = self.workspaces.load();
             let workspaces_vec: Vec<&Workspace> = workspaces.values().collect();
@@ -805,6 +1004,13 @@ impl WorkspaceStore {
                 guard.entry(workspace.id)
             {
                 preserve_control_registry_authority(entry.get(), &mut workspace, &self.working_dir);
+                if let Some(generation) = entry.get().config.get("build_generation") {
+                    workspace.config["build_generation"] = generation.clone();
+                }
+                if entry.get().status == WorkspaceStatus::Building {
+                    workspace.status = WorkspaceStatus::Building;
+                    workspace.error_message = entry.get().error_message.clone();
+                }
                 entry.insert(workspace);
                 true
             } else {

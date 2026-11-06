@@ -190,23 +190,6 @@ impl From<Workspace> for WorkspaceResponse {
     }
 }
 
-/// Apply build-related fields from a completed build back to the latest stored
-/// workspace, preserving any updates (env vars, init script, etc.) that arrived
-/// while the build was running.
-async fn merge_build_result(store: &workspace::WorkspaceStore, built: Workspace) {
-    if let Some(mut latest) = store.get(built.id).await {
-        latest.status = built.status;
-        latest.error_message = built.error_message;
-        latest.distro = built.distro;
-        if built.harness_versions.is_some() {
-            latest.harness_versions = built.harness_versions;
-        }
-        store.update(latest).await;
-    } else {
-        store.update(built).await;
-    }
-}
-
 /// Look up a workspace by ID, returning 404 if it does not exist.
 async fn require_workspace(
     store: &workspace::WorkspaceStore,
@@ -917,52 +900,40 @@ async fn build_workspace(
     AxumPath(id): AxumPath<Uuid>,
     body: Option<Json<BuildWorkspaceRequest>>,
 ) -> Result<Json<WorkspaceResponse>, (StatusCode, String)> {
-    let mut workspace = require_workspace(&state.workspaces, id).await?;
-
-    if workspace.workspace_type != WorkspaceType::Container {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Workspace is not a container type".to_string(),
-        ));
-    }
-
     let force_rebuild = body.as_ref().and_then(|b| b.rebuild).unwrap_or(false);
-
-    // Parse distro from request (or stored workspace default)
-    let distro_override = body
-        .as_ref()
-        .and_then(|b| b.distro.as_ref())
-        .map(|d| parse_distro(d))
-        .transpose()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
-    let distro = match distro_override {
-        Some(distro) => {
-            workspace.distro = Some(distro.api_value().to_string());
-            Some(distro)
-        }
-        None => match workspace.distro.as_ref() {
-            Some(value) => Some(parse_distro(value).map_err(|e| (StatusCode::BAD_REQUEST, e))?),
-            None => None,
-        },
-    };
-
-    // Check if already building (prevents concurrent builds)
-    if workspace.status == WorkspaceStatus::Building {
-        return Err((
-            StatusCode::CONFLICT,
-            "Workspace build already in progress".to_string(),
-        ));
+    if let Some(distro) = body.as_ref().and_then(|b| b.distro.as_deref()) {
+        parse_distro(distro).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     }
 
-    // Set status to Building immediately to prevent concurrent builds
-    workspace.status = WorkspaceStatus::Building;
-    state.workspaces.update(workspace.clone()).await;
+    let claim = state
+        .workspaces
+        .try_claim_workspace_build(
+            id,
+            body.as_ref()
+                .and_then(|b| b.distro.as_deref())
+                .and_then(|d| parse_distro(d).ok())
+                .map(|d| d.api_value().to_string()),
+        )
+        .await
+        .map_err(|conflict| (conflict.status, conflict.message))?;
+    let distro = match claim.workspace.distro.as_deref() {
+        Some(value) => match parse_distro(value) {
+            Ok(distro) => Some(distro),
+            Err(error) => {
+                let mut failed = claim.workspace.clone();
+                failed.status = WorkspaceStatus::Error;
+                failed.error_message = Some(error.clone());
+                let _ = claim.settle(failed).await;
+                return Err((StatusCode::BAD_REQUEST, error));
+            }
+        },
+        None => None,
+    };
+    let response_workspace = claim.workspace.clone();
 
     // Run the container build in the background so long builds aren't tied to the HTTP request
-    let workspaces_store = Arc::clone(&state.workspaces);
     let working_dir = state.config.working_dir.clone();
-    let mut workspace_for_build = workspace.clone();
+    let mut workspace_for_build = claim.workspace.clone();
     let harness_policy = state.settings.get_harness_versions().await;
 
     tokio::spawn(async move {
@@ -976,6 +947,10 @@ async fn build_workspace(
         .await;
 
         if let Err(e) = result {
+            if workspace_for_build.status == WorkspaceStatus::Building {
+                workspace_for_build.status = WorkspaceStatus::Error;
+                workspace_for_build.error_message = Some(e.to_string());
+            }
             tracing::error!(
                 workspace = %workspace_for_build.name,
                 error = %e,
@@ -983,10 +958,12 @@ async fn build_workspace(
             );
         }
 
-        merge_build_result(&workspaces_store, workspace_for_build).await;
+        if let Err(error) = claim.settle(workspace_for_build).await {
+            tracing::error!(%error, "Failed to persist workspace build result");
+        }
     });
 
-    Ok(Json(workspace.into()))
+    Ok(Json(response_workspace.into()))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1425,6 +1402,13 @@ async fn rerun_init_script(
         ));
     }
 
+    let claim = state
+        .workspaces
+        .try_claim_workspace_build(id, None)
+        .await
+        .map_err(|conflict| (conflict.status, conflict.message))?;
+    workspace = claim.workspace.clone();
+
     // Write the init script to the container
     let script_path = workspace.path.join("sandboxed-init.sh");
     tokio::fs::write(&script_path, &init_script)
@@ -1449,11 +1433,6 @@ async fn rerun_init_script(
                 )
             })?;
     }
-
-    // Update status to building
-    workspace.status = WorkspaceStatus::Building;
-    workspace.error_message = None;
-    state.workspaces.update(workspace.clone()).await;
 
     // Run the init script
     let start_time = std::time::Instant::now();
@@ -1485,7 +1464,7 @@ async fn rerun_init_script(
             // Revert workspace status to Error so it's not stuck in Building
             workspace.status = WorkspaceStatus::Error;
             workspace.error_message = Some(format!("Failed to execute init script: {}", e));
-            state.workspaces.update(workspace).await;
+            let _ = claim.settle(workspace).await;
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to execute init script: {}", e),
@@ -1520,7 +1499,9 @@ async fn rerun_init_script(
         workspace.error_message = Some(format!("Init script failed: {}", error_msg));
     }
 
-    state.workspaces.update(workspace).await;
+    if let Err(error) = claim.settle(workspace).await {
+        tracing::error!(%error, "Failed to persist workspace init result");
+    }
 
     Ok(Json(RerunInitResponse {
         success,
@@ -2349,5 +2330,211 @@ mod tests {
             .expect_err("relative traversal must not leave the workspace");
 
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    }
+
+    async fn test_state(path: &Path) -> Arc<super::super::routes::AppState> {
+        let config = crate::config::Config::new(path.to_path_buf());
+        let root_agent: crate::agents::AgentRef =
+            Arc::new(crate::agents::OpenCodeAgent::new(config.clone()));
+        let mcp = Arc::new(crate::mcp::McpRegistry::new(path).await);
+        let workspaces = Arc::new(workspace::WorkspaceStore::new(path.to_path_buf()).await);
+        let library = Arc::new(tokio::sync::RwLock::new(None));
+        let control = crate::api::control::ControlHub::new(
+            config.clone(),
+            root_agent.clone(),
+            mcp.clone(),
+            workspaces.clone(),
+            library.clone(),
+            None,
+        );
+        Arc::new(super::super::routes::AppState {
+            config,
+            root_agent,
+            mcp,
+            workspaces,
+            library,
+            control,
+            tasks: Default::default(),
+            opencode_connections: Arc::new(
+                crate::opencode_config::OpenCodeStore::new(path.join("connections.json")).await,
+            ),
+            opencode_agents_cache: Default::default(),
+            ai_providers: Arc::new(
+                crate::ai_providers::AIProviderStore::new(path.join("providers.json")).await,
+            ),
+            pending_oauth: Default::default(),
+            pending_github_oauth: Default::default(),
+            pending_github_integration: Default::default(),
+            github_connection: Arc::new(
+                crate::github_connection::GithubConnectionStore::new(path.join("github.json"))
+                    .await,
+            ),
+            secrets: None,
+            console_pool: Arc::new(crate::api::console::SessionPool::new()),
+            settings: Arc::new(crate::settings::SettingsStore::new(path).await),
+            backend_registry: Arc::new(tokio::sync::RwLock::new(
+                crate::backend::registry::BackendRegistry::new("opencode"),
+            )),
+            backend_configs: Arc::new(
+                crate::backend_config::BackendConfigStore::new(path.join("backends.json"), vec![])
+                    .await,
+            ),
+            model_catalog: Default::default(),
+            health_tracker: Arc::new(crate::provider_health::ProviderHealthTracker::new()),
+            chain_store: Arc::new(
+                crate::provider_health::ModelChainStore::new(path.join("chains.json")).await,
+            ),
+            http_client: reqwest::Client::new(),
+            proxy_secret: "test".into(),
+            proxy_api_keys: Arc::new(
+                crate::api::proxy_keys::ProxyApiKeyStore::new(path.join("keys.json")).await,
+            ),
+            deferred_requests: Arc::new(
+                crate::api::deferred_proxy::DeferredRequestStore::new(path.join("requests.json"))
+                    .await,
+            ),
+            telegram_bridge: Arc::new(crate::api::telegram::TelegramBridge::new()),
+            fido_hub: Arc::new(crate::api::fido::FidoSigningHub::new()),
+            control_metrics: Arc::new(crate::api::control_metrics::ControlMetrics::new()),
+            provider_usage_cache: crate::api::provider_usage_cache::ProviderUsageCache::new(),
+            codex_usage: crate::api::codex_usage::CodexUsageStore::new(),
+            fleet: Arc::new(crate::remote_node::FleetMonitor::new()),
+            validation: Arc::new(
+                crate::api::validation::ValidationStore::open(path.join("validation.db")).unwrap(),
+            ),
+            projects: Arc::new(
+                crate::api::projects_store::ProjectsStore::open(path.join("projects.db")).unwrap(),
+            ),
+            attention_snapshot: Default::default(),
+            managed: Default::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn concurrent_build_workspace_admits_exactly_one_and_rejects_second() {
+        let root = TempDir::new().unwrap();
+        let state = test_state(root.path()).await;
+        let path = root.path().join(".sandboxed-sh/containers/race");
+        for dir in ["bin", "usr", "etc"] {
+            std::fs::create_dir_all(path.join(dir)).unwrap();
+        }
+        std::fs::write(
+            path.join("etc/os-release"),
+            "ID=ubuntu\nVERSION_CODENAME=noble\n",
+        )
+        .unwrap();
+        let container = Workspace::new_container("race".into(), path);
+        let id = state.workspaces.add(container).await;
+        let (first, second) = tokio::join!(
+            build_workspace(State(Arc::clone(&state)), AxumPath(id), None),
+            build_workspace(State(Arc::clone(&state)), AxumPath(id), None),
+        );
+        let admitted = usize::from(first.is_ok()) + usize::from(second.is_ok());
+        assert_eq!(admitted, 1);
+        let rejected = first.err().or_else(|| second.err()).unwrap();
+        assert_eq!(rejected.0, StatusCode::CONFLICT);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.workspaces.get(id).await.unwrap().status == WorkspaceStatus::Building {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let retry = build_workspace(State(Arc::clone(&state)), AxumPath(id), None)
+            .await
+            .unwrap();
+        assert_eq!(retry.0.config["build_generation"].as_u64(), Some(2));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.workspaces.get(id).await.unwrap().status == WorkspaceStatus::Building {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn build_claim_guard_recovers_after_panic_and_fences_stale_generation() {
+        let root = TempDir::new().unwrap();
+        let store = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let container = Workspace::new_container(
+            "panic-recovery".into(),
+            root.path().join(".sandboxed-sh/containers/panic-recovery"),
+        );
+        let id = store.add(container).await;
+        let panicked = tokio::spawn({
+            let store = Arc::clone(&store);
+            async move {
+                let claim = store.try_claim_workspace_build(id, None).await.unwrap();
+                assert_eq!(claim.generation(), 1);
+                panic!("simulated build task panic");
+            }
+        })
+        .await;
+        assert!(panicked.is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while store.get(id).await.unwrap().status == WorkspaceStatus::Building {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(store.get(id).await.unwrap().status, WorkspaceStatus::Error);
+
+        let second = store.try_claim_workspace_build(id, None).await.unwrap();
+        assert_eq!(second.generation(), 2);
+        let mut stale = second.workspace.clone();
+        stale.status = WorkspaceStatus::Ready;
+        store.settle_for_generation(&stale, 1).await.unwrap();
+        assert_eq!(
+            store.get(id).await.unwrap().status,
+            WorkspaceStatus::Building
+        );
+        let mut ready = second.workspace.clone();
+        ready.status = WorkspaceStatus::Ready;
+        second.settle(ready).await.unwrap();
+        assert_eq!(store.get(id).await.unwrap().status, WorkspaceStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn cross_handle_flock_contention_returns_conflict() {
+        use fs2::FileExt;
+
+        let root = TempDir::new().unwrap();
+        let state = test_state(root.path()).await;
+        let path = root.path().join(".sandboxed-sh/containers/locked");
+        let id = state
+            .workspaces
+            .add(Workspace::new_container("locked".into(), path.clone()))
+            .await;
+        let lock_path = workspace::workspace_build_lock_path(&path);
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let external = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        external.try_lock_exclusive().unwrap();
+
+        let err = build_workspace(State(Arc::clone(&state)), AxumPath(id), None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_ne!(
+            state.workspaces.get(id).await.unwrap().status,
+            WorkspaceStatus::Building
+        );
+        drop(external);
+        let claim = state
+            .workspaces
+            .try_claim_workspace_build(id, None)
+            .await
+            .unwrap();
+        let mut ready = claim.workspace.clone();
+        ready.status = WorkspaceStatus::Ready;
+        claim.settle(ready).await.unwrap();
     }
 }
