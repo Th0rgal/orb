@@ -3,9 +3,10 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@solidjs/testing-library";
 import fixtures from "./fixtures/hermes-jobs.json";
 import { getProjectCronFromJob, hermesPatch, ignoredCronFields, normalizeControllerView, scheduleExpression } from "../src/cronSchema";
+import { ControllerView } from "../src/Controller";
 import { CronForm, draftOf } from "../src/ControllerSettings";
 import { parseSchedule, describeSchedule, SchedulePicker } from "../src/SchedulePicker";
-import { getProjectCron, getProjectController, listProjectCrons, projectCronAction, updateProjectCron } from "../src/api";
+import { clearConnection, getProjectCron, getProjectController, listProjectCrons, projectCronAction, setConnection, updateProjectCron } from "../src/api";
 import { PopupMenu } from "../src/Menu";
 
 const view = () => getProjectCronFromJob("notes", fixtures.hourly);
@@ -195,4 +196,53 @@ it("deletes a cron from the Settings page after confirmation", async () => {
   expect(screen.getByRole("dialog", { name: "Delete cron?" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Delete" }));
   await waitFor(() => expect(onDelete).toHaveBeenCalledOnce());
+});
+
+it("surfaces explicit controller action failures even after dismissing a background poll error", async () => {
+  vi.useFakeTimers();
+  setConnection("https://test.invalid", "tok");
+  let failNetwork = false;
+  const actionCalls: string[] = [];
+  const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/steers")) return response({ pending: [], recent: [] });
+    if (method === "POST") {
+      actionCalls.push(url);
+      if (failNetwork) throw new Error("Scheduler unreachable");
+      return response({ job: { ...fixtures.hourly, enabled: false, state: "paused" } });
+    }
+    if (failNetwork) throw new Error("Scheduler unreachable");
+    return response({ job: fixtures.hourly, runs: [] });
+  });
+  try {
+    render(() => <ControllerView slug="notes-poll-sep" id={fixtures.hourly.id} />);
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "Pause" })).toBeTruthy());
+
+    failNetwork = true;
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(screen.getByText("Couldn’t load controller")).toBeTruthy());
+
+    fireEvent.click(screen.getByLabelText("Dismiss"));
+    await vi.waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+
+    // Subsequent poll keeps the same error suppressed.
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    // Explicit Pause action fails with the exact same error message and still surfaces its own toast + Retry.
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await vi.waitFor(() => expect(screen.getByText("Couldn’t pause controller")).toBeTruthy());
+    expect(actionCalls).toHaveLength(1);
+
+    // Retry on the action toast retries the Pause mutation rather than background load().
+    failNetwork = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await vi.waitFor(() => expect(actionCalls).toHaveLength(2));
+    await vi.waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  } finally {
+    fetcher.mockRestore();
+    clearConnection();
+    vi.useRealTimers();
+  }
 });

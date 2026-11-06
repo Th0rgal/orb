@@ -263,6 +263,7 @@ export function ControllerView(p: { slug: string; id?: string }) {
   const viewKey = () => `c:${p.slug}:${p.id ?? ""}`;
   const [view, setView] = createSignal<View | null>(cachePeek<View>(viewKey()) ?? null);
   const [error, setError] = createSignal<string | null>(null);
+  const [actionError, setActionError] = createSignal<{ title: string; message: string; retry: () => unknown } | null>(null);
   const [busy, setBusy] = createSignal<string | null>(null);
   const now = useNow(15000);
   const [tab, setTab] = createSignal<"runs" | "settings">("runs");
@@ -308,21 +309,32 @@ export function ControllerView(p: { slug: string; id?: string }) {
   const act = async (action: "pause" | "resume" | "run") => {
     if (busy()) return;
     setBusy(action);
+    setActionError(null);
     try {
       const next = p.id ? await projectCronAction(p.slug, p.id, action) : await controllerAction(p.slug, action);
       cachePut(viewKey(), next);
       setView(next);
-      setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const title =
+        action === "pause"
+          ? "Couldn’t pause controller"
+          : action === "resume"
+            ? "Couldn’t resume controller"
+            : "Couldn’t start controller";
+      setActionError({
+        title,
+        message: e instanceof Error ? e.message : String(e),
+        retry: () => act(action),
+      });
     } finally {
       setBusy(null);
     }
   };
 
-  const removeCron = async () => {
+  const removeCron = async (surfaceToast = false) => {
     if (busy()) return;
     setBusy("delete");
+    if (surfaceToast) setActionError(null);
     try {
       if (p.id) await deleteProjectCron(p.slug, p.id);
       else await deleteProjectController(p.slug);
@@ -330,6 +342,7 @@ export function ControllerView(p: { slug: string; id?: string }) {
       cachePut(viewKey(), cleared);
       setView(cleared);
       setError(null);
+      setActionError(null);
       window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: p.slug, id: p.id, deleted: true } }));
       bumpProjects();
     } catch (e) {
@@ -338,11 +351,18 @@ export function ControllerView(p: { slug: string; id?: string }) {
         cachePut(viewKey(), cleared);
         setView(cleared);
         setError(null);
+        setActionError(null);
         window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: p.slug, id: p.id, deleted: true } }));
         bumpProjects();
         return;
       }
-      setError(e instanceof Error ? e.message : String(e));
+      if (surfaceToast) {
+        setActionError({
+          title: "Couldn’t delete controller",
+          message: e instanceof Error ? e.message : String(e),
+          retry: () => removeCron(true).catch(swallow("controller.removeCron")),
+        });
+      }
       throw e;
     } finally {
       setBusy(null);
@@ -353,7 +373,14 @@ export function ControllerView(p: { slug: string; id?: string }) {
     <div class="col cr-view" style={{ flex: 1, "min-height": 0, display: "flex", "flex-direction": "column" }}>
     <div class="scroll">
       <div class="col cr-page">
-        <Show when={view()} fallback={error() ? <p class="s-lead">{error()}</p> : <ControllerSkeleton />}>
+        <ErrorToast error={error()} title="Couldn’t load controller" background action={{ label: "Retry", run: () => load() }} />
+        <ErrorToast
+          error={actionError()?.message}
+          title={actionError()?.title}
+          onDismiss={() => setActionError(null)}
+          action={actionError() ? { label: "Retry", run: () => actionError()!.retry() } : undefined}
+        />
+        <Show when={view()} fallback={<ControllerSkeleton />}>
           <Show when={job()} fallback={<p class="s-lead">{p.id ? "This cron was removed from Hermes." : "This project has no controller cron in Hermes."}</p>}>
             {(j) => (
               <>
@@ -422,13 +449,12 @@ export function ControllerView(p: { slug: string; id?: string }) {
                       {busy() === "run" ? "Starting…" : "Run now"}
                     </button>
                     <Show when={!!p.id}>
-                      <button class="s-btn sm quiet" disabled={!!busy() || running()} onClick={() => void removeCron().catch(swallow("controller.removeCron"))}>
+                      <button class="s-btn sm quiet" disabled={!!busy() || running()} onClick={() => void removeCron(true).catch(swallow("controller.removeCron"))}>
                         {busy() === "delete" ? "Deleting…" : "Delete"}
                       </button>
                     </Show>
                   </div>
                 </div>
-                <ErrorToast error={error()} title="Couldn’t load controller" background action={{ label: "Retry", run: () => load() }} />
                 <Show when={j().last_error && state() === "attention"}>
                   <ErrorNotice error={j().last_error!} />
                 </Show>
@@ -443,7 +469,7 @@ export function ControllerView(p: { slug: string; id?: string }) {
                 </div>
 
                 <Show when={tab() === "settings"}>
-                  <ControllerSettingsPanel slug={p.slug} id={p.id} view={view()!} onSaved={setView} save={p.id ? (patch) => updateProjectCron(p.slug, p.id!, patch) : undefined} onDelete={removeCron} deleting={busy() === "delete"} deleteDisabled={!!busy() || running()} />
+                  <ControllerSettingsPanel slug={p.slug} id={p.id} view={view()!} onSaved={setView} save={p.id ? (patch) => updateProjectCron(p.slug, p.id!, patch) : undefined} onDelete={() => removeCron(false)} deleting={busy() === "delete"} deleteDisabled={!!busy() || running()} />
                 </Show>
                 <div class="cr-timeline" style={{ display: tab() === "runs" ? "block" : "none" }}>
                   <For each={entries()}>
