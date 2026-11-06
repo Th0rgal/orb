@@ -124,14 +124,45 @@ def main : IO Unit := do
   assertTrue "TLS authenticated close_notify (1) on close-delimited response succeeds"
     (decodeTlsRoundtripWire (ByteArray.mk #[1] ++ rawCloseDelim) 4096).isOk
 
-  -- Curl HTTP/1.1 chunked fallback: headers carry `Transfer-Encoding: chunked`, stdout carries already-decoded body
+  -- Curl HTTP/1.1 chunked fallback + trailer dump + 1xx informational + HEAD/304 bodyless checks
+  let wire1xx :=
+    ("HTTP/1.1 100 Continue\r\n\r\n" ++
+     "HTTP/1.1 103 Early Hints\r\nLink: </app.js>; rel=preload\r\n\r\n" ++
+     "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone").toUTF8
+  let .ok parsed1xx := parseHttpResponseWire wire1xx
+    | throw (IO.userError "parseHttpResponseWire 1xx skip failed")
+  assertTrue "HTTP wire parser skips 100/103 informational blocks"
+    (parsed1xx.status == 200 && parsed1xx.body == "done".toUTF8)
+
+  let wireHead := ("HTTP/1.1 200 OK\r\nContent-Length: 99999\r\n\r\n").toUTF8
+  let .ok parsedHead := parseHttpResponseWire wireHead 4096 false "HEAD"
+    | throw (IO.userError "parseHttpResponseWire HEAD failed")
+  assertTrue "HEAD response with nonzero Content-Length succeeds with empty body"
+    (parsedHead.status == 200 && parsedHead.body.isEmpty)
+
+  let wire304 := ("HTTP/1.1 304 Not Modified\r\nContent-Length: 4096\r\n\r\n").toUTF8
+  let .ok parsed304 := parseHttpResponseWire wire304 4096 false "GET"
+    | throw (IO.userError "parseHttpResponseWire 304 failed")
+  assertTrue "304 Not Modified response with nonzero Content-Length succeeds with empty body"
+    (parsed304.status == 304 && parsed304.body.isEmpty)
+
+  let wireTeSmuggle := ("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nContent-Length: 5\r\n\r\nhello").toUTF8
+  assertTrue "Transfer-Encoding: gzip with Content-Length rejected fail-closed"
+    (parseHttpResponseWire wireTeSmuggle 4096 false "GET").isOk.not
+
   let curlHdrDump :=
     ("HTTP/1.1 100 Continue\r\n\r\n" ++
-     "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\n").toUTF8
+     "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: X-Checksum\r\nContent-Type: application/json\r\n\r\n" ++
+     "X-Checksum: abc123\r\n\r\n").toUTF8
   let curlDecodedBody := "{\"ok\":true}".toUTF8
-  let .ok curlResp := parseCurlDumpHeadersAndBody curlHdrDump curlDecodedBody 4096
-    | throw (IO.userError "parseCurlDumpHeadersAndBody chunked fallback failed")
-  assertTrue "Curl HTTP/1.1 chunked fallback preserves already-decoded body without double-dechunking"
+  let .ok curlResp := parseCurlDumpHeadersAndBody curlHdrDump curlDecodedBody 4096 "GET"
+    | throw (IO.userError "parseCurlDumpHeadersAndBody chunked+trailer fallback failed")
+  assertTrue "Curl HTTP/1.1 chunked fallback with trailers preserves decoded body"
     (curlResp.status == 200 && curlResp.body == curlDecodedBody)
+
+  let .ok curlHeadResp := parseCurlDumpHeadersAndBody wireHead ByteArray.empty 4096 "HEAD"
+    | throw (IO.userError "parseCurlDumpHeadersAndBody HEAD failed")
+  assertTrue "Curl HEAD response with nonzero Content-Length succeeds"
+    (curlHeadResp.status == 200 && curlHeadResp.body.isEmpty)
 
   IO.println "[OrbNetLeaf] ALL SELF-TESTS PASSED"

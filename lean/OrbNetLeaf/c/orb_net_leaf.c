@@ -173,9 +173,11 @@ LEAN_EXPORT lean_obj_res orb_net_leaf_tls_roundtrip(
         size_t rem = (cap - got) > 0x40000000ULL ? 0x40000000ULL : (cap - got);
         int r = SSL_read(ssl, lean_sarray_cptr(out) + 1 + got, (int)rem);
         if (r > 0) { got += (size_t)r; continue; }
-        int err = SSL_get_error(ssl, r);
+        int err = SSL_get_error(ssl, r); unsigned long e = ERR_peek_error();
         if (err == SSL_ERROR_ZERO_RETURN) status = 1;
-        else if (err == SSL_ERROR_SYSCALL && ERR_peek_error() == 0 && r == 0) status = 4;
+        else if ((err == SSL_ERROR_SYSCALL && e == 0 && r == 0) ||
+                 (err == SSL_ERROR_SSL && ERR_GET_LIB(e) == ERR_LIB_SSL &&
+                  ERR_GET_REASON(e) == SSL_R_UNEXPECTED_EOF_WHILE_READING)) status = 4;
         else ok = 0;
         break;
     }
