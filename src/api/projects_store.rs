@@ -449,6 +449,15 @@ pub struct RemoteJobNodeSpan {
     pub latest_mission_id: String,
 }
 
+/// Snapshot of a single `project_crons` row rewritten by a folder prefix cascade,
+/// allowing rollback to restore only the rows changed by the failed transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronFolderRename {
+    pub job_id: String,
+    pub previous_folder: String,
+    pub updated_folder: String,
+}
+
 impl ProjectsStore {
     pub fn open(path: PathBuf) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -1440,17 +1449,19 @@ impl ProjectsStore {
     }
 
     /// Atomically rewrite `folder` for all crons in `slug` whose folder equals
-    /// `old_prefix` or starts with `"{old_prefix}/"`.
+    /// `old_prefix` or starts with `"{old_prefix}/"`, returning the exact rows
+    /// mutated so a failed transfer can roll back without touching pre-existing
+    /// destination crons.
     pub fn cascade_rename_cron_folder(
         &self,
         slug: &str,
         old_prefix: &str,
         new_prefix: &str,
-    ) -> Result<usize, String> {
+    ) -> Result<Vec<CronFolderRename>, String> {
         let old_norm = crate::api::mission_store::normalize_mission_folder(old_prefix);
         let new_norm = crate::api::mission_store::normalize_mission_folder(new_prefix);
         if old_norm.is_empty() || old_norm == new_norm {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         let mut connection = self.lock()?;
         let tx = connection
@@ -1458,7 +1469,7 @@ impl ProjectsStore {
             .map_err(|e| e.to_string())?;
         let lower = format!("{old_norm}/");
         let upper = format!("{old_norm}0");
-        let mut count = 0usize;
+        let mut renamed = Vec::new();
         {
             let mut stmt = tx
                 .prepare(
@@ -1496,11 +1507,52 @@ impl ProjectsStore {
                 update_stmt
                     .execute(params![&rewritten, slug, &job_id])
                     .map_err(|e| e.to_string())?;
-                count += 1;
+                renamed.push(CronFolderRename {
+                    job_id,
+                    previous_folder: cur_folder,
+                    updated_folder: rewritten,
+                });
             }
         }
         tx.commit().map_err(|e| e.to_string())?;
-        Ok(count)
+        Ok(renamed)
+    }
+
+    /// Restore only the cron rows mutated by an earlier `cascade_rename_cron_folder`.
+    pub fn restore_cron_folders(
+        &self,
+        slug: &str,
+        renamed: &[CronFolderRename],
+    ) -> Result<usize, String> {
+        if renamed.is_empty() {
+            return Ok(0);
+        }
+        let mut connection = self.lock()?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let mut restored = 0usize;
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "UPDATE project_crons
+                     SET folder = ?1
+                     WHERE slug = ?2 AND job_id = ?3 AND folder = ?4",
+                )
+                .map_err(|e| e.to_string())?;
+            for entry in renamed {
+                restored += stmt
+                    .execute(params![
+                        &entry.previous_folder,
+                        slug,
+                        &entry.job_id,
+                        &entry.updated_folder
+                    ])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(restored)
     }
 
     /// Every explicit binding, keyed by project slug. Read once per overview

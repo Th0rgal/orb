@@ -4605,7 +4605,20 @@ mod subtree_move_tests {
         );
 
         // If `cascade_rename_folder` fails in SQLite, `transfer_file` rolls back BOTH `moved_crons`
-        // and the context folder rename and propagates `500 Internal Server Error` instead of returning `200`.
+        // and the context folder rename — without touching pre-existing cron-only virtual folders
+        // at the destination — and propagates `500 Internal Server Error` instead of returning `200`.
+        state
+            .projects
+            .bind_project_cron_in_folder("assistant", "cron-broken-exact", "broken/2026")
+            .unwrap();
+        state
+            .projects
+            .bind_project_cron_in_folder(
+                "assistant",
+                "cron-broken-existing",
+                "broken/2026/existing",
+            )
+            .unwrap();
         {
             let mission_db =
                 rusqlite::Connection::open(dir.path().join("missions/missions-subtree-test.db"))
@@ -4645,6 +4658,20 @@ mod subtree_move_tests {
                 .project_cron_folder("assistant", "cron-daily-audit")
                 .unwrap(),
             "archive/2026/sub"
+        );
+        assert_eq!(
+            state
+                .projects
+                .project_cron_folder("assistant", "cron-broken-exact")
+                .unwrap(),
+            "broken/2026"
+        );
+        assert_eq!(
+            state
+                .projects
+                .project_cron_folder("assistant", "cron-broken-existing")
+                .unwrap(),
+            "broken/2026/existing"
         );
     }
 

@@ -467,12 +467,12 @@ pub(crate) async fn transfer_file(
     let mut moved_missions = Vec::new();
     let mut moved_crons = 0usize;
     if !req.copy && was_directory {
-        moved_crons =
+        let renamed_crons =
             match state
                 .projects
                 .cascade_rename_cron_folder(&canonical, &req.path, &req.destination)
             {
-                Ok(n) => n,
+                Ok(renamed) => renamed,
                 Err(err) => {
                     let src_rb = req.path.clone();
                     let dst_rb = req.destination.clone();
@@ -486,6 +486,7 @@ pub(crate) async fn transfer_file(
                     )));
                 }
             };
+        moved_crons = renamed_crons.len();
         let auth_user = user
             .map(|axum::Extension(u)| u)
             .unwrap_or_else(|| super::auth::implicit_single_tenant_user(&state.config));
@@ -508,12 +509,10 @@ pub(crate) async fn transfer_file(
                 moved_missions = moved;
             }
             Err(err) => {
-                if moved_crons > 0 {
-                    let _ = state.projects.cascade_rename_cron_folder(
-                        &canonical,
-                        &req.destination,
-                        &req.path,
-                    );
+                if !renamed_crons.is_empty() {
+                    let _ = state
+                        .projects
+                        .restore_cron_folders(&canonical, &renamed_crons);
                 }
                 let src_rb = req.path.clone();
                 let dst_rb = req.destination.clone();
