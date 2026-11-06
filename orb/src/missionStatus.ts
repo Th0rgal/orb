@@ -171,7 +171,7 @@ export function handoffPending(status: Status, handoff: Handoff | null | undefin
 export type ActivityReason = "running" | "queued" | "starting" | "stopping" | "handoff" | "idle" | "failed" | "needs_you";
 export type MissionActivity = { working: boolean; reason: ActivityReason; label?: string };
 
-type ActivityJob = { phase?: string | null; node_state?: string | null; forced?: boolean; node_id?: string | null; lease_state?: string | null; terminal_reason?: string | null; finished_at?: string | null; exit_code?: number | null } | null | undefined;
+type ActivityJob = { phase?: string | null; node_state?: string | null; forced?: boolean; node_id?: string | null; lease_state?: string | null; terminal_reason?: string | null; finished_at?: string | null; exit_code?: number | null; error?: string | null } | null | undefined;
 type ActivityQueueWait = { reason?: string; slots_used?: number; slots_max?: number } | null | undefined;
 type ActivityMission = { id?: string; status?: string | null; remote_node_id?: string | null; remote_job?: ActivityJob; queue_wait?: ActivityQueueWait; execution?: { state?: string | null } | null } | null | undefined;
 type ActivityItem = { kind: string; queued?: boolean };
@@ -193,6 +193,34 @@ export function canForceSlot(mission: ActivityMission): boolean {
 
 const TERMINAL_LEASES = new Set(["released", "expired", "lost", "terminal", "terminated", "finished", "failed", "cancelled", "canceled"]);
 const FAILED_JOB_STATES = new Set(["failed", "lost", "cancelled", "canceled"]);
+const NON_FAILURE_JOB_TERMINAL_REASONS = new Set([
+  "remote_node_job",
+  "remote_job_succeeded",
+  "superseded",
+  "idle_wait_exhausted",
+  "completed",
+  "succeeded",
+  "done",
+  "awaiting_user",
+  "client_runner",
+]);
+
+/** True when a remote job's `terminal_reason` denotes a failure/stop rather than a neutral completion tag like `remote_node_job`. */
+export function hasFailureTerminalReason(reason: string | null | undefined): boolean {
+  const normalized = (reason ?? "").trim().toLowerCase();
+  return !!normalized && !NON_FAILURE_JOB_TERMINAL_REASONS.has(normalized);
+}
+
+/** True when a remote job terminated in failure rather than normal completion. */
+export function remoteJobFailed(job: ActivityJob): boolean {
+  if (!job) return false;
+  return (
+    FAILED_JOB_STATES.has(job.node_state ?? "") ||
+    (job.exit_code != null && job.exit_code !== 0) ||
+    !!job.error?.trim() ||
+    hasFailureTerminalReason(job.terminal_reason)
+  );
+}
 
 /** A remote job that has ended, whatever the mission status still says. */
 export function remoteJobEnded(job: ActivityJob): boolean {
@@ -232,7 +260,7 @@ export function missionActivity(mission: ActivityMission, items: readonly Activi
   const handoff = opts.handoff !== undefined ? opts.handoff : missionHandoff(mission.id);
   if (handoffPending(status, handoff, opts.now)) return { working: true, reason: "handoff", label: "Sending" };
   if (job && remoteJobEnded(job)) {
-    const failed = !!job.terminal_reason || FAILED_JOB_STATES.has(job.node_state ?? "") || (job.exit_code != null && job.exit_code !== 0) || isFailedStatus(status);
+    const failed = remoteJobFailed(job) || isFailedStatus(status);
     return { working: false, reason: failed ? "failed" : "idle" };
   }
   if (mission.execution?.state === "stopping") return { working: true, reason: "stopping" };
@@ -255,11 +283,16 @@ export function missionActivity(mission: ActivityMission, items: readonly Activi
 }
 
 /** The status a row should present for `mission`, corrected by `missionActivity`:
- * a stale live status whose run already ended reads as failed or idle. */
+ * a stale live status whose run already ended reads as failed, completed, or interrupted. */
 export function presentedStatus(mission: ActivityMission & { status: string }, activity: MissionActivity = missionActivity(mission)): string {
   if (activity.working) return activity.reason === "queued" ? "queued" : activity.reason === "starting" ? "starting" : isLive(mission.status) ? mission.status : "running";
   if (!isLive(mission.status)) return mission.status;
-  return activity.reason === "failed" ? "failed" : "interrupted";
+  if (activity.reason === "failed") return "failed";
+  const job = mission.remote_job;
+  if (job && remoteJobEnded(job) && !remoteJobFailed(job) && (job.node_state === "succeeded" || job.exit_code === 0)) {
+    return "completed";
+  }
+  return "interrupted";
 }
 
 /**

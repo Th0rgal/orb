@@ -175,6 +175,41 @@ class LibrarySkillsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn('python3 is not installed', result.stderr)
 
+    def test_remote_node_missions_share_work_root_cache_across_isolated_homes(self):
+        work_root = self.base / 'node-root'
+        upload_dir = work_root / 'uploads' / '752f0e80-9d57-4dd9-8ab0-8aadd0fe52d8'
+        upload_dir.mkdir(parents=True)
+        archive = upload_dir / 'library-skills-0123456789ab.tar.gz'
+        sha = make_archive(archive, skill_files('spark-memory', 'bitwarden-secrets'))
+
+        mission_a = work_root / 'mission-a'
+        mission_b = work_root / 'mission-b'
+        mission_a.mkdir()
+        mission_b.mkdir()
+        clean_env = {k: v for k, v in os.environ.items() if k != 'XDG_CACHE_HOME'}
+
+        first = subprocess.run(
+            ['sh', '-c', WRAPPER, 'sandboxed-library-skills', 'install', 'opencode', str(archive), sha, PROGRAM],
+            cwd=mission_a, env={**clean_env, 'HOME': str(mission_a)},
+            capture_output=True, text=True,
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertTrue((mission_a / '.opencode/skills/spark-memory/SKILL.md').is_file())
+        self.assertTrue((work_root / 'caches/library-skills' / sha / 'skills/spark-memory/SKILL.md').is_file())
+
+        # Even if an un-upgraded node removes the upload directory, the next mission
+        # with its own isolated HOME still receives Library skills from work_root/caches.
+        archive.unlink()
+        upload_dir.rmdir()
+        second = subprocess.run(
+            ['sh', '-c', WRAPPER, 'sandboxed-library-skills', 'install', 'opencode', str(archive), sha, PROGRAM],
+            cwd=mission_b, env={**clean_env, 'HOME': str(mission_b)},
+            capture_output=True, text=True,
+        )
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertTrue((mission_b / '.opencode/skills/spark-memory/SKILL.md').is_file())
+        self.assertTrue((mission_b / '.opencode/skills/bitwarden-secrets/SKILL.md').is_file())
+
 
 if __name__ == '__main__':
     unittest.main()

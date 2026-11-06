@@ -768,7 +768,7 @@ export function Transcript(p: { sizeKey?: string; backend?: string | null; prepa
               return isOrchestrationTool(item.name) ? <OrchestrationCard item={item} /> : <ToolRow item={item} />;
             case "error":
               return <ErrorNotice backend={p.backend} error={item.text} title={item.title ?? (item.cancelled ? "Mission cancelled" : "Mission failed")}>
-                <Show when={!item.cancelled && p.onResume && item.key === lastErrorKey() && !isNonResumableError(item.text, p.backend)}><button type="button" class="error-notice-link" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></Show>
+                <Show when={!item.cancelled && p.onResume && item.key === lastErrorKey() && !isNonResumableError(item.text, p.backend)}><button type="button" class="error-notice-link primary" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></Show>
                 <Show when={p.onOpenSource && item.key === lastErrorKey()}><button type="button" class="error-notice-link" onClick={() => p.onOpenSource?.()}>Open original conversation</button></Show>
               </ErrorNotice>;
           }

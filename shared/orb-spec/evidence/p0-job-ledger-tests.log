@@ -1,0 +1,32 @@
+
+running 1 test
+test stateful_tests::wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.00s
+
+
+running 21 tests
+test remote_node::job_ledger::tests::accepted_handle_replaces_pre_submit_tentative_handle ... ok
+test remote_node::job_ledger::tests::attached_missions_get_their_own_receipts_and_wakes ... ok
+test remote_node::job_ledger::tests::finalization_retains_immutable_remote_validation_receipt ... ok
+test remote_node::job_ledger::tests::fire_and_forget_validation_never_supersedes_a_continuation_owner ... ok
+test remote_node::job_ledger::tests::heartbeat_advances_only_an_existing_handle ... ok
+test remote_node::job_ledger::tests::identity_hash_is_content_not_commit_and_every_input_matters ... ok
+test remote_node::job_ledger::tests::immutable_validation_lookup_blocks_active_and_reuses_success ... ok
+test remote_node::job_ledger::tests::legacy_handles_default_to_mission_kind ... ok
+test remote_node::job_ledger::tests::legacy_v0_receipts_never_replay_but_still_exclude ... ok
+test remote_node::job_ledger::tests::legacy_validation_identity_keeps_cwd_unknown ... ok
+test remote_node::job_ledger::tests::newer_tentative_submission_defers_without_suppressing_wake ... ok
+test remote_node::job_ledger::tests::newer_terminal_validation_prevents_old_handle_from_owning_wait_lease ... ok
+test remote_node::job_ledger::tests::newer_terminal_wake_is_not_blocked_by_an_older_active_validation ... ok
+test remote_node::job_ledger::tests::newer_validation_suppresses_stale_terminal_wake ... ok
+test remote_node::job_ledger::tests::record_is_durable_and_idempotent ... ok
+test remote_node::job_ledger::tests::record_surfaces_an_unwritable_ledger_path ... ok
+test remote_node::job_ledger::tests::remote_build_continuation_mode_is_explicit_and_legacy_safe ... ok
+test remote_node::job_ledger::tests::sql_mirror_tracks_handles_receipts_and_backfills ... ok
+test remote_node::job_ledger::tests::submission_sequence_breaks_equal_timestamp_ties_without_using_uuid_order ... ok
+test remote_node::job_ledger::tests::tentative_handles_round_trip ... ok
+test remote_node::job_ledger::tests::terminal_tentative_handle_never_becomes_validation_receipt ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3795 filtered out; finished in 0.77s
+

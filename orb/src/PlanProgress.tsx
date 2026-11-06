@@ -3,6 +3,7 @@ import {connectionVersion} from './api';
 import {sideQuestionKey} from './sideQuestionStorage';
 import {readSideThread,saveSideThread} from './composerDrafts';
 import {MdView} from './Markdown';
+import {ErrorToast} from './toast';
 import type {StreamItem} from './transcriptModel';
 import {foldIncrementalTasks,INCREMENTAL_TASK_TOOLS} from './taskList';
 import {toolName} from './workModel';
@@ -83,7 +84,7 @@ export function PlanDetails(p:{data:PlanProgressData}){
  return <section class="plan-progress">
   <div class="plan-progress-heading">Plan · {p.data.label}<Show when={p.data.steps.length}> · {p.data.completed}/{p.data.steps.length}</Show></div>
   <div class="plan-progress-body">
-   <Show when={p.data.saveFailed}><p class="inline-error" role="alert">Plan accepted, but local storage failed. Tracking may be lost on refresh.</p></Show>
+   <ErrorToast error={p.data.saveFailed ? 'Plan accepted, but local storage failed. Tracking may be lost on refresh.' : null} title="Local storage unavailable" background />
    <small>{p.data.plan.approvedAt?`Approved in Orb · ${new Date(p.data.plan.approvedAt).toLocaleString()}`:'Recovered from conversation · approval not recorded'}</small>
    <Show when={p.data.steps.length} fallback={<p class="dim">Progress not reported by the agent.</p>}>
     <ol><For each={p.data.steps}>{step=><li><span>{step.status==='completed'?'✓':step.status==='in_progress'?'◐':step.status==='blocked'?'!':'○'}</span> {step.text} <small>{step.status.replaceAll('_',' ')}</small></li>}</For></ol>

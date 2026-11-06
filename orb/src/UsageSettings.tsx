@@ -86,8 +86,9 @@ export function ReliabilitySection() {
         }</For>
       </div>
     </div>
+    <ErrorToast error={error() && !/\b404\b|not found/i.test(error()) ? `Router reliability is unavailable: ${error()}` : null} title="Couldn’t load router reliability" background action={{ label: "Retry", run: () => load() }} />
     <Show when={error()} fallback={<ReliabilityView health={isConnected() ? health() : null} />}>
-      <p class="routing-muted">Router reliability is unavailable: {error()}</p>
+      <p class="routing-muted">Router reliability is unavailable.</p>
     </Show>
   </section>;
 }

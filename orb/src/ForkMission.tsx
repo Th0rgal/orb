@@ -1,5 +1,5 @@
 import { isHarness } from "./harnesses";
-import { DONE_STATUSES, isArchivable, isFailedStatus, isReady, remoteJobEnded } from "./missionStatus";
+import { DONE_STATUSES, isArchivable, isFailedStatus, isReady, remoteJobEnded, remoteJobFailed } from "./missionStatus";
 import { CodexSpeedPicker, missionSpeed, requireSpeedSupport } from "./CodexSpeedPicker";
 import { localBinding } from "./localAgents";
 import { ApiError, archiveMission, cancelMission, forkMission, getMission, shortModelLabel, type CodexServiceTier, type HarnessChoice, type Mission } from "./api";
@@ -71,8 +71,6 @@ export const transferForDestination = (destinationId: string | null | undefined)
 const targetKey = (backend: string, model: string, effort: string, speed?: CodexServiceTier) =>
   JSON.stringify([backend, model, effort, backend === "codex" ? (speed ?? "standard") : ""]);
 
-const FAILED_NODE_STATES = new Set(["failed", "lost", "cancelled", "canceled"]);
-
 export function destinationStartupOutcome(
   mission: Mission | null | undefined,
   items: readonly StreamItem[] = [],
@@ -92,11 +90,7 @@ export function destinationStartupOutcome(
   const status = (mission?.status ?? "").toLowerCase();
   const hasError = afterUser.some(item => item.kind === "error");
   const job = mission?.remote_job;
-  const jobFailed = !!job && remoteJobEnded(job) && (
-    !!job.terminal_reason ||
-    FAILED_NODE_STATES.has(job.node_state ?? "") ||
-    (job.exit_code != null && job.exit_code !== 0)
-  );
+  const jobFailed = !!job && remoteJobEnded(job) && remoteJobFailed(job);
   if (!hasError && !jobFailed && (DONE_STATUSES.has(status) || (isReady(status) && status !== "acknowledged"))) {
     return "running";
   }

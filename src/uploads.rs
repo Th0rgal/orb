@@ -1080,8 +1080,38 @@ pub fn store(root: &Path, upload: Upload) -> Result<Receipt, String> {
     result
 }
 
+fn is_shared_library_archive_name(name: &str) -> bool {
+    name.starts_with("library-skills-") && name.ends_with(".tar.gz")
+}
+
+fn dir_holds_shared_library_archive(dir: &Path) -> bool {
+    fs::read_dir(dir).ok().is_some_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(is_shared_library_archive_name)
+        })
+    })
+}
+
+fn prompt_ref_targets_shared_library_archive(after_uuid: &str, target: &Path) -> bool {
+    if let Some(after_slash) = after_uuid.strip_prefix('/') {
+        let end = after_slash
+            .find(['/', '"', '\'', ']', ')', ' ', '\n', '\r', '\t'])
+            .unwrap_or(after_slash.len());
+        if is_shared_library_archive_name(&after_slash[..end]) {
+            return true;
+        }
+    }
+    dir_holds_shared_library_archive(target)
+}
+
 /// Removes any upload directories (`<root>/<uuid>`) referenced in `prompt`
 /// once the session completes, so temporary attachments do not accumulate.
+/// Shared `library-skills-*.tar.gz` bundles cached across missions in
+/// `REMOTE_LIBRARY_SKILL_UPLOADS` stay intact until `prune_expired_uploads`
+/// reaps them after TTL expiration.
 pub fn cleanup_prompt_uploads(root: &Path, prompt: &str) {
     if prompt.is_empty() {
         return;
@@ -1106,8 +1136,10 @@ pub fn cleanup_prompt_uploads(root: &Path, prompt: &str) {
             if let Ok(id) = uuid::Uuid::parse_str(segment) {
                 let id_str = id.hyphenated().to_string();
                 let target = base.join(&id_str);
-                let _ = fs::remove_dir_all(&target);
-                let _ = fs::remove_file(base.join(".batches").join(&id_str));
+                if !prompt_ref_targets_shared_library_archive(&rest[seg_len..], &target) {
+                    let _ = fs::remove_dir_all(&target);
+                    let _ = fs::remove_file(base.join(".batches").join(&id_str));
+                }
             }
             cursor = after + seg_len.max(1);
         }
@@ -1931,5 +1963,48 @@ mod tests {
         assert!(!Path::new(&a.path).exists());
         assert!(Path::new(&b.path).exists());
         assert!(!Path::new(&c.path).exists());
+    }
+
+    #[test]
+    fn cleanup_prompt_uploads_preserves_shared_library_skill_archives_until_ttl_prune() {
+        let root = tempfile::tempdir().unwrap();
+        let skills = store(
+            root.path(),
+            Upload {
+                name: "library-skills-0123456789ab.tar.gz".into(),
+                data_base64: "YQ==".into(),
+                placement: Placement::default(),
+            },
+        )
+        .unwrap();
+        let attachment = store(
+            root.path(),
+            Upload {
+                name: "screenshot.png".into(),
+                data_base64: "Yg==".into(),
+                placement: Placement::default(),
+            },
+        )
+        .unwrap();
+
+        let command = format!(
+            "sh -c '...' sandboxed-library-skills install 'opencode' '{}' 'deadbeef'; opencode run 'Inspect {}'",
+            skills.path, attachment.path
+        );
+        cleanup_prompt_uploads(root.path(), &command);
+        assert!(
+            Path::new(&skills.path).exists(),
+            "shared library-skills archive must survive post-job cleanup for subsequent missions"
+        );
+        assert!(
+            !Path::new(&attachment.path).exists(),
+            "ephemeral user attachment must still be cleaned up immediately"
+        );
+
+        prune_expired_uploads(root.path(), std::time::Duration::ZERO);
+        assert!(
+            !Path::new(&skills.path).exists(),
+            "TTL sweep must eventually prune expired library-skills archives"
+        );
     }
 }

@@ -7,9 +7,10 @@ No additional UI library is needed. Native iOS and Android are separate clients.
 
 - A task that blocks the underlying view: `Dialog`.
 - One editable name or path: `NameDialog`.
-- Confirmation before an operation: `ConfirmDialog`. Always pass `destructive` explicitly; use `true` for irreversible deletion.
-- Page, panel, poll, connection, or action failure outside an open modal: `ErrorToast` (`Toaster`), centered across the active workspace panels without shifting underlying layout. Pass `background` for recurring poll/refresh errors so dismissing with `×` suppresses repeat ticks until recovery or explicit `Retry`.
-- An interrupted modal operation with technical details: `ErrorDialog`, or `ErrorNotice` / `Field` inside an open `Dialog` / `Popover` (where the background is `inert`). Persisted historical turn/tick failures in timelines also use neutral-surface `ErrorNotice`.
+- Confirmation before an operation: `ConfirmDialog`. Always pass `destructive` explicitly; use `true` for irreversible deletion and `false` for non-destructive confirmations (for example large file or folder background uploads).
+- Page, panel, poll, connection, or action failure outside an open modal: `ErrorToast` (`Toaster`), centered horizontally across the full app window (including over the sidebar) without shifting underlying layout. Pass `background` for recurring poll/refresh errors so dismissing with `×` suppresses repeat ticks until recovery or explicit `Retry`.
+- Non-error status, sync confirmation, or warning notice outside an open modal: `StatusToast` (`Toaster`, `role="status"`), optionally with `tone="warning"` or `timeout`. Never introduce page-specific `.banner` or `.notice` bars.
+- An interrupted modal operation with technical details: `ErrorDialog`, or `ErrorNotice` / `Field` inside an open `Dialog` / `Popover` (where the background is `inert`). Persisted historical turn/tick failures in timelines (`MissionFailure`, `Transcript` `case "error"`, `FailedFold`) also use `ErrorNotice`, which shares the exact card grammar of `Toaster` (`8px` radius, `1px` `--overlay-border`, `--overlay-surface`, `14px` alert glyph, `12px`/`11.5px` typography, `.toast-link` external links, `24px` `.error-notice-link` / `.primary` pills matching `.toast-btn`, and `24px` `.toast-icon-btn` controls).
 - Commands, including cascading submenus: `Menu` / `PopupMenu` and `MenuList`.
 - A native form value with a fixed option set: `Select`.
 - Searchable values, groups, loading/empty/error states or footer actions: `Picker`.
@@ -28,8 +29,8 @@ the multi-step machine transfer retain their business content inside `Popover`;
 they share layer, focus and placement behavior, with no independent backdrops.
 
 Non-overlay exceptions are explicit: the Find bar stays attached to its search
-region, file panels are layout panes, and `Toaster` renders workspace-centered
-bottom cards (shared by `ErrorToast`, biometric `ApprovalQueueCard` /
+region, file panels are layout panes, and `Toaster` renders window-centered
+bottom cards over the sidebar and workspace (shared by `ErrorToast`, `StatusToast`, biometric `ApprovalQueueCard` /
 `BunkerModeCard`, and undo announcements). Compact, non-interactive queue
 shortcut hints keep their local presentation; they cannot contain commands or
 open child surfaces. Native `title` hints remain native. New interactive content

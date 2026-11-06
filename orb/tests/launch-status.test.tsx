@@ -145,3 +145,20 @@ it('offers Use subscription reset… when a quota-waiting mission has an eligibl
   vi.unstubAllGlobals();
  }
 });
+
+it("never renders Remote job stopped / Resume when a succeeded remote node job settles with terminal_reason=remote_node_job", () => {
+  const succeeded = remote({
+    phase: "finished",
+    node_state: "succeeded",
+    exit_code: 0,
+    terminal_reason: "remote_node_job",
+  });
+  const { container } = render(() => (
+    <>
+      <LaunchStatus destination="ashur" mission={succeeded} activity />
+      <MissionFailure mission={succeeded} onResume={() => {}} />
+    </>
+  ));
+  expect(container.querySelector(".error-notice")).toBeNull();
+  expect(container.textContent).not.toContain("Remote job stopped");
+});

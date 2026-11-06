@@ -322,9 +322,12 @@ export function MachineProvidersCard(p: { providers?: readonly ManagedProviderIn
   return <Show when={isConnected() && rows().length > 0}>
     <section class={p.inSettings ? "s-sec" : "managed-providers-sec"} aria-label="Machine providers">
       <h3 class={p.inSettings ? undefined : "s-section-title"}>Machine providers</h3>
-      <Show when={err()}>{item => <ErrorNotice error={item().message} onDismiss={() => setErr(null)}>
-        <Show when={item().retry}><button type="button" class="s-btn sm" onClick={() => item().retry?.()}>Retry</button></Show>
-      </ErrorNotice>}</Show>
+      <ErrorToast
+        error={err()?.message}
+        title="Couldn’t update machine provider"
+        onDismiss={() => setErr(null)}
+        action={err()?.retry ? { label: "Retry", run: () => err()?.retry?.() } : undefined}
+      />
       <div class="m-list s-card managed-providers-card">
         <For each={rows().map(r => r.provider)}>{id => {
           const pr = () => rows().find(r => r.provider === id)!;
