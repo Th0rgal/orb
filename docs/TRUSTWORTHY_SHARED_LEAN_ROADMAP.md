@@ -12,7 +12,7 @@ open-work statements rather than claiming phase acceptance.
 **P1/P3 local evidence now exists.** turbo-lean Stage 1D #280 merged at
 `e585ba96f58cb06414ce5e3216f3ffc0ce235300` after exact-head green CI and a
 clean Codex review (and `lean/turbo-lean-revision` is currently pinned to
-`72d713b6d8a88038c1b63aedbe6f1f01a18d698e`). At
+`29d85f7da2d963750f77d76d5323408a73386f14`). At
 the historical execution head Orb `3c70e5ada278a4e37e0180255f360aa2ff5fe86c` /
 Turbo `e585ba96f58cb06414ce5e3216f3ffc0ce235300` / LeanSys
 `c089f3e31dbd36f2bde2219913d5b9c90da670be`, the six-engine kernel conformance

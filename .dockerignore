@@ -1,5 +1,8 @@
-# Rust build artifacts
+# Rust & Lean build caches
 target/
+lean/.lake/
+lean/**/.lake/
+crates/**/.lake/
 
 # Git
 .git/
