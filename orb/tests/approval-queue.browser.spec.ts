@@ -90,22 +90,24 @@ test('rows deny through their own kind, Review opens settings',async({page})=>{
  expect(await page.evaluate(()=>(window as any).opened)).toBe(true);
  await expect(card).toHaveCount(0);
 });
-test('the card is centred across all open workspace panels and lifts above the composer',async({page})=>{
- for(const width of [1400,900]){
+test('the card is centred across the full app window (including over the sidebar) and lifts above the composer',async({page})=>{
+ for(const width of [1400,760]){
   await page.setViewportSize({width,height:900});
   await page.goto('/tests/approval-queue.html');
   await page.evaluate(()=>{(window as any).addDock();(window as any).show('many');});
   const card=page.getByTestId('approval-queue-card');
   await expect(card).toBeVisible();
-  const expectedCenter=220+(width-220)/2;
-  const expectedWidth=Math.min(580,width-220-48);
+  const expectedCenter=width/2;
+  const expectedWidth=Math.min(580,width-48);
   await expect.poll(async()=>{
-   const c=await page.locator('.toast').filter({has:card}).boundingBox();const k=await page.locator('.dock .composer').boundingBox();
-   return Math.abs((c!.x+c!.width/2)-expectedCenter)<=1&&Math.abs(c!.width-expectedWidth)<=1&&c!.y+c!.height<=k!.y;
+   const c=await page.locator('.toast').filter({has:card}).boundingBox();const k=await page.locator('.dock .composer').boundingBox();const sb=await page.locator('.sidebar').boundingBox();
+   const overSidebar=width===760?c!.x<sb!.x+sb!.width:true;
+   const hit=await page.evaluate(()=>{const el=document.querySelector('[data-testid="approval-queue-card"]')!;const r=el.getBoundingClientRect();const t=document.elementFromPoint(r.left+12,r.top+12);return !!t&&el.contains(t);});
+   return Math.abs((c!.x+c!.width/2)-expectedCenter)<=1&&Math.abs(c!.width-expectedWidth)<=1&&c!.y+c!.height<=k!.y&&overSidebar&&hit;
   }).toBe(true);
  }
 });
-test('without a composer, the card and approval errors center on the workspace and deduplicate',async({page})=>{
+test('without a composer, the card and approval errors center on the app window and deduplicate',async({page})=>{
  await page.setViewportSize({width:1200,height:900});
  await page.goto('/tests/approval-queue.html');
  await page.evaluate(()=>{const w=window as any;localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');w.failApprove=true;w.addSettings();w.show('many');});
@@ -118,8 +120,7 @@ test('without a composer, the card and approval errors center on the workspace a
  await expect.poll(async()=>{
   const c=await page.locator('.toast').filter({has:card}).boundingBox();
   const err=await page.getByRole('alert').boundingBox();
-  const m=await page.locator('.main').boundingBox();
-  return Math.abs((c!.x+c!.width/2)-(m!.x+m!.width/2))<=1&&Math.abs(c!.width-580)<=1&&Math.abs(err!.x-c!.x)<=1&&Math.abs(err!.width-c!.width)<=1;
+  return Math.abs((c!.x+c!.width/2)-600)<=1&&Math.abs(c!.width-580)<=1&&Math.abs(err!.x-c!.x)<=1&&Math.abs(err!.width-c!.width)<=1;
  }).toBe(true);
 });
 test('a Core without the queue still shows a pending privilege request, approved through its own route',async({page})=>{

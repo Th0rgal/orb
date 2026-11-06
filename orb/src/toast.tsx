@@ -7,7 +7,7 @@ import { swallow } from "./log";
 import { hasInteractiveOverlay } from "./overlayLayer";
 
 /**
- * Unified floating bottom notifications across all workspace panels:
+ * Unified floating bottom notifications centered across the app window:
  * connection/reachability, page/panel load & refresh, failed actions,
  * undoable changes, and biometric approvals. Inline ErrorNotice stays only
  * inside active modals/popovers or persisted historical timeline turns/ticks.
@@ -269,7 +269,7 @@ function ToastItem(p: { toast: Toast }) {
   </div>;
 }
 
-/** Mount once at the app root. Centered across all active workspace panels; never covers a bottom composer or save bar. */
+/** Mount once at the app root. Centered across the app window (including over the sidebar); never covers a bottom composer or save bar. */
 export function Toaster() {
   toasterMounted = true;
   onCleanup(() => { toasterMounted = false; });
@@ -279,15 +279,12 @@ export function Toaster() {
       [...document.querySelectorAll(sel)]
         .map(el => el.getBoundingClientRect())
         .filter(r => r.height > 0 && r.width > 0 && r.top < window.innerHeight && r.bottom > 0 && r.left < window.innerWidth && r.right > 0);
-    const panes = rects(".main, .file-panel, .btw-sidebar");
-    if (!panes.length) return setPos({ bottom: 20, left: "50%" });
-    const wsLeft = Math.max(0, Math.min(...panes.map(r => r.left)));
-    const wsRight = Math.min(window.innerWidth, Math.max(...panes.map(r => r.right)));
-    const wsWidth = Math.max(0, wsRight - wsLeft);
-    const center = wsLeft + wsWidth / 2;
-    const pad = wsWidth < 520 ? 32 : 48;
-    const width = Math.min(580, Math.max(0, wsWidth - pad)) || undefined;
-    const half = (width ?? Math.min(580, Math.max(0, window.innerWidth - 32))) / 2;
+    const vw = window.innerWidth;
+    if (vw <= 0) return setPos({ bottom: 20, left: "50%" });
+    const center = vw / 2;
+    const pad = vw < 520 ? 32 : 48;
+    const width = Math.min(580, Math.max(0, vw - pad)) || undefined;
+    const half = (width ?? Math.min(580, Math.max(0, vw - 32))) / 2;
     const toastLeft = center - half;
     const toastRight = center + half;
     const bars = rects(".dock .composer, .composer, .btw-composer-dock, .cs-savebar")
