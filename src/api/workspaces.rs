@@ -101,6 +101,8 @@ pub struct CreateWorkspaceRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateWorkspaceRequest {
+    pub workspace_type: Option<WorkspaceType>,
+    pub path: Option<PathBuf>,
     /// Human-readable name (optional update)
     pub name: Option<String>,
     /// Skill names from library to sync to this workspace
@@ -187,23 +189,6 @@ impl From<Workspace> for WorkspaceResponse {
             compute_policy,
             harness_versions: w.harness_versions,
         }
-    }
-}
-
-/// Apply build-related fields from a completed build back to the latest stored
-/// workspace, preserving any updates (env vars, init script, etc.) that arrived
-/// while the build was running.
-async fn merge_build_result(store: &workspace::WorkspaceStore, built: Workspace) {
-    if let Some(mut latest) = store.get(built.id).await {
-        latest.status = built.status;
-        latest.error_message = built.error_message;
-        latest.distro = built.distro;
-        if built.harness_versions.is_some() {
-            latest.harness_versions = built.harness_versions;
-        }
-        store.update(latest).await;
-    } else {
-        store.update(built).await;
     }
 }
 
@@ -478,7 +463,16 @@ async fn create_workspace(
             })?;
     }
 
-    let id = state.workspaces.add(workspace.clone()).await;
+    let id = state
+        .workspaces
+        .add(workspace.clone())
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to persist workspace: {error}"),
+            )
+        })?;
 
     // Sync skills to workspace if any are specified
     let library_guard = state.library.read().await;
@@ -523,106 +517,137 @@ async fn update_workspace(
     AxumPath(id): AxumPath<Uuid>,
     Json(req): Json<UpdateWorkspaceRequest>,
 ) -> Result<Json<WorkspaceResponse>, (StatusCode, String)> {
-    let mut workspace = require_workspace(&state.workspaces, id).await?;
-
-    // Validate name if provided
-    if let Some(ref name) = req.name {
-        validate_workspace_name(name)?;
-        workspace.name = name.clone();
-    }
-
-    // Update skills if provided
-    let skills_changed = if let Some(skills) = req.skills {
-        workspace.skills = sanitize_skill_list(skills);
-        true
-    } else {
-        false
-    };
-
-    // Update plugins if provided
-    if let Some(plugins) = req.plugins {
-        workspace.plugins = plugins;
-    }
-
-    if let Some(template) = req.template {
-        let trimmed = template.trim();
-        if trimmed.is_empty() {
-            workspace.template = None;
-        } else {
-            workspace.template = Some(trimmed.to_string());
-        }
-    }
-
-    if let Some(distro) = req.distro {
-        let trimmed = distro.trim();
-        if trimmed.is_empty() {
-            workspace.distro = None;
-        } else {
-            workspace.distro = Some(normalize_distro_value(trimmed)?);
-        }
-    }
-
-    if let Some(env_vars) = req.env_vars {
-        workspace.env_vars = sanitize_env_vars(env_vars);
-    }
-
-    if let Some(init_script) = req.init_script {
-        workspace.init_script = normalize_init_script(Some(init_script));
-    }
-
-    // Update init_scripts (fragment names) if provided
-    if let Some(init_scripts) = req.init_scripts {
-        workspace.init_scripts = init_scripts;
-    }
-
-    // Update shared_network if explicitly set in the request.
-    // The request uses Option<Option<bool>> pattern - outer Option for "field present",
-    // inner Option for the actual value including null for "reset to default".
-    // However, serde flattens this, so we check if the field was explicitly provided.
-    // For now, we only update if Some() is passed; to reset, pass null explicitly via the UI.
-    if req.shared_network.is_some() {
-        workspace.shared_network = req.shared_network;
-    }
-
-    // Update tailscale_mode if explicitly set in the request
-    if req.tailscale_mode.is_some() {
-        workspace.tailscale_mode = req.tailscale_mode;
-    }
-
-    // Update MCPs if provided
-    if let Some(mcps) = req.mcps {
-        workspace.mcps = mcps;
-    }
-    if let Some(exclude) = req.mcps_replace_defaults {
-        workspace.mcps_replace_defaults = exclude;
-    }
-
-    if let Some(config_profile) = req.config_profile {
-        let trimmed = config_profile.trim();
-        if trimmed.is_empty() {
-            workspace.config_profile = None;
-        } else {
-            workspace.config_profile = Some(trimmed.to_string());
-        }
-    }
-
-    // Merge freeform config (shallow merge of top-level keys). The control
-    // registry path is server-owned and must not move with a client edit.
-    if let Some(config) = req.config {
-        if let Some(new_obj) = config.as_object() {
-            let mut existing = workspace.config.as_object().cloned().unwrap_or_default();
-            for (k, v) in new_obj {
-                if k == "mission_workspace_registry_control_root" {
-                    continue;
+    let skills_changed = req.skills.is_some();
+    let working_dir = state.config.working_dir.clone();
+    let workspace = state
+        .workspaces
+        .update_with(id, move |workspace| {
+            let apply = |existing: Workspace| -> Result<Workspace, (StatusCode, String)> {
+                let mut workspace = existing.clone();
+                if let Some(workspace_type) = req.workspace_type {
+                    if existing.status != WorkspaceStatus::Building
+                        && workspace_type != existing.workspace_type
+                    {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            "Workspace type cannot be changed after creation".to_string(),
+                        ));
+                    }
+                    workspace.workspace_type = workspace_type;
                 }
-                existing.insert(k.clone(), v.clone());
-            }
-            workspace.config = serde_json::Value::Object(existing);
-        }
-    }
+                if let Some(path) = req.path {
+                    let resolved = resolve_custom_path(&working_dir, &path)?;
+                    if existing.status != WorkspaceStatus::Building && resolved != existing.path {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            "Workspace path cannot be changed after creation".to_string(),
+                        ));
+                    }
+                    workspace.path = resolved;
+                }
+                // Validate name if provided
+                if let Some(ref name) = req.name {
+                    validate_workspace_name(name)?;
+                    workspace.name = name.clone();
+                }
 
-    // Save the updated workspace
-    state.workspaces.update(workspace.clone()).await;
+                // Update skills if provided
+                if let Some(skills) = req.skills {
+                    workspace.skills = sanitize_skill_list(skills);
+                }
+
+                // Update plugins if provided
+                if let Some(plugins) = req.plugins {
+                    workspace.plugins = plugins;
+                }
+
+                if let Some(template) = req.template {
+                    let trimmed = template.trim();
+                    if trimmed.is_empty() {
+                        workspace.template = None;
+                    } else {
+                        workspace.template = Some(trimmed.to_string());
+                    }
+                }
+
+                if let Some(distro) = req.distro {
+                    let trimmed = distro.trim();
+                    if trimmed.is_empty() {
+                        workspace.distro = None;
+                    } else {
+                        workspace.distro = Some(normalize_distro_value(trimmed)?);
+                    }
+                }
+
+                if let Some(env_vars) = req.env_vars {
+                    workspace.env_vars = sanitize_env_vars(env_vars);
+                }
+
+                if let Some(init_script) = req.init_script {
+                    workspace.init_script = normalize_init_script(Some(init_script));
+                }
+
+                // Update init_scripts (fragment names) if provided
+                if let Some(init_scripts) = req.init_scripts {
+                    workspace.init_scripts = init_scripts;
+                }
+
+                // Update shared_network if explicitly set in the request.
+                // The request uses Option<Option<bool>> pattern - outer Option for "field present",
+                // inner Option for the actual value including null for "reset to default".
+                // However, serde flattens this, so we check if the field was explicitly provided.
+                // For now, we only update if Some() is passed; to reset, pass null explicitly via the UI.
+                if req.shared_network.is_some() {
+                    workspace.shared_network = req.shared_network;
+                }
+
+                // Update tailscale_mode if explicitly set in the request
+                if req.tailscale_mode.is_some() {
+                    workspace.tailscale_mode = req.tailscale_mode;
+                }
+
+                // Update MCPs if provided
+                if let Some(mcps) = req.mcps {
+                    workspace.mcps = mcps;
+                }
+                if let Some(exclude) = req.mcps_replace_defaults {
+                    workspace.mcps_replace_defaults = exclude;
+                }
+
+                if let Some(config_profile) = req.config_profile {
+                    let trimmed = config_profile.trim();
+                    if trimmed.is_empty() {
+                        workspace.config_profile = None;
+                    } else {
+                        workspace.config_profile = Some(trimmed.to_string());
+                    }
+                }
+
+                // Merge freeform config (shallow merge of top-level keys). The control
+                // registry path is server-owned and must not move with a client edit.
+                if let Some(config) = req.config {
+                    if let Some(new_obj) = config.as_object() {
+                        let mut existing =
+                            workspace.config.as_object().cloned().unwrap_or_default();
+                        for (k, v) in new_obj {
+                            if k == "mission_workspace_registry_control_root" {
+                                continue;
+                            }
+                            existing.insert(k.clone(), v.clone());
+                        }
+                        workspace.config = serde_json::Value::Object(existing);
+                    }
+                }
+
+                Ok(workspace)
+            };
+            let next = apply(workspace.clone())
+                .map_err(|(status, message)| workspace::BuildConflict { status, message })?;
+            *workspace = next;
+            Ok(())
+        })
+        .await
+        .map_err(|conflict| (conflict.status, conflict.message))?;
 
     // Sync skills and tools if they changed
     let library_guard = state.library.read().await;
@@ -917,52 +942,41 @@ async fn build_workspace(
     AxumPath(id): AxumPath<Uuid>,
     body: Option<Json<BuildWorkspaceRequest>>,
 ) -> Result<Json<WorkspaceResponse>, (StatusCode, String)> {
-    let mut workspace = require_workspace(&state.workspaces, id).await?;
-
-    if workspace.workspace_type != WorkspaceType::Container {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Workspace is not a container type".to_string(),
-        ));
-    }
-
     let force_rebuild = body.as_ref().and_then(|b| b.rebuild).unwrap_or(false);
-
-    // Parse distro from request (or stored workspace default)
-    let distro_override = body
-        .as_ref()
-        .and_then(|b| b.distro.as_ref())
-        .map(|d| parse_distro(d))
-        .transpose()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
-    let distro = match distro_override {
-        Some(distro) => {
-            workspace.distro = Some(distro.api_value().to_string());
-            Some(distro)
-        }
-        None => match workspace.distro.as_ref() {
-            Some(value) => Some(parse_distro(value).map_err(|e| (StatusCode::BAD_REQUEST, e))?),
-            None => None,
-        },
-    };
-
-    // Check if already building (prevents concurrent builds)
-    if workspace.status == WorkspaceStatus::Building {
-        return Err((
-            StatusCode::CONFLICT,
-            "Workspace build already in progress".to_string(),
-        ));
+    if let Some(distro) = body.as_ref().and_then(|b| b.distro.as_deref()) {
+        parse_distro(distro).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     }
 
-    // Set status to Building immediately to prevent concurrent builds
-    workspace.status = WorkspaceStatus::Building;
-    state.workspaces.update(workspace.clone()).await;
+    let claim = state
+        .workspaces
+        .try_claim_workspace_build(
+            id,
+            body.as_ref()
+                .and_then(|b| b.distro.as_deref())
+                .and_then(|d| parse_distro(d).ok())
+                .map(|d| d.api_value().to_string()),
+        )
+        .await
+        .map_err(|conflict| (conflict.status, conflict.message))?;
+    let distro = match claim.workspace.distro.as_deref() {
+        Some(value) => match parse_distro(value) {
+            Ok(distro) => Some(distro),
+            Err(error) => {
+                let mut failed = claim.workspace.clone();
+                failed.status = WorkspaceStatus::Error;
+                failed.error_message = Some(error.clone());
+                let _ = claim.settle(failed).await;
+                return Err((StatusCode::BAD_REQUEST, error));
+            }
+        },
+        None => None,
+    };
+    let mut response_workspace = claim.workspace.clone();
+    response_workspace.error_message = None;
 
     // Run the container build in the background so long builds aren't tied to the HTTP request
-    let workspaces_store = Arc::clone(&state.workspaces);
     let working_dir = state.config.working_dir.clone();
-    let mut workspace_for_build = workspace.clone();
+    let mut workspace_for_build = claim.workspace.clone();
     let harness_policy = state.settings.get_harness_versions().await;
 
     tokio::spawn(async move {
@@ -976,6 +990,10 @@ async fn build_workspace(
         .await;
 
         if let Err(e) = result {
+            if workspace_for_build.status == WorkspaceStatus::Building {
+                workspace_for_build.status = WorkspaceStatus::Error;
+                workspace_for_build.error_message = Some(e.to_string());
+            }
             tracing::error!(
                 workspace = %workspace_for_build.name,
                 error = %e,
@@ -983,10 +1001,12 @@ async fn build_workspace(
             );
         }
 
-        merge_build_result(&workspaces_store, workspace_for_build).await;
+        if let Err(error) = claim.settle(workspace_for_build).await {
+            tracing::error!(%error, "Failed to persist workspace build result");
+        }
     });
 
-    Ok(Json(workspace.into()))
+    Ok(Json(response_workspace.into()))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1425,35 +1445,48 @@ async fn rerun_init_script(
         ));
     }
 
-    // Write the init script to the container
-    let script_path = workspace.path.join("sandboxed-init.sh");
-    tokio::fs::write(&script_path, &init_script)
+    let claim = state
+        .workspaces
+        .try_claim_workspace_build(id, None)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to write init script: {}", e),
-            )
-        })?;
+        .map_err(|conflict| (conflict.status, conflict.message))?;
+    workspace = claim.workspace.clone();
+
+    let settle_claim_error =
+        |claim: workspace::BuildClaimGuard, workspace: Workspace, error: String| async move {
+            let mut failed = workspace;
+            failed.status = WorkspaceStatus::Error;
+            failed.error_message = Some(error.clone());
+            if let Err(settle_error) = claim.settle(failed).await {
+                tracing::error!(%settle_error, "Failed to settle workspace init error");
+            }
+            Err((StatusCode::INTERNAL_SERVER_ERROR, error))
+        };
+
+    let script_path = workspace.path.join("sandboxed-init.sh");
+    if let Err(error) = tokio::fs::write(&script_path, &init_script).await {
+        return settle_claim_error(
+            claim,
+            workspace,
+            format!("Failed to write init script: {}", error),
+        )
+        .await;
+    }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o755);
-        tokio::fs::set_permissions(&script_path, perms)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to set script permissions: {}", e),
-                )
-            })?;
+        if let Err(error) = tokio::fs::set_permissions(&script_path, perms).await {
+            let _ = tokio::fs::remove_file(&script_path).await;
+            return settle_claim_error(
+                claim,
+                workspace,
+                format!("Failed to set script permissions: {}", error),
+            )
+            .await;
+        }
     }
-
-    // Update status to building
-    workspace.status = WorkspaceStatus::Building;
-    workspace.error_message = None;
-    state.workspaces.update(workspace.clone()).await;
 
     // Run the init script
     let start_time = std::time::Instant::now();
@@ -1485,7 +1518,7 @@ async fn rerun_init_script(
             // Revert workspace status to Error so it's not stuck in Building
             workspace.status = WorkspaceStatus::Error;
             workspace.error_message = Some(format!("Failed to execute init script: {}", e));
-            state.workspaces.update(workspace).await;
+            let _ = claim.settle(workspace).await;
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to execute init script: {}", e),
@@ -1520,7 +1553,9 @@ async fn rerun_init_script(
         workspace.error_message = Some(format!("Init script failed: {}", error_msg));
     }
 
-    state.workspaces.update(workspace).await;
+    if let Err(error) = claim.settle(workspace).await {
+        tracing::error!(%error, "Failed to persist workspace init result");
+    }
 
     Ok(Json(RerunInitResponse {
         success,
@@ -2074,7 +2109,27 @@ async fn update_workspace_resources(
     }
 
     if req.persist {
-        state.workspaces.update(workspace.clone()).await;
+        let updates_owned: Vec<(String, String)> = updates
+            .iter()
+            .filter_map(|(k, v)| {
+                v.as_ref()
+                    .map(|val| ((*k).to_string(), val.trim().to_string()))
+            })
+            .collect();
+        state
+            .workspaces
+            .update_with(id, move |ws| {
+                for (key, val) in updates_owned {
+                    if val.is_empty() {
+                        ws.env_vars.remove(&key);
+                    } else {
+                        ws.env_vars.insert(key, val);
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|conflict| (conflict.status, conflict.message))?;
     }
 
     tracing::info!(
@@ -2349,5 +2404,1067 @@ mod tests {
             .expect_err("relative traversal must not leave the workspace");
 
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    }
+
+    async fn test_state(path: &Path) -> Arc<super::super::routes::AppState> {
+        let config = crate::config::Config::new(path.to_path_buf());
+        let root_agent: crate::agents::AgentRef =
+            Arc::new(crate::agents::OpenCodeAgent::new(config.clone()));
+        let mcp = Arc::new(crate::mcp::McpRegistry::new(path).await);
+        let workspaces = Arc::new(workspace::WorkspaceStore::new(path.to_path_buf()).await);
+        let library = Arc::new(tokio::sync::RwLock::new(None));
+        let control = crate::api::control::ControlHub::new(
+            config.clone(),
+            root_agent.clone(),
+            mcp.clone(),
+            workspaces.clone(),
+            library.clone(),
+            None,
+        );
+        Arc::new(super::super::routes::AppState {
+            config,
+            root_agent,
+            mcp,
+            workspaces,
+            library,
+            control,
+            tasks: Default::default(),
+            opencode_connections: Arc::new(
+                crate::opencode_config::OpenCodeStore::new(path.join("connections.json")).await,
+            ),
+            opencode_agents_cache: Default::default(),
+            ai_providers: Arc::new(
+                crate::ai_providers::AIProviderStore::new(path.join("providers.json")).await,
+            ),
+            pending_oauth: Default::default(),
+            pending_github_oauth: Default::default(),
+            pending_github_integration: Default::default(),
+            github_connection: Arc::new(
+                crate::github_connection::GithubConnectionStore::new(path.join("github.json"))
+                    .await,
+            ),
+            secrets: None,
+            console_pool: Arc::new(crate::api::console::SessionPool::new()),
+            settings: Arc::new(crate::settings::SettingsStore::new(path).await),
+            backend_registry: Arc::new(tokio::sync::RwLock::new(
+                crate::backend::registry::BackendRegistry::new("opencode"),
+            )),
+            backend_configs: Arc::new(
+                crate::backend_config::BackendConfigStore::new(path.join("backends.json"), vec![])
+                    .await,
+            ),
+            model_catalog: Default::default(),
+            health_tracker: Arc::new(crate::provider_health::ProviderHealthTracker::new()),
+            chain_store: Arc::new(
+                crate::provider_health::ModelChainStore::new(path.join("chains.json")).await,
+            ),
+            http_client: reqwest::Client::new(),
+            proxy_secret: "test".into(),
+            proxy_api_keys: Arc::new(
+                crate::api::proxy_keys::ProxyApiKeyStore::new(path.join("keys.json")).await,
+            ),
+            deferred_requests: Arc::new(
+                crate::api::deferred_proxy::DeferredRequestStore::new(path.join("requests.json"))
+                    .await,
+            ),
+            telegram_bridge: Arc::new(crate::api::telegram::TelegramBridge::new()),
+            fido_hub: Arc::new(crate::api::fido::FidoSigningHub::new()),
+            control_metrics: Arc::new(crate::api::control_metrics::ControlMetrics::new()),
+            provider_usage_cache: crate::api::provider_usage_cache::ProviderUsageCache::new(),
+            codex_usage: crate::api::codex_usage::CodexUsageStore::new(),
+            fleet: Arc::new(crate::remote_node::FleetMonitor::new()),
+            validation: Arc::new(
+                crate::api::validation::ValidationStore::open(path.join("validation.db")).unwrap(),
+            ),
+            projects: Arc::new(
+                crate::api::projects_store::ProjectsStore::open(path.join("projects.db")).unwrap(),
+            ),
+            attention_snapshot: Default::default(),
+            managed: Default::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn concurrent_build_workspace_admits_exactly_one_and_rejects_second() {
+        let root = TempDir::new().unwrap();
+        let state = test_state(root.path()).await;
+        let path = root.path().join(".sandboxed-sh/containers/race");
+        for dir in ["bin", "usr", "etc"] {
+            std::fs::create_dir_all(path.join(dir)).unwrap();
+        }
+        std::fs::write(
+            path.join("etc/os-release"),
+            "ID=ubuntu\nVERSION_CODENAME=noble\n",
+        )
+        .unwrap();
+        let container = Workspace::new_container("race".into(), path);
+        let id = state.workspaces.add(container).await.unwrap();
+        let (first, second) = tokio::join!(
+            build_workspace(State(Arc::clone(&state)), AxumPath(id), None),
+            build_workspace(State(Arc::clone(&state)), AxumPath(id), None),
+        );
+        let admitted = usize::from(first.is_ok()) + usize::from(second.is_ok());
+        assert_eq!(admitted, 1);
+        let rejected = first.err().or_else(|| second.err()).unwrap();
+        assert_eq!(rejected.0, StatusCode::CONFLICT);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.workspaces.get(id).await.unwrap().status == WorkspaceStatus::Building {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let retry = build_workspace(State(Arc::clone(&state)), AxumPath(id), None)
+            .await
+            .unwrap();
+        assert_eq!(retry.0.config["build_generation"].as_u64(), Some(2));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.workspaces.get(id).await.unwrap().status == WorkspaceStatus::Building {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn build_claim_guard_recovers_after_panic_and_fences_stale_generation() {
+        let root = TempDir::new().unwrap();
+        let store = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let container = Workspace::new_container(
+            "panic-recovery".into(),
+            root.path().join(".sandboxed-sh/containers/panic-recovery"),
+        );
+        let id = store.add(container).await.unwrap();
+        let panicked = tokio::spawn({
+            let store = Arc::clone(&store);
+            async move {
+                let claim = store.try_claim_workspace_build(id, None).await.unwrap();
+                assert_eq!(claim.generation(), 1);
+                panic!("simulated build task panic");
+            }
+        })
+        .await;
+        assert!(panicked.is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while store.get(id).await.unwrap().status == WorkspaceStatus::Building {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(store.get(id).await.unwrap().status, WorkspaceStatus::Error);
+
+        let second = store.try_claim_workspace_build(id, None).await.unwrap();
+        assert_eq!(second.generation(), 2);
+        let mut stale = second.workspace.clone();
+        stale.status = WorkspaceStatus::Ready;
+        store.settle_for_generation(&stale, 1).await.unwrap();
+        assert_eq!(
+            store.get(id).await.unwrap().status,
+            WorkspaceStatus::Building
+        );
+        let mut ready = second.workspace.clone();
+        ready.status = WorkspaceStatus::Ready;
+        second.settle(ready).await.unwrap();
+        assert_eq!(store.get(id).await.unwrap().status, WorkspaceStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn cross_handle_flock_contention_returns_conflict() {
+        use fs2::FileExt;
+
+        let root = TempDir::new().unwrap();
+        let state = test_state(root.path()).await;
+        let path = root.path().join(".sandboxed-sh/containers/locked");
+        let id = state
+            .workspaces
+            .add(Workspace::new_container("locked".into(), path.clone()))
+            .await
+            .unwrap();
+        let lock_path = workspace::workspace_build_lock_path(&path);
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let external = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        external.try_lock_exclusive().unwrap();
+
+        let err = build_workspace(State(Arc::clone(&state)), AxumPath(id), None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_ne!(
+            state.workspaces.get(id).await.unwrap().status,
+            WorkspaceStatus::Building
+        );
+        drop(external);
+        let claim = state
+            .workspaces
+            .try_claim_workspace_build(id, None)
+            .await
+            .unwrap();
+        let mut ready = claim.workspace.clone();
+        ready.status = WorkspaceStatus::Ready;
+        claim.settle(ready).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_scan_ignores_build_artifacts_and_cleans_unlocked_build_lock_on_delete() {
+        let root = TempDir::new().unwrap();
+        let containers_dir = root.path().join(".sandboxed-sh/containers");
+        std::fs::create_dir_all(containers_dir.join(".hidden")).unwrap();
+        std::fs::create_dir_all(containers_dir.join("legacy.build")).unwrap();
+        std::fs::create_dir_all(containers_dir.join("stale.lock")).unwrap();
+
+        let store = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let ws_path = containers_dir.join("clean-container");
+        let id = store
+            .add(Workspace::new_container(
+                "clean-container".into(),
+                ws_path.clone(),
+            ))
+            .await
+            .unwrap();
+
+        let claim = store
+            .try_claim_workspace_build(id, Some("ubuntu-noble".into()))
+            .await
+            .unwrap();
+        let lock_path = workspace::workspace_build_lock_path(&ws_path);
+        assert!(lock_path.is_file());
+        assert!(!containers_dir.join("clean-container.build").exists());
+
+        let mut ready = claim.workspace.clone();
+        ready.status = WorkspaceStatus::Ready;
+        claim.settle(ready).await.unwrap();
+
+        let restarted = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let names: Vec<String> = restarted.list().await.into_iter().map(|w| w.name).collect();
+        assert_eq!(
+            names,
+            vec!["clean-container".to_string(), "host".to_string()]
+        );
+
+        assert!(restarted.delete(id).await);
+        assert!(!lock_path.exists());
+    }
+
+    #[tokio::test]
+    async fn restart_recovery_preserves_live_build_lock_and_fails_interrupted_build() {
+        let root = TempDir::new().unwrap();
+        let store = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let live_id = store
+            .add(Workspace::new_container(
+                "live-build".into(),
+                root.path().join(".sandboxed-sh/containers/live-build"),
+            ))
+            .await
+            .unwrap();
+        let dead_id = store
+            .add(Workspace::new_container(
+                "dead-build".into(),
+                root.path().join(".sandboxed-sh/containers/dead-build"),
+            ))
+            .await
+            .unwrap();
+
+        let live_claim = store
+            .try_claim_workspace_build(live_id, None)
+            .await
+            .unwrap();
+
+        let dead_claim = store
+            .try_claim_workspace_build(dead_id, None)
+            .await
+            .unwrap();
+        let dead_lock = workspace::workspace_build_lock_path(&dead_claim.workspace.path);
+        assert!(dead_lock.exists());
+
+        let storage_path = root.path().join(".sandboxed-sh/workspaces.json");
+        let mut persisted: Vec<Workspace> =
+            serde_json::from_slice(&std::fs::read(&storage_path).unwrap()).unwrap();
+        let mut ready = dead_claim.workspace.clone();
+        ready.status = WorkspaceStatus::Ready;
+        dead_claim.settle(ready).await.unwrap();
+
+        for ws in &mut persisted {
+            if ws.id == dead_id {
+                ws.status = WorkspaceStatus::Building;
+                ws.error_message = None;
+            }
+        }
+        std::fs::write(
+            &storage_path,
+            serde_json::to_vec_pretty(&persisted).unwrap(),
+        )
+        .unwrap();
+
+        let recovered = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        assert_eq!(
+            recovered.get(live_id).await.unwrap().status,
+            WorkspaceStatus::Building
+        );
+        let dead = recovered.get(dead_id).await.unwrap();
+        assert_eq!(dead.status, WorkspaceStatus::Error);
+        assert_eq!(
+            dead.error_message.as_deref(),
+            Some("Workspace build interrupted by restart")
+        );
+
+        let mut live_ready = live_claim.workspace.clone();
+        live_ready.status = WorkspaceStatus::Ready;
+        live_claim.settle(live_ready).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn put_during_build_rejects_build_defining_edits_and_settle_preserves_concurrent_fields()
+    {
+        let root = TempDir::new().unwrap();
+        let state = test_state(root.path()).await;
+        let ws_path = root.path().join(".sandboxed-sh/containers/concurrent-put");
+        let mut container = Workspace::new_container("concurrent-put".into(), ws_path);
+        container.distro = Some("ubuntu-noble".into());
+        let id = state.workspaces.add(container).await.unwrap();
+
+        let claim = state
+            .workspaces
+            .try_claim_workspace_build(id, None)
+            .await
+            .unwrap();
+
+        let distro_conflict = update_workspace(
+            State(Arc::clone(&state)),
+            AxumPath(id),
+            Json(UpdateWorkspaceRequest {
+                workspace_type: None,
+                path: None,
+                name: None,
+                skills: None,
+                plugins: None,
+                template: None,
+                distro: Some("debian-bookworm".into()),
+                env_vars: None,
+                init_script: None,
+                init_scripts: None,
+                shared_network: None,
+                tailscale_mode: None,
+                mcps: None,
+                mcps_replace_defaults: None,
+                config_profile: None,
+                config: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(distro_conflict.0, StatusCode::CONFLICT);
+
+        let type_conflict = update_workspace(
+            State(Arc::clone(&state)),
+            AxumPath(id),
+            Json(UpdateWorkspaceRequest {
+                workspace_type: Some(WorkspaceType::Host),
+                path: None,
+                name: None,
+                skills: None,
+                plugins: None,
+                template: None,
+                distro: None,
+                env_vars: None,
+                init_script: None,
+                init_scripts: None,
+                shared_network: None,
+                tailscale_mode: None,
+                mcps: None,
+                mcps_replace_defaults: None,
+                config_profile: None,
+                config: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(type_conflict.0, StatusCode::CONFLICT);
+
+        let path_conflict = update_workspace(
+            State(Arc::clone(&state)),
+            AxumPath(id),
+            Json(UpdateWorkspaceRequest {
+                workspace_type: None,
+                path: Some(root.path().join(".sandboxed-sh/containers/other-path")),
+                name: None,
+                skills: None,
+                plugins: None,
+                template: None,
+                distro: None,
+                env_vars: None,
+                init_script: None,
+                init_scripts: None,
+                shared_network: None,
+                tailscale_mode: None,
+                mcps: None,
+                mcps_replace_defaults: None,
+                config_profile: None,
+                config: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(path_conflict.0, StatusCode::CONFLICT);
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("FOO".into(), "bar".into());
+        let updated = update_workspace(
+            State(Arc::clone(&state)),
+            AxumPath(id),
+            Json(UpdateWorkspaceRequest {
+                workspace_type: None,
+                path: None,
+                name: Some("renamed-during-build".into()),
+                skills: Some(vec!["ops".into()]),
+                plugins: Some(vec!["plugin-a".into()]),
+                template: None,
+                distro: None,
+                env_vars: Some(env_vars.clone()),
+                init_script: Some("echo updated".into()),
+                init_scripts: Some(vec!["frag-a".into()]),
+                shared_network: Some(false),
+                tailscale_mode: Some(TailscaleMode::ExitNode),
+                mcps: Some(vec!["mcp-a".into()]),
+                mcps_replace_defaults: Some(false),
+                config_profile: Some("custom-profile".into()),
+                config: Some(serde_json::json!({ "custom_key": 42, "build_generation": 999 })),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(updated.status, WorkspaceStatus::Building);
+        assert_eq!(updated.distro.as_deref(), Some("ubuntu-noble"));
+        assert_eq!(updated.name, "renamed-during-build");
+        assert_eq!(updated.config["build_generation"].as_u64(), Some(1));
+        assert_eq!(updated.config["custom_key"].as_i64(), Some(42));
+
+        let mut built = claim.workspace.clone();
+        built.status = WorkspaceStatus::Ready;
+        built.distro = Some("ubuntu-noble".into());
+        claim.settle(built).await.unwrap();
+
+        let settled = state.workspaces.get(id).await.unwrap();
+        assert_eq!(settled.status, WorkspaceStatus::Ready);
+        assert_eq!(settled.name, "renamed-during-build");
+        assert_eq!(settled.skills, vec!["ops".to_string()]);
+        assert_eq!(settled.plugins, vec!["plugin-a".to_string()]);
+        assert_eq!(settled.env_vars, env_vars);
+        assert_eq!(settled.init_script.as_deref(), Some("echo updated"));
+        assert_eq!(settled.init_scripts, vec!["frag-a".to_string()]);
+        assert_eq!(settled.shared_network, Some(false));
+        assert_eq!(settled.tailscale_mode, Some(TailscaleMode::ExitNode));
+        assert_eq!(settled.mcps, vec!["mcp-a".to_string()]);
+        assert!(!settled.mcps_replace_defaults);
+        assert_eq!(settled.config_profile.as_deref(), Some("custom-profile"));
+        assert_eq!(settled.config["custom_key"].as_i64(), Some(42));
+        assert_eq!(settled.distro.as_deref(), Some("ubuntu-noble"));
+    }
+
+    #[tokio::test]
+    async fn cross_store_json_locking_and_settle_failure_do_not_corrupt_or_double_drop() {
+        let root = TempDir::new().unwrap();
+        let store_a = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let store_b = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+
+        let ws_a = Workspace::new_container(
+            "store-a".into(),
+            root.path().join(".sandboxed-sh/containers/store-a"),
+        );
+        let ws_b = Workspace::new_container(
+            "store-b".into(),
+            root.path().join(".sandboxed-sh/containers/store-b"),
+        );
+        let (id_a, id_b) = tokio::join!(store_a.add(ws_a), store_b.add(ws_b));
+        let (id_a, id_b) = (id_a.unwrap(), id_b.unwrap());
+
+        let reloaded = workspace::WorkspaceStore::new(root.path().to_path_buf()).await;
+        assert!(reloaded.get(id_a).await.is_some());
+        assert!(reloaded.get(id_b).await.is_some());
+
+        let claim = store_a
+            .try_claim_workspace_build(id_a, Some("ubuntu-noble".into()))
+            .await
+            .unwrap();
+        let storage_path = root.path().join(".sandboxed-sh/workspaces.json");
+        let saved_bytes = std::fs::read(&storage_path).unwrap();
+        std::fs::remove_file(&storage_path).unwrap();
+        std::fs::create_dir_all(&storage_path).unwrap();
+
+        let mut ready = claim.workspace.clone();
+        ready.status = WorkspaceStatus::Ready;
+        let settle_err = claim.settle(ready).await;
+        assert!(settle_err.is_err());
+
+        std::fs::remove_dir_all(&storage_path).unwrap();
+        std::fs::write(&storage_path, &saved_bytes).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let after_failed_settle = store_a.get(id_a).await.unwrap();
+        assert_eq!(after_failed_settle.status, WorkspaceStatus::Building);
+        assert_ne!(
+            after_failed_settle.error_message.as_deref(),
+            Some("Workspace build aborted before completion")
+        );
+    }
+
+    #[tokio::test]
+    async fn flock_contention_returns_immediate_conflict_without_waiting_on_storage_lock() {
+        use fs2::FileExt;
+
+        let root = TempDir::new().unwrap();
+        let store = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let ws_path = root.path().join(".sandboxed-sh/containers/contended");
+        let id = store
+            .add(Workspace::new_container(
+                "contended".into(),
+                ws_path.clone(),
+            ))
+            .await
+            .unwrap();
+
+        let build_lock_path = workspace::workspace_build_lock_path(&ws_path);
+        std::fs::create_dir_all(build_lock_path.parent().unwrap()).unwrap();
+        let held_build_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&build_lock_path)
+            .unwrap();
+        held_build_lock.try_lock_exclusive().unwrap();
+
+        let storage_lock_path = root.path().join(".sandboxed-sh/workspaces.json.lock");
+        let held_storage_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&storage_lock_path)
+            .unwrap();
+        held_storage_lock.try_lock_exclusive().unwrap();
+
+        let Err(err) = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            store.try_claim_workspace_build(id, None),
+        )
+        .await
+        .expect("try-flock contention must fail fast without waiting on storage lock") else {
+            panic!("expected conflict when build lock is held");
+        };
+        assert_eq!(err.status, StatusCode::CONFLICT);
+
+        drop(held_storage_lock);
+        drop(held_build_lock);
+    }
+
+    #[tokio::test]
+    async fn cancelling_try_claim_workspace_build_mid_claim_settles_abort_and_allows_retry() {
+        use fs2::FileExt;
+
+        let root = TempDir::new().unwrap();
+        let store = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let ws_path = root.path().join(".sandboxed-sh/containers/cancel-claim");
+        let id = store
+            .add(Workspace::new_container(
+                "cancel-claim".into(),
+                ws_path.clone(),
+            ))
+            .await
+            .unwrap();
+
+        let storage_lock_path = root.path().join(".sandboxed-sh/workspaces.json.lock");
+        let held_storage_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&storage_lock_path)
+            .unwrap();
+        held_storage_lock.try_lock_exclusive().unwrap();
+
+        let build_lock_path = workspace::workspace_build_lock_path(&ws_path);
+        let claim_store = Arc::clone(&store);
+        let mut claim_fut = Box::pin(async move {
+            claim_store
+                .try_claim_workspace_build(id, Some("ubuntu-noble".into()))
+                .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(5), &mut claim_fut)
+                        .await
+                        .is_err()
+                );
+                if let Ok(probe) = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&build_lock_path)
+                {
+                    if probe.try_lock_exclusive().is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("claim must acquire build lock while blocked on storage lock");
+
+        drop(claim_fut);
+        drop(held_storage_lock);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let in_mem = store.get(id).await.unwrap();
+                let probe = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&build_lock_path)
+                    .unwrap();
+                let lock_free = probe.try_lock_exclusive().is_ok();
+                if in_mem.status == WorkspaceStatus::Error
+                    && in_mem.config["build_generation"].as_u64() == Some(1)
+                    && lock_free
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled claim must settle abort and release build lock");
+
+        let storage_path = root.path().join(".sandboxed-sh/workspaces.json");
+        let persisted: Vec<Workspace> =
+            serde_json::from_slice(&std::fs::read(&storage_path).unwrap()).unwrap();
+        let disk_ws = persisted.into_iter().find(|w| w.id == id).unwrap();
+        assert_eq!(disk_ws.status, WorkspaceStatus::Error);
+        assert_eq!(
+            disk_ws.error_message.as_deref(),
+            Some("Workspace build aborted before completion")
+        );
+        assert_eq!(disk_ws.config["build_generation"].as_u64(), Some(1));
+
+        let next_claim = store
+            .try_claim_workspace_build(id, Some("debian-bookworm".into()))
+            .await
+            .unwrap();
+        assert_eq!(next_claim.generation(), 2);
+        let mut ready = next_claim.workspace.clone();
+        ready.status = WorkspaceStatus::Ready;
+        next_claim.settle(ready).await.unwrap();
+        assert_eq!(store.get(id).await.unwrap().status, WorkspaceStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn update_workspace_resources_propagates_persistence_error_instead_of_reporting_persisted(
+    ) {
+        let root = TempDir::new().unwrap();
+        let state = test_state(root.path()).await;
+        let id = state
+            .workspaces
+            .add(Workspace::new_container(
+                "resource-persist-fail".into(),
+                root.path()
+                    .join(".sandboxed-sh/containers/resource-persist-fail"),
+            ))
+            .await
+            .unwrap();
+
+        let storage_path = root.path().join(".sandboxed-sh/workspaces.json");
+        let saved = std::fs::read(&storage_path).unwrap();
+        std::fs::remove_file(&storage_path).unwrap();
+        std::fs::create_dir_all(&storage_path).unwrap();
+
+        let err = update_workspace_resources(
+            AxumPath(id),
+            State(Arc::clone(&state)),
+            Json(UpdateWorkspaceResourcesRequest {
+                memory_max: Some("8G".into()),
+                memory_high: None,
+                memory_swap_max: None,
+                cpu_weight: None,
+                cpu_quota: None,
+                persist: true,
+                apply_live: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!state
+            .workspaces
+            .get(id)
+            .await
+            .unwrap()
+            .env_vars
+            .contains_key("MISSION_MEMORY_MAX"));
+
+        std::fs::remove_dir_all(&storage_path).unwrap();
+        std::fs::write(&storage_path, saved).unwrap();
+
+        let ok = update_workspace_resources(
+            AxumPath(id),
+            State(Arc::clone(&state)),
+            Json(UpdateWorkspaceResourcesRequest {
+                memory_max: Some("8G".into()),
+                memory_high: None,
+                memory_swap_max: None,
+                cpu_weight: None,
+                cpu_quota: None,
+                persist: true,
+                apply_live: false,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(ok.persisted);
+        assert_eq!(
+            state
+                .workspaces
+                .get(id)
+                .await
+                .unwrap()
+                .env_vars
+                .get("MISSION_MEMORY_MAX")
+                .map(String::as_str),
+            Some("8G")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_workspace_propagates_storage_failure_and_does_not_register_workspace() {
+        let root = TempDir::new().unwrap();
+        let state = test_state(root.path()).await;
+        let storage_path = root.path().join(".sandboxed-sh/workspaces.json");
+        let saved = std::fs::read(&storage_path).unwrap();
+        std::fs::remove_file(&storage_path).unwrap();
+        std::fs::create_dir_all(&storage_path).unwrap();
+
+        let store_err = state
+            .workspaces
+            .add(Workspace::new_container(
+                "direct-add-fail".into(),
+                root.path().join(".sandboxed-sh/containers/direct-add-fail"),
+            ))
+            .await
+            .unwrap_err();
+        assert_ne!(store_err.kind(), std::io::ErrorKind::NotFound);
+
+        let err = create_workspace(
+            State(Arc::clone(&state)),
+            Json(CreateWorkspaceRequest {
+                name: "unpersisted-ws".into(),
+                workspace_type: WorkspaceType::Container,
+                path: None,
+                skills: Vec::new(),
+                plugins: Vec::new(),
+                template: None,
+                distro: Some("ubuntu-noble".into()),
+                env_vars: None,
+                init_script: None,
+                shared_network: None,
+                tailscale_mode: None,
+                mcps: Vec::new(),
+                mcps_replace_defaults: true,
+                config_profile: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(state.workspaces.list().await.len(), 1);
+        assert!(
+            std::fs::read_dir(root.path().join(".sandboxed-sh/mission-workspace-roots"))
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(true)
+        );
+
+        std::fs::remove_dir_all(&storage_path).unwrap();
+        std::fs::write(&storage_path, saved).unwrap();
+
+        let created = create_workspace(
+            State(Arc::clone(&state)),
+            Json(CreateWorkspaceRequest {
+                name: "persisted-ws".into(),
+                workspace_type: WorkspaceType::Container,
+                path: None,
+                skills: Vec::new(),
+                plugins: Vec::new(),
+                template: None,
+                distro: Some("ubuntu-noble".into()),
+                env_vars: None,
+                init_script: None,
+                shared_network: None,
+                tailscale_mode: None,
+                mcps: Vec::new(),
+                mcps_replace_defaults: true,
+                config_profile: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(state.workspaces.get(created.id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn cross_handle_stale_cached_building_consults_lock_and_disk_after_other_handle_settles()
+    {
+        let root = TempDir::new().unwrap();
+        let store_a = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let ws_path = root.path().join(".sandboxed-sh/containers/stale-building");
+        let id = store_a
+            .add(Workspace::new_container(
+                "stale-building".into(),
+                ws_path.clone(),
+            ))
+            .await
+            .unwrap();
+
+        let claim_a = store_a
+            .try_claim_workspace_build(id, Some("ubuntu-noble".into()))
+            .await
+            .unwrap();
+        assert_eq!(claim_a.generation(), 1);
+
+        let store_b = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        assert_eq!(
+            store_b.get(id).await.unwrap().status,
+            WorkspaceStatus::Building
+        );
+        let Err(while_active) = store_b.try_claim_workspace_build(id, None).await else {
+            panic!("expected conflict while build lock is held");
+        };
+        assert_eq!(while_active.status, StatusCode::CONFLICT);
+
+        let mut ready_a = claim_a.workspace.clone();
+        ready_a.status = WorkspaceStatus::Ready;
+        claim_a.settle(ready_a).await.unwrap();
+
+        assert_eq!(
+            store_b.get(id).await.unwrap().status,
+            WorkspaceStatus::Building
+        );
+
+        let claim_b = store_b
+            .try_claim_workspace_build(id, Some("debian-bookworm".into()))
+            .await
+            .unwrap();
+        assert_eq!(claim_b.generation(), 2);
+        assert_eq!(claim_b.workspace.distro.as_deref(), Some("debian-bookworm"));
+
+        let mut ready_b = claim_b.workspace.clone();
+        ready_b.status = WorkspaceStatus::Ready;
+        claim_b.settle(ready_b).await.unwrap();
+        assert_eq!(
+            store_b.get(id).await.unwrap().status,
+            WorkspaceStatus::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_workspace_build_preserves_prior_error_for_build_input_and_clears_response_and_store(
+    ) {
+        let root = TempDir::new().unwrap();
+        let state = test_state(root.path()).await;
+        let ws_path = root.path().join(".sandboxed-sh/containers/claim-error");
+        let mut container = Workspace::new_container("claim-error".into(), ws_path);
+        container.distro = Some("ubuntu-noble".into());
+        container.status = WorkspaceStatus::Error;
+        container.error_message = Some("Init script failed: exit code 1".into());
+        let id = state.workspaces.add(container).await.unwrap();
+
+        let claim = state
+            .workspaces
+            .try_claim_workspace_build(id, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            claim.workspace.error_message.as_deref(),
+            Some("Init script failed: exit code 1")
+        );
+        let in_mem = state.workspaces.get(id).await.unwrap();
+        assert_eq!(in_mem.status, WorkspaceStatus::Building);
+        assert!(in_mem.error_message.is_none());
+        let storage_path = root.path().join(".sandboxed-sh/workspaces.json");
+        let persisted: Vec<Workspace> =
+            serde_json::from_slice(&std::fs::read(&storage_path).unwrap()).unwrap();
+        let disk_ws = persisted.into_iter().find(|w| w.id == id).unwrap();
+        assert_eq!(disk_ws.status, WorkspaceStatus::Building);
+        assert!(disk_ws.error_message.is_none());
+
+        let mut ready = claim.workspace.clone();
+        ready.status = WorkspaceStatus::Ready;
+        ready.error_message = None;
+        claim.settle(ready).await.unwrap();
+
+        let mut errored = state.workspaces.get(id).await.unwrap();
+        errored.status = WorkspaceStatus::Error;
+        errored.error_message = Some("Init script failed: second".into());
+        assert!(state.workspaces.update(errored).await);
+
+        let response = build_workspace(State(Arc::clone(&state)), AxumPath(id), None)
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(response.status, WorkspaceStatus::Building);
+        assert!(response.error_message.is_none());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.workspaces.get(id).await.unwrap().status == WorkspaceStatus::Building {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn build_workspace_preserves_prior_error_for_force_rebuild_while_clearing_persisted_error(
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        if std::env::var_os("ORB_FAILED_INIT_REGRESSION_CHILD").is_none() {
+            let root = TempDir::new().unwrap();
+            let fake_bin = root.path().join("fake-bin");
+            std::fs::create_dir_all(&fake_bin).unwrap();
+            for (name, body) in [
+                ("systemd-nspawn", "#!/bin/sh\nexit 0\n"),
+                ("debootstrap", "#!/bin/sh\nexit 1\n"),
+            ] {
+                let bin_path = fake_bin.join(name);
+                std::fs::write(&bin_path, body).unwrap();
+                std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+            let joined_path = match std::env::var_os("PATH") {
+                Some(existing) => {
+                    let mut paths = vec![fake_bin];
+                    paths.extend(std::env::split_paths(&existing));
+                    std::env::join_paths(paths).unwrap()
+                }
+                None => fake_bin.into_os_string(),
+            };
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "api::workspaces::tests::build_workspace_preserves_prior_error_for_force_rebuild_while_clearing_persisted_error",
+                    "--nocapture",
+                ])
+                .env("ORB_FAILED_INIT_REGRESSION_CHILD", "1")
+                .env("PATH", joined_path)
+                .env("WORKING_DIR", root.path())
+                .env("SANDBOXED_SH_ALLOW_CONTAINER_FALLBACK", "0")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "stdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let root_path = PathBuf::from(std::env::var_os("WORKING_DIR").unwrap());
+        let state = test_state(&root_path).await;
+        let ws_path = root_path.join(".sandboxed-sh/containers/failed-init");
+        for dir in ["bin", "usr", "etc", "var"] {
+            std::fs::create_dir_all(ws_path.join(dir)).unwrap();
+        }
+        std::fs::write(
+            ws_path.join("etc/os-release"),
+            "ID=ubuntu\nVERSION_CODENAME=noble\n",
+        )
+        .unwrap();
+        let stale_marker = ws_path.join("var/stale-failed-init-marker");
+        std::fs::write(&stale_marker, "stale").unwrap();
+
+        let mut container = Workspace::new_container("failed-init".into(), ws_path.clone());
+        container.distro = Some("ubuntu-noble".into());
+        container.status = WorkspaceStatus::Error;
+        container.error_message = Some("Init script failed: exit code 1".into());
+        let id = state.workspaces.add(container).await.unwrap();
+
+        let response = build_workspace(State(Arc::clone(&state)), AxumPath(id), None)
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(response.status, WorkspaceStatus::Building);
+        assert!(response.error_message.is_none());
+
+        let in_mem = state.workspaces.get(id).await.unwrap();
+        if in_mem.status == WorkspaceStatus::Building {
+            assert!(in_mem.error_message.is_none());
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.workspaces.get(id).await.unwrap().status == WorkspaceStatus::Building {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let settled = state.workspaces.get(id).await.unwrap();
+        assert_eq!(settled.status, WorkspaceStatus::Error);
+        assert!(!stale_marker.exists());
+    }
+
+    #[tokio::test]
+    async fn rerun_init_script_write_failure_deterministically_settles_error_before_response() {
+        let root = TempDir::new().unwrap();
+        let state = test_state(root.path()).await;
+        let ws_path = root
+            .path()
+            .join(".sandboxed-sh/containers/rerun-write-fail");
+        std::fs::create_dir_all(ws_path.join("bin")).unwrap();
+        std::fs::create_dir_all(ws_path.join("sandboxed-init.sh")).unwrap();
+
+        let mut container = Workspace::new_container("rerun-write-fail".into(), ws_path.clone());
+        container.status = WorkspaceStatus::Ready;
+        container.init_script = Some("echo hello".into());
+        let id = state.workspaces.add(container).await.unwrap();
+
+        let err = rerun_init_script(State(Arc::clone(&state)), AxumPath(id))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.1.starts_with("Failed to write init script:"));
+
+        let in_mem = state.workspaces.get(id).await.unwrap();
+        assert_eq!(in_mem.status, WorkspaceStatus::Error);
+        assert_eq!(in_mem.error_message.as_deref(), Some(err.1.as_str()));
+        assert_eq!(in_mem.config["build_generation"].as_u64(), Some(1));
+
+        let reloaded = workspace::WorkspaceStore::new(root.path().to_path_buf()).await;
+        let on_disk = reloaded.get(id).await.unwrap();
+        assert_eq!(on_disk.status, WorkspaceStatus::Error);
+        assert_eq!(on_disk.error_message.as_deref(), Some(err.1.as_str()));
+
+        let next_claim = state
+            .workspaces
+            .try_claim_workspace_build(id, None)
+            .await
+            .unwrap();
+        assert_eq!(next_claim.generation(), 2);
+        let mut recovered = next_claim.workspace.clone();
+        recovered.status = WorkspaceStatus::Ready;
+        recovered.error_message = None;
+        next_claim.settle(recovered).await.unwrap();
     }
 }
