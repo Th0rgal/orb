@@ -1,6 +1,6 @@
 import { For, Show, createMemo, createResource, createSignal, onCleanup } from "solid-js";
 import { ConfirmDialog } from "./Dialog";
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { FileDocument } from "./ProjectFiles";
 import { mdSource, setMdSource } from "./Markdown";
@@ -220,7 +220,7 @@ export function SkillPage(p: { name: string; initialView?: "edit" | "history"; o
         <span class="dlg-spacer" />
         <Show when={state() === "saving"}><span class="pf-state">Saving…</span></Show>
         <Show when={state() === "saved" && !dirty()}><span class="pf-state dim" role="status">Saved to repo</span></Show>
-        <Show when={state() === "error"}><span class="pf-state inline-error" role="alert">{error()} <button type="button" class="link-btn" onClick={() => void save()}>Retry</button></span></Show>
+        <ErrorToast error={state() === "error" ? error() : null} title={`Couldn’t save ${p.name}`} onDismiss={() => { setState("idle"); setError(null); }} action={{ label: "Retry", run: () => save() }} />
         <Show when={editable() && view() === "edit"}>
           <button class="s-btn" title="Toggle source and preview (⌘/)" onClick={() => setMdSource(!mdSource())}>{mdSource() ? "Preview" : "Edit"}</button>
           <button class="s-btn primary" title="Save (⌘S)" disabled={!dirty() || state() === "saving"} onClick={() => void save()}>Save</button>
@@ -281,7 +281,7 @@ export function SkillPage(p: { name: string; initialView?: "edit" | "history"; o
           </Show>
         </nav>
         <section class="skill-main">
-          <Show when={loadError()}>{(e) => <div class="col"><ErrorNotice error={e()} /></div>}</Show>
+          <ErrorToast error={loadError()} title={`Couldn’t load ${p.name}`} background action={{ label: "Retry", run: () => load() }} />
           <Show when={view() === "edit"} fallback={
             <div class="scroll"><div class="col">
               <SkillHistory name={p.name} current={originals()[SKILL_MD] ?? ""} busy={state() === "saving"} onRestore={(rev, content) => { setDrafts((d) => ({ ...d, [SKILL_MD]: content })); setOpenFile(SKILL_MD); void save(`skill: restore ${p.name} to ${rev.slice(0, 7)}`).then(() => setView("edit")); }} />
@@ -316,7 +316,8 @@ function SkillHistory(p: { name: string; current: string; busy: boolean; onResto
   return (
     <div class="skills-versions" aria-label="History">
       <Show when={!versions.loading} fallback={<For each={[0, 1, 2]}>{() => <div class="skills-version skeleton"><span class="spend-skel skills-skel-desc" /></div>}</For>}>
-        <Show when={!versions.error} fallback={<p class="inline-error">Couldn’t load the history: {String(versions.error?.message ?? versions.error)}</p>}>
+        <ErrorToast error={versions.error ? `Couldn’t load the history: ${String(versions.error?.message ?? versions.error)}` : null} title="Couldn’t load the history" background />
+        <Show when={!versions.error}>
           <Show when={versions()} fallback={<p class="skills-sub-note">This Core is too old to show skill history.</p>}>{(list) =>
             <For each={list()} fallback={<p class="skills-sub-note">No saved versions yet.</p>}>{(v, i) =>
               <div class="skills-version">

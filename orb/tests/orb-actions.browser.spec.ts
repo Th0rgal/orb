@@ -571,9 +571,9 @@ test('a refused sidebar action explains itself in a dialog, not inside the proje
   const shortcut = process.platform === 'darwin' ? 'Meta' : 'Control';
   await page.locator('.row.folder .row-main').filter({hasText:'reference'}).focus(); await page.keyboard.press(`${shortcut}+x`);
   await page.getByRole('button',{name:'Test',exact:true}).focus(); await page.keyboard.press(`${shortcut}+v`);
-  const dialog = page.getByRole('dialog');
-  await expect(dialog.getByRole('alert')).toContainText('Choose a different name or folder');
+  const alert = page.getByRole('alert');
+  await expect(alert).toContainText('Choose a different name or folder');
   await expect(page.locator('.sidebar .error-notice, nav .error-notice')).toHaveCount(0);
-  await dialog.locator('.dlg-foot').getByRole('button',{name:'Close',exact:true}).click();
-  await expect(dialog).toHaveCount(0);
+  await alert.getByRole('button',{name:'Dismiss',exact:true}).click();
+  await expect(alert).toHaveCount(0);
 });
