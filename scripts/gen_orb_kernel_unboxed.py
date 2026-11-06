@@ -32,7 +32,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "shared/orb-spec/cabi/orb_kernel_unboxed.c"
 LEANSYS_REPO = "https://github.com/Th0rgal/lean-sys.git"
-LEANSYS_REV = "d658cb2450743434d255e59ea4225bd651681177"
+LEANSYS_REV = "bbe3183d3fd57ee662405f0c63fde890fb878324"
 
 # Only scalar primitives with obvious C semantics are allowed; anything else
 # means the kernel started depending on the Lean runtime and must fail.

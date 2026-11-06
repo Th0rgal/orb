@@ -11,7 +11,7 @@ package «orb-net-leaf» where
   moreLinkArgs := #["-lssl", "-lcrypto", "-lutil", "-ldl"]
 
 require «lean-sys» from git
-  "https://github.com/Th0rgal/lean-sys.git" @ "d658cb2450743434d255e59ea4225bd651681177"
+  "https://github.com/Th0rgal/lean-sys.git" @ "bbe3183d3fd57ee662405f0c63fde890fb878324"
 
 target orb_net_leaf_o pkg : FilePath := do
   let oFile := pkg.buildDir / "c" / "orb_net_leaf.o"
