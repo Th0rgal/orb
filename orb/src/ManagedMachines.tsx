@@ -472,7 +472,7 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
   onMount(() => {
     if (isConnected()) void refresh();
     onCleanup(pollWhileVisible(() => (isConnected() ? refresh() : undefined), 15000, "managed"));
-    const onProvidersChanged = () => { if (isConnected()) void refresh(); };
+    const onProvidersChanged = () => { if (isConnected()) { setLoadError(null); void refresh(); } };
     window.addEventListener("orb:managed-providers-changed", onProvidersChanged);
     onCleanup(() => window.removeEventListener("orb:managed-providers-changed", onProvidersChanged));
   });

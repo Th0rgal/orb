@@ -1,6 +1,8 @@
 import { createSignal, For } from "solid-js";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
+import { clearConnection, setConnection } from "../src/api";
+import { CloudProviders } from "../src/CloudProviders";
 import { ErrorToast, notify } from "../src/toast";
 
 const rect = (left: number, top: number, right: number, bottom: number): DOMRect => ({
@@ -167,5 +169,35 @@ describe("unified workspace ErrorToast & Toaster", () => {
     setErrors({});
     setErrors({ health: "503 Service Unavailable" });
     expect(screen.getByRole("alert").textContent).toContain("health: 503 Service Unavailable");
+  });
+
+  it("resets CloudProviders background suppression on manual orb:providers-refresh while keeping polls quiet", async () => {
+    vi.useFakeTimers();
+    setConnection("https://test.invalid", "tok");
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/api/cloud/usage")) {
+        return new Response(JSON.stringify({ accounts: {} }), { status: 200 });
+      }
+      throw new Error("Cloud registry offline");
+    });
+    try {
+      render(() => <CloudProviders />);
+      await vi.waitFor(() => expect(screen.getByText("Couldn’t load cloud accounts")).toBeTruthy());
+
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+      expect(screen.queryByRole("alert")).toBeNull();
+
+      // Background 60s poll stays suppressed when the same failure persists.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(screen.queryByRole("alert")).toBeNull();
+
+      // Manual Refresh button on Inference dispatches orb:providers-refresh -> surfaces the error again.
+      window.dispatchEvent(new Event("orb:providers-refresh"));
+      await vi.waitFor(() => expect(screen.getByText("Couldn’t load cloud accounts")).toBeTruthy());
+    } finally {
+      fetcher.mockRestore();
+      clearConnection();
+      vi.useRealTimers();
+    }
   });
 });

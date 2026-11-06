@@ -237,6 +237,7 @@ export default function Resources(props: {
       [connectionVersion, () => props.missionId ?? null, range, horizon],
       ([, mid]) => {
         const needsSkeleton = mid ? detail()?.mission.id !== mid : overview() === null;
+        setError(null);
         void refresh(needsSkeleton);
       },
     ),
