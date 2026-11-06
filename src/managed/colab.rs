@@ -319,6 +319,7 @@ struct WorkerEndpoint {
 #[derive(Debug, Clone)]
 struct RuntimeTracking {
     started_at: DateTime<Utc>,
+    stopped_at: Option<DateTime<Utc>>,
     usd_per_hour: f64,
 }
 
@@ -926,21 +927,62 @@ impl ManagedProvider for ColabProvider {
             ));
         }
 
+        // For `colab-auto` without explicit caller CPU/RAM overrides, `spec.cpu`/`spec.ram_gb`
+        // carry the auto catalog baseline (8 vCPU / 30 GB), whereas a T4 fallback provides
+        // 2 vCPU / 12 GB. Only require tiers above T4 when `spec.cpu`/`spec.ram_gb` exceed
+        // the `colab-auto` baseline (meaning the caller explicitly asked for higher CPU/RAM)
+        // or when a specific size was requested.
+        let (min_cpu, min_ram_gb) = if size_spec.size == "colab-auto" {
+            (
+                if spec.cpu > size_spec.cpu {
+                    spec.cpu
+                } else {
+                    0
+                },
+                if spec.ram_gb > size_spec.ram_gb {
+                    spec.ram_gb
+                } else {
+                    0
+                },
+            )
+        } else {
+            (spec.cpu, spec.ram_gb)
+        };
+        let tier_fits_floors = |tier: SizeSpec| tier.cpu >= min_cpu && tier.ram_gb >= min_ram_gb;
+
         // When accelerator eligibility was fetched, pick the highest-priority
-        // wanted accelerator that at least one usable account can actually serve.
+        // wanted accelerator that is eligible AND satisfies requested CPU/RAM floors.
         let chosen_tier = if !snap.eligible_accelerators.is_empty() {
-            let Some(matched) = wanted.iter().find(|w| {
+            let any_eligible = wanted.iter().any(|w| {
                 snap.eligible_accelerators
                     .iter()
                     .any(|elig| elig.eq_ignore_ascii_case(w))
-            }) else {
+            });
+            if !any_eligible {
                 return Err(format!(
                     "provider_at_capacity (accelerator_ineligible): none of {:?} are eligible on usable Colab accounts (eligible: {:?})",
                     wanted, snap.eligible_accelerators
                 ));
+            }
+            let Some(matched) = wanted.iter().find(|w| {
+                snap.eligible_accelerators
+                    .iter()
+                    .any(|elig| elig.eq_ignore_ascii_case(w))
+                    && tier_fits_floors(spec_for_accelerator(w))
+            }) else {
+                return Err(format!(
+                    "provider_at_capacity (insufficient_tier_resources): eligible Colab tiers {:?} do not satisfy requested minimum {} vCPU / {} GB RAM",
+                    snap.eligible_accelerators, spec.cpu, spec.ram_gb
+                ));
             };
             spec_for_accelerator(matched)
         } else {
+            if !tier_fits_floors(size_spec) {
+                return Err(format!(
+                    "colab tier '{}' ({} vCPU / {} GB RAM) is smaller than requested minimum {} vCPU / {} GB RAM",
+                    size_spec.size, size_spec.cpu, size_spec.ram_gb, spec.cpu, spec.ram_gb
+                ));
+            }
             size_spec
         };
 
@@ -956,13 +998,37 @@ impl ManagedProvider for ColabProvider {
         Ok(Some(SpawnQuote {
             offer_id: None,
             usd_per_hour: chosen_tier.usd_per_hour,
-            cpu: chosen_tier.cpu.max(spec.cpu),
-            ram_gb: chosen_tier.ram_gb.max(spec.ram_gb),
+            cpu: chosen_tier.cpu,
+            ram_gb: chosen_tier.ram_gb,
         }))
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<ProviderMachine, String> {
-        let wanted = requested_accelerators(&spec.size, spec.gpu.as_deref());
+        let size_spec = colab_size_spec(&spec.size);
+        let (min_cpu, min_ram_gb) = match size_spec {
+            Some(s) if s.size == "colab-auto" => (
+                if spec.cpu > s.cpu { spec.cpu } else { 0 },
+                if spec.ram_gb > s.ram_gb {
+                    spec.ram_gb
+                } else {
+                    0
+                },
+            ),
+            _ => (spec.cpu, spec.ram_gb),
+        };
+        let wanted: Vec<String> = requested_accelerators(&spec.size, spec.gpu.as_deref())
+            .into_iter()
+            .filter(|w| {
+                let t = spec_for_accelerator(w);
+                t.cpu >= min_cpu && t.ram_gb >= min_ram_gb
+            })
+            .collect();
+        if wanted.is_empty() {
+            return Err(format!(
+                "no Colab accelerator tier for size '{}' satisfies requested minimum {} vCPU / {} GB RAM",
+                spec.size, spec.cpu, spec.ram_gb
+            ));
+        }
         let body = CreateNotebookBody {
             name: &spec.name,
             accelerator: &wanted,
@@ -1009,6 +1075,7 @@ impl ManagedProvider for ColabProvider {
                 rec.id.clone(),
                 RuntimeTracking {
                     started_at: Utc::now(),
+                    stopped_at: None,
                     usd_per_hour: assigned_rate,
                 },
             );
@@ -1113,10 +1180,12 @@ impl ManagedProvider for ColabProvider {
         if let Ok(mut w) = self.workers.write() {
             w.remove(provider_id);
         }
-        if let Ok(mut rt) = self.runtimes.write() {
-            rt.remove(provider_id);
-        }
         if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
+            if let Ok(mut rt) = self.runtimes.write() {
+                if let Some(entry) = rt.get_mut(provider_id) {
+                    entry.stopped_at.get_or_insert_with(Utc::now);
+                }
+            }
             return Ok(());
         }
         let body = resp.text().await.unwrap_or_default();
@@ -1172,11 +1241,25 @@ impl ManagedProvider for ColabProvider {
             .await
             .map_err(|e| format!("colab GET /notebooks/{{id}}: {}", e.without_url()))?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(ProviderUsage {
-                dollars: 0.0,
-                seconds: 0,
-                running: false,
-            });
+            if let Some(t) = self
+                .runtimes
+                .write()
+                .ok()
+                .and_then(|mut m| m.remove(provider_id))
+            {
+                let end = t.stopped_at.unwrap_or_else(Utc::now);
+                let seconds = (end - t.started_at).num_seconds().max(0) as u64;
+                let dollars = (seconds as f64 / 3600.0) * t.usd_per_hour;
+                return Ok(ProviderUsage {
+                    dollars,
+                    seconds,
+                    running: false,
+                });
+            }
+            // If Core restarted and lost in-memory `RuntimeTracking` before deletion,
+            // return `Err` so `ManagedManager::refresh_usage` preserves `estimated_cost`
+            // and closes the ledger instead of overwriting `cost_usd` with `$0.00`.
+            return Err("colab usage: notebook deleted".into());
         }
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -1196,18 +1279,15 @@ impl ManagedProvider for ColabProvider {
             tracked.as_ref().map_or(0.225, |t| t.usd_per_hour)
         };
         let Some(t) = tracked else {
-            return Ok(ProviderUsage {
-                dollars: 0.0,
-                seconds: 0,
-                running: true,
-            });
+            return Err("colab usage: runtime start timestamp unavailable after restart".into());
         };
-        let seconds = (Utc::now() - t.started_at).num_seconds().max(0) as u64;
+        let end = t.stopped_at.unwrap_or_else(Utc::now);
+        let seconds = (end - t.started_at).num_seconds().max(0) as u64;
         let dollars = (seconds as f64 / 3600.0) * rate;
         Ok(ProviderUsage {
             dollars,
             seconds,
-            running: true,
+            running: t.stopped_at.is_none(),
         })
     }
 }
@@ -1278,6 +1358,7 @@ mod tests {
         accounts: Value,
         accelerators: Value,
         deleted_ids: Vec<String>,
+        spawned_accelerators: Vec<Vec<String>>,
         files: HashMap<String, String>,
         commands: Vec<String>,
         worker_url: String,
@@ -1321,6 +1402,14 @@ mod tests {
                             );
                         }
                         let worker_url = st.lock().unwrap().worker_url.clone();
+                        if let Some(arr) = body.get("accelerator").and_then(Value::as_array) {
+                            let req_acc: Vec<String> = arr
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect();
+                            st.lock().unwrap().spawned_accelerators.push(req_acc);
+                        }
                         let name = body.get("name").cloned().unwrap_or(Value::Null);
                         (
                             StatusCode::CREATED,
@@ -1341,15 +1430,25 @@ mod tests {
                 get(
                     |Path(id): Path<String>,
                      State(st): State<StdArc<StdMutex<MockColabState>>>| async move {
-                        let worker_url = st.lock().unwrap().worker_url.clone();
-                        Json(json!({
-                            "id": id,
-                            "name": "orb-managed-mmcolab1",
-                            "accelerator": "A100",
-                            "connected": true,
-                            "worker_url": worker_url,
-                            "worker_token": "wtok-1"
-                        }))
+                        let guard = st.lock().unwrap();
+                        if guard.deleted_ids.iter().any(|d| d == &id) {
+                            return (
+                                StatusCode::NOT_FOUND,
+                                Json(json!({"error": "notebook not found"})),
+                            );
+                        }
+                        let worker_url = guard.worker_url.clone();
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "id": id,
+                                "name": "orb-managed-mmcolab1",
+                                "accelerator": "A100",
+                                "connected": true,
+                                "worker_url": worker_url,
+                                "worker_token": "wtok-1"
+                            })),
+                        )
                     },
                 ),
             )
@@ -1540,6 +1639,105 @@ mod tests {
         assert_eq!(
             state.lock().unwrap().deleted_ids,
             vec!["rt-123~pro@gmail.com".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn destroy_preserves_final_shadow_usage_and_errors_after_ledger_reap() {
+        let state = StdArc::new(StdMutex::new(MockColabState {
+            accounts: json!({"accounts": [{"email": "pro@gmail.com", "usable": true}]}),
+            accelerators: json!({"accounts": []}),
+            ..Default::default()
+        }));
+        let base = spawn_mock_colab(state).await;
+        let p = ColabProvider::new(&base, "colab-secret");
+
+        let pm = p.spawn(&test_spec("a100")).await.unwrap();
+        // Backdate `started_at` by 1800s (0.5h at $0.675/h = $0.3375).
+        {
+            let mut rt = p.runtimes.write().unwrap();
+            rt.get_mut(&pm.provider_id).unwrap().started_at =
+                Utc::now() - chrono::Duration::seconds(1800);
+        }
+
+        let live_usage = p.usage(&pm.provider_id).await.unwrap();
+        assert!(live_usage.running);
+        assert!(live_usage.dollars >= 0.33);
+
+        // `destroy()` freezes `stopped_at`; subsequent `usage()` (when GET returns 404)
+        // returns the final accrued shadow bill with `running = false` so `refresh_usage`
+        // closes the ledger without zeroing `cost_usd`.
+        p.destroy(&pm.provider_id).await.unwrap();
+        let final_usage = p.usage(&pm.provider_id).await.unwrap();
+        assert!(!final_usage.running);
+        assert!(
+            (final_usage.dollars - 0.3375).abs() < 0.01,
+            "got: {final_usage:?}"
+        );
+
+        // Any poll after the one-shot final bill was consumed returns `Err` (never `$0.00`)
+        // so `ManagedManager::refresh_usage` preserves existing `estimated_cost` / `cost_usd`.
+        assert!(p.usage(&pm.provider_id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn quote_and_spawn_enforce_cpu_ram_floors_without_inflating_t4() {
+        let state = StdArc::new(StdMutex::new(MockColabState {
+            accounts: json!({
+                "accounts": [
+                    {"email": "free1@gmail.com", "usable": true},
+                    {"email": "free2@gmail.com", "usable": true}
+                ]
+            }),
+            accelerators: json!({
+                "accounts": [{
+                    "account": "free1@gmail.com",
+                    "tier": "SUBSCRIPTION_TIER_FREE",
+                    "best": "T4",
+                    "available": [
+                        {"variant": "VARIANT_GPU", "accelerator": "T4", "shape": "SHAPE_STANDARD", "eligible": true}
+                    ]
+                }]
+            }),
+            ..Default::default()
+        }));
+        let base = spawn_mock_colab(state.clone()).await;
+        let p = ColabProvider::new(&base, "colab-secret");
+
+        // Plain `colab-auto` (spec carries its 8 vCPU / 30 GB catalog default) falls back
+        // to T4 cleanly AND reports T4's real 2 vCPU / 12 GB capacity rather than inflating to 8 / 30.
+        let mut auto_default = test_spec("colab-auto");
+        auto_default.cpu = 8;
+        auto_default.ram_gb = 30;
+        let q = p.quote_spawn(&auto_default).await.unwrap().unwrap();
+        assert_eq!(q.cpu, 2);
+        assert_eq!(q.ram_gb, 12);
+        assert!((q.usd_per_hour - 0.10).abs() < 1e-9);
+
+        // Explicit caller floor (`cpu=12, ram_gb=64`) rejects T4 in `quote_spawn`, filters
+        // `spawn`'s accelerator list down to 12 vCPU / 80 GB tiers (`["H100", "A100"]`), and
+        // rejects requests above every Colab tier (`cpu=16`).
+        let mut high_floor = test_spec("colab-auto");
+        high_floor.cpu = 12;
+        high_floor.ram_gb = 64;
+        let q_err = p.quote_spawn(&high_floor).await.unwrap_err();
+        assert!(
+            q_err.contains("insufficient_tier_resources"),
+            "got: {q_err}"
+        );
+        let _ = p.spawn(&high_floor).await.unwrap();
+        assert_eq!(
+            state.lock().unwrap().spawned_accelerators.last().cloned(),
+            Some(vec!["H100".to_string(), "A100".to_string()])
+        );
+
+        let mut impossible_floor = test_spec("colab-auto");
+        impossible_floor.cpu = 16;
+        impossible_floor.ram_gb = 96;
+        let s_err = p.spawn(&impossible_floor).await.unwrap_err();
+        assert!(
+            s_err.contains("satisfies requested minimum"),
+            "got: {s_err}"
         );
     }
 }
