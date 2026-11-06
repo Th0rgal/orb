@@ -425,14 +425,19 @@ private def toolGetText (args : JVal) : IO (Except String String) := do
   let wd ← getWorkingDir
   let screenshotsDir := wd / "screenshots"
   try IO.FS.createDirAll screenshotsDir catch e => return .error s!"Failed to create screenshots dir: {e}"
-  let tmpPng := screenshotsDir / "_ocr_temp.png"
+  let reqId ← newUuidV4
+  let tmpPng := screenshotsDir / s!"_ocr_temp_{reqId}.png"
   let wenv ← match (← waylandEnvForDisplay displayId) with
     | .ok e => pure e
     | .error err => return .error err
   match (← runWithWayland wenv "grim" #[tmpPng.toString]) with
-  | .error e => return .error e
+  | .error e =>
+    try IO.FS.removeFile tmpPng catch _ => pure ()
+    return .error e
   | .ok (_, stderr, code) =>
-    if code != 0 then return .error s!"Failed to take screenshot for OCR: {stderr}"
+    if code != 0 then
+      try IO.FS.removeFile tmpPng catch _ => pure ()
+      return .error s!"Failed to take screenshot for OCR: {stderr}"
     let out ←
       try IO.Process.output { cmd := "tesseract", args := #[tmpPng.toString, "stdout", "-l", "eng"] }
       catch e =>

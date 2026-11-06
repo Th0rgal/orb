@@ -311,7 +311,14 @@ private def tomlParseBasicString (s : TomlLexer) : Except String (String × Toml
   while p < s.cs.size && !closed do
     if multiline && p + 3 ≤ s.cs.size &&
        s.cs[p]! == '"' && s.cs[p + 1]! == '"' && s.cs[p + 2]! == '"' then
-      p := p + 3
+      let mut qCount := 3
+      while p + qCount < s.cs.size && qCount < 5 && s.cs[p + qCount]! == '"' do
+        qCount := qCount + 1
+      if p + qCount < s.cs.size && s.cs[p + qCount]! == '"' then
+        throw "six or more consecutive quotes in TOML multiline basic string"
+      for _ in [0 : qCount - 3] do
+        out := out.push '"'
+      p := p + qCount
       closed := true
     else if !multiline && s.cs[p]! == '"' then
       p := p + 1
@@ -365,7 +372,14 @@ private def tomlParseLiteralString (s : TomlLexer) : Except String (String × To
   while p < s.cs.size && !closed do
     if multiline && p + 3 ≤ s.cs.size &&
        s.cs[p]! == '\'' && s.cs[p + 1]! == '\'' && s.cs[p + 2]! == '\'' then
-      p := p + 3
+      let mut qCount := 3
+      while p + qCount < s.cs.size && qCount < 5 && s.cs[p + qCount]! == '\'' do
+        qCount := qCount + 1
+      if p + qCount < s.cs.size && s.cs[p + qCount]! == '\'' then
+        throw "six or more consecutive single quotes in TOML multiline literal string"
+      for _ in [0 : qCount - 3] do
+        out := out.push '\''
+      p := p + qCount
       closed := true
     else if !multiline && s.cs[p]! == '\'' then
       p := p + 1
@@ -458,6 +472,19 @@ private partial def tomlParseValue (s0 : TomlLexer) : Except String (JVal × Tom
           return (JVal.int (-(Int.ofNat n)), { s with pos := p })
       throw s!"invalid TOML scalar value `{rawTok}`"
 
+private def normalizeGateTableFields (fields : Array (String × JVal)) : JVal := Id.run do
+  let mut g : JVal := .obj #[
+    ("dependencies", .arr #[]),
+    ("required", .bool true),
+    ("mode", .str "incremental"),
+    ("reuse", .bool true),
+    ("artifacts", .arr #[])
+  ]
+  for (k, v) in fields do
+    let normKey := if k == "depends_on" then "dependencies" else k
+    g := g.setField normKey v
+  return g
+
 def parseValidationMatrixText (raw : String) : Except String JVal := do
   let trimmed := raw.trimAscii.toString
   if trimmed.startsWith "{" then
@@ -467,6 +494,7 @@ def parseValidationMatrixText (raw : String) : Except String JVal := do
   let mut project? : Option String := none
   let mut profile? : Option String := none
   let mut gates : Array JVal := #[]
+  let mut gatesStyle? : Option String := none
   let mut curGate : Option (Array (String × JVal)) := none
   while true do
     lex := tomlSkipWsAndComments lex
@@ -478,15 +506,12 @@ def parseValidationMatrixText (raw : String) : Except String JVal := do
       if secName != "gates" || sClose.pos + 2 > sClose.cs.size ||
          sClose.cs[sClose.pos]! != ']' || sClose.cs[sClose.pos + 1]! != ']' then
         throw s!"unsupported TOML array-of-tables header `[[{secName}]]`"
+      if gatesStyle? == some "inline" then
+        throw "cannot redefine static `gates` array with `[[gates]]`"
+      gatesStyle? := some "aot"
       if let some g := curGate then
-        gates := gates.push (.obj g)
-      curGate := some #[
-        ("dependencies", .arr #[]),
-        ("required", .bool true),
-        ("mode", .str "incremental"),
-        ("reuse", .bool true),
-        ("artifacts", .arr #[])
-      ]
+        gates := gates.push (normalizeGateTableFields g)
+      curGate := some #[]
       lex := { sClose with pos := sClose.pos + 2 }
     else if lex.cs[lex.pos]! == '[' then
       throw "unexpected TOML table header in validation matrix"
@@ -508,14 +533,22 @@ def parseValidationMatrixText (raw : String) : Except String JVal := do
         else if k == "profile" then
           let some profStr := vParsed.asStr? | throw "profile must be a string"
           profile? := some profStr
+        else if k == "gates" then
+          if gatesStyle?.isSome then
+            throw "duplicate `gates` definition in validation matrix"
+          let some gArr := vParsed.asArr? | throw "`gates` must be an array of gate tables"
+          let mut normArr : Array JVal := Array.mkEmpty gArr.size
+          for item in gArr do
+            let some fields := item.asObj? | throw "each element of `gates` must be a table"
+            normArr := normArr.push (normalizeGateTableFields fields)
+          gates := normArr
+          gatesStyle? := some "inline"
         else
           throw s!"unknown top-level validation matrix key `{k}`"
       | some g =>
-        let normKey := if k == "depends_on" then "dependencies" else k
-        let updated := JVal.setField (.obj g) normKey vParsed
-        curGate := updated.asObj?
+        curGate := some ((g.filter (fun (ek, _) => ek != k)).push (k, vParsed))
   if let some g := curGate then
-    gates := gates.push (.obj g)
+    gates := gates.push (normalizeGateTableFields g)
   let some project := project? | throw "missing required top-level `project` field"
   return .obj #[
     ("version", .nat version),

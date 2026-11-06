@@ -260,18 +260,25 @@ partial def walkDirList (dir : System.FilePath) (depth maxDepth : Nat) : IO (Arr
       out := out.push s!"{indent}{entry.fileName}"
   return out
 
-private def execListDirectory (args : JVal) (workingDir : System.FilePath) : IO (Except String String) := do
+private def resolveTargetPath (p : System.FilePath) : IO (Option System.FilePath) := do
+  let st ← statPath p.toString
+  if !st.exists_ then return none
+  if st.isSymlink then
+    try return some (← IO.FS.realPath p) catch _ => return none
+  return some p
+
+def execListDirectory (args : JVal) (workingDir : System.FilePath) : IO (Except String String) := do
   let some pathStr := args.fieldStr? "path" | return .error "Missing 'path' argument"
   let maxDepth := (args.fieldNat? "max_depth").getD 3
   let (resolved, _) := resolvePath pathStr workingDir
-  let st ← statPath resolved.toString
-  if !st.exists_ then
-    return .error s!"Directory not found: {pathStr} (resolved to: {resolved})"
+  let some targetRoot ← resolveTargetPath resolved
+    | return .error s!"Directory not found: {pathStr} (resolved to: {resolved})"
+  let st ← statPath targetRoot.toString
   if !st.isDir then
     return .error s!"Not a directory: {pathStr}"
   if maxDepth == 0 then
     return .ok "Directory is empty"
-  let entries ← walkDirList resolved 1 maxDepth
+  let entries ← walkDirList targetRoot 1 maxDepth
   if entries.isEmpty then return .ok "Directory is empty"
   return .ok (String.intercalate "\n" entries.toList)
 
@@ -324,13 +331,15 @@ private def execSearchFiles (args : JVal) (workingDir : System.FilePath) : IO (E
   let some pattern := args.fieldStr? "pattern" | return .error "Missing 'pattern' argument"
   let pathStr := (args.fieldStr? "path").getD "."
   let (resolved, _) := resolvePath pathStr workingDir
-  let st ← statPath resolved.toString
-  if !st.exists_ then
-    return .error s!"Directory not found: {pathStr} (resolved to: {resolved})"
+  let some targetRoot ← resolveTargetPath resolved
+    | return .error s!"Directory not found: {pathStr} (resolved to: {resolved})"
+  let st ← statPath targetRoot.toString
+  if !st.isDir then
+    return .error s!"Not a directory: {pathStr}"
   let patLower := pattern.toLower
   let isGlob := pattern.contains '*'
   let acc ← IO.mkRef (#[] : Array String)
-  walkSearchFiles resolved patLower isGlob acc
+  walkSearchFiles targetRoot patLower isGlob acc
   let mut matchesArr ← acc.get
   if matchesArr.isEmpty then
     return .ok s!"No files matching '{pattern}' found"

@@ -29,12 +29,22 @@ def parseUrl (rawUrl : String) : Except String ParsedUrl := do
     if u.startsWith "https://" then .ok (true, (u.drop 8).toString)
     else if u.startsWith "http://" then .ok (false, (u.drop 7).toString)
     else .error s!"URL must start with http:// or https://: `{u}`"
-  let (authority, pq) :=
+  let (authority, pqRaw) :=
     match rest.splitOn "/" with
     | [] => (rest, "/")
     | a :: tail =>
       if tail.isEmpty then (a, "/")
       else (a, "/" ++ String.intercalate "/" tail)
+  let pq := (pqRaw.splitOn "#").headD "/"
+  let (authority, pq) :=
+    if authority.contains '?' || authority.contains '#' then
+      let authNoFrag := (authority.splitOn "#").headD authority
+      match authNoFrag.splitOn "?" with
+      | [] => (authNoFrag, pq)
+      | [aOnly] => (aOnly, if pq == "/" && authority.contains '#' then "/" else pq)
+      | aOnly :: qRest => (aOnly, "/?" ++ String.intercalate "?" qRest)
+    else
+      (authority, pq)
   if authority.isEmpty then
     throw s!"URL has empty host: `{u}`"
   let defaultPort : UInt16 := if isHttps then 443 else 80
@@ -147,26 +157,74 @@ def sendRequest
       let _ ← LeanSys.Posix.closeFd fd
       return .error s!"HTTP transport exception: {e}"
 
-/-- Resolve a redirect `Location` header value against `baseUrl`. -/
+/-- RFC 3986 §5.2.4 `remove_dot_segments` over an absolute HTTP path. -/
+private def removeDotSegments (rawPath : String) : String := Id.run do
+  let segs := (rawPath.splitOn "/").drop 1
+  let mut out : Array String := #[]
+  let mut trailingDir := rawPath.endsWith "/"
+  let total := segs.length
+  let mut idx := 0
+  for seg in segs do
+    let isLast := idx + 1 == total
+    if seg == "." then
+      if isLast then trailingDir := true
+    else if seg == ".." then
+      if !out.isEmpty then out := out.pop
+      if isLast then trailingDir := true
+    else
+      out := out.push seg
+      if isLast then trailingDir := seg.isEmpty
+    idx := idx + 1
+  if out.isEmpty then
+    return "/"
+  let joined := "/" ++ String.intercalate "/" out.toList
+  if trailingDir && !joined.endsWith "/" then
+    return joined ++ "/"
+  return joined
+
+private def normalizeParsedAbsoluteUrl (rawAbsUrl : String) : Except String String := do
+  let p ← parseUrl rawAbsUrl
+  let scheme := if p.isHttps then "https://" else "http://"
+  let (pPath, pQuery) :=
+    match p.pathQuery.splitOn "?" with
+    | [] => ("/", "")
+    | [pa] => (pa, "")
+    | pa :: qs => (pa, "?" ++ String.intercalate "?" qs)
+  return s!"{scheme}{p.hostHeader}{removeDotSegments pPath}{pQuery}"
+
+/-- Resolve an RFC 3986 redirect `Location` URI reference against `baseUrl`. -/
 def resolveRedirectUrl (baseUrl location : String) : Except String String := do
-  let loc := location.trimAscii.toString
-  if loc.isEmpty then throw "Empty redirect Location header"
+  let locRaw := location.trimAscii.toString
+  if locRaw.isEmpty then throw "Empty redirect Location header"
+  let loc := (locRaw.splitOn "#").headD ""
+  if loc.isEmpty then
+    let base ← parseUrl baseUrl
+    let scheme := if base.isHttps then "https://" else "http://"
+    return s!"{scheme}{base.hostHeader}{base.pathQuery}"
   if loc.startsWith "http://" || loc.startsWith "https://" then
-    return loc
+    return (← normalizeParsedAbsoluteUrl loc)
   let base ← parseUrl baseUrl
   let scheme := if base.isHttps then "https://" else "http://"
   if loc.startsWith "//" then
-    return scheme ++ (loc.drop 2).toString
-  if loc.startsWith "/" then
-    return s!"{scheme}{base.hostHeader}{loc}"
+    return (← normalizeParsedAbsoluteUrl (scheme ++ (loc.drop 2).toString))
   let basePath := (base.pathQuery.splitOn "?").headD "/"
+  if loc.startsWith "?" then
+    return s!"{scheme}{base.hostHeader}{removeDotSegments basePath}{loc}"
+  let (relPath, relQuery) :=
+    match loc.splitOn "?" with
+    | [] => ("", "")
+    | [pa] => (pa, "")
+    | pa :: qs => (pa, "?" ++ String.intercalate "?" qs)
+  if relPath.startsWith "/" then
+    return s!"{scheme}{base.hostHeader}{removeDotSegments relPath}{relQuery}"
   let parts := basePath.splitOn "/"
   let baseDir :=
     if parts.length > 1 then
       String.intercalate "/" parts.dropLast ++ "/"
     else
       "/"
-  return s!"{scheme}{base.hostHeader}{baseDir}{loc}"
+  let merged := removeDotSegments (baseDir ++ relPath)
+  return s!"{scheme}{base.hostHeader}{merged}{relQuery}"
 
 /-- Execute an HTTP/1.1 or HTTPS request following up to `maxRedirects` (`301/302/303/307/308`) hops.
     Sensitive headers (`Authorization`, `Cookie`) are stripped across cross-origin hops. -/

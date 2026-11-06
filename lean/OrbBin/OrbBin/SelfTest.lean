@@ -29,6 +29,7 @@ open OrbBin.PrivdShared
 open OrbBin.MeshCli
 open OrbBin.PalomaCtl
 open OrbBin.SandboxedMcp
+open OrbBin.WorkspaceMcp
 
 private def assertEq {α : Type} [BEq α] [Repr α] (label : String) (got expected : α) : IO Unit := do
   if got != expected then
@@ -285,7 +286,7 @@ def runAllTests : IO UInt32 := do
   assertEq "parseTrackerMarkdown preserves & lowercases Unicode alphanumeric title"
     parsedChecklist[2]!.key "réparer-interface-δ1"
 
-  -- TOML validation-matrix syntax (single-quoted literal strings, multiline arrays, trailing commas)
+  -- TOML validation-matrix syntax (single-quoted literal strings, multiline arrays, trailing commas, inline-table gates, 4/5-quote multiline strings)
   let tomlMatrix :=
     "version = 1\nproject = 'verity-core'\n\n[[gates]]\nid = 'build'\ncommand = [\n  'lake',\n  \"build\",\n] # trailing comma + multiline\nrequired = true\n"
   match parseValidationMatrixText tomlMatrix >>= validateMatrixJson with
@@ -297,13 +298,40 @@ def runAllTests : IO UInt32 := do
     let cmdArr := ((gs[0]!.fieldArr? "command").getD #[]).filterMap JVal.asStr?
     assertEq "TOML validation matrix multiline command" cmdArr #["lake", "build"]
 
-  -- HTTP redirect URL resolution
+  let inlineMatrix :=
+    "project = \"orb\"\ngates = [{ id = \"build\", command = [\"sh\", \"-c\", \"\"\"echo \"hello\"\"\"\", '''say ''hi'''''] }]\n"
+  match parseValidationMatrixText inlineMatrix >>= validateMatrixJson with
+  | .error e => throw <| IO.userError s!"parseValidationMatrixText inline gates failed: {e}"
+  | .ok mat2 =>
+    let gs2 := (mat2.fieldArr? "gates").getD #[]
+    assertEq "TOML inline gates count" gs2.size 1
+    let cmdArr2 := ((gs2[0]!.fieldArr? "command").getD #[]).filterMap JVal.asStr?
+    assertEq "TOML multiline 4/5-quote endings" cmdArr2 #["sh", "-c", "echo \"hello\"", "say ''hi''"]
+
+  -- HTTP redirect URL resolution (RFC 3986 relative, query-only, dot segments, fragment stripping)
   assertEq "resolveRedirectUrl relative root path"
     (resolveRedirectUrl "http://example.com:8080/docs/old" "/docs/new").toOption
     (some "http://example.com:8080/docs/new")
   assertEq "resolveRedirectUrl scheme-relative URL"
     (resolveRedirectUrl "https://example.com/a" "//cdn.example.com/b").toOption
     (some "https://cdn.example.com/b")
+  assertEq "resolveRedirectUrl query-only preserves base path"
+    (resolveRedirectUrl "https://example.com/docs/page?old=1" "?v=2#frag").toOption
+    (some "https://example.com/docs/page?v=2")
+  assertEq "resolveRedirectUrl dot-segment normalization"
+    (resolveRedirectUrl "https://example.com/a/b/c" "../d/./e#sec").toOption
+    (some "https://example.com/a/d/e")
+
+  -- `workspace-mcp` directory symlink root traversal
+  let realSubDir := tmpDir / "ws-real-dir"
+  let linkSubDir := tmpDir / "ws-link-dir"
+  IO.FS.createDirAll realSubDir
+  IO.FS.writeFile (realSubDir / "hello.txt") "hi\n"
+  let lnOut ← IO.Process.output { cmd := "ln", args := #["-sfn", realSubDir.toString, linkSubDir.toString] }
+  assertEq "ln -sfn ws-link-dir exitCode" lnOut.exitCode 0
+  let listSymRes ← execListDirectory (.obj #[("path", .str "ws-link-dir")]) tmpDir
+  assertEq "execListDirectory follows explicitly requested directory symlink"
+    listSymRes.toOption (some "hello.txt")
 
   -- 10. `StdioMcpServer` cancel + reused ID ownership & 8-slot `inFlight` retention
   let inPath := tmpDir / "rpc-in.jsonl"
