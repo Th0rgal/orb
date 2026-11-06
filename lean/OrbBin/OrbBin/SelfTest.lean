@@ -321,6 +321,12 @@ def runAllTests : IO UInt32 := do
   assertEq "resolveRedirectUrl dot-segment normalization"
     (resolveRedirectUrl "https://example.com/a/b/c" "../d/./e#sec").toOption
     (some "https://example.com/a/d/e")
+  assertEq "resolveRedirectUrl preserves slash-containing query with empty path"
+    (resolveRedirectUrl "https://example.com/start" "http://example.com?next=/a/b#frag").toOption
+    (some "http://example.com/?next=/a/b")
+  assertEq "resolveRedirectUrl scheme-relative preserves slash-containing query with empty path"
+    (resolveRedirectUrl "https://example.com/start" "//cdn.example.com?next=/a/b").toOption
+    (some "https://cdn.example.com/?next=/a/b")
 
   -- `workspace-mcp` directory symlink root traversal
   let realSubDir := tmpDir / "ws-real-dir"

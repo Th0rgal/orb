@@ -29,22 +29,19 @@ def parseUrl (rawUrl : String) : Except String ParsedUrl := do
     if u.startsWith "https://" then .ok (true, (u.drop 8).toString)
     else if u.startsWith "http://" then .ok (false, (u.drop 7).toString)
     else .error s!"URL must start with http:// or https://: `{u}`"
-  let (authority, pqRaw) :=
-    match rest.splitOn "/" with
-    | [] => (rest, "/")
-    | a :: tail =>
-      if tail.isEmpty then (a, "/")
-      else (a, "/" ++ String.intercalate "/" tail)
-  let pq := (pqRaw.splitOn "#").headD "/"
-  let (authority, pq) :=
-    if authority.contains '?' || authority.contains '#' then
-      let authNoFrag := (authority.splitOn "#").headD authority
-      match authNoFrag.splitOn "?" with
-      | [] => (authNoFrag, pq)
-      | [aOnly] => (aOnly, if pq == "/" && authority.contains '#' then "/" else pq)
-      | aOnly :: qRest => (aOnly, "/?" ++ String.intercalate "?" qRest)
-    else
-      (authority, pq)
+  let restNoFrag := (rest.splitOn "#").headD rest
+  let restChars := restNoFrag.toList.toArray
+  let delimIdx := Id.run do
+    let mut i := 0
+    while i < restChars.size && restChars[i]! != '/' && restChars[i]! != '?' do
+      i := i + 1
+    return i
+  let authority := String.ofList (restChars.extract 0 delimIdx).toList
+  let afterAuth := String.ofList (restChars.extract delimIdx restChars.size).toList
+  let pq :=
+    if afterAuth.isEmpty then "/"
+    else if afterAuth.startsWith "?" then "/" ++ afterAuth
+    else afterAuth
   if authority.isEmpty then
     throw s!"URL has empty host: `{u}`"
   let defaultPort : UInt16 := if isHttps then 443 else 80
