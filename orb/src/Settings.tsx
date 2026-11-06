@@ -22,10 +22,12 @@ import {
   type ServerHealthInfo,
 } from "./api";
 import {
+  DEFAULT_CLEANUP_RETENTION_DAYS,
   authorizeGitHubIntegration,
   changeServerPassword,
   disconnectGitHubIntegration,
   downloadSettingsBackup,
+  effectiveCleanupDays,
   getAuthStatus,
   getGitHubIntegrationStatus,
   interpretRestoreResponse,
@@ -296,9 +298,10 @@ function BackgroundSyncCard() {
 function WorkspaceCleanupCard() {
   const [loaded, setLoaded] = createSignal(false);
   const [enabled, setEnabled] = createSignal(false);
-  const [daysDraft, setDaysDraft] = createSignal("14");
-  const [stoppedDaysDraft, setStoppedDaysDraft] = createSignal("7");
-  const [orphansEnabled, setOrphansEnabled] = createSignal(true);
+  const [baseEnabled, setBaseEnabled] = createSignal(false);
+  const [rawDays, setRawDays] = createSignal<number | null>(null);
+  const [daysDraft, setDaysDraft] = createSignal(String(DEFAULT_CLEANUP_RETENTION_DAYS));
+  const [daysEdited, setDaysEdited] = createSignal(false);
   const [dirty, setDirty] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -311,6 +314,7 @@ function WorkspaceCleanupCard() {
     setSaving(false);
     setLoaded(false);
     setDirty(false);
+    setDaysEdited(false);
     setError(null);
     setNotice(null);
     if (!isConnected()) return;
@@ -318,10 +322,16 @@ function WorkspaceCleanupCard() {
     try {
       const s = await getGlobalSettings();
       if (connectionVersion() !== version) return;
-      setEnabled(Boolean(s.auto_cleanup_enabled));
-      setDaysDraft(String(s.auto_cleanup_days ?? 14));
-      setStoppedDaysDraft(String(s.auto_cleanup_stopped_days ?? 7));
-      setOrphansEnabled(s.auto_cleanup_orphans_enabled ?? true);
+      const isOn = Boolean(s.auto_cleanup_enabled);
+      const configuredDays =
+        typeof s.auto_cleanup_days === "number" && s.auto_cleanup_days >= 1
+          ? s.auto_cleanup_days
+          : null;
+      setEnabled(isOn);
+      setBaseEnabled(isOn);
+      setRawDays(configuredDays);
+      setDaysDraft(String(effectiveCleanupDays(configuredDays)));
+      setDaysEdited(false);
       setDirty(false);
       setLoaded(true);
     } catch (e) {
@@ -338,9 +348,13 @@ function WorkspaceCleanupCard() {
   const save = async () => {
     if (saving() || !loaded()) return;
     const days = parseCleanupDays(daysDraft(), 1, 365);
-    const stoppedDays = parseCleanupDays(stoppedDaysDraft(), 1, 365);
-    if (days == null || stoppedDays == null) {
-      setError("Retention days must be whole numbers between 1 and 365.");
+    if (days == null) {
+      setError("Retention days must be a whole number between 1 and 365.");
+      return;
+    }
+    const includeDays = daysEdited() || rawDays() !== null;
+    if (!includeDays && enabled() === baseEnabled()) {
+      setDirty(false);
       return;
     }
     const version = connectionVersion();
@@ -351,15 +365,21 @@ function WorkspaceCleanupCard() {
     try {
       const updated = await updateGlobalSettings({
         auto_cleanup_enabled: enabled(),
-        auto_cleanup_days: days,
-        auto_cleanup_stopped_days: stoppedDays,
-        auto_cleanup_orphans_enabled: orphansEnabled(),
+        ...(includeDays ? { auto_cleanup_days: days } : {}),
       });
       if (seq !== saveSeq || connectionVersion() !== version) return;
-      setEnabled(Boolean(updated.auto_cleanup_enabled));
-      setDaysDraft(String(updated.auto_cleanup_days ?? days));
-      setStoppedDaysDraft(String(updated.auto_cleanup_stopped_days ?? stoppedDays));
-      setOrphansEnabled(updated.auto_cleanup_orphans_enabled ?? orphansEnabled());
+      const isOn = Boolean(updated.auto_cleanup_enabled);
+      const nextRawDays =
+        typeof updated.auto_cleanup_days === "number" && updated.auto_cleanup_days >= 1
+          ? updated.auto_cleanup_days
+          : includeDays
+            ? days
+            : null;
+      setEnabled(isOn);
+      setBaseEnabled(isOn);
+      setRawDays(nextRawDays);
+      setDaysDraft(String(effectiveCleanupDays(nextRawDays)));
+      setDaysEdited(false);
       setDirty(false);
       setNotice("Saved workspace cleanup policy.");
     } catch (e) {
@@ -376,7 +396,7 @@ function WorkspaceCleanupCard() {
   return (
     <Show when={isConnected()}>
       <Card title="Workspace cleanup">
-        <Row title="Automatic mission workspace GC" desc="Periodically reclaim disk and container /tmp scratch from finished missions.">
+        <Row title="Terminal workspace retention sweep" desc="Periodically audit terminal mission workspaces past retention (resumable, failed, and unmatched directories are always kept).">
           <Toggle
             on={enabled()}
             label="Automatic mission workspace GC"
@@ -384,35 +404,17 @@ function WorkspaceCleanupCard() {
             onClick={() => { if (!loaded()) return; setEnabled(!enabled()); setDirty(true); setNotice(null); }}
           />
         </Row>
-        <Row title="Completed retention (days)" desc="Days to keep workspaces for completed missions (1–365).">
+        <Row title="Completed retention (days)" desc="Days before terminal mission workspaces become cleanup candidates (1–365, default 1).">
           <input
             class="s-input ps-cap-input"
             inputmode="numeric"
             aria-label="Completed retention days"
             value={daysDraft()}
             disabled={!loaded() || saving()}
-            onInput={(e) => { setDaysDraft(e.currentTarget.value); setDirty(true); setNotice(null); }}
+            onInput={(e) => { setDaysDraft(e.currentTarget.value); setDaysEdited(true); setDirty(true); setNotice(null); }}
           />
         </Row>
-        <Row title="Stopped / failed retention (days)" desc="Days to keep workspaces for cancelled or failed missions (1–365).">
-          <input
-            class="s-input ps-cap-input"
-            inputmode="numeric"
-            aria-label="Stopped retention days"
-            value={stoppedDaysDraft()}
-            disabled={!loaded() || saving()}
-            onInput={(e) => { setStoppedDaysDraft(e.currentTarget.value); setDirty(true); setNotice(null); }}
-          />
-        </Row>
-        <Row title="Clean orphaned directories" desc="Remove leftover per-mission directories with no matching mission record.">
-          <Toggle
-            on={orphansEnabled()}
-            label="Clean orphaned directories"
-            disabled={!loaded() || saving()}
-            onClick={() => { if (!loaded()) return; setOrphansEnabled(!orphansEnabled()); setDirty(true); setNotice(null); }}
-          />
-        </Row>
-        <Row title="Policy changes" desc={notice() ?? "Changes apply on the next scheduled cleanup sweep."}>
+        <Row title="Policy changes" desc={notice() ?? "Changes apply on the next scheduled retention sweep."}>
           <button type="button" class="s-btn primary" disabled={!loaded() || saving() || !dirty()} onClick={() => void save()}>
             {saving() ? "Saving…" : "Save"}
           </button>

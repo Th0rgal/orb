@@ -25,9 +25,10 @@ struct OrbDebugInfoView: View {
     @State private var selectedError: OrbActivityDetailItem?
     @State private var cleanupLoaded = false
     @State private var cleanupEnabled = false
-    @State private var cleanupDays = "7"
-    @State private var cleanupStoppedDays = "1"
-    @State private var cleanupOrphans = false
+    @State private var cleanupBaseEnabled = false
+    @State private var cleanupRawDays: Int?
+    @State private var cleanupDays = String(OrbBackupArchive.defaultCleanupRetentionDays)
+    @State private var cleanupDaysEdited = false
     @State private var cleanupDirty = false
     @State private var cleanupSaving = false
     @State private var cleanupSaveSeq = 0
@@ -234,6 +235,7 @@ struct OrbDebugInfoView: View {
             cleanupSaveSeq += 1
             cleanupSaving = false
             cleanupLoaded = false
+            cleanupDaysEdited = false
             cleanupDirty = false
             cleanupError = nil
             cleanupNotice = nil
@@ -247,7 +249,7 @@ struct OrbDebugInfoView: View {
     @ViewBuilder
     private var workspaceCleanupSection: some View {
         Section {
-            Toggle("Automatic mission workspace GC", isOn: Binding(
+            Toggle("Terminal workspace retention sweep", isOn: Binding(
                 get: { cleanupEnabled },
                 set: { cleanupEnabled = $0; cleanupDirty = true; cleanupNotice = nil }
             ))
@@ -255,32 +257,15 @@ struct OrbDebugInfoView: View {
             HStack {
                 Text("Completed retention (days)")
                 Spacer()
-                TextField("7", text: Binding(
-                    get: { cleanupDays },
-                    set: { cleanupDays = $0; cleanupDirty = true; cleanupNotice = nil }
-                ))
-                .keyboardType(.numberPad)
-                .multilineTextAlignment(.trailing)
-                .frame(width: 64)
-                .disabled(!cleanupLoaded || cleanupSaving)
-            }
-            HStack {
-                Text("Stopped / failed retention (days)")
-                Spacer()
                 TextField("1", text: Binding(
-                    get: { cleanupStoppedDays },
-                    set: { cleanupStoppedDays = $0; cleanupDirty = true; cleanupNotice = nil }
+                    get: { cleanupDays },
+                    set: { cleanupDays = $0; cleanupDaysEdited = true; cleanupDirty = true; cleanupNotice = nil }
                 ))
                 .keyboardType(.numberPad)
                 .multilineTextAlignment(.trailing)
                 .frame(width: 64)
                 .disabled(!cleanupLoaded || cleanupSaving)
             }
-            Toggle("Clean orphaned directories", isOn: Binding(
-                get: { cleanupOrphans },
-                set: { cleanupOrphans = $0; cleanupDirty = true; cleanupNotice = nil }
-            ))
-            .disabled(!cleanupLoaded || cleanupSaving)
             Button(cleanupSaving ? "Saving…" : "Save cleanup policy") {
                 Task { await saveCleanupSettings() }
             }
@@ -294,7 +279,7 @@ struct OrbDebugInfoView: View {
         } header: {
             Text("Workspace cleanup")
         } footer: {
-            Text("Reclaims disk and container /tmp scratch from finished missions (1–365 days).")
+            Text("Audits terminal mission workspaces past retention (1–365 days, default 1). Resumable, failed, and unmatched directories are always kept.")
         }
     }
 
@@ -335,26 +320,30 @@ struct OrbDebugInfoView: View {
             let s = try await OrbCore.shared.call("/api/settings")
             guard "\(OrbCore.shared.endpoint)|\(OrbInboxAccount.current)" == scopeKey else { return }
             if !cleanupDirty {
-                cleanupEnabled = s["auto_cleanup_enabled"].flag
-                cleanupDays = String(Int(s["auto_cleanup_days"].number ?? 7))
-                cleanupStoppedDays = String(Int(s["auto_cleanup_stopped_days"].number ?? 1))
-                cleanupOrphans = s["auto_cleanup_orphans_enabled"].flag
+                let isOn = s["auto_cleanup_enabled"].flag
+                let configuredDays = s["auto_cleanup_days"].number.flatMap { Int(exactly: $0) }.flatMap { $0 >= 1 ? $0 : nil }
+                cleanupEnabled = isOn
+                cleanupBaseEnabled = isOn
+                cleanupRawDays = configuredDays
+                cleanupDays = String(OrbBackupArchive.effectiveCleanupDays(s["auto_cleanup_days"].number))
+                cleanupDaysEdited = false
             }
             cleanupLoaded = true
         } catch is CancellationError {} catch {}
     }
 
     private func saveCleanupSettings() async {
-        let daysResult = OrbBackupArchive.parseCleanupDays(cleanupDays)
-        let stoppedResult = OrbBackupArchive.parseCleanupDays(cleanupStoppedDays)
         let days: Int
-        let stoppedDays: Int
-        switch (daysResult, stoppedResult) {
-        case (.success(let d), .success(let s)):
+        switch OrbBackupArchive.parseCleanupDays(cleanupDays) {
+        case .success(let d):
             days = d
-            stoppedDays = s
-        case (.failure(let err), _), (_, .failure(let err)):
+        case .failure(let err):
             cleanupError = err.localizedDescription
+            return
+        }
+        let includeDays = cleanupDaysEdited || cleanupRawDays != nil
+        if !includeDays, cleanupEnabled == cleanupBaseEnabled {
+            cleanupDirty = false
             return
         }
         let scopeKey = "\(OrbCore.shared.endpoint)|\(OrbInboxAccount.current)"
@@ -369,21 +358,26 @@ struct OrbDebugInfoView: View {
             }
         }
         do {
+            var payload: [String: OrbJSON] = [
+                "auto_cleanup_enabled": .bool(cleanupEnabled)
+            ]
+            if includeDays {
+                payload["auto_cleanup_days"] = .number(Double(days))
+            }
             let updated = try await OrbCore.shared.call(
                 "/api/settings",
                 method: "PUT",
-                body: .object([
-                    "auto_cleanup_enabled": .bool(cleanupEnabled),
-                    "auto_cleanup_days": .number(Double(days)),
-                    "auto_cleanup_stopped_days": .number(Double(stoppedDays)),
-                    "auto_cleanup_orphans_enabled": .bool(cleanupOrphans)
-                ])
+                body: .object(payload)
             )
             guard cleanupSaveSeq == seq, "\(OrbCore.shared.endpoint)|\(OrbInboxAccount.current)" == scopeKey else { return }
-            cleanupEnabled = updated["auto_cleanup_enabled"].flag
-            cleanupDays = String(Int(updated["auto_cleanup_days"].number ?? Double(days)))
-            cleanupStoppedDays = String(Int(updated["auto_cleanup_stopped_days"].number ?? Double(stoppedDays)))
-            cleanupOrphans = updated["auto_cleanup_orphans_enabled"].flag
+            let isOn = updated["auto_cleanup_enabled"].flag
+            let nextRawDays = updated["auto_cleanup_days"].number.flatMap { Int(exactly: $0) }.flatMap { $0 >= 1 ? $0 : nil }
+                ?? (includeDays ? days : nil)
+            cleanupEnabled = isOn
+            cleanupBaseEnabled = isOn
+            cleanupRawDays = nextRawDays
+            cleanupDays = String(OrbBackupArchive.effectiveCleanupDays(nextRawDays.map(Double.init)))
+            cleanupDaysEdited = false
             cleanupDirty = false
             cleanupNotice = "Saved workspace cleanup policy."
         } catch {

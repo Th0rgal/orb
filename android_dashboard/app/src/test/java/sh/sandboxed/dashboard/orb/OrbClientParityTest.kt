@@ -27,6 +27,9 @@ class OrbClientParityTest {
         assertTrue(text.contains("name=\"backup\"; filename=\"backup.zip\""))
 
         assertEquals(14, OrbBackupArchive.parseCleanupDays("14").getOrNull())
+        assertEquals(1, OrbBackupArchive.effectiveCleanupDays(null))
+        assertEquals(1, OrbBackupArchive.effectiveCleanupDays(0))
+        assertEquals(14, OrbBackupArchive.effectiveCleanupDays(14))
         assertTrue(OrbBackupArchive.parseCleanupDays("0").isFailure)
         assertTrue(OrbBackupArchive.parseCleanupDays("366").isFailure)
         assertTrue(OrbBackupArchive.parseCleanupDays("abc").isFailure)

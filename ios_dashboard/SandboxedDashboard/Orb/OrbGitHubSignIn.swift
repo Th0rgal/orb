@@ -197,6 +197,16 @@ final class OrbGitHubSignIn: @unchecked Sendable {
 
 /// Deterministic multipart archive builder and retention parser shared with `OrbDebugInfoView` and tests.
 enum OrbBackupArchive {
+    /// Matches `src/api/mission_workspace_gc.rs::DEFAULT_RETENTION_DAYS`.
+    static let defaultCleanupRetentionDays = 1
+
+    static func effectiveCleanupDays(_ raw: Double?) -> Int {
+        guard let raw, let n = Int(exactly: raw), n >= 1 else {
+            return defaultCleanupRetentionDays
+        }
+        return n
+    }
+
     struct MultipartPayload: Sendable {
         let body: Data
         let contentType: String

@@ -49,6 +49,12 @@ import java.util.UUID
  * desktop `orb/src/accountAdmin.ts` and iOS `OrbBackupArchive` in `OrbGitHubSignIn.swift`.
  */
 object OrbBackupArchive {
+    /** Matches `src/api/mission_workspace_gc.rs::DEFAULT_RETENTION_DAYS`. */
+    const val DEFAULT_CLEANUP_RETENTION_DAYS = 1
+
+    fun effectiveCleanupDays(days: Int?): Int =
+        if (days != null && days >= 1) days else DEFAULT_CLEANUP_RETENTION_DAYS
+
     data class MultipartPayload(
         val body: ByteArray,
         val contentType: String,

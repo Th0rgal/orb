@@ -290,9 +290,10 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
 
     var cleanupLoaded by remember { mutableStateOf(false) }
     var cleanupEnabled by remember { mutableStateOf(false) }
-    var cleanupDays by remember { mutableStateOf("7") }
-    var cleanupStoppedDays by remember { mutableStateOf("1") }
-    var cleanupOrphans by remember { mutableStateOf(false) }
+    var cleanupBaseEnabled by remember { mutableStateOf(false) }
+    var cleanupRawDays by remember { mutableStateOf<Int?>(null) }
+    var cleanupDays by remember { mutableStateOf(OrbBackupArchive.DEFAULT_CLEANUP_RETENTION_DAYS.toString()) }
+    var cleanupDaysEdited by remember { mutableStateOf(false) }
     var cleanupDirty by remember { mutableStateOf(false) }
     var cleanupSaving by remember { mutableStateOf(false) }
     var cleanupSaveSeq by remember { mutableStateOf(0) }
@@ -311,10 +312,13 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
             val s = core.fetchDict("/api/settings")
             if ("${core.baseURL}|${core.token}" != expectedScope) return
             if (!cleanupDirty) {
-                cleanupEnabled = OrbJSON.bool(s, "auto_cleanup_enabled") == true
-                cleanupDays = (OrbJSON.int(s, "auto_cleanup_days") ?: 7).toString()
-                cleanupStoppedDays = (OrbJSON.int(s, "auto_cleanup_stopped_days") ?: 1).toString()
-                cleanupOrphans = OrbJSON.bool(s, "auto_cleanup_orphans_enabled") == true
+                val isOn = OrbJSON.bool(s, "auto_cleanup_enabled") == true
+                val configuredDays = OrbJSON.int(s, "auto_cleanup_days")?.takeIf { it >= 1 }
+                cleanupEnabled = isOn
+                cleanupBaseEnabled = isOn
+                cleanupRawDays = configuredDays
+                cleanupDays = OrbBackupArchive.effectiveCleanupDays(configuredDays).toString()
+                cleanupDaysEdited = false
             }
             cleanupLoaded = true
         } catch (c: CancellationException) {
@@ -380,6 +384,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
         cleanupSaveSeq += 1
         cleanupSaving = false
         cleanupLoaded = false
+        cleanupDaysEdited = false
         cleanupDirty = false
         cleanupError = null
         cleanupNotice = null
@@ -529,7 +534,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
             ) {
                 Text("Workspace cleanup", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "Reclaims disk and container /tmp scratch from finished missions (1–365 days).",
+                    "Audits terminal mission workspaces past retention (1–365 days, default 1). Resumable, failed, and unmatched directories are always kept.",
                     color = OrbStyle.textMuted,
                     fontSize = 12.sp
                 )
@@ -538,7 +543,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Automatic mission workspace GC", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    Text("Terminal workspace retention sweep", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
                     Switch(
                         checked = cleanupEnabled,
                         enabled = cleanupLoaded && !cleanupSaving,
@@ -553,6 +558,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                     value = cleanupDays,
                     onValueChange = {
                         cleanupDays = it
+                        cleanupDaysEdited = true
                         cleanupDirty = true
                         cleanupNotice = null
                     },
@@ -562,35 +568,6 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                     label = { Text("Completed retention (days)") },
                     modifier = Modifier.fillMaxWidth()
                 )
-                OutlinedTextField(
-                    value = cleanupStoppedDays,
-                    onValueChange = {
-                        cleanupStoppedDays = it
-                        cleanupDirty = true
-                        cleanupNotice = null
-                    },
-                    enabled = cleanupLoaded && !cleanupSaving,
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    label = { Text("Stopped / failed retention (days)") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Clean orphaned directories", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                    Switch(
-                        checked = cleanupOrphans,
-                        enabled = cleanupLoaded && !cleanupSaving,
-                        onCheckedChange = {
-                            cleanupOrphans = it
-                            cleanupDirty = true
-                            cleanupNotice = null
-                        }
-                    )
-                }
                 TextButton(
                     enabled = cleanupLoaded && !cleanupSaving && cleanupDirty,
                     onClick = {
@@ -598,8 +575,9 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                             cleanupError = err.message
                             return@TextButton
                         }
-                        val stoppedDays = OrbBackupArchive.parseCleanupDays(cleanupStoppedDays).getOrElse { err ->
-                            cleanupError = err.message
+                        val includeDays = cleanupDaysEdited || cleanupRawDays != null
+                        if (!includeDays && cleanupEnabled == cleanupBaseEnabled) {
+                            cleanupDirty = false
                             return@TextButton
                         }
                         val reqScope = "${core.baseURL}|${core.token}"
@@ -610,23 +588,26 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                         cleanupNotice = null
                         scope.launch {
                             try {
+                                val payload = LinkedHashMap<String, Any?>().apply {
+                                    put("auto_cleanup_enabled", cleanupEnabled)
+                                    if (includeDays) put("auto_cleanup_days", days)
+                                }
                                 val updated = OrbJSON.dict(
                                     core.request(
                                         "/api/settings",
                                         "PUT",
-                                        body = mapOf(
-                                            "auto_cleanup_enabled" to cleanupEnabled,
-                                            "auto_cleanup_days" to days,
-                                            "auto_cleanup_stopped_days" to stoppedDays,
-                                            "auto_cleanup_orphans_enabled" to cleanupOrphans
-                                        )
+                                        body = payload
                                     )
                                 )
                                 if (cleanupSaveSeq == seq && "${core.baseURL}|${core.token}" == reqScope) {
-                                    cleanupEnabled = OrbJSON.bool(updated, "auto_cleanup_enabled") ?: cleanupEnabled
-                                    cleanupDays = (OrbJSON.int(updated, "auto_cleanup_days") ?: days).toString()
-                                    cleanupStoppedDays = (OrbJSON.int(updated, "auto_cleanup_stopped_days") ?: stoppedDays).toString()
-                                    cleanupOrphans = OrbJSON.bool(updated, "auto_cleanup_orphans_enabled") ?: cleanupOrphans
+                                    val isOn = OrbJSON.bool(updated, "auto_cleanup_enabled") ?: cleanupEnabled
+                                    val nextRawDays = OrbJSON.int(updated, "auto_cleanup_days")?.takeIf { it >= 1 }
+                                        ?: (if (includeDays) days else null)
+                                    cleanupEnabled = isOn
+                                    cleanupBaseEnabled = isOn
+                                    cleanupRawDays = nextRawDays
+                                    cleanupDays = OrbBackupArchive.effectiveCleanupDays(nextRawDays).toString()
+                                    cleanupDaysEdited = false
                                     cleanupDirty = false
                                     cleanupNotice = "Saved workspace cleanup policy."
                                 }

@@ -66,6 +66,9 @@ final class OrbClientParityTests: XCTestCase {
         XCTAssertTrue(text.contains("name=\"backup\"; filename=\"backup.zip\""))
 
         XCTAssertEqual(OrbBackupArchive.parseCleanupDays("14"), .success(14))
+        XCTAssertEqual(OrbBackupArchive.effectiveCleanupDays(nil), 1)
+        XCTAssertEqual(OrbBackupArchive.effectiveCleanupDays(0), 1)
+        XCTAssertEqual(OrbBackupArchive.effectiveCleanupDays(14), 14)
         if case .success = OrbBackupArchive.parseCleanupDays("0") {
             XCTFail("Expected 0 days to fail validation")
         }

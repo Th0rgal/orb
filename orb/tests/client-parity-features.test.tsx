@@ -318,6 +318,58 @@ describe("Backup multipart & cleanup helpers", () => {
     expect(daysInput.value).toBe("21");
   });
 
+  it("displays Core's 1-day default when auto_cleanup_days is unset, hides legacy non-operational cleanup fields, and omits unset days when toggling cleanup", async () => {
+    setConnection("http://core-unset.test", "jwt-unset");
+    const putPayloads: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "http://core-unset.test/api/settings" && init?.method === "PUT") {
+        const parsed = JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>;
+        putPayloads.push(parsed);
+        return Promise.resolve(
+          new Response(JSON.stringify({ auto_cleanup_enabled: parsed.auto_cleanup_enabled, auto_cleanup_days: parsed.auto_cleanup_days ?? null })),
+        );
+      }
+      if (url === "http://core-unset.test/api/settings") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              auto_cleanup_enabled: false,
+              auto_cleanup_days: null,
+              auto_cleanup_stopped_days: null,
+              auto_cleanup_orphans_enabled: null,
+            }),
+          ),
+        );
+      }
+      return Promise.resolve(new Response(JSON.stringify({})));
+    });
+
+    render(() => <Settings />);
+    const details = document.querySelector("details.settings-advanced") as HTMLDetailsElement;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+
+    const daysInput = (await screen.findByLabelText("Completed retention days")) as HTMLInputElement;
+    await waitFor(() => {
+      expect(daysInput.disabled).toBe(false);
+      expect(daysInput.value).toBe("1");
+    });
+    expect(screen.queryByLabelText("Stopped retention days")).toBeNull();
+    expect(screen.queryByRole("switch", { name: "Clean orphaned directories" })).toBeNull();
+
+    const gcToggle = screen.getByRole("switch", { name: "Automatic mission workspace GC" });
+    fireEvent.click(gcToggle);
+    const saveBtn = await screen.findByRole("button", { name: "Save" });
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => expect(putPayloads.length).toBe(1));
+    expect(putPayloads[0]).toEqual({ auto_cleanup_enabled: true });
+    expect("auto_cleanup_days" in putPayloads[0]).toBe(false);
+    expect("auto_cleanup_stopped_days" in putPayloads[0]).toBe(false);
+    expect("auto_cleanup_orphans_enabled" in putPayloads[0]).toBe(false);
+  });
+
   it("preserves session when POST /api/auth/change-password rejects current_password with 401", async () => {
     setConnection("http://core.test", "valid-jwt");
     vi.stubGlobal(

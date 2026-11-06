@@ -195,6 +195,15 @@ export async function restoreSettingsBackup(
   return (await res.json()) as RestoreBackupResponse;
 }
 
+/** Matches `src/api/mission_workspace_gc.rs::DEFAULT_RETENTION_DAYS`. */
+export const DEFAULT_CLEANUP_RETENTION_DAYS = 1;
+
+export function effectiveCleanupDays(days: number | null | undefined): number {
+  return typeof days === "number" && Number.isSafeInteger(days) && days >= 1
+    ? days
+    : DEFAULT_CLEANUP_RETENTION_DAYS;
+}
+
 export function parseCleanupDays(raw: string, min = 1, max = 365): number | null {
   const trimmed = raw.trim();
   if (!/^\d+$/.test(trimmed)) return null;
