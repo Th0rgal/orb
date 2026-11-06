@@ -21,12 +21,13 @@
 //!     retries after transient failures execute normally.
 
 use std::collections::HashMap;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use axum::{
-    body::{to_bytes, Body},
+    body::Body,
     extract::State,
     http::{HeaderName, HeaderValue, Method, Request, StatusCode},
     middleware::Next,
@@ -38,6 +39,7 @@ use futures::StreamExt;
 use rusqlite::{params, OptionalExtension};
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
+use tokio_util::io::ReaderStream;
 
 use super::auth::AuthUser;
 use super::routes::AppState;
@@ -47,6 +49,7 @@ pub const REPLAY_HEADER_NAME: &str = "x-orb-idempotent-replay";
 pub const IDEMPOTENT_REPLAYED_HEADER_NAME: &str = "idempotent-replayed";
 const MAX_KEY_BYTES: usize = 200;
 const MAX_BUFFERED_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+const MAX_LARGE_REQUEST_BYTES: usize = 512 * 1024 * 1024;
 const MAX_CACHED_RESPONSE_BYTES: usize = 512 * 1024;
 const TTL_SECS: i64 = 24 * 3600;
 const INFLIGHT_WAIT: Duration = Duration::from_secs(25);
@@ -72,6 +75,8 @@ pub struct IdempotencyStore {
     conn: StdMutex<Option<rusqlite::Connection>>,
     inflight: StdMutex<HashMap<String, InFlightClaim>>,
     fallback_committed: StdMutex<HashMap<String, (StoredResponse, i64)>>,
+    #[cfg(test)]
+    after_inflight_insert_hook: StdMutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
 }
 
 static STORES: OnceLock<StdMutex<HashMap<PathBuf, Arc<IdempotencyStore>>>> = OnceLock::new();
@@ -91,7 +96,7 @@ pub fn store_for_state(state: &AppState) -> Arc<IdempotencyStore> {
 }
 
 enum ClaimOutcome {
-    Leader,
+    Leader(LeaderGuard),
     Replay(StoredResponse),
     Conflict(&'static str),
     Wait(Arc<Notify>),
@@ -99,12 +104,13 @@ enum ClaimOutcome {
 
 impl IdempotencyStore {
     pub fn new(db_path: PathBuf) -> Self {
-        let conn = Self::open_db(&db_path).ok();
         Self {
             db_path,
-            conn: StdMutex::new(conn),
+            conn: StdMutex::new(None),
             inflight: StdMutex::new(HashMap::new()),
             fallback_committed: StdMutex::new(HashMap::new()),
+            #[cfg(test)]
+            after_inflight_insert_hook: StdMutex::new(None),
         }
     }
 
@@ -253,9 +259,53 @@ impl IdempotencyStore {
         }
     }
 
-    fn try_claim(&self, scope_key: &str, request_sha256: &str) -> ClaimOutcome {
-        let now_ts = Utc::now().timestamp();
-        if let Some(stored) = self.lookup_persisted(scope_key, now_ts) {
+    fn persist_fallback_only(&self, scope_key: &str, entry: StoredResponse, now_ts: i64) {
+        let expires_at = now_ts + TTL_SECS;
+        let mut fallback = self
+            .fallback_committed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        fallback.retain(|_, (_, exp)| *exp > now_ts);
+        fallback.insert(scope_key.to_string(), (entry, expires_at));
+    }
+
+    fn try_claim(self: &Arc<Self>, scope_key: &str, request_sha256: &str) -> ClaimOutcome {
+        let guard = {
+            let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = inflight.get(scope_key) {
+                if existing.request_sha256 != request_sha256 {
+                    return ClaimOutcome::Conflict(
+                        "Idempotency-Key is currently in flight with a different request payload",
+                    );
+                }
+                return ClaimOutcome::Wait(existing.notify.clone());
+            }
+            inflight.insert(
+                scope_key.to_string(),
+                InFlightClaim {
+                    request_sha256: request_sha256.to_string(),
+                    notify: Arc::new(Notify::new()),
+                },
+            );
+            LeaderGuard {
+                store: self.clone(),
+                scope_key: scope_key.to_string(),
+                fallback_on_drop: None,
+                completed: false,
+            }
+        };
+        #[cfg(test)]
+        {
+            let hook = self
+                .after_inflight_insert_hook
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(hook) = hook {
+                hook(scope_key);
+            }
+        }
+        if let Some(stored) = self.lookup_persisted(scope_key, Utc::now().timestamp()) {
             if stored.request_sha256 != request_sha256 {
                 return ClaimOutcome::Conflict(
                     "Idempotency-Key was already used with a different request payload",
@@ -263,34 +313,7 @@ impl IdempotencyStore {
             }
             return ClaimOutcome::Replay(stored);
         }
-
-        let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(existing) = inflight.get(scope_key) {
-            if existing.request_sha256 != request_sha256 {
-                return ClaimOutcome::Conflict(
-                    "Idempotency-Key is currently in flight with a different request payload",
-                );
-            }
-            return ClaimOutcome::Wait(existing.notify.clone());
-        }
-
-        if let Some(stored) = self.lookup_persisted(scope_key, now_ts) {
-            if stored.request_sha256 != request_sha256 {
-                return ClaimOutcome::Conflict(
-                    "Idempotency-Key was already used with a different request payload",
-                );
-            }
-            return ClaimOutcome::Replay(stored);
-        }
-
-        inflight.insert(
-            scope_key.to_string(),
-            InFlightClaim {
-                request_sha256: request_sha256.to_string(),
-                notify: Arc::new(Notify::new()),
-            },
-        );
-        ClaimOutcome::Leader
+        ClaimOutcome::Leader(guard)
     }
 
     fn release_leader(&self, scope_key: &str) {
@@ -381,8 +404,9 @@ fn spawn_finish_leader(
     {
         safety.disarm();
     } else {
+        store.persist_fallback_only(&scope_key, stored, Utc::now().timestamp());
         safety.disarm();
-        store.finish_leader(&scope_key, Some(stored));
+        store.release_leader(&scope_key);
     }
 }
 
@@ -440,7 +464,8 @@ impl LeaderGuard {
                     store.release_leader(&scope_key);
                 }
             } else {
-                store.finish_leader(&scope_key, Some(stored));
+                store.persist_fallback_only(&scope_key, stored, Utc::now().timestamp());
+                store.release_leader(&scope_key);
             }
         }
     }
@@ -464,17 +489,137 @@ fn is_valid_idempotency_key(raw: &str) -> bool {
         && raw.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
 }
 
-fn should_bypass_path(path: &str) -> bool {
+fn allows_large_request_body(path: &str) -> bool {
     path.starts_with("/api/uploads")
         || path.starts_with("/api/fs/upload")
         || path.contains("/import-chunks")
         || path.starts_with("/api/voice/")
-        || path.contains("/ask/stream")
         || path.starts_with("/api/settings/restore")
         || path.starts_with("/api/control/missions/import")
         || path.contains("/machine-transfer")
         || path.contains("/local-origins")
         || path.contains("/btw")
+}
+
+enum BufferedRequestBody {
+    Memory(Bytes),
+    Spilled(std::fs::File),
+}
+
+impl BufferedRequestBody {
+    fn into_body(self) -> Body {
+        match self {
+            Self::Memory(bytes) => Body::from(bytes),
+            Self::Spilled(file) => {
+                Body::from_stream(ReaderStream::new(tokio::fs::File::from_std(file)))
+            }
+        }
+    }
+}
+
+async fn read_and_hash_request_body(
+    body: Body,
+    max_bytes: usize,
+) -> Result<(String, BufferedRequestBody), Response> {
+    let mut stream = body.into_data_stream();
+    let mut hasher = Sha256::new();
+    let mut mem = BytesMut::new();
+    let mut spilled: Option<std::fs::File> = None;
+    let mut total: usize = 0;
+
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res.map_err(|_| {
+            (StatusCode::BAD_REQUEST, "Failed to read request body").into_response()
+        })?;
+        total = total.saturating_add(chunk.len());
+        if total > max_bytes {
+            let msg = if max_bytes == MAX_BUFFERED_REQUEST_BYTES {
+                "Request with Idempotency-Key exceeds 2 MiB body limit"
+            } else {
+                "Request with Idempotency-Key exceeds maximum body limit"
+            };
+            return Err((StatusCode::PAYLOAD_TOO_LARGE, msg).into_response());
+        }
+        hasher.update(&chunk);
+        if let Some(file) = spilled.take() {
+            let file = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+                let mut file = file;
+                file.write_all(&chunk)?;
+                Ok(file)
+            })
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to buffer large request body",
+                )
+                    .into_response()
+            })?
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to write large request body",
+                )
+                    .into_response()
+            })?;
+            spilled = Some(file);
+        } else if mem.len().saturating_add(chunk.len()) <= MAX_BUFFERED_REQUEST_BYTES {
+            mem.extend_from_slice(&chunk);
+        } else {
+            let initial = mem.split().freeze();
+            let file = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+                let mut file = tempfile::tempfile()?;
+                if !initial.is_empty() {
+                    file.write_all(&initial)?;
+                }
+                file.write_all(&chunk)?;
+                Ok(file)
+            })
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to create request spool",
+                )
+                    .into_response()
+            })?
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to spill large request body",
+                )
+                    .into_response()
+            })?;
+            spilled = Some(file);
+        }
+    }
+
+    let request_sha256 = hex::encode(hasher.finalize());
+    if let Some(file) = spilled {
+        let file = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+            let mut file = file;
+            file.seek(SeekFrom::Start(0))?;
+            Ok(file)
+        })
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to rewind large request body",
+            )
+                .into_response()
+        })?
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to seek large request body",
+            )
+                .into_response()
+        })?;
+        Ok((request_sha256, BufferedRequestBody::Spilled(file)))
+    } else {
+        Ok((request_sha256, BufferedRequestBody::Memory(mem.freeze())))
+    }
 }
 
 fn build_replay_response(stored: StoredResponse) -> Response {
@@ -545,11 +690,6 @@ async fn handle_idempotency_with_store(
         return next.run(req).await;
     }
 
-    let path = req.uri().path().to_string();
-    if should_bypass_path(&path) {
-        return next.run(req).await;
-    }
-
     let Some(raw_key) = req.headers().get(HEADER_NAME) else {
         return next.run(req).await;
     };
@@ -567,6 +707,12 @@ async fn handle_idempotency_with_store(
         )
             .into_response();
     }
+    let path = req.uri().path().to_string();
+    let max_req_bytes = if allows_large_request_body(&path) {
+        MAX_LARGE_REQUEST_BYTES
+    } else {
+        MAX_BUFFERED_REQUEST_BYTES
+    };
     let key = key_trimmed.to_string();
 
     let user_id = req
@@ -583,18 +729,11 @@ async fn handle_idempotency_with_store(
         .to_string();
 
     let (parts, body) = req.into_parts();
-    let body_bytes = match to_bytes(body, MAX_BUFFERED_REQUEST_BYTES).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Request with Idempotency-Key exceeds 2 MiB body limit",
-            )
-                .into_response();
-        }
-    };
-
-    let request_sha256 = hex::encode(Sha256::digest(&body_bytes));
+    let (request_sha256, buffered_body) =
+        match read_and_hash_request_body(body, max_req_bytes).await {
+            Ok(pair) => pair,
+            Err(err_resp) => return err_resp,
+        };
     let scope_key = format!("{user_id}\n{method_str}\n{full_uri}\n{key}");
 
     let mut guard = loop {
@@ -616,14 +755,7 @@ async fn handle_idempotency_with_store(
             }
         };
         match outcome {
-            ClaimOutcome::Leader => {
-                break LeaderGuard {
-                    store: store.clone(),
-                    scope_key: scope_key.clone(),
-                    fallback_on_drop: None,
-                    completed: false,
-                };
-            }
+            ClaimOutcome::Leader(guard) => break guard,
             ClaimOutcome::Replay(stored) => return build_replay_response(stored),
             ClaimOutcome::Conflict(msg) => return conflict_response(msg),
             ClaimOutcome::Wait(notify) => {
@@ -650,7 +782,7 @@ async fn handle_idempotency_with_store(
         }
     };
 
-    let rebuilt_req = Request::from_parts(parts, Body::from(body_bytes));
+    let rebuilt_req = Request::from_parts(parts, buffered_body.into_body());
     let resp = next.run(rebuilt_req).await;
     let status = resp.status();
 
@@ -663,7 +795,7 @@ async fn handle_idempotency_with_store(
         .as_deref()
         .is_some_and(|ct| ct.to_ascii_lowercase().contains("text/event-stream"));
 
-    if !status.is_success() || status == StatusCode::SWITCHING_PROTOCOLS || is_event_stream {
+    if !status.is_success() || status == StatusCode::SWITCHING_PROTOCOLS {
         guard.complete(None).await;
         return resp;
     }
@@ -676,7 +808,12 @@ async fn handle_idempotency_with_store(
         oversize: true,
         response_sha256: None,
     };
-    guard.fence_committed(committed_sentinel);
+    guard.fence_committed(committed_sentinel.clone());
+
+    if is_event_stream {
+        guard.complete(Some(committed_sentinel)).await;
+        return resp;
+    }
 
     let (resp_parts, resp_body) = resp.into_parts();
     let mut stream = resp_body.into_data_stream();
@@ -1489,7 +1626,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bypass_paths_allow_large_payloads_and_sse_streams_without_buffering_or_poisoning() {
+    async fn unkeyed_bypass_paths_preserve_large_payloads_and_sse_streams() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("idem.db");
         let store = Arc::new(IdempotencyStore::new(db_path.clone()));
@@ -1607,32 +1744,174 @@ mod tests {
             "/api/control/local-origins/sync",
             "/api/control/missions/123/btw",
         ] {
-            let res = client
+            let unkeyed = client
+                .post(format!("http://{addr}{route}"))
+                .body(large_body.clone())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(unkeyed.status(), reqwest::StatusCode::OK, "route {route}");
+            let unkeyed_json: serde_json::Value = unkeyed.json().await.unwrap();
+            assert_eq!(unkeyed_json["bytes"], large_body.len());
+
+            let keyed_first = client
                 .post(format!("http://{addr}{route}"))
                 .header("Idempotency-Key", "mobile-auto-key")
                 .body(large_body.clone())
                 .send()
                 .await
                 .unwrap();
-            assert_eq!(res.status(), reqwest::StatusCode::OK, "route {route}");
-            let json: serde_json::Value = res.json().await.unwrap();
-            assert_eq!(json["bytes"], large_body.len());
-        }
-        assert_eq!(large_calls.load(Ordering::SeqCst), 5);
+            assert_eq!(
+                keyed_first.status(),
+                reqwest::StatusCode::OK,
+                "route {route}"
+            );
+            assert!(keyed_first.headers().get(REPLAY_HEADER_NAME).is_none());
+            let first_json: serde_json::Value = keyed_first.json().await.unwrap();
+            assert_eq!(first_json["bytes"], large_body.len());
 
-        for expected_call in [1, 2] {
-            let sse_res = client
-                .post(format!("http://{addr}/api/control/missions/123/ask/stream"))
-                .header("Idempotency-Key", "sse-same-key")
+            let keyed_replay = client
+                .post(format!("http://{addr}{route}"))
+                .header("Idempotency-Key", "mobile-auto-key")
                 .body(large_body.clone())
                 .send()
                 .await
                 .unwrap();
-            assert_eq!(sse_res.status(), reqwest::StatusCode::OK);
-            let text = sse_res.text().await.unwrap();
-            assert!(text.contains(&format!("event-{expected_call}-")));
+            assert_eq!(
+                keyed_replay.status(),
+                reqwest::StatusCode::OK,
+                "route {route}"
+            );
+            assert_eq!(
+                keyed_replay.headers().get(REPLAY_HEADER_NAME).unwrap(),
+                "true"
+            );
+            let replay_json: serde_json::Value = keyed_replay.json().await.unwrap();
+            assert_eq!(replay_json["bytes"], large_body.len());
+        }
+        assert_eq!(large_calls.load(Ordering::SeqCst), 10);
+
+        for expected_call in [1, 2] {
+            let sse_unkeyed = client
+                .post(format!("http://{addr}/api/control/missions/123/ask/stream"))
+                .body(b"question".to_vec())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(sse_unkeyed.status(), reqwest::StatusCode::OK);
+            let text = sse_unkeyed.text().await.unwrap();
+            assert!(text.contains(&format!("event-{expected_call}-8")));
         }
         assert_eq!(sse_calls.load(Ordering::SeqCst), 2);
+
+        let sse_keyed_first = client
+            .post(format!("http://{addr}/api/control/missions/123/ask/stream"))
+            .header("Idempotency-Key", "sse-same-key")
+            .body(b"question".to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sse_keyed_first.status(), reqwest::StatusCode::OK);
+        let sse_first_text = sse_keyed_first.text().await.unwrap();
+        assert!(sse_first_text.contains("event-3-8"));
+        assert_eq!(sse_calls.load(Ordering::SeqCst), 3);
+
+        let sse_keyed_retry = client
+            .post(format!("http://{addr}/api/control/missions/123/ask/stream"))
+            .header("Idempotency-Key", "sse-same-key")
+            .body(b"question".to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sse_keyed_retry.status(), reqwest::StatusCode::CONFLICT);
+        assert_eq!(
+            sse_keyed_retry
+                .headers()
+                .get(IDEMPOTENT_REPLAYED_HEADER_NAME)
+                .unwrap(),
+            "oversize-committed"
+        );
+        assert_eq!(sse_calls.load(Ordering::SeqCst), 3);
+
+        server.abort();
+        let _ = server.await;
+        drop(store);
+
+        let reopened_store = Arc::new(IdempotencyStore::new(db_path.clone()));
+        let sse_calls_restart = sse_calls.clone();
+        let large_calls_restart = large_calls.clone();
+        let app_restart = Router::new()
+            .route(
+                "/api/control/missions/123/ask/stream",
+                post(move |_body: Bytes| {
+                    let sse_calls = sse_calls_restart.clone();
+                    async move {
+                        sse_calls.fetch_add(1, Ordering::SeqCst);
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                            .body(Body::from("data: unexpected\n\n"))
+                            .unwrap()
+                    }
+                }),
+            )
+            .route(
+                "/api/settings/restore",
+                post(move |body: Bytes| {
+                    let large_calls = large_calls_restart.clone();
+                    async move {
+                        large_calls.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({ "bytes": body.len() }))
+                    }
+                }),
+            )
+            .layer(axum::extract::DefaultBodyLimit::disable())
+            .layer(axum::middleware::from_fn(
+                move |req: Request<Body>, next: Next| {
+                    handle_idempotency_with_store(reopened_store.clone(), req, next)
+                },
+            ));
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let server2 = tokio::spawn(async move {
+            let _ = axum::serve(listener2, app_restart).await;
+        });
+
+        let restore_after_restart = client
+            .post(format!("http://{addr2}/api/settings/restore"))
+            .header("Idempotency-Key", "mobile-auto-key")
+            .body(large_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(restore_after_restart.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            restore_after_restart
+                .headers()
+                .get(REPLAY_HEADER_NAME)
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(large_calls.load(Ordering::SeqCst), 10);
+
+        let sse_after_restart = client
+            .post(format!(
+                "http://{addr2}/api/control/missions/123/ask/stream"
+            ))
+            .header("Idempotency-Key", "sse-same-key")
+            .body(b"question".to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sse_after_restart.status(), reqwest::StatusCode::CONFLICT);
+        assert_eq!(
+            sse_after_restart
+                .headers()
+                .get(IDEMPOTENT_REPLAYED_HEADER_NAME)
+                .unwrap(),
+            "oversize-committed"
+        );
+        assert_eq!(sse_calls.load(Ordering::SeqCst), 3);
 
         let count: i64 = rusqlite::Connection::open(&db_path)
             .unwrap()
@@ -1640,9 +1919,9 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(count, 0);
+        assert_eq!(count, 6);
 
-        server.abort();
+        server2.abort();
     }
 
     #[tokio::test]
@@ -1752,10 +2031,9 @@ mod tests {
         let scope = "u1\nPOST\n/api/control/test-write\ndrop-offload-key".to_string();
         let req_sha = hex::encode(Sha256::digest(b"{}"));
 
-        assert!(matches!(
-            store.try_claim(&scope, &req_sha),
-            ClaimOutcome::Leader
-        ));
+        let ClaimOutcome::Leader(mut guard) = store.try_claim(&scope, &req_sha) else {
+            panic!("expected leader");
+        };
         let notify = match store.try_claim(&scope, &req_sha) {
             ClaimOutcome::Wait(n) => n,
             _ => panic!("expected Wait outcome while leader is inflight"),
@@ -1766,12 +2044,6 @@ mod tests {
         notified.as_mut().enable();
 
         let conn_lock = store.conn.lock().unwrap();
-        let mut guard = LeaderGuard {
-            store: store.clone(),
-            scope_key: scope.clone(),
-            fallback_on_drop: None,
-            completed: false,
-        };
         guard.fence_committed(StoredResponse {
             request_sha256: req_sha.clone(),
             status: 200,
@@ -1808,15 +2080,8 @@ mod tests {
         let scope = "u1\nPOST\n/api/control/test-write\noutside-tokio".to_string();
         let req_sha = hex::encode(Sha256::digest(b"{}"));
 
-        assert!(matches!(
-            store.try_claim(&scope, &req_sha),
-            ClaimOutcome::Leader
-        ));
-        let mut guard = LeaderGuard {
-            store: store.clone(),
-            scope_key: scope.clone(),
-            fallback_on_drop: None,
-            completed: false,
+        let ClaimOutcome::Leader(mut guard) = store.try_claim(&scope, &req_sha) else {
+            panic!("expected leader");
         };
         guard.fence_committed(StoredResponse {
             request_sha256: req_sha.clone(),
@@ -1848,10 +2113,9 @@ mod tests {
         let scope = "u1\nPOST\n/api/control/test-write\nabort-complete-key".to_string();
         let req_sha = hex::encode(Sha256::digest(b"{}"));
 
-        assert!(matches!(
-            store.try_claim(&scope, &req_sha),
-            ClaimOutcome::Leader
-        ));
+        let ClaimOutcome::Leader(guard) = store.try_claim(&scope, &req_sha) else {
+            panic!("expected leader");
+        };
         let notify = match store.try_claim(&scope, &req_sha) {
             ClaimOutcome::Wait(n) => n,
             _ => panic!("expected Wait outcome"),
@@ -1861,16 +2125,8 @@ mod tests {
         notified.as_mut().enable();
 
         let conn_lock = store.conn.lock().unwrap();
-        let store_task = store.clone();
-        let scope_task = scope.clone();
         let sha_task = req_sha.clone();
         let task = tokio::spawn(async move {
-            let guard = LeaderGuard {
-                store: store_task,
-                scope_key: scope_task,
-                fallback_on_drop: None,
-                completed: false,
-            };
             guard
                 .complete(Some(StoredResponse {
                     request_sha256: sha_task,
@@ -1896,5 +2152,368 @@ mod tests {
         assert!(store
             .lookup_persisted(&scope, Utc::now().timestamp())
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn mutating_sse_route_fences_committed_2xx_across_restart_and_allows_non_2xx_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("idem.db");
+        let store = Arc::new(IdempotencyStore::new(db_path.clone()));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let calls_h = calls.clone();
+        let store_mw = store.clone();
+        let app = Router::new()
+            .route(
+                "/api/control/custom-stream-mutation",
+                post(move |Json(payload): Json<serde_json::Value>| {
+                    let calls = calls_h.clone();
+                    async move {
+                        let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                        if payload.get("fail_once").and_then(|v| v.as_bool()) == Some(true)
+                            && n == 1
+                        {
+                            return Response::builder()
+                                .status(StatusCode::SERVICE_UNAVAILABLE)
+                                .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                                .body(Body::from("data: transient-error\n\n"))
+                                .unwrap();
+                        }
+                        let s = async_stream::stream! {
+                            yield Ok::<Bytes, std::convert::Infallible>(
+                                Bytes::from(format!("data: committed-{n}\n\n"))
+                            );
+                        };
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header(
+                                axum::http::header::CONTENT_TYPE,
+                                "text/event-stream; charset=utf-8",
+                            )
+                            .body(Body::from_stream(s))
+                            .unwrap()
+                    }
+                }),
+            )
+            .layer(axum::middleware::from_fn(
+                move |req: Request<Body>, next: Next| {
+                    handle_idempotency_with_store(store_mw.clone(), req, next)
+                },
+            ));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/api/control/custom-stream-mutation");
+
+        let failed = client
+            .post(&url)
+            .header("Idempotency-Key", "custom-sse-key")
+            .json(&serde_json::json!({"fail_once": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(failed.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let committed = client
+            .post(&url)
+            .header("Idempotency-Key", "custom-sse-key")
+            .json(&serde_json::json!({"fail_once": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(committed.status(), reqwest::StatusCode::OK);
+        let text = committed.text().await.unwrap();
+        assert!(text.contains("committed-2"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let retry = client
+            .post(&url)
+            .header("Idempotency-Key", "custom-sse-key")
+            .json(&serde_json::json!({"fail_once": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), reqwest::StatusCode::CONFLICT);
+        assert_eq!(
+            retry
+                .headers()
+                .get(IDEMPOTENT_REPLAYED_HEADER_NAME)
+                .unwrap(),
+            "oversize-committed"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        server.abort();
+        let _ = server.await;
+        drop(store);
+
+        let reopened = Arc::new(IdempotencyStore::new(db_path));
+        let calls_restart = calls.clone();
+        let app_restart = Router::new()
+            .route(
+                "/api/control/custom-stream-mutation",
+                post(move |Json(_): Json<serde_json::Value>| {
+                    let calls = calls_restart.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                            .body(Body::from("data: duplicate\n\n"))
+                            .unwrap()
+                    }
+                }),
+            )
+            .layer(axum::middleware::from_fn(
+                move |req: Request<Body>, next: Next| {
+                    handle_idempotency_with_store(reopened.clone(), req, next)
+                },
+            ));
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let server2 = tokio::spawn(async move {
+            let _ = axum::serve(listener2, app_restart).await;
+        });
+
+        let retry_after_restart = client
+            .post(format!("http://{addr2}/api/control/custom-stream-mutation"))
+            .header("Idempotency-Key", "custom-sse-key")
+            .json(&serde_json::json!({"fail_once": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retry_after_restart.status(), reqwest::StatusCode::CONFLICT);
+        assert_eq!(
+            retry_after_restart
+                .headers()
+                .get(IDEMPOTENT_REPLAYED_HEADER_NAME)
+                .unwrap(),
+            "oversize-committed"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        server2.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelled_claim_acquisition_after_inflight_insert_releases_without_orphan() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(IdempotencyStore::new(dir.path().join("idem.db")));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let entered_hook = entered.clone();
+        let release_hook = release.clone();
+        *store.after_inflight_insert_hook.lock().unwrap() = Some(Arc::new(move |_| {
+            entered_hook.wait();
+            release_hook.wait();
+        }));
+
+        let middleware_cancel_notify = Arc::new(Notify::new());
+        let middleware_cancel_signal = middleware_cancel_notify.clone();
+        let store_mw = store.clone();
+        let calls_mw = calls.clone();
+        let app1 = Router::new()
+            .route(
+                "/api/control/test-write",
+                post(move |Json(payload): Json<serde_json::Value>| {
+                    let calls = calls_mw.clone();
+                    async move {
+                        let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                        Json(serde_json::json!({ "call": n, "payload": payload }))
+                    }
+                }),
+            )
+            .layer(axum::middleware::from_fn(
+                move |req: Request<Body>, next: Next| {
+                    let store_mw = store_mw.clone();
+                    let cancel = middleware_cancel_signal.clone();
+                    async move {
+                        tokio::select! {
+                            resp = handle_idempotency_with_store(store_mw, req, next) => resp,
+                            _ = cancel.notified() => StatusCode::REQUEST_TIMEOUT.into_response(),
+                        }
+                    }
+                },
+            ));
+        let listener1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr1 = listener1.local_addr().unwrap();
+        let server1 = tokio::spawn(async move {
+            let _ = axum::serve(listener1, app1).await;
+        });
+        let client = reqwest::Client::new();
+        let url1 = format!("http://{addr1}/api/control/test-write");
+        let url1_req = url1.clone();
+        let client_req = client.clone();
+        let req_join = tokio::spawn(async move {
+            client_req
+                .post(&url1_req)
+                .header("Idempotency-Key", "cancel-mid-claim")
+                .json(&serde_json::json!({"op": "first"}))
+                .send()
+                .await
+                .unwrap()
+        });
+
+        let entered_wait = entered.clone();
+        tokio::task::spawn_blocking(move || {
+            entered_wait.wait();
+        })
+        .await
+        .unwrap();
+
+        let scope = "anonymous\nPOST\n/api/control/test-write\ncancel-mid-claim";
+        assert!(store.inflight.lock().unwrap().contains_key(scope));
+
+        middleware_cancel_notify.notify_waiters();
+        let cancelled_resp = req_join.await.unwrap();
+        assert_eq!(
+            cancelled_resp.status(),
+            reqwest::StatusCode::REQUEST_TIMEOUT
+        );
+
+        *store.after_inflight_insert_hook.lock().unwrap() = None;
+        tokio::task::spawn_blocking(move || {
+            release.wait();
+        })
+        .await
+        .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while store.inflight.lock().unwrap().contains_key(scope) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "cancelled claim left orphaned inflight entry"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let retry = client
+            .post(&url1)
+            .header("Idempotency-Key", "cancel-mid-claim")
+            .json(&serde_json::json!({"op": "first"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = retry.json().await.unwrap();
+        assert_eq!(body["call"], 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        server1.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sqlite_lock_contention_does_not_stall_tokio_tasks_followers_or_lazy_init() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lazy-subdir").join("idem.db");
+        let store = Arc::new(IdempotencyStore::new(db_path.clone()));
+        assert!(!db_path.exists());
+
+        let scope_blocked = "u1\nPOST\n/api/control/test-write\nsqlite-contended".to_string();
+        let sha_blocked = hex::encode(Sha256::digest(b"{\"k\":1}"));
+        let sha_conflict = hex::encode(Sha256::digest(b"{\"k\":2}"));
+
+        let conn_guard = store.conn.lock().unwrap();
+
+        let store_leader = store.clone();
+        let scope_leader = scope_blocked.clone();
+        let sha_leader = sha_blocked.clone();
+        let leader_claim = tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || store_leader.try_claim(&scope_leader, &sha_leader))
+                .await
+                .unwrap()
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !store.inflight.lock().unwrap().contains_key(&scope_blocked) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "leader did not record inflight claim before blocking on SQLite"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+
+        let heartbeat = tokio::time::timeout(
+            Duration::from_millis(200),
+            tokio::spawn(async { 42usize }),
+        )
+        .await
+        .expect("tokio current_thread runtime must stay responsive under SQLite lock contention")
+        .unwrap();
+        assert_eq!(heartbeat, 42);
+
+        let follower_same = tokio::time::timeout(Duration::from_millis(200), {
+            let store_f = store.clone();
+            let scope_f = scope_blocked.clone();
+            let sha_f = sha_blocked.clone();
+            async move {
+                tokio::task::spawn_blocking(move || store_f.try_claim(&scope_f, &sha_f))
+                    .await
+                    .unwrap()
+            }
+        })
+        .await
+        .expect("same-payload follower check must not block on SQLite mutex");
+        assert!(matches!(follower_same, ClaimOutcome::Wait(_)));
+
+        let follower_conflict = tokio::time::timeout(Duration::from_millis(200), {
+            let store_c = store.clone();
+            let scope_c = scope_blocked.clone();
+            async move {
+                tokio::task::spawn_blocking(move || store_c.try_claim(&scope_c, &sha_conflict))
+                    .await
+                    .unwrap()
+            }
+        })
+        .await
+        .expect("conflicting follower check must not block on SQLite mutex");
+        assert!(matches!(follower_conflict, ClaimOutcome::Conflict(_)));
+
+        drop(conn_guard);
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), leader_claim)
+            .await
+            .expect("leader claim must finish once SQLite mutex is released")
+            .unwrap();
+        let ClaimOutcome::Leader(mut guard) = outcome else {
+            panic!("expected Leader outcome");
+        };
+        assert!(db_path.exists());
+
+        let conn_guard2 = store.conn.lock().unwrap();
+        guard.fence_committed(StoredResponse {
+            request_sha256: sha_blocked.clone(),
+            status: 200,
+            content_type: None,
+            body: Vec::new(),
+            oversize: true,
+            response_sha256: None,
+        });
+        let drop_started = std::time::Instant::now();
+        drop(guard);
+        assert!(drop_started.elapsed() < Duration::from_millis(100));
+
+        let post_drop_tick =
+            tokio::time::timeout(Duration::from_millis(200), tokio::spawn(async { "alive" }))
+                .await
+                .expect("LeaderGuard::drop must never block current_thread runtime")
+                .unwrap();
+        assert_eq!(post_drop_tick, "alive");
+
+        drop(conn_guard2);
+        let clear_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while store.inflight.lock().unwrap().contains_key(&scope_blocked) {
+            assert!(tokio::time::Instant::now() < clear_deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 }
