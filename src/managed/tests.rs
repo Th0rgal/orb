@@ -6298,6 +6298,106 @@ fn daily_pool_window_spend_respects_pool_change_intervals_and_excludes_stopped_g
     );
 }
 
+#[test]
+fn legacy_prior_pool_charges_preserved_across_stop_and_window_boundary() {
+    let t_22 = chrono::DateTime::parse_from_rfc3339("2026-11-04T22:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t_01 = chrono::DateTime::parse_from_rfc3339("2026-11-05T01:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t_02 = chrono::DateTime::parse_from_rfc3339("2026-11-05T02:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t_03 = chrono::DateTime::parse_from_rfc3339("2026-11-05T03:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    let mut pool_a = pool("pool_a", 100.0, None);
+    pool_a.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    let mut pool_b = pool("pool_b", 100.0, None);
+    pool_b.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    let mut pools = HashMap::new();
+    pools.insert("pool_a".into(), pool_a);
+    pools.insert("pool_b".into(), pool_b);
+
+    // Case A: Pre-upgrade persisted machine created today at 01:00 that already
+    // transferred from `pool_a` ($10) to `pool_b` at 02:00 with empty
+    // `billed_segments` and `segment_spent_offset == 0.0`, then stopped at 03:00.
+    // Stopping must preserve `pool_a`'s $10 charge and record only $10 under `pool_b`.
+    let mut legacy_same_day = spend_machine(
+        "m-legacy-stop",
+        "large",
+        Some("pool_b"),
+        "2026-11-05T01:00:00Z",
+        None,
+        0.0,
+    );
+    legacy_same_day.created_at = t_01;
+    legacy_same_day.usd_per_hour = 10.0;
+    legacy_same_day.cost_is_metered = false;
+    legacy_same_day.expires_at = t_03 + chrono::Duration::minutes(30);
+    legacy_same_day.prior_pool_charges = vec![("pool_a".into(), 10.0)];
+    legacy_same_day.pool_spent_offset = 10.0;
+    legacy_same_day.billed_segments.clear();
+    legacy_same_day.segment_started_at = None;
+    legacy_same_day.segment_spent_offset = 0.0;
+
+    legacy_same_day.cost_usd = legacy_same_day.estimated_cost(t_03);
+    legacy_same_day.close_billing_segment(t_03, t_03, t_03);
+    legacy_same_day.state = MachineState::Stopped;
+    legacy_same_day.stopped_at = Some(t_03);
+
+    let is_open = |_: &str| true;
+    let same_day_machines = vec![legacy_same_day];
+    let ua_stop = budget::pool_usage("pool_a", &pools, &same_day_machines, t_03, &is_open).unwrap();
+    let ub_stop = budget::pool_usage("pool_b", &pools, &same_day_machines, t_03, &is_open).unwrap();
+    assert!(
+        (ua_stop.spent_usd - 10.0).abs() < 0.01 && (ua_stop.lifetime_spent_usd - 10.0).abs() < 0.01,
+        "Legacy Pool A charge must survive first segment close: {ua_stop:?}"
+    );
+    assert!(
+        (ub_stop.spent_usd - 10.0).abs() < 0.01 && (ub_stop.lifetime_spent_usd - 10.0).abs() < 0.01,
+        "Pool B must only be charged post-handoff $10 on first segment close: {ub_stop:?}"
+    );
+
+    // Case B: Pre-upgrade persisted machine created yesterday at 22:00 that
+    // transferred from `pool_a` ($20) to `pool_b` at 00:00 and is inspected at
+    // 02:00 BEFORE any `close_billing_segment` call runs.
+    let mut legacy_cross_day = spend_machine(
+        "m-legacy-cross",
+        "large",
+        Some("pool_b"),
+        "2026-11-04T22:00:00Z",
+        None,
+        0.0,
+    );
+    legacy_cross_day.created_at = t_22;
+    legacy_cross_day.usd_per_hour = 10.0;
+    legacy_cross_day.cost_is_metered = false;
+    legacy_cross_day.expires_at = t_02 + chrono::Duration::minutes(30);
+    legacy_cross_day.prior_pool_charges = vec![("pool_a".into(), 20.0)];
+    legacy_cross_day.pool_spent_offset = 20.0;
+    legacy_cross_day.billed_segments.clear();
+    legacy_cross_day.segment_started_at = None;
+    legacy_cross_day.segment_spent_offset = 0.0;
+
+    let cross_day_machines = vec![legacy_cross_day];
+    let ua_cross =
+        budget::pool_usage("pool_a", &pools, &cross_day_machines, t_02, &is_open).unwrap();
+    let ub_cross =
+        budget::pool_usage("pool_b", &pools, &cross_day_machines, t_02, &is_open).unwrap();
+    assert!(
+        ua_cross.spent_usd.abs() < 0.01 && (ua_cross.lifetime_spent_usd - 20.0).abs() < 0.01,
+        "Legacy cross-midnight Pool A should have $0 today and $20 lifetime: {ua_cross:?}"
+    );
+    assert!(
+        (ub_cross.spent_usd - 20.0).abs() < 0.01
+            && (ub_cross.lifetime_spent_usd - 20.0).abs() < 0.01,
+        "Legacy cross-midnight Pool B should have $20 today and $20 lifetime: {ub_cross:?}"
+    );
+}
+
 #[tokio::test]
 async fn sub_budget_rejects_non_total_reset_period_and_reparenting_clears_period() {
     let dir = tempfile::tempdir().unwrap();

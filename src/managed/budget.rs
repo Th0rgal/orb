@@ -326,14 +326,32 @@ fn machine_pool_spent_in_window(
     if m.created_at >= w0 {
         return total_here;
     }
-    // Legacy fallback for persisted machines created before `billed_segments`:
-    // when `cost_before_resume > 0` and `usd_per_hour > 0`, derive the actual
-    // pre-resume active duration from `cost_before_resume / usd_per_hour` so
-    // stopped idle time before `run_started_at` is excluded from window overlap.
     let total_spent = machine_spent(m, now);
     if total_spent <= 0.0 {
         return 0.0;
     }
+    // Legacy fallback for persisted machines that changed pools before
+    // `billed_segments` existed: attribute prior pool charges to sequential
+    // pre-handoff intervals instead of spreading them across later ownership.
+    if m.pool_spent_offset > 0.0 || !m.prior_pool_charges.is_empty() {
+        let (legacy_segs, cur_start) = m.legacy_pool_segments(end, total_spent);
+        let mut sum = 0.0;
+        for seg in &legacy_segs {
+            if seg.pool_id.as_deref() == Some(pool_id) {
+                sum += segment_cost_in_window(seg.start, seg.end, seg.cost_usd, w0);
+            }
+        }
+        if m.budget_pool_id.as_deref() == Some(pool_id) {
+            let open_start = cur_start.max(m.run_started_at.unwrap_or(m.created_at));
+            sum += segment_cost_in_window(open_start, end.max(open_start), current_here, w0);
+        }
+        return sum.min(total_here);
+    }
+    // Single-pool legacy fallback for persisted machines created before
+    // `billed_segments`: when `cost_before_resume > 0` and `usd_per_hour > 0`,
+    // derive the actual pre-resume active duration from
+    // `cost_before_resume / usd_per_hour` so stopped idle time before
+    // `run_started_at` is excluded from window overlap.
     let machine_in_window = match m.run_started_at {
         Some(run_start) if run_start > m.created_at && m.cost_before_resume > 0.0 => {
             let post_resume = (total_spent - m.cost_before_resume).max(0.0);
@@ -353,8 +371,7 @@ fn machine_pool_spent_in_window(
         }
         _ => segment_cost_in_window(m.created_at, end, total_spent, w0),
     };
-    let frac = (machine_in_window / total_spent).clamp(0.0, 1.0);
-    total_here * frac
+    machine_in_window.min(total_here)
 }
 
 /// Usage of `pool_id`. `open(mission_id)` tells whether a child pool's owner

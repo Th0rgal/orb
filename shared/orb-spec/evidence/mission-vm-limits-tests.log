@@ -1,5 +1,4 @@
-   Compiling orb-spec v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap/crates/orb-spec)
-    Finished `test` profile [unoptimized] target(s) in 2.40s
+    Finished `test` profile [unoptimized] target(s) in 0.19s
      Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/orb_spec-4c486aa5e7ada9e6)
 
 running 1 test
@@ -7,6 +6,7 @@ test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified 
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -214,12 +214,12 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 0.44s
+    Finished `test` profile [unoptimized] target(s) in 1m 09s
      Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 2 tests
 test managed::tests::mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_usd_budget ... ok
 test managed::tests::mission_vm_limits_bypass_saturated_global_pool_and_enforce_per_provider_caps ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3782 filtered out; finished in 0.24s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3783 filtered out; finished in 0.04s
 
