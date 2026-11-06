@@ -784,4 +784,64 @@ it('replays 9409f9a9: renders completed /btw turn synchronously on frame 0 witho
  });
 });
 
+it('transitions an idle open /btw panel into busy streaming via the warm fast path when another device asks a follow-up',async()=>{
+ const parentId='cross-device-warm-parent';
+ const sideId='side-cross-device';
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ const streamMod=await import('../src/stream');
+ await writeSideQuestion(sideQuestionKey(parentId),{
+  history:[{id:`btw:${sideId}:1`,question:'First question?',answer:'First answer.'}],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+ });
+ sessionMock.current={id:sideId,question:'First question?',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0};
+ warmMock.current.set(parentId,{
+  history:[{id:`btw:${sideId}:1`,question:'First question?',answer:'First answer.'}],
+  latest:sideId,
+  clean:true,
+ });
+ let streamNotify:((event:any)=>void)|undefined;
+ const streamSpy=vi.spyOn(streamMod,'streamMission').mockImplementation((_id,cb)=>{streamNotify=cb as any;return ()=>{};});
+ const muxSpy=vi.spyOn(streamMod,'isMultiplexSyncActive').mockReturnValue(true);
+ const reconcileSpy=vi.fn(async(parent:string)=>({
+  history:warmMock.current.get(parent)?.history??[],
+  latest:sideId,
+  authoritative:true,
+ }));
+ serverReconcile.fn=reconcileSpy;
+ watchMock.fn=(_parent,_signal,receive)=>new Promise<void>(()=>{
+  receive({type:'start',model:'opencode · builtin/smart',startedAt:'2026-11-06T12:10:00Z'});
+  receive({type:'snapshot',text:'Streaming cross-device reply…',narration:[]});
+ });
+ let handle!:SideQuestionsHandle;
+ try{
+  render(()=><SideQuestions mission={parentId} items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+  expect(await screen.findByText('First answer.')).toBeTruthy();
+  await waitFor(()=>expect(streamNotify).toBeDefined());
+  const callsAfterInitialSync=reconcileSpy.mock.calls.length;
+
+  // Another device posts a new question on the existing side mission; warm reducer updates `activeSession` while keeping `clean: true`:
+  const activeSession={id:sideId,question:'Cross-device follow-up?',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:1,startedAt:'2026-11-06T12:10:00Z'};
+  sessionMock.current=activeSession;
+  warmMock.current.set(parentId,{
+   history:[{id:`btw:${sideId}:1`,question:'First question?',answer:'First answer.'}],
+   activeSession,
+   latest:sideId,
+   clean:true,
+  });
+  streamNotify!({type:'user_message'});
+
+  expect(await screen.findByText('Cross-device follow-up?')).toBeTruthy();
+  expect(await screen.findByText('Streaming cross-device reply…')).toBeTruthy();
+  // Applied directly from warm state without triggering an extra HTTP reconcile:
+  expect(reconcileSpy.mock.calls.length).toBe(callsAfterInitialSync);
+ }finally{
+  streamSpy.mockRestore();
+  muxSpy.mockRestore();
+ }
+});
+
+
 

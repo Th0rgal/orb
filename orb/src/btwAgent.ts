@@ -884,7 +884,7 @@ export function peekWarmBtwState(
   history: entry.history,
   activeSession: entry.activeSession,
   latest: entry.latest,
-  clean: !entry.dirty && !entry.activeSession,
+  clean: !entry.dirty,
  };
 }
 

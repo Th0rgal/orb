@@ -337,6 +337,65 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    // polling when the heartbeat-monitored multiplex WebSocket is active.
    const poll=setInterval(()=>{if(!stale&&inFlight===0&&document.visibilityState!=='hidden'&&(!isMultiplexSyncActive()||busy()||awaitingServerPending))sync(history(),true);},15000);
    onCleanup(()=>{stopFollow?.();clearTimeout(again);clearInterval(poll);});
+   const applyReconciled=(reconciled:Awaited<ReturnType<typeof reconcile>>)=>{
+    if(reconciled.latest)setSideSessionId(prev=>prev||reconciled.latest!);
+    refreshSideSession(missionId,reconciled.activeSession);
+    if(reconciled.activeSession?.startedAt)setStartedAt(reconciled.activeSession.startedAt);
+    follow(reconciled.latest);
+    const changed=reconciled.history.length!==history().length||reconciled.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
+    if(changed)setHistory(reconciled.history);
+    if(!migratingLegacyQueue&&unmigratedLegacyQueue.length&&hasQueueFollowUp()){
+     const answered=new Set(reconciled.history.map(h=>h.question.trim()));
+     if(reconciled.activeSession?.question)answered.add(reconciled.activeSession.question.trim());
+     unmigratedLegacyQueue=unmigratedLegacyQueue.filter(item=>item.question.trim()&&!answered.has(item.question.trim()));
+     const remainingIds=new Set(unmigratedLegacyQueue.map(item=>item.id));
+     setQueue(rows=>rows.filter(r=>remainingIds.has(r.id)));
+     if(unmigratedLegacyQueue.length){
+      migratingLegacyQueue=true;
+      const batch=[...unmigratedLegacyQueue];
+      void (async()=>{
+       try{
+        for(const item of batch){
+         if(stale||key()!==current)break;
+         const ok=await ask(item.question,[],[],item.attachments??[],false,item.id as ReturnType<typeof crypto.randomUUID>).catch(()=>false);
+         if(ok){
+          unmigratedLegacyQueue=unmigratedLegacyQueue.filter(r=>r.id!==item.id);
+          setQueue(rows=>rows.filter(r=>r.id!==item.id));
+         }
+        }
+       }finally{
+        migratingLegacyQueue=false;
+       }
+      })();
+     }
+    }
+    const pendingQ=question().trim();
+    const answeredPending=pendingQ?doesTurnAnswerPending({question:pendingQ,turnId:turnId(),startedAt:startedAt()},reconciled.history,pendingBaselineHistory,BTW_HISTORY_LIMIT):false;
+    if(answeredPending&&error()){
+     pendingBaselineHistory=[];
+     setError('');setNotSent(false);setStartedAt(undefined);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());
+    }
+    // A restored pending turn ("Starting side agent…" or "Reconnecting…") that
+    // Core has since answered is finished: show Core's answer instead of a stale spinner.
+    if(answeredPending&&busy()&&!asking&&!reconciled.activeSession){
+     awaitingServerPending=false;
+     pendingBaselineHistory=[];
+     abort?.abort();setBusy(false);setStartedAt(undefined);setRunStatus('');setError('');setNotSent(false);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());
+     queueMicrotask(sendNext);
+    }
+    if(reconciled.activeSession&&(!busy()||(awaitingServerPending&&!asking)||handoffId())){
+     awaitingServerPending=false;
+     setHandoffId(undefined);
+     watchActive(reconciled.activeSession);
+    }else if(awaitingServerPending&&!asking&&!reconciled.activeSession){
+     if(reconciled.authoritative===false){
+      setBusy(true);setRunStatus('Connection interrupted — reconnecting…');
+     }else{
+      awaitingServerPending=false;
+      setBusy(false);setStartedAt(undefined);setRunStatus('');setError(interruptedError);
+     }
+    }
+   };
    const follow=(id:string|undefined)=>{
     if(!id||id===following||stale)return;
     stopFollow?.();following=id;
@@ -345,11 +404,9 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      if(isMultiplexSyncActive()&&'peekWarmBtwState' in btwMod&&typeof btwMod.peekWarmBtwState==='function'){
       queueMicrotask(()=>{
        if(stale||key()!==current)return;
-       const warmNow=btwMod.peekWarmBtwState(missionId);
-       if(warmNow&&warmNow.clean){
-        const changed=warmNow.history.length!==history().length||warmNow.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
-        if(changed)setHistory(warmNow.history);
-        refreshSideSession(missionId,warmNow.activeSession);
+       const warmCurrent=btwMod.peekWarmBtwState(missionId);
+       if(warmCurrent&&warmCurrent.clean){
+        applyReconciled({...warmCurrent,authoritative:true});
         return;
        }
        clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history(),true);},300);
@@ -365,63 +422,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     const mine=++generation;inFlight++;
     void reconcile(missionId,local,undefined,force?{force:true}:undefined).then(reconciled=>{
      if(stale||key()!==current||mine!==generation)return;
-     if(reconciled.latest)setSideSessionId(prev=>prev||reconciled.latest!);
-     refreshSideSession(missionId,reconciled.activeSession);
-     if(reconciled.activeSession?.startedAt)setStartedAt(reconciled.activeSession.startedAt);
-     follow(reconciled.latest);
-     const changed=reconciled.history.length!==history().length||reconciled.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
-     if(changed)setHistory(reconciled.history);
-     if(!migratingLegacyQueue&&unmigratedLegacyQueue.length&&hasQueueFollowUp()){
-      const answered=new Set(reconciled.history.map(h=>h.question.trim()));
-      if(reconciled.activeSession?.question)answered.add(reconciled.activeSession.question.trim());
-      unmigratedLegacyQueue=unmigratedLegacyQueue.filter(item=>item.question.trim()&&!answered.has(item.question.trim()));
-      const remainingIds=new Set(unmigratedLegacyQueue.map(item=>item.id));
-      setQueue(rows=>rows.filter(r=>remainingIds.has(r.id)));
-      if(unmigratedLegacyQueue.length){
-       migratingLegacyQueue=true;
-       const batch=[...unmigratedLegacyQueue];
-       void (async()=>{
-        try{
-         for(const item of batch){
-          if(stale||key()!==current)break;
-          const ok=await ask(item.question,[],[],item.attachments??[],false,item.id as ReturnType<typeof crypto.randomUUID>).catch(()=>false);
-          if(ok){
-           unmigratedLegacyQueue=unmigratedLegacyQueue.filter(r=>r.id!==item.id);
-           setQueue(rows=>rows.filter(r=>r.id!==item.id));
-          }
-         }
-        }finally{
-         migratingLegacyQueue=false;
-        }
-       })();
-      }
-     }
-     const pendingQ=question().trim();
-     const answeredPending=pendingQ?doesTurnAnswerPending({question:pendingQ,turnId:turnId(),startedAt:startedAt()},reconciled.history,pendingBaselineHistory,BTW_HISTORY_LIMIT):false;
-     if(answeredPending&&error()){
-      pendingBaselineHistory=[];
-      setError('');setNotSent(false);setStartedAt(undefined);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());
-     }
-     // A restored pending turn ("Starting side agent…" or "Reconnecting…") that
-     // Core has since answered is finished: show Core's answer instead of a stale spinner.
-     if(answeredPending&&busy()&&!asking&&!reconciled.activeSession){
-      awaitingServerPending=false;
-      pendingBaselineHistory=[];
-      abort?.abort();setBusy(false);setStartedAt(undefined);setRunStatus('');setError('');setNotSent(false);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());
-      queueMicrotask(sendNext);
-     }
-     if(reconciled.activeSession&&(!busy()||(awaitingServerPending&&!asking)||handoffId())){
-      awaitingServerPending=false;
-      setHandoffId(undefined);
-      watchActive(reconciled.activeSession);
-     }else if(awaitingServerPending&&!asking&&!reconciled.activeSession){
-      if(reconciled.authoritative===false){
-       setBusy(true);setRunStatus('Connection interrupted — reconnecting…');
-      }else{
-       awaitingServerPending=false;
-       setBusy(false);setStartedAt(undefined);setRunStatus('');setError(interruptedError);
-      }
-     }
+     applyReconciled(reconciled);
     }).catch(e=>{
      if(!stale&&key()===current&&mine===generation&&awaitingServerPending&&!asking){
       if(isTransientNetworkError(e)){
@@ -435,7 +436,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     }).finally(()=>{inFlight=Math.max(0,inFlight-1);});
    };
    resync=()=>{if(!stale)sync(history(),true);};
-   sync(initialHistory,Boolean((saved?.pending&&!warmAnsweredPending)||(warmNow&&!warmNow.clean)));
+   sync(initialHistory,Boolean((saved?.pending&&!warmAnsweredPending)||(warmNow&&(!warmNow.clean||Boolean(warmNow.activeSession)))));
   }
   };
   if(cachedSaved){
