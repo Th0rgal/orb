@@ -35,7 +35,98 @@ use crate::workspace::{use_nspawn_for_workspace, SharedWorkspaceStore, Workspace
 use crate::workspace_exec::WorkspaceExec;
 
 pub use client::AskClient;
-pub use store::{AskMessage, AskStore, AskThread, OperatorNote};
+pub use store::{AskMessage, AskThread, OperatorNote};
+
+#[derive(Debug)]
+pub struct AskStore {
+    inner: store::AskStore,
+    notes_conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+}
+
+impl std::ops::Deref for AskStore {
+    type Target = store::AskStore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl AskStore {
+    pub async fn open(db_path: PathBuf) -> Result<Self, String> {
+        let inner = store::AskStore::open(db_path.clone()).await?;
+        let conn = tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
+            conn.busy_timeout(std::time::Duration::from_secs(10))
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(conn)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        Ok(Self {
+            inner,
+            notes_conn: Arc::new(tokio::sync::Mutex::new(conn)),
+        })
+    }
+
+    pub async fn peek_unflushed_operator_notes(
+        &self,
+        mission_id: Uuid,
+    ) -> Result<Vec<OperatorNote>, String> {
+        let conn = Arc::clone(&self.notes_conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, body, source_thread_id, created_at FROM operator_notes \
+                 WHERE mission_id = ?1 AND flushed_at IS NULL ORDER BY created_at ASC, rowid ASC",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([mission_id.to_string()], |row| {
+                    let id: String = row.get(0)?;
+                    let source: Option<String> = row.get(2)?;
+                    Ok(OperatorNote {
+                        id: Uuid::parse_str(&id).unwrap_or_default(),
+                        mission_id,
+                        body: row.get(1)?,
+                        source_thread_id: source.and_then(|id| Uuid::parse_str(&id).ok()),
+                        created_at: row.get(3)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    pub async fn mark_operator_notes_flushed(
+        &self,
+        mission_id: Uuid,
+        note_ids: &[Uuid],
+        flushed_at: &str,
+    ) -> Result<(), String> {
+        let conn = Arc::clone(&self.notes_conn);
+        let ids = note_ids.to_vec();
+        let flushed_at = flushed_at.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock();
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            for id in ids {
+                tx.execute(
+                    "UPDATE operator_notes SET flushed_at = ?3 \
+                     WHERE mission_id = ?1 AND id = ?2 AND flushed_at IS NULL",
+                    rusqlite::params![mission_id.to_string(), id.to_string(), flushed_at],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+}
 
 /// Hard cap on tool-calling iterations per turn — keeps cost/latency bounded.
 /// When the cap is hit mid-investigation, a final tools-disabled pass still
@@ -79,25 +170,103 @@ fn finalize_answer(raw: &str) -> String {
 }
 
 static ASK_STORE: OnceCell<Arc<AskStore>> = OnceCell::const_new();
+static SANDBOX_GC: OnceCell<()> = OnceCell::const_new();
+static LIVE_SANDBOXES: std::sync::OnceLock<std::sync::Mutex<HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+fn live_sandboxes() -> &'static std::sync::Mutex<HashSet<PathBuf>> {
+    LIVE_SANDBOXES.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
+fn gc_stale_sandboxes_excluding(root: &Path, live: &HashSet<PathBuf>) -> Result<(), String> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("ask-sandbox-")
+            && entry.file_type().map_err(|e| e.to_string())?.is_dir()
+            && !live.contains(&path)
+        {
+            if let Err(err) = std::fs::remove_dir_all(&path) {
+                tracing::warn!(path = %path.display(), %err, "Failed to GC stale Ask sandbox");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn gc_stale_sandboxes(root: &Path) -> Result<(), String> {
+    let root = root.to_path_buf();
+    let live = live_sandboxes()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    tokio::task::spawn_blocking(move || gc_stale_sandboxes_excluding(&root, &live))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+async fn initialize_sandbox_gc() -> Result<(), String> {
+    SANDBOX_GC
+        .get_or_try_init(|| gc_stale_sandboxes(Path::new("/tmp")))
+        .await
+        .map(|_| ())
+}
+
+async fn initialize_ask_store(
+    cell: &OnceCell<Arc<AskStore>>,
+    working_dir: &Path,
+) -> Result<Arc<AskStore>, String> {
+    ask_store_in_cell(cell, working_dir, Some(Path::new("/tmp"))).await
+}
+
+pub(crate) async fn ask_store_in_cell(
+    cell: &OnceCell<Arc<AskStore>>,
+    working_dir: &Path,
+    sandbox_root: Option<&Path>,
+) -> Result<Arc<AskStore>, String> {
+    cell.get_or_try_init(|| async {
+        match sandbox_root {
+            Some(root) if root == Path::new("/tmp") => initialize_sandbox_gc().await?,
+            Some(root) => gc_stale_sandboxes(root).await?,
+            None => {}
+        }
+        let base = working_dir.join(".sandboxed-sh/missions");
+        tokio::fs::create_dir_all(&base)
+            .await
+            .map_err(|e| e.to_string())?;
+        AskStore::open(base.join("ask.db")).await.map(Arc::new)
+    })
+    .await
+    .map(Arc::clone)
+}
 
 /// Get (lazily initializing) the global Ask store, placed next to the mission
 /// databases under the working directory.
 pub async fn ask_store(config: &crate::config::Config) -> Result<Arc<AskStore>, String> {
-    ASK_STORE
-        .get_or_try_init(|| async {
-            let base = config.working_dir.join(".sandboxed-sh").join("missions");
-            tokio::fs::create_dir_all(&base)
-                .await
-                .map_err(|e| e.to_string())?;
-            AskStore::open(base.join("ask.db")).await.map(Arc::new)
-        })
-        .await
-        .map(Arc::clone)
+    initialize_ask_store(&ASK_STORE, &config.working_dir).await
 }
 
-/// Non-initializing accessor for runners: returns the store only if some Ask
-/// interaction already opened it this process lifetime. Runners use this for
-/// best-effort mid-turn note injection without needing a `Config`.
+pub(crate) async fn initialize_on_startup(config: &crate::config::Config) -> anyhow::Result<()> {
+    ask_store(config).await.map_err(anyhow::Error::msg)?;
+    Ok(())
+}
+
+pub async fn ask_store_for_midturn() -> Result<Arc<AskStore>, String> {
+    if let Some(store) = ASK_STORE.get() {
+        return Ok(Arc::clone(store));
+    }
+    let config = crate::config::Config::from_env().map_err(|err| err.to_string())?;
+    ask_store(&config).await
+}
+
 pub fn ask_store_if_initialized() -> Option<Arc<AskStore>> {
     ASK_STORE.get().cloned()
 }
@@ -1614,8 +1783,13 @@ pub async fn prepend_pending_operator_notes(
 /// `None` for an explicit sandbox request as an error rather than silently
 /// running against the live tree.
 pub async fn prepare_sandbox(exec: &WorkspaceExec, base_work_dir: &Path) -> Option<PathBuf> {
+    let _ = initialize_sandbox_gc().await;
     let sandbox_guest = PathBuf::from(format!("/tmp/ask-sandbox-{}", Uuid::new_v4()));
     let sandbox_host = sandbox_host_path(exec, &sandbox_guest);
+    live_sandboxes()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(sandbox_host.clone());
     // Shell snippets execute in the workspace context. For nspawn workspaces,
     // interpolating host paths here makes both `git -C` and `test -d` point at
     // paths that do not exist in the guest, so every sandbox request fails.
@@ -1740,6 +1914,10 @@ fn log_sandbox_command_failure(stage: &str, output: &std::process::Output) {
 /// Tear down a sandbox created by [`prepare_sandbox`]. Best-effort: removes the
 /// git worktree if it is one, otherwise `rm -rf`s the copy.
 pub async fn cleanup_sandbox(exec: &WorkspaceExec, base_work_dir: &Path, sandbox: &Path) {
+    live_sandboxes()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(sandbox);
     let base_str = exec.translate_path_for_container(base_work_dir);
     let sandbox_str = exec.translate_path_for_container(sandbox);
     // `prune` matters for the failure path: a `worktree add` that died partway
@@ -1929,5 +2107,98 @@ mod tests {
         let masked = mask_value("sk-proxy-0123456789abcdef0123456789abcdef");
         assert_eq!(masked, "sk-p… (41 chars)");
         assert!(!masked.contains("0123456789"));
+    }
+
+    #[tokio::test]
+    async fn startup_gc_removes_stale_ask_sandboxes_only() {
+        let root = tempfile::tempdir().unwrap();
+        let stale = root.path().join("ask-sandbox-stale");
+        let live = root.path().join("ask-sandbox-live");
+        let keep_dir = root.path().join("other-worktree");
+        let keep_file = root.path().join("ask-sandbox-not-a-dir");
+        tokio::fs::create_dir_all(stale.join("nested"))
+            .await
+            .unwrap();
+        tokio::fs::write(stale.join("nested/file.txt"), "stale")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(live.join("nested"))
+            .await
+            .unwrap();
+        tokio::fs::write(live.join("nested/file.txt"), "live")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(&keep_dir).await.unwrap();
+        tokio::fs::write(&keep_file, "keep").await.unwrap();
+
+        live_sandboxes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(live.clone());
+
+        let cell = OnceCell::new();
+        let work_dir = tempfile::tempdir().unwrap();
+        let _store = ask_store_in_cell(&cell, work_dir.path(), Some(root.path()))
+            .await
+            .unwrap();
+
+        live_sandboxes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&live);
+
+        assert!(!stale.exists());
+        assert!(live.exists());
+        assert!(keep_dir.exists());
+        assert!(keep_file.exists());
+    }
+
+    #[tokio::test]
+    async fn peek_and_mark_operator_notes_preserve_identity_and_order() {
+        let store = temp_store().await;
+        let mission = Uuid::new_v4();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        let ts1 = "2026-11-06T09:00:00Z";
+        let ts2 = "2026-11-06T09:00:01Z";
+        {
+            let conn = store.notes_conn.lock().await;
+            for (id, body, ts) in [(id1, "first", ts1), (id2, "second", ts2)] {
+                conn.execute(
+                    "INSERT INTO operator_notes (id, mission_id, body, source_thread_id, created_at, flushed_at) \
+                     VALUES (?1, ?2, ?3, NULL, ?4, NULL)",
+                    rusqlite::params![id.to_string(), mission.to_string(), body, ts],
+                )
+                .unwrap();
+            }
+        }
+
+        let peeked = store.peek_unflushed_operator_notes(mission).await.unwrap();
+        assert_eq!(
+            peeked
+                .iter()
+                .map(|n| (n.id, n.created_at.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(id1, ts1), (id2, ts2)]
+        );
+
+        let peeked_again = store.peek_unflushed_operator_notes(mission).await.unwrap();
+        assert_eq!(
+            peeked_again
+                .iter()
+                .map(|n| (n.id, n.created_at.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(id1, ts1), (id2, ts2)]
+        );
+
+        store
+            .mark_operator_notes_flushed(mission, &[id1, id2], "2026-11-06T09:00:02Z")
+            .await
+            .unwrap();
+        assert!(store
+            .peek_unflushed_operator_notes(mission)
+            .await
+            .unwrap()
+            .is_empty());
     }
 }
