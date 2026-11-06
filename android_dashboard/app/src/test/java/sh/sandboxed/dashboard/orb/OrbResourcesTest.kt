@@ -151,29 +151,34 @@ class OrbResourcesTest {
             )
         }
 
+        val marginY = 8.0 * density
+        val canvasH = 280.0 * density
         val layout = OrbResourcesModel.computeSankeyLayout(
             inputNodes = nodes,
             inputLinks = links,
             width = 360.0 * density,
-            height = 280.0 * density,
+            height = canvasH,
             metric = OrbResourcesModel.Metric.Raw,
-            marginX = 100.0 * density,
-            marginY = 12.0 * density,
+            marginX = 6.0 * density,
+            marginY = marginY,
             density = density,
         )
 
         val col1Visible = layout.nodes.filter { it.column == 1 && it.showLabel }
         assertTrue(col1Visible.size in 2 until weights.size)
+        for (node in col1Visible) {
+            val half = (if (node.showSublabel) 15.0 else 9.0) * density
+            assertTrue(node.labelY - half >= marginY - 1e-6)
+            assertTrue(node.labelY + half <= canvasH - marginY + 1e-6)
+        }
         for (i in 1 until col1Visible.size) {
             val prev = col1Visible[i - 1]
             val curr = col1Visible[i]
-            val prevMid = (prev.y0 + prev.y1) / 2.0
-            val currMid = (curr.y0 + curr.y1) / 2.0
-            val prevHalf = if (prev.y1 - prev.y0 >= 24.0 * density) 12.0 * density else 8.0 * density
-            val currHalf = if (curr.y1 - curr.y0 >= 24.0 * density) 12.0 * density else 8.0 * density
+            val prevHalf = (if (prev.showSublabel) 15.0 else 9.0) * density
+            val currHalf = (if (curr.showSublabel) 15.0 else 9.0) * density
             assertTrue(
-                "Expected non-overlapping pixel bounds at 3x density, got prevMid=$prevMid currMid=$currMid",
-                currMid - currHalf >= prevMid + prevHalf + 3.0 * density - 1e-6,
+                "Expected non-overlapping pixel bounds at 3x density, got prevY=${prev.labelY} currY=${curr.labelY}",
+                curr.labelY - currHalf >= prev.labelY + prevHalf + 3.0 * density - 1e-6,
             )
         }
     }
