@@ -1,5 +1,5 @@
 /-
-  OrbClient.MutantSuite: 3 Realistic Semantic Mutants Killed by Proof (`0 import Lean`, `0 sorryAx`).
+  OrbClient.MutantSuite: 4 Realistic Semantic Mutants Killed by Proof (`0 import Lean`, `0 sorryAx`).
 -/
 import OrbClient.Spec
 

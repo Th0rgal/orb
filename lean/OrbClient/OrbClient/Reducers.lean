@@ -1,8 +1,7 @@
 /-
-  OrbClient.Reducers: Pure State Reducers for Client Sync Cursors, Inbox Unread Counts & Stream Checkpoints.
+  OrbClient.Reducers: Pure State Reducers for Client Sync Cursors, Inbox Unread Counts & Stream Checkpoints (`0 import Lean`, `0 sorryAx`).
 -/
 import OrbClient.Spec
-import Std.Tactic.BVDecide
 
 namespace OrbClient.Reducers
 
@@ -42,7 +41,9 @@ private theorem u16_rebuild_two_bytes (w : UInt16) :
   apply UInt16.eq_of_toBitVec_eq
   change (BitVec.zeroExtend 16 (BitVec.truncate 8 ((w.toBitVec >>> 8) &&& 0xFF#16)) <<< 8) |||
     BitVec.zeroExtend 16 (BitVec.truncate 8 (w.toBitVec &&& 0xFF#16)) = w.toBitVec
-  bv_decide
+  ext i hi
+  rcases i with _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | n
+  all_goals first | omega | simp
 
 private theorem nat_rebuild_from_u16 (w : UInt16) :
     ((((w >>> 8) &&& 0xFF).toUInt8).toNat <<< 8) ||| ((w &&& 0xFF).toUInt8).toNat = w.toNat := by

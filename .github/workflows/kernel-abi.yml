@@ -216,6 +216,9 @@ jobs:
           (cd lean/OrbClient && lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-client-test)
           client_elab_syms=$(nm -u lean/OrbClient/.lake/build/bin/orb-client-test | grep -c lean_elab || true)
           test "$client_elab_syms" -eq 0
+          ax_out=$(printf 'import OrbClient.Reducers\n#print axioms OrbClient.Reducers.parse_encode_orb_client_patch_roundtrip\n' | LEAN_PATH="lean/OrbClient/.lake/build/lib/lean:$(lean --print-prefix)/lib/lean" lean --stdin)
+          echo "$ax_out"
+          echo "$ax_out" | grep -qF "depends on axioms: [propext, Classical.choice, Quot.sound]"
           out=$(LEAN_PATH="lean/OrbClient/.lake/build/lib/lean:$(lean --print-prefix)/lib/lean" lean --run scripts/gen_client_core_fixtures.lean)
           diff <(printf '%s\n' "$out") shared/orb-spec/fixtures/client-core.json
           for bin in fido-agent-proxy orb-privd orb-sudo lean-mesh palomactl sandboxed-mcp workspace-mcp desktop-mcp automation-manager-mcp sandboxed-node; do
@@ -256,6 +259,8 @@ jobs:
           python3 scripts/check_spec_audit.py audit-results/orb-client-spec-audit.json
           .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbClient/OrbClient/MutantSuite.lean > audit-results/orb-client-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-client-mutant-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbClient/OrbClient/Reducers.lean > audit-results/orb-client-reducers-audit.json
+          python3 scripts/check_spec_audit.py audit-results/orb-client-reducers-audit.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
