@@ -44,6 +44,9 @@ VALID_STATUSES = {"OPEN", "IN_PROGRESS", "COMPLETED"}
 VALID_PHASES = {f"R{index}" for index in range(1, 9)}
 VALID_MODES = {"incremental", "clean"}
 GATE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+CLOSING_PR_TOKEN_RE = re.compile(
+    r"^(?:(?:[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*)?#[1-9][0-9]*|[0-9a-fA-F]{7,64})$"
+)
 
 MATRIX_KEYS = {"version", "project", "profile", "gates"}
 GATE_KEYS = {
@@ -64,7 +67,12 @@ GATE_KEYS = {
 
 def strip_code(cell: str) -> str:
     value = cell.strip()
-    if len(value) >= 2 and value.startswith("`") and value.endswith("`"):
+    if (
+        len(value) >= 2
+        and value.startswith("`")
+        and value.endswith("`")
+        and "`" not in value[1:-1]
+    ):
         return value[1:-1].strip()
     return value
 
@@ -129,30 +137,148 @@ def parse_markdown_tables(markdown: str) -> list[tuple[list[str], list[dict[str,
     return tables
 
 
+def _walk_confined(
+    repo_root: Path,
+    resolved_root: Path,
+    base: Path,
+    parts: tuple[str, ...],
+    raw_path: str,
+    context: str,
+    *,
+    remaining_symlinks: int = 40,
+) -> Path:
+    current = base
+    abs_root = repo_root.absolute()
+    for idx, part in enumerate(parts):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            parent = current.parent
+            if current == resolved_root or not parent.is_relative_to(resolved_root):
+                raise ValueError(f"{context}: path escapes repository root ({raw_path!r})")
+            current = parent
+            continue
+        candidate = current / part
+        try:
+            is_link = candidate.is_symlink()
+        except OSError as exc:
+            raise ValueError(f"{context}: invalid path ({raw_path!r})") from exc
+        if is_link:
+            if remaining_symlinks <= 0:
+                raise ValueError(f"{context}: symlink loop in path ({raw_path!r})")
+            try:
+                target = candidate.readlink()
+            except OSError as exc:
+                raise ValueError(f"{context}: unreadable symlink in path ({raw_path!r})") from exc
+            if target.is_absolute():
+                if target.is_relative_to(resolved_root):
+                    rel_target = target.relative_to(resolved_root)
+                elif target.is_relative_to(abs_root):
+                    rel_target = target.relative_to(abs_root)
+                else:
+                    raise ValueError(f"{context}: path escapes repository root ({raw_path!r})")
+                current = _walk_confined(
+                    repo_root,
+                    resolved_root,
+                    resolved_root,
+                    rel_target.parts,
+                    raw_path,
+                    context,
+                    remaining_symlinks=remaining_symlinks - 1,
+                )
+            else:
+                current = _walk_confined(
+                    repo_root,
+                    resolved_root,
+                    current,
+                    target.parts,
+                    raw_path,
+                    context,
+                    remaining_symlinks=remaining_symlinks - 1,
+                )
+        else:
+            current = candidate
+        if not current.is_relative_to(resolved_root):
+            raise ValueError(f"{context}: path escapes repository root ({raw_path!r})")
+        if idx < len(parts) - 1 and current.exists() and not current.is_dir():
+            raise ValueError(f"{context}: non-directory parent component in path ({raw_path!r})")
+    return current
+
+
+def resolve_repo_confined_path(
+    repo_root: Path,
+    raw_path: str,
+    context: str,
+    *,
+    allow_root: bool = False,
+) -> Path:
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path.strip()
+        or raw_path != raw_path.strip()
+        or "\x00" in raw_path
+        or "\\" in raw_path
+    ):
+        raise ValueError(f"{context}: path must be repository-relative ({raw_path!r})")
+    rel = Path(raw_path)
+    if rel.is_absolute():
+        raise ValueError(f"{context}: path must be repository-relative ({raw_path!r})")
+    if allow_root and raw_path == ".":
+        segments: list[str] = []
+    else:
+        segments = raw_path.split("/")
+        if not segments or any(seg in {"", ".", ".."} for seg in segments):
+            raise ValueError(f"{context}: path must be repository-relative ({raw_path!r})")
+    try:
+        resolved_root = repo_root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"{context}: repository root does not exist ({repo_root!r})") from exc
+    if not resolved_root.is_dir():
+        raise ValueError(f"{context}: repository root is not a directory ({repo_root!r})")
+    return _walk_confined(
+        repo_root,
+        resolved_root,
+        resolved_root,
+        tuple(segments),
+        raw_path,
+        context,
+    )
+
+
 def ensure_repo_file(repo_root: Path, raw_path: str, context: str) -> None:
     cleaned = strip_code(raw_path)
     if not cleaned:
         raise ValueError(f"{context}: empty file path")
-    rel = Path(cleaned)
-    if rel.is_absolute() or ".." in rel.parts:
-        raise ValueError(f"{context}: path must be repository-relative ({cleaned!r})")
-    resolved_root = repo_root.resolve()
-    candidate = repo_root / rel
-    if not candidate.is_file():
+    resolved = resolve_repo_confined_path(repo_root, cleaned, context, allow_root=False)
+    if not resolved.is_file():
         raise ValueError(f"{context}: file does not exist ({cleaned!r})")
-    if not candidate.resolve().is_relative_to(resolved_root):
-        raise ValueError(f"{context}: path escapes repository root ({cleaned!r})")
 
 
 def parse_semicolon_paths(raw: str, context: str) -> list[str]:
-    cleaned = strip_code(raw)
-    parts = [strip_code(part) for part in cleaned.split(";")]
+    parts = [strip_code(part) for part in strip_code(raw).split(";")]
     paths = [part for part in parts if part]
-    if not paths or len(paths) != len(parts):
+    if not paths or len(paths) != len(parts) or any("`" in path for path in paths):
         raise ValueError(f"{context}: expected non-empty ';'-separated file list, got {raw!r}")
     if len(set(paths)) != len(paths):
         raise ValueError(f"{context}: duplicate path in {paths!r}")
     return paths
+
+
+def parse_closing_pr_refs(raw: str, context: str) -> list[str]:
+    parts = [strip_code(part) for part in re.split(r"[;,]", strip_code(raw))]
+    tokens = [part for part in parts if part]
+    if (
+        not tokens
+        or len(tokens) != len(parts)
+        or any("`" in token or not CLOSING_PR_TOKEN_RE.fullmatch(token) for token in tokens)
+    ):
+        raise ValueError(
+            f"{context}: COMPLETED row must specify concrete closing_pr PR/commit token "
+            f"(e.g. '#123', 'Th0rgal/orb#123', or >=7-hex SHA), got {raw!r}"
+        )
+    if len(set(tokens)) != len(tokens):
+        raise ValueError(f"{context}: duplicate closing_pr reference in {tokens!r}")
+    return tokens
 
 
 def parse_target_phases(raw: str, context: str) -> list[str]:
@@ -200,10 +326,8 @@ def validate_inventory_markdown(
         if status not in VALID_STATUSES:
             raise ValueError(f"{sm_id}.status: invalid status {status!r}")
         reproducer = strip_code(row["reproducer_or_gate"])
-        closing_pr = strip_code(row["closing_pr"])
         if status == "COMPLETED":
-            if closing_pr.upper() == "TBD":
-                raise ValueError(f"{sm_id}: COMPLETED row must specify non-TBD closing_pr")
+            parse_closing_pr_refs(row["closing_pr"], sm_id)
             if reproducer.upper() == "TBD":
                 raise ValueError(f"{sm_id}: COMPLETED row must specify concrete reproducer_or_gate")
             for gate_path in parse_semicolon_paths(row["reproducer_or_gate"], f"{sm_id}.reproducer_or_gate"):
@@ -316,8 +440,13 @@ def validate_validation_matrix(matrix: dict[str, Any], repo_root: Path) -> list[
         if cwd is not None:
             if not isinstance(cwd, str) or not cwd.strip():
                 raise ValueError(f"gate '{gate_id}' cwd must be a non-empty string")
-            cwd_path = Path(cwd)
-            if cwd_path.is_absolute() or ".." in cwd_path.parts or not (repo_root / cwd_path).is_dir():
+            resolved_cwd = resolve_repo_confined_path(
+                repo_root,
+                cwd,
+                f"gate '{gate_id}' cwd",
+                allow_root=True,
+            )
+            if not resolved_cwd.is_dir():
                 raise ValueError(f"gate '{gate_id}' cwd must be an existing repo-relative directory")
 
         deps = raw_gate.get("dependencies", raw_gate.get("depends_on", []))
@@ -345,8 +474,21 @@ def validate_validation_matrix(matrix: dict[str, Any], repo_root: Path) -> list[
             raise ValueError(f"gate '{gate_id}' timeout_secs must be a positive integer")
 
         artifacts = raw_gate.get("artifacts", [])
-        if not isinstance(artifacts, list) or not all(isinstance(item, str) and item for item in artifacts):
+        if not isinstance(artifacts, list) or not all(
+            isinstance(item, str) and item.strip() for item in artifacts
+        ):
             raise ValueError(f"gate '{gate_id}' artifacts must be a list of non-empty strings")
+        for artifact in artifacts:
+            resolved_artifact = resolve_repo_confined_path(
+                repo_root,
+                artifact,
+                f"gate '{gate_id}' artifact",
+                allow_root=False,
+            )
+            if resolved_artifact.is_dir():
+                raise ValueError(
+                    f"gate '{gate_id}' artifact must not be an existing directory ({artifact!r})"
+                )
 
         entry = {
             "id": gate_id,

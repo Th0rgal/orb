@@ -8,7 +8,7 @@ Status: authoritative Phase `R0` obligation inventory for [`plan.md`](../../plan
 2. Every path listed in `current_files` (semicolon-separated repository-relative paths) must exist in the working tree.
 3. Valid `status` values are `OPEN`, `IN_PROGRESS`, and `COMPLETED`.
 4. Transitioning a row to `COMPLETED` requires both:
-   - a concrete `closing_pr` reference (not `TBD`), and
+   - a concrete `closing_pr` PR/commit reference (`#<digits>`, `<owner>/<repo>#<digits>`, or `>=7`-hex commit SHA; placeholders such as `TBD`, `-`, `N/A`, and `none` are rejected), and
    - an existing repository-relative test/gate file path in `reproducer_or_gate`.
 5. Phase `R8` runs `python3 scripts/check_state_inventory.py --require-all-completed` as a blocking release gate.
 

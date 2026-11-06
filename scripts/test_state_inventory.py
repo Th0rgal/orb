@@ -17,6 +17,7 @@ import check_state_inventory as checker
 ROOT = Path(__file__).resolve().parent.parent
 INVENTORY_PATH = ROOT / "docs/specs/state-machine-inventory.md"
 VALIDATION_PATH = ROOT / ".sandboxed/validation.toml"
+PLAN_PATH = ROOT / "plan.md"
 
 
 class StateInventoryTests(unittest.TestCase):
@@ -44,6 +45,8 @@ class StateInventoryTests(unittest.TestCase):
                 "orb-client-unit",
             }.issubset(gate_ids)
         )
+        expected_plan_cols = f"({', '.join(checker.SM_COLUMNS)})"
+        self.assertIn(expected_plan_cols, PLAN_PATH.read_text(encoding="utf-8"))
 
     def test_rejects_missing_or_duplicate_sm_and_gap_rows(self) -> None:
         missing_sm = "\n".join(
@@ -83,13 +86,31 @@ class StateInventoryTests(unittest.TestCase):
             checker.validate_inventory_markdown(traversal, ROOT)
 
     def test_completed_status_requires_concrete_pr_and_existing_reproducer(self) -> None:
-        completed_with_tbd = self.inventory_text.replace(
-            "| R1, R2 | OPEN | `src/api/idempotency.rs` | TBD |",
-            "| R1, R2 | COMPLETED | `src/api/idempotency.rs` | TBD |",
-            1,
-        )
-        with self.assertRaisesRegex(ValueError, "COMPLETED row must specify non-TBD closing_pr"):
-            checker.validate_inventory_markdown(completed_with_tbd, ROOT)
+        for placeholder in ("TBD", "-", "N/A", "none", "#0", "abc123", "#1501, none"):
+            with self.subTest(placeholder=placeholder):
+                completed_placeholder = self.inventory_text.replace(
+                    "| R1, R2 | OPEN | `src/api/idempotency.rs` | TBD |",
+                    f"| R1, R2 | COMPLETED | `src/api/idempotency.rs` | {placeholder} |",
+                    1,
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "COMPLETED row must specify concrete closing_pr",
+                ):
+                    checker.validate_inventory_markdown(completed_placeholder, ROOT)
+
+                all_completed_placeholder = self.inventory_text.replace(
+                    "| OPEN |", "| COMPLETED |"
+                ).replace("| TBD |", f"| {placeholder} |")
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "COMPLETED row must specify concrete closing_pr",
+                ):
+                    checker.validate_inventory_markdown(
+                        all_completed_placeholder,
+                        ROOT,
+                        require_all_completed=True,
+                    )
 
         completed_missing_gate = self.inventory_text.replace(
             "| R1, R2 | OPEN | `src/api/idempotency.rs` | TBD |",
@@ -99,14 +120,57 @@ class StateInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "file does not exist"):
             checker.validate_inventory_markdown(completed_missing_gate, ROOT)
 
-        valid_single_completed = self.inventory_text.replace(
-            "| R1, R2 | OPEN | `src/api/idempotency.rs` | TBD |",
-            "| R1, R2 | COMPLETED | `src/api/idempotency.rs` | #1501 |",
+        valid_tokens = (
+            "#1501",
+            "Th0rgal/orb#1576",
+            "09405d1",
+            "09405d18b34cf7a49acad061b55d803a27218fe4",
+            "#1501, Th0rgal/orb#1576; 09405d1",
+            "`#1501`; `Th0rgal/orb#1576`",
+        )
+        for token in valid_tokens:
+            with self.subTest(token=token):
+                valid_single_completed = self.inventory_text.replace(
+                    "| R1, R2 | OPEN | `src/api/idempotency.rs` | TBD |",
+                    f"| R1, R2 | COMPLETED | `src/api/idempotency.rs` | {token} |",
+                    1,
+                )
+                sm_rows, _ = checker.validate_inventory_markdown(valid_single_completed, ROOT)
+                sm12 = next(row for row in sm_rows if row["id"] == "SM-12")
+                self.assertEqual(sm12["status"], "COMPLETED")
+
+    def test_parse_semicolon_paths_handles_multi_span_backticks(self) -> None:
+        self.assertEqual(
+            checker.parse_semicolon_paths(
+                "`src/api/idempotency.rs`; `src/uploads.rs`",
+                "SM-12.current_files",
+            ),
+            ["src/api/idempotency.rs", "src/uploads.rs"],
+        )
+        self.assertEqual(
+            checker.parse_semicolon_paths(
+                "`src/api/idempotency.rs`; `src/uploads.rs`; `src/concurrency.rs`",
+                "SM-21.current_files",
+            ),
+            ["src/api/idempotency.rs", "src/uploads.rs", "src/concurrency.rs"],
+        )
+        self.assertEqual(
+            checker.parse_semicolon_paths(
+                "`src/api/idempotency.rs; src/uploads.rs`",
+                "SM-12.current_files",
+            ),
+            ["src/api/idempotency.rs", "src/uploads.rs"],
+        )
+        with self.assertRaisesRegex(ValueError, "expected non-empty ';'-separated file list"):
+            checker.parse_semicolon_paths("`src/api/idempotency.rs; `src/uploads.rs`", "broken")
+
+        multi_span_inventory = self.inventory_text.replace(
+            "`src/api/control/control_queue.rs; src/api/control/types.rs`",
+            "`src/api/control/control_queue.rs`; `src/api/control/types.rs`",
             1,
         )
-        sm_rows, _ = checker.validate_inventory_markdown(valid_single_completed, ROOT)
-        sm12 = next(row for row in sm_rows if row["id"] == "SM-12")
-        self.assertEqual(sm12["status"], "COMPLETED")
+        sm_rows, _ = checker.validate_inventory_markdown(multi_span_inventory, ROOT)
+        self.assertEqual(len(sm_rows), 27)
 
     def test_require_all_completed_flag_enforces_r8_exit_gate(self) -> None:
         with self.assertRaisesRegex(ValueError, "expected 'COMPLETED'"):
@@ -160,6 +224,91 @@ class StateInventoryTests(unittest.TestCase):
         unknown_field["gates"][0]["unexpected_key"] = True
         with self.assertRaisesRegex(ValueError, "unknown gate keys"):
             checker.validate_validation_matrix(unknown_field, ROOT)
+
+    def test_validation_toml_enforces_repo_confinement_for_cwd_and_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo = base / "repo"
+            outside = base / "outside"
+            (repo / "subdir").mkdir(parents=True)
+            outside.mkdir(parents=True)
+            (outside / "secret.txt").write_text("secret\n", encoding="utf-8")
+            (repo / "subdir" / "existing.txt").write_text("ok\n", encoding="utf-8")
+            (repo / "escape_dir").symlink_to(outside)
+            (repo / "subdir" / "rel_escape_dir").symlink_to(Path("../../outside"))
+            (repo / "subdir" / "escape_file.txt").symlink_to(outside / "secret.txt")
+            (repo / "subdir" / "dangling_escape.txt").symlink_to(outside / "missing.txt")
+            (repo / "subdir" / "internal_dir").symlink_to(Path("."))
+            (outside / "hop_back").symlink_to(repo / "subdir")
+            (repo / "trampoline").symlink_to(Path("../outside/hop_back"))
+
+            def make_matrix(
+                *,
+                cwd: str | None = None,
+                artifacts: list[str] | None = None,
+            ) -> dict[str, object]:
+                gate: dict[str, object] = {
+                    "id": "cert-gate",
+                    "command": ["python3", "-V"],
+                    "required": True,
+                    "mode": "clean",
+                    "reuse": False,
+                }
+                if cwd is not None:
+                    gate["cwd"] = cwd
+                if artifacts is not None:
+                    gate["artifacts"] = artifacts
+                return {
+                    "version": 1,
+                    "project": "orb",
+                    "gates": [gate],
+                }
+
+            normalized = checker.validate_validation_matrix(
+                make_matrix(
+                    cwd="subdir",
+                    artifacts=[
+                        "subdir/existing.txt",
+                        "subdir/nonexistent_leaf.json",
+                        "subdir/internal_dir/nonexistent_leaf.json",
+                        "build/out/future_report.json",
+                    ],
+                ),
+                repo,
+            )
+            self.assertEqual(len(normalized), 1)
+
+            for bad_cwd in ("escape_dir", "subdir/rel_escape_dir", "trampoline", "../outside", "/etc"):
+                with self.subTest(bad_cwd=bad_cwd):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "escapes repository root|repository-relative",
+                    ):
+                        checker.validate_validation_matrix(make_matrix(cwd=bad_cwd), repo)
+
+            for bad_artifact in (
+                "../../../etc/passwd",
+                "subdir/../../outside/secret.txt",
+                "/etc/passwd",
+                "escape_dir/secret.txt",
+                "escape_dir/nonexistent_leaf.json",
+                "subdir/rel_escape_dir/nonexistent_leaf.json",
+                "subdir/escape_file.txt",
+                "subdir/dangling_escape.txt",
+                "trampoline/existing.txt",
+            ):
+                with self.subTest(bad_artifact=bad_artifact):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "escapes repository root|repository-relative",
+                    ):
+                        checker.validate_validation_matrix(
+                            make_matrix(artifacts=[bad_artifact]),
+                            repo,
+                        )
+
+            with self.assertRaisesRegex(ValueError, "must not be an existing directory"):
+                checker.validate_validation_matrix(make_matrix(artifacts=["subdir"]), repo)
 
     def test_cli_entry_point_accepts_override_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

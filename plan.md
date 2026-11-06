@@ -211,7 +211,7 @@ Every item below must be tracked in `docs/specs/state-machine-inventory.md` (cre
 **Goal:** Turn all 27 audited implicit state machine families into tracked, machine-checked obligations and wire project-level validation gates before code fan-out.
 
 - **Tasks (2 parallel Boat workers -> 1 merge):**
-  - `R0-A` (`docs/specs/state-machine-inventory.md`): Create the canonical registry mapping `SM-01..SM-27` with columns `(id, canonical_owner, current_encoding, events, invariants, reproducer_test, lean_export_or_reason, target_phase, status, closing_pr)`. Cross-link `G-ORB-1..8` from `docs/TRUSTWORTHY_SHARED_LEAN_ROADMAP.md`.
+  - `R0-A` (`docs/specs/state-machine-inventory.md`): Create the canonical registry mapping `SM-01..SM-27` with columns `(id, title, canonical_owner, current_files, current_encoding, primary_hazard, lean_target_or_adapter_rationale, target_phase, status, reproducer_or_gate, closing_pr)`. Cross-link `G-ORB-1..8` from `docs/TRUSTWORTHY_SHARED_LEAN_ROADMAP.md`.
   - `R0-B` (`scripts/check_state_inventory.py` + `.sandboxed/validation.toml` if absent/extended): Add a deterministic checker verifying every `SM-*` entry has valid file references and non-empty disposition, plus wave gate definitions compatible with `orb_validation_dag_step`.
 - **Merge checkpoint:** Rebase, review (`writer: false`), green CI, merge R0 PR, build initial warm Boat snapshot `orb-state-<sha7>-warm`.
 
