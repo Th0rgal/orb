@@ -85,11 +85,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 enum class OrbSettingsRoute {
@@ -511,12 +513,37 @@ fun OrbSetupView(
     var urlInput by remember(savedBase) {
         mutableStateOf(savedBase.ifEmpty { "https://agent-backend.thomas.md" })
     }
+    var usernameInput by remember(savedBase) {
+        mutableStateOf(core.savedUsername(savedBase))
+    }
     var passwordInput by remember { mutableStateOf("") }
+    var authMode by remember { mutableStateOf("single_tenant") }
+    var showChangePassword by remember { mutableStateOf(false) }
+    var noticeMessage by remember { mutableStateOf<String?>(null) }
     var isConnecting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val signedInToken by core.tokenFlow.collectAsState()
     val bgSyncState by OrbBackgroundSyncMonitor.stateFlow.collectAsState()
+    val isConnectedSession = onBack != null && core.isConfigured && (!signedInToken.isNullOrEmpty() || authMode == "disabled")
+
+    LaunchedEffect(urlInput) {
+        val cleanBase = urlInput.trim().trimEnd('/')
+        if (!cleanBase.startsWith("http://") && !cleanBase.startsWith("https://")) return@LaunchedEffect
+        delay(250L)
+        val detected = withContext(Dispatchers.IO) {
+            runCatching {
+                val req = okhttp3.Request.Builder().url("$cleanBase/api/health").get().build()
+                core.httpClient.newCall(req).execute().use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    OrbJSON.dict(OrbJSON.parse(body))
+                }
+            }.getOrNull()
+        } ?: return@LaunchedEffect
+        authMode = OrbJSON.str(detected, "auth_mode")
+            ?: if (OrbJSON.bool(detected, "auth_required") == true) "single_tenant" else "disabled"
+    }
+
     val gitHubButton = remember {
         OrbGitHubSignInButton(OrbGitHubSignIn(OrbGitHubSignIn.prefsStore(context))) { base ->
             // The callback is only accepted for the endpoint the app is configured with.
@@ -541,8 +568,14 @@ fun OrbSetupView(
     fun connect() {
         val cleanBase = urlInput.trim().trimEnd('/')
         if (cleanBase.isEmpty()) return
+        val trimmedUser = usernameInput.trim()
+        if (authMode == "multi_user" && passwordInput.isNotEmpty() && trimmedUser.isEmpty()) {
+            errorMessage = "Username is required for multi-user servers."
+            return
+        }
         isConnecting = true
         errorMessage = null
+        noticeMessage = null
         scope.launch {
             try {
                 if (passwordInput.isEmpty()) {
@@ -552,17 +585,23 @@ fun OrbSetupView(
                     core.refreshAll()
                     onConnected()
                 } else {
-                    core.configureSession(cleanBase, null, passwordInput)
+                    core.configureSession(cleanBase, null, passwordInput, trimmedUser)
+                    val loginBody = LinkedHashMap<String, Any?>().apply {
+                        put("password", passwordInput)
+                        if (authMode == "multi_user" && trimmedUser.isNotEmpty()) {
+                            put("username", trimmedUser)
+                        }
+                    }
                     val resp = core.request(
                         path = "/api/auth/login",
                         method = "POST",
-                        body = mapOf("password" to passwordInput),
+                        body = loginBody,
                         allowAuthRetry = false
                     )
                     val dict = OrbJSON.dict(resp)
                     val newToken = OrbJSON.str(dict, "token")
                         ?: throw OrbError("Invalid login response")
-                    core.configureSession(cleanBase, newToken, passwordInput)
+                    core.configureSession(cleanBase, newToken, passwordInput, trimmedUser)
                     core.refreshAll()
                     onConnected()
                 }
@@ -648,6 +687,38 @@ fun OrbSetupView(
             }
         }
 
+        if (authMode == "multi_user") {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "USERNAME",
+                    color = OrbStyle.textMuted,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.6.sp
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 14.dp, vertical = 13.dp)
+                ) {
+                    if (usernameInput.isEmpty()) {
+                        Text("Account username", color = OrbStyle.textMuted, fontSize = 15.sp)
+                    }
+                    BasicTextField(
+                        value = usernameInput,
+                        onValueChange = { usernameInput = it },
+                        textStyle = TextStyle(color = Color.White, fontSize = 15.sp),
+                        cursorBrush = SolidColor(Color.White),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        }
+
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 text = "PASSWORD",
@@ -678,6 +749,10 @@ fun OrbSetupView(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
+        }
+
+        noticeMessage?.let { msg ->
+            Text(text = msg, color = OrbStyle.success, fontSize = 13.sp)
         }
 
         errorMessage?.let { err ->
@@ -738,6 +813,47 @@ fun OrbSetupView(
             )
             is OrbGitHubSignInButton.State.Failed -> OrbNotice(title = state.message, log = null)
             OrbGitHubSignInButton.State.Idle -> Unit
+        }
+
+        if (isConnectedSession) {
+            if (authMode == "single_tenant") {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "SERVER PASSWORD",
+                        color = OrbStyle.textMuted,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.6.sp
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Single-tenant password", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text("Rotate the password required to sign in to this server.", color = OrbStyle.textMuted, fontSize = 12.sp)
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(OrbStyle.card)
+                                .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                                .orbPressClickable { showChangePassword = true }
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Text("Change…", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
+            }
+
+            OrbGitHubIntegrationCard(core = core)
         }
 
         if (onBack != null) {
@@ -823,5 +939,16 @@ fun OrbSetupView(
                 )
             }
         }
+    }
+
+    if (showChangePassword) {
+        OrbChangePasswordDialog(
+            core = core,
+            onDismiss = { showChangePassword = false },
+            onSaved = { msg ->
+                showChangePassword = false
+                noticeMessage = msg
+            }
+        )
     }
 }

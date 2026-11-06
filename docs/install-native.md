@@ -395,7 +395,7 @@ For local development, you can rsync to a _different_ path (e.g.,
 ```bash
 # Fast dev loop (to a separate path)
 rsync -az --delete \
-  --exclude target --exclude .git --exclude dashboard/node_modules \
+  --exclude target --exclude .git \
   /path/to/local-dev/ \
   root@<server-ip>:/root/sandboxed_sh/
 
@@ -965,46 +965,25 @@ missions and workspaces.
 
 ---
 
-## 12) Dashboard Configuration
+## 12) Connecting Orb Clients
 
-This guide installs the **backend** on your server. The dashboard (frontend) is
-separate and you have several options:
+This guide installs the **Core backend** on your server. Connect from any native Orb client:
 
-| Option      | Best For                      | Setup                             |
-| ----------- | ----------------------------- | --------------------------------- |
-| **Vercel**  | Production, always accessible | Deploy `dashboard/` to Vercel     |
-| **Local**   | Development, quick testing    | Run `bun dev` in dashboard folder |
-| **iOS App** | Mobile access                 | Enter backend URL in app          |
+| Client          | Platform                      | Setup                                        |
+| --------------- | ----------------------------- | -------------------------------------------- |
+| **Orb Desktop** | macOS, Linux, Windows         | Enter backend URL in **Settings → Account**  |
+| **Orb iOS**     | iPhone & iPad                 | Enter backend URL in the setup sheet         |
+| **Orb Android** | Android                       | Enter backend URL in **Settings → Account**  |
 
-### 12.1 Web Dashboard (Vercel)
+### 12.1 Orb Desktop
 
-Deploy the `dashboard/` folder to [Vercel](https://vercel.com):
+Open **Settings** (`⌘,`) → **Account**, enter your backend URL (e.g., `https://agent.yourdomain.com`) and password (or sign in with GitHub / multi-user credentials), and click **Connect**.
 
-1. Connect your repo to Vercel
-2. Set the root directory to `dashboard`
-3. Add environment variable: `NEXT_PUBLIC_API_URL=https://agent.yourdomain.com`
-4. Deploy
+### 12.2 Orb iOS & Android
 
-The dashboard will connect to your backend server.
+On first launch, Orb prompts for the server URL. Enter your backend URL (e.g., `https://agent.yourdomain.com`) and sign in.
 
-### 12.2 Web Dashboard (Local)
-
-Run the dashboard locally on your machine:
-
-```bash
-cd dashboard
-bun install
-NEXT_PUBLIC_API_URL=https://agent.yourdomain.com bun dev
-```
-
-Then open `http://localhost:3001` (the dev server runs on port 3001).
-
-### 12.3 iOS App
-
-On first launch, the iOS app prompts for the server URL. Enter your backend URL
-(e.g., `https://agent.yourdomain.com`).
-
-To change later: **Menu (⋮) → Settings**
+To change later: open the profile/settings sheet → **Account**.
 
 ---
 

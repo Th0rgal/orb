@@ -1,11 +1,11 @@
 # Capability Matrix
 
-This repository keeps a versioned capability matrix at `capabilities/matrix.v1.json` to prevent backend/client feature drift.
+This repository keeps a versioned capability matrix at `capabilities/matrix.v1.json` to prevent backend/client feature drift across Orb surfaces.
 
 ## What is enforced
 
 - The matrix must exist and be valid JSON with `version: 1`.
-- Each surface (`api`, `web`, `ios`) must have at least one `supported` capability row.
+- Each surface (`api`, `orb`, `ios`, `android`) must have at least one `supported` capability row.
 - Each `supported` row must provide one or more evidence entries:
   - `path`: repo-relative file path
   - `pattern`: exact string that must exist in that file
@@ -16,7 +16,7 @@ CI runs `scripts/check-capability-matrix.sh` on every push/PR.
 ## Updating the matrix during rollouts
 
 1. Update backend contract code.
-2. Update web and iOS consumers (or mark deferred explicitly).
+2. Update Orb desktop, iOS, and Android consumers (or mark deferred explicitly).
 3. Edit `capabilities/matrix.v1.json`:
    - Keep status as `supported` when the surface ships the capability.
    - Set status to `deferred` with a concrete note if not shipped yet.

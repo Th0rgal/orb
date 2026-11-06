@@ -4,19 +4,17 @@
 }
 
 :80 {
-	# API & backend endpoints → Rust backend
-	handle /api/* {
+	handle / {
+		header Content-Type "text/plain; charset=utf-8"
+		respond "Orb Core API is running. Connect with Orb on desktop, iOS, or Android." 200
+	}
+
+	# API, /v1 proxy, WebSocket, and remote-access endpoints → Rust backend
+	handle {
 		reverse_proxy localhost:{$PORT:3000} {
 			header_up X-Real-IP {remote_host}
 			# SSE: disable response buffering so event streams flush immediately
 			flush_interval -1
-		}
-	}
-
-	# Everything else → Next.js dashboard
-	handle {
-		reverse_proxy localhost:3001 {
-			header_up X-Real-IP {remote_host}
 		}
 	}
 }
