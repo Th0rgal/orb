@@ -569,14 +569,203 @@ pub struct WorkspaceStore {
     working_dir: PathBuf,
 }
 
-fn workspace_build_lock_directory(workspace_path: &Path) -> PathBuf {
+pub fn workspace_build_lock_path(workspace_path: &Path) -> PathBuf {
+    if let Some(containers_dir) = workspace_path
+        .parent()
+        .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some("containers"))
+    {
+        if let (Some(sandboxed_dir), Some(name)) = (
+            containers_dir.parent(),
+            workspace_path.file_name().and_then(|n| n.to_str()),
+        ) {
+            return sandboxed_dir
+                .join("build-locks")
+                .join(format!("{name}.lock"));
+        }
+    }
     let mut path = workspace_path.to_path_buf().into_os_string();
-    path.push(".build");
+    path.push(".build.lock");
     PathBuf::from(path)
 }
 
-pub fn workspace_build_lock_path(workspace_path: &Path) -> PathBuf {
-    workspace_build_lock_directory(workspace_path).join("build.lock")
+fn storage_lock_path(storage_path: &Path) -> PathBuf {
+    let mut path = storage_path.to_path_buf().into_os_string();
+    path.push(".lock");
+    PathBuf::from(path)
+}
+
+fn open_storage_lock(storage_path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::MetadataExt;
+
+    let lock_path = storage_lock_path(storage_path);
+    if let Some(parent) = lock_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    loop {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        fs2::FileExt::lock_exclusive(&file)?;
+        let file_meta = file.metadata()?;
+        match std::fs::metadata(&lock_path) {
+            Ok(path_meta)
+                if path_meta.dev() == file_meta.dev() && path_meta.ino() == file_meta.ino() =>
+            {
+                return Ok(file);
+            }
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn try_open_build_lock(workspace_path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::MetadataExt;
+
+    let lock_path = workspace_build_lock_path(workspace_path);
+    if let Some(parent) = lock_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    loop {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        fs2::FileExt::try_lock_exclusive(&file)?;
+        let file_meta = file.metadata()?;
+        match std::fs::metadata(&lock_path) {
+            Ok(path_meta)
+                if path_meta.dev() == file_meta.dev() && path_meta.ino() == file_meta.ino() =>
+            {
+                return Ok(file);
+            }
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_build_lock_held(workspace_path: &Path) -> bool {
+    let lock_path = workspace_build_lock_path(workspace_path);
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(error) => {
+            tracing::warn!(
+                path = %workspace_path.display(),
+                %error,
+                "Could not open build lock during recovery; assuming build lock may be held"
+            );
+            return true;
+        }
+    };
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&file);
+            false
+        }
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                tracing::warn!(
+                    path = %workspace_path.display(),
+                    %error,
+                    "Unexpected error probing build lock; assuming build lock may be held"
+                );
+            }
+            true
+        }
+    }
+}
+
+fn try_cleanup_build_lock_file(workspace_path: &Path) {
+    use std::os::unix::fs::MetadataExt;
+
+    let lock_path = workspace_build_lock_path(workspace_path);
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+    {
+        if fs2::FileExt::try_lock_exclusive(&file).is_ok() {
+            if let (Ok(file_meta), Ok(path_meta)) = (file.metadata(), std::fs::metadata(&lock_path))
+            {
+                if file_meta.dev() == path_meta.dev() && file_meta.ino() == path_meta.ino() {
+                    let _ = std::fs::remove_file(&lock_path);
+                }
+            }
+            let _ = fs2::FileExt::unlock(&file);
+        }
+    }
+}
+
+fn read_workspace_snapshot(path: &Path) -> std::io::Result<HashMap<Uuid, Workspace>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(error),
+    };
+    let workspaces: Vec<Workspace> = serde_json::from_slice(&bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(workspaces
+        .into_iter()
+        .map(|workspace| (workspace.id, workspace))
+        .collect())
+}
+
+fn load_base_workspaces(
+    storage_path: &Path,
+    in_memory: &HashMap<Uuid, Workspace>,
+) -> std::io::Result<HashMap<Uuid, Workspace>> {
+    let bytes = match std::fs::read(storage_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(in_memory.clone());
+        }
+        Err(error) => return Err(error),
+    };
+    let workspaces: Vec<Workspace> = serde_json::from_slice(&bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(workspaces
+        .into_iter()
+        .map(|workspace| (workspace.id, workspace))
+        .collect())
+}
+
+fn write_workspace_snapshot(path: &Path, next: &HashMap<Uuid, Workspace>) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.as_os_str().is_empty() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut list: Vec<&Workspace> = next.values().collect();
+    list.sort_by_key(|w| w.id);
+    let bytes = serde_json::to_vec_pretty(&list)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(&bytes)?;
+    temp.flush()?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -590,6 +779,7 @@ pub struct BuildClaimGuard {
     pub workspace: Workspace,
     generation: u64,
     lock: Option<std::fs::File>,
+    settled: bool,
 }
 
 impl BuildClaimGuard {
@@ -598,37 +788,70 @@ impl BuildClaimGuard {
     }
 
     pub async fn settle(mut self, built: Workspace) -> Result<(), std::io::Error> {
-        self.store
-            .settle_workspace_build(&built, self.generation)
-            .await?;
-        self.lock.take();
-        Ok(())
+        let Some(lock) = self.lock.take() else {
+            self.settled = true;
+            return Ok(());
+        };
+        let store = Arc::clone(&self.store);
+        let claimed = self.workspace.clone();
+        let generation = self.generation;
+        self.settled = true;
+        tokio::spawn(async move {
+            let result = store
+                .settle_workspace_build(&built, Some(&claimed), generation)
+                .await;
+            let _ = tokio::task::spawn_blocking(move || drop(lock)).await;
+            result
+        })
+        .await
+        .map_err(std::io::Error::other)?
     }
 }
 
 impl Drop for BuildClaimGuard {
     fn drop(&mut self) {
+        if self.settled {
+            if let Some(lock) = self.lock.take() {
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn_blocking(move || drop(lock));
+                } else {
+                    std::thread::spawn(move || drop(lock));
+                }
+            }
+            return;
+        }
         let Some(lock) = self.lock.take() else {
             return;
         };
-        let mut built = self.workspace.clone();
+        let claimed = self.workspace.clone();
+        let mut built = claimed.clone();
         built.status = WorkspaceStatus::Error;
         built.error_message = Some("Workspace build aborted before completion".into());
         let store = Arc::clone(&self.store);
         let generation = self.generation;
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                let _lock = lock;
-                if let Err(error) = store.settle_workspace_build(&built, generation).await {
+                if let Err(error) = store
+                    .settle_workspace_build(&built, Some(&claimed), generation)
+                    .await
+                {
                     tracing::error!(%error, "Failed to settle aborted workspace build");
                 }
+                let _ = tokio::task::spawn_blocking(move || drop(lock)).await;
             });
         } else {
             std::thread::spawn(move || {
-                let _lock = lock;
-                if let Ok(runtime) = tokio::runtime::Builder::new_current_thread().build() {
-                    let _ = runtime.block_on(store.settle_workspace_build(&built, generation));
+                if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    let _ = runtime.block_on(store.settle_workspace_build(
+                        &built,
+                        Some(&claimed),
+                        generation,
+                    ));
                 }
+                drop(lock);
             });
         }
     }
@@ -641,89 +864,165 @@ impl WorkspaceStore {
         distro: Option<String>,
     ) -> Result<BuildClaimGuard, BuildConflict> {
         use axum::http::StatusCode;
-        use fs2::FileExt;
         use std::io::{Read, Seek, Write};
 
-        let conflict = |status: StatusCode, message: String| BuildConflict { status, message };
-        let io_error =
-            |error: std::io::Error| conflict(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
-        let _writer = self.workspaces.lock_writer().await;
-        let mut next = (*self.workspaces.load_full()).clone();
-        let workspace = next
-            .get_mut(&id)
-            .ok_or_else(|| conflict(StatusCode::NOT_FOUND, "Workspace not found".into()))?;
-        if workspace.status == WorkspaceStatus::Building {
-            return Err(conflict(
-                StatusCode::CONFLICT,
-                "Workspace build already in progress".into(),
-            ));
+        fn conflict(status: axum::http::StatusCode, message: String) -> BuildConflict {
+            BuildConflict { status, message }
         }
-        if workspace.workspace_type != WorkspaceType::Container {
-            return Err(conflict(
-                StatusCode::BAD_REQUEST,
-                "Workspace is not a container type".into(),
-            ));
+        fn io_error(error: std::io::Error) -> BuildConflict {
+            conflict(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            )
         }
-        let directory = workspace_build_lock_directory(&workspace.path);
-        std::fs::create_dir_all(&directory).map_err(io_error)?;
-        let mut lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(directory.join("build.lock"))
-            .map_err(io_error)?;
-        lock.try_lock_exclusive().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                conflict(
+
+        let candidate_path = {
+            let snapshot = self.workspaces.load();
+            let workspace = snapshot
+                .get(&id)
+                .ok_or_else(|| conflict(StatusCode::NOT_FOUND, "Workspace not found".into()))?;
+            if workspace.status == WorkspaceStatus::Building {
+                return Err(conflict(
                     StatusCode::CONFLICT,
                     "Workspace build already in progress".into(),
-                )
-            } else {
-                io_error(error)
+                ));
             }
-        })?;
-        let mut previous = String::new();
-        lock.read_to_string(&mut previous).map_err(io_error)?;
-        let generation = previous
-            .trim()
-            .parse::<u64>()
-            .unwrap_or(0)
-            .max(workspace.config["build_generation"].as_u64().unwrap_or(0))
-            .checked_add(1)
-            .ok_or_else(|| {
-                conflict(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Build generation exhausted".into(),
-                )
+            if workspace.workspace_type != WorkspaceType::Container {
+                return Err(conflict(
+                    StatusCode::BAD_REQUEST,
+                    "Workspace is not a container type".into(),
+                ));
+            }
+            workspace.path.clone()
+        };
+
+        let expected_path = candidate_path.clone();
+        let (mut lock, lock_generation) = tokio::task::spawn_blocking(move || {
+            let mut lock = try_open_build_lock(&candidate_path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    conflict(
+                        StatusCode::CONFLICT,
+                        "Workspace build already in progress".into(),
+                    )
+                } else {
+                    io_error(error)
+                }
             })?;
-        lock.rewind().map_err(io_error)?;
-        lock.set_len(0).map_err(io_error)?;
-        write!(lock, "{generation}").map_err(io_error)?;
-        lock.sync_data().map_err(io_error)?;
-        workspace.config["build_generation"] = generation.into();
-        workspace.status = WorkspaceStatus::Building;
-        workspace.error_message = None;
-        if let Some(distro) = distro {
-            workspace.distro = Some(distro);
-        }
-        let claimed = workspace.clone();
-        self.persist_build_snapshot(&next).await.map_err(io_error)?;
+            let mut previous = String::new();
+            lock.read_to_string(&mut previous).map_err(io_error)?;
+            let parsed = previous.trim().parse::<u64>().unwrap_or(0);
+            Ok::<_, BuildConflict>((lock, parsed))
+        })
+        .await
+        .map_err(|join_err| {
+            conflict(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Build lock task failed: {join_err}"),
+            )
+        })??;
+
+        let _writer = self.workspaces.lock_writer().await;
+        let storage_path = self.storage_path.clone();
+        let in_memory = (*self.workspaces.load_full()).clone();
+
+        let (next, claimed, generation, lock) = tokio::task::spawn_blocking(move || {
+            let _storage_lock = match open_storage_lock(&storage_path) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    drop(lock);
+                    return Err(io_error(error));
+                }
+            };
+            let mut next = match load_base_workspaces(&storage_path, &in_memory) {
+                Ok(map) => map,
+                Err(error) => {
+                    drop(lock);
+                    return Err(io_error(error));
+                }
+            };
+            let Some(workspace) = next.get_mut(&id) else {
+                drop(lock);
+                return Err(conflict(
+                    StatusCode::NOT_FOUND,
+                    "Workspace not found".into(),
+                ));
+            };
+            if workspace.status == WorkspaceStatus::Building {
+                drop(lock);
+                return Err(conflict(
+                    StatusCode::CONFLICT,
+                    "Workspace build already in progress".into(),
+                ));
+            }
+            if workspace.workspace_type != WorkspaceType::Container {
+                drop(lock);
+                return Err(conflict(
+                    StatusCode::BAD_REQUEST,
+                    "Workspace is not a container type".into(),
+                ));
+            }
+            if workspace.path != expected_path {
+                drop(lock);
+                return Err(conflict(
+                    StatusCode::CONFLICT,
+                    "Workspace path changed concurrently".into(),
+                ));
+            }
+            let generation = match lock_generation
+                .max(workspace.config["build_generation"].as_u64().unwrap_or(0))
+                .checked_add(1)
+            {
+                Some(gen) => gen,
+                None => {
+                    drop(lock);
+                    return Err(conflict(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Build generation exhausted".into(),
+                    ));
+                }
+            };
+            if let Err(error) = (|| -> std::io::Result<()> {
+                lock.rewind()?;
+                lock.set_len(0)?;
+                write!(lock, "{generation}")?;
+                lock.sync_data()?;
+                Ok(())
+            })() {
+                drop(lock);
+                return Err(io_error(error));
+            }
+            if !workspace.config.is_object() {
+                workspace.config = serde_json::json!({});
+            }
+            workspace.config["build_generation"] = generation.into();
+            workspace.status = WorkspaceStatus::Building;
+            workspace.error_message = None;
+            if let Some(distro) = distro {
+                workspace.distro = Some(distro);
+            }
+            let claimed = workspace.clone();
+            if let Err(error) = write_workspace_snapshot(&storage_path, &next) {
+                drop(lock);
+                return Err(io_error(error));
+            }
+            Ok((next, claimed, generation, lock))
+        })
+        .await
+        .map_err(|join_err| {
+            conflict(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Build claim persistence task failed: {join_err}"),
+            )
+        })??;
+
         self.workspaces.store(Arc::new(next));
         Ok(BuildClaimGuard {
             store: Arc::clone(self),
             workspace: claimed,
             generation,
             lock: Some(lock),
+            settled: false,
         })
-    }
-
-    async fn persist_build_snapshot(
-        &self,
-        next: &HashMap<Uuid, Workspace>,
-    ) -> Result<(), std::io::Error> {
-        let contents = serde_json::to_vec_pretty(&next.values().collect::<Vec<_>>())?;
-        crate::concurrency::write_atomic_async(&self.storage_path, &contents, None).await
     }
 
     pub async fn settle_for_generation(
@@ -731,37 +1030,65 @@ impl WorkspaceStore {
         built: &Workspace,
         generation: u64,
     ) -> Result<(), std::io::Error> {
-        self.settle_workspace_build(built, generation).await
+        self.settle_workspace_build(built, None, generation).await
     }
 
     async fn settle_workspace_build(
         &self,
         built: &Workspace,
+        claimed_snapshot: Option<&Workspace>,
         generation: u64,
     ) -> Result<(), std::io::Error> {
         let _writer = self.workspaces.lock_writer().await;
-        let mut next = (*self.workspaces.load_full()).clone();
-        let Some(latest) = next.get_mut(&built.id) else {
-            return Ok(());
-        };
-        if latest.status != WorkspaceStatus::Building
-            || latest.config["build_generation"].as_u64() != Some(generation)
-        {
-            return Ok(());
+        let storage_path = self.storage_path.clone();
+        let in_memory = (*self.workspaces.load_full()).clone();
+        let built = built.clone();
+        let claimed_distro = claimed_snapshot.map(|ws| ws.distro.clone());
+
+        let next = tokio::task::spawn_blocking(
+            move || -> std::io::Result<Option<HashMap<Uuid, Workspace>>> {
+                let _storage_lock = open_storage_lock(&storage_path)?;
+                let mut next = load_base_workspaces(&storage_path, &in_memory)?;
+                let Some(latest) = next.get_mut(&built.id) else {
+                    return Ok(None);
+                };
+                if latest.status != WorkspaceStatus::Building
+                    || latest.config["build_generation"].as_u64() != Some(generation)
+                {
+                    return Ok(None);
+                }
+                latest.status = if built.status == WorkspaceStatus::Ready {
+                    WorkspaceStatus::Ready
+                } else {
+                    WorkspaceStatus::Error
+                };
+                latest.error_message = built.error_message.clone();
+                match claimed_distro {
+                    Some(ref original_distro) => {
+                        if &built.distro != original_distro {
+                            latest.distro = built.distro.clone();
+                        }
+                    }
+                    None => {
+                        if built.distro.is_some() {
+                            latest.distro = built.distro.clone();
+                        }
+                    }
+                }
+                if built.harness_versions.is_some() {
+                    latest.harness_versions = built.harness_versions.clone();
+                }
+                write_workspace_snapshot(&storage_path, &next)?;
+                Ok(Some(next))
+            },
+        )
+        .await
+        .map_err(std::io::Error::other)??;
+
+        if let Some(next) = next {
+            self.workspaces.store(Arc::new(next));
         }
-        latest.status = if built.status == WorkspaceStatus::Ready {
-            WorkspaceStatus::Ready
-        } else {
-            WorkspaceStatus::Error
-        };
-        latest.error_message = built.error_message.clone();
-        latest.distro = built.distro.clone();
-        if built.harness_versions.is_some() {
-            latest.harness_versions = built.harness_versions.clone();
-        }
-        let persisted = self.persist_build_snapshot(&next).await;
-        self.workspaces.store(Arc::new(next));
-        persisted
+        Ok(())
     }
 
     /// Create a new workspace store, loading existing data from disk.
@@ -770,194 +1097,88 @@ impl WorkspaceStore {
     pub async fn new(working_dir: PathBuf) -> Self {
         let storage_path = working_dir.join(".sandboxed-sh/workspaces.json");
 
-        let store = Self {
-            workspaces: crate::concurrency::ArcSwapStore::new(HashMap::new()),
-            storage_path,
-            working_dir: working_dir.clone(),
-        };
+        let workspaces = tokio::task::spawn_blocking({
+            let storage_path = storage_path.clone();
+            let working_dir = working_dir.clone();
+            move || -> HashMap<Uuid, Workspace> {
+                let storage_lock = match open_storage_lock(&storage_path) {
+                    Ok(lock) => Some(lock),
+                    Err(e) => {
+                        tracing::error!("Failed to acquire workspace storage lock: {}", e);
+                        None
+                    }
+                };
+                let mut had_load_error = storage_lock.is_none();
+                let mut workspaces = match read_workspace_snapshot(&storage_path) {
+                    Ok(loaded) => loaded,
+                    Err(e) => {
+                        tracing::warn!("Failed to load workspaces from disk: {}", e);
+                        had_load_error = true;
+                        HashMap::new()
+                    }
+                };
 
-        // Load existing workspaces from disk
-        let mut workspaces = match store.load_from_disk() {
-            Ok(loaded) => loaded,
-            Err(e) => {
-                tracing::warn!("Failed to load workspaces from disk: {}", e);
-                HashMap::new()
-            }
-        };
+                // Ensure default host workspace exists
+                if !workspaces.contains_key(&DEFAULT_WORKSPACE_ID) {
+                    let host = Workspace::default_host(working_dir.clone());
+                    workspaces.insert(host.id, host);
+                }
+                if let Some(host) = workspaces.get_mut(&DEFAULT_WORKSPACE_ID) {
+                    if !host.skills.is_empty() {
+                        host.skills.clear();
+                        tracing::info!(
+                            workspace = %host.name,
+                            "Cleared default host workspace skills list to allow all library skills"
+                        );
+                    }
+                }
 
-        // Ensure default host workspace exists
-        if !workspaces.contains_key(&DEFAULT_WORKSPACE_ID) {
-            let host = Workspace::default_host(working_dir.clone());
-            workspaces.insert(host.id, host);
-        }
-        if let Some(host) = workspaces.get_mut(&DEFAULT_WORKSPACE_ID) {
-            if !host.skills.is_empty() {
-                host.skills.clear();
-                tracing::info!(
-                    workspace = %host.name,
-                    "Cleared default host workspace skills list to allow all library skills"
-                );
-            }
-        }
+                // A custom workspace may be a removable/mounted filesystem.  Persist
+                // its mission-root registry in this store's control directory before
+                // any mission code can consult it.  Copy the old colocated registry
+                // while it is still reachable; if it is not, write an empty control
+                // registry so first-use is distinguishable from a lost file.
+                for workspace in workspaces.values_mut() {
+                    if workspace.status == WorkspaceStatus::Building
+                        && !is_build_lock_held(&workspace.path)
+                    {
+                        workspace.status = WorkspaceStatus::Error;
+                        workspace.error_message =
+                            Some("Workspace build interrupted by restart".into());
+                    }
+                    stamp_custom_workspace_control_registry(workspace, &working_dir);
+                }
 
-        // A custom workspace may be a removable/mounted filesystem.  Persist
-        // its mission-root registry in this store's control directory before
-        // any mission code can consult it.  Copy the old colocated registry
-        // while it is still reachable; if it is not, write an empty control
-        // registry so first-use is distinguishable from a lost file.
-        for workspace in workspaces.values_mut() {
-            if workspace.status == WorkspaceStatus::Building {
-                workspace.status = WorkspaceStatus::Error;
-                workspace.error_message = Some("Workspace build interrupted by restart".into());
-            }
-            stamp_custom_workspace_control_registry(workspace, &working_dir);
-        }
-
-        // Scan for orphaned containers and restore them
-        let orphaned = store.scan_orphaned_containers(&workspaces).await;
-        for mut workspace in orphaned {
-            tracing::info!(
-                "Restored orphaned container workspace: {} at {}",
-                workspace.name,
-                workspace.path.display()
-            );
-            stamp_custom_workspace_control_registry(&mut workspace, &working_dir);
-            workspaces.insert(workspace.id, workspace);
-        }
-
-        // Store workspaces
-        store.workspaces.store(Arc::new(workspaces));
-
-        // Save to disk to persist any recovered workspaces
-        if let Err(e) = store.save_to_disk().await {
-            tracing::error!("Failed to save workspaces to disk: {}", e);
-        }
-
-        store
-    }
-
-    /// Load workspaces from disk.
-    fn load_from_disk(&self) -> Result<HashMap<Uuid, Workspace>, std::io::Error> {
-        if !self.storage_path.exists() {
-            return Ok(HashMap::new());
-        }
-
-        let contents = std::fs::read_to_string(&self.storage_path)?;
-        let workspaces: Vec<Workspace> = serde_json::from_str(&contents)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        Ok(workspaces.into_iter().map(|w| (w.id, w)).collect())
-    }
-
-    /// Save workspaces to disk.
-    async fn save_to_disk(&self) -> Result<(), std::io::Error> {
-        let _writer = self.workspaces.lock_writer().await;
-        let contents = {
-            let workspaces = self.workspaces.load();
-            let workspaces_vec: Vec<&Workspace> = workspaces.values().collect();
-            serde_json::to_string_pretty(&workspaces_vec)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-        };
-
-        crate::concurrency::write_atomic_async(&self.storage_path, contents.as_bytes(), None).await
-    }
-
-    /// Scan for container directories that exist on disk but aren't in the store.
-    async fn scan_orphaned_containers(&self, known: &HashMap<Uuid, Workspace>) -> Vec<Workspace> {
-        let containers_dir = self.working_dir.join(".sandboxed-sh/containers");
-
-        if !containers_dir.exists() {
-            return Vec::new();
-        }
-
-        // Get all known container paths
-        let known_paths: std::collections::HashSet<PathBuf> = known
-            .values()
-            .filter(|w| w.workspace_type == WorkspaceType::Container)
-            .map(|w| w.path.clone())
-            .collect();
-
-        let mut orphaned = Vec::new();
-
-        for root in [containers_dir] {
-            if !root.exists() {
-                continue;
-            }
-
-            let entries = match std::fs::read_dir(&root) {
-                Ok(entries) => entries,
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to read containers directory {}: {}",
-                        root.display(),
-                        e
+                // Scan for orphaned containers and restore them
+                let orphaned = scan_orphaned_containers_sync(&working_dir, &workspaces);
+                for mut workspace in orphaned {
+                    tracing::info!(
+                        "Restored orphaned container workspace: {} at {}",
+                        workspace.name,
+                        workspace.path.display()
                     );
-                    continue;
-                }
-            };
-
-            for entry in entries.flatten() {
-                let path = entry.path();
-
-                // Skip non-directories
-                if !path.is_dir() {
-                    continue;
+                    stamp_custom_workspace_control_registry(&mut workspace, &working_dir);
+                    workspaces.insert(workspace.id, workspace);
                 }
 
-                // Check if this path is known
-                if known_paths.contains(&path) {
-                    continue;
+                if !had_load_error {
+                    if let Err(e) = write_workspace_snapshot(&storage_path, &workspaces) {
+                        tracing::error!("Failed to save workspaces to disk: {}", e);
+                    }
                 }
+                drop(storage_lock);
 
-                // Get the directory name as workspace name
-                let name = match path.file_name().and_then(|n| n.to_str()) {
-                    Some(n) => n.to_string(),
-                    None => continue,
-                };
-
-                // Check if it looks like a valid container (has basic structure)
-                let is_valid_container = path.join("etc").exists() || path.join("bin").exists();
-
-                // Determine status based on filesystem state
-                let status = if is_valid_container {
-                    WorkspaceStatus::Ready
-                } else {
-                    // Incomplete container - might have been interrupted
-                    WorkspaceStatus::Pending
-                };
-
-                let workspace = Workspace {
-                    id: Uuid::new_v4(),
-                    name,
-                    workspace_type: WorkspaceType::Container,
-                    path,
-                    status,
-                    error_message: None,
-                    config: serde_json::json!({}),
-                    template: None,
-                    distro: None,
-                    env_vars: HashMap::new(),
-                    init_scripts: Vec::new(),
-                    init_script: None,
-                    created_at: Utc::now(), // We don't know the actual creation time
-                    skills: Vec::new(),
-                    plugins: Vec::new(),
-                    shared_network: None, // Default to shared network
-                    tailscale_mode: None,
-                    mcps: Vec::new(),
-                    mcps_replace_defaults: true,
-                    config_profile: None,
-                    resolved_git_credentials: None,
-                    read_only_command_guard_dir: None,
-                    mission_project_skills: Vec::new(),
-                    harness_versions: None,
-                };
-
-                orphaned.push(workspace);
+                workspaces
             }
-        }
+        })
+        .await
+        .unwrap_or_default();
 
-        orphaned
+        Self {
+            workspaces: crate::concurrency::ArcSwapStore::new(workspaces),
+            storage_path,
+            working_dir,
+        }
     }
 
     /// List all workspaces.
@@ -981,50 +1202,156 @@ impl WorkspaceStore {
     }
 
     /// Add a new workspace.
-    pub async fn add(&self, mut workspace: Workspace) -> Uuid {
-        stamp_custom_workspace_control_registry(&mut workspace, &self.working_dir);
+    pub async fn add(&self, workspace: Workspace) -> Uuid {
         let id = workspace.id;
-        {
-            let mut guard = self.workspaces.write().await;
-            guard.insert(id, workspace);
-        }
+        let _writer = self.workspaces.lock_writer().await;
+        let storage_path = self.storage_path.clone();
+        let working_dir = self.working_dir.clone();
+        let in_memory = (*self.workspaces.load_full()).clone();
 
-        if let Err(e) = self.save_to_disk().await {
-            tracing::error!("Failed to save workspaces to disk: {}", e);
+        match tokio::task::spawn_blocking(move || -> std::io::Result<HashMap<Uuid, Workspace>> {
+            let mut workspace = workspace;
+            stamp_custom_workspace_control_registry(&mut workspace, &working_dir);
+            let _storage_lock = open_storage_lock(&storage_path)?;
+            let mut next = load_base_workspaces(&storage_path, &in_memory)?;
+            next.insert(id, workspace);
+            write_workspace_snapshot(&storage_path, &next)?;
+            Ok(next)
+        })
+        .await
+        {
+            Ok(Ok(next)) => {
+                self.workspaces.store(Arc::new(next));
+            }
+            Ok(Err(e)) => {
+                tracing::error!("Failed to save workspaces to disk: {}", e);
+            }
+            Err(e) => {
+                tracing::error!("Workspace add task panicked: {}", e);
+            }
         }
 
         id
     }
 
+    pub async fn update_with<F>(&self, id: Uuid, edit: F) -> Result<Workspace, BuildConflict>
+    where
+        F: FnOnce(&mut Workspace) -> Result<(), BuildConflict> + Send + 'static,
+    {
+        let _writer = self.workspaces.lock_writer().await;
+        let path = self.storage_path.clone();
+        let working_dir = self.working_dir.clone();
+        let in_memory = (*self.workspaces.load_full()).clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let failure = |error: std::io::Error| BuildConflict {
+                status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                message: error.to_string(),
+            };
+            let _lock = open_storage_lock(&path).map_err(failure)?;
+            let mut next = load_base_workspaces(&path, &in_memory).map_err(failure)?;
+            let existing = next
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| BuildConflict {
+                    status: axum::http::StatusCode::NOT_FOUND,
+                    message: format!("Workspace {} not found", id),
+                })?;
+            let mut updated = existing.clone();
+            edit(&mut updated)?;
+            preserve_control_registry_authority(&existing, &mut updated, &working_dir);
+            if let Some(generation) = existing.config.get("build_generation").cloned() {
+                if !updated.config.is_object() {
+                    updated.config = serde_json::json!({});
+                }
+                updated.config["build_generation"] = generation;
+            }
+            if existing.status == WorkspaceStatus::Building {
+                if updated.distro != existing.distro
+                    || updated.workspace_type != existing.workspace_type
+                    || updated.path != existing.path
+                {
+                    return Err(BuildConflict {
+                        status: axum::http::StatusCode::CONFLICT,
+                        message:
+                            "Cannot change build-defining workspace fields while a build is in progress"
+                                .into(),
+                    });
+                }
+                updated.status = WorkspaceStatus::Building;
+                updated.error_message = existing.error_message.clone();
+            }
+            let stored = updated.clone();
+            next.insert(id, updated);
+            write_workspace_snapshot(&path, &next).map_err(failure)?;
+            Ok::<_, BuildConflict>((next, stored))
+        })
+        .await
+        .map_err(|error| BuildConflict {
+            status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            message: error.to_string(),
+        })??;
+        self.workspaces.store(Arc::new(result.0));
+        Ok(result.1)
+    }
+
     /// Update a workspace.
-    pub async fn update(&self, mut workspace: Workspace) -> bool {
-        let updated = {
-            let mut guard = self.workspaces.write().await;
-            if let std::collections::hash_map::Entry::Occupied(mut entry) =
-                guard.entry(workspace.id)
-            {
-                preserve_control_registry_authority(entry.get(), &mut workspace, &self.working_dir);
-                if let Some(generation) = entry.get().config.get("build_generation") {
-                    workspace.config["build_generation"] = generation.clone();
+    pub async fn update(&self, workspace: Workspace) -> bool {
+        self.update_returning(workspace).await.is_some()
+    }
+
+    /// Update a workspace and return the stored post-update snapshot.
+    pub async fn update_returning(&self, workspace: Workspace) -> Option<Workspace> {
+        let _writer = self.workspaces.lock_writer().await;
+        let storage_path = self.storage_path.clone();
+        let working_dir = self.working_dir.clone();
+        let in_memory = (*self.workspaces.load_full()).clone();
+
+        match tokio::task::spawn_blocking(
+            move || -> std::io::Result<Option<(HashMap<Uuid, Workspace>, Workspace)>> {
+                let mut workspace = workspace;
+                let _storage_lock = open_storage_lock(&storage_path)?;
+                let mut next = load_base_workspaces(&storage_path, &in_memory)?;
+                let std::collections::hash_map::Entry::Occupied(mut entry) =
+                    next.entry(workspace.id)
+                else {
+                    return Ok(None);
+                };
+                preserve_control_registry_authority(entry.get(), &mut workspace, &working_dir);
+                if let Some(generation) = entry.get().config.get("build_generation").cloned() {
+                    if !workspace.config.is_object() {
+                        workspace.config = serde_json::json!({});
+                    }
+                    workspace.config["build_generation"] = generation;
                 }
                 if entry.get().status == WorkspaceStatus::Building {
                     workspace.status = WorkspaceStatus::Building;
                     workspace.error_message = entry.get().error_message.clone();
+                    workspace.distro = entry.get().distro.clone();
+                    workspace.workspace_type = entry.get().workspace_type;
+                    workspace.path = entry.get().path.clone();
                 }
+                let stored = workspace.clone();
                 entry.insert(workspace);
-                true
-            } else {
-                false
+                write_workspace_snapshot(&storage_path, &next)?;
+                Ok(Some((next, stored)))
+            },
+        )
+        .await
+        {
+            Ok(Ok(Some((next, stored)))) => {
+                self.workspaces.store(Arc::new(next));
+                Some(stored)
             }
-        };
-
-        if updated {
-            if let Err(e) = self.save_to_disk().await {
+            Ok(Ok(None)) => None,
+            Ok(Err(e)) => {
                 tracing::error!("Failed to save workspaces to disk: {}", e);
+                None
+            }
+            Err(e) => {
+                tracing::error!("Workspace update task panicked: {}", e);
+                None
             }
         }
-
-        updated
     }
 
     /// Delete a workspace (cannot delete the default host workspace).
@@ -1033,31 +1360,156 @@ impl WorkspaceStore {
             return false; // Cannot delete default workspace
         }
 
-        let removed = {
-            let mut guard = self.workspaces.write().await;
-            guard.remove(&id)
-        };
+        let _writer = self.workspaces.lock_writer().await;
+        let storage_path = self.storage_path.clone();
+        let in_memory = (*self.workspaces.load_full()).clone();
 
-        if let Some(workspace) = removed {
-            let registry = mission_workspace_roots_path(&workspace);
-            if registry.exists() {
-                if let Err(error) = tokio::fs::remove_file(&registry).await {
-                    tracing::warn!(
-                        workspace = %id,
-                        path = %registry.display(),
-                        %error,
-                        "failed to remove mission-root registry after workspace delete"
-                    );
+        match tokio::task::spawn_blocking(
+            move || -> std::io::Result<Option<(HashMap<Uuid, Workspace>, Workspace)>> {
+                let _storage_lock = open_storage_lock(&storage_path)?;
+                let mut next = load_base_workspaces(&storage_path, &in_memory)?;
+                let Some(removed) = next.remove(&id) else {
+                    return Ok(None);
+                };
+                write_workspace_snapshot(&storage_path, &next)?;
+                try_cleanup_build_lock_file(&removed.path);
+                let registry = mission_workspace_roots_path(&removed);
+                if registry.exists() {
+                    if let Err(error) = std::fs::remove_file(&registry) {
+                        tracing::warn!(
+                            workspace = %id,
+                            path = %registry.display(),
+                            %error,
+                            "failed to remove mission-root registry after workspace delete"
+                        );
+                    }
                 }
+                Ok(Some((next, removed)))
+            },
+        )
+        .await
+        {
+            Ok(Ok(Some((next, _)))) => {
+                self.workspaces.store(Arc::new(next));
+                true
             }
-            if let Err(e) = self.save_to_disk().await {
+            Ok(Ok(None)) => false,
+            Ok(Err(e)) => {
                 tracing::error!("Failed to save workspaces to disk: {}", e);
+                false
             }
-            true
-        } else {
-            false
+            Err(e) => {
+                tracing::error!("Workspace delete task panicked: {}", e);
+                false
+            }
         }
     }
+}
+
+/// Scan for container directories that exist on disk but aren't in the store.
+fn scan_orphaned_containers_sync(
+    working_dir: &Path,
+    known: &HashMap<Uuid, Workspace>,
+) -> Vec<Workspace> {
+    let containers_dir = working_dir.join(".sandboxed-sh/containers");
+
+    if !containers_dir.exists() {
+        return Vec::new();
+    }
+
+    // Get all known container paths
+    let known_paths: std::collections::HashSet<PathBuf> = known
+        .values()
+        .filter(|w| w.workspace_type == WorkspaceType::Container)
+        .map(|w| w.path.clone())
+        .collect();
+
+    let mut orphaned = Vec::new();
+
+    for root in [containers_dir] {
+        if !root.exists() {
+            continue;
+        }
+
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to read containers directory {}: {}",
+                    root.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            // Skip non-directories
+            if !path.is_dir() {
+                continue;
+            }
+
+            // Check if this path is known
+            if known_paths.contains(&path) {
+                continue;
+            }
+
+            // Get the directory name as workspace name
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+
+            // Defensively ignore hidden entries and build/lock metadata artifacts
+            if name.starts_with('.') || name.ends_with(".build") || name.ends_with(".lock") {
+                continue;
+            }
+
+            // Check if it looks like a valid container (has basic structure)
+            let is_valid_container = path.join("etc").exists() || path.join("bin").exists();
+
+            // Determine status based on filesystem state
+            let status = if is_valid_container {
+                WorkspaceStatus::Ready
+            } else {
+                // Incomplete container - might have been interrupted
+                WorkspaceStatus::Pending
+            };
+
+            let workspace = Workspace {
+                id: Uuid::new_v4(),
+                name,
+                workspace_type: WorkspaceType::Container,
+                path,
+                status,
+                error_message: None,
+                config: serde_json::json!({}),
+                template: None,
+                distro: None,
+                env_vars: HashMap::new(),
+                init_scripts: Vec::new(),
+                init_script: None,
+                created_at: Utc::now(), // We don't know the actual creation time
+                skills: Vec::new(),
+                plugins: Vec::new(),
+                shared_network: None, // Default to shared network
+                tailscale_mode: None,
+                mcps: Vec::new(),
+                mcps_replace_defaults: true,
+                config_profile: None,
+                resolved_git_credentials: None,
+                read_only_command_guard_dir: None,
+                mission_project_skills: Vec::new(),
+                harness_versions: None,
+            };
+
+            orphaned.push(workspace);
+        }
+    }
+
+    orphaned
 }
 
 /// Shared workspace store type.
@@ -5403,10 +5855,14 @@ pub async fn destroy_container_workspace(workspace: &Workspace) -> anyhow::Resul
     if !use_nspawn_for_workspace(workspace) {
         // Fallback workspaces are plain directories on the host.
         let _ = tokio::fs::remove_dir_all(&workspace.path).await;
+        let path = workspace.path.clone();
+        let _ = tokio::task::spawn_blocking(move || try_cleanup_build_lock_file(&path)).await;
         return Ok(());
     }
 
     nspawn::destroy_container(&workspace.path).await?;
+    let path = workspace.path.clone();
+    let _ = tokio::task::spawn_blocking(move || try_cleanup_build_lock_file(&path)).await;
 
     Ok(())
 }

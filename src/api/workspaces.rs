@@ -101,6 +101,8 @@ pub struct CreateWorkspaceRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateWorkspaceRequest {
+    pub workspace_type: Option<WorkspaceType>,
+    pub path: Option<PathBuf>,
     /// Human-readable name (optional update)
     pub name: Option<String>,
     /// Skill names from library to sync to this workspace
@@ -506,106 +508,137 @@ async fn update_workspace(
     AxumPath(id): AxumPath<Uuid>,
     Json(req): Json<UpdateWorkspaceRequest>,
 ) -> Result<Json<WorkspaceResponse>, (StatusCode, String)> {
-    let mut workspace = require_workspace(&state.workspaces, id).await?;
-
-    // Validate name if provided
-    if let Some(ref name) = req.name {
-        validate_workspace_name(name)?;
-        workspace.name = name.clone();
-    }
-
-    // Update skills if provided
-    let skills_changed = if let Some(skills) = req.skills {
-        workspace.skills = sanitize_skill_list(skills);
-        true
-    } else {
-        false
-    };
-
-    // Update plugins if provided
-    if let Some(plugins) = req.plugins {
-        workspace.plugins = plugins;
-    }
-
-    if let Some(template) = req.template {
-        let trimmed = template.trim();
-        if trimmed.is_empty() {
-            workspace.template = None;
-        } else {
-            workspace.template = Some(trimmed.to_string());
-        }
-    }
-
-    if let Some(distro) = req.distro {
-        let trimmed = distro.trim();
-        if trimmed.is_empty() {
-            workspace.distro = None;
-        } else {
-            workspace.distro = Some(normalize_distro_value(trimmed)?);
-        }
-    }
-
-    if let Some(env_vars) = req.env_vars {
-        workspace.env_vars = sanitize_env_vars(env_vars);
-    }
-
-    if let Some(init_script) = req.init_script {
-        workspace.init_script = normalize_init_script(Some(init_script));
-    }
-
-    // Update init_scripts (fragment names) if provided
-    if let Some(init_scripts) = req.init_scripts {
-        workspace.init_scripts = init_scripts;
-    }
-
-    // Update shared_network if explicitly set in the request.
-    // The request uses Option<Option<bool>> pattern - outer Option for "field present",
-    // inner Option for the actual value including null for "reset to default".
-    // However, serde flattens this, so we check if the field was explicitly provided.
-    // For now, we only update if Some() is passed; to reset, pass null explicitly via the UI.
-    if req.shared_network.is_some() {
-        workspace.shared_network = req.shared_network;
-    }
-
-    // Update tailscale_mode if explicitly set in the request
-    if req.tailscale_mode.is_some() {
-        workspace.tailscale_mode = req.tailscale_mode;
-    }
-
-    // Update MCPs if provided
-    if let Some(mcps) = req.mcps {
-        workspace.mcps = mcps;
-    }
-    if let Some(exclude) = req.mcps_replace_defaults {
-        workspace.mcps_replace_defaults = exclude;
-    }
-
-    if let Some(config_profile) = req.config_profile {
-        let trimmed = config_profile.trim();
-        if trimmed.is_empty() {
-            workspace.config_profile = None;
-        } else {
-            workspace.config_profile = Some(trimmed.to_string());
-        }
-    }
-
-    // Merge freeform config (shallow merge of top-level keys). The control
-    // registry path is server-owned and must not move with a client edit.
-    if let Some(config) = req.config {
-        if let Some(new_obj) = config.as_object() {
-            let mut existing = workspace.config.as_object().cloned().unwrap_or_default();
-            for (k, v) in new_obj {
-                if k == "mission_workspace_registry_control_root" {
-                    continue;
+    let skills_changed = req.skills.is_some();
+    let working_dir = state.config.working_dir.clone();
+    let workspace = state
+        .workspaces
+        .update_with(id, move |workspace| {
+            let apply = |existing: Workspace| -> Result<Workspace, (StatusCode, String)> {
+                let mut workspace = existing.clone();
+                if let Some(workspace_type) = req.workspace_type {
+                    if existing.status != WorkspaceStatus::Building
+                        && workspace_type != existing.workspace_type
+                    {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            "Workspace type cannot be changed after creation".to_string(),
+                        ));
+                    }
+                    workspace.workspace_type = workspace_type;
                 }
-                existing.insert(k.clone(), v.clone());
-            }
-            workspace.config = serde_json::Value::Object(existing);
-        }
-    }
+                if let Some(path) = req.path {
+                    let resolved = resolve_custom_path(&working_dir, &path)?;
+                    if existing.status != WorkspaceStatus::Building && resolved != existing.path {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            "Workspace path cannot be changed after creation".to_string(),
+                        ));
+                    }
+                    workspace.path = resolved;
+                }
+                // Validate name if provided
+                if let Some(ref name) = req.name {
+                    validate_workspace_name(name)?;
+                    workspace.name = name.clone();
+                }
 
-    // Save the updated workspace
-    state.workspaces.update(workspace.clone()).await;
+                // Update skills if provided
+                if let Some(skills) = req.skills {
+                    workspace.skills = sanitize_skill_list(skills);
+                }
+
+                // Update plugins if provided
+                if let Some(plugins) = req.plugins {
+                    workspace.plugins = plugins;
+                }
+
+                if let Some(template) = req.template {
+                    let trimmed = template.trim();
+                    if trimmed.is_empty() {
+                        workspace.template = None;
+                    } else {
+                        workspace.template = Some(trimmed.to_string());
+                    }
+                }
+
+                if let Some(distro) = req.distro {
+                    let trimmed = distro.trim();
+                    if trimmed.is_empty() {
+                        workspace.distro = None;
+                    } else {
+                        workspace.distro = Some(normalize_distro_value(trimmed)?);
+                    }
+                }
+
+                if let Some(env_vars) = req.env_vars {
+                    workspace.env_vars = sanitize_env_vars(env_vars);
+                }
+
+                if let Some(init_script) = req.init_script {
+                    workspace.init_script = normalize_init_script(Some(init_script));
+                }
+
+                // Update init_scripts (fragment names) if provided
+                if let Some(init_scripts) = req.init_scripts {
+                    workspace.init_scripts = init_scripts;
+                }
+
+                // Update shared_network if explicitly set in the request.
+                // The request uses Option<Option<bool>> pattern - outer Option for "field present",
+                // inner Option for the actual value including null for "reset to default".
+                // However, serde flattens this, so we check if the field was explicitly provided.
+                // For now, we only update if Some() is passed; to reset, pass null explicitly via the UI.
+                if req.shared_network.is_some() {
+                    workspace.shared_network = req.shared_network;
+                }
+
+                // Update tailscale_mode if explicitly set in the request
+                if req.tailscale_mode.is_some() {
+                    workspace.tailscale_mode = req.tailscale_mode;
+                }
+
+                // Update MCPs if provided
+                if let Some(mcps) = req.mcps {
+                    workspace.mcps = mcps;
+                }
+                if let Some(exclude) = req.mcps_replace_defaults {
+                    workspace.mcps_replace_defaults = exclude;
+                }
+
+                if let Some(config_profile) = req.config_profile {
+                    let trimmed = config_profile.trim();
+                    if trimmed.is_empty() {
+                        workspace.config_profile = None;
+                    } else {
+                        workspace.config_profile = Some(trimmed.to_string());
+                    }
+                }
+
+                // Merge freeform config (shallow merge of top-level keys). The control
+                // registry path is server-owned and must not move with a client edit.
+                if let Some(config) = req.config {
+                    if let Some(new_obj) = config.as_object() {
+                        let mut existing =
+                            workspace.config.as_object().cloned().unwrap_or_default();
+                        for (k, v) in new_obj {
+                            if k == "mission_workspace_registry_control_root" {
+                                continue;
+                            }
+                            existing.insert(k.clone(), v.clone());
+                        }
+                        workspace.config = serde_json::Value::Object(existing);
+                    }
+                }
+
+                Ok(workspace)
+            };
+            let next = apply(workspace.clone())
+                .map_err(|(status, message)| workspace::BuildConflict { status, message })?;
+            *workspace = next;
+            Ok(())
+        })
+        .await
+        .map_err(|conflict| (conflict.status, conflict.message))?;
 
     // Sync skills and tools if they changed
     let library_guard = state.library.read().await;
@@ -2055,7 +2088,26 @@ async fn update_workspace_resources(
     }
 
     if req.persist {
-        state.workspaces.update(workspace.clone()).await;
+        let updates_owned: Vec<(String, String)> = updates
+            .iter()
+            .filter_map(|(k, v)| {
+                v.as_ref()
+                    .map(|val| ((*k).to_string(), val.trim().to_string()))
+            })
+            .collect();
+        let _ = state
+            .workspaces
+            .update_with(id, move |ws| {
+                for (key, val) in updates_owned {
+                    if val.is_empty() {
+                        ws.env_vars.remove(&key);
+                    } else {
+                        ws.env_vars.insert(key, val);
+                    }
+                }
+                Ok(())
+            })
+            .await;
     }
 
     tracing::info!(
@@ -2536,5 +2588,355 @@ mod tests {
         let mut ready = claim.workspace.clone();
         ready.status = WorkspaceStatus::Ready;
         claim.settle(ready).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_scan_ignores_build_artifacts_and_cleans_unlocked_build_lock_on_delete() {
+        let root = TempDir::new().unwrap();
+        let containers_dir = root.path().join(".sandboxed-sh/containers");
+        std::fs::create_dir_all(containers_dir.join(".hidden")).unwrap();
+        std::fs::create_dir_all(containers_dir.join("legacy.build")).unwrap();
+        std::fs::create_dir_all(containers_dir.join("stale.lock")).unwrap();
+
+        let store = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let ws_path = containers_dir.join("clean-container");
+        let id = store
+            .add(Workspace::new_container(
+                "clean-container".into(),
+                ws_path.clone(),
+            ))
+            .await;
+
+        let claim = store
+            .try_claim_workspace_build(id, Some("ubuntu-noble".into()))
+            .await
+            .unwrap();
+        let lock_path = workspace::workspace_build_lock_path(&ws_path);
+        assert!(lock_path.is_file());
+        assert!(!containers_dir.join("clean-container.build").exists());
+
+        let mut ready = claim.workspace.clone();
+        ready.status = WorkspaceStatus::Ready;
+        claim.settle(ready).await.unwrap();
+
+        let restarted = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let names: Vec<String> = restarted.list().await.into_iter().map(|w| w.name).collect();
+        assert_eq!(
+            names,
+            vec!["clean-container".to_string(), "host".to_string()]
+        );
+
+        assert!(restarted.delete(id).await);
+        assert!(!lock_path.exists());
+    }
+
+    #[tokio::test]
+    async fn restart_recovery_preserves_live_build_lock_and_fails_interrupted_build() {
+        let root = TempDir::new().unwrap();
+        let store = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let live_id = store
+            .add(Workspace::new_container(
+                "live-build".into(),
+                root.path().join(".sandboxed-sh/containers/live-build"),
+            ))
+            .await;
+        let dead_id = store
+            .add(Workspace::new_container(
+                "dead-build".into(),
+                root.path().join(".sandboxed-sh/containers/dead-build"),
+            ))
+            .await;
+
+        let live_claim = store
+            .try_claim_workspace_build(live_id, None)
+            .await
+            .unwrap();
+
+        let dead_claim = store
+            .try_claim_workspace_build(dead_id, None)
+            .await
+            .unwrap();
+        let dead_lock = workspace::workspace_build_lock_path(&dead_claim.workspace.path);
+        assert!(dead_lock.exists());
+
+        let storage_path = root.path().join(".sandboxed-sh/workspaces.json");
+        let mut persisted: Vec<Workspace> =
+            serde_json::from_slice(&std::fs::read(&storage_path).unwrap()).unwrap();
+        let mut ready = dead_claim.workspace.clone();
+        ready.status = WorkspaceStatus::Ready;
+        dead_claim.settle(ready).await.unwrap();
+
+        for ws in &mut persisted {
+            if ws.id == dead_id {
+                ws.status = WorkspaceStatus::Building;
+                ws.error_message = None;
+            }
+        }
+        std::fs::write(
+            &storage_path,
+            serde_json::to_vec_pretty(&persisted).unwrap(),
+        )
+        .unwrap();
+
+        let recovered = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        assert_eq!(
+            recovered.get(live_id).await.unwrap().status,
+            WorkspaceStatus::Building
+        );
+        let dead = recovered.get(dead_id).await.unwrap();
+        assert_eq!(dead.status, WorkspaceStatus::Error);
+        assert_eq!(
+            dead.error_message.as_deref(),
+            Some("Workspace build interrupted by restart")
+        );
+
+        let mut live_ready = live_claim.workspace.clone();
+        live_ready.status = WorkspaceStatus::Ready;
+        live_claim.settle(live_ready).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn put_during_build_rejects_build_defining_edits_and_settle_preserves_concurrent_fields()
+    {
+        let root = TempDir::new().unwrap();
+        let state = test_state(root.path()).await;
+        let ws_path = root.path().join(".sandboxed-sh/containers/concurrent-put");
+        let mut container = Workspace::new_container("concurrent-put".into(), ws_path);
+        container.distro = Some("ubuntu-noble".into());
+        let id = state.workspaces.add(container).await;
+
+        let claim = state
+            .workspaces
+            .try_claim_workspace_build(id, None)
+            .await
+            .unwrap();
+
+        let distro_conflict = update_workspace(
+            State(Arc::clone(&state)),
+            AxumPath(id),
+            Json(UpdateWorkspaceRequest {
+                workspace_type: None,
+                path: None,
+                name: None,
+                skills: None,
+                plugins: None,
+                template: None,
+                distro: Some("debian-bookworm".into()),
+                env_vars: None,
+                init_script: None,
+                init_scripts: None,
+                shared_network: None,
+                tailscale_mode: None,
+                mcps: None,
+                mcps_replace_defaults: None,
+                config_profile: None,
+                config: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(distro_conflict.0, StatusCode::CONFLICT);
+
+        let type_conflict = update_workspace(
+            State(Arc::clone(&state)),
+            AxumPath(id),
+            Json(UpdateWorkspaceRequest {
+                workspace_type: Some(WorkspaceType::Host),
+                path: None,
+                name: None,
+                skills: None,
+                plugins: None,
+                template: None,
+                distro: None,
+                env_vars: None,
+                init_script: None,
+                init_scripts: None,
+                shared_network: None,
+                tailscale_mode: None,
+                mcps: None,
+                mcps_replace_defaults: None,
+                config_profile: None,
+                config: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(type_conflict.0, StatusCode::CONFLICT);
+
+        let path_conflict = update_workspace(
+            State(Arc::clone(&state)),
+            AxumPath(id),
+            Json(UpdateWorkspaceRequest {
+                workspace_type: None,
+                path: Some(root.path().join(".sandboxed-sh/containers/other-path")),
+                name: None,
+                skills: None,
+                plugins: None,
+                template: None,
+                distro: None,
+                env_vars: None,
+                init_script: None,
+                init_scripts: None,
+                shared_network: None,
+                tailscale_mode: None,
+                mcps: None,
+                mcps_replace_defaults: None,
+                config_profile: None,
+                config: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(path_conflict.0, StatusCode::CONFLICT);
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("FOO".into(), "bar".into());
+        let updated = update_workspace(
+            State(Arc::clone(&state)),
+            AxumPath(id),
+            Json(UpdateWorkspaceRequest {
+                workspace_type: None,
+                path: None,
+                name: Some("renamed-during-build".into()),
+                skills: Some(vec!["ops".into()]),
+                plugins: Some(vec!["plugin-a".into()]),
+                template: None,
+                distro: None,
+                env_vars: Some(env_vars.clone()),
+                init_script: Some("echo updated".into()),
+                init_scripts: Some(vec!["frag-a".into()]),
+                shared_network: Some(false),
+                tailscale_mode: Some(TailscaleMode::ExitNode),
+                mcps: Some(vec!["mcp-a".into()]),
+                mcps_replace_defaults: Some(false),
+                config_profile: Some("custom-profile".into()),
+                config: Some(serde_json::json!({ "custom_key": 42, "build_generation": 999 })),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(updated.status, WorkspaceStatus::Building);
+        assert_eq!(updated.distro.as_deref(), Some("ubuntu-noble"));
+        assert_eq!(updated.name, "renamed-during-build");
+        assert_eq!(updated.config["build_generation"].as_u64(), Some(1));
+        assert_eq!(updated.config["custom_key"].as_i64(), Some(42));
+
+        let mut built = claim.workspace.clone();
+        built.status = WorkspaceStatus::Ready;
+        built.distro = Some("ubuntu-noble".into());
+        claim.settle(built).await.unwrap();
+
+        let settled = state.workspaces.get(id).await.unwrap();
+        assert_eq!(settled.status, WorkspaceStatus::Ready);
+        assert_eq!(settled.name, "renamed-during-build");
+        assert_eq!(settled.skills, vec!["ops".to_string()]);
+        assert_eq!(settled.plugins, vec!["plugin-a".to_string()]);
+        assert_eq!(settled.env_vars, env_vars);
+        assert_eq!(settled.init_script.as_deref(), Some("echo updated"));
+        assert_eq!(settled.init_scripts, vec!["frag-a".to_string()]);
+        assert_eq!(settled.shared_network, Some(false));
+        assert_eq!(settled.tailscale_mode, Some(TailscaleMode::ExitNode));
+        assert_eq!(settled.mcps, vec!["mcp-a".to_string()]);
+        assert!(!settled.mcps_replace_defaults);
+        assert_eq!(settled.config_profile.as_deref(), Some("custom-profile"));
+        assert_eq!(settled.config["custom_key"].as_i64(), Some(42));
+        assert_eq!(settled.distro.as_deref(), Some("ubuntu-noble"));
+    }
+
+    #[tokio::test]
+    async fn cross_store_json_locking_and_settle_failure_do_not_corrupt_or_double_drop() {
+        let root = TempDir::new().unwrap();
+        let store_a = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let store_b = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+
+        let ws_a = Workspace::new_container(
+            "store-a".into(),
+            root.path().join(".sandboxed-sh/containers/store-a"),
+        );
+        let ws_b = Workspace::new_container(
+            "store-b".into(),
+            root.path().join(".sandboxed-sh/containers/store-b"),
+        );
+        let (id_a, id_b) = tokio::join!(store_a.add(ws_a), store_b.add(ws_b));
+
+        let reloaded = workspace::WorkspaceStore::new(root.path().to_path_buf()).await;
+        assert!(reloaded.get(id_a).await.is_some());
+        assert!(reloaded.get(id_b).await.is_some());
+
+        let claim = store_a
+            .try_claim_workspace_build(id_a, Some("ubuntu-noble".into()))
+            .await
+            .unwrap();
+        let storage_path = root.path().join(".sandboxed-sh/workspaces.json");
+        let saved_bytes = std::fs::read(&storage_path).unwrap();
+        std::fs::remove_file(&storage_path).unwrap();
+        std::fs::create_dir_all(&storage_path).unwrap();
+
+        let mut ready = claim.workspace.clone();
+        ready.status = WorkspaceStatus::Ready;
+        let settle_err = claim.settle(ready).await;
+        assert!(settle_err.is_err());
+
+        std::fs::remove_dir_all(&storage_path).unwrap();
+        std::fs::write(&storage_path, &saved_bytes).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let after_failed_settle = store_a.get(id_a).await.unwrap();
+        assert_eq!(after_failed_settle.status, WorkspaceStatus::Building);
+        assert_ne!(
+            after_failed_settle.error_message.as_deref(),
+            Some("Workspace build aborted before completion")
+        );
+    }
+
+    #[tokio::test]
+    async fn flock_contention_returns_immediate_conflict_without_waiting_on_storage_lock() {
+        use fs2::FileExt;
+
+        let root = TempDir::new().unwrap();
+        let store = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let ws_path = root.path().join(".sandboxed-sh/containers/contended");
+        let id = store
+            .add(Workspace::new_container(
+                "contended".into(),
+                ws_path.clone(),
+            ))
+            .await;
+
+        let build_lock_path = workspace::workspace_build_lock_path(&ws_path);
+        std::fs::create_dir_all(build_lock_path.parent().unwrap()).unwrap();
+        let held_build_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&build_lock_path)
+            .unwrap();
+        held_build_lock.try_lock_exclusive().unwrap();
+
+        let storage_lock_path = root.path().join(".sandboxed-sh/workspaces.json.lock");
+        let held_storage_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&storage_lock_path)
+            .unwrap();
+        held_storage_lock.try_lock_exclusive().unwrap();
+
+        let Err(err) = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            store.try_claim_workspace_build(id, None),
+        )
+        .await
+        .expect("try-flock contention must fail fast without waiting on storage lock") else {
+            panic!("expected conflict when build lock is held");
+        };
+        assert_eq!(err.status, StatusCode::CONFLICT);
+
+        drop(held_storage_lock);
+        drop(held_build_lock);
     }
 }
