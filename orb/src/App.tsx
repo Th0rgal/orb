@@ -80,7 +80,6 @@ const RoutingSettings = lazy(() =>
 const Machines = lazy(() => import("./Machines").then(module => ({ default: module.Machines })));
 import {
   MACHINES,
-  formatAutoManagedTarget,
   isAgentSpawnedManagedNode,
   isAutoManagedTarget,
   isManagedNode,
@@ -88,25 +87,10 @@ import {
   nodeSize,
   parseAutoManagedTarget,
 } from "./machines/nodes";
-import {
-  findManagedSize,
-  is24hCommitmentSize,
-  managedCatalog,
-  providerLabel,
-  refreshManagedCatalog,
-  sizeLabel,
-  usableManagedProviders,
-  usd,
-  type ManagedProviderInfo,
-  type ManagedSize,
-} from "./managedMachineModel";
-import {
-  AgentSpawnedVmsToggle,
-  CloudVmProviderRows,
-  dismissSubmenuOnSiblingHover,
-  type ActiveProviderSubmenu,
-} from "./MachineCloudMenu";
-import { ConfirmDialog } from "./Dialog";
+import type { ActiveProviderSubmenu, Pending24hLeasePrompt } from "./MachineCloudMenu";
+const NewAgentCloudVmSection = lazy(() => import("./MachineCloudMenu").then(module => ({ default: module.NewAgentCloudVmSection })));
+const AgentSpawnedVmsToggle = lazy(() => import("./MachineCloudMenu").then(module => ({ default: module.AgentSpawnedVmsToggle })));
+const Lazy24hConfirmDialog = lazy(() => import("./MachineCloudMenu").then(module => ({ default: module.Lazy24hConfirmDialog })));
 const Providers=lazy(()=>import("./Providers").then(module=>({default:module.Providers})));
 const Resources = lazy(() => import("./Resources"));
 import { PopupMenu, type MenuEntry } from "./Menu";
@@ -274,8 +258,16 @@ export default function App() {
   );
   const [providerSubmenu, setProviderSubmenu] = createSignal<ActiveProviderSubmenu | undefined>();
   const [agentVmsOpen, setAgentVmsOpen] = createSignal(false);
-  const [pending24hPick, setPending24hPick] = createSignal<{ provider: ManagedProviderInfo; size: ManagedSize } | null>(null);
+  const [pending24hPick, setPending24hPick] = createSignal<Pending24hLeasePrompt | null>(null);
   const [confirmed24hTarget, setConfirmed24hTarget] = createSignal<string | null>(null);
+  const [managedAntigravityAllowed, setManagedAntigravityAllowed] = createSignal(true);
+  const warmManagedCatalog = (force = false) => {
+    void import("./MachineCloudMenu");
+    void import("./managedMachineModel").then(async m => {
+      await m.refreshManagedCatalog(force);
+      setManagedAntigravityAllowed(m.managedCatalog().settings?.antigravity_on_managed !== false);
+    });
+  };
   const chooseMachine = (id: string) => {
     setExplicitMachine(true);
     setNewMachine(id);
@@ -360,8 +352,7 @@ export default function App() {
     if (!isConnected() || machine === "core" || machine === "local") return { state: "unknown", note: "" };
     if (isAutoManagedTarget(machine)) {
       if (backend === "grok" || backend === "vibe") return { state: "unsupported", note: "not on Cloud VMs" };
-      const cat = managedCatalog();
-      if (backend === "antigravity" && cat.loaded && cat.settings?.antigravity_on_managed === false) {
+      if (backend === "antigravity" && !managedAntigravityAllowed()) {
         return { state: "unsupported", note: "disabled on Cloud VMs" };
       }
     }
@@ -646,7 +637,7 @@ export default function App() {
     if (connected) {
       void refreshMissions();
       void refreshFleet();
-      void refreshManagedCatalog();
+      warmManagedCatalog();
       void refreshHarnessChoices();
       listProjects()
         .then(setLiveProjects)
@@ -862,8 +853,10 @@ export default function App() {
         const sentPrompt = imagePrompt(prompt, await stageRemoteImages(images, undefined, machine), images);
         const folder = newFolderPath(projectSlug);
         const autoTarget = parseAutoManagedTarget(machine);
-        const chosenSize = autoTarget ? findManagedSize(autoTarget.provider, autoTarget.size) : undefined;
-        const allow24h = autoTarget && (is24hCommitmentSize(chosenSize) || confirmed24hTarget() === machine);
+        const allow24h = autoTarget
+          ? confirmed24hTarget() === machine ||
+            await import("./managedMachineModel").then(m => m.is24hCommitmentSize(m.findManagedSize(autoTarget.provider, autoTarget.size)))
+          : false;
         const body = {...(pick.backend === "codex" ? {cyber_access:selectedCyber,service_tier:pick.service_tier??"standard"} : {}),...(pick.backend === "vibe" && planObjective(prompt) !== null ? {agent:"plan"} : {}),title,prompt:sentPrompt,working_directory:autoTarget ? undefined : (workingDirectory().trim() || undefined),project:projectSlug,...(folder ? {folder} : {}),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(allow24h ? {managed_allow_24h_commitment:true} : {}),...(attachments.length ? {attachments} : {})};
         const signature = JSON.stringify(body);
         if (launchAttempt?.signature !== signature) launchAttempt = {signature,key:crypto.randomUUID()};
@@ -871,7 +864,7 @@ export default function App() {
         launchAttempt = undefined;
         setDraftCyber("standard");
         setAttachChips([]);
-        if (autoTarget) void refreshManagedCatalog(true);
+        if (autoTarget) warmManagedCatalog(true);
         const resolvedNode = m.remote_node_id ?? machine;
         rememberLaunch(m.id, {...receipt,nodeId:resolvedNode,destination:nodeLabel(resolvedNode === machine ? machine : resolvedNode),prompt:sentPrompt});
         if (machine === "dgx-spark-admin") chooseMachine("core");
@@ -1426,7 +1419,7 @@ export default function App() {
                         onMachine={() => {
                           setProviderSubmenu(undefined);
                           setAgentVmsOpen(sortedNodes().filter(isAgentSpawnedManagedNode).some(n => n.id === newMachine()));
-                          void refreshManagedCatalog();
+                          warmManagedCatalog();
                           setEnvOpen("machine");
                         }} />
                     </Show>
@@ -1442,7 +1435,7 @@ export default function App() {
                         } else {
                           setProviderSubmenu(undefined);
                           setAgentVmsOpen(sortedNodes().filter(isAgentSpawnedManagedNode).some(n => n.id === newMachine()));
-                          void refreshManagedCatalog();
+                          warmManagedCatalog();
                           setEnvOpen("machine");
                         }
                       }}
@@ -1474,7 +1467,13 @@ export default function App() {
                       >
                         <div
                           class="na-menu-list"
-                          onMouseOver={(e) => dismissSubmenuOnSiblingHover(e, providerSubmenu(), () => setProviderSubmenu(undefined))}
+                          onMouseOver={(e) => {
+                            if (!providerSubmenu()) return;
+                            const t = e.target instanceof Element ? e.target : null;
+                            if (t && !t.closest(".machine-submenu") && !t.closest(".machine-provider-trigger") && t.closest(".menu-item")) {
+                              setProviderSubmenu(undefined);
+                            }
+                          }}
                         >
                         <Show
                           when={isConnected()}
@@ -1583,22 +1582,18 @@ export default function App() {
                               )}
                             </For>
                           </Show>
-                          <CloudVmProviderRows
-                            providers={usableManagedProviders()}
-                            catalog={managedCatalog()}
+                          <NewAgentCloudVmSection
                             selectedTarget={newMachine()}
-                            subtitle="starts on send"
                             activeSubmenu={providerSubmenu()}
+                            confirmed24hTarget={confirmed24hTarget()}
                             onSubmenuChange={setProviderSubmenu}
-                            onSelectSize={(prov, size) => {
-                              const target = formatAutoManagedTarget(prov.provider, size.size);
-                              setProviderSubmenu(undefined);
+                            onPickTarget={(target) => {
                               setEnvOpen(null);
-                              if (is24hCommitmentSize(size) && confirmed24hTarget() !== target) {
-                                setPending24hPick({ provider: prov, size });
-                              } else {
-                                chooseMachine(target);
-                              }
+                              chooseMachine(target);
+                            }}
+                            onRequire24hConfirm={(prompt) => {
+                              setEnvOpen(null);
+                              setPending24hPick(prompt);
                             }}
                           />
                           <Show when={sortedNodes().some(isUserManagedNode)}>
@@ -1682,13 +1677,10 @@ export default function App() {
                     </Show>
                     <Show when={pending24hPick()}>
                       {(pick) => (
-                        <ConfirmDialog
-                          title="24-hour minimum lease"
-                          description={`${providerLabel(pick().provider.provider)} ${sizeLabel(pick().size.size)} requires a ${pick().size.min_billing_hours ?? 24}-hour minimum billing commitment (${usd(pick().size.usd_per_hour * (pick().size.min_billing_hours ?? 24))} minimum) once the VM starts on send.`}
-                          action={`Select ${sizeLabel(pick().size.size)}`}
-                          destructive={false}
+                        <Lazy24hConfirmDialog
+                          prompt={pick()}
                           onConfirm={() => {
-                            const target = formatAutoManagedTarget(pick().provider.provider, pick().size.size);
+                            const target = pick().target;
                             setConfirmed24hTarget(target);
                             chooseMachine(target);
                             setPending24hPick(null);

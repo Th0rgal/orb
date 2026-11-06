@@ -1,4 +1,5 @@
 import { For, Show } from "solid-js";
+import { ConfirmDialog } from "./Dialog";
 import { Menu } from "./Menu";
 import { ChevronRight, CloudIcon } from "./icons";
 import {
@@ -9,9 +10,12 @@ import {
   compactSizeSpec,
   is24hCommitmentSize,
   machineProviderKey,
+  managedCatalog,
   providerAllowedSizes,
   providerLabel,
   sizeLabel,
+  usableManagedProviders,
+  usd,
   usdPerHour,
   type ManagedCatalogState,
   type ManagedProviderInfo,
@@ -21,6 +25,63 @@ import {
 export interface ActiveProviderSubmenu {
   provider: string;
   anchor: HTMLButtonElement;
+}
+
+export interface Pending24hLeasePrompt {
+  target: string;
+  description: string;
+  action: string;
+}
+
+export function NewAgentCloudVmSection(p: {
+  selectedTarget: string;
+  activeSubmenu: ActiveProviderSubmenu | undefined;
+  confirmed24hTarget: string | null;
+  onSubmenuChange: (next: ActiveProviderSubmenu | undefined) => void;
+  onPickTarget: (target: string) => void;
+  onRequire24hConfirm: (prompt: Pending24hLeasePrompt) => void;
+}) {
+  return (
+    <CloudVmProviderRows
+      providers={usableManagedProviders()}
+      catalog={managedCatalog()}
+      selectedTarget={p.selectedTarget}
+      subtitle="starts on send"
+      activeSubmenu={p.activeSubmenu}
+      onSubmenuChange={p.onSubmenuChange}
+      onSelectSize={(prov, size) => {
+        const target = formatAutoManagedTarget(prov.provider, size.size);
+        p.onSubmenuChange(undefined);
+        if (is24hCommitmentSize(size) && p.confirmed24hTarget !== target) {
+          const hours = size.min_billing_hours ?? 24;
+          p.onRequire24hConfirm({
+            target,
+            description: `${providerLabel(prov.provider)} ${sizeLabel(size.size)} requires a ${hours}-hour minimum billing commitment (${usd(size.usd_per_hour * hours)} minimum) once the VM starts on send.`,
+            action: `Select ${sizeLabel(size.size)}`,
+          });
+        } else {
+          p.onPickTarget(target);
+        }
+      }}
+    />
+  );
+}
+
+export function Lazy24hConfirmDialog(p: {
+  prompt: Pending24hLeasePrompt;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <ConfirmDialog
+      title="24-hour minimum lease"
+      description={p.prompt.description}
+      action={p.prompt.action}
+      destructive={false}
+      onConfirm={p.onConfirm}
+      onClose={p.onClose}
+    />
+  );
 }
 
 export function CloudVmProviderRows(p: {
