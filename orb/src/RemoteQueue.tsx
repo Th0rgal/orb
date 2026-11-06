@@ -224,9 +224,9 @@ export function RemoteQueue(p: {
     setWorking(true); setError("");
     try {
       await api(`/api/control/queue/${encodeURIComponent(id)}`, { method: "DELETE" });
-      for (const r of after) {
-        await api(`/api/control/queue/${encodeURIComponent(r.id)}`, { method: "DELETE" }).catch(swallow("remoteQueue.delete", { message: r.id }));
-      }
+      await Promise.all(
+        after.map(r => api(`/api/control/queue/${encodeURIComponent(r.id)}`, { method: "DELETE" }).catch(swallow("remoteQueue.delete", { message: r.id }))),
+      );
       revision++;
       for (const r of tail) deletedIds.add(r.id);
       setRows(previous => previous.filter(row => !tail.some(t => t.id === row.id)));

@@ -227,17 +227,17 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     try {
       const side: Promise<unknown>[] = [refreshLocalAgents(force).catch(() => []), refreshSoftware(force).catch(swallow("skills.refreshSoftware"))];
       if (isConnected()) {
+        void getLibraryStatus().then((st) => { setRepo(st); if (st.remote) setConfiguredRemote(st.remote); }).catch(() => setRepo(null));
+        void getGlobalSettings().then((s) => { if (s.library_remote != null) setConfiguredRemote(s.library_remote); }).catch(() => {});
+        side.push(getRemoteNodes().then((res) => setRemoteNodes(res.nodes ?? [])).catch(swallow("skills.remoteNodes")));
+        side.push(loadProjectSkills());
         const { bodies } = await loadLibrary().catch((e) => {
           setLibraryLoaded(false);
           setLibraryError(errorText(e));
           return { bodies: Promise.resolve() };
         });
-        void getLibraryStatus().then((st) => { setRepo(st); if (st.remote) setConfiguredRemote(st.remote); }).catch(() => setRepo(null));
-        void getGlobalSettings().then((s) => { if (s.library_remote != null) setConfiguredRemote(s.library_remote); }).catch(() => {});
         // Drift needs the bodies; it fills the badges in when ready.
         side.push(bodies.then(() => refreshReport()).catch((e) => setSyncError(errorText(e))));
-        side.push(getRemoteNodes().then((res) => setRemoteNodes(res.nodes ?? [])).catch(swallow("skills.remoteNodes")));
-        side.push(loadProjectSkills());
       } else {
         setLibrarySkills([]);
         setLibraryFull({});
@@ -558,9 +558,13 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   };
 
   const refetchSkill = async (name: string) => {
-    const skill = await fetchLibrarySkill(name);
+    const needList = !librarySkills().some((s) => s.name === name);
+    const [skill, list] = await Promise.all([
+      fetchLibrarySkill(name),
+      needList ? listLibrarySkills() : Promise.resolve(null),
+    ]);
     setLibraryFull((prev) => ({ ...prev, [name]: skill }));
-    if (!librarySkills().some((s) => s.name === name)) setLibrarySkills(await listLibrarySkills());
+    if (list) setLibrarySkills(list);
   };
 
   /** Save to the Library and land it in the repo (commit + push), then sync harnesses. */
@@ -579,8 +583,9 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     await putLibrarySkill(name, src.content);
     for (const f of files) await putSkillFile(name, f.rel, f.content);
     await commitAndPush(`skill: import ${name}`);
-    setLibrarySkills(await listLibrarySkills());
-    await refetchSkill(name);
+    const [list, skill] = await Promise.all([listLibrarySkills(), fetchLibrarySkill(name)]);
+    setLibrarySkills(list);
+    setLibraryFull((prev) => ({ ...prev, [name]: skill }));
     await syncNow(false, `Imported "${name}" from ${src.label} and saved it to the repo.`);
   };
 
@@ -659,8 +664,9 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     try {
       await putLibrarySkill(name, newSkillTemplate(name, newDesc()));
       await commitAndPush(`skill: create ${name}`);
-      setLibrarySkills(await listLibrarySkills());
-      await refetchSkill(name);
+      const [list, skill] = await Promise.all([listLibrarySkills(), fetchLibrarySkill(name)]);
+      setLibrarySkills(list);
+      setLibraryFull((prev) => ({ ...prev, [name]: skill }));
       setCreating(false);
       setNewName("");
       setNewDesc("");

@@ -228,7 +228,10 @@ async fn collect_job_mission_projects(
     state: &AppState,
     jobs: &[Value],
 ) -> std::collections::HashMap<String, String> {
-    let mut mission_projects = std::collections::HashMap::new();
+    use futures::stream::{self, StreamExt};
+
+    let mut unique_ids = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for job in jobs {
         for ptr in ["/origin/session_id", "/origin/chat_id", "/session_id"] {
             if let Some(mission_id) = job
@@ -237,12 +240,41 @@ async fn collect_job_mission_projects(
                 .and_then(|s| s.trim().strip_prefix("orb_"))
             {
                 if let Ok(uuid) = uuid::Uuid::parse_str(mission_id) {
-                    if let Ok(Some((_, m))) = state.control.find_mission_store_owner(uuid).await {
-                        if let Some(proj) = m.project.project.filter(|p| !p.trim().is_empty()) {
-                            mission_projects.insert(mission_id.to_string(), proj);
-                            break;
-                        }
+                    if seen.insert(uuid) {
+                        unique_ids.push((mission_id.to_string(), uuid));
                     }
+                }
+            }
+        }
+    }
+    let resolved_by_id: std::collections::HashMap<String, String> = stream::iter(unique_ids)
+        .map(|(mission_id, uuid)| async move {
+            let proj = state
+                .control
+                .find_mission_store_owner(uuid)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|(_, m)| m.project.project)
+                .filter(|p| !p.trim().is_empty())?;
+            Some((mission_id, proj))
+        })
+        .buffered(8)
+        .filter_map(std::future::ready)
+        .collect()
+        .await;
+
+    let mut mission_projects = std::collections::HashMap::new();
+    for job in jobs {
+        for ptr in ["/origin/session_id", "/origin/chat_id", "/session_id"] {
+            if let Some(mission_id) = job
+                .pointer(ptr)
+                .and_then(Value::as_str)
+                .and_then(|s| s.trim().strip_prefix("orb_"))
+            {
+                if let Some(proj) = resolved_by_id.get(mission_id) {
+                    mission_projects.insert(mission_id.to_string(), proj.clone());
+                    break;
                 }
             }
         }
@@ -353,9 +385,23 @@ where
     F: FnMut(String) -> Fut,
     Fut: std::future::Future<Output = Result<Value, Response>>,
 {
+    use futures::stream::{self, StreamExt};
+
+    let tasks: Vec<(String, Fut)> = ids
+        .into_iter()
+        .map(|id| {
+            let fut = fetch(id.clone());
+            (id, fut)
+        })
+        .collect();
+    let results: Vec<(String, Result<Value, Response>)> = stream::iter(tasks)
+        .map(|(id, fut)| async move { (id, fut.await) })
+        .buffered(8)
+        .collect()
+        .await;
     let mut jobs = Vec::new();
-    for id in ids {
-        match fetch(id.clone()).await {
+    for (id, res) in results {
+        match res {
             Ok(value) => {
                 let job = value.get("job").unwrap_or(&value);
                 if job.get("id").and_then(Value::as_str) != Some(id.as_str()) {

@@ -918,12 +918,14 @@ pub async fn run_opencode_turn(
     let (sse_complete_tx, mut sse_complete_rx) = tokio::sync::watch::channel(false);
     let (sse_session_idle_tx, mut sse_session_idle_rx) = tokio::sync::watch::channel(false);
     let (sse_retry_tx, mut sse_retry_rx) = tokio::sync::watch::channel(0u32);
-    let last_activity = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let last_activity = Arc::new(std::sync::atomic::AtomicU64::new(
+        crate::concurrency::monotonic_nanos(),
+    ));
     // Track recent OpenCode heartbeats separately from "meaningful" activity.
     // Some provider chains can spend >120s between message/status updates while
     // still emitting heartbeats, so treating heartbeat-only periods as hard
-    // inactivity can kill valid runs prematurely.
-    let last_heartbeat = Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+    // inactivity can kill valid runs prematurely. `0` = None.
+    let last_heartbeat = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (text_output_tx, mut text_output_rx) = tokio::sync::watch::channel(false);
     // Track active tool call depth: incremented on ToolCall, decremented on ToolResult.
     // Used to skip inactivity timeouts during long tool runs (builds, tests, etc.).
@@ -975,14 +977,16 @@ pub async fn run_opencode_turn(
                         || clean.contains("server.connected")
                         || clean.contains("server.listening");
                     if is_heartbeat {
-                        if let Ok(mut guard) = stderr_last_heartbeat.lock() {
-                            *guard = Some(std::time::Instant::now());
-                        }
+                        stderr_last_heartbeat.store(
+                            crate::concurrency::monotonic_nanos(),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                     }
                     if !is_server_noise {
-                        if let Ok(mut guard) = stderr_last_activity.lock() {
-                            *guard = std::time::Instant::now();
-                        }
+                        stderr_last_activity.store(
+                            crate::concurrency::monotonic_nanos(),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                     }
                     tracing::debug!(mission_id = %mission_id_clone, line = %clean, "OpenCode CLI stderr");
 
@@ -1339,11 +1343,11 @@ pub async fn run_opencode_turn(
                 // Only kill if there's also no real SSE activity (tool calls, thinking).
                 // If the model is doing tool calls, the retry status may be transient.
                 if rate_limit_detected.load(std::sync::atomic::Ordering::SeqCst) {
-                    let sse_idle = last_activity
-                        .lock()
-                        .ok()
-                        .map(|g| g.elapsed() >= std::time::Duration::from_secs(15))
-                        .unwrap_or(true);
+                    let sse_idle = crate::concurrency::elapsed_since_monotonic(
+                        last_activity.load(std::sync::atomic::Ordering::Relaxed),
+                    )
+                    .map(|d| d >= std::time::Duration::from_secs(15))
+                    .unwrap_or(true);
                     if sse_idle {
                         tracing::info!(
                             mission_id = %mission_id,
@@ -1376,11 +1380,11 @@ pub async fn run_opencode_turn(
                             .map(linux_pid_has_children)
                             .unwrap_or(false);
                         let long_tool = tools_active || cli_has_children;
-                        let recent_activity = last_activity
-                            .lock()
-                            .ok()
-                            .map(|g| g.elapsed() < std::time::Duration::from_secs(opencode_text_idle_timeout_secs))
-                            .unwrap_or(false);
+                        let recent_activity = crate::concurrency::elapsed_since_monotonic(
+                            last_activity.load(std::sync::atomic::Ordering::Relaxed),
+                        )
+                        .map(|d| d < std::time::Duration::from_secs(opencode_text_idle_timeout_secs))
+                        .unwrap_or(false);
                         // Proxy-stream grace: thinking models can spend minutes
                         // inside a reasoning segment with no OpenCode events at
                         // all, while the builtin proxy sees upstream chunks
@@ -1424,17 +1428,15 @@ pub async fn run_opencode_turn(
                 let cli_has_children = cli_pid
                     .map(linux_pid_has_children)
                     .unwrap_or(false);
-                let inactivity_elapsed = last_activity
-                    .lock()
-                    .ok()
-                    .map(|g| g.elapsed())
-                    .unwrap_or_default();
-                let recent_heartbeat = last_heartbeat
-                    .lock()
-                    .ok()
-                    .and_then(|g| *g)
-                    .map(|ts| ts.elapsed() <= std::time::Duration::from_secs(45))
-                    .unwrap_or(false);
+                let inactivity_elapsed = crate::concurrency::elapsed_since_monotonic(
+                    last_activity.load(std::sync::atomic::Ordering::Relaxed),
+                )
+                .unwrap_or_default();
+                let recent_heartbeat = crate::concurrency::elapsed_since_monotonic(
+                    last_heartbeat.load(std::sync::atomic::Ordering::Relaxed),
+                )
+                .map(|d| d <= std::time::Duration::from_secs(45))
+                .unwrap_or(false);
                 if opencode_inactivity_should_kill(
                     tools_active,
                     cli_alive,
@@ -1495,9 +1497,10 @@ pub async fn run_opencode_turn(
                         if trimmed.is_empty() {
                             continue;
                         }
-                        if let Ok(mut guard) = last_activity.lock() {
-                            *guard = std::time::Instant::now();
-                        }
+                        last_activity.store(
+                            crate::concurrency::monotonic_nanos(),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
 
                         // Try to parse as JSON event
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
@@ -1722,9 +1725,10 @@ pub async fn run_opencode_turn(
                                     }
                                 }
                                 if let Some(event) = parsed.event {
-                                    if let Ok(mut guard) = last_activity.lock() {
-                                        *guard = std::time::Instant::now();
-                                    }
+                                    last_activity.store(
+                                        crate::concurrency::monotonic_nanos(),
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
                                     if let AgentEvent::Error { ref message, .. } = event {
                                         let mut guard = sse_error_message.lock().unwrap_or_else(|e| e.into_inner());
                                         if guard.is_none() {

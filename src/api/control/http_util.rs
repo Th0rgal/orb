@@ -45,32 +45,39 @@ pub(super) fn require_mission_id(
 pub(crate) async fn get_running_missions(
     control: &ControlState,
 ) -> Result<Vec<super::super::mission_runner::RunningMissionInfo>, (StatusCode, String)> {
-    let (tx, rx) = oneshot::channel();
-    control
-        .cmd_tx
-        .send(ControlCommand::ListRunning { respond: tx })
-        .await
-        .map_err(session_unavailable)?;
-    let actor_rows = rx.await.map_err(recv_failed)?;
-    let durable_runs = control
-        .mission_store
-        .list_active_mission_runs()
-        .await
-        .map_err(internal_error)?;
+    let actor_fut = async {
+        let (tx, rx) = oneshot::channel();
+        control
+            .cmd_tx
+            .send(ControlCommand::ListRunning { respond: tx })
+            .await
+            .map_err(session_unavailable)?;
+        rx.await.map_err(recv_failed)
+    };
+    let durable_fut = async {
+        control
+            .mission_store
+            .list_active_mission_runs()
+            .await
+            .map_err(internal_error)
+    };
+    let (actor_rows, durable_runs) = tokio::try_join!(actor_fut, durable_fut)?;
     let mut actor_by_mission: HashMap<Uuid, super::super::mission_runner::RunningMissionInfo> =
         actor_rows
             .into_iter()
             .map(|row| (row.mission_id, row))
             .collect();
+    let missions = futures::future::try_join_all(
+        durable_runs
+            .iter()
+            .map(|run| control.mission_store.get_mission(run.mission_id)),
+    )
+    .await
+    .map_err(internal_error)?;
     let mut projected = Vec::with_capacity(durable_runs.len() + actor_by_mission.len());
     let mut seen_missions = HashSet::new();
-    for run in durable_runs {
+    for (run, mission) in durable_runs.into_iter().zip(missions) {
         seen_missions.insert(run.mission_id);
-        let mission = control
-            .mission_store
-            .get_mission(run.mission_id)
-            .await
-            .map_err(internal_error)?;
         let heartbeat_age = chrono::DateTime::parse_from_rfc3339(&run.heartbeat_at)
             .ok()
             .map(|timestamp| {

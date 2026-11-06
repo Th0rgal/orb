@@ -120,14 +120,30 @@ async function folderWork(slug: string, path: string, first = false) {
   const checkConnection = () => { if (version !== connectionVersion()) throw new Error("Connection changed. Try again."); };
   const missions = new Map<string, string>();
   const collect = (list: Mission[]) => { for (const mission of list) { const at = missionFolderIn(slug, path, mission); if (at !== undefined) missions.set(mission.id, at); } };
+  if (!first) {
+    const [, , rawCrons] = await Promise.all([
+      import("./localOrigins").then(m => m.localOrigins()).then(local => { checkConnection(); collect(local); }),
+      (async () => {
+        for (let offset = 0; ; offset += 200) {
+          const page = await api<Mission[]>(`/api/control/missions?project=${encodeURIComponent(slug)}&limit=200&offset=${offset}&all=true`);
+          checkConnection();
+          collect(page);
+          if (page.length < 200) break;
+        }
+      })(),
+      listProjectCrons(slug),
+    ]);
+    checkConnection();
+    return { missions, crons: rawCrons.filter(job => containsFolder(path, job.folder ?? "")) };
+  }
   collect(await import("./localOrigins").then(m => m.localOrigins()));
   checkConnection();
-  if (first && missions.size) return { missions, crons: [] };
+  if (missions.size) return { missions, crons: [] };
   for (let offset = 0; ; offset += 200) {
     const page = await api<Mission[]>(`/api/control/missions?project=${encodeURIComponent(slug)}&limit=200&offset=${offset}&all=true`);
     checkConnection();
     collect(page);
-    if (first && missions.size) return { missions, crons: [] };
+    if (missions.size) return { missions, crons: [] };
     if (page.length < 200) break;
   }
   const crons = (await listProjectCrons(slug)).filter(job => containsFolder(path, job.folder ?? ""));
@@ -144,7 +160,9 @@ export async function assertFolderHasNoWork(slug: string, path: string, action =
 export async function moveFolderWork(slug: string, path: string, destination: string): Promise<void> {
   const work = await folderWork(slug, path), failed: string[] = [];
   const target = (folder: string) => destination + folder.slice(path.length);
-  for (const [id, folder] of work.missions) await moveMission(id, slug, target(folder)).catch(() => failed.push(id.slice(0, 8)));
-  for (const job of work.crons) await updateProjectCron(slug, job.id, { folder: target(job.folder ?? "") }).catch(() => failed.push(job.name));
+  await Promise.all([
+    ...[...work.missions].map(([id, folder]) => moveMission(id, slug, target(folder)).catch(() => { failed.push(id.slice(0, 8)); })),
+    ...work.crons.map(job => updateProjectCron(slug, job.id, { folder: target(job.folder ?? "") }).catch(() => { failed.push(job.name); })),
+  ]);
   if (failed.length) throw new Error(`The folder moved, but ${failed.join(", ")} could not follow. They remain visible under the previous path; move them to ${destination}.`);
 }

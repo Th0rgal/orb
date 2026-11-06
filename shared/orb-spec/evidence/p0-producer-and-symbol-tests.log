@@ -1,3 +1,24 @@
+   Compiling sandboxed_sh v1.3.0 (/var/lib/sandboxed-node/work/9c44a457-5ffd-4ea6-bde4-12b97183bd0f/orb)
+warning: function `populate_activity` is never used
+    --> src/api/control/mission_list.rs:1177:21
+     |
+1177 | pub(super) async fn populate_activity(control: &ControlState, missions...
+     |                     ^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `merge_text_stream_fragment` is never used
+  --> src/api/control/streaming.rs:87:15
+   |
+87 | pub(super) fn merge_text_stream_fragment(buffer: &mut String, fragment: ...
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_text_ops` is never used
+   --> src/api/mission_store/sqlite/events.rs:125:15
+    |
+125 | pub(super) fn apply_text_ops(buffer: &mut String, ops: &[TextOp]) {
+    |               ^^^^^^^^^^^^^^
+
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
    |
@@ -8,7 +29,6 @@ warning: field `billable_tokens` is never read
    |         ^^^^^^^^^^^^^^^
    |
    = note: `UsageRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: field `node_id` is never read
   --> src/api/mission_store/sqlite_resources.rs:56:9
@@ -130,14 +150,43 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.33s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
+warning: method `note_activity` is never used
+  --> src/api/proxy_liveness.rs:60:12
+   |
+50 | impl MissionProxyLiveness {
+   | ------------------------- method in this implementation
+...
+60 |     pub fn note_activity(&self) {
+   |            ^^^^^^^^^^^^^
+
+warning: `sandboxed_sh` (lib test) generated 13 warnings
+    Finished `test` profile [unoptimized] target(s) in 36.95s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 1 test
 test api::control::dispatch_admission_tests::remote_submission_rejects_closed_snapshots_and_records_host_observations ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3776 filtered out; finished in 0.97s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3790 filtered out; finished in 0.84s
+
+warning: function `populate_activity` is never used
+    --> src/api/control/mission_list.rs:1177:21
+     |
+1177 | pub(super) async fn populate_activity(control: &ControlState, missions...
+     |                     ^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `merge_text_stream_fragment` is never used
+  --> src/api/control/streaming.rs:87:15
+   |
+87 | pub(super) fn merge_text_stream_fragment(buffer: &mut String, fragment: ...
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_text_ops` is never used
+   --> src/api/mission_store/sqlite/events.rs:125:15
+    |
+125 | pub(super) fn apply_text_ops(buffer: &mut String, ops: &[TextOp]) {
+    |               ^^^^^^^^^^^^^^
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -149,7 +198,6 @@ warning: field `billable_tokens` is never read
    |         ^^^^^^^^^^^^^^^
    |
    = note: `UsageRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: field `node_id` is never read
   --> src/api/mission_store/sqlite_resources.rs:56:9
@@ -271,9 +319,18 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: `sandboxed_sh` (lib test) generated 9 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.34s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c628acfbc56cd87d)
+warning: method `note_activity` is never used
+  --> src/api/proxy_liveness.rs:60:12
+   |
+50 | impl MissionProxyLiveness {
+   | ------------------------- method in this implementation
+...
+60 |     pub fn note_activity(&self) {
+   |            ^^^^^^^^^^^^^
+
+warning: `sandboxed_sh` (lib test) generated 13 warnings
+    Finished `test` profile [unoptimized] target(s) in 0.19s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 14 tests
 test api::control::fork::tests::an_edited_message_replaces_the_rest_of_the_conversation ... ok
@@ -291,14 +348,14 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3763 filtered out; finished in 0.59s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3777 filtered out; finished in 0.50s
 
-    Finished `test` profile [unoptimized] target(s) in 0.24s
+    Finished `test` profile [unoptimized] target(s) in 0.09s
      Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-70c0d7a6354c9bb7)
 
 running 2 tests
 test missing_extra_duplicate_nontext_and_imported_symbols_fail ... ok
 test real_object_and_archive_mutations_are_rejected ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.39s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.43s
 

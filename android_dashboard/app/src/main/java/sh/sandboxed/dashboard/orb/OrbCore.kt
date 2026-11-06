@@ -1674,16 +1674,20 @@ class OrbCore private constructor(context: Context) {
                 launch(Dispatchers.IO) {
                     seedMissionAndProjectCaches(m, fresh = true)
                     OrbDisk.write("missions", m.map { it.raw })
-                    for (row in m.take(5)) {
-                        val evKey = "mission_events_${row.id}"
-                        if (OrbReadCache.loadRows(evKey).isEmpty()) {
-                            val evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
-                                fetchRows("/api/control/missions/${encodeComponent(row.id)}/events?limit=150", "events")
-                            }.getOrDefault(emptyList())
-                            if (evs.isNotEmpty()) {
-                                OrbReadCache.saveRows(evKey, evs)
+                    coroutineScope {
+                        m.take(5).map { row ->
+                            async {
+                                val evKey = "mission_events_${row.id}"
+                                if (OrbReadCache.loadRows(evKey).isEmpty()) {
+                                    val evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                                        fetchRows("/api/control/missions/${encodeComponent(row.id)}/events?limit=150", "events")
+                                    }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
+                                    if (evs.isNotEmpty()) {
+                                        OrbReadCache.saveRows(evKey, evs)
+                                    }
+                                }
                             }
-                        }
+                        }.awaitAll()
                     }
                 }
             }

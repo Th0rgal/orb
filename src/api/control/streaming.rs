@@ -83,6 +83,7 @@ pub(super) fn suffix_prefix_overlap_len(existing: &str, incoming: &str) -> usize
     crate::orb_spec::suffix_prefix_overlap_len(existing, incoming)
 }
 
+#[cfg(test)]
 pub(super) fn merge_text_stream_fragment(buffer: &mut String, fragment: &str) {
     crate::orb_spec::merge_text_stream_fragment(buffer, fragment);
 }
@@ -151,37 +152,92 @@ pub fn evaluate_stream_bounded_commit_gate(
     verdict
 }
 
+#[derive(Debug, Default, Clone)]
+pub(super) struct StreamTextState {
+    pub(super) text: String,
+    pub(super) chars: usize,
+    pub(super) raw_commit: u32,
+    pub(super) checkpoint: u32,
+}
+
+impl StreamTextState {
+    #[cfg(test)]
+    pub(super) fn as_str(&self) -> &str {
+        &self.text
+    }
+}
+
 pub(super) fn text_op_events_for_stream(
     ev: AgentEvent,
-    text_buffers: &mut HashMap<Uuid, String>,
+    text_buffers: &mut HashMap<Uuid, StreamTextState>,
 ) -> Vec<AgentEvent> {
     match ev {
         AgentEvent::TextDelta {
             content,
             mission_id: Some(mission_id),
         } => {
-            let previous = text_buffers.entry(mission_id).or_default();
-            let prev_bytes = previous.len().min(u32::MAX as usize) as u32;
-            let prev_raw_commit = previous
-                .rfind("\n\n")
-                .map(|idx| (idx + 2).min(u32::MAX as usize) as u32)
-                .unwrap_or(0);
-            let prev_checkpoint =
-                prev_raw_commit.max(prev_bytes.saturating_sub(STREAM_MAX_OPEN_TAIL_BYTES));
-            let previous_len = previous.chars().count();
-            let mut next = previous.clone();
-            merge_text_stream_fragment(&mut next, &content);
-            let new_bytes = next.len().min(u32::MAX as usize) as u32;
-            let tail_start = (prev_checkpoint.saturating_sub(1) as usize).min(next.len());
-            let tail_scan = crate::orb_spec::scan_host_stream_bytes(&next.as_bytes()[tail_start..]);
+            if content.is_empty() && !text_buffers.contains_key(&mission_id) {
+                return vec![AgentEvent::TextOp {
+                    mission_id,
+                    bubble_id: "text_delta_latest".to_string(),
+                    ops: vec![TextOp::Insert {
+                        pos: 0,
+                        text: String::new(),
+                    }],
+                }];
+            }
+            let state = text_buffers.entry(mission_id).or_default();
+            let prev_bytes = state.text.len().min(u32::MAX as usize) as u32;
+            let prev_raw_commit = state.raw_commit;
+            let prev_checkpoint = state
+                .checkpoint
+                .max(prev_raw_commit)
+                .max(prev_bytes.saturating_sub(STREAM_MAX_OPEN_TAIL_BYTES));
+            let previous_len = state.chars;
+            let was_empty = state.text.is_empty();
+
+            let appended_suffix: Option<String> = if was_empty {
+                state.chars = content.chars().count();
+                state.text = content;
+                Some(state.text.clone())
+            } else if content.is_empty() || state.text.starts_with(&content) {
+                None
+            } else if let Some(suffix) = content.strip_prefix(state.text.as_str()) {
+                let delta_chars = suffix.chars().count();
+                state.chars += delta_chars;
+                state.text.push_str(suffix);
+                Some(suffix.to_string())
+            } else {
+                let overlap = crate::orb_spec::suffix_prefix_overlap_len(&state.text, &content);
+                let suffix = &content[overlap..];
+                if suffix.is_empty() {
+                    None
+                } else {
+                    let delta_chars = suffix.chars().count();
+                    state.chars += delta_chars;
+                    state.text.push_str(suffix);
+                    Some(suffix.to_string())
+                }
+            };
+
+            let new_bytes = state.text.len().min(u32::MAX as usize) as u32;
+            let tail_start = (prev_checkpoint.saturating_sub(1) as usize).min(state.text.len());
+            let tail_scan =
+                crate::orb_spec::scan_host_stream_bytes(&state.text.as_bytes()[tail_start..]);
             let raw_commit = if tail_scan.newlines >= 2 && tail_scan.last_newline != usize::MAX {
-                let bound = (tail_start + tail_scan.last_newline + 1).min(next.len());
-                next.as_bytes()[tail_start..bound]
+                let bound = (tail_start + tail_scan.last_newline + 1).min(state.text.len());
+                state.text.as_bytes()[tail_start..bound]
                     .windows(2)
                     .rposition(|pair| pair == b"\n\n")
                     .map(|idx| (tail_start + idx + 2).min(u32::MAX as usize) as u32)
                     .unwrap_or(prev_raw_commit)
                     .max(prev_raw_commit)
+            } else if tail_start > 0
+                && tail_scan.newlines == 1
+                && state.text.as_bytes().get(tail_start) == Some(&b'\n')
+                && state.text.as_bytes().get(tail_start + 1) == Some(&b'\n')
+            {
+                ((tail_start + 2).min(u32::MAX as usize) as u32).max(prev_raw_commit)
             } else {
                 prev_raw_commit
             };
@@ -200,18 +256,17 @@ pub(super) fn text_op_events_for_stream(
                         .saturating_sub(commit_verdict.next_checkpoint)
                         <= STREAM_MAX_OPEN_TAIL_BYTES
             );
-            let ops = if previous.is_empty() {
-                vec![TextOp::Insert {
-                    pos: 0,
-                    text: next.clone(),
-                }]
-            } else {
-                vec![TextOp::Replace {
-                    range: (0, previous_len),
-                    text: next.clone(),
-                }]
+            state.raw_commit = prev_raw_commit.max(raw_commit.min(new_bytes));
+            state.checkpoint = commit_verdict.next_checkpoint;
+
+            let ops = match appended_suffix {
+                Some(text) if was_empty => vec![TextOp::Insert { pos: 0, text }],
+                Some(text) => vec![TextOp::Insert {
+                    pos: previous_len,
+                    text,
+                }],
+                None => return Vec::new(),
             };
-            *previous = next;
             vec![AgentEvent::TextOp {
                 mission_id,
                 bubble_id: "text_delta_latest".to_string(),
@@ -533,7 +588,7 @@ pub(super) async fn control_ws_loop(
             .unwrap_or(0),
         None => 0,
     };
-    let mut text_op_buffers: HashMap<Uuid, String> = HashMap::new();
+    let mut text_op_buffers: HashMap<Uuid, StreamTextState> = HashMap::new();
     let initial_status = AgentEvent::Status {
         state: initial.state,
         queue_len: initial.queue_len,
@@ -764,7 +819,7 @@ pub async fn stream(
         keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut shutdown_check_interval = tokio::time::interval(std::time::Duration::from_secs(1));
         shutdown_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut text_op_buffers: HashMap<Uuid, String> = HashMap::new();
+        let mut text_op_buffers: HashMap<Uuid, StreamTextState> = HashMap::new();
         let mut activity_sent: HashMap<Uuid, std::time::Instant> = HashMap::new();
 
         if !presentation {
@@ -1209,7 +1264,7 @@ mod presentation_tests {
         );
         assert_eq!(second.len(), 1);
         assert_eq!(
-            buffers.get(&mission_id).map(String::as_str),
+            buffers.get(&mission_id).map(StreamTextState::as_str),
             Some(format!("{initial}😀\n\nnext paragraph").as_str())
         );
 

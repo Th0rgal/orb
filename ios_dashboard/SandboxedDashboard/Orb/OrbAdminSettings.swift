@@ -684,9 +684,12 @@ struct OrbSkillsSettings: View {
 
     private func load() async {
         do {
-            skills = try await client.call("/api/library/skill").items.sorted { $0.skillName < $1.skillName }
-            repo = try? await client.call("/api/library/status")
-            let raw = (try? await client.call("/api/projects")) ?? .null
+            async let s = client.call("/api/library/skill")
+            async let r = client.call("/api/library/status")
+            async let p = client.call("/api/projects")
+            skills = try await s.items.sorted { $0.skillName < $1.skillName }
+            repo = try? await r
+            let raw = (try? await p) ?? .null
             projects = raw.items.isEmpty ? raw["projects"].items : raw.items
             unconfigured = false
             error = ""
@@ -952,14 +955,16 @@ private struct OrbSkillEditor: View {
     }
 
     private func load() async {
+        async let skillReq = client.call("/api/library/skill/\(OrbCore.escape(name))")
+        async let historyReq = client.call("/api/library/skill/\(OrbCore.escape(name))/history")
         do {
-            let skill = try await client.call("/api/library/skill/\(OrbCore.escape(name))")
+            let skill = try await skillReq
             content = skill["content"].text
             files = Array(Set(skill["references"].items.map(\.text) + skill["files"].items.map { $0["path"].text.isEmpty ? $0["name"].text : $0["path"].text }).filter { !$0.isEmpty && $0 != "SKILL.md" }).sorted()
             original = content; loaded = true; error = ""
         } catch is CancellationError {} catch { self.error = error.localizedDescription }
         // Older cores have no history endpoint: the section then stays empty.
-        history = (try? await client.call("/api/library/skill/\(OrbCore.escape(name))/history").items) ?? []
+        history = (try? await historyReq.items) ?? []
     }
     private func save(_ text: String, message: String) async {
         saving = true; saved = false; defer { saving = false }

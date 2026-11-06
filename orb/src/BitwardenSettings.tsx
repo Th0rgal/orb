@@ -206,12 +206,16 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
       setServerUrlDraft(st.server_url ?? "");
 
       if (st.configured && st.bws_installed) {
-        const bwList = await listBitwardenProjects();
+        const [bwResult] = await Promise.allSettled([
+          listBitwardenProjects(),
+          loadSecretsForProject(),
+        ]);
+        if (bwResult.status === "rejected") throw bwResult.reason;
+        const bwList = bwResult.value;
         setBwProjects(bwList);
         if (selectedProjectId() && !bwList.some((x) => x.id === selectedProjectId())) {
           setSelectedProjectId("");
         }
-        await loadSecretsForProject();
       } else {
         setBwProjects([]);
         setAllSecrets([]);

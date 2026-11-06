@@ -37,15 +37,13 @@ export async function stageRemoteImages(images: DraftImage[], mission?: Mission 
   const node = destination ?? missionAssignedNode(mission) ?? "core";
   const version = connectionVersion();
   const scope = imagePreviewScope(getApiUrl(), version, node);
-  const paths: string[] = [];
-  for (const image of images) {
+  return Promise.all(images.map(async image => {
     if (node !== "core") {
       const result = await api<{path:string}>("/api/uploads", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({node_id:node,name:image.name,data_base64:image.dataUrl.split(",")[1]})});
       if (!result?.path) throw new Error("Image upload did not return a file path. Your draft is kept.");
       if (version !== connectionVersion()) throw new Error("The backend changed. Your draft is kept.");
       rememberImagePreview(scope, result.path, image.dataUrl);
-      paths.push(result.path);
-      continue;
+      return result.path;
     }
     const form = new FormData();
     const bytes = Uint8Array.from(atob(image.dataUrl.split(",")[1]), char => char.charCodeAt(0));
@@ -57,9 +55,8 @@ export async function stageRemoteImages(images: DraftImage[], mission?: Mission 
     if (!result?.path) throw new Error("Image upload did not return a file path. Your draft is kept.");
     if (version !== connectionVersion()) throw new Error("The backend changed. Your draft is kept.");
     rememberImagePreview(scope, result.path, image.dataUrl);
-    paths.push(result.path);
-  }
-  return paths;
+    return result.path;
+  }));
 }
 
 // Parse inert clipboard HTML: never mount pasted markup or execute its scripts.
@@ -100,6 +97,12 @@ export async function readImagePaste(html: string, plain: string, files: File[],
     return /^(P|DIV|LI|TR|H[1-6]|BLOCKQUOTE|PRE)$/.test(node.tagName) ? content + "\n" : content;
   };
   let text = embedded.length ? render(doc.body).replace(/\n{3,}/g, "\n\n").trim() : plain;
-  for (const file of remaining) text += `${text ? "\n" : ""}${await add(file)}`;
+  if (images.length + remaining.length > IMAGE_COUNT) throw new Error(`Attach up to ${IMAGE_COUNT} images at a time.`);
+  const trailing = await Promise.all(remaining.map(readImage));
+  for (const image of trailing) {
+    image.reference = firstReference + images.length;
+    images.push(image);
+    text += `${text ? "\n" : ""}[Image #${image.reference}]`;
+  }
   return {text, images};
 }

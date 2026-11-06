@@ -146,9 +146,117 @@ const TELEGRAM_MEMORY_SEARCH_STOPWORDS: &[&str] = &[
 /// Content size threshold for inline storage (64KB).
 const CONTENT_SIZE_THRESHOLD: usize = 64 * 1024;
 
+/// Bounded group-commit writer queue sharing `SqliteMissionStore::conn`.
+///
+/// Coalesces up to 64 concurrent single-op write closures arriving while the
+/// previous batch commits into one `BEGIN IMMEDIATE ... COMMIT` transaction
+/// (one WAL fsync), isolating each closure with `SAVEPOINT` so an individual
+/// error rolls back only its own statement without aborting sibling writes.
+type SqliteWriteClosure = Box<dyn FnOnce(&Connection) -> Result<(), String> + Send>;
+
+struct SqliteWriteJob {
+    op: SqliteWriteClosure,
+    reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+}
+
 #[derive(Clone)]
-pub struct SqliteMissionStore {
+pub(super) struct SqliteWriteBatcher {
+    tx: tokio::sync::mpsc::Sender<SqliteWriteJob>,
+}
+
+impl SqliteWriteBatcher {
+    fn spawn(conn: Arc<Mutex<Connection>>) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SqliteWriteJob>(512);
+        std::thread::Builder::new()
+            .name("orb-sqlite-group-writer".into())
+            .spawn(move || {
+                let mut batch = Vec::with_capacity(64);
+                while let Some(first) = rx.blocking_recv() {
+                    batch.push(first);
+                    while batch.len() < 64 {
+                        match rx.try_recv() {
+                            Ok(job) => batch.push(job),
+                            Err(_) => break,
+                        }
+                    }
+                    let guard = conn.blocking_lock();
+                    if batch.len() == 1 {
+                        let job = batch.pop().expect("single job");
+                        let res = (job.op)(&guard);
+                        let _ = job.reply.send(res);
+                        continue;
+                    }
+                    if let Err(e) = guard.execute_batch("BEGIN IMMEDIATE") {
+                        for job in batch.drain(..) {
+                            let res = (job.op)(&guard)
+                                .map_err(|inner| format!("{inner} (no batch transaction: {e})"));
+                            let _ = job.reply.send(res);
+                        }
+                        continue;
+                    }
+                    let mut pending = Vec::with_capacity(batch.len());
+                    for (idx, job) in batch.drain(..).enumerate() {
+                        let sp = format!("orb_sp_{idx}");
+                        if let Err(e) = guard.execute_batch(&format!("SAVEPOINT {sp}")) {
+                            let _ = job.reply.send(Err(e.to_string()));
+                            continue;
+                        }
+                        match (job.op)(&guard) {
+                            Ok(()) => {
+                                let res = guard
+                                    .execute_batch(&format!("RELEASE {sp}"))
+                                    .map_err(|e| e.to_string());
+                                pending.push((job.reply, res));
+                            }
+                            Err(err) => {
+                                let _ =
+                                    guard.execute_batch(&format!("ROLLBACK TO {sp}; RELEASE {sp}"));
+                                pending.push((job.reply, Err(err)));
+                            }
+                        }
+                    }
+                    match guard.execute_batch("COMMIT") {
+                        Ok(()) => {
+                            for (reply, res) in pending {
+                                let _ = reply.send(res);
+                            }
+                        }
+                        Err(e) => {
+                            let _ = guard.execute_batch("ROLLBACK");
+                            let msg = format!("batch commit failed: {e}");
+                            for (reply, _) in pending {
+                                let _ = reply.send(Err(msg.clone()));
+                            }
+                        }
+                    }
+                }
+            })
+            .expect("failed to spawn orb-sqlite-group-writer thread");
+        Self { tx }
+    }
+
+    pub(super) async fn submit<F>(&self, op: F) -> Result<(), String>
+    where
+        F: FnOnce(&Connection) -> Result<(), String> + Send + 'static,
+    {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(SqliteWriteJob {
+                op: Box::new(op),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| "sqlite group writer closed".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "sqlite group writer dropped reply".to_string())?
+    }
+}
+
+#[doc(hidden)]
+pub struct SqliteMissionStoreInner {
     conn: Arc<Mutex<Connection>>,
+    writer: Option<SqliteWriteBatcher>,
     /// Read-only connections for the queries clients poll. In WAL mode they
     /// do not wait for the writer, so a slow write or a burst of event
     /// writes no longer queues every status request behind one lock.
@@ -157,11 +265,25 @@ pub struct SqliteMissionStore {
     content_dir: PathBuf,
 }
 
+#[derive(Clone)]
+pub struct SqliteMissionStore {
+    inner: Arc<SqliteMissionStoreInner>,
+}
+
+impl std::ops::Deref for SqliteMissionStore {
+    type Target = SqliteMissionStoreInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
 static SQLITE_STORE_REGISTRY: std::sync::OnceLock<
-    std::sync::RwLock<HashMap<PathBuf, SqliteMissionStore>>,
+    std::sync::RwLock<HashMap<PathBuf, std::sync::Weak<SqliteMissionStoreInner>>>,
 > = std::sync::OnceLock::new();
 
-fn sqlite_store_registry() -> &'static std::sync::RwLock<HashMap<PathBuf, SqliteMissionStore>> {
+fn sqlite_store_registry(
+) -> &'static std::sync::RwLock<HashMap<PathBuf, std::sync::Weak<SqliteMissionStoreInner>>> {
     SQLITE_STORE_REGISTRY.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
 }
 
@@ -172,7 +294,9 @@ pub(crate) fn lookup_sqlite_store(
     let sanitized = sanitize_filename(user_id);
     let db_path = base_dir.join(format!("missions-{}.db", sanitized));
     let reg = sqlite_store_registry().read().ok()?;
-    reg.get(&db_path).cloned()
+    reg.get(&db_path)
+        .and_then(|weak| weak.upgrade())
+        .map(|inner| SqliteMissionStore { inner })
 }
 
 /// Decisions kept for the audit views, and how often an insert trims the rest.
@@ -218,6 +342,24 @@ fn configure_sqlite_connection(conn: &Connection, is_reader: bool) -> Result<(),
 }
 
 impl SqliteMissionStore {
+    /// Submit a single-op write closure to the group-commit writer when active,
+    /// falling back to `spawn_blocking` + `conn.blocking_lock()` on recovery-only handles.
+    pub(super) async fn write_grouped<F>(&self, op: F) -> Result<(), String>
+    where
+        F: FnOnce(&Connection) -> Result<(), String> + Send + 'static,
+    {
+        if let Some(writer) = &self.writer {
+            return writer.submit(op).await;
+        }
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.blocking_lock();
+            op(&guard)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
     /// A connection for a query that only reads committed state.
     fn reader(&self) -> Arc<Mutex<Connection>> {
         if self.readers.is_empty() {
@@ -527,16 +669,19 @@ impl SqliteMissionStore {
             resources::spawn_background_backfill(Arc::downgrade(&conn_arc));
         }
 
-        let store = Self {
+        let writer = SqliteWriteBatcher::spawn(conn_arc.clone());
+        let inner = Arc::new(SqliteMissionStoreInner {
             conn: conn_arc,
+            writer: Some(writer),
             readers: Arc::new(readers),
             next_reader: Arc::default(),
             content_dir,
-        };
+        });
         if let Ok(mut reg) = sqlite_store_registry().write() {
-            reg.insert(registry_key, store.clone());
+            reg.retain(|_, v| v.strong_count() > 0);
+            reg.insert(registry_key, Arc::downgrade(&inner));
         }
-        Ok(store)
+        Ok(Self { inner })
     }
 
     /// Open only an existing store for admission recovery. The caller holds
@@ -564,10 +709,13 @@ impl SqliteMissionStore {
         .await
         .map_err(|e| e.to_string())??;
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-            readers: Arc::default(),
-            next_reader: Arc::default(),
-            content_dir,
+            inner: Arc::new(SqliteMissionStoreInner {
+                conn: Arc::new(Mutex::new(conn)),
+                writer: None,
+                readers: Arc::default(),
+                next_reader: Arc::default(),
+                content_dir,
+            }),
         })
     }
 

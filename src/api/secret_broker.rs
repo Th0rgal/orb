@@ -195,18 +195,22 @@ pub struct SecretBroker {
     resolving: Mutex<()>,
 }
 
-static BROKER: OnceLock<Arc<SecretBroker>> = OnceLock::new();
+static BROKERS: OnceLock<dashmap::DashMap<PathBuf, Arc<SecretBroker>>> = OnceLock::new();
 
 pub fn broker(state: &AppState) -> Arc<SecretBroker> {
-    BROKER
-        .get_or_init(|| {
-            let path = state
-                .config
-                .working_dir
-                .join(".sandboxed-sh")
-                .join("secret_broker.json");
-            SecretBroker::load(path)
-        })
+    let path = state
+        .config
+        .working_dir
+        .join(".sandboxed-sh")
+        .join("secret_broker.json");
+    let brokers = BROKERS.get_or_init(dashmap::DashMap::new);
+    if let Some(existing) = brokers.get(&path) {
+        return Arc::clone(existing.value());
+    }
+    brokers
+        .entry(path.clone())
+        .or_insert_with(|| SecretBroker::load(path))
+        .value()
         .clone()
 }
 
@@ -1180,27 +1184,24 @@ pub(crate) async fn caller_for(
                 username: p.username.clone(),
             })
             .await;
-        let mission = control
-            .mission_store
-            .get_mission(mission_id)
-            .await
+        let (mission_res, lineage, placement_res) = tokio::join!(
+            control.mission_store.get_mission(mission_id),
+            mission_secret_lineage(
+                &state.config.working_dir,
+                &control.mission_store,
+                mission_id,
+            ),
+            crate::api::control::remote_grok::placement(
+                &state.config.working_dir,
+                &control.mission_store,
+                mission_id,
+            ),
+        );
+        let mission = mission_res.ok().flatten();
+        let on_managed_node = placement_res
             .ok()
-            .flatten();
-        let lineage = mission_secret_lineage(
-            &state.config.working_dir,
-            &control.mission_store,
-            mission_id,
-        )
-        .await;
-        let on_managed_node = crate::api::control::remote_grok::placement(
-            &state.config.working_dir,
-            &control.mission_store,
-            mission_id,
-        )
-        .await
-        .ok()
-        .flatten()
-        .is_some_and(|pl| crate::managed::is_managed_node(&pl.node_id));
+            .flatten()
+            .is_some_and(|pl| crate::managed::is_managed_node(&pl.node_id));
         (mission, lineage, on_managed_node)
     } else {
         (None, Vec::new(), false)

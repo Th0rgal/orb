@@ -115,7 +115,7 @@ export function SecretAccessPanel(p: {
     if (busy()) return;
     setBusy(id);
     try {
-      for (const g of grants) await revokeSecretGrant(g.id);
+      await Promise.all(grants.map((g) => revokeSecretGrant(g.id)));
     } catch (e) {
       p.onError(e instanceof Error ? e.message : String(e));
     } finally {

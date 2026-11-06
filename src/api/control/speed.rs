@@ -41,28 +41,31 @@ async fn support(root: &std::path::Path, account: &CodexOAuthAccount, model: &st
                 .await
                 .ok()?;
         let client = reqwest::Client::new();
-        let usage = super::super::codex_usage::read_usage(
+        let usage_fut = super::super::codex_usage::read_usage(
             &client,
             &account.access_token,
             &account.chatgpt_account_id,
-        )
-        .await
-        .ok()?;
-        let catalog: serde_json::Value = client
-            .get("https://chatgpt.com/backend-api/codex/models")
-            .query(&[("client_version", "0.162.0")])
-            .bearer_auth(&account.access_token)
-            .header("chatgpt-account-id", &account.chatgpt_account_id)
-            .header("originator", "codex_cli_rs")
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json()
-            .await
-            .ok()?;
+        );
+        let catalog_fut = async {
+            client
+                .get("https://chatgpt.com/backend-api/codex/models")
+                .query(&[("client_version", "0.162.0")])
+                .bearer_auth(&account.access_token)
+                .header("chatgpt-account-id", &account.chatgpt_account_id)
+                .header("originator", "codex_cli_rs")
+                .timeout(Duration::from_secs(15))
+                .send()
+                .await
+                .ok()?
+                .error_for_status()
+                .ok()?
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+        };
+        let (usage_res, catalog_opt) = tokio::join!(usage_fut, catalog_fut);
+        let usage = usage_res.ok()?;
+        let catalog = catalog_opt?;
         // A generic `pro` claim does not distinguish Pro $200 from Pro $500.
         // Enterprise/Edu access must also be advertised by this account's catalog.
         let eligible_ultrafast_plan =
@@ -88,17 +91,20 @@ pub(crate) async fn eligible_accounts(
     model: &str,
     tier: Tier,
 ) -> Vec<CodexOAuthAccount> {
-    let mut eligible = Vec::new();
-    for account in super::super::ai_providers::get_all_openai_oauth_accounts(root) {
-        let supported = support(root, &account, model).await;
-        if tier == Tier::Standard
-            || (tier == Tier::Fast && supported.fast)
-            || (tier == Tier::Ultrafast && supported.ultrafast)
-        {
-            eligible.push(account);
-        }
-    }
-    eligible
+    let accounts = super::super::ai_providers::get_all_openai_oauth_accounts(root);
+    let supported_list =
+        futures::future::join_all(accounts.iter().map(|account| support(root, account, model)))
+            .await;
+    accounts
+        .into_iter()
+        .zip(supported_list)
+        .filter_map(|(account, supported)| {
+            (tier == Tier::Standard
+                || (tier == Tier::Fast && supported.fast)
+                || (tier == Tier::Ultrafast && supported.ultrafast))
+                .then_some(account)
+        })
+        .collect()
 }
 
 async fn validate_selection(

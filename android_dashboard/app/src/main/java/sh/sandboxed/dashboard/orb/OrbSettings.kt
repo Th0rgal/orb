@@ -84,7 +84,10 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -145,17 +148,33 @@ fun OrbSettingsSheet(
     var quotaExhausted by remember { mutableStateOf(false) }
     val attention = OrbSettingsSection.attention(bunkerActive, deviceEnrolled, quotaExhausted)
     LaunchedEffect(baseURL) {
-        runCatching { (OrbJSON.dict(core.request("/api/privilege-access"))?.get("bunker_state") as? Number)?.toInt() ?: 0 }
-            .onSuccess { bunkerActive = it > 0 }
-        runCatching {
-            val mine = OrbApprovalKey.publicKey()
-            val devices = OrbJSON.dictList(OrbJSON.dict(core.request("/api/approvals/devices"))?.get("devices"))
-            mine == null || devices.any { it["public_key"] == mine }
-        }.onSuccess { deviceEnrolled = it }
-        runCatching {
-            val entries = OrbJSON.dict(core.fetchDict("/api/ai/providers/usage")["entries"]) ?: emptyMap()
-            entries.values.any { v -> quotaStatus(providerQuotaWindows(OrbJSON.dict(v)))?.level == OrbQuotaLevel.Exhausted }
-        }.onSuccess { quotaExhausted = it }
+        coroutineScope {
+            val bunkerTask = async {
+                runCatching { (OrbJSON.dict(core.request("/api/privilege-access"))?.get("bunker_state") as? Number)?.toInt() ?: 0 }
+            }
+            val devicesTask = async {
+                runCatching {
+                    val mine = OrbApprovalKey.publicKey()
+                    val devices = OrbJSON.dictList(OrbJSON.dict(core.request("/api/approvals/devices"))?.get("devices"))
+                    mine == null || devices.any { it["public_key"] == mine }
+                }
+            }
+            val usageTask = async {
+                runCatching {
+                    val entries = OrbJSON.dict(core.fetchDict("/api/ai/providers/usage")["entries"]) ?: emptyMap()
+                    entries.values.any { v -> quotaStatus(providerQuotaWindows(OrbJSON.dict(v)))?.level == OrbQuotaLevel.Exhausted }
+                }
+            }
+            bunkerTask.await()
+                .onFailure { if (it is CancellationException) throw it }
+                .onSuccess { bunkerActive = it > 0 }
+            devicesTask.await()
+                .onFailure { if (it is CancellationException) throw it }
+                .onSuccess { deviceEnrolled = it }
+            usageTask.await()
+                .onFailure { if (it is CancellationException) throw it }
+                .onSuccess { quotaExhausted = it }
+        }
     }
 
     ModalBottomSheet(

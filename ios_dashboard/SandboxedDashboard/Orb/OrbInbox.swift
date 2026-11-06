@@ -594,8 +594,10 @@ struct OrbInboxSummariesSettingsView: View {
                 .disabled(customModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .task {
-            let chains = (try? await client.call("/api/model-routing/chains").items) ?? []
-            let providers = (try? await client.call("/api/providers?include_all=true&include_unverified=true")["providers"].items) ?? []
+            async let chainsReq = client.call("/api/model-routing/chains")
+            async let providersReq = client.call("/api/providers?include_all=true&include_unverified=true")
+            let chains = (try? await chainsReq.items) ?? []
+            let providers = (try? await providersReq["providers"].items) ?? []
             choices = chains.map { $0["id"].text } + providers.flatMap { p in p["models"].items.map { p["id"].text + "/" + $0["id"].text } }
         }
     }
@@ -2836,9 +2838,11 @@ struct OrbInboxView: View {
             recomputeSections()
         }
         // Cached rows paint immediately even when shared Core state is offline.
-        await OrbSharedInboxState.shared.refresh()
+        async let sharedRefresh: Void = OrbSharedInboxState.shared.refresh()
+        async let missionsReq = api.call("/api/control/missions?limit=100&all=true")
         do {
-            let raw = try await api.call("/api/control/missions?limit=100&all=true")
+            let raw = try await missionsReq
+            await sharedRefresh
             OrbReadCache.seedFromGlobalMissions(raw.items)
             let rows = raw.items.map { OrbRow($0) }.filter(\.mobile)
             if missions != rows { missions = rows }
@@ -2848,6 +2852,7 @@ struct OrbInboxView: View {
             error = ""
             await prefetchActiveEvents(for: rows)
         } catch {
+            await sharedRefresh
             if missions.isEmpty {
                 self.error = error.localizedDescription
             }

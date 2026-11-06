@@ -51,6 +51,14 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Run tests
+        env:
+          # `cargo test --workspace` links `sandboxed_sh` unit tests alongside 8
+          # binary targets; 4 concurrent rustc/cc1/ld jobs exceed the 16 GB RAM
+          # ceiling on GitHub-hosted ubuntu-latest runners (exit 143 OOM).
+          CARGO_BUILD_JOBS: 1
+          CARGO_PROFILE_DEV_DEBUG: 0
+          CARGO_PROFILE_TEST_DEBUG: 0
+          CARGO_INCREMENTAL: 0
         run: cargo test --locked --workspace
 
   clippy:

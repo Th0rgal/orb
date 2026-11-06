@@ -255,7 +255,7 @@ async fn control_sync_loop(
     }
 
     let mut subscribed_missions: HashMap<Uuid, Option<usize>> = HashMap::new();
-    let mut text_op_buffers: HashMap<Uuid, String> = HashMap::new();
+    let mut text_op_buffers: HashMap<Uuid, streaming::StreamTextState> = HashMap::new();
     let mut activity_sent: HashMap<Uuid, std::time::Instant> = HashMap::new();
     let mut btw_parent_cache: HashMap<Uuid, Option<Uuid>> = HashMap::new();
 

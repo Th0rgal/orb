@@ -592,6 +592,7 @@ pub(crate) async fn build_mission_index(state: &Arc<AppState>) -> MissionIndex {
         .working_dir
         .join(".sandboxed-sh")
         .join("missions");
+    let mut offline_db_paths = Vec::new();
     match tokio::fs::read_dir(&missions_dir).await {
         Ok(mut rd) => loop {
             let entry = match rd.next_entry().await {
@@ -615,28 +616,7 @@ pub(crate) async fn build_mission_index(state: &Arc<AppState>) -> MissionIndex {
                 if live_users.contains(user) {
                     continue;
                 }
-                let path = entry.path();
-                let rows = tokio::task::spawn_blocking({
-                    let path = path.clone();
-                    move || index_store_file_blocking(&path)
-                })
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
-                match rows {
-                    Ok(rows) => {
-                        for (short, entry) in rows {
-                            index.entry(short).or_default().push(entry);
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            store = %path.display(),
-                            err,
-                            "mission index: offline store read failed; index marked incomplete"
-                        );
-                        complete = false;
-                    }
-                }
+                offline_db_paths.push(entry.path());
             } else if stem.ends_with(".json") {
                 // File-store format: not offline-indexed; play safe.
                 if !live_users.contains(stem.trim_end_matches(".json")) {
@@ -656,6 +636,43 @@ pub(crate) async fn build_mission_index(state: &Arc<AppState>) -> MissionIndex {
                 "mission index: persisted-store directory unreadable; index marked incomplete"
             );
             complete = false;
+        }
+    }
+    if !offline_db_paths.is_empty() {
+        use futures::stream::{self, StreamExt};
+        type OfflineStoreScan = (
+            std::path::PathBuf,
+            Result<Vec<(String, MissionIndexEntry)>, String>,
+        );
+        let offline_results: Vec<OfflineStoreScan> = stream::iter(offline_db_paths)
+            .map(|path| async move {
+                let rows = tokio::task::spawn_blocking({
+                    let path = path.clone();
+                    move || index_store_file_blocking(&path)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+                (path, rows)
+            })
+            .buffered(8)
+            .collect()
+            .await;
+        for (path, rows) in offline_results {
+            match rows {
+                Ok(rows) => {
+                    for (short, entry) in rows {
+                        index.entry(short).or_default().push(entry);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        store = %path.display(),
+                        err,
+                        "mission index: offline store read failed; index marked incomplete"
+                    );
+                    complete = false;
+                }
+            }
         }
     }
 
@@ -753,18 +770,19 @@ pub async fn run_once(state: &Arc<AppState>, params: &SweepParams) -> SweepRepor
     // Snapshot live exec scopes before considering *any* mission directory.
     // A scope may have a process holding cwd/fds in the directory, so it wins
     // over terminal status in both dry-run and execution mode.
-    let scope_protected =
-        match protected_exec_scope_snapshot(super::scope_reaper::try_list_exec_scope_units().await)
-        {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                report.errors += 1;
-                tracing::warn!(%err, "mission GC: scope snapshot unavailable; skipping sweep");
-                return report;
-            }
-        };
-    let mission_index = build_mission_index(state).await;
-    let all_workspaces = state.workspaces.list().await;
+    let (scope_units_res, mission_index, all_workspaces) = tokio::join!(
+        super::scope_reaper::try_list_exec_scope_units(),
+        build_mission_index(state),
+        state.workspaces.list(),
+    );
+    let scope_protected = match protected_exec_scope_snapshot(scope_units_res) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            report.errors += 1;
+            tracing::warn!(%err, "mission GC: scope snapshot unavailable; skipping sweep");
+            return report;
+        }
+    };
     let workspace_roots: std::collections::HashMap<_, _> = all_workspaces
         .iter()
         .map(|workspace| {

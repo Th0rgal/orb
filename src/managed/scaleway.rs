@@ -737,28 +737,36 @@ impl ManagedProvider for ScalewayProvider {
     }
 
     async fn list(&self) -> Result<Vec<ProviderMachine>, String> {
+        let (instance_results, apple_results) = tokio::join!(
+            futures::future::try_join_all(INSTANCE_ZONES.iter().map(|zone| async move {
+                let v = self
+                    .call(
+                        reqwest::Method::GET,
+                        &format!("/instance/v1/zones/{zone}/servers?tags=orb-managed&per_page=100"),
+                        None,
+                    )
+                    .await?;
+                Ok::<(&str, Value), String>((*zone, v))
+            })),
+            futures::future::join_all(APPLE_SILICON_ZONES.iter().map(|zone| async move {
+                let res = self
+                    .call(
+                        reqwest::Method::GET,
+                        &format!("/apple-silicon/v1alpha1/zones/{zone}/servers?per_page=100"),
+                        None,
+                    )
+                    .await;
+                (*zone, res)
+            })),
+        );
         let mut out = Vec::new();
-        for zone in INSTANCE_ZONES {
-            let v = self
-                .call(
-                    reqwest::Method::GET,
-                    &format!("/instance/v1/zones/{zone}/servers?tags=orb-managed&per_page=100"),
-                    None,
-                )
-                .await?;
+        for (zone, v) in instance_results? {
             if let Some(items) = v.get("servers").and_then(Value::as_array) {
                 out.extend(items.iter().filter_map(|s| parse_instance_machine(s, zone)));
             }
         }
-        for zone in APPLE_SILICON_ZONES {
-            if let Ok(v) = self
-                .call(
-                    reqwest::Method::GET,
-                    &format!("/apple-silicon/v1alpha1/zones/{zone}/servers?per_page=100"),
-                    None,
-                )
-                .await
-            {
+        for (zone, res) in apple_results {
+            if let Ok(v) = res {
                 if let Some(items) = v.get("servers").and_then(Value::as_array) {
                     out.extend(
                         items

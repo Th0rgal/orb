@@ -13,7 +13,12 @@ fn configuration(base: &str, route: &str, mission: &str) -> Value {
             "options": {"baseURL": format!("{}/v1",base.trim_end_matches('/')),
                 "apiKey": "{env:ORB_ROUTING_KEY}",
                 "headers": {"x-sandboxed-mission-id": mission}},
-            "models": {(route): {"name": route, "id": route}}
+            "models": {(route): {
+                "name": route,
+                "id": route,
+                "attachment": true,
+                "modalities": {"input": ["text", "image"], "output": ["text"]}
+            }}
         }}
     })
 }
@@ -56,40 +61,83 @@ pub async fn start_fenced(
         .json()
         .await
         .map_err(|_| "Invalid mission project identity")?;
-    if let Some(project) = mission["project"]
+    let project = mission["project"]
         .as_str()
         .or_else(|| mission["project"]["project"].as_str())
-    {
-        crate::context_service::project_skills_prepare(
-            crate::context_service::Request {
-                endpoint: base.into(),
-                token: token.into(),
-                project: project.into(),
-                paths: vec![],
-            },
-            request.cwd.clone(),
-            request.harness.clone(),
-            Some(request.bin.clone()),
-        )
-        .await?;
-    } else {
-        let output = std::process::Command::new("sh")
-            .args([
-                "-c",
-                include_str!("../../../shared/prepare_project_skills.sh"),
-                "orb-project-skills",
-                "",
-                &request.harness,
-                include_str!("../../../shared/prepare_project_skills.py"),
-                &request.cwd,
-            ])
-            .output()
-            .map_err(|e| format!("Prepare project skills: {e}"))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).into_owned());
-        }
-    }
-    let mut launch_env = crate::mcp_launch::environment(&request.id, base, token).await?;
+        .map(str::to_owned);
+    let mission_id = request.id.clone();
+    let cwd = request.cwd.clone();
+    let harness = request.harness.clone();
+    let bin = request.bin.clone();
+    let trimmed_base = base.trim_end_matches('/');
+    let (skills_res, launch_env_res, opencode_routes_res) = tokio::join!(
+        async {
+            if let Some(project) = project {
+                crate::context_service::project_skills_prepare(
+                    crate::context_service::Request {
+                        endpoint: base.into(),
+                        token: token.into(),
+                        project,
+                        paths: vec![],
+                    },
+                    cwd,
+                    harness,
+                    Some(bin),
+                )
+                .await
+            } else {
+                let output = std::process::Command::new("sh")
+                    .args([
+                        "-c",
+                        include_str!("../../../shared/prepare_project_skills.sh"),
+                        "orb-project-skills",
+                        "",
+                        &harness,
+                        include_str!("../../../shared/prepare_project_skills.py"),
+                        &cwd,
+                    ])
+                    .output()
+                    .map_err(|e| format!("Prepare project skills: {e}"))?;
+                if !output.status.success() {
+                    return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+                }
+                Ok(())
+            }
+        },
+        crate::mcp_launch::environment(&mission_id, base, token),
+        async {
+            if request.harness != "opencode" {
+                return None;
+            }
+            let res: Result<(reqwest::Client, Vec<Value>), String> = async {
+                let http = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(20))
+                    .build()
+                    .map_err(|_| "Could not initialize routing connection".to_string())?;
+                let response = http
+                    .get(format!("{trimmed_base}/api/model-routing/chains"))
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                    .map_err(|_| "Could not load OpenCode routes".to_string())?;
+                if !response.status().is_success() {
+                    return Err(format!(
+                        "Could not load OpenCode routes ({})",
+                        response.status()
+                    ));
+                }
+                let routes: Vec<Value> = response
+                    .json()
+                    .await
+                    .map_err(|_| "Invalid routing catalog".to_string())?;
+                Ok((http, routes))
+            }
+            .await;
+            Some(res)
+        },
+    );
+    skills_res?;
+    let mut launch_env = launch_env_res?;
     crate::local_wakeups::prepare(
         &mut request,
         &crate::run_recovery::Connection {
@@ -98,30 +146,11 @@ pub async fn start_fenced(
         },
         run_generation,
     )?;
-    if request.harness != "opencode" {
+    let Some(opencode_routes_res) = opencode_routes_res else {
         return local_agents::start_with_env_fenced(request, &launch_env, stop_generation);
-    }
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|_| "Could not initialize routing connection")?;
-    let base = base.trim_end_matches('/');
-    let response = http
-        .get(format!("{base}/api/model-routing/chains"))
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|_| "Could not load OpenCode routes")?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Could not load OpenCode routes ({})",
-            response.status()
-        ));
-    }
-    let routes: Vec<Value> = response
-        .json()
-        .await
-        .map_err(|_| "Invalid routing catalog")?;
+    };
+    let (http, routes) = opencode_routes_res?;
+    let base = trimmed_base;
     let selected = request.model.as_deref().filter(|s| !s.is_empty());
     let route = routes
         .iter()
@@ -204,7 +233,11 @@ mod tests {
         for route in ["builtin/smart", "reviewer", "team/custom"] {
             let c = configuration("https://core.test/", route, "mission");
             assert_eq!(c["model"], format!("orb-routing/{route}"));
-            assert_eq!(c["provider"]["orb-routing"]["models"][route]["id"], route);
+            let model = &c["provider"]["orb-routing"]["models"][route];
+            assert_eq!(model["id"], route);
+            assert_eq!(model["attachment"], true);
+            assert_eq!(model["modalities"]["input"], json!(["text", "image"]));
+            assert_eq!(model["modalities"]["output"], json!(["text"]));
             assert_eq!(
                 c["provider"]["orb-routing"]["options"]["baseURL"],
                 "https://core.test/v1"

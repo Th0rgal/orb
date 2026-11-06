@@ -1244,8 +1244,10 @@ async function projectRows(slug: string): Promise<Mission[]> {
 /** Missions tagged with this project (exact slug match on the backend). */
 export async function listProjectMissions(slug: string): Promise<Mission[]> {
   const origins=await import("./localOrigins"),observedAt=origins.observe();
+  const remotePromise=projectRows(slug).then(rows=>includeAncestors(rows,slug));
+  remotePromise.catch(()=>{});
   const local=excludeBtwMissions(await origins.localOrigins()).filter(m=>m.project===slug);
-  try{const remote=await includeAncestors(await projectRows(slug),slug);await origins.rememberCoreState(local,remote,observedAt);const pending=excludeBtwMissions(local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id)))));return [...pending,...excludeBtwMissions(remote).filter(m=>!pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return partialList(local);throw error;}
+  try{const remote=await remotePromise;await origins.rememberCoreState(local,remote,observedAt);const pending=excludeBtwMissions(local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id)))));return [...pending,...excludeBtwMissions(remote).filter(m=>!pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return partialList(local);throw error;}
 }
 
 export async function listProjectFiles(slug: string, path: string): Promise<ProjectFileEntry[]> {
@@ -1420,12 +1422,14 @@ export function recordMissionSyncCursor(rows: readonly Mission[], fullSync: bool
 
 export async function listMissions(limit = 200, options?: { updatedSince?: string }): Promise<Mission[]> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
-  const local = excludeBtwMissions(await origins.localOrigins());
   const isDelta = Boolean(options?.updatedSince);
   const params = new URLSearchParams({ limit: String(limit) });
   if (options?.updatedSince) params.set("updated_since", options.updatedSince);
+  const remotePromise = api<Mission[]>(`/api/control/missions?${params}`).then(rows => includeAncestors(rows));
+  remotePromise.catch(() => {});
+  const local = excludeBtwMissions(await origins.localOrigins());
   try {
-    const remote = await includeAncestors(await api<Mission[]>(`/api/control/missions?${params}`));
+    const remote = await remotePromise;
     recordMissionSyncCursor(remote, !isDelta);
     if (!isDelta) {
       await origins.rememberCoreState(local, [...remote, ...await origins.unlistedCoreState(local, remote, id => api<Mission>(`/api/control/missions/${id}`))], observedAt);
@@ -1456,24 +1460,27 @@ export async function listCompletedMissions(limit = 100): Promise<Mission[] | nu
  * placement must not see a journal row that predates a machine transfer. */
 export async function getMission(id: string, options: { coreOnly?: boolean; fresh?: boolean; includeHistory?: boolean } = {}): Promise<Mission> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
-  const local = options.coreOnly ? undefined : (await origins.localOrigins(id)).find(row=>row.id===id);
-  try{
-    const path = options.includeHistory === false
-      ? `/api/control/missions/${id}?include_history=false`
-      : `/api/control/missions/${id}`;
-    const read = async () => {
-      // `fresh`: never join a read that started before the caller's newer event.
-      const value = await api<Mission>(path, options.fresh ? {} : undefined);
-      if (!value || typeof value !== "object" || value.id !== id) throw new InvalidApiResponseError(`GET ${path}`);
-      return value;
-    };
-    let remote: Mission;
-    try { remote = await read(); }
+  const path = options.includeHistory === false
+    ? `/api/control/missions/${id}?include_history=false`
+    : `/api/control/missions/${id}`;
+  const read = async () => {
+    // `fresh`: never join a read that started before the caller's newer event.
+    const value = await api<Mission>(path, options.fresh ? {} : undefined);
+    if (!value || typeof value !== "object" || value.id !== id) throw new InvalidApiResponseError(`GET ${path}`);
+    return value;
+  };
+  const remotePromise = (async () => {
+    try { return await read(); }
     catch (error) {
       if (!(error instanceof InvalidApiResponseError)) throw error;
       // Retry only this read. Retrying a POST could duplicate a sent message.
-      remote = await read();
+      return await read();
     }
+  })();
+  remotePromise.catch(() => {});
+  const local = options.coreOnly ? undefined : (await origins.localOrigins(id)).find(row=>row.id===id);
+  try{
+    const remote = await remotePromise;
     if(local && origins.localPending(local))return origins.withCoreEffort(local,remote);
     if(local)await origins.rememberCoreState([local],[remote],observedAt);
     return remote;

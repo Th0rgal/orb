@@ -3,11 +3,12 @@
 //! Persists user-configurable settings to disk at `{working_dir}/.sandboxed-sh/settings.json`.
 //! Environment variables are used as initial defaults when no settings file exists.
 
+use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
 /// Global cached max parallel missions value.
 /// A value of 0 means "unset" and callers should fall back to their default.
@@ -65,26 +66,21 @@ impl HarnessVersionPolicy {
 /// Globally cached harness version policy, refreshed whenever settings are
 /// loaded, updated, or reloaded. Lets code without a `SettingsStore` handle
 /// (e.g. the system component update checks) read the current pins.
-static HARNESS_VERSIONS_CACHED: std::sync::OnceLock<std::sync::RwLock<HarnessVersionPolicy>> =
+static HARNESS_VERSIONS_CACHED: std::sync::OnceLock<ArcSwap<HarnessVersionPolicy>> =
     std::sync::OnceLock::new();
 
-fn harness_versions_cell() -> &'static std::sync::RwLock<HarnessVersionPolicy> {
-    HARNESS_VERSIONS_CACHED.get_or_init(|| std::sync::RwLock::new(HarnessVersionPolicy::default()))
+fn harness_versions_cell() -> &'static ArcSwap<HarnessVersionPolicy> {
+    HARNESS_VERSIONS_CACHED.get_or_init(|| ArcSwap::from_pointee(HarnessVersionPolicy::default()))
 }
 
 /// Current harness version policy from the global cache.
 pub fn harness_versions_cached() -> HarnessVersionPolicy {
-    harness_versions_cell()
-        .read()
-        .map(|p| p.clone())
-        .unwrap_or_default()
+    (**harness_versions_cell().load()).clone()
 }
 
 /// Refresh the global harness version cache.
 pub fn set_harness_versions_cached(policy: Option<&HarnessVersionPolicy>) {
-    if let Ok(mut cell) = harness_versions_cell().write() {
-        *cell = policy.cloned().unwrap_or_default();
-    }
+    harness_versions_cell().store(Arc::new(policy.cloned().unwrap_or_default()));
 }
 
 /// Authentication settings managed via the dashboard.
@@ -204,7 +200,8 @@ pub struct Settings {
 /// In-memory store for global settings with disk persistence.
 #[derive(Debug)]
 pub struct SettingsStore {
-    settings: RwLock<Settings>,
+    settings: ArcSwap<Settings>,
+    writer: Mutex<()>,
     storage_path: PathBuf,
 }
 
@@ -243,7 +240,8 @@ impl SettingsStore {
         set_google_max_concurrency_cached(settings.google_max_concurrency);
 
         Self {
-            settings: RwLock::new(settings),
+            settings: ArcSwap::from_pointee(settings),
+            writer: Mutex::new(()),
             storage_path,
         }
     }
@@ -290,27 +288,22 @@ impl SettingsStore {
 
     /// Get the current Bitwarden settings.
     pub async fn get_bitwarden(&self) -> BitwardenSettings {
-        self.settings
-            .read()
-            .await
-            .bitwarden
-            .clone()
-            .unwrap_or_default()
+        self.settings.load().bitwarden.clone().unwrap_or_default()
     }
 
     /// Update the Bitwarden settings and persist to disk.
     pub async fn set_bitwarden(&self, bitwarden: BitwardenSettings) -> Result<(), std::io::Error> {
-        let mut settings = self.settings.write().await;
-        settings.bitwarden = Some(bitwarden);
-        drop(settings);
-        self.save_to_disk().await
+        let _guard = self.writer.lock().await;
+        let mut next = (**self.settings.load()).clone();
+        next.bitwarden = Some(bitwarden);
+        self.settings.store(Arc::new(next.clone()));
+        self.save_snapshot(&next).await
     }
 
     /// Current usage telemetry settings (disabled when unset).
     pub async fn get_orb_telemetry(&self) -> OrbTelemetrySettings {
         self.settings
-            .read()
-            .await
+            .load()
             .orb_telemetry
             .clone()
             .unwrap_or_default()
@@ -321,17 +314,17 @@ impl SettingsStore {
         &self,
         telemetry: OrbTelemetrySettings,
     ) -> Result<(), std::io::Error> {
-        let mut settings = self.settings.write().await;
-        settings.orb_telemetry = Some(telemetry);
-        drop(settings);
-        self.save_to_disk().await
+        let _guard = self.writer.lock().await;
+        let mut next = (**self.settings.load()).clone();
+        next.orb_telemetry = Some(telemetry);
+        self.settings.store(Arc::new(next.clone()));
+        self.save_snapshot(&next).await
     }
 
     /// Effective harness version policy (empty policy when unset).
     pub async fn get_harness_versions(&self) -> HarnessVersionPolicy {
         self.settings
-            .read()
-            .await
+            .load()
             .harness_versions
             .clone()
             .unwrap_or_default()
@@ -339,12 +332,12 @@ impl SettingsStore {
 
     /// Get the auto-cleanup enabled state.
     pub async fn get_auto_cleanup_enabled(&self) -> Option<bool> {
-        self.settings.read().await.auto_cleanup_enabled
+        self.settings.load().auto_cleanup_enabled
     }
 
     /// Get the auto-cleanup retention window in days.
     pub async fn get_auto_cleanup_days(&self) -> Option<u32> {
-        self.settings.read().await.auto_cleanup_days
+        self.settings.load().auto_cleanup_days
     }
 
     /// Load settings from a file path.
@@ -354,36 +347,29 @@ impl SettingsStore {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
-    /// Save current settings to disk.
-    async fn save_to_disk(&self) -> Result<(), std::io::Error> {
-        let settings = self.settings.read().await;
-
-        // Ensure parent directory exists
-        if let Some(parent) = self.storage_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let contents = serde_json::to_string_pretty(&*settings)
+    /// Save a settings snapshot atomically to disk via `tokio::fs` without blocking readers.
+    async fn save_snapshot(&self, settings: &Settings) -> Result<(), std::io::Error> {
+        let contents = serde_json::to_string_pretty(settings)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        std::fs::write(&self.storage_path, contents)?;
+        crate::concurrency::write_atomic_async(&self.storage_path, contents.as_bytes(), None)
+            .await?;
         tracing::debug!("Saved settings to {}", self.storage_path.display());
         Ok(())
     }
 
     /// Get a clone of the current settings.
     pub async fn get(&self) -> Settings {
-        self.settings.read().await.clone()
+        (**self.settings.load()).clone()
     }
 
     /// Get the library remote URL.
     pub async fn get_library_remote(&self) -> Option<String> {
-        self.settings.read().await.library_remote.clone()
+        self.settings.load().library_remote.clone()
     }
 
     /// Get the configured sandboxed.sh repo path.
     pub async fn get_sandboxed_repo_path(&self) -> Option<String> {
-        self.settings.read().await.sandboxed_repo_path.clone()
+        self.settings.load().sandboxed_repo_path.clone()
     }
 
     /// Update the library remote URL.
@@ -393,13 +379,14 @@ impl SettingsStore {
         &self,
         remote: Option<String>,
     ) -> Result<(bool, Option<String>), std::io::Error> {
-        let mut settings = self.settings.write().await;
-        let previous = settings.library_remote.clone();
+        let _guard = self.writer.lock().await;
+        let mut next = (**self.settings.load()).clone();
+        let previous = next.library_remote.clone();
 
         if previous != remote {
-            settings.library_remote = remote;
-            drop(settings); // Release lock before saving
-            self.save_to_disk().await?;
+            next.library_remote = remote;
+            self.settings.store(Arc::new(next.clone()));
+            self.save_snapshot(&next).await?;
             Ok((true, previous))
         } else {
             Ok((false, previous))
@@ -408,21 +395,41 @@ impl SettingsStore {
 
     /// Get the auth settings.
     pub async fn get_auth_settings(&self) -> Option<AuthSettings> {
-        self.settings.read().await.auth.clone()
+        self.settings.load().auth.clone()
     }
 
     /// Update auth settings and persist to disk.
     pub async fn set_auth_settings(&self, auth: AuthSettings) -> Result<(), std::io::Error> {
-        let mut settings = self.settings.write().await;
-        settings.auth = Some(auth);
-        drop(settings);
-        self.save_to_disk().await
+        let _guard = self.writer.lock().await;
+        let mut next = (**self.settings.load()).clone();
+        next.auth = Some(auth);
+        self.settings.store(Arc::new(next.clone()));
+        self.save_snapshot(&next).await
+    }
+
+    pub async fn upgrade_password_hash_if_current(
+        &self,
+        expected_current_hash: &str,
+        upgraded_hash: String,
+    ) -> Result<bool, std::io::Error> {
+        let _guard = self.writer.lock().await;
+        let mut next = (**self.settings.load()).clone();
+        let Some(ref mut auth) = next.auth else {
+            return Ok(false);
+        };
+        if auth.password_hash.as_deref() != Some(expected_current_hash) {
+            return Ok(false);
+        }
+        auth.password_hash = Some(upgraded_hash);
+        self.settings.store(Arc::new(next.clone()));
+        self.save_snapshot(&next).await?;
+        Ok(true)
     }
 
     /// Get the max parallel missions setting.
     /// Returns None if not explicitly set (caller should check env var as fallback).
     pub async fn get_max_parallel_missions(&self) -> Option<usize> {
-        self.settings.read().await.max_parallel_missions
+        self.settings.load().max_parallel_missions
     }
 
     /// Update the max parallel missions setting.
@@ -432,16 +439,17 @@ impl SettingsStore {
         &self,
         max_parallel_missions: Option<usize>,
     ) -> Result<(bool, Option<usize>), std::io::Error> {
-        let mut settings = self.settings.write().await;
-        let previous = settings.max_parallel_missions;
+        let _guard = self.writer.lock().await;
+        let mut next = (**self.settings.load()).clone();
+        let previous = next.max_parallel_missions;
 
         if previous != max_parallel_missions {
-            settings.max_parallel_missions = max_parallel_missions;
+            next.max_parallel_missions = max_parallel_missions;
             if let Some(limit) = max_parallel_missions {
                 set_max_parallel_missions_cached(limit);
             }
-            drop(settings); // Release lock before saving
-            self.save_to_disk().await?;
+            self.settings.store(Arc::new(next.clone()));
+            self.save_snapshot(&next).await?;
             Ok((true, previous))
         } else {
             Ok((false, previous))
@@ -450,12 +458,11 @@ impl SettingsStore {
 
     /// Update multiple settings at once.
     pub async fn update(&self, new_settings: Settings) -> Result<(), std::io::Error> {
+        let _guard = self.writer.lock().await;
         set_harness_versions_cached(new_settings.harness_versions.as_ref());
         set_google_max_concurrency_cached(new_settings.google_max_concurrency);
-        let mut settings = self.settings.write().await;
-        *settings = new_settings;
-        drop(settings);
-        self.save_to_disk().await
+        self.settings.store(Arc::new(new_settings.clone()));
+        self.save_snapshot(&new_settings).await
     }
 
     /// Reload settings from disk.
@@ -463,19 +470,24 @@ impl SettingsStore {
     /// Used after restoring a backup to pick up the restored settings.
     /// Also refreshes all atomic caches so the new values take effect immediately.
     pub async fn reload(&self) -> Result<(), std::io::Error> {
-        if self.storage_path.exists() {
-            let loaded = Self::load_from_path(&self.storage_path)?;
-            let mut settings = self.settings.write().await;
-            *settings = loaded;
+        let _guard = self.writer.lock().await;
+        let exists = tokio::fs::try_exists(&self.storage_path)
+            .await
+            .unwrap_or_else(|_| self.storage_path.exists());
+        if exists {
+            let contents = tokio::fs::read_to_string(&self.storage_path).await?;
+            let loaded: Settings = serde_json::from_str(&contents)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             // Refresh atomic caches from the reloaded settings.
-            if let Some(limit) = settings.max_parallel_missions {
+            if let Some(limit) = loaded.max_parallel_missions {
                 set_max_parallel_missions_cached(limit);
             }
-            if let Some(limit) = settings.max_concurrent_tasks {
+            if let Some(limit) = loaded.max_concurrent_tasks {
                 set_max_concurrent_tasks_cached(limit);
             }
-            set_google_max_concurrency_cached(settings.google_max_concurrency);
-            set_harness_versions_cached(settings.harness_versions.as_ref());
+            set_google_max_concurrency_cached(loaded.google_max_concurrency);
+            set_harness_versions_cached(loaded.harness_versions.as_ref());
+            self.settings.store(Arc::new(loaded));
             tracing::info!("Reloaded settings from {}", self.storage_path.display());
         }
         Ok(())
@@ -488,16 +500,17 @@ impl SettingsStore {
         &self,
         max_concurrent_tasks: Option<usize>,
     ) -> Result<(bool, Option<usize>), std::io::Error> {
-        let mut settings = self.settings.write().await;
-        let previous = settings.max_concurrent_tasks;
+        let _guard = self.writer.lock().await;
+        let mut next = (**self.settings.load()).clone();
+        let previous = next.max_concurrent_tasks;
 
         if previous != max_concurrent_tasks {
-            settings.max_concurrent_tasks = max_concurrent_tasks;
+            next.max_concurrent_tasks = max_concurrent_tasks;
             if let Some(limit) = max_concurrent_tasks {
                 set_max_concurrent_tasks_cached(limit);
             }
-            drop(settings);
-            self.save_to_disk().await?;
+            self.settings.store(Arc::new(next.clone()));
+            self.save_snapshot(&next).await?;
             Ok((true, previous))
         } else {
             Ok((false, previous))
@@ -507,17 +520,14 @@ impl SettingsStore {
     /// Initialize cached values from loaded settings.
     /// Must be called after creating the settings store, before any workspace operations.
     pub fn init_cached_values(&self) {
-        // Try to get the current value using block_in_place for sync access
-        // Since we're in the constructor/startup context, use try_read
-        if let Ok(settings) = self.settings.try_read() {
-            if let Some(limit) = settings.max_parallel_missions {
-                set_max_parallel_missions_cached(limit);
-            }
-            if let Some(limit) = settings.max_concurrent_tasks {
-                set_max_concurrent_tasks_cached(limit);
-            }
-            set_google_max_concurrency_cached(settings.google_max_concurrency);
+        let settings = self.settings.load();
+        if let Some(limit) = settings.max_parallel_missions {
+            set_max_parallel_missions_cached(limit);
         }
+        if let Some(limit) = settings.max_concurrent_tasks {
+            set_max_concurrent_tasks_cached(limit);
+        }
+        set_google_max_concurrency_cached(settings.google_max_concurrency);
     }
 }
 

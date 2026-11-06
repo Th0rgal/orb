@@ -1998,9 +1998,10 @@ impl ManagedManager {
             .read()
             .map(|m| m.values().cloned().collect())
             .unwrap_or_default();
-        for p in providers {
+        futures::future::join_all(providers.into_iter().map(|p| async move {
             let _ = p.refresh_availability().await;
-        }
+        }))
+        .await;
     }
 
     #[cfg(test)]
@@ -3010,17 +3011,23 @@ impl ManagedManager {
     async fn persist(&self) {
         let machines = self.machines.lock().await.clone();
         let secrets = self.secrets.lock().await.clone();
-        let _ = std::fs::create_dir_all(&self.dir);
-        write_atomic(
-            &self.machines_path(),
-            &serde_json::to_vec_pretty(&Persisted { machines }).unwrap_or_default(),
-            false,
-        );
-        write_atomic(
-            &self.secrets_path(),
-            &serde_json::to_vec(&secrets).unwrap_or_default(),
-            true,
-        );
+        let dir = self.dir.clone();
+        let machines_path = self.machines_path();
+        let secrets_path = self.secrets_path();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = std::fs::create_dir_all(&dir);
+            write_atomic(
+                &machines_path,
+                &serde_json::to_vec_pretty(&Persisted { machines }).unwrap_or_default(),
+                false,
+            );
+            write_atomic(
+                &secrets_path,
+                &serde_json::to_vec(&secrets).unwrap_or_default(),
+                true,
+            );
+        })
+        .await;
     }
 
     fn ledger(&self, event: &str, machine: &ManagedMachine) {
@@ -4611,7 +4618,17 @@ impl ManagedManager {
         }
 
         let enroll_token = enroll_token.ok_or("missing enrollment token")?;
-        self.update(id, |m| m.state = MachineState::Enrolling).await;
+        let enrolling = self
+            .update(id, |m| {
+                if m.state == MachineState::Provisioning {
+                    m.state = MachineState::Enrolling;
+                }
+            })
+            .await
+            .ok_or("machine vanished")?;
+        if enrolling.state != MachineState::Enrolling {
+            return Err("machine destroyed while provisioning".into());
+        }
         let (provision_ms, provisioned) = if provider.uses_cloud_init_bootstrap() {
             // Cloud-init / onstart script already writes enroll.env, runs
             // PROVISION_SCRIPT and starts sandboxed-node inside the guest.
@@ -5060,6 +5077,17 @@ impl ManagedManager {
             .get(id)
             .await
             .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
+        if matches!(
+            current.state,
+            MachineState::Destroyed | MachineState::Failed
+        ) || (failed
+            && matches!(
+                current.state,
+                MachineState::Destroying | MachineState::Stopped | MachineState::Online
+            ))
+        {
+            return Ok(current);
+        }
         let was_online = current.state == MachineState::Online;
         // Scaleway Apple Silicon 24h minimum lease (`deletable_at`): never
         // call provider DELETE before `deletable_at`. Unregister the node &
@@ -6741,12 +6769,17 @@ impl ManagedManager {
 
     async fn persist_budgets(&self) {
         let budgets = self.budgets.lock().await.clone();
-        let _ = std::fs::create_dir_all(&self.dir);
-        write_atomic(
-            &self.budgets_path(),
-            &serde_json::to_vec_pretty(&budgets).unwrap_or_default(),
-            false,
-        );
+        let dir = self.dir.clone();
+        let budgets_path = self.budgets_path();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = std::fs::create_dir_all(&dir);
+            write_atomic(
+                &budgets_path,
+                &serde_json::to_vec_pretty(&budgets).unwrap_or_default(),
+                false,
+            );
+        })
+        .await;
     }
 
     pub async fn budget_pools(&self) -> HashMap<String, budget::BudgetPool> {

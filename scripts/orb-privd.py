@@ -50,36 +50,17 @@ HOST_LABEL = os.environ.get("ORB_NODE_NAME") or socket.gethostname()
 OPS_READ_BINARIES = {
     "journalctl",
     "systemctl",
-    "docker",
-    "nft",
     "ss",
     "ps",
     "df",
-    "du",
     "free",
     "uptime",
     "uname",
     "cat",
     "head",
     "tail",
-    "ls",
     "stat",
-    "grep",
-    "mdadm",
     "lsblk",
-    "smartctl",
-}
-
-
-# Allowlists, not denylists: anything not listed (abbreviated long options,
-# --cursor-file, --stop, -t ...) is refused.
-READ_ONLY_OPTIONS = {
-    "journalctl": {"-u", "--unit", "-n", "--lines", "--since", "--until", "-p", "--priority",
-                   "-b", "--boot", "--no-pager", "-o", "--output", "-k", "--dmesg", "-r", "--reverse",
-                   "-x", "--catalog", "-e", "--pager-end", "--list-boots", "--disk-usage", "-g", "--grep"},
-    "mdadm": {"--detail", "-D", "--examine", "-E", "--query", "-Q", "--scan", "-s", "--verbose", "-v", "--brief", "-b"},
-    "smartctl": {"-a", "--all", "-x", "--xall", "-i", "--info", "-H", "--health", "-A", "--attributes",
-                 "-d", "--device", "-j", "--json"},
 }
 
 
@@ -101,7 +82,20 @@ UNSAFE_ENV_KEYS = {
 
 
 TRUSTED_EXEC_DIRS = ("/bin", "/usr/bin", "/sbin", "/usr/sbin")
+TRUSTED_RESOLVED_EXEC_PREFIXES = ("/bin/", "/usr/bin/", "/sbin/", "/usr/sbin/", "/usr/lib/", "/lib/")
 TRUSTED_EXEC_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+PUBLIC_DIAGNOSTIC_PATHS = {
+    "/proc/cpuinfo",
+    "/proc/meminfo",
+    "/proc/loadavg",
+    "/proc/uptime",
+    "/proc/version",
+    "/proc/stat",
+    "/proc/diskstats",
+    "/proc/mdstat",
+    "/etc/os-release",
+    "/usr/lib/os-release",
+}
 
 
 def _load_orb_kernel_so():
@@ -208,19 +202,165 @@ def _is_trusted_executable_token(raw_exe: str) -> bool:
         return False
     if exe_path.is_symlink():
         try:
-            canon_parent = str(exe_path.resolve().parent)
+            canon_str = str(exe_path.resolve(strict=True))
         except OSError:
             return False
-        if canon_parent not in TRUSTED_EXEC_DIRS:
+        if not canon_str.startswith(TRUSTED_RESOLVED_EXEC_PREFIXES):
             return False
     return True
 
 
-def _read_only_arg(prog: str, arg: str) -> bool:
-    if not arg.startswith("-"):
-        # journalctl values (unit names, times, counts); mdadm/smartctl device paths or option values.
-        return prog == "journalctl" or arg.startswith("/dev/") or re.fullmatch(r"[A-Za-z0-9_.,=-]+", arg) is not None
-    return arg.split("=", 1)[0] in READ_ONLY_OPTIONS[prog]
+def _is_canonical_absolute_path_str(raw: str) -> bool:
+    return (
+        bool(raw)
+        and raw.startswith("/")
+        and raw == str(Path(raw))
+        and "\\" not in raw
+        and not any(part in {".", ".."} for part in raw.split("/"))
+    )
+
+
+def ops_read_command_allowed(prog: str, args: list[str]) -> bool:
+    if prog in {"cat", "head", "tail", "stat"}:
+        return len(args) == 1 and args[0] in PUBLIC_DIAGNOSTIC_PATHS
+    forms = {
+        "free": [[], ["-h"], ["-m"]],
+        "df": [[], ["-h"], ["-hT"]],
+        "uptime": [[]],
+        "uname": [[], ["-a"], ["-r"]],
+        "lsblk": [[]],
+        "ps": [["-eo", "pid,ppid,uid,comm"]],
+        "ss": [["-lntu"], ["-s"]],
+        "journalctl": [["--disk-usage"]],
+    }
+    if prog == "systemctl":
+        return (len(args) == 2 and args[0] in {"is-active", "is-failed"}
+                and not args[1].startswith("-")
+                and re.fullmatch(r"[A-Za-z0-9_.@:-]+", args[1]) is not None)
+    return args in forms.get(prog, [])
+
+
+def confined_existing_path(
+    raw: str,
+    *,
+    directory: bool = False,
+    allow_symlink_leaf: bool = False,
+    trusted_uid: int = 0,
+) -> Path:
+    import stat
+    if not _is_canonical_absolute_path_str(raw):
+        raise ValueError("Ambiguous diagnostic path")
+    path = Path(raw)
+    parents = list(reversed(path.parents))
+    for component in parents:
+        metadata = component.lstat()
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or (metadata.st_uid not in {0, trusted_uid})
+            or (metadata.st_mode & 0o002 and not (metadata.st_mode & stat.S_ISVTX))
+        ):
+            raise ValueError("Untrusted diagnostic path component")
+    leaf = path.lstat()
+    if leaf.st_uid not in {0, trusted_uid}:
+        raise ValueError("Untrusted diagnostic path owner")
+    if stat.S_ISLNK(leaf.st_mode):
+        if not allow_symlink_leaf or directory:
+            raise ValueError("Symlink diagnostic path rejected")
+        resolved = path.resolve(strict=True)
+        return confined_existing_path(
+            str(resolved),
+            directory=False,
+            allow_symlink_leaf=False,
+            trusted_uid=trusted_uid,
+        )
+    if leaf.st_mode & 0o002:
+        raise ValueError("Writable diagnostic path rejected")
+    if path.resolve(strict=True) != path:
+        raise ValueError("Noncanonical diagnostic path")
+    if directory and not path.is_dir():
+        raise ValueError("Diagnostic cwd is not a directory")
+    if not directory and not path.is_file():
+        raise ValueError("Diagnostic path is not a regular file")
+    return path
+
+
+def _resolve_trusted_ops_read_executable(raw_exe: str, prog: str, *, trusted_uid: int = 0) -> Path:
+    import stat
+
+    candidates = (
+        [Path(raw_exe)]
+        if Path(raw_exe).is_absolute()
+        else [Path(d) / prog for d in TRUSTED_EXEC_PATH.split(":")]
+    )
+    if Path(raw_exe).is_absolute() and not _is_canonical_absolute_path_str(raw_exe):
+        raise ValueError("Ambiguous diagnostic executable path")
+    for candidate in candidates:
+        if str(candidate.parent) not in TRUSTED_EXEC_DIRS or candidate.name != prog:
+            continue
+        try:
+            parent_meta = candidate.parent.lstat()
+            cand_meta = candidate.lstat()
+        except OSError:
+            continue
+        if (
+            (parent_meta.st_uid not in {0, trusted_uid})
+            or (parent_meta.st_mode & 0o002)
+            or (cand_meta.st_uid not in {0, trusted_uid})
+            or (not stat.S_ISLNK(cand_meta.st_mode) and (cand_meta.st_mode & 0o002))
+        ):
+            continue
+        try:
+            resolved_exe = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not str(resolved_exe).startswith(TRUSTED_RESOLVED_EXEC_PREFIXES):
+            continue
+        try:
+            confined_existing_path(str(resolved_exe), trusted_uid=trusted_uid)
+        except ValueError:
+            continue
+        return candidate
+    raise ValueError("Untrusted resolved diagnostic executable")
+
+
+def prepare_ops_read(
+    argv: list[str],
+    cwd: str | None,
+    *,
+    allowed_paths: set[str] | None = None,
+    trusted_uid: int = 0,
+) -> tuple[list[str], str]:
+    if not argv or not _is_trusted_executable_token(argv[0]):
+        raise ValueError("Untrusted diagnostic executable")
+    prog = Path(argv[0]).name
+    public_paths = PUBLIC_DIAGNOSTIC_PATHS if allowed_paths is None else allowed_paths
+    if prog in {"cat", "head", "tail", "stat"}:
+        if len(argv) != 2 or argv[1] not in public_paths:
+            raise ValueError("Diagnostic command is not allowlisted")
+    elif not ops_read_command_allowed(prog, argv[1:]):
+        raise ValueError("Diagnostic command is not allowlisted")
+    executable = _resolve_trusted_ops_read_executable(argv[0], prog, trusted_uid=trusted_uid)
+    raw_cwd = (cwd or "/").strip() or "/"
+    execution_cwd = str(confined_existing_path(raw_cwd, directory=True, trusted_uid=trusted_uid))
+    exec_args = list(argv[1:])
+    if prog in {"cat", "head", "tail", "stat"}:
+        target = confined_existing_path(
+            argv[1],
+            allow_symlink_leaf=argv[1] in {"/etc/os-release", "/usr/lib/os-release"},
+            trusted_uid=trusted_uid,
+        )
+        if str(target) not in public_paths:
+            raise ValueError("Resolved diagnostic file outside public allowlist")
+        exec_args = [str(target)]
+    return [str(executable), *exec_args], execution_cwd
+
+
+def execute_ops_read(argv: list[str], cwd: str | None) -> int:
+    exec_argv, execution_cwd = prepare_ops_read(argv, cwd)
+    return subprocess.run(exec_argv, cwd=execution_cwd, env={
+        "PATH": TRUSTED_EXEC_PATH, "HOME": "/", "LANG": "C.UTF-8",
+        "SYSTEMD_PAGER": "cat", "SYSTEMD_PAGERSECURE": "1",
+    }, timeout=120).returncode
 
 
 def check_scope_restrictions(
@@ -244,11 +384,26 @@ def check_scope_restrictions(
     )
     cwd_bad = False
     if cwd is not None and str(cwd).strip():
-        cwd_path = Path(str(cwd).strip())
+        raw_cwd = str(cwd).strip()
+        cwd_path = Path(raw_cwd)
         if not cwd_path.is_absolute() or ".." in cwd_path.parts or cwd_path.is_symlink():
             cwd_bad = True
+        elif scope == "ops_read":
+            if not _is_canonical_absolute_path_str(raw_cwd):
+                cwd_bad = True
+            elif cwd_path.exists() or any(p.is_symlink() for p in cwd_path.parents):
+                if any(p.is_symlink() for p in cwd_path.parents):
+                    cwd_bad = True
     argv_traversal = any(
-        tok == ".." or tok.startswith("../") or tok.endswith("/..") or "/../" in tok
+        tok == ".."
+        or tok.startswith("../")
+        or tok.endswith("/..")
+        or "/../" in tok
+        or (
+            scope == "ops_read"
+            and tok.startswith("/")
+            and not _is_canonical_absolute_path_str(tok)
+        )
         for tok in argv
     )
     exe_trusted = _is_trusted_executable_token(argv[0])
@@ -280,19 +435,22 @@ def check_scope_restrictions(
         assert (packed & 256) == 0 and (packed & 1536) == 1536
         raise ValueError(f"Untrusted executable path '{argv[0]}' rejected by orb_privd_command_step confinement gate")
     prog = Path(argv[0]).name
+    flag_bypass = False
     if scope == "ops_read":
-        if prog not in OPS_READ_BINARIES:
-            raise ValueError(f"ops_read grant does not allow binary '{prog}'")
-        if prog == "systemctl" and (len(argv) < 2 or argv[1] not in {"status", "show", "list-units", "is-active", "is-failed"}):
-            raise ValueError("ops_read grant only allows read-only systemctl subcommands")
-        if prog == "docker" and (len(argv) < 2 or argv[1] not in {"ps", "logs", "inspect", "stats", "info", "version"}):
-            raise ValueError("ops_read grant only allows read-only docker subcommands")
-        if prog == "nft" and argv[1:] != ["list", "ruleset"]:
-            raise ValueError("ops_read grant only allows 'nft list ruleset'")
-        if prog == "mdadm" and argv[1:2] not in (["--detail"], ["-D"], ["--examine"], ["-E"], ["--query"], ["-Q"]):
-            raise ValueError("ops_read grant only allows 'mdadm --detail/--examine/--query'")
-        if prog in READ_ONLY_OPTIONS and not all(_read_only_arg(prog, a) for a in argv[1:]):
-            raise ValueError(f"ops_read grant only allows read-only {prog} options")
+        if not ops_read_command_allowed(prog, argv[1:]):
+            flag_bypass = prog in OPS_READ_BINARIES
+            packed = orb_privd_command_step(
+                1,
+                scope_rank,
+                4,
+                1,
+                int(has_metachar or flag_bypass),
+                has_path_traversal_or_symlink,
+                has_unsafe_env,
+                int(require_force_cmd),
+            )
+            assert (packed & 256) == 0 and (packed & 1536) == 1536
+            raise ValueError("ops_read diagnostic command is not allowlisted")
         command_class = 1
         unit_matches = 1
     elif scope == "service_deploy":
@@ -400,7 +558,8 @@ def handle_exec(req: dict) -> dict:
     mission_id = str(req.get("mission_id", "")).strip()
     lease_token = str(req.get("lease_token", "")).strip()
     argv = [str(x) for x in req.get("argv", [])]
-    cwd = str(req.get("cwd") or "/root")
+    raw_cwd_opt = req.get("cwd")
+    cwd = str(raw_cwd_opt).strip() if raw_cwd_opt is not None and str(raw_cwd_opt).strip() else None
     target_host = str(req.get("target_host") or "self")
 
     if not mission_id or not lease_token or not argv:
@@ -424,7 +583,7 @@ def handle_exec(req: dict) -> dict:
             "executing_host": HOST_LABEL,
             "command": f"[pre-exec] {command_str}",
             "argv": argv,
-            "cwd": cwd,
+            "cwd": cwd or "/",
         }
     )
     if not verdict.get("allow_exec"):
@@ -432,11 +591,12 @@ def handle_exec(req: dict) -> dict:
 
     scope = str(verdict.get("scope", "root_exec"))
     allowed_unit = verdict.get("allowed_unit")
+    effective_cwd = cwd or ("/" if scope == "ops_read" else "/root")
     check_scope_restrictions(
         scope,
         allowed_unit,
         argv,
-        cwd=cwd,
+        cwd=effective_cwd,
         env=req.get("env") if isinstance(req.get("env"), dict) else None,
         require_force_cmd=bool(verdict.get("require_force_cmd")),
     )
@@ -448,19 +608,30 @@ def handle_exec(req: dict) -> dict:
         else (shutil.which(Path(argv[0]).name, path=TRUSTED_EXEC_PATH) or argv[0])
     )
     exec_argv = [resolved_exe, *argv[1:]]
+    execution_cwd = effective_cwd if Path(effective_cwd).is_dir() else "/root"
+    exec_env = {
+        "PATH": TRUSTED_EXEC_PATH,
+        "HOME": "/root",
+        "LANG": "C.UTF-8",
+        "ORB_MISSION_ID": mission_id,
+        "ORB_JIT_GRANT_ID": str(verdict.get("grant_id", "")),
+    }
+    if scope == "ops_read":
+        exec_argv, execution_cwd = prepare_ops_read(argv, effective_cwd)
+        exec_env = {
+            "PATH": TRUSTED_EXEC_PATH,
+            "HOME": "/",
+            "LANG": "C.UTF-8",
+            "SYSTEMD_PAGER": "cat",
+            "SYSTEMD_PAGERSECURE": "1",
+        }
     t0 = time.monotonic()
     proc = subprocess.run(
         exec_argv,
-        cwd=cwd if Path(cwd).is_dir() else "/root",
+        cwd=execution_cwd,
         capture_output=True,
         timeout=int(req.get("timeout_secs", 600)),
-        env={
-            "PATH": TRUSTED_EXEC_PATH,
-            "HOME": "/root",
-            "LANG": "C.UTF-8",
-            "ORB_MISSION_ID": mission_id,
-            "ORB_JIT_GRANT_ID": str(verdict.get("grant_id", "")),
-        },
+        env=exec_env,
     )
     duration_ms = int((time.monotonic() - t0) * 1000)
     stdout_bytes = proc.stdout or b""
@@ -477,7 +648,7 @@ def handle_exec(req: dict) -> dict:
             "executing_host": HOST_LABEL,
                 "command": command_str,
                 "argv": argv,
-                "cwd": cwd,
+                "cwd": effective_cwd,
                 "exit_code": proc.returncode,
                 "duration_ms": duration_ms,
                 "stdout_sha256": stdout_sha256,

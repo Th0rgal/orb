@@ -705,28 +705,36 @@ pub(super) async fn agent_finished_automation_messages(
         }
     };
 
-    let mut eligible = Vec::with_capacity(active.len());
-    for automation in active {
-        let consecutive_failures =
-            consecutive_failure_count_for_automation(mission_store, &automation).await;
-        let has_fired = if matches!(
-            automation.stop_policy,
-            mission_store::StopPolicy::AfterFirstFire
-        ) {
-            automation_has_fired(mission_store, automation.id).await
-        } else {
-            false
+    let precomputed = futures::future::join_all(active.iter().map(|automation| async move {
+        let has_fired_fut = async {
+            if matches!(
+                automation.stop_policy,
+                mission_store::StopPolicy::AfterFirstFire
+            ) {
+                automation_has_fired(mission_store, automation.id).await
+            } else {
+                false
+            }
         };
-
-        if mission_is_terminal_for_goal_loop(mission.status)
+        let (consecutive_failures, has_fired) = tokio::join!(
+            consecutive_failure_count_for_automation(mission_store, automation),
+            has_fired_fut,
+        );
+        let should_stop = mission_is_terminal_for_goal_loop(mission.status)
             || stop_policy_matches_status(
                 &automation.stop_policy,
                 mission.status,
                 consecutive_failures,
                 has_fired,
             )
-            .await
-        {
+            .await;
+        should_stop
+    }))
+    .await;
+
+    let mut eligible = Vec::with_capacity(active.len());
+    for (automation, should_stop) in active.into_iter().zip(precomputed) {
+        if should_stop {
             tracing::info!(
                 "Disabling agent_finished automation {} due to stop policy {:?} (mission {} status {:?})",
                 automation.id,

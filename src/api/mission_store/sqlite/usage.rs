@@ -599,61 +599,68 @@ impl SqliteMissionStore {
         output_tokens: u64,
         cost_cents: u64,
     ) -> Result<(), String> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT INTO proxy_usage (timestamp, model, input_tokens, output_tokens, cost_cents)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                chrono::Utc::now().to_rfc3339(),
-                model,
-                input_tokens as i64,
-                output_tokens as i64,
-                cost_cents as i64,
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
+        let model = model.to_string();
+        let ts = chrono::Utc::now().to_rfc3339();
+        self.write_grouped(move |conn| {
+            conn.execute(
+                "INSERT INTO proxy_usage (timestamp, model, input_tokens, output_tokens, cost_cents)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    ts,
+                    model,
+                    input_tokens as i64,
+                    output_tokens as i64,
+                    cost_cents as i64,
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub(super) async fn record_proxy_outcome(
         &self,
         record: &ProxyOutcomeRecord,
     ) -> Result<(), String> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT INTO proxy_outcomes (timestamp, chain_id, provider, account_id, model,
-                status, http_status, retries, ttft_ms, total_ms, fallback_depth, stream, superseded)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            rusqlite::params![
-                record.timestamp,
-                record.chain_id,
-                record.provider,
-                record.account_id.map(|id| id.to_string()),
-                record.model,
-                record.status,
-                record.http_status.map(i64::from),
-                i64::from(record.retries),
-                record.ttft_ms.map(|v| v as i64),
-                record.total_ms as i64,
-                i64::from(record.fallback_depth),
-                record.stream as i64,
-                record.superseded as i64,
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        super::resources::on_proxy_outcome_sync(&conn, record);
-        // Cheap bounded retention: prune roughly once per 512 inserts.
-        if conn.last_insert_rowid() % 512 == 0 {
-            let cutoff = (chrono::Utc::now()
-                - chrono::Duration::days(PROXY_OUTCOME_RETENTION_DAYS))
-            .to_rfc3339();
+        let record = record.clone();
+        self.write_grouped(move |conn| {
             conn.execute(
-                "DELETE FROM proxy_outcomes WHERE timestamp < ?1",
-                rusqlite::params![cutoff],
+                "INSERT INTO proxy_outcomes (timestamp, chain_id, provider, account_id, model,
+                    status, http_status, retries, ttft_ms, total_ms, fallback_depth, stream, superseded)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                rusqlite::params![
+                    record.timestamp,
+                    record.chain_id,
+                    record.provider,
+                    record.account_id.map(|id| id.to_string()),
+                    record.model,
+                    record.status,
+                    record.http_status.map(i64::from),
+                    i64::from(record.retries),
+                    record.ttft_ms.map(|v| v as i64),
+                    record.total_ms as i64,
+                    i64::from(record.fallback_depth),
+                    record.stream as i64,
+                    record.superseded as i64,
+                ],
             )
             .map_err(|e| e.to_string())?;
-        }
-        Ok(())
+            super::resources::on_proxy_outcome_sync(conn, &record);
+            // Cheap bounded retention: prune roughly once per 512 inserts.
+            if conn.last_insert_rowid() % 512 == 0 {
+                let cutoff = (chrono::Utc::now()
+                    - chrono::Duration::days(PROXY_OUTCOME_RETENTION_DAYS))
+                .to_rfc3339();
+                conn.execute(
+                    "DELETE FROM proxy_outcomes WHERE timestamp < ?1",
+                    rusqlite::params![cutoff],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub(super) async fn get_proxy_outcomes(

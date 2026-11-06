@@ -44,25 +44,31 @@ type Entry = { isFile: boolean; isDirectory: boolean; name: string; file?: (ok: 
 export async function sourcesFromDataTransfer(data: Pick<DataTransfer, "files"> & { items?: DataTransferItemList | ArrayLike<DataTransferItem> }): Promise<UploadSource[]> {
   const entries = Array.from(data.items ?? []).map(item => (item as DataTransferItem & { webkitGetAsEntry?: () => Entry | null }).webkitGetAsEntry?.() ?? null);
   if (!entries.some(entry => entry?.isDirectory)) return Array.from(data.files ?? []).map(file => ({ name: file.name, file }));
-  const out: UploadSource[] = [];
-  const walk = async (entry: Entry, prefix: string): Promise<void> => {
-    if (out.length > BATCH_MAX_FILES || JUNK.has(entry.name)) return;
+  let seen = 0;
+  const walk = async (entry: Entry, prefix: string): Promise<UploadSource[]> => {
+    if (seen > BATCH_MAX_FILES || JUNK.has(entry.name)) return [];
     const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (entry.isFile && entry.file) {
+      seen++;
       const file = await new Promise<File>((ok, fail) => entry.file!(ok, fail));
-      out.push({ name: file.name, file, ...(prefix ? { relativePath: relative } : {}) });
-    } else if (entry.isDirectory && entry.createReader) {
+      return [{ name: file.name, file, ...(prefix ? { relativePath: relative } : {}) }];
+    }
+    if (entry.isDirectory && entry.createReader) {
       const reader = entry.createReader();
+      const collected: UploadSource[] = [];
       // readEntries returns at most ~100 entries per call.
       for (;;) {
         const batch = await new Promise<Entry[]>((ok, fail) => reader.readEntries(ok, fail));
-        if (!batch.length) break;
-        for (const child of batch) await walk(child, relative);
+        if (!batch.length || seen > BATCH_MAX_FILES) break;
+        const chunks = await Promise.all(batch.map(child => walk(child, relative)));
+        collected.push(...chunks.flat());
       }
+      return collected;
     }
+    return [];
   };
-  for (const entry of entries) if (entry) await walk(entry, "");
-  return out;
+  const chunks = await Promise.all(entries.map(entry => (entry ? walk(entry, "") : Promise.resolve([] as UploadSource[]))));
+  return chunks.flat().slice(0, BATCH_MAX_FILES + 1);
 }
 
 /**

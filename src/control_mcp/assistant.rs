@@ -3282,18 +3282,16 @@ impl AssistantMcp {
                 if mission_ids.len() > 10 {
                     return Err("mission_ids accepts at most 10 missions per call".into());
                 }
-                let mut results = Vec::with_capacity(mission_ids.len());
-                let mut all_done = true;
-                for raw in &mission_ids {
-                    if raw.trim().is_empty() {
-                        return Err("mission_ids entries must not be empty".into());
-                    }
-                    let entry = self.single_consult_result(raw).await?;
-                    if entry["done"].as_bool() != Some(true) {
-                        all_done = false;
-                    }
-                    results.push(entry);
+                if mission_ids.iter().any(|raw| raw.trim().is_empty()) {
+                    return Err("mission_ids entries must not be empty".into());
                 }
+                let results = futures::future::try_join_all(
+                    mission_ids.iter().map(|raw| self.single_consult_result(raw)),
+                )
+                .await?;
+                let all_done = results
+                    .iter()
+                    .all(|entry| entry["done"].as_bool() == Some(true));
                 let mut out = json!({
                     "all_done": all_done,
                     "results": results,
@@ -8373,6 +8371,7 @@ pub(crate) fn compact_managed_list(list: &Value) -> Value {
                         "reap_at": m["reap_at"],
                         "reap_reason": m["reap_reason"],
                         "deletable_at": m["deletable_at"],
+                        "source_snapshot": m["source_snapshot"],
                         "cost_usd": m["cost_usd"],
                         "budget_pool_id": m["budget_pool_id"],
                         "cap_pool_id": m["cap_pool_id"],
@@ -8440,6 +8439,7 @@ mod compact_managed_tests {
             "providers": [{"provider": "boat", "configured": true}],
             "machines": [
                 {"name": "small-a", "id": "mm1", "provider": "boat", "state": "online", "size": "small",
+                 "created_at": "2026-11-05T00:00:00Z", "source_snapshot": "snap-verity",
                  "cpu": 2, "error": null, "reason": "long text"},
                 {"name": "", "id": "mm0", "provider": "hetzner", "state": "destroyed", "size": "cpx41"}
             ],
@@ -8451,6 +8451,8 @@ mod compact_managed_tests {
         assert_eq!(c["machines"].as_array().unwrap().len(), 1);
         assert_eq!(c["machines"][0]["name"], "small-a");
         assert_eq!(c["machines"][0]["provider"], "boat");
+        assert_eq!(c["machines"][0]["created_at"], "2026-11-05T00:00:00Z");
+        assert_eq!(c["machines"][0]["source_snapshot"], "snap-verity");
         assert!(c["machines"][0].get("reason").is_none());
         assert_eq!(c["spend_today_usd"], 0.25);
         assert_eq!(c["providers"][0]["provider"], "boat");

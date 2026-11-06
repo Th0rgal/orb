@@ -297,6 +297,8 @@ pub struct Presence {
     pub last_seen_at: String,
 }
 
+const CLIENT_LINK_OUTBOX_CAPACITY: usize = 256;
+
 struct Link {
     conn_id: Uuid,
     connected_at: String,
@@ -305,8 +307,8 @@ struct Link {
     name: String,
     /// Opaque harness list reported by Orb: `[{backend, name?, models?}]`.
     harnesses: serde_json::Value,
-    /// Frames for this socket (remote start).
-    outbox: tokio::sync::mpsc::UnboundedSender<String>,
+    /// Bounded frames for this socket (remote start).
+    outbox: tokio::sync::mpsc::Sender<String>,
 }
 
 /// One known computer, as listed to other clients.
@@ -334,7 +336,7 @@ fn register(
     conn_id: Uuid,
     name: Option<String>,
     harnesses: serde_json::Value,
-    outbox: tokio::sync::mpsc::UnboundedSender<String>,
+    outbox: tokio::sync::mpsc::Sender<String>,
 ) {
     let now = crate::api::mission_store::now_string();
     let name = name
@@ -396,7 +398,7 @@ fn push(user_id: &str, client_id: &str, frame: &serde_json::Value) -> bool {
     let map = registry().lock().expect("client link registry");
     map.get(&(user_id.to_string(), client_id.to_string()))
         .filter(|l| l.last_seen.elapsed() < OFFLINE_AFTER)
-        .is_some_and(|l| l.outbox.send(frame.to_string()).is_ok())
+        .is_some_and(|l| l.outbox.try_send(frame.to_string()).is_ok())
 }
 
 /// Refresh liveness, but only for the current socket: a superseded socket
@@ -785,7 +787,7 @@ async fn link_loop(state: Arc<AppState>, user: AuthUser, socket: WebSocket) {
         _ => return,
     };
     let (client_id, name, harnesses) = client_id;
-    let (outbox, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (outbox, mut outgoing) = tokio::sync::mpsc::channel::<String>(CLIENT_LINK_OUTBOX_CAPACITY);
     register(&user.id, &client_id, conn_id, name, harnesses, outbox);
     tracing::info!(%conn_id, user_id = %user.id, %client_id, "Client link opened");
     if !send(
@@ -1110,7 +1112,7 @@ mod tests {
     async fn remote_start_reaches_the_current_socket_and_lists_the_computer() {
         let (user, client) = ("start-user", Uuid::new_v4().to_string());
         assert!(!push(user, &client, &serde_json::json!({})), "offline");
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(CLIENT_LINK_OUTBOX_CAPACITY);
         register(
             user,
             &client,
@@ -1138,7 +1140,7 @@ mod tests {
             old,
             None,
             serde_json::Value::Null,
-            tokio::sync::mpsc::unbounded_channel().0,
+            tokio::sync::mpsc::channel(CLIENT_LINK_OUTBOX_CAPACITY).0,
         );
         assert!(presence(user, &client).online);
         // Reconnect overlap: the draining old socket must not reclaim the
@@ -1150,7 +1152,7 @@ mod tests {
             new,
             None,
             serde_json::Value::Null,
-            tokio::sync::mpsc::unbounded_channel().0,
+            tokio::sync::mpsc::channel(CLIENT_LINK_OUTBOX_CAPACITY).0,
         );
         touch(user, &client, old);
         drop_link(user, &client, old);

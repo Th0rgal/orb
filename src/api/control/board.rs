@@ -1372,9 +1372,15 @@ pub async fn scheduler_pass(
 
     // The actor snapshot only sees local runners. Reserve slots across every
     // board for external workers and creates still awaiting adoption.
-    let mut board_tasks = Vec::new();
-    for boss_id in boards {
-        match mission_store.list_board_tasks(boss_id).await {
+    let board_task_results = futures::future::join_all(
+        boards
+            .iter()
+            .map(|boss_id| mission_store.list_board_tasks(*boss_id)),
+    )
+    .await;
+    let mut board_tasks = Vec::with_capacity(boards.len());
+    for (boss_id, res) in boards.into_iter().zip(board_task_results) {
+        match res {
             Ok(tasks) => board_tasks.push((boss_id, tasks)),
             Err(error) => {
                 tracing::warn!(boss = %boss_id, %error, "board: cannot determine worker occupancy");
@@ -1386,17 +1392,44 @@ pub async fn scheduler_pass(
     // A worker that is not executing anywhere (a client worker whose computer
     // is away, a run that ended) holds no slot: only a live mission does.
     let mut external_running = 0usize;
+    let mut worker_ids_to_probe: Vec<Uuid> = Vec::new();
+    let mut seen_worker_ids: HashSet<Uuid> = HashSet::new();
     for (_, tasks) in &board_tasks {
         for task in external_worker_candidates(tasks, &snapshot.running_ids, &inflight) {
-            let live = match task.worker_mission_id {
-                Some(id) if !inflight.contains(&task.id) => matches!(
-                    mission_store.get_mission(id).await,
-                    Ok(Some(mission)) if mission.status == MissionStatus::Active
-                ),
-                _ => true,
-            };
-            if live {
-                external_running += 1;
+            match task.worker_mission_id {
+                Some(id) if !inflight.contains(&task.id) => {
+                    if seen_worker_ids.insert(id) {
+                        worker_ids_to_probe.push(id);
+                    }
+                }
+                _ => {
+                    external_running += 1;
+                }
+            }
+        }
+    }
+    if !worker_ids_to_probe.is_empty() {
+        let probed = futures::future::join_all(
+            worker_ids_to_probe
+                .iter()
+                .map(|id| mission_store.get_mission(*id)),
+        )
+        .await;
+        let active_workers: HashSet<Uuid> = worker_ids_to_probe
+            .into_iter()
+            .zip(probed)
+            .filter_map(|(id, res)| {
+                matches!(res, Ok(Some(mission)) if mission.status == MissionStatus::Active)
+                    .then_some(id)
+            })
+            .collect();
+        for (_, tasks) in &board_tasks {
+            for task in external_worker_candidates(tasks, &snapshot.running_ids, &inflight) {
+                if let Some(id) = task.worker_mission_id {
+                    if !inflight.contains(&task.id) && active_workers.contains(&id) {
+                        external_running += 1;
+                    }
+                }
             }
         }
     }

@@ -155,6 +155,16 @@ uint64_t orb_scroll_policy_step(uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, ui
 uint64_t orb_wire_scroll_slice_step(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t orb_wire_stream_slice_step(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 uint64_t orb_wire_transcript_slice_step(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t, uint64_t, uint64_t, uint32_t, uint8_t, uint8_t, uint8_t);
+uint32_t orb_proxy_sse_scan_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_stream_repetition_step(uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t);
+uint64_t orb_http_rate_limit_classify_step(uint32_t, uint8_t, uint8_t, uint64_t, uint64_t);
+uint8_t orb_fleet_place_argmin_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t);
+uint64_t orb_pool_pacer_step(uint8_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint32_t orb_confinement_scan_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t);
+uint32_t orb_job_identity_eq256_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint8_t, uint8_t);
+uint32_t orb_validation_dag_step(uint32_t, uint32_t, uint32_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_fts5_lexer_step(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint64_t orb_utf8_utf16_window_step(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 #ifdef __cplusplus
 }
 #endif

@@ -185,23 +185,23 @@ pub(super) async fn check_github_all_issues_closed_and_prs_merged(repo: &str) ->
 }
 
 async fn check_github_repo_stop_policy(client: &reqwest::Client, repo_url: &str) -> bool {
-    let check_repo = async {
-        for resource in ["issues", "pulls"] {
-            let response = client
-                .get(format!("{repo_url}/{resource}?state=open"))
-                .header("User-Agent", "sandboxed-sh")
-                .header("Accept", "application/vnd.github.v3+json")
-                .send()
-                .await?;
-            if !response.status().is_success() {
-                return Ok::<bool, reqwest::Error>(false);
-            }
-            let items = response.json::<Vec<serde_json::Value>>().await?;
-            if !items.is_empty() {
-                return Ok(false);
-            }
+    let check_resource = |resource: &'static str| async move {
+        let response = client
+            .get(format!("{repo_url}/{resource}?state=open"))
+            .header("User-Agent", "sandboxed-sh")
+            .header("Accept", "application/vnd.github.v3+json")
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Ok::<bool, reqwest::Error>(false);
         }
-        Ok(true)
+        let items = response.json::<Vec<serde_json::Value>>().await?;
+        Ok(items.is_empty())
+    };
+    let check_repo = async {
+        let (issues_empty, pulls_empty) =
+            tokio::try_join!(check_resource("issues"), check_resource("pulls"))?;
+        Ok::<bool, reqwest::Error>(issues_empty && pulls_empty)
     };
 
     // Unknown repository state must never be treated as completed work.
