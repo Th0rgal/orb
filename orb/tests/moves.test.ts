@@ -176,35 +176,33 @@ it("scopes placement acknowledgements to LOCAL_PLACEMENT_CLIENT_ID across collid
   expect(capturedOpId).toBe(1);
   expect(withHierarchy(seeded)).toMatchObject({ project: "beta", folder: "docs" });
 
-  // Another client broadcasts `client_op_id: 1` at `placement_revision <= curRev` (`2`)
-  // with a foreign `client_id` (e.g. a no-op/same-revision or slightly older ack on
-  // another mission/session): WITHOUT `client_id` scoping (`ackOpId === pendingOpId`),
-  // `orb_placement_merge_step` would treat it as our own ack (`incRev >= curRev`) and
-  // prematurely clear `pendingOpId = 1` + overwrite `beta/docs` with `gamma/foreign`!
-  // WITH `client_id` scoping (`ackOpId = 0`), it is fenced (`status = fenced_by_pending_op`)
-  // and `pendingOpId = 1` stays intact so subsequent rollback works!
+  // Another client moves `m1` to `gamma/foreign` at `placement_revision: 3 > curRev: 2`
+  // with a colliding `client_op_id: 1` and a foreign `client_id`:
+  // `client_id` scoping maps `ackOpId -> 0`, and `orb_placement_merge_step` (`ackOpId < pendingOpId`)
+  // advances the confirmed rollback baseline to `gamma/foreign` (rev 3) WITHOUT clearing
+  // `pendingOpId = 1` or replacing the in-flight `beta/docs` preview!
   expect(applyServerPlacementEvent(
-    [{ mission_id: "m1", project: "gamma", folder: "foreign", placement_revision: 2 }],
+    [{ mission_id: "m1", project: "gamma", folder: "foreign", placement_revision: 3 }],
     capturedOpId,
     "foreign-client-id",
   )).toEqual([]);
   expect(withHierarchy(seeded)).toMatchObject({ project: "beta", folder: "docs" });
 
-  // When this client's in-flight move fails, rollback still works cleanly back to `alpha/old`!
+  // When this client's in-flight move fails, rollback restores the updated confirmed baseline (`gamma/foreign`, rev 3)!
   request.reject(new ApprovalTransferConfirmationRequiredError("Confirm secret transfer", "beta", [], []));
   await expect(inFlight).rejects.toBeInstanceOf(ApprovalTransferConfirmationRequiredError);
   expect(withHierarchy(seeded)).toMatchObject({
     id: "m1",
-    project: "alpha",
-    folder: "old",
-    placement_revision: 2,
+    project: "gamma",
+    folder: "foreign",
+    placement_revision: 3,
   });
 
-  // Conversely, an event carrying `LOCAL_PLACEMENT_CLIENT_ID` at the same revision (`incRev == curRev`)
+  // Conversely, an event carrying `LOCAL_PLACEMENT_CLIENT_ID` at the same revision (`incRev == curRev == 3`)
   // acknowledges and clears `pendingOpId`!
   await moveOptimistically(missionMoveKey("m1"), move, async (opId) => {
     applyServerPlacementEvent(
-      [{ mission_id: "m1", project: "beta", folder: "docs", placement_revision: 2 }],
+      [{ mission_id: "m1", project: "beta", folder: "docs", placement_revision: 3 }],
       opId,
       LOCAL_PLACEMENT_CLIENT_ID,
     );
@@ -213,6 +211,6 @@ it("scopes placement acknowledgements to LOCAL_PLACEMENT_CLIENT_ID across collid
     id: "m1",
     project: "beta",
     folder: "docs",
-    placement_revision: 2,
+    placement_revision: 3,
   });
 });

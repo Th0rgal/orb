@@ -2852,6 +2852,9 @@ def wireTranscriptSliceStep
     `0 = snapshot_or_poll` (list poll / single GET / journal snapshot),
     `1 = sse_or_ack` (authoritative move HTTP response or SSE `mission_placement_changed`),
     `2 = optimistic_preview` (local user cut/paste or drag-drop preview),
+    `0 = poll_or_snapshot` (list/read snapshot — cannot clear `pendingOpId`),
+    `1 = live_event` (HTTP response or SSE `mission_placement_changed` — clears `pendingOpId` iff `ackOpId >= pendingOpId` and `incRev >= curRev`),
+    `2 = optimistic_stage` (local optimistic move staging `ackOpId` as `pendingOpId`),
     `3 = rollback` (failed local move rolling back iff `ackOpId == pendingOpId` and `pendingOpId != 0`).
   - `hasPlacement == 1` iff the incoming payload carries explicit placement fields (`project`/`folder`).
   - Returns a 64-bit word:
@@ -2876,7 +2879,7 @@ def wireTranscriptSliceStep
   else if !(hasPlacement == 1) then 3
   else if pendingOpId != 0 then
     if incRev > curRev then
-      if sourceKind == 0 || (sourceKind == 1 && ackOpId != 0 && ackOpId < pendingOpId) then
+      if sourceKind == 0 || (sourceKind == 1 && ackOpId < pendingOpId) then
         1281
       else 1793
     else if sourceKind == 1 && ackOpId == pendingOpId && incRev ≥ curRev then 1793

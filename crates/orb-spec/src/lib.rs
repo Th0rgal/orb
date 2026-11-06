@@ -11896,8 +11896,9 @@ mod stateful_tests {
         assert!(ack.evict_other_projects);
         assert_eq!(ack.next_rev32, 6);
 
-        // Live event with strictly newer revision (`ack_op_id = 0`) supersedes optimistic move cleanly.
-        let supersede = placement_merge_step(PlacementMergeInput {
+        // Uncorrelated foreign live event (`ack_op_id = 0 < pending_op_id = 7`, `inc_rev = 7 > cur_rev = 5`)
+        // advances the confirmed rollback baseline without clearing `pending_op_id = 7`.
+        let foreign_live_event = placement_merge_step(PlacementMergeInput {
             cur_rev: 5,
             inc_rev: 7,
             pending_op_id: 7,
@@ -11905,11 +11906,11 @@ mod stateful_tests {
             source_kind: 1,
             has_placement: true,
         });
-        assert!(supersede.admitted);
-        assert_eq!(supersede.status, 1);
-        assert!(supersede.clear_pending);
-        assert!(supersede.evict_other_projects);
-        assert_eq!(supersede.next_rev32, 7);
+        assert!(foreign_live_event.admitted);
+        assert_eq!(foreign_live_event.status, 1);
+        assert!(!foreign_live_event.clear_pending);
+        assert!(foreign_live_event.evict_other_projects);
+        assert_eq!(foreign_live_event.next_rev32, 7);
 
         // Overlapping moves: earlier ack (`ack_op_id = 1 < pending_op_id = 2`) advances revision
         // without clearing the newer pending op so `op 2`'s preview stays fenced until `op 2` settles.

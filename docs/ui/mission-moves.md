@@ -78,9 +78,10 @@ separate and governed by [ORB_MISSION_TRANSFER.md](../ORB_MISSION_TRANSFER.md).
      `orb_placement_merge_step` gate:
      - While an optimistic local move is in flight (`pendingLocalOpId != 0`),
        polls/snapshots at `incomingRev <= currentRev` cannot snap the row back
-       to its prior folder or project, and intermediate polls (`sourceKind = 0`)
-       or older local acknowledgements (`0 < ackOpId < pendingLocalOpId`) at
-       `incomingRev > currentRev` advance the confirmed rollback base without
+       to its prior folder or project, and intermediate polls (`sourceKind = 0`),
+       older local acknowledgements (`ackOpId < pendingLocalOpId`), or
+       uncorrelated foreign placement events (`ackOpId = 0 < pendingLocalOpId`)
+       at `incomingRev > currentRev` advance the confirmed rollback base without
        clearing `pendingLocalOpId` — even when their destination matches the
        current optimistic preview (e.g., `A -> B -> C -> B`).
      - Once settled, any payload with `incomingRev < currentRev` preserves the

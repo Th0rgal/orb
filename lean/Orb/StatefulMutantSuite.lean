@@ -556,10 +556,16 @@ theorem kill_placement_intermediate_poll_clears_pending :
       placementMergeLo32 0 1 3 0 0 1 := by
   decide
 
+theorem kill_placement_foreign_event_clears_pending :
+    mutantPlacementOlderAckClearsPending ⟨0, 1, 1, 0, 1, 1⟩ ≠
+      placementMergeLo32 0 1 1 0 1 1 := by
+  decide
+
 #guard placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1⟩ == false
 #guard placementMergeMetaGate.gate ⟨5, 4, 0, 0, 0, 1⟩ == false
 #guard placementMergeMetaGate.gate ⟨4, 4, 12, 11, 3, 1⟩ == false
 #guard ((placementMergeStep 0 1 3 1 1 1 &&& 0xFFFFFFFF) &&& 512) == 0
 #guard ((placementMergeStep 0 1 3 0 0 1 &&& 0xFFFFFFFF) &&& 512) == 0
+#guard ((placementMergeStep 0 1 1 0 1 1 &&& 0xFFFFFFFF) &&& 512) == 0
 
 end Orb.StatefulMutantSuite

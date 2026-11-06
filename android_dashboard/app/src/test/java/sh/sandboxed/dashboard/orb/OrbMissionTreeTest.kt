@@ -617,7 +617,8 @@ class OrbMissionTreeTest {
         assertEquals(listOf("beta-newer", "stage-root", "beta-older"), merged.map { it.id })
         assertEquals("docs", merged[1].raw["folder"])
 
-        // 2. Colliding `client_op_id` from a foreign client at `incRev <= curRev` is fenced without clearing `pendingOpId`.
+        // 2. Foreign placement event at `incRev > curRev` (`3 > 2`) with colliding `client_op_id` advances the confirmed
+        //    rollback baseline without clearing `pendingOpId` or replacing the in-flight `beta/docs` preview!
         val foreignAccepted = OrbMissionTree.commitIncomingPlacementEvent(
             mapOf(
                 "client_op_id" to op,
@@ -627,23 +628,24 @@ class OrbMissionTreeTest {
                         "mission_id" to "stage-root",
                         "project" to "gamma",
                         "folder" to "foreign",
-                        "placement_revision" to 2L,
+                        "placement_revision" to 3L,
                     )
                 ),
             )
         )
         assertTrue(foreignAccepted.isEmpty())
         assertEquals(op, OrbMissionTree.placementOf("stage-root")?.pendingOpId)
+        assertEquals(3L, OrbMissionTree.placementOf("stage-root")?.revision)
         assertEquals("beta", OrbMissionTree.projectSlug(rootRow))
 
-        // 3. Failed local move rolls back cleanly to source `alpha/old` at rev 2.
+        // 3. Failed local move rolls back cleanly to the updated confirmed baseline (`gamma/foreign` at rev 3).
         val reverted = OrbMissionTree.rollbackOptimisticPlacement(op)
         assertEquals(1, reverted.size)
-        assertEquals("alpha", reverted[0].project)
-        assertEquals("old", reverted[0].folder)
-        assertEquals(2L, reverted[0].placementRevision)
+        assertEquals("gamma", reverted[0].project)
+        assertEquals("foreign", reverted[0].folder)
+        assertEquals(3L, reverted[0].placementRevision)
 
-        // 4. Event carrying `localClientId` at `incRev == curRev` acknowledges and clears `pendingOpId`.
+        // 4. Event carrying `localClientId` at `incRev == curRev` (`3`) acknowledges and clears `pendingOpId`.
         val op2 = OrbMissionTree.allocateOpId()
         OrbMissionTree.stageOptimisticPlacement(listOf("stage-root"), op2, "beta", "docs")
         val localAccepted = OrbMissionTree.commitIncomingPlacementEvent(
@@ -655,14 +657,14 @@ class OrbMissionTreeTest {
                         "mission_id" to "stage-root",
                         "project" to "beta",
                         "folder" to "docs",
-                        "placement_revision" to 2L,
+                        "placement_revision" to 3L,
                     )
                 ),
             )
         )
         assertEquals(1, localAccepted.size)
         assertEquals(0, OrbMissionTree.placementOf("stage-root")?.pendingOpId)
-        assertEquals(2L, OrbMissionTree.placementOf("stage-root")?.revision)
+        assertEquals(3L, OrbMissionTree.placementOf("stage-root")?.revision)
         OrbMissionTree.resetHierarchy()
     }
 }

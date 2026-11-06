@@ -8158,9 +8158,8 @@ theorem placementMerge_admit_eq (p : PlacementMergeCheck) :
             · simp only [hgt, decide_true, ite_true, Bool.true_or]
               cases hsk0 : (p.sourceKind == 0) <;>
                 cases hsk1 : (p.sourceKind == 1) <;>
-                cases hack0 : (p.ackOpId != 0) <;>
                 by_cases hlt_op : p.ackOpId < p.pendingOpId <;>
-                (simp only [hsk0, hsk1, hack0, hlt_op, decide_true, decide_false,
+                (simp only [hsk0, hsk1, hlt_op, decide_true, decide_false,
                   Bool.true_and, Bool.false_and, Bool.true_or, Bool.false_or,
                   Bool.false_eq_true, ite_true, ite_false];
                  decide)
@@ -8306,14 +8305,15 @@ def placementMergeMetaStepSpec :
        `clearPendingBit = 0`), preventing snap-back and keeping return-to-origin (`A → B → A`) pending.
     2. **Monotone settled revision (`status = 4`)**: Once settled (`pendingOpId = 0`), any poll or
        SSE frame with `incRev < curRev` is rejected (`lo32 = 4`, `admittedBit = 0`).
-    3. **Authoritative ack clears fence & evicts stale buckets (`lo32 = 1793`)**: A matching ack or
-       remote SSE frame with `incRev > curRev` while `pendingOpId != 0` admits (`256`), clears the
-       pending op (`512`), and signals cross-project eviction (`1024`).
-    4. **Intermediate poll & older ack preserve newer pending op (`lo32 = 1281`)**: Both a poll
-       (`sourceKind = 0`) and an older acknowledgement (`sourceKind = 1`, `0 < ackOpId < pendingOpId`)
-       observing an intermediate revision (`incRev > curRev`) while `pendingOpId != 0` admit (`256`)
-       and update the confirmed rollback baseline without clearing `pendingOpId` (`clearPendingBit = 0`),
-       including repeated-destination sequences (`A → B → C → B`). -/
+    3. **Authoritative ack clears fence & evicts stale buckets (`lo32 = 1793`)**: A matching local ack
+       (`ackOpId == pendingOpId`) with `incRev > curRev` while `pendingOpId != 0` admits (`256`), clears
+       the pending op (`512`), and signals cross-project eviction (`1024`).
+    4. **Intermediate poll, older ack, & uncorrelated foreign event preserve pending op (`lo32 = 1281`)**:
+       A poll (`sourceKind = 0`), an older local acknowledgement (`sourceKind = 1`, `ackOpId < pendingOpId`),
+       or an uncorrelated foreign placement event (`sourceKind = 1`, `ackOpId = 0 < pendingOpId`) observing
+       an intermediate revision (`incRev > curRev`) while `pendingOpId != 0` admits (`256`) and updates the
+       confirmed rollback baseline without clearing `pendingOpId` (`clearPendingBit = 0`), including
+       repeated-destination sequences (`A → B → C → B`). -/
 theorem placement_merge_fences_stale_polls_and_advances_monotonically
     (curRev incRev : UInt64) (pendingOpId ackOpId : UInt32)
     (h_pend : pendingOpId != 0)
@@ -8325,7 +8325,7 @@ theorem placement_merge_fences_stale_polls_and_advances_monotonically
       (placementMergeStep curRev (curRev + 1) pendingOpId pendingOpId 1 1 &&& 0xFFFFFFFF) = 1793) ∧
     (curRev < curRev + 1 →
       (placementMergeStep curRev (curRev + 1) pendingOpId 0 0 1 &&& 0xFFFFFFFF) = 1281) ∧
-    (curRev < curRev + 1 → ackOpId != 0 → ackOpId < pendingOpId →
+    (curRev < curRev + 1 → ackOpId < pendingOpId →
       (placementMergeStep curRev (curRev + 1) pendingOpId ackOpId 1 1 &&& 0xFFFFFFFF) = 1281) := by
   have h_not_gt : ¬ (curRev < incRev) := UInt64.not_lt.mpr h_le
   have hsk0_3 : ((0 : UInt8) ≤ 3) := by decide
@@ -8370,12 +8370,12 @@ theorem placement_merge_fences_stale_polls_and_advances_monotonically
     simp only [hsk0_3, h_ovf, decide_true, Bool.not_true, Bool.false_eq_true,
       ite_false, h0_eq0, h0_eq2, h0_eq3, h1_eq1, h0_eq1, h_pend, ite_true, Bool.true_or]
     decide
-  · intro h_ovf hack_nz hack_lt
+  · intro h_ovf hack_lt
     unfold placementMergeStep placementMergeLo32
     rw [pack32_lo]
     dsimp only [GT.gt, GE.ge]
     simp only [hsk1_3, h_ovf, hack_lt, decide_true, Bool.not_true, Bool.false_eq_true,
-      ite_false, h1_eq0, h1_eq2, h1_eq3, h1_eq1, h_pend, hack_nz, ite_true,
+      ite_false, h1_eq0, h1_eq2, h1_eq3, h1_eq1, h_pend, ite_true,
       Bool.true_and, Bool.false_or]
     decide
 

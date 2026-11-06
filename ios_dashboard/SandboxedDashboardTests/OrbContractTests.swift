@@ -1171,7 +1171,8 @@ final class OrbContractTests: XCTestCase {
         let mergedAfterInFlightLoad = OrbMissionTree.mergePendingStagedRows([existingNewer, existingOlder], projectSlug: "beta")
         XCTAssertEqual(mergedAfterInFlightLoad.map(\.id), ["beta-newer", "stage-root", "beta-older"])
 
-        // 3. Colliding `client_op_id` from a foreign client at `incRev <= curRev` is fenced instead of prematurely clearing `pendingOpID`.
+        // 3. Foreign placement event at `incRev > curRev` (`3 > 2`) with colliding `client_op_id` advances the confirmed
+        //    rollback baseline without clearing `pendingOpID` or replacing the in-flight `beta/docs` preview!
         let foreignCommitted = OrbCore.applyIncomingPlacementEvent([
             "client_op_id": Int(op),
             "client_id": "foreign-client-uuid",
@@ -1179,26 +1180,30 @@ final class OrbContractTests: XCTestCase {
                 "mission_id": "stage-root",
                 "project": "gamma",
                 "folder": "foreign",
-                "placement_revision": 2
+                "placement_revision": 3
             ]]
         ])
         XCTAssertTrue(foreignCommitted.isEmpty)
         XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.pendingOpID, op)
         XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.project, "beta")
+        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.revision, 3)
 
-        // 4. Failed local move rolls back cleanly to source `alpha/old` and restores locally without reload.
+        // 4. Failed local move rolls back cleanly to the updated confirmed baseline (`gamma/foreign`, rev 3) and restores locally.
         XCTAssertTrue(OrbHierarchy.rollbackOptimisticPlacement(id: "stage-root", ackOpID: op))
-        let restoredAlpha = OrbMissionTree.applyPlacementItems(
+        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.project, "gamma")
+        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.folder, "foreign")
+        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.revision, 3)
+        let restoredGamma = OrbMissionTree.applyPlacementItems(
             to: [],
-            projectSlug: "alpha",
-            moves: [OrbPlacementCommitItem(missionID: "stage-root", project: "alpha", folder: "old", placementRevision: 2)]
+            projectSlug: "gamma",
+            moves: [OrbPlacementCommitItem(missionID: "stage-root", project: "gamma", folder: "foreign", placementRevision: 3)]
         )
-        XCTAssertTrue(restoredAlpha.changed)
-        XCTAssertTrue(restoredAlpha.missingIDs.isEmpty)
-        XCTAssertEqual(restoredAlpha.rows.map(\.id), ["stage-root"])
-        XCTAssertEqual(restoredAlpha.rows.first?.folder, "old")
+        XCTAssertTrue(restoredGamma.changed)
+        XCTAssertTrue(restoredGamma.missingIDs.isEmpty)
+        XCTAssertEqual(restoredGamma.rows.map(\.id), ["stage-root"])
+        XCTAssertEqual(restoredGamma.rows.first?.folder, "foreign")
 
-        // 5. Same `client_id == OrbHierarchy.localClientID` at `incRev == curRev` acknowledges and clears `pendingOpID`.
+        // 5. Same `client_id == OrbHierarchy.localClientID` at `incRev == curRev` (`3`) acknowledges and clears `pendingOpID`.
         let op2 = OrbHierarchy.allocateOpID()
         OrbHierarchy.stageOptimisticPlacement(id: "stage-root", toProject: "beta", toFolder: "docs", opID: op2)
         let localCommitted = OrbCore.applyIncomingPlacementEvent([
@@ -1208,12 +1213,12 @@ final class OrbContractTests: XCTestCase {
                 "mission_id": "stage-root",
                 "project": "beta",
                 "folder": "docs",
-                "placement_revision": 2
+                "placement_revision": 3
             ]]
         ])
         XCTAssertEqual(localCommitted.count, 1)
         XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.pendingOpID, 0)
-        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.revision, 2)
+        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.revision, 3)
         OrbHierarchy.reset()
     }
 }

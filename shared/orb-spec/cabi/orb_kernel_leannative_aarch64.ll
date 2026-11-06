@@ -6203,8 +6203,7 @@ entry:
   %cmp_eq_123.not.i = icmp eq i32 %a3, 0
   %cmp_lt_134.not.i = icmp ult i32 %a3, %a2
   %sel_142.i = select i1 %cmp_lt_134.not.i, i64 1281, i64 1793
-  %sel_146.i = select i1 %cmp_eq_123.not.i, i64 1793, i64 %sel_142.i
-  %sel_150.i = select i1 %cmp_eq_65.not.i, i64 %sel_146.i, i64 1793
+  %sel_150.i = select i1 %cmp_eq_65.not.i, i64 %sel_142.i, i64 1793
   %sel_154.i = select i1 %cmp_eq_105.not.i, i64 1281, i64 %sel_150.i
   %sel_159.i = select i1 %cmp_lt_56.not.i, i64 %sel_154.i, i64 %sel_101.i
   %2 = and i1 %cmp_le_85.not.not.i, %cmp_eq_65.not.i
