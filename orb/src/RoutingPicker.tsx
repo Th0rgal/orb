@@ -12,7 +12,7 @@ export function RoutingPicker(p: { label: string; value: string; options: { id: 
   const matches = createMemo(() => uniqueOptions().filter(o => `${o.name} ${o.id}`.toLowerCase().includes(p.value.toLowerCase())).slice(0, 30));
   const choose = (value: string) => { p.onInput(value); setOpen(false); setActive(-1); };
   return <div class="routing-picker" ref={host}>
-    <input class="s-input" role="combobox" aria-label={p.label} aria-autocomplete="list" aria-expanded={open()} aria-controls={id}
+    <input class="s-input" role="combobox" autocapitalize="off" autocorrect="off" spellcheck={false} aria-label={p.label} aria-autocomplete="list" aria-expanded={open()} aria-controls={id}
       aria-activedescendant={open() && active() >= 0 ? `${id}-${active()}` : undefined} value={p.value}
       onFocus={() => { show(); setActive(-1); }} onBlur={() => setOpen(false)}
       onInput={e => { p.onInput(e.currentTarget.value); show(); setActive(-1); }}

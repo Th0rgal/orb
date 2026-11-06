@@ -275,7 +275,7 @@ export function SkillPage(p: { name: string; initialView?: "edit" | "history"; o
           <Show when={editable()}>
             <Show when={newFile() !== null} fallback={<button type="button" class="s-btn sm quiet skills-file-add" onClick={() => setNewFile("references/")}><Ic.PlusIcon size={12} /> New file</button>}>
               <form class="skills-file-new" onSubmit={(e) => { e.preventDefault(); void createFile(); }}>
-                <input class="s-input" aria-label="New file path" value={newFile() ?? ""} autofocus onInput={(e) => setNewFile(e.currentTarget.value)} onBlur={() => void createFile()} />
+                <input class="s-input" autocapitalize="off" autocorrect="off" spellcheck={false} aria-label="New file path" value={newFile() ?? ""} autofocus onInput={(e) => setNewFile(e.currentTarget.value)} onBlur={() => void createFile()} />
               </form>
             </Show>
           </Show>

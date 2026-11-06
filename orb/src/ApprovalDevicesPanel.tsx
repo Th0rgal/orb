@@ -136,6 +136,9 @@ export function ApprovalDevicesPanel(p: { onError: (message: string) => void }) 
             <div class="s-row-ctrl bw-binding-ctrl">
               <input
                 class="s-input bw-mono"
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck={false}
                 placeholder="One-time code"
                 value={code()}
                 onInput={(e) => setCode(e.currentTarget.value)}

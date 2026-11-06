@@ -660,6 +660,9 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                     <input
                       class="s-input bw-search-input"
                       type="search"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      spellcheck={false}
                       placeholder="Filter secrets"
                       aria-label="Filter secrets by name, ID, or note"
                       value={search()}
@@ -952,6 +955,9 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                   <textarea
                     class={`s-input bw-textarea bw-mono ${showDraftValue() ? "" : "bw-masked-textarea"}`}
                     rows={4}
+                    autocapitalize="off"
+                    autocorrect="off"
+                    spellcheck={false}
                     placeholder="Secret value…"
                     value={secretValueDraft()}
                     disabled={savingSecret()}

@@ -38,6 +38,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.animation.animateContentSize
 import androidx.compose.ui.platform.testTag
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -3296,6 +3298,7 @@ fun OrbConversationPage(
                         textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
                         cursorBrush = SolidColor(Color.White),
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -4122,6 +4125,7 @@ fun OrbAgentPickerSheet(
                                     textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
                                     cursorBrush = SolidColor(Color.White),
                                     singleLine = true,
+                                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                                     modifier = Modifier.fillMaxWidth()
                                 )
                             }
@@ -4358,6 +4362,7 @@ fun OrbAgentPickerSheet(
                         textStyle = TextStyle(color = Color.White, fontSize = 14.sp, fontFamily = FontFamily.Monospace),
                         cursorBrush = SolidColor(Color.White),
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -4390,6 +4395,7 @@ fun OrbAgentPickerSheet(
                             textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
                             cursorBrush = SolidColor(Color.White),
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
@@ -4410,6 +4416,7 @@ fun OrbAgentPickerSheet(
                             textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
                             cursorBrush = SolidColor(Color.White),
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                             modifier = Modifier.fillMaxWidth()
                         )
                     }

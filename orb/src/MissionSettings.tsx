@@ -720,6 +720,9 @@ export function MissionSettings(p: {
                       id="ms-bw-tpm"
                       aria-label="Tokens per minute"
                       class="s-input ms-num-input"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      spellcheck={false}
                       placeholder="120000"
                       value={bwTokensDraft()}
                       disabled={busy()}

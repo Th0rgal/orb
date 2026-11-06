@@ -455,6 +455,9 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
           <input
             class="s-input"
             id="routing-chain-name"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck={false}
             value={draft().name}
             onInput={(e) => change({ name: e.currentTarget.value })}
           />
@@ -465,6 +468,9 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
           Chain ID
           <input
             class="s-input"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck={false}
             disabled={editing() !== ""}
             value={draft().id}
             onInput={(e) => change({ id: e.currentTarget.value })}

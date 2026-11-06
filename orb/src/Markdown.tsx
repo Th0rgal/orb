@@ -1266,6 +1266,8 @@ export function MdSource(p: { text: string; onInput: (t: string) => void; readOn
         class="md-ta"
         readOnly={p.readOnly}
         value={p.text}
+        autocapitalize="off"
+        autocorrect="off"
         spellcheck={false}
         onScroll={sync}
         onInput={(e) => {

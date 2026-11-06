@@ -1733,6 +1733,9 @@ export default function App() {
                       queueMicrotask(() => el.focus({ preventScroll: true }));
                     }}
                     type="text"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    spellcheck={false}
                     aria-label="Search conversations and messages"
                     value={searchQuery()}
                     onInput={e => setSearchQuery(e.currentTarget.value)}

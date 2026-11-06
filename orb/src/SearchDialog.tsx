@@ -679,6 +679,8 @@ export default function SearchDialog(p: SearchDialogProps) {
                   placeholder="Search conversations and messages…"
                   value={p.query}
                   autocomplete="off"
+                  autocapitalize="off"
+                  autocorrect="off"
                   spellcheck={false}
                   onCompositionStart={() => {
                     composing = true;

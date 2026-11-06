@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { createSignal, Show } from "solid-js";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
-import { ConfirmDialog, Dialog, NameDialog } from "../src/Dialog";
+import { ConfirmDialog, Dialog, Field, NameDialog } from "../src/Dialog";
 import { SchedulePicker } from "../src/SchedulePicker";
 import { hasFocusScope } from "../src/focusScope";
 import { useTooltip } from "../src/Tooltip";
@@ -154,10 +154,23 @@ describe("shared modal behavior", () => {
   });
 });
 
-it("associates field errors and prevents IME submission", () => {
+it("associates field errors, disables auto-capitalization/autocorrect on naming and single-line fields, and prevents IME submission", () => {
   const action = vi.fn();
-  render(() => <NameDialog title="Rename agent" label="Agent name" value="Notes" error="Choose another name" onInput={() => {}} action="Rename" onAction={action} onClose={() => {}}/>);
-  const input = screen.getByLabelText("Agent name");
+  render(() => <>
+    <NameDialog title="Rename agent" label="Mission name" value="ffmpeg" error="Choose another name" onInput={() => {}} action="Rename" onAction={action} onClose={() => {}}/>
+    <Field label="Account label"><input class="s-input" /></Field>
+    <Field label="Notes"><textarea class="s-input" /></Field>
+  </>);
+  const input = screen.getByLabelText("Mission name") as HTMLInputElement;
+  expect(input.getAttribute("autocapitalize")).toBe("off");
+  expect(input.getAttribute("autocorrect")).toBe("off");
+  expect(input.getAttribute("spellcheck")).toBe("false");
+  const accountInput = screen.getByLabelText("Account label") as HTMLInputElement;
+  expect(accountInput.getAttribute("autocapitalize")).toBe("off");
+  expect(accountInput.getAttribute("autocorrect")).toBe("off");
+  expect(accountInput.getAttribute("spellcheck")).toBe("false");
+  const notesTextarea = screen.getByLabelText("Notes") as HTMLTextAreaElement;
+  expect(notesTextarea.hasAttribute("autocapitalize")).toBe(false);
   expect(input.getAttribute("aria-invalid")).toBe("true");
   expect(document.getElementById(input.getAttribute("aria-describedby")!)?.textContent).toContain("Choose another name");
   fireEvent.compositionStart(input); fireEvent.keyDown(input, {key:"Escape", isComposing:true}); fireEvent.submit(input.closest("form")!);

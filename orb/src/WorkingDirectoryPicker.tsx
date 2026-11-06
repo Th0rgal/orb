@@ -426,6 +426,9 @@ export function WorkingDirectoryPicker(p: {
             <div class="directory-input-row">
               <input
                 ref={pathInputRef}
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck={false}
                 aria-label="Folder path"
                 value={p.value}
                 placeholder={resolvedDir() ? `${resolvedDir()} (default)` : "Default directory or /path/to/folder"}
@@ -477,6 +480,9 @@ export function WorkingDirectoryPicker(p: {
             <div class="directory-new-folder">
               <input
                 ref={newFolderInputRef}
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck={false}
                 aria-label="New folder name"
                 placeholder="New folder name…"
                 value={newFolderName()}

@@ -890,7 +890,7 @@ struct OrbMissionSettingsSheet: View {
                             HStack {
                                 Text("Tokens / min")
                                 Spacer()
-                                TextField("e.g. 120k", text: $bwTokensDraft)
+                                TextField("e.g. 120k", text: $bwTokensDraft).textInputAutocapitalization(.never).autocorrectionDisabled()
                                     .multilineTextAlignment(.trailing)
                                     .frame(maxWidth: 130)
                                     .accessibilityIdentifier("mission.settings.bandwidth.tpm")

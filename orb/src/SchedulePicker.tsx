@@ -208,6 +208,8 @@ export function SchedulePicker(p: { value: string; onChange: (v: string) => void
         <Match when={mode() === "custom"}>
           <input
             aria-label="Schedule expression" class="s-input sp-raw"
+            autocapitalize="off"
+            autocorrect="off"
             spellcheck={false}
             placeholder="0 9 * * 1-5"
             value={p.value}

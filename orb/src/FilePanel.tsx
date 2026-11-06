@@ -1067,6 +1067,9 @@ export function FilePanelProvider(p: {
                 <Show when={search() !== null}>
                   <input
                     ref={searchInput}
+                    autocapitalize="off"
+                    autocorrect="off"
+                    spellcheck={false}
                     aria-label="Find file by name or path"
                     placeholder="Find file by name or path…"
                     value={search() ?? ""}

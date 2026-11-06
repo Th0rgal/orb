@@ -27,6 +27,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
@@ -995,6 +997,7 @@ fun OrbHomeScreen(
                             textStyle = TextStyle(color = Color.White, fontSize = 15.sp),
                             cursorBrush = SolidColor(Color.White),
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
@@ -1040,6 +1043,7 @@ fun OrbHomeScreen(
                             textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
                             cursorBrush = SolidColor(Color.White),
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
@@ -1098,6 +1102,7 @@ fun OrbHomeScreen(
                         textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
                         cursorBrush = SolidColor(Color.White),
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -2198,6 +2203,7 @@ fun OrbProjectPage(
                         textStyle = TextStyle(color = Color.White, fontSize = 15.sp),
                         cursorBrush = SolidColor(Color.White),
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -2255,6 +2261,7 @@ fun OrbProjectPage(
                         textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
                         cursorBrush = SolidColor(Color.White),
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -2358,6 +2365,7 @@ fun OrbProjectPage(
                         textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
                         cursorBrush = SolidColor(Color.White),
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -2403,6 +2411,7 @@ fun OrbProjectPage(
                         textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
                         cursorBrush = SolidColor(Color.White),
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -2456,6 +2465,7 @@ fun OrbProjectPage(
                             textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
                             cursorBrush = SolidColor(Color.White),
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                             modifier = Modifier.fillMaxWidth()
                         )
                     }

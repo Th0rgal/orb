@@ -205,7 +205,7 @@ export function ProxyApiKeys() {
             {copied() === "key" ? <span role="status">Copied</span> : "Copy key"}
           </button></div>
         </>}>
-          <label>Key name<input class="s-input" autofocus placeholder="Cursor, CI pipeline…" value={name()} disabled={busy()} onInput={e => setName(e.currentTarget.value)} /></label>
+          <label>Key name<input class="s-input" autofocus autocapitalize="off" autocorrect="off" spellcheck={false} placeholder="Cursor, CI pipeline…" value={name()} disabled={busy()} onInput={e => setName(e.currentTarget.value)} /></label>
         </Show>
         <div class="routing-actions proxy-key-footer">
           <button class="s-btn" type="button" disabled={busy()} onClick={closePanel}>{created() ? "Done" : "Cancel"}</button>

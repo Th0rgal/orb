@@ -41,7 +41,7 @@ export function Picker(p: {
         e.preventDefault(); e.stopPropagation(); move(e.key === "ArrowUp" || e.key === "End" ? -1 : 1, e.key === "Home" ? "first" : e.key === "End" ? "last" : undefined);
       } else if ((e.key === "Enter" || (e.key === " " && e.target !== search)) && (e.target === search || (e.target as HTMLElement).closest('[role="option"]'))) {e.preventDefault(); e.stopPropagation(); choose(active());}
     }}>
-    <Show when={p.searchable !== false}><input ref={search} class="picker-search" role="combobox" aria-label={p.searchLabel ?? `Search ${p.label.toLowerCase()}`} aria-expanded="true" aria-controls={id} aria-autocomplete="list" aria-activedescendant={active() >= 0 ? `${id}-${active()}` : undefined} placeholder={`${p.searchLabel ?? "Search"}…`} value={query()} onInput={e => setQuery(e.currentTarget.value)}/></Show>
+    <Show when={p.searchable !== false}><input ref={search} class="picker-search" role="combobox" autocapitalize="off" autocorrect="off" spellcheck={false} aria-label={p.searchLabel ?? `Search ${p.label.toLowerCase()}`} aria-expanded="true" aria-controls={id} aria-autocomplete="list" aria-activedescendant={active() >= 0 ? `${id}-${active()}` : undefined} placeholder={`${p.searchLabel ?? "Search"}…`} value={query()} onInput={e => setQuery(e.currentTarget.value)}/></Show>
     <Show when={!p.loading} fallback={<div class="picker-state" role="status">Loading…</div>}>
       <Show when={!p.error} fallback={<div class="picker-state" role="alert">{p.error}<Show when={p.onRetry}><button class="dlg-button" onClick={p.onRetry}>Try again</button></Show></div>}>
         <div class="picker-list" role="listbox" id={id} aria-label={p.label}>

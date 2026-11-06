@@ -163,7 +163,7 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
         <Show when={repo()}><div class="na-drop" onPointerDown={e => e.stopPropagation()}>
           <button class="na-drop-btn" aria-label="Git reference" aria-haspopup="dialog" aria-expanded={open() === 'reference'} disabled={busy()} onClick={e => {e.currentTarget.focus(); setOpen(open() === 'reference' ? null : 'reference');}}>{ref() || 'Default branch'}<Ic.ChevronDown size={12}/></button>
           <Show when={open() === 'reference'}><AgentChoiceMenu label="Git reference" meta dialog onClose={close}>
-            <input class="project-search" aria-label="Branch or Git reference" placeholder="Default branch" value={ref()} onInput={e => setRef(e.currentTarget.value)} onKeyDown={e => {if(e.key === 'Enter'){e.preventDefault(); close();}}}/>
+            <input class="project-search" autocapitalize="off" autocorrect="off" spellcheck={false} aria-label="Branch or Git reference" placeholder="Default branch" value={ref()} onInput={e => setRef(e.currentTarget.value)} onKeyDown={e => {if(e.key === 'Enter'){e.preventDefault(); close();}}}/>
             <button class="menu-item" onClick={close}>Use {ref() || 'default branch'}</button>
           </AgentChoiceMenu></Show>
         </div></Show>

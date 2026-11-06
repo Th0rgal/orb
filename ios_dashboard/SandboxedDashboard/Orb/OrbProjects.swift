@@ -530,11 +530,11 @@ struct OrbHome: View {
                 SetupSheet(onComplete: { changingServer = false; Task { await load() } }, allowsDismissal: true)
             }
             .alert("New project", isPresented: $creating) {
-                TextField("Project name", text: $name)
+                TextField("Project name", text: $name).textInputAutocapitalization(.never).autocorrectionDisabled()
                 Button("Create") { Task { await create() } }; Button("Cancel", role: .cancel) {}
             }
             .alert("Rename project", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
-                TextField("Name", text: $renamedTitle)
+                TextField("Name", text: $renamedTitle).textInputAutocapitalization(.never).autocorrectionDisabled()
                 Button("Save") { if let project = renaming { Task { do { _ = try await api.call("/api/projects", method: "PUT", body: .object(["slug": .string(project.id), "title": .string(renamedTitle)])); await load() } catch { self.error = error.localizedDescription } } } }
                 Button("Cancel", role: .cancel) {}
             }
@@ -1546,7 +1546,7 @@ struct OrbProjectPage: View {
                 }
             }
             .alert(newFolderParent.isEmpty ? "New folder" : "New subfolder in \(Self.folderBaseName(newFolderParent))", isPresented: $newFolder) {
-                TextField("Folder name", text: $folderName)
+                TextField("Folder name", text: $folderName).textInputAutocapitalization(.never).autocorrectionDisabled()
                 Button("Create") { Task { await mkdir() } }
                 Button("Cancel", role: .cancel) { newFolderParent = ""; folderName = "" }
             }
@@ -1555,13 +1555,13 @@ struct OrbProjectPage: View {
                     .presentationDetents([.medium, .large])
             }
             .alert("Rename conversation", isPresented: Binding(get: { renamingMission != nil }, set: { if !$0 { renamingMission = nil } })) {
-                TextField("Title", text: $missionTitleDraft)
+                TextField("Title", text: $missionTitleDraft).textInputAutocapitalization(.never).autocorrectionDisabled()
                 Button("Save") { if let row = renamingMission { Task { await renameMission(row, to: missionTitleDraft) } } }
                 Button("Cancel", role: .cancel) { renamingMission = nil }
             }
             .safeAreaInset(edge: .bottom) { OrbMoveBanner() }
             .alert("Rename folder", isPresented: Binding(get: { renamingFolder != nil }, set: { if !$0 { renamingFolder = nil } })) {
-                TextField("Folder name", text: $renameFolderDraft)
+                TextField("Folder name", text: $renameFolderDraft).textInputAutocapitalization(.never).autocorrectionDisabled()
                 Button("Rename") {
                     if let folder = renamingFolder {
                         Task { await renameFolder(folder, to: renameFolderDraft) }
@@ -1570,7 +1570,7 @@ struct OrbProjectPage: View {
                 Button("Cancel", role: .cancel) { renamingFolder = nil }
             }
             .alert("Move folder", isPresented: Binding(get: { movingFolder != nil }, set: { if !$0 { movingFolder = nil } })) {
-                TextField("Destination folder (empty for root)", text: $moveFolderDraft)
+                TextField("Destination folder (empty for root)", text: $moveFolderDraft).textInputAutocapitalization(.never).autocorrectionDisabled()
                 Button("Move") {
                     if let folder = movingFolder {
                         Task { await moveFolder(folder, into: moveFolderDraft) }

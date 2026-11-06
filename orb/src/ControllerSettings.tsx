@@ -224,7 +224,7 @@ export function CronForm(p: {
       <fieldset class="cs-fieldset" disabled={saving()}>
       <Section title="Schedule">
         <Row title="Name">
-          <input aria-label="Name" class="s-input cs-input" value={draft.name} onInput={(e) => setDraft("name", e.currentTarget.value)} />
+          <input aria-label="Name" class="s-input cs-input" autocapitalize="off" autocorrect="off" spellcheck={false} value={draft.name} onInput={(e) => setDraft("name", e.currentTarget.value)} />
         </Row>
         <Row title="Runs">
           <SchedulePicker value={draft.schedule} onChange={(v) => setDraft("schedule", v)} />
@@ -239,7 +239,7 @@ export function CronForm(p: {
           />
         </Row>
         <Row title="Deliver to" desc={deliveryHint()}>
-          <input class="s-input cs-input" placeholder={`project:${p.view.slug}`} aria-label="Delivery" value={draft.deliver} onInput={(e) => setDraft("deliver", e.currentTarget.value)} />
+          <input class="s-input cs-input" autocapitalize="off" autocorrect="off" spellcheck={false} placeholder={`project:${p.view.slug}`} aria-label="Delivery" value={draft.deliver} onInput={(e) => setDraft("deliver", e.currentTarget.value)} />
         </Row>
       </Section>
 
@@ -257,6 +257,8 @@ export function CronForm(p: {
               <textarea
                 aria-label="Script"
                 class="cs-prompt cs-script"
+                autocapitalize="off"
+                autocorrect="off"
                 spellcheck={false}
                 placeholder={settings()?.script_content == null ? `Script ${scriptName()} on Hermes host` : undefined}
                 value={draft.script_content}
@@ -308,6 +310,9 @@ export function CronForm(p: {
           </For>
           <input
             class="cs-skill-input"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck={false}
             list="orb-known-skills"
             placeholder={draft.skills.length ? "Add skill" : "No skills attached. Add one"}
             value={skillInput()}
@@ -334,13 +339,13 @@ export function CronForm(p: {
       <Section title="Execution overrides" hint="Optional Hermes execution and delivery overrides.">
 
         <Row title="Model" desc={settings()?.model_snapshot ? `Saved default: ${settings()!.model_snapshot}` : undefined}>
-          <input class="s-input cs-input" placeholder={settings()?.model_snapshot ? "No override" : "Hermes default"} aria-label="Model" value={draft.model} onInput={(e) => setDraft("model", e.currentTarget.value)} />
+          <input class="s-input cs-input" autocapitalize="off" autocorrect="off" spellcheck={false} placeholder={settings()?.model_snapshot ? "No override" : "Hermes default"} aria-label="Model" value={draft.model} onInput={(e) => setDraft("model", e.currentTarget.value)} />
         </Row>
         <Row title="Provider" desc={settings()?.provider_snapshot ? `Saved default: ${settings()!.provider_snapshot}` : undefined}>
-          <input class="s-input cs-input" placeholder={settings()?.provider_snapshot ? "No override" : "Hermes default"} aria-label="Provider" value={draft.provider} onInput={(e) => setDraft("provider", e.currentTarget.value)} />
+          <input class="s-input cs-input" autocapitalize="off" autocorrect="off" spellcheck={false} placeholder={settings()?.provider_snapshot ? "No override" : "Hermes default"} aria-label="Provider" value={draft.provider} onInput={(e) => setDraft("provider", e.currentTarget.value)} />
         </Row>
-        <Row title="Failure delivery"><input class="s-input cs-input" placeholder="Same as delivery" aria-label="Failure delivery" value={draft.failure_deliver} onInput={(e) => setDraft("failure_deliver", e.currentTarget.value)} /></Row>
-        <Row title="Working directory"><input class="s-input cs-input" placeholder="Hermes default" aria-label="Working directory" value={draft.workdir} onInput={(e) => setDraft("workdir", e.currentTarget.value)} /></Row>
+        <Row title="Failure delivery"><input class="s-input cs-input" autocapitalize="off" autocorrect="off" spellcheck={false} placeholder="Same as delivery" aria-label="Failure delivery" value={draft.failure_deliver} onInput={(e) => setDraft("failure_deliver", e.currentTarget.value)} /></Row>
+        <Row title="Working directory"><input class="s-input cs-input" autocapitalize="off" autocorrect="off" spellcheck={false} placeholder="Hermes default" aria-label="Working directory" value={draft.workdir} onInput={(e) => setDraft("workdir", e.currentTarget.value)} /></Row>
         <Row title="Reasoning"><Select aria-label="Reasoning" class="s-input cs-input" value={draft.reasoning_effort} onChange={(e) => setDraft("reasoning_effort", e.currentTarget.value)}>
           <option value="">Hermes default</option><For each={["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]}>{(effort) => <option value={effort}>{effort}</option>}</For>
         </Select></Row>

@@ -131,12 +131,12 @@ struct OrbDocuments: View {
             }
         }
         .alert(newFolderParent.isEmpty ? "New folder" : "New subfolder in \(Self.baseName(newFolderParent))", isPresented: $creatingFolder) {
-            TextField("Folder name", text: $newFolderName)
+            TextField("Folder name", text: $newFolderName).textInputAutocapitalization(.never).autocorrectionDisabled()
             Button("Create") { Task { await createFolder() } }
             Button("Cancel", role: .cancel) { newFolderName = "" }
         }
         .alert(renamingIsDir ? "Rename folder" : "Rename file", isPresented: Binding(get: { renamingPath != nil }, set: { if !$0 { renamingPath = nil } })) {
-            TextField(renamingIsDir ? "Folder name" : "File name", text: $renameDraft)
+            TextField(renamingIsDir ? "Folder name" : "File name", text: $renameDraft).textInputAutocapitalization(.never).autocorrectionDisabled()
             Button("Rename") {
                 if let target = renamingPath {
                     Task { await renameItem(target, to: renameDraft) }
@@ -145,7 +145,7 @@ struct OrbDocuments: View {
             Button("Cancel", role: .cancel) { renamingPath = nil }
         }
         .alert(movingIsDir ? "Move folder" : "Move file", isPresented: Binding(get: { movingPath != nil }, set: { if !$0 { movingPath = nil } })) {
-            TextField("Destination folder (empty for root)", text: $moveDraft)
+            TextField("Destination folder (empty for root)", text: $moveDraft).textInputAutocapitalization(.never).autocorrectionDisabled()
             Button("Move") {
                 if let target = movingPath {
                     Task { await moveItem(target, into: moveDraft) }
