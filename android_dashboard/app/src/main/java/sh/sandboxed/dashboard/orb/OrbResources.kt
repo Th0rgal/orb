@@ -302,11 +302,20 @@ object OrbResourcesModel {
         width: Double,
         height: Double,
         metric: Metric,
-        marginX: Double = 80.0,
-        marginY: Double = 10.0,
+        marginX: Double? = null,
+        marginY: Double? = null,
+        density: Double = 1.0,
     ): SankeyLayoutResult {
-        val nodeWidth = 10.0
-        val nodePadding = 10.0
+        val scale = max(0.5, density)
+        val effMarginX = marginX ?: (80.0 * scale)
+        val effMarginY = marginY ?: (10.0 * scale)
+        val nodeWidth = 10.0 * scale
+        val nodePadding = 10.0 * scale
+        val minNodeH = 6.0 * scale
+        val minDrawnNodeH = 4.0 * scale
+        val singleLabelHalfH = 8.0 * scale
+        val twoLineLabelHalfH = 12.0 * scale
+        val labelGap = 3.0 * scale
         val maxCol = inputNodes.maxOfOrNull { it.column } ?: 1
         val columns = max(2, maxCol + 1)
 
@@ -342,8 +351,8 @@ object OrbResourcesModel {
             }
         }
 
-        val innerW = max(60.0, width - marginX * 2.0 - nodeWidth)
-        val innerH = max(60.0, height - marginY * 2.0)
+        val innerW = max(60.0 * scale, width - effMarginX * 2.0 - nodeWidth)
+        val innerH = max(60.0 * scale, height - effMarginY * 2.0)
 
         val cols = Array(columns) { mutableListOf<SankeyLayoutNode>() }
         val nodeMap = mutableMapOf<String, SankeyLayoutNode>()
@@ -353,7 +362,7 @@ object OrbResourcesModel {
             val rVal = max(max(rawIn[n.id] ?: 0.0, rawOut[n.id] ?: 0.0), n.fallbackValue)
             val uVal = max(max(usdIn[n.id] ?: 0.0, usdOut[n.id] ?: 0.0), n.fallbackUsd)
             val active = if (metric == Metric.Usd) uVal else rVal
-            val x0 = marginX + (n.column.toDouble() / max(1, columns - 1).toDouble()) * innerW
+            val x0 = effMarginX + (n.column.toDouble() / max(1, columns - 1).toDouble()) * innerW
             cols[n.column].add(
                 SankeyLayoutNode(
                     id = n.id,
@@ -388,7 +397,7 @@ object OrbResourcesModel {
             }
             val sumVal = col.sumOf { max(0.0, it.value) }
             val padTotal = max(0, col.size - 1) * nodePadding
-            val availH = max(32.0, innerH - padTotal)
+            val availH = max(32.0 * scale, innerH - padTotal)
             if (sumVal > 0.0) sharedScale = min(sharedScale, availH / sumVal)
         }
         if (!sharedScale.isFinite() || sharedScale <= 0.0) sharedScale = 1.0
@@ -396,19 +405,21 @@ object OrbResourcesModel {
         for (c in 0 until columns) {
             val col = cols[c]
             if (col.isEmpty()) continue
-            val heights = col.map { max(6.0, it.value * sharedScale) }
+            val heights = col.map { max(minNodeH, it.value * sharedScale) }
             val rawColH = heights.sum() + max(0, col.size - 1) * nodePadding
             val compress = if (rawColH > innerH) innerH / rawColH else 1.0
             val effPad = nodePadding * compress
             val finalH = heights.sumOf { it * compress } + max(0, col.size - 1) * effPad
-            var cursorY = marginY + max(0.0, (innerH - finalH) / 2.0)
+            var cursorY = effMarginY + max(0.0, (innerH - finalH) / 2.0)
             var lastLabelBottom = Double.NEGATIVE_INFINITY
             for (i in col.indices) {
-                val h = max(4.0, heights[i] * compress)
+                val h = max(minDrawnNodeH, heights[i] * compress)
                 val midY = cursorY + h / 2.0
-                if (midY - 7.0 >= lastLabelBottom + 2.0) {
+                val hasSub = (c == 0 || c == columns - 1) && h >= 24.0 * scale
+                val labelHalfH = if (hasSub) twoLineLabelHalfH else singleLabelHalfH
+                if (midY - labelHalfH >= lastLabelBottom + labelGap) {
                     col[i].showLabel = true
-                    lastLabelBottom = midY + 7.0
+                    lastLabelBottom = midY + labelHalfH
                 } else {
                     col[i].showLabel = false
                 }
@@ -433,7 +444,7 @@ object OrbResourcesModel {
         for ((srcId, list) in outBySource) {
             val src = nodeMap[srcId] ?: continue
             list.sortBy { nodeMap[it.target]?.y0 ?: 0.0 }
-            val nodeH = max(4.0, src.y1 - src.y0)
+            val nodeH = max(minDrawnNodeH, src.y1 - src.y0)
             val sumM = list.sumOf { max(1e-6, if (metric == Metric.Usd) it.estUsdPerH else it.value) }
             var off = src.y0
             for (l in list) {
@@ -448,7 +459,7 @@ object OrbResourcesModel {
         for ((dstId, list) in inByTarget) {
             val dst = nodeMap[dstId] ?: continue
             list.sortBy { nodeMap[it.source]?.y0 ?: 0.0 }
-            val nodeH = max(4.0, dst.y1 - dst.y0)
+            val nodeH = max(minDrawnNodeH, dst.y1 - dst.y0)
             val sumM = list.sumOf { max(1e-6, if (metric == Metric.Usd) it.estUsdPerH else it.value) }
             var off = dst.y0
             for (l in list) {
@@ -478,8 +489,8 @@ object OrbResourcesModel {
                     targetX = dst.x0,
                     y0 = y0,
                     y1 = y1,
-                    sourceWidth = max(1.5, sw),
-                    width = max(1.5, w),
+                    sourceWidth = max(1.5 * scale, sw),
+                    width = max(1.5 * scale, w),
                 ),
             )
         }
@@ -1079,7 +1090,7 @@ private fun DrawScope.drawSankeyDiagram(
     val padPx = 6.dp.toPx()
 
     for (node in layout.nodes) {
-        val nodeH = max(4.0, node.y1 - node.y0).toFloat()
+        val nodeH = max(4.dp.toPx(), (node.y1 - node.y0).toFloat())
         drawRoundRect(
             color = OrbResourcesModel.parseColor(node.colorHex),
             topLeft = Offset(node.x0.toFloat(), node.y0.toFloat()),
@@ -1402,6 +1413,7 @@ private fun FleetSankeyCard(
                     metric = metric,
                     marginX = edgeMargin,
                     marginY = 12.dp.toPx().toDouble(),
+                    density = density.toDouble(),
                 )
                 val wide = size.width > 500.dp.toPx()
                 drawSankeyDiagram(
@@ -1693,6 +1705,7 @@ private fun MissionFlowCard(
                     metric = metric,
                     marginX = edgeMargin,
                     marginY = 12.dp.toPx().toDouble(),
+                    density = density.toDouble(),
                 )
                 val wide = size.width > 500.dp.toPx()
                 drawSankeyDiagram(

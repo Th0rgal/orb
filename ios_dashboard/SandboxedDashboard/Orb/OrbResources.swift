@@ -313,12 +313,15 @@ enum OrbResourcesModel {
             let finalH = heights.reduce(0) { $0 + $1 * compress } + Double(max(0, cols[c].count - 1)) * effPad
             var cursorY = marginY + max(0, (innerH - finalH) / 2)
             var lastLabelBottom = -Double.infinity
+            let labelGap = 3.0
             for i in 0..<cols[c].count {
                 let h = max(4.0, heights[i] * compress)
                 let midY = cursorY + h / 2.0
-                if midY - 7.0 >= lastLabelBottom + 2.0 {
+                let hasSub = (c == 0 || c == columns - 1) && h >= 24.0
+                let labelHalfH = hasSub ? 12.0 : 8.0
+                if midY - labelHalfH >= lastLabelBottom + labelGap {
                     cols[c][i].showLabel = true
-                    lastLabelBottom = midY + 7.0
+                    lastLabelBottom = midY + labelHalfH
                 } else {
                     cols[c][i].showLabel = false
                 }

@@ -110,4 +110,40 @@ final class OrbResourcesTests: XCTestCase {
             }
         }
     }
+
+    func testSankeySuppressesOverlappingLabelsForDenseSmallMissions() {
+        let weights: [Double] = [100, 1, 1, 1, 1, 1, 1, 1]
+        var nodes: [OrbResourcesModel.SankeyInputNode] = [
+            .init(id: "pool-0", column: 0, label: "Claude Max", sub: "pool", colorHex: "#2f83bf")
+        ]
+        var links: [OrbResourcesModel.SankeyInputLink] = []
+        for (idx, w) in weights.enumerated() {
+            let mid = "m-\(idx)"
+            nodes.append(.init(id: mid, column: 1, label: "Mission \(idx)", sub: "active", colorHex: "#7f5ab6"))
+            links.append(.init(id: "l-\(idx)", source: "pool-0", target: mid, value: w, estUsdPerH: w * 0.5, degraded: false))
+        }
+
+        let layout = OrbResourcesModel.computeSankeyLayout(
+            nodes: nodes,
+            links: links,
+            width: 360,
+            height: 280,
+            metric: .raw,
+            marginX: 100,
+            marginY: 12
+        )
+
+        let col1Visible = layout.nodes.filter { $0.column == 1 && $0.showLabel }
+        XCTAssertGreaterThanOrEqual(col1Visible.count, 2)
+        XCTAssertLessThan(col1Visible.count, weights.count)
+        for i in 1..<col1Visible.count {
+            let prev = col1Visible[i - 1]
+            let curr = col1Visible[i]
+            let prevMid = (prev.y0 + prev.y1) / 2.0
+            let currMid = (curr.y0 + curr.y1) / 2.0
+            let prevHalf = (prev.y1 - prev.y0 >= 24.0) ? 12.0 : 8.0
+            let currHalf = (curr.y1 - curr.y0 >= 24.0) ? 12.0 : 8.0
+            XCTAssertGreaterThanOrEqual(currMid - currHalf, prevMid + prevHalf + 3.0 - 1e-6)
+        }
+    }
 }

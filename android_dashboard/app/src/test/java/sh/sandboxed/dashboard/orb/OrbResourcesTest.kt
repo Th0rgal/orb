@@ -113,4 +113,68 @@ class OrbResourcesTest {
             }
         }
     }
+
+    @Test
+    fun sankeySuppressesOverlappingLabelsAtHighDensity() {
+        val density = 3.0
+        val weights = listOf(100.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+        val nodes = mutableListOf(
+            OrbResourcesModel.SankeyInputNode(
+                id = "pool-0",
+                column = 0,
+                label = "Claude Max",
+                sub = "pool",
+                colorHex = "#2f83bf",
+            ),
+        )
+        val links = mutableListOf<OrbResourcesModel.SankeyInputLink>()
+        weights.forEachIndexed { idx, w ->
+            val mid = "m-$idx"
+            nodes.add(
+                OrbResourcesModel.SankeyInputNode(
+                    id = mid,
+                    column = 1,
+                    label = "Mission $idx",
+                    sub = "active",
+                    colorHex = "#7f5ab6",
+                ),
+            )
+            links.add(
+                OrbResourcesModel.SankeyInputLink(
+                    id = "l-$idx",
+                    source = "pool-0",
+                    target = mid,
+                    value = w,
+                    estUsdPerH = w * 0.5,
+                    degraded = false,
+                ),
+            )
+        }
+
+        val layout = OrbResourcesModel.computeSankeyLayout(
+            inputNodes = nodes,
+            inputLinks = links,
+            width = 360.0 * density,
+            height = 280.0 * density,
+            metric = OrbResourcesModel.Metric.Raw,
+            marginX = 100.0 * density,
+            marginY = 12.0 * density,
+            density = density,
+        )
+
+        val col1Visible = layout.nodes.filter { it.column == 1 && it.showLabel }
+        assertTrue(col1Visible.size in 2 until weights.size)
+        for (i in 1 until col1Visible.size) {
+            val prev = col1Visible[i - 1]
+            val curr = col1Visible[i]
+            val prevMid = (prev.y0 + prev.y1) / 2.0
+            val currMid = (curr.y0 + curr.y1) / 2.0
+            val prevHalf = if (prev.y1 - prev.y0 >= 24.0 * density) 12.0 * density else 8.0 * density
+            val currHalf = if (curr.y1 - curr.y0 >= 24.0 * density) 12.0 * density else 8.0 * density
+            assertTrue(
+                "Expected non-overlapping pixel bounds at 3x density, got prevMid=$prevMid currMid=$currMid",
+                currMid - currHalf >= prevMid + prevHalf + 3.0 * density - 1e-6,
+            )
+        }
+    }
 }
