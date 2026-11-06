@@ -184,9 +184,12 @@ describe("unified workspace ErrorToast & Toaster", () => {
     try {
       render(() => <CloudProviders />);
       await vi.waitFor(() => expect(screen.getByText("Couldn’t load cloud accounts")).toBeTruthy());
+      expect(screen.queryByText("No cloud accounts configured.")).toBeNull();
 
       fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
       expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByText("No cloud accounts configured.")).toBeNull();
+      expect(screen.getByText("Cloud accounts could not be loaded.")).toBeTruthy();
 
       // Background 60s poll stays suppressed when the same failure persists.
       await vi.advanceTimersByTimeAsync(60_000);

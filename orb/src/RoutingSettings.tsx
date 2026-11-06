@@ -640,7 +640,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                 New chain
               </button>
             </div>
-            <Show when={!loading() && !chains().length}>
+            <Show when={!loading() && !errors()["Fallback Chains"] && !chains().length}>
               <p class="routing-muted">
                 No chains configured. The backend creates builtin/smart when
                 first needed.
@@ -733,10 +733,12 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
             <Show
               when={health().length}
               fallback={
-                <p class="routing-muted">
-                  No health data yet. Tracking begins when the proxy handles
-                  requests.
-                </p>
+                <Show when={!loading() && !errors()["Provider Health"]}>
+                  <p class="routing-muted">
+                    No health data yet. Tracking begins when the proxy handles
+                    requests.
+                  </p>
+                </Show>
               }
             >
               <For each={health()}>

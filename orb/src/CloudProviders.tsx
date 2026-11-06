@@ -37,7 +37,8 @@ export function CloudProviders() {
   <ErrorToast error={error()} title="Couldn’t load cloud accounts" background action={{label:'Retry',run:()=>refresh(true)}}/>
   <Show when={loaded()} fallback={<div class="s-row" role="status">Loading cloud accounts…</div>}>
    <For each={services.filter(service=>accounts().some(a=>a.provider===service))}>{service=><CloudProviderRow provider={service} accounts={accounts().filter(a=>a.provider===service)} usage={usage()[accounts().find(a=>a.provider===service)?.id??'']}/>}</For>
-   <Show when={!accounts().length}><div class="s-row"><span class="s-row-desc">No cloud accounts configured.</span></div></Show>
+   <Show when={!error()&&!accounts().length}><div class="s-row"><span class="s-row-desc">No cloud accounts configured.</span></div></Show>
+   <Show when={error()&&!accounts().length}><div class="s-row"><span class="s-row-desc">Cloud accounts could not be loaded.</span><button class="s-btn sm" onClick={()=>void refresh(true)}>Retry</button></div></Show>
   </Show>
  </div></section>;
 }

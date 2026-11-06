@@ -82,7 +82,7 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
   const [repositoriesLoading, setRepositoriesLoading] = createSignal(true);
   const [repo, setRepo] = createSignal(''); const [ref, setRef] = createSignal('');
   const [options, setOptions] = createSignal<{models: {id: string; name?: string; displayName?: string}[]; repos: {url: string}[]}>({models: [], repos: []});
-  const [error, setError] = createSignal(''); const [busy, setBusy] = createSignal(false); const [loaded, setLoaded] = createSignal(false);
+  const [error, setError] = createSignal(''); const [accountsError, setAccountsError] = createSignal(''); const [busy, setBusy] = createSignal(false); const [loaded, setLoaded] = createSignal(false);
   const [launching, setLaunching] = createSignal<CloudLaunchSeed | null>(null);
   const [open, setOpen] = createSignal<string | null>(null);
   const close = () => setOpen(null);
@@ -90,10 +90,12 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
   let explicit = false;
   const account = () => accounts().find(a => a.provider === provider() && a.id === accountId()) ?? accounts().find(a => a.provider === provider() && a.available) ?? accounts().find(a => a.provider === provider());
   const canAttach = () => Boolean(account()?.capabilities.attachments);
-  onMount(async () => {
-    try { const list = await cloudAccounts(); setAccounts(list); if (!explicit) setProvider(defaultCloudProvider(list, readCloudProvider())); }
-    catch(e) { setError(String(e)); } finally { setLoaded(true); }
-  });
+  const loadAccounts = async () => {
+    setAccountsError('');
+    try { const list = await cloudAccounts(); setAccounts(list); setLoaded(true); if (!explicit) setProvider(defaultCloudProvider(list, readCloudProvider())); }
+    catch(e) { setAccountsError(String(e)); }
+  };
+  onMount(() => { void loadAccounts(); });
   const choose = (value: CloudProvider) => {
     explicit = true; writeCloudProvider(value);
     setError(''); setProvider(value); setAccountId(''); setModel(''); setModelParams([]); setRepo(''); setRef('');
@@ -166,8 +168,9 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
           </AgentChoiceMenu></Show>
         </div></Show>
       </div></Show>
-      <Show when={!account()}><p class="cloud-note" role="status">{loaded() ? 'No connected account for this service' : 'Checking connected accounts…'}</p></Show>
+      <Show when={!account()}><p class="cloud-note" role="status">{loaded() ? 'No connected account for this service' : accountsError() ? 'Connected accounts could not be loaded.' : 'Checking connected accounts…'}</p></Show>
       <Show when={account()?.reason && !account()?.available}><p class="cloud-note" role="status">{account()?.reason}</p></Show>
+      <ErrorToast error={accountsError()} title="Couldn’t load cloud accounts" background action={{ label: 'Retry', run: () => loadAccounts() }} />
       <ErrorToast error={error()} title="Couldn’t start the cloud agent" onDismiss={() => setError('')} />
     </div>
   </div></section></>;
