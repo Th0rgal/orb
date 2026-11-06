@@ -191,6 +191,16 @@ jobs:
           pathlib.Path("audit-results/turbo-lean-provenance.json").write_text(json.dumps(receipt, indent=2) + "\n")
           print(json.dumps(receipt, indent=2))
           PYCODE
+      - name: Build and self-test OrbNetLeaf foundation (<= 220 C LOC, zero lean_elab)
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev
+          c_lines=$(wc -l < lean/OrbNetLeaf/c/orb_net_leaf.c)
+          echo "orb_net_leaf.c LOC: $c_lines"
+          test "$c_lines" -le 220
+          (cd lean/OrbNetLeaf && lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-net-leaf-test)
+          elab_syms=$(nm -u lean/OrbNetLeaf/.lake/build/bin/orb-net-leaf-test | grep -c lean_elab || true)
+          test "$elab_syms" -eq 0
       - name: Fresh turbo-lean tightness and horizontal-packing gate
         env:
           TURBO_LEAN_NO_AUDIT_CACHE: "1"
@@ -208,6 +218,10 @@ jobs:
           python3 scripts/check_spec_audit.py audit-results/stream-audit.json
           .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Transcript.lean > audit-results/transcript-audit.json
           python3 scripts/check_spec_audit.py audit-results/transcript-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbNetLeaf/OrbNetLeaf/Spec.lean > audit-results/orb-net-leaf-spec-audit.json
+          python3 scripts/check_spec_audit.py audit-results/orb-net-leaf-spec-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbNetLeaf/OrbNetLeaf/MutantSuite.lean > audit-results/orb-net-leaf-mutant-audit.json
+          python3 scripts/check_spec_audit.py audit-results/orb-net-leaf-mutant-audit.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
