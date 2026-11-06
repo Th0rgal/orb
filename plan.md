@@ -7,7 +7,7 @@ Status: executable campaign plan grounded in `AGENTS.md`, `docs/TRUSTWORTHY_SHAR
 ## 0. Campaign Mandate & Constraints
 
 ### Primary objective
-Eliminate split-brain state, ad-hoc flag/string protocols, TOCTOU races, and shadow-only formalization across `Th0rgal/orb` (`src/`, `crates/orb-spec/`, `lean/Orb/`, `orb/`, `orb/src-tauri/`, `ios_dashboard/`, `android_dashboard/`, `dashboard/`) by establishing:
+Eliminate split-brain state, ad-hoc flag/string protocols, TOCTOU races, and shadow-only formalization across `Th0rgal/orb` (`src/`, `crates/orb-spec/`, `lean/Orb/`, `orb/`, `orb/src-tauri/`, `ios_dashboard/`, `android_dashboard/`) by establishing:
 
 1. **One canonical owner per state** (no competing in-memory maps, duplicate runners, or magic string tags acting as authority).
 2. **One authoritative pure transition function** (`Lean Decides, Rust/Client Does` where pure protocol logic applies; clean single-owner Rust/platform adapters for pure I/O mechanics).
@@ -33,11 +33,11 @@ Eliminate split-brain state, ad-hoc flag/string protocols, TOCTOU races, and sha
 - Cross-client follow-up queue reconciliation, optimistic send retirement by `(id, seq)`, transport epoch/fallback state, transcript patching, scroll policy, and stream block commit.
 - Resource conservation (`ConservedResource`), clock discipline (`ClockDiscipline`), scoped authority (`ScopedAuthority`), and cross-client determinism (`ProjectionStability`).
 
-#### Stays in Rust & platform adapters (`src/`, `orb/`, `orb/src-tauri/`, `ios_dashboard/`, `android_dashboard/`, `dashboard/`)
+#### Stays in Rust & platform adapters (`src/`, `orb/`, `orb/src-tauri/`, `ios_dashboard/`, `android_dashboard/`)
 - SQLite transactions, WAL checkpoints, schema migrations, and CAS queries.
 - Filesystem `fsync`/atomic rename, `flock`, process spawning, `systemd-run`/`systemd-nspawn` scopes, and signals.
 - HTTP/WS/SSE sockets, upstream LLM/cloud-provider requests, Bitwarden/OAuth/FIDO/crypto I/O.
-- SolidJS, SwiftUI, Jetpack Compose, and Next.js rendering, layout measurement, IME/focus, and platform media APIs.
+- SolidJS, SwiftUI, and Jetpack Compose rendering, layout measurement, IME/focus, and platform media APIs.
 
 **Honesty boundary:** Lean proves protocol invariants under explicit environmental and adapter assumptions (`0 import Lean`, `0 sorryAx`). Lean alone does **not** prove SQLite SQL text, OS signal delivery, or third-party provider idempotency; adapters require concurrency, crash-injection, and exact-head integration tests. Keep `ORB_KERNEL_BACKEND=stock-c` decoupled from `LeanNative` compiler-backend switching (`P3` in `docs/TRUSTWORTHY_SHARED_LEAN_ROADMAP.md` remains a separate track).
 
@@ -163,8 +163,8 @@ Every item below must be tracked in `docs/specs/state-machine-inventory.md` (cre
 | **SM-22** | Uploads, Workspaces, MCP Registry, Control MCP & Brokers (`uploads.rs:456-530`, `workspaces.rs:920-961`, `mcp/registry.rs:246-360,1291-1425`, `control_mcp/actions.rs:10-232,531-615`, `approvals.rs`, `secret_broker.rs`, `system.rs:3455-3614`) | Unlocked upload finalization; `ArcSwap` build check-then-set; `McpRegistry` `stdio_processes` vs `states`; `mcp_actions_v1` `reconciliation_required` | **Critical bugs:** `uploads.rs:509-529` deletes `payload.part`/`bitmap.bin` before durable `meta.json`; `workspaces.rs:920-961` TOCTOU admits duplicate builds; `mcp/registry.rs` leaves dead stdio servers `Connected` and leaks children on `tools/list` error | **R1**, R7 |
 | **SM-23** | Desktop Durable Local Message Queue (`orb/src/localMessageQueue.ts:15-95,120-555`) | IndexedDB `QueuedLocalMessage` (`4` states $\times$ 14 optional flags) + tab-local `optimisticallyRemoved` + `WakeupFence` + regex `CONNECTION` retry | Tab-local `optimisticallyRemoved` diverges across multi-window/reload; composite optional flags permit unreachable/stuck combinations | R6 |
 | **SM-24** | Cross-Client Follow-Up Queue & Send Flow (`orb/src/RemoteQueue.tsx:200-251`, `MissionView.tsx:858-869,1085-1280`, `CloudAgents.tsx:226-290`, `OrbSendFlow.swift:35-105`, `OrbSendFlow.kt:26-91`) | Server queue merged with client `pending`/`edits`/`hidden`/`delivered`; 3050ms handover timer; turn-count cloud retirement | **Critical bugs:** `RemoteQueue.tsx:226-244` `DELETE`s tail rows before re-POSTing (data loss on disconnect); `OrbSendFlow.kt` lacks `postedAt`/`seenAfter` guard so `"yes"`/`"continue"` prematurely retires against old turns | **R1**, R6 |
-| **SM-25** | Transcript Reducer & Streaming Renderers (`orb/src/transcriptModel.ts:32-65,285-425`, `missionCache.ts:24-697`, `OrbStreamText.kt:341-468`, `dashboard/.../streaming-markdown.tsx:30-186`, `use-virtual-timeline-anchor.ts:108-136`) | `WeakMap<StreamItem[], TranscriptReducer>`; dual `pendingReplace`+`pending` in Kotlin; raw `/\n\n+/` split & passive scroll unpin in `dashboard/` | Cloning `StreamItem[]` silently resets reducer dedup/tool state; `dashboard/` tears open code fences and unpins scroll on layout growth | R6 |
-| **SM-26** | Sticky Client Transport & Tauri Link Latches (`orb/src/stream.ts:349,565`, `orb/src-tauri/src/client_link.rs:94,404,668`, `local_origin.rs:43,312`, `OrbClient.swift:370-423`, `OrbCore.kt:2085,2280-2285`, `dashboard/src/lib/api.ts:876-906`) | 3-strike permanent mobile WS disable; desktop `everReady` WS lock; `dashboard` cursorless SSE fallback; Tauri process-lifetime `unsupported` & 256-frame ring drop | Transient captive portal/restart permanently disables mobile WS or Tauri journaling until app kill; `dashboard` drops events during WS->SSE fallback; `local_origin` matches `"409"` prose | R6 |
+| **SM-25** | Transcript Reducer & Streaming Renderers (`orb/src/transcriptModel.ts:32-65,285-425`, `missionCache.ts:24-697`, `OrbStreamText.swift`, `OrbStreamText.kt:341-468`) | `WeakMap<StreamItem[], TranscriptReducer>`; dual `pendingReplace`+`pending` in Kotlin (legacy `dashboard/` retired in #1559) | Cloning `StreamItem[]` silently resets reducer dedup/tool state; dual Kotlin stream buffers risk out-of-order block replacement | R6 |
+| **SM-26** | Sticky Client Transport & Tauri Link Latches (`orb/src/stream.ts:349,565`, `orb/src-tauri/src/client_link.rs:94,404,668`, `local_origin.rs:43,312`, `OrbClient.swift:370-423`, `OrbCore.kt:2085,2280-2285`) | 3-strike permanent mobile WS disable; desktop `everReady` WS lock; Tauri process-lifetime `unsupported` & 256-frame ring drop | Transient captive portal/restart permanently disables mobile WS or Tauri journaling until app kill; `local_origin` matches `"409"` prose | R6 |
 | **SM-27** | Inbox Outbox, Dictation, FIDO & UI Overlays (`orb/src/inboxState.ts:41-91`, `NativeInteraction.tsx:26-86`, `overlayLayer.ts:6-45`, `OrbDictation.kt:95-129`, `OrbFido.kt:154-165`) | Serialized localStorage outbox (`pending` blocks `readInboxState`); unjoined `OrbDictation` thread; `OrbFido` unconditional `finally { resolve }`; flat `inerted` map | **Critical bugs:** `inboxState.ts` 409 starves `_versions` refresh; `OrbFido.kt:163` drops unanswered FIDO request on transient network error; `OrbDictation.kt:126` races shared `pcm` buffer on restart | **R1**, R6 |
 
 ---
@@ -328,7 +328,7 @@ All 10 shards below touch **disjoint file footprints** and can run concurrently 
 
 ### Phase R6 — Cross-Client Reconciliation, Transport & Shared WASM/C-ABI Projections
 
-**Goal:** Converge Orb Desktop (`orb/`), Tauri (`orb/src-tauri/`), iOS (`ios_dashboard/`), Android (`android_dashboard/`), and Web (`dashboard/`) onto single-owner state models backed by shared Lean kernel exports and cross-platform fixtures in `shared/orb-spec/fixtures/`.
+**Goal:** Converge Orb Desktop (`orb/`), Tauri (`orb/src-tauri/`), iOS (`ios_dashboard/`), and Android (`android_dashboard/`) onto single-owner state models backed by shared Lean kernel exports and cross-platform fixtures in `shared/orb-spec/fixtures/` (note: legacy Next.js `dashboard/` was retired on `master` in #1559).
 
 - **DAG Shards (parallel after R1 + R2):**
   - **R6-A (Lean Client Queue, Transport Epoch & Transcript Fold Specs + `P2` WASM Dedup — Maxwell Gate):**
@@ -345,11 +345,10 @@ All 10 shards below touch **disjoint file footprints** and can run concurrently 
       - Replace permanent session-long 3-strike WS disable (`OrbClient.swift:370-423`, `OrbCore.kt:2085,2280-2285`) with the R6-A cooldown reprobe stepper.
       - Wire `OrbSendFlow.swift` and `OrbSendFlow.kt` against the shared R6-A queue-reconciliation fixture suite.
       - Collapse `OrbStreamText.kt`'s dual `pendingReplace` + `pending` buffers into one canonical state transitions tested against `stream-commit.json` and `stream-cost.json`.
-  - **R6-D (Transcript Identity, Overlays & Next.js Dashboard Convergence — `SM-25, SM-26, SM-27`, depends on R6-A):**
+  - **R6-D (Transcript Identity, Native Prompts & UI Overlays — `SM-25, SM-27`, depends on R6-A):**
     - Key `TranscriptReducer` (`orb/src/transcriptModel.ts:32`) by stable conversation/session key rather than `WeakMap<StreamItem[], ...>` array reference identity.
     - Persist answered native-interaction IDs per `(mission_id, tool_call_id)` (`NativeInteraction.tsx:40`) and make `overlayLayer.ts` (`inerted`) stack/ref-counted across nested modals (`tests/overlays.html` + `playwright.overlays.config.ts`).
-    - Fix `dashboard/src/lib/api.ts:897-906` to pass `since_seq = lastSeq` on WS->SSE fallback, replace fence-tearing `/\n\n+/` splitting in `dashboard/src/components/streaming-markdown.tsx` with fence-aware block scanning (`Orb.Stream`), and stop passive layout-growth scroll events from unpinning `use-virtual-timeline-anchor.ts` (`Orb.Scroll`).
-- **Merge checkpoint:** Run `orb` (`pnpm build && pnpm test && pnpm test:browser`), `dashboard` (`bun run test:unit && bun run build`), Android (`./gradlew :app:testDebugUnitTest :app:assembleDebug`), and iOS checks (or document `BLOCKED_HOST_UNREACHABLE` / CI Xcode check honestly if running on Linux Boat workers, letting GitHub Actions macOS CI gate the PR before merge).
+- **Merge checkpoint:** Run `orb` (`pnpm build && pnpm test && pnpm test:browser`), Android (`./gradlew :app:testDebugUnitTest :app:assembleDebug`), and iOS checks (or document `BLOCKED_HOST_UNREACHABLE` / CI Xcode check honestly if running on Linux Boat workers, letting GitHub Actions macOS CI gate the PR before merge).
 
 ---
 
@@ -385,7 +384,6 @@ All 10 shards below touch **disjoint file footprints** and can run concurrently 
      - `cargo test --locked --workspace`
      - `scripts/harness_contract_tests.sh && scripts/check-capability-matrix.sh`
      - `(cd orb && pnpm install --frozen-lockfile && pnpm build && pnpm test && pnpm test:browser)`
-     - `(cd dashboard && bun install --frozen-lockfile && bun run test:unit && bun run build)`
      - Android unit + debug assemble (`./gradlew :app:testDebugUnitTest :app:assembleDebug`) and GitHub Actions iOS build/test green on exact `master` HEAD (preserving honest `BLOCKED_PHYSICAL_DEVICE` notes where physical hardware is unattached).
   4. **Fleet cleanup:** Destroy all remaining campaign Boat VMs (`destroy_managed_machine`) and prune temporary snapshots once `master` is merged and green.
 
