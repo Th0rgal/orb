@@ -103,6 +103,57 @@ pub fn first_token_timeout_for_prompt(
     ))
 }
 
+/// Two-clock pre-first-chunk deadline pair (`ClockDiscipline`,
+/// `docs/specs/proxy-precommit-clock-discipline.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstTokenDeadlines {
+    /// Per-chunk transport silence limit: resets whenever any upstream byte
+    /// arrives (including `: keepalive\n\n` comments and reasoning chunks).
+    pub transport_idle: Duration,
+    /// Monotone wall-clock limit from SSE stream open until committed output:
+    /// never resets on `: keepalive\n\n` heartbeats or role-only envelopes.
+    pub semantic_total: Duration,
+}
+
+impl FirstTokenDeadlines {
+    pub const fn symmetric(limit: Duration) -> Self {
+        Self {
+            transport_idle: limit,
+            semantic_total: limit,
+        }
+    }
+}
+
+/// Monotone semantic first-output deadline for a routed request.
+///
+/// Standard cloud providers and Cloudflare-proxied routes preserve
+/// [`first_token_timeout_for_prompt`] so hung upstreams emitting `: keepalive`
+/// comments fail over promptly (and stay below Cloudflare's 100 s cliff).
+/// Direct custom/private GPU fleet endpoints (`ProviderType::Custom` with
+/// `!via_cloudflare`, e.g. `spark` / `dgx-spark`) allow
+/// `PROXY_FLEET_SEMANTIC_FIRST_TOKEN_SECS` (default 600 s, strictly below
+/// OpenCode's `OPENCODE_PROXY_PROVIDER_TIMEOUT_MS` = 900 s) so 2–3 concurrent
+/// missions queued behind a serialized single-GPU lock keep their queue turn
+/// while `transport_idle` still catches dead sockets in <= 240 s.
+pub fn semantic_first_token_timeout_for_prompt(
+    provider: &str,
+    model: &str,
+    via_cloudflare: bool,
+    estimated_prompt_tokens: u64,
+) -> Duration {
+    let transport_idle =
+        first_token_timeout_for_prompt(provider, model, via_cloudflare, estimated_prompt_tokens);
+    if via_cloudflare
+        || matches!(
+            crate::ai_providers::ProviderType::from_id(provider),
+            Some(p) if p != crate::ai_providers::ProviderType::Custom
+        )
+    {
+        return transport_idle;
+    }
+    Duration::from_secs(env_secs("PROXY_FLEET_SEMANTIC_FIRST_TOKEN_SECS", 600)).max(transport_idle)
+}
+
 /// Formally verified admission check (`orb_fleet_endpoint_gate`) for routing to
 /// a local/private GPU fleet endpoint (`mesh_reachable && router_ready && model_loaded && !breaker_open`).
 pub fn fleet_endpoint_admitted(
@@ -830,6 +881,44 @@ mod tests {
         assert_eq!(
             first_token_timeout_for_prompt("openai", "gpt-5", false, 40_960).as_secs(),
             45
+        );
+        assert_eq!(
+            semantic_first_token_timeout_for_prompt(
+                "dgx-spark",
+                "qwen3.8-flash-next",
+                false,
+                40_960
+            )
+            .as_secs(),
+            600
+        );
+        assert_eq!(
+            semantic_first_token_timeout_for_prompt(
+                "dgx-spark",
+                "qwen3.8-flash-next",
+                true,
+                40_960
+            )
+            .as_secs(),
+            90
+        );
+        assert_eq!(
+            semantic_first_token_timeout_for_prompt("openai", "gpt-5", false, 40_960).as_secs(),
+            45
+        );
+        assert_eq!(
+            semantic_first_token_timeout_for_prompt("google", "gemini-4-carbon-eap", false, 40_960)
+                .as_secs(),
+            240
+        );
+        assert!(
+            Duration::from_millis(crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS)
+                > semantic_first_token_timeout_for_prompt(
+                    "dgx-spark",
+                    "qwen3.8-flash-next",
+                    false,
+                    u64::MAX
+                )
         );
         assert!(fleet_endpoint_admitted(true, true, true, false));
         assert!(!fleet_endpoint_admitted(false, true, true, false));

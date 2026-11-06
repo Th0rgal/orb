@@ -981,21 +981,21 @@
           },
           {
             "path": "src/api/proxy.rs",
-            "sha256": "78de5d854c628bfdb64b5c5aefae307a77ee664d8622bac7c1484027bc48367c"
+            "sha256": "d2f45e02686b23bfb24b66c0433cc1bb6e261c3907f557294f3f46bd3f5ef070"
           },
           {
-            "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "9ec95bbfd0aa74311e1c3608a06d5ad6d16eaabd19bca90d069dc1167642e614"
+            "path": "shared/orb-spec/evidence/p0-proxy-deadlines-tests.log",
+            "sha256": "6d4c1d23e44abc33b6d51efa685c0ee529d6e682476d5e10712df6c52d146e9e"
           }
         ],
         "execution": {
-          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+          "path": "shared/orb-spec/evidence/p0-proxy-deadlines-tests.log",
+          "command": "cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && cargo test --locked -j 1 --lib keepalive_only_stream_hits_semantic_deadline_without_resetting_clock -- --test-threads=1 && cargo test --locked -j 1 --lib fleet_keepalive_bridges_transport_idle_within_semantic_queue_budget -- --test-threads=1 && cargo test --locked -j 1 --lib exhausted_semantic_deadline_skips_same_entry_retries -- --test-threads=1 && cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
           "exit_code": 0,
           "result": "TESTED_LOCAL"
         },
         "assumptions": [
-          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "The receipt records local execution against the listed source hashes.",
           "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
           "No native mobile or WASM target execution is established by this receipt."
         ],
@@ -1023,7 +1023,7 @@
       ],
       "evidence": {
         "status": "partial",
-        "claim": "Local proxy SSE latency tests verify keepalive emission only at complete SSE event boundaries and independent client-gap timing.",
+        "claim": "Local proxy SSE latency and pre-commit deadline tests verify keepalive emission only at complete SSE event boundaries, independent client-gap timing, and monotone semantic first-token deadline enforcement without reset on comment-only keepalives.",
         "links": [
           {
             "kind": "theorem",
@@ -1039,6 +1039,16 @@
             "kind": "host_test",
             "path": "src/api/proxy.rs",
             "symbol": "keepalives_fill_long_pauses_between_events_only"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/proxy.rs",
+            "symbol": "precommit_semantic_deadline_exceeded"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/proxy.rs",
+            "symbol": "keepalive_only_stream_hits_semantic_deadline_without_resetting_clock"
           }
         ],
         "sources": [
@@ -1056,21 +1066,21 @@
           },
           {
             "path": "src/api/proxy.rs",
-            "sha256": "78de5d854c628bfdb64b5c5aefae307a77ee664d8622bac7c1484027bc48367c"
+            "sha256": "d2f45e02686b23bfb24b66c0433cc1bb6e261c3907f557294f3f46bd3f5ef070"
           },
           {
-            "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "9ec95bbfd0aa74311e1c3608a06d5ad6d16eaabd19bca90d069dc1167642e614"
+            "path": "shared/orb-spec/evidence/p0-proxy-deadlines-tests.log",
+            "sha256": "6d4c1d23e44abc33b6d51efa685c0ee529d6e682476d5e10712df6c52d146e9e"
           }
         ],
         "execution": {
-          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+          "path": "shared/orb-spec/evidence/p0-proxy-deadlines-tests.log",
+          "command": "cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && cargo test --locked -j 1 --lib keepalive_only_stream_hits_semantic_deadline_without_resetting_clock -- --test-threads=1 && cargo test --locked -j 1 --lib fleet_keepalive_bridges_transport_idle_within_semantic_queue_budget -- --test-threads=1 && cargo test --locked -j 1 --lib exhausted_semantic_deadline_skips_same_entry_retries -- --test-threads=1 && cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
           "exit_code": 0,
           "result": "TESTED_LOCAL"
         },
         "assumptions": [
-          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "The receipt records local execution against the listed source hashes.",
           "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
           "No native mobile or WASM target execution is established by this receipt."
         ],
@@ -3145,7 +3155,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -3225,7 +3235,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -3300,7 +3310,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -3375,7 +3385,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -5502,7 +5512,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -5986,7 +5996,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -7055,7 +7065,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
@@ -7145,7 +7155,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
@@ -7235,7 +7245,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           },
           {
             "path": "shared/orb-spec/evidence/r1-turbo-lean-and-host-gates-tests.log",
@@ -7303,7 +7313,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -7367,7 +7377,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -7447,7 +7457,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -7551,7 +7561,7 @@
           },
           {
             "path": "src/api/proxy.rs",
-            "sha256": "78de5d854c628bfdb64b5c5aefae307a77ee664d8622bac7c1484027bc48367c"
+            "sha256": "d2f45e02686b23bfb24b66c0433cc1bb6e261c3907f557294f3f46bd3f5ef070"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
@@ -7559,7 +7569,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -7633,7 +7643,7 @@
           },
           {
             "path": "src/api/proxy_reliability.rs",
-            "sha256": "0b8d3e775c44cb36597b2bdfe0f87a73e846a8afc2a3b6f901ebf951c0b14c60"
+            "sha256": "bc3758d30d0b4b2bc1ee17054510299379c8d5b2a2291e42ff29c62a3bde4508"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
@@ -7641,7 +7651,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -7718,7 +7728,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -7800,7 +7810,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -7882,7 +7892,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -7969,7 +7979,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -8051,7 +8061,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -8138,7 +8148,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -8225,7 +8235,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -8299,7 +8309,7 @@
           },
           {
             "path": "src/api/proxy.rs",
-            "sha256": "78de5d854c628bfdb64b5c5aefae307a77ee664d8622bac7c1484027bc48367c"
+            "sha256": "d2f45e02686b23bfb24b66c0433cc1bb6e261c3907f557294f3f46bd3f5ef070"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
@@ -8307,7 +8317,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -8384,7 +8394,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -8453,7 +8463,7 @@
           },
           {
             "path": "src/api/proxy.rs",
-            "sha256": "78de5d854c628bfdb64b5c5aefae307a77ee664d8622bac7c1484027bc48367c"
+            "sha256": "d2f45e02686b23bfb24b66c0433cc1bb6e261c3907f557294f3f46bd3f5ef070"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
@@ -8461,7 +8471,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -8538,7 +8548,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -8620,7 +8630,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -8706,7 +8716,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -8788,7 +8798,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -8870,7 +8880,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -8947,7 +8957,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
@@ -9024,7 +9034,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "5768b4cf5a24bbc86fcd4d9ebb868f2bcade2a7acfd8d91558787eb66b085f52"
+            "sha256": "a8c93f2ca95a8b0a3d47822777d34dc867109c5558956b374465329030008bc8"
           }
         ],
         "execution": {
