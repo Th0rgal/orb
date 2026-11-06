@@ -141,6 +141,32 @@ enum OrbControllerModel {
         return .object(out)
     }
 
+    private static let hermesOverrideKeys = [
+        "model", "provider", "reasoning_effort", "workdir", "failure_deliver", "continuity"
+    ]
+
+    /// Older Hermes REST handlers silently filter execution overrides; detect unretained fields (`orb/src/cronSchema.ts`).
+    static func ignoredCronFields(patch: [String: OrbJSON], savedView: OrbJSON) -> [String] {
+        let j = savedView["job"]
+        let s = savedView["settings"] == .null ? j : savedView["settings"]
+        return hermesOverrideKeys.filter { key in
+            guard let requestedValue = patch[key] else { return false }
+            if key == "continuity" {
+                return requestedValue.flag != continuityEnabled(settings: s, job: j)
+            }
+            let requested = requestedValue.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let actual = (s[key].text.isEmpty ? j[key].text : s[key].text)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return requested != actual
+        }
+    }
+
+    static func ignoredCronWarning(patch: [String: OrbJSON], savedView: OrbJSON) -> String? {
+        let ignored = ignoredCronFields(patch: patch, savedView: savedView)
+        guard !ignored.isEmpty else { return nil }
+        return "Hermes did not retain: \(ignored.joined(separator: ", ")). Its cron API needs support for these settings."
+    }
+
     static func cronState(job: OrbJSON?, running: Bool = false) -> CronState {
         guard let job, job != .null else { return .scheduled }
         let enabled = (job["enabled"] == .null) ? true : job["enabled"].flag
@@ -367,6 +393,7 @@ struct OrbProjectAutomationView: View {
                         body: .object(patch)
                     )
                     controllerView = next
+                    return next
                 },
                 onDelete: {
                     let next = try await api.call(
@@ -374,7 +401,8 @@ struct OrbProjectAutomationView: View {
                         method: "DELETE"
                     )
                     controllerView = next
-                }
+                },
+                onWarning: { self.error = $0?.isEmpty == true ? nil : $0 }
             )
         }
         .sheet(isPresented: $creatingCron) {
@@ -386,14 +414,17 @@ struct OrbProjectAutomationView: View {
                 allowDelete: false,
                 onSave: { patch in
                     let body = OrbControllerModel.hermesPatch(patch)
-                    _ = try await api.call(
+                    let created = try await api.call(
                         "/api/projects/\(OrbCore.escape(slug))/crons",
                         method: "POST",
                         body: body
                     )
                     await loadCrons()
+                    let cJob = created["job"] == .null ? created : created["job"]
+                    return .object(["job": cJob, "settings": cJob])
                 },
-                onDelete: nil
+                onDelete: nil,
+                onWarning: { self.error = $0?.isEmpty == true ? nil : $0 }
             )
         }
         .refreshable { _ = await loadAll() }
@@ -971,9 +1002,11 @@ struct OrbProjectCronDetailView: View {
                         method: "PATCH",
                         body: body
                     )
-                    if updated["job"] != .null { job = updated["job"] }
+                    let savedJob = updated["job"] == .null ? job : updated["job"]
+                    job = savedJob
                     if !updated["runs"].items.isEmpty { runs = updated["runs"].items }
                     onChanged()
+                    return .object(["job": savedJob, "settings": savedJob, "runs": .array(runs)])
                 },
                 onDelete: {
                     _ = try await OrbCore.shared.call(
@@ -982,7 +1015,8 @@ struct OrbProjectCronDetailView: View {
                     )
                     onChanged()
                     dismiss()
-                }
+                },
+                onWarning: { self.error = $0?.isEmpty == true ? nil : $0 }
             )
         }
         .refreshable { _ = await load() }
@@ -1033,10 +1067,13 @@ struct OrbCronEditorSheet: View {
     let existingView: OrbJSON?
     let defaultDeliver: String
     let allowDelete: Bool
-    let onSave: ([String: OrbJSON]) async throws -> Void
+    let onSave: ([String: OrbJSON]) async throws -> OrbJSON
     let onDelete: (() async throws -> Void)?
+    var onWarning: ((String?) -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
+    @State private var baseView: OrbJSON?
+    @State private var didPopulate = false
     @State private var name = ""
     @State private var schedule = "every 30m"
     @State private var prompt = ""
@@ -1140,11 +1177,19 @@ struct OrbCronEditorSheet: View {
     }
 
     private func populate() {
+        guard !didPopulate else { return }
+        didPopulate = true
+        baseView = existingView
         guard let view = existingView, view["job"] != .null else {
             if name.isEmpty { name = "\(slug) controller" }
             if deliver.isEmpty { deliver = defaultDeliver }
             return
         }
+        applyFields(from: view, keepRejectedOverrides: [])
+    }
+
+    private func applyFields(from view: OrbJSON, keepRejectedOverrides ignored: Set<String>) {
+        guard view["job"] != .null else { return }
         let j = view["job"]
         let s = view["settings"] == .null ? j : view["settings"]
         name = j["name"].text
@@ -1153,17 +1198,20 @@ struct OrbCronEditorSheet: View {
         prompt = s["prompt"].text
         deliver = s["deliver"].text.isEmpty ? j["deliver"].text : s["deliver"].text
         skillsText = OrbControllerModel.skillsOf(settings: s, job: j).joined(separator: ", ")
-        model = s["model"].text
-        reasoningEffort = s["reasoning_effort"].text
-        continuity = OrbControllerModel.continuityEnabled(settings: s, job: j)
+        if !ignored.contains("model") { model = s["model"].text }
+        if !ignored.contains("reasoning_effort") { reasoningEffort = s["reasoning_effort"].text }
+        if !ignored.contains("continuity") {
+            continuity = OrbControllerModel.continuityEnabled(settings: s, job: j)
+        }
     }
 
     private func save() async {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedSchedule = schedule.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isEditing = existingView != nil && existingView?["job"] != .null
+        let activeBase = baseView ?? existingView
+        let isEditing = activeBase != nil && activeBase?["job"] != .null
         let existingSettings: OrbJSON? = {
-            guard let view = existingView else { return nil }
+            guard let view = activeBase else { return nil }
             return view["settings"] == .null ? view["job"] : view["settings"]
         }()
         let hasScript = !(existingSettings?["script"].text ?? "").isEmpty
@@ -1180,7 +1228,7 @@ struct OrbCronEditorSheet: View {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         let patch = OrbControllerModel.buildCronPatch(
-            existingView: existingView,
+            existingView: activeBase,
             defaultDeliver: defaultDeliver,
             name: trimmedName,
             schedule: trimmedSchedule,
@@ -1199,7 +1247,21 @@ struct OrbCronEditorSheet: View {
         error = nil
         defer { saving = false }
         do {
-            try await onSave(patch)
+            let savedView = try await onSave(patch)
+            let ignored = OrbControllerModel.ignoredCronFields(patch: patch, savedView: savedView)
+            if savedView["job"] != .null {
+                baseView = savedView
+            }
+            if let warning = OrbControllerModel.ignoredCronWarning(patch: patch, savedView: savedView) {
+                if isEditing {
+                    applyFields(from: savedView, keepRejectedOverrides: Set(ignored))
+                    self.error = warning
+                    return
+                }
+                onWarning?(warning)
+            } else {
+                onWarning?(nil)
+            }
             dismiss()
         } catch {
             self.error = error.localizedDescription

@@ -158,6 +158,43 @@ class OrbClientParityTest {
             "Steer saved, but the controller could not start: scheduler offline. Use Run now to retry.",
             OrbControllerModel.steerRunFailureMessage("scheduler offline")
         )
+
+        val overridePatch: Map<String, Any?> = mapOf(
+            "model" to "gpt-5",
+            "reasoning_effort" to "high",
+            "continuity" to true
+        )
+        val filteredSavedView: OrbDict = mapOf(
+            "job" to mapOf("id" to "job-2", "name" to "nightly"),
+            "settings" to mapOf("id" to "job-2", "name" to "nightly")
+        )
+        assertEquals(
+            listOf("model", "reasoning_effort", "continuity"),
+            OrbControllerModel.ignoredCronFields(overridePatch, filteredSavedView)
+        )
+        assertEquals(
+            "Hermes did not retain: model, reasoning_effort, continuity. Its cron API needs support for these settings.",
+            OrbControllerModel.ignoredCronWarning(overridePatch, filteredSavedView)
+        )
+
+        val retainedSavedView: OrbDict = mapOf(
+            "job" to mapOf(
+                "id" to "job-2",
+                "name" to "nightly",
+                "model" to "gpt-5",
+                "reasoning_effort" to "high",
+                "context_from" to listOf("self")
+            ),
+            "settings" to mapOf(
+                "id" to "job-2",
+                "name" to "nightly",
+                "model" to "gpt-5",
+                "reasoning_effort" to "high",
+                "context_from" to listOf("self")
+            )
+        )
+        assertEquals(emptyList<String>(), OrbControllerModel.ignoredCronFields(overridePatch, retainedSavedView))
+        assertNull(OrbControllerModel.ignoredCronWarning(overridePatch, retainedSavedView))
     }
 
     @Test

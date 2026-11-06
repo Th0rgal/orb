@@ -215,5 +215,46 @@ final class OrbClientParityTests: XCTestCase {
             OrbControllerModel.steerRunFailureMessage("scheduler offline"),
             "Steer saved, but the controller could not start: scheduler offline. Use Run now to retry."
         )
+
+        // Older Hermes REST APIs filter execution overrides; detect unretained fields and format warning.
+        let overridePatch: [String: OrbJSON] = [
+            "model": .string("gpt-5"),
+            "reasoning_effort": .string("high"),
+            "continuity": .bool(true)
+        ]
+        let filteredSavedView: OrbJSON = .object([
+            "job": .object(["id": .string("job-2"), "name": .string("nightly")]),
+            "settings": .object(["id": .string("job-2"), "name": .string("nightly")])
+        ])
+        XCTAssertEqual(
+            OrbControllerModel.ignoredCronFields(patch: overridePatch, savedView: filteredSavedView),
+            ["model", "reasoning_effort", "continuity"]
+        )
+        XCTAssertEqual(
+            OrbControllerModel.ignoredCronWarning(patch: overridePatch, savedView: filteredSavedView),
+            "Hermes did not retain: model, reasoning_effort, continuity. Its cron API needs support for these settings."
+        )
+
+        let retainedSavedView: OrbJSON = .object([
+            "job": .object([
+                "id": .string("job-2"),
+                "name": .string("nightly"),
+                "model": .string("gpt-5"),
+                "reasoning_effort": .string("high"),
+                "context_from": .array([.string("self")])
+            ]),
+            "settings": .object([
+                "id": .string("job-2"),
+                "name": .string("nightly"),
+                "model": .string("gpt-5"),
+                "reasoning_effort": .string("high"),
+                "context_from": .array([.string("self")])
+            ])
+        ])
+        XCTAssertEqual(
+            OrbControllerModel.ignoredCronFields(patch: overridePatch, savedView: retainedSavedView),
+            []
+        )
+        XCTAssertNil(OrbControllerModel.ignoredCronWarning(patch: overridePatch, savedView: retainedSavedView))
     }
 }

@@ -215,6 +215,32 @@ object OrbControllerModel {
         return out
     }
 
+    private val HERMES_OVERRIDE_KEYS = listOf(
+        "model", "provider", "reasoning_effort", "workdir", "failure_deliver", "continuity"
+    )
+
+    /** Older Hermes REST handlers silently filter execution overrides; detect unretained fields (`orb/src/cronSchema.ts`). */
+    fun ignoredCronFields(patch: Map<String, Any?>, savedView: OrbDict?): List<String> {
+        val job = OrbJSON.dict(savedView?.get("job"))
+        val settings = OrbJSON.dict(savedView?.get("settings")) ?: job
+        return HERMES_OVERRIDE_KEYS.filter { key ->
+            if (!patch.containsKey(key) || patch[key] == null) return@filter false
+            if (key == "continuity") {
+                val requested = patch[key] as? Boolean ?: false
+                return@filter requested != continuityEnabled(settings, job)
+            }
+            val requested = (patch[key] as? String)?.trim().orEmpty()
+            val actual = (OrbJSON.str(settings, key) ?: OrbJSON.str(job, key))?.trim().orEmpty()
+            requested != actual
+        }
+    }
+
+    fun ignoredCronWarning(patch: Map<String, Any?>, savedView: OrbDict?): String? {
+        val ignored = ignoredCronFields(patch, savedView)
+        if (ignored.isEmpty()) return null
+        return "Hermes did not retain: ${ignored.joinToString(", ")}. Its cron API needs support for these settings."
+    }
+
     fun cronState(job: OrbDict?, running: Boolean = false): CronState {
         if (job == null) return CronState.Scheduled
         val enabled = if (job.containsKey("enabled") && job["enabled"] != null) {
@@ -1159,6 +1185,7 @@ fun OrbProjectAutomationPage(
                     )
                 )
                 if (next != null) controllerView = next
+                next
             },
             onDelete = {
                 val next = OrbJSON.dict(
@@ -1168,7 +1195,8 @@ fun OrbProjectAutomationPage(
                     )
                 )
                 if (next != null) controllerView = next
-            }
+            },
+            onWarning = { error = it }
         )
     }
 
@@ -1183,14 +1211,19 @@ fun OrbProjectAutomationPage(
             onDismiss = { creatingCron = false },
             onSave = { patch ->
                 val body = OrbControllerModel.hermesPatch(patch)
-                core.request(
-                    "/api/projects/${core.encodeComponent(slug)}/crons",
-                    "POST",
-                    body = body
+                val created = OrbJSON.dict(
+                    core.request(
+                        "/api/projects/${core.encodeComponent(slug)}/crons",
+                        "POST",
+                        body = body
+                    )
                 )
                 loadCrons()
+                val createdJob = OrbJSON.dict(created?.get("job")) ?: created
+                if (createdJob != null) mapOf("job" to createdJob, "settings" to createdJob) else null
             },
-            onDelete = null
+            onDelete = null,
+            onWarning = { error = it }
         )
     }
 }
@@ -1409,10 +1442,12 @@ private fun OrbProjectCronDetailSubpage(
                         body = body
                     )
                 )
-                OrbJSON.dict(updated?.get("job"))?.let { job = it }
+                val savedJob = OrbJSON.dict(updated?.get("job")) ?: job
+                job = savedJob
                 val updatedRuns = OrbJSON.dictList(updated?.get("runs"))
                 if (updatedRuns.isNotEmpty()) runs = updatedRuns
                 onChanged()
+                mapOf("job" to savedJob, "settings" to savedJob, "runs" to runs)
             },
             onDelete = {
                 core.request(
@@ -1421,7 +1456,8 @@ private fun OrbProjectCronDetailSubpage(
                 )
                 onChanged()
                 onBack()
-            }
+            },
+            onWarning = { error = it }
         )
     }
 }
@@ -1437,12 +1473,14 @@ private fun OrbCronEditorDialog(
     defaultDeliver: String,
     allowDelete: Boolean,
     onDismiss: () -> Unit,
-    onSave: suspend (Map<String, Any?>) -> Unit,
-    onDelete: (suspend () -> Unit)?
+    onSave: suspend (Map<String, Any?>) -> OrbDict?,
+    onDelete: (suspend () -> Unit)?,
+    onWarning: ((String?) -> Unit)? = null
 ) {
     val scope = rememberCoroutineScope()
-    val existingJob = OrbJSON.dict(existingView?.get("job"))
-    val existingSettings = OrbJSON.dict(existingView?.get("settings")) ?: existingJob
+    var baseView by remember { mutableStateOf(existingView) }
+    val existingJob = OrbJSON.dict(baseView?.get("job"))
+    val existingSettings = OrbJSON.dict(baseView?.get("settings")) ?: existingJob
 
     var name by remember {
         mutableStateOf(OrbJSON.str(existingJob, "name") ?: "$slug controller")
@@ -1602,9 +1640,10 @@ private fun OrbCronEditorDialog(
                         error = "Name, schedule, and instruction are required."
                         return@TextButton
                     }
+                    val isEditing = existingJob != null
                     val skills = skillsText.split(",").map { it.trim() }.filter { it.isNotEmpty() }
                     val patch = OrbControllerModel.buildCronPatch(
-                        existingView = existingView,
+                        existingView = baseView,
                         defaultDeliver = defaultDeliver,
                         name = trimmedName,
                         schedule = trimmedSchedule,
@@ -1615,7 +1654,7 @@ private fun OrbCronEditorDialog(
                         reasoningEffort = reasoningEffort,
                         continuity = continuity
                     )
-                    if (existingJob != null && patch.isEmpty()) {
+                    if (isEditing && patch.isEmpty()) {
                         onDismiss()
                         return@TextButton
                     }
@@ -1623,7 +1662,38 @@ private fun OrbCronEditorDialog(
                     error = null
                     scope.launch {
                         try {
-                            onSave(patch)
+                            val savedView = onSave(patch)
+                            val savedJob = OrbJSON.dict(savedView?.get("job"))
+                            val savedSettings = OrbJSON.dict(savedView?.get("settings")) ?: savedJob
+                            val ignored = OrbControllerModel.ignoredCronFields(patch, savedView).toSet()
+                            if (savedJob != null) {
+                                baseView = savedView
+                            }
+                            val warning = OrbControllerModel.ignoredCronWarning(patch, savedView)
+                            if (warning != null) {
+                                if (isEditing) {
+                                    if (savedJob != null) {
+                                        name = OrbJSON.str(savedJob, "name").orEmpty()
+                                        val sched = OrbControllerModel.scheduleExpression(savedJob["schedule"])
+                                        schedule = sched.ifEmpty { "every 30m" }
+                                        prompt = OrbJSON.rawStr(savedSettings, "prompt").orEmpty()
+                                        deliver = (OrbJSON.str(savedSettings, "deliver") ?: OrbJSON.str(savedJob, "deliver")).orEmpty()
+                                        skillsText = OrbControllerModel.skillsOf(savedSettings, savedJob).joinToString(", ")
+                                        if (!ignored.contains("model")) model = OrbJSON.str(savedSettings, "model").orEmpty()
+                                        if (!ignored.contains("reasoning_effort")) {
+                                            reasoningEffort = OrbJSON.str(savedSettings, "reasoning_effort").orEmpty()
+                                        }
+                                        if (!ignored.contains("continuity")) {
+                                            continuity = OrbControllerModel.continuityEnabled(savedSettings, savedJob)
+                                        }
+                                    }
+                                    error = warning
+                                    return@launch
+                                }
+                                onWarning?.invoke(warning)
+                            } else {
+                                onWarning?.invoke(null)
+                            }
                             onDismiss()
                         } catch (e: CancellationException) {
                             throw e
