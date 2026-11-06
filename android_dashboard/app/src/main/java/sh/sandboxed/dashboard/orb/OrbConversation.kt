@@ -614,6 +614,18 @@ fun OrbConversationPage(
     var dismissedQuestionId by remember(missionId) { mutableStateOf<String?>(null) }
 
     var inputText by remember { mutableStateOf("") }
+    val composerDraftStore = remember { OrbComposerDraftStore(initialMission?.id) }
+    var adoptedNewMissionId by remember { mutableStateOf<String?>(null) }
+    if (composerDraftStore.activeMissionId != missionId) {
+        inputText = composerDraftStore.syncMission(
+            nextMissionId = missionId,
+            currentInput = inputText,
+            adoptedNewMissionId = adoptedNewMissionId,
+        )
+        if (adoptedNewMissionId == missionId) {
+            adoptedNewMissionId = null
+        }
+    }
     var composeMode by remember { mutableStateOf(OrbComposeMode.Message) }
     var showModePicker by remember { mutableStateOf(false) }
     // Core's durable follow-up queue merged with optimistic sends/edits (OrbSendFlow.kt).
@@ -1539,6 +1551,7 @@ fun OrbConversationPage(
                     val dict = OrbJSON.dict(created) ?: OrbJSON.dict(OrbJSON.dict(created)?.get("mission"))
                     if (dict != null) {
                         val row = OrbRow(dict)
+                        adoptedNewMissionId = row.id
                         currentMission = row
                         core.refreshMissionsQuietly()
                         loadHistory(row.id)
@@ -1724,10 +1737,12 @@ fun OrbConversationPage(
         if (dismissedPlanReviewKeys.contains(key)) null else key
     }
 
+    var speechTargetMissionId by remember { mutableStateOf(missionId) }
     var dictationPhase by remember(missionId) { mutableStateOf(OrbAndroidDictationPhase.Idle) }
     val speechLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        if (speechTargetMissionId != composerDraftStore.activeMissionId) return@rememberLauncherForActivityResult
         if (result.resultCode == Activity.RESULT_OK) {
             val matches = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
             val spoken = matches?.firstOrNull()?.trim().orEmpty()
@@ -1754,6 +1769,7 @@ fun OrbConversationPage(
     }
 
     fun launchSystemSpeech() {
+        speechTargetMissionId = composerDraftStore.activeMissionId
         dictationPhase = OrbAndroidDictationPhase.Listening
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -1767,48 +1783,62 @@ fun OrbConversationPage(
         }
     }
 
+    val sparkDictation = remember(sparkRecorder, core, missionId) {
+        OrbSparkDictationSessionCoordinator(
+            recorder = sparkRecorder,
+            isSparkAvailable = { core.isConfigured },
+            transcribeWav = { wav -> OrbSparkTranscriber.transcribe(core, wav, OrbDictationSettings.resolve()) },
+            onPhaseChange = { phase ->
+                if (missionId == composerDraftStore.activeMissionId) dictationPhase = phase
+            },
+            onAppendTranscript = { spoken ->
+                if (missionId == composerDraftStore.activeMissionId) appendTranscript(spoken)
+            },
+            onFallbackSystemSpeech = {
+                if (missionId == composerDraftStore.activeMissionId) launchSystemSpeech()
+            },
+            onError = { message ->
+                if (missionId == composerDraftStore.activeMissionId) {
+                    errorMessage = message?.takeIf { it.isNotEmpty() }
+                }
+            },
+        )
+    }
+
+    var permissionTargetMissionId by remember { mutableStateOf(missionId) }
+
     fun startSparkRecording() {
-        if (!sparkRecorder.start()) {
-            launchSystemSpeech()
-            return
+        if (sparkDictation.startRecording()) {
+            dictationElapsed = 0
         }
-        dictationElapsed = 0
-        dictationPhase = OrbAndroidDictationPhase.Recording
     }
 
     val micPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) startSparkRecording() else launchSystemSpeech()
+        if (permissionTargetMissionId != composerDraftStore.activeMissionId) return@rememberLauncherForActivityResult
+        if (granted) {
+            startSparkRecording()
+        } else {
+            sparkDictation.cancel(resetPhase = false)
+            launchSystemSpeech()
+        }
     }
 
     fun launchSpeech() {
         val granted = androidx.core.content.ContextCompat.checkSelfPermission(
             context, android.Manifest.permission.RECORD_AUDIO
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        if (granted) startSparkRecording() else micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+        if (granted) {
+            startSparkRecording()
+        } else {
+            permissionTargetMissionId = missionId
+            micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+        }
     }
 
     fun finishSparkRecording() {
-        val wav = sparkRecorder.stop()
-        if (wav == null) {
-            dictationPhase = OrbAndroidDictationPhase.Idle
-            return
-        }
-        dictationPhase = OrbAndroidDictationPhase.Transcribing
-        scope.launch {
-            val text = runCatching {
-                OrbSparkTranscriber.transcribe(core, wav, OrbDictationSettings.resolve())
-            }.getOrNull()
-            if (dictationPhase != OrbAndroidDictationPhase.Transcribing) return@launch
-            if (!text.isNullOrEmpty()) {
-                appendTranscript(text)
-                dictationPhase = OrbAndroidDictationPhase.Idle
-            } else {
-                // Spark unavailable or returned nothing: let the on-device recognizer try.
-                launchSystemSpeech()
-            }
-        }
+        sparkDictation.finishRecording(scope)
     }
 
     LaunchedEffect(dictationPhase) {
@@ -1819,7 +1849,11 @@ fun OrbConversationPage(
         }
     }
 
-    DisposableEffect(Unit) { onDispose { sparkRecorder.cancel() } }
+    DisposableEffect(sparkDictation, missionId) {
+        onDispose {
+            sparkDictation.cancel(resetPhase = false)
+        }
+    }
 
     // Project context files for `@` mentions. Mirrors iOS OrbAttachments: the context
     // manifest (entries keyed by path) first, then a shallow walk of /files.
@@ -2879,12 +2913,11 @@ fun OrbConversationPage(
                     phase = dictationPhase,
                     elapsedSeconds = dictationElapsed,
                     onCancel = {
-                        sparkRecorder.cancel()
-                        dictationPhase = OrbAndroidDictationPhase.Idle
+                        sparkDictation.cancel()
                     },
                     onFinish = {
                         if (dictationPhase == OrbAndroidDictationPhase.Recording) finishSparkRecording()
-                        else if (dictationPhase != OrbAndroidDictationPhase.Transcribing) dictationPhase = OrbAndroidDictationPhase.Idle
+                        else if (dictationPhase != OrbAndroidDictationPhase.Transcribing) sparkDictation.cancel()
                     },
                     onRetry = { launchSpeech() }
                 )
