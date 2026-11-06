@@ -170,8 +170,9 @@ final class OrbLandscapeUITests: XCTestCase {
         }
 
         saveShot("resources-portrait-fleet-inference")
-        XCTAssertGreaterThanOrEqual(fleetSankey.frame.height, 260, "Portrait Sankey gets generous height")
-        XCTAssertGreaterThanOrEqual(fleetSankey.frame.width, app.windows.firstMatch.frame.width - 44, "Sankey spans nearly full sheet width")
+        XCTAssertTrue(app.buttons["resources.back"].exists, "Compact left Resources back/title button is present")
+        XCTAssertGreaterThanOrEqual(fleetSankey.frame.height, 320, "Portrait Sankey gets generous height")
+        XCTAssertGreaterThanOrEqual(fleetSankey.frame.width, app.windows.firstMatch.frame.width - 28, "Sankey spans nearly edge-to-edge")
 
         // Switch to Compute lens in portrait, then back to Inference for a clean banner-free screenshot
         app.buttons["resources.lens.Compute"].tap()
@@ -180,12 +181,12 @@ final class OrbLandscapeUITests: XCTestCase {
         app.buttons["resources.lens.Inference"].tap()
         saveShot("resources-portrait-fleet-inference")
 
-        // Rotate to landscape and verify Sankey fits comfortably above the fold without footer clipping
+        // Rotate to landscape and verify Sankey fits comfortably above the fold without bulky nav bar
         checkLandscape(app, "resources-fleet")
         saveShot("resources-landscape-fleet-inference")
         let winH = min(app.windows.firstMatch.frame.width, app.windows.firstMatch.frame.height)
-        XCTAssertGreaterThanOrEqual(fleetSankey.frame.height, 200, "Landscape Sankey stays tall")
-        XCTAssertLessThan(fleetSankey.frame.minY, winH * 0.45, "Landscape Sankey starts right below compact controls")
+        XCTAssertGreaterThanOrEqual(fleetSankey.frame.height, 210, "Landscape Sankey stays tall")
+        XCTAssertLessThan(fleetSankey.frame.minY, winH * 0.30, "Landscape Sankey starts right below single-row header")
 
         // Drill down into a mission in portrait -> verify 3-column Mission Flow + Fast-DAG + Landscape
         XCUIDevice.shared.orientation = .portrait
@@ -197,7 +198,7 @@ final class OrbLandscapeUITests: XCTestCase {
         let missionSankey = app.descendants(matching: .any)["resources.missionSankey"]
         XCTAssertTrue(missionSankey.waitForExistence(timeout: 10))
         saveShot("resources-portrait-mission-flow")
-        XCTAssertGreaterThanOrEqual(missionSankey.frame.height, 250)
+        XCTAssertGreaterThanOrEqual(missionSankey.frame.height, 320)
 
         checkLandscape(app, "resources-mission-flow")
         saveShot("resources-landscape-mission-flow")
@@ -209,5 +210,13 @@ final class OrbLandscapeUITests: XCTestCase {
 
         checkLandscape(app, "resources-mission-dag")
         saveShot("resources-landscape-mission-dag")
+
+        // Pop back to Fleet and back to Agents to verify custom header navigation
+        XCUIDevice.shared.orientation = .portrait
+        Thread.sleep(forTimeInterval: 0.5)
+        app.buttons["resources.backFleet"].tap()
+        XCTAssertTrue(fleetSankey.waitForExistence(timeout: 5))
+        app.buttons["resources.back"].tap()
+        XCTAssertTrue(app.buttons["settings.resources"].waitForExistence(timeout: 5))
     }
 }

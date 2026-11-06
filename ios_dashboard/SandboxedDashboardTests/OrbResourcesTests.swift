@@ -123,27 +123,75 @@ final class OrbResourcesTests: XCTestCase {
             links.append(.init(id: "l-\(idx)", source: "pool-0", target: mid, value: w, estUsdPerH: w * 0.5, degraded: false))
         }
 
+        let marginY = 8.0
+        let canvasH = 280.0
         let layout = OrbResourcesModel.computeSankeyLayout(
             nodes: nodes,
             links: links,
             width: 360,
-            height: 280,
+            height: canvasH,
             metric: .raw,
-            marginX: 100,
-            marginY: 12
+            marginX: 6,
+            marginY: marginY
         )
 
         let col1Visible = layout.nodes.filter { $0.column == 1 && $0.showLabel }
         XCTAssertGreaterThanOrEqual(col1Visible.count, 2)
         XCTAssertLessThan(col1Visible.count, weights.count)
+        for node in col1Visible {
+            let half = node.showSublabel ? 15.0 : 9.0
+            XCTAssertGreaterThanOrEqual(node.labelY - half, marginY - 1e-6)
+            XCTAssertLessThanOrEqual(node.labelY + half, canvasH - marginY + 1e-6)
+        }
         for i in 1..<col1Visible.count {
             let prev = col1Visible[i - 1]
             let curr = col1Visible[i]
-            let prevMid = (prev.y0 + prev.y1) / 2.0
-            let currMid = (curr.y0 + curr.y1) / 2.0
-            let prevHalf = (prev.y1 - prev.y0 >= 24.0) ? 12.0 : 8.0
-            let currHalf = (curr.y1 - curr.y0 >= 24.0) ? 12.0 : 8.0
-            XCTAssertGreaterThanOrEqual(currMid - currHalf, prevMid + prevHalf + 3.0 - 1e-6)
+            let prevHalf = prev.showSublabel ? 15.0 : 9.0
+            let currHalf = curr.showSublabel ? 15.0 : 9.0
+            XCTAssertGreaterThanOrEqual(curr.labelY - currHalf, prev.labelY + prevHalf + 3.0 - 1e-6)
         }
+    }
+
+    func testChooseHeaderTierAdaptsForWidthAndFontScale() {
+        XCTAssertEqual(
+            OrbResourcesModel.chooseHeaderTier(
+                availableWidthPx: 381,
+                minGapPx: 6,
+                leftWidthPx: 100,
+                rightFullWidthPx: 255,
+                rightCompactWidthPx: 190
+            ),
+            .fullSingleRow
+        )
+        XCTAssertEqual(
+            OrbResourcesModel.chooseHeaderTier(
+                availableWidthPx: 381,
+                minGapPx: 6,
+                leftWidthPx: 155,
+                rightFullWidthPx: 255,
+                rightCompactWidthPx: 190
+            ),
+            .compactSingleRow
+        )
+        XCTAssertEqual(
+            OrbResourcesModel.chooseHeaderTier(
+                availableWidthPx: 381,
+                minGapPx: 6,
+                leftWidthPx: 210,
+                rightFullWidthPx: 340,
+                rightCompactWidthPx: 265
+            ),
+            .twoClusterWrap
+        )
+        XCTAssertEqual(
+            OrbResourcesModel.chooseHeaderTier(
+                availableWidthPx: 250,
+                minGapPx: 6,
+                leftWidthPx: 210,
+                rightFullWidthPx: 340,
+                rightCompactWidthPx: 265
+            ),
+            .individualWrap
+        )
     }
 }
