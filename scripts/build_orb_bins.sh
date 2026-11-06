@@ -77,6 +77,7 @@ if ! command -v lake >/dev/null 2>&1; then
         echo "error: --ensure-lean automatic bootstrap unsupported on $os_name/$arch_name" >&2
         exit 1
       fi
+      mkdir -p "$(dirname "$lean_dest")"
       lean_archive="$(mktemp "/tmp/lean-4.35.0-XXXXXX${lean_ext}")"
       lean_stage="$(mktemp -d "${lean_dest}.stage.XXXXXX")"
       cleanup_bootstrap() {
@@ -90,7 +91,6 @@ if ! command -v lake >/dev/null 2>&1; then
       else
         echo "${lean_sha256}  ${lean_archive}" | shasum -a 256 -c -
       fi
-      mkdir -p "$(dirname "$lean_dest")"
       tar --zstd -xf "$lean_archive" --strip-components=1 -C "$lean_stage"
       rm -rf "$lean_dest"
       mv "$lean_stage" "$lean_dest"
