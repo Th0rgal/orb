@@ -9,7 +9,12 @@ import android.media.MediaRecorder
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
@@ -19,6 +24,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /** Dictation language, stored like iOS `orb.dictationLanguage`; empty = device language. */
 object OrbDictationSettings {
@@ -61,71 +69,264 @@ object OrbDictationSettings {
 }
 
 /** Records mono 16 kHz 16-bit PCM, the only format `/api/voice/transcribe` accepts. */
-class OrbSparkRecorder {
+class OrbSparkRecorder(
+    private val sourceFactory: () -> AudioSource? = ::createPlatformAudioSource,
+    private val joinTimeoutMs: Long = JOIN_TIMEOUT_MS,
+) {
+    interface AudioSource {
+        val bufferSize: Int
+        fun startRecording()
+        fun read(buffer: ByteArray, offset: Int, size: Int): Int
+        fun stop()
+        fun release()
+    }
+
+    internal class SessionState(
+        val sessionGeneration: Long,
+        val pcmBuffer: ByteArrayOutputStream,
+        val running: AtomicBoolean,
+        val workerThread: Thread,
+        private val source: AudioSource,
+    ) {
+        val completed = AtomicBoolean(false)
+        private val stopped = AtomicBoolean(false)
+        private val released = AtomicBoolean(false)
+
+        fun stopSourceOnce() {
+            if (stopped.compareAndSet(false, true)) {
+                runCatching { source.stop() }
+            }
+        }
+
+        fun releaseSourceOnce() {
+            stopSourceOnce()
+            if (released.compareAndSet(false, true)) {
+                runCatching { source.release() }
+            }
+        }
+    }
+
     companion object {
         const val SAMPLE_RATE = 16_000
         const val MAX_SECONDS = 120
         const val MAX_BYTES = 4 * 1024 * 1024
-    }
+        const val JOIN_TIMEOUT_MS = 1_500L
 
-    @Volatile private var running = false
-    private var thread: Thread? = null
-    private val pcm = ByteArrayOutputStream()
-
-    val elapsedSeconds: Int get() = synchronized(pcm) { pcm.size() / (SAMPLE_RATE * 2) }
-
-    @SuppressLint("MissingPermission")
-    fun start(): Boolean {
-        val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        if (minBuf <= 0) return false
-        val record = runCatching {
-            AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+        @SuppressLint("MissingPermission")
+        private fun createPlatformAudioSource(): AudioSource? {
+            val minBuf = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
-                minBuf * 2
             )
-        }.getOrNull() ?: return false
-        if (record.state != AudioRecord.STATE_INITIALIZED) {
-            record.release()
+            if (minBuf <= 0) return null
+            val record = runCatching {
+                AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    minBuf * 2,
+                )
+            }.getOrNull() ?: return null
+            if (record.state != AudioRecord.STATE_INITIALIZED) {
+                record.release()
+                return null
+            }
+            return object : AudioSource {
+                override val bufferSize: Int = minBuf
+                override fun startRecording() = record.startRecording()
+                override fun read(buffer: ByteArray, offset: Int, size: Int): Int =
+                    record.read(buffer, offset, size)
+                override fun stop() = record.stop()
+                override fun release() = record.release()
+            }
+        }
+    }
+
+    private val stateLock = Any()
+    private val generationCounter = AtomicLong(0L)
+    @Volatile private var activeSession: SessionState? = null
+
+    val currentGeneration: Long
+        get() = generationCounter.get()
+
+    val elapsedSeconds: Int
+        get() {
+            val session = activeSession ?: return 0
+            if (session.sessionGeneration != generationCounter.get()) return 0
+            return synchronized(session.pcmBuffer) { session.pcmBuffer.size() / (SAMPLE_RATE * 2) }
+        }
+
+    fun isCurrentGeneration(generation: Long): Boolean =
+        generation > 0L && generationCounter.get() == generation
+
+    fun runIfCurrent(generation: Long, block: () -> Unit): Boolean {
+        synchronized(stateLock) {
+            if (!isCurrentGeneration(generation)) return false
+        }
+        block()
+        return true
+    }
+
+    suspend fun transcribeSession(
+        generation: Long,
+        wav: ByteArray,
+        transcribe: suspend (ByteArray) -> String,
+        onResult: (String?) -> Unit,
+    ): Boolean {
+        if (!isCurrentGeneration(generation)) return false
+        val text = try {
+            transcribe(wav)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Throwable) {
+            null
+        }
+        val shouldPublish = synchronized(stateLock) {
+            isCurrentGeneration(generation)
+        }
+        if (!shouldPublish) return false
+        onResult(text)
+        return true
+    }
+
+    fun start(): Boolean {
+        val (previous, myGen) = synchronized(stateLock) {
+            val prev = activeSession
+            activeSession = null
+            val next = generationCounter.incrementAndGet()
+            prev to next
+        }
+        if (previous != null) {
+            terminateSession(previous)
+        }
+        if (generationCounter.get() != myGen) {
             return false
         }
-        synchronized(pcm) { pcm.reset() }
-        running = true
-        record.startRecording()
-        thread = Thread {
-            val buf = ByteArray(minBuf)
-            val limit = minOf(MAX_SECONDS * SAMPLE_RATE * 2, MAX_BYTES - 44)
-            try {
-                while (running) {
-                    val n = record.read(buf, 0, buf.size)
-                    if (n > 0) synchronized(pcm) {
-                        val room = limit - pcm.size()
-                        if (room <= 0) running = false else pcm.write(buf, 0, minOf(n, room))
+
+        val source = sourceFactory() ?: return false
+        val minBuf = source.bufferSize
+        if (minBuf <= 0 || generationCounter.get() != myGen) {
+            runCatching { source.release() }
+            return false
+        }
+        val startedOk = runCatching { source.startRecording() }.isSuccess
+        if (!startedOk || generationCounter.get() != myGen) {
+            runCatching { source.stop() }
+            runCatching { source.release() }
+            return false
+        }
+
+        val pcmBuffer = ByteArrayOutputStream()
+        val running = AtomicBoolean(true)
+        lateinit var session: SessionState
+        val worker = Thread(
+            {
+                val buf = ByteArray(minBuf)
+                val limit = minOf(MAX_SECONDS * SAMPLE_RATE * 2, MAX_BYTES - 44)
+                try {
+                    while (running.get() && generationCounter.get() == myGen) {
+                        val n = runCatching { source.read(buf, 0, buf.size) }.getOrDefault(-1)
+                        if (!running.get() || generationCounter.get() != myGen) break
+                        if (n > 0) {
+                            synchronized(pcmBuffer) {
+                                if (!running.get() || generationCounter.get() != myGen || session.completed.get()) return@synchronized
+                                val room = limit - pcmBuffer.size()
+                                if (room <= 0) {
+                                    running.set(false)
+                                } else {
+                                    pcmBuffer.write(buf, 0, minOf(n, room))
+                                    if (pcmBuffer.size() >= limit) {
+                                        running.set(false)
+                                    }
+                                }
+                            }
+                        } else if (n < 0) {
+                            running.set(false)
+                        }
                     }
+                } finally {
+                    session.completed.set(true)
+                    session.releaseSourceOnce()
                 }
-            } finally {
-                runCatching { record.stop() }
-                record.release()
+            },
+            "OrbSparkRecorder-$myGen",
+        )
+        session = SessionState(
+            sessionGeneration = myGen,
+            pcmBuffer = pcmBuffer,
+            running = running,
+            workerThread = worker,
+            source = source,
+        )
+        val installed = synchronized(stateLock) {
+            if (generationCounter.get() != myGen) {
+                false
+            } else {
+                activeSession = session
+                true
             }
-        }.also { it.start() }
+        }
+        if (!installed) {
+            running.set(false)
+            session.releaseSourceOnce()
+            return false
+        }
+        worker.start()
         return true
     }
 
     /** Stops recording and returns a WAV file, or null when nothing was captured. */
-    fun stop(): ByteArray? {
-        running = false
-        thread?.join(1500)
-        thread = null
-        val data = synchronized(pcm) { pcm.toByteArray() }
-        if (data.isEmpty()) return null
-        return wav(data)
+    fun stop(): ByteArray? = stopSession()?.second
+
+    fun stopSession(): Pair<Long, ByteArray>? {
+        val session = synchronized(stateLock) {
+            val cur = activeSession ?: return null
+            if (cur.sessionGeneration != generationCounter.get()) {
+                activeSession = null
+                return null
+            }
+            activeSession = null
+            cur
+        }
+        val joined = terminateSession(session)
+        if (!isCurrentGeneration(session.sessionGeneration)) return null
+        val data = synchronized(session.pcmBuffer) {
+            session.completed.set(true)
+            session.pcmBuffer.toByteArray()
+        }
+        if (!joined && session.workerThread.isAlive) {
+            session.running.set(false)
+        }
+        if (data.isEmpty() || !isCurrentGeneration(session.sessionGeneration)) return null
+        return session.sessionGeneration to wav(data)
     }
 
     fun cancel() {
-        running = false
-        thread = null
+        val session = synchronized(stateLock) {
+            generationCounter.incrementAndGet()
+            val cur = activeSession
+            activeSession = null
+            cur
+        }
+        if (session != null) {
+            session.completed.set(true)
+            terminateSession(session)
+        }
+    }
+
+    private fun terminateSession(session: SessionState): Boolean {
+        session.running.set(false)
+        session.stopSourceOnce()
+        if (Thread.currentThread() !== session.workerThread) {
+            runCatching { session.workerThread.join(joinTimeoutMs) }
+        }
+        if (!session.workerThread.isAlive) {
+            session.releaseSourceOnce()
+            return true
+        }
+        return false
     }
 
     private fun wav(data: ByteArray): ByteArray {
@@ -159,6 +360,181 @@ object OrbSparkTranscriber {
                 throw OrbError(OrbJSON.str(dict, "error", "message") ?: "Transcription failed (HTTP ${resp.code})", resp.code)
             }
             OrbJSON.rawStr(dict, "text")?.trim().orEmpty()
+        }
+    }
+}
+
+class OrbComposerDraftStore(initialMissionId: String? = null) {
+    private val drafts = mutableMapOf<String, String>()
+    var activeMissionId: String? = initialMissionId
+        private set
+
+    private fun key(missionId: String?): String = missionId ?: "new"
+
+    fun syncMission(
+        nextMissionId: String?,
+        currentInput: String,
+        adoptedNewMissionId: String? = null,
+    ): String {
+        if (activeMissionId == nextMissionId) {
+            return currentInput
+        }
+        val prevId = activeMissionId
+        activeMissionId = nextMissionId
+        if (prevId == null && nextMissionId != null && nextMissionId == adoptedNewMissionId) {
+            drafts.remove("new")
+            drafts[nextMissionId] = currentInput
+            return currentInput
+        }
+        drafts[key(prevId)] = currentInput
+        return drafts[key(nextMissionId)].orEmpty()
+    }
+}
+
+class OrbSparkDictationSessionCoordinator(
+    val recorder: OrbSparkRecorder = OrbSparkRecorder(),
+    private val isSparkAvailable: () -> Boolean = { true },
+    private val transcribeWav: suspend (ByteArray) -> String,
+    private val onPhaseChange: (OrbAndroidDictationPhase) -> Unit,
+    private val onAppendTranscript: (String) -> Unit,
+    private val onFallbackSystemSpeech: () -> Unit,
+    private val onError: (String?) -> Unit = {},
+) {
+    companion object {
+        const val MIC_FAILURE_MESSAGE = "Could not start the microphone. Please try again."
+    }
+
+    private val coordinatorLock = Any()
+    private val coordinatorGeneration = AtomicLong(0L)
+    private val transcribeJobRef = AtomicReference<Job?>(null)
+
+    val currentCoordinatorGeneration: Long
+        get() = coordinatorGeneration.get()
+
+    val activeTranscribeJob: Job?
+        get() = transcribeJobRef.get()
+
+    fun isCurrentCoordinatorGeneration(generation: Long): Boolean =
+        generation > 0L && coordinatorGeneration.get() == generation
+
+    fun cancelActiveTranscription() {
+        transcribeJobRef.getAndSet(null)?.cancel()
+    }
+
+    private fun runIfSessionCurrent(recorderGeneration: Long, sessionGeneration: Long, block: () -> Unit): Boolean {
+        synchronized(coordinatorLock) {
+            if (!isCurrentCoordinatorGeneration(sessionGeneration) || !recorder.isCurrentGeneration(recorderGeneration)) {
+                return false
+            }
+        }
+        return recorder.runIfCurrent(recorderGeneration) {
+            if (isCurrentCoordinatorGeneration(sessionGeneration)) {
+                block()
+            }
+        }
+    }
+
+    fun startRecording(): Boolean {
+        val mySessionGen = synchronized(coordinatorLock) {
+            coordinatorGeneration.incrementAndGet()
+        }
+        cancelActiveTranscription()
+        if (!isSparkAvailable()) {
+            synchronized(coordinatorLock) {
+                if (!isCurrentCoordinatorGeneration(mySessionGen)) return false
+            }
+            onError(null)
+            onFallbackSystemSpeech()
+            return false
+        }
+        val startedGenBefore = recorder.currentGeneration
+        if (!recorder.start()) {
+            val failedGen = recorder.currentGeneration
+            if (failedGen > startedGenBefore) {
+                runIfSessionCurrent(failedGen, mySessionGen) {
+                    onError(MIC_FAILURE_MESSAGE)
+                    onPhaseChange(OrbAndroidDictationPhase.Failed)
+                }
+            }
+            return false
+        }
+        val startedGen = recorder.currentGeneration
+        val activated = runIfSessionCurrent(startedGen, mySessionGen) {
+            onError(null)
+            onPhaseChange(OrbAndroidDictationPhase.Recording)
+        }
+        if (!activated) {
+            recorder.cancel()
+        }
+        return activated
+    }
+
+    fun finishRecording(scope: CoroutineScope) {
+        val sessionGen = coordinatorGeneration.get()
+        if (sessionGen <= 0L) return
+        val genAtStop = recorder.currentGeneration
+        val session = recorder.stopSession()
+        if (session == null) {
+            runIfSessionCurrent(genAtStop, sessionGen) {
+                onError(null)
+                onPhaseChange(OrbAndroidDictationPhase.Idle)
+            }
+            return
+        }
+        val (generation, wavBytes) = session
+        if (!runIfSessionCurrent(generation, sessionGen) {
+                onError(null)
+                onPhaseChange(OrbAndroidDictationPhase.Transcribing)
+            }
+        ) {
+            return
+        }
+        cancelActiveTranscription()
+        val launched = scope.launch(start = CoroutineStart.LAZY) {
+            recorder.transcribeSession(
+                generation = generation,
+                wav = wavBytes,
+                transcribe = transcribeWav,
+                onResult = { text ->
+                    runIfSessionCurrent(generation, sessionGen) {
+                        val trimmed = text?.trim().orEmpty()
+                        if (trimmed.isNotEmpty()) {
+                            onError(null)
+                            onAppendTranscript(trimmed)
+                            onPhaseChange(OrbAndroidDictationPhase.Idle)
+                        } else {
+                            onError(null)
+                            onFallbackSystemSpeech()
+                        }
+                    }
+                },
+            )
+        }
+        launched.invokeOnCompletion {
+            transcribeJobRef.compareAndSet(launched, null)
+        }
+        transcribeJobRef.set(launched)
+        if (!isCurrentCoordinatorGeneration(sessionGen) || !recorder.isCurrentGeneration(generation)) {
+            transcribeJobRef.compareAndSet(launched, null)
+            launched.cancel()
+            return
+        }
+        launched.start()
+        if (!isCurrentCoordinatorGeneration(sessionGen) || !recorder.isCurrentGeneration(generation)) {
+            transcribeJobRef.compareAndSet(launched, null)
+            launched.cancel()
+        }
+    }
+
+    fun cancel(resetPhase: Boolean = true) {
+        synchronized(coordinatorLock) {
+            coordinatorGeneration.incrementAndGet()
+        }
+        cancelActiveTranscription()
+        recorder.cancel()
+        onError(null)
+        if (resetPhase) {
+            onPhaseChange(OrbAndroidDictationPhase.Idle)
         }
     }
 }

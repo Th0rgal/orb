@@ -13,6 +13,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -61,6 +63,12 @@ object OrbFido {
     private val _pending = MutableStateFlow<List<OrbFidoRequest>>(emptyList())
     val pending: StateFlow<List<OrbFidoRequest>> = _pending.asStateFlow()
 
+    private val _inFlight = MutableStateFlow<Set<String>>(emptySet())
+    val inFlight: StateFlow<Set<String>> = _inFlight.asStateFlow()
+
+    private val _errors = MutableStateFlow<Map<String, String>>(emptyMap())
+    val errors: StateFlow<Map<String, String>> = _errors.asStateFlow()
+
     /** Parse a stream event; null if it is not a usable FIDO request. */
     fun parse(eventType: String?, data: String): OrbFidoRequest? {
         val dict = OrbJSON.dict(OrbJSON.parse(data)) ?: return null
@@ -95,19 +103,29 @@ object OrbFido {
     fun backoffMs(attempt: Int): Long = (1_000L shl attempt.coerceIn(0, 5)).coerceAtMost(30_000L)
 
     fun enqueue(req: OrbFidoRequest) {
+        if (req.requestId in _inFlight.value) return
         _pending.update { cur -> if (cur.any { it.requestId == req.requestId }) cur else cur + req }
     }
 
     fun resolve(requestId: String) {
         _pending.update { cur -> cur.filterNot { it.requestId == requestId } }
+        _errors.update { it - requestId }
     }
 
     fun dropExpired(nowMs: Long = System.currentTimeMillis()) {
-        _pending.update { cur -> cur.filterNot { it.isExpired(nowMs) } }
+        _pending.update { cur ->
+            cur.filterNot { it.isExpired(nowMs) && it.requestId !in _errors.value && it.requestId !in _inFlight.value }
+        }
+    }
+
+    fun interface Transport {
+        suspend fun post(path: String, body: Map<String, Any?>): Any?
     }
 
     fun clear() {
         _pending.value = emptyList()
+        _inFlight.value = emptySet()
+        _errors.value = emptyMap()
         OrbFidoSettings.trust.clear()
     }
 
@@ -151,16 +169,57 @@ object OrbFido {
             cont.invokeOnCancellation { source.cancel() }
         }
 
-    suspend fun respond(core: OrbCore, requestId: String, approved: Boolean) {
+    private fun tryStartInFlight(requestId: String): Boolean {
+        var added = false
+        _inFlight.update { cur ->
+            if (requestId in cur) {
+                added = false
+                cur
+            } else {
+                added = true
+                cur + requestId
+            }
+        }
+        return added
+    }
+
+    internal fun isTerminalRespondError(t: Throwable): Boolean {
+        val err = t as? OrbError ?: return false
+        val status = err.status ?: return false
+        if (status == 404 || status == 410) return true
+        if (status !in 400..499) return false
+        val dict = err.body?.let { OrbJSON.dict(OrbJSON.parse(it)) } ?: return false
+        return dict["error"] == "already_resolved" || dict["code"] == "already_resolved"
+    }
+
+    suspend fun respond(core: OrbCore, requestId: String, approved: Boolean): Boolean =
+        respond(Transport { path, body -> core.request(path, method = "POST", body = body) }, requestId, approved)
+
+    suspend fun respond(
+        transport: Transport,
+        requestId: String,
+        approved: Boolean,
+    ): Boolean {
+        if (!tryStartInFlight(requestId)) return false
+        _errors.update { it - requestId }
         try {
-            core.request(RESPOND_PATH, method = "POST", body = respondBody(requestId, approved))
+            transport.post(RESPOND_PATH, respondBody(requestId, approved))
+            resolve(requestId)
+            return true
         } catch (c: CancellationException) {
+            _errors.update { it + (requestId to "Response interrupted. Retry approval or deny.") }
             throw c
         } catch (t: Throwable) {
-            // 404 = expired or already answered elsewhere; either way the request is gone.
             OrbLog.w(OrbLog.Category.Network, "FIDO respond ($approved) failed", t)
+            if (isTerminalRespondError(t)) {
+                resolve(requestId)
+                return true
+            }
+            val msg = t.message?.takeIf { it.isNotBlank() } ?: t::class.simpleName ?: "Request failed"
+            _errors.update { it + (requestId to msg) }
+            return false
         } finally {
-            resolve(requestId)
+            _inFlight.update { it - requestId }
         }
     }
 
@@ -207,20 +266,31 @@ object OrbFido {
 @Composable
 fun OrbFidoApprovalDialog(core: OrbCore) {
     val pending by OrbFido.pending.collectAsState()
+    val inFlight by OrbFido.inFlight.collectAsState()
+    val errors by OrbFido.errors.collectAsState()
     val req = pending.firstOrNull() ?: return
+    var authenticating by remember(req.requestId) { mutableStateOf(false) }
+    val busy = req.requestId in inFlight || authenticating
+    val errorText = errors[req.requestId]
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     remember(context) { OrbFidoSettings.init(context); true }
     val shownAt = remember(req.requestId) { System.currentTimeMillis() }
+    var autoAttempted by remember(req.requestId) { mutableStateOf(false) }
+    var approvedMethod by remember(req.requestId) { mutableStateOf<UsageTelemetry.Method?>(null) }
     fun record(decision: UsageTelemetry.Decision, method: UsageTelemetry.Method) = UsageTelemetry.trackApproval(
         UsageTelemetry.ApprovalKind.Tool, decision, method, System.currentTimeMillis() - shownAt, toolName = "ssh_sign"
     )
     // Opt-in trust window (default off): same key + host, shortly after a biometric approval.
-    if (OrbFidoSettings.trust.isTrusted(req)) {
-        LaunchedEffect(req.requestId) {
+    val isTrusted = OrbFidoSettings.trust.isTrusted(req)
+    LaunchedEffect(req.requestId, isTrusted) {
+        if (isTrusted && !autoAttempted && errorText == null) {
+            autoAttempted = true
             OrbLog.d(OrbLog.Category.Auth, "FIDO request approved by trust window")
             OrbFido.respond(core, req.requestId, approved = true)
         }
+    }
+    if (isTrusted && (!autoAttempted || busy) && errorText == null) {
         return
     }
     AlertDialog(
@@ -234,27 +304,55 @@ fun OrbFidoApprovalDialog(core: OrbCore) {
                 req.workspace?.let { Text("Workspace: $it", color = Color.White, fontSize = 14.sp) }
                 Text("Key: ${req.keyType}", color = Color.White, fontSize = 14.sp)
                 Text(req.keyFingerprint, color = OrbStyle.textMuted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                if (!errorText.isNullOrBlank()) {
+                    Text(errorText, color = OrbStyle.warning, fontSize = 12.sp)
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                scope.launch {
-                    val activity = context.fragmentActivity()
-                    val method = activity?.let { OrbFido.authenticate(it, req) }
-                    if (method != null) {
-                        record(UsageTelemetry.Decision.Approved, method)
-                        OrbFidoSettings.trust.recordBiometricApproval(req)
-                        OrbFido.respond(core, req.requestId, approved = true)
+            TextButton(
+                enabled = !busy,
+                onClick = {
+                    if (busy) return@TextButton
+                    scope.launch {
+                        if (OrbFidoSettings.trust.isTrusted(req) || approvedMethod != null) {
+                            val method = approvedMethod
+                            if (OrbFido.respond(core, req.requestId, approved = true) && method != null) {
+                                record(UsageTelemetry.Decision.Approved, method)
+                            }
+                            return@launch
+                        }
+                        val activity = context.fragmentActivity()
+                        val method = try {
+                            authenticating = true
+                            activity?.let { OrbFido.authenticate(it, req) }
+                        } finally {
+                            authenticating = false
+                        }
+                        if (method != null) {
+                            approvedMethod = method
+                            OrbFidoSettings.trust.recordBiometricApproval(req)
+                            if (OrbFido.respond(core, req.requestId, approved = true)) {
+                                record(UsageTelemetry.Decision.Approved, method)
+                            }
+                        }
+                        // Cancelled prompt: keep the request on screen so the user can retry or deny.
                     }
-                    // Cancelled prompt: keep the request on screen so the user can retry or deny.
                 }
-            }) { Text("Approve", color = Color.White) }
+            ) { Text(if (busy) "Sending…" else if (errorText != null) "Retry" else "Approve", color = Color.White) }
         },
         dismissButton = {
-            TextButton(onClick = {
-                record(UsageTelemetry.Decision.Denied, UsageTelemetry.Method.None)
-                scope.launch { OrbFido.respond(core, req.requestId, approved = false) }
-            }) { Text("Deny", color = OrbStyle.error) }
+            TextButton(
+                enabled = !busy,
+                onClick = {
+                    if (busy) return@TextButton
+                    scope.launch {
+                        if (OrbFido.respond(core, req.requestId, approved = false)) {
+                            record(UsageTelemetry.Decision.Denied, UsageTelemetry.Method.None)
+                        }
+                    }
+                }
+            ) { Text("Deny", color = OrbStyle.error) }
         }
     )
 }

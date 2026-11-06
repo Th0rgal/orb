@@ -37,7 +37,7 @@ struct FidoApprovalOverlay: View {
                                     .font(.headline)
                                     .foregroundStyle(Theme.textPrimary)
                                 Spacer()
-                                CountdownView(expiresAt: request.expiresAt)
+                                CountdownView(expiresAt: request.expiresAt, requestId: request.id)
                             }
 
                             // Request details
@@ -54,7 +54,7 @@ struct FidoApprovalOverlay: View {
                             .padding(.vertical, 8)
 
                             // Quick auto-approve chip
-                            let isInFlight = fidoState.inFlightRequestIds.contains(request.id)
+                            let isBusy = fidoState.inFlightRequestIds.contains(request.id) || fidoState.authenticatingRequestIds.contains(request.id)
                             if let lastError = fidoState.lastError, !lastError.isEmpty {
                                 HStack(spacing: 8) {
                                     Image(systemName: "exclamationmark.triangle.fill")
@@ -88,8 +88,8 @@ struct FidoApprovalOverlay: View {
                                 .background(.ultraThinMaterial)
                                 .clipShape(Capsule())
                             }
-                            .disabled(isInFlight)
-                            .opacity(isInFlight ? 0.5 : 1)
+                            .disabled(isBusy)
+                            .opacity(isBusy ? 0.5 : 1)
 
                             // Action buttons — show a spinner inside whichever
                             // button is in flight so the user can't double-fire
@@ -99,7 +99,7 @@ struct FidoApprovalOverlay: View {
                                     Task { await fidoState.deny(request.id) }
                                 } label: {
                                     HStack(spacing: 6) {
-                                        if isInFlight {
+                                        if isBusy {
                                             ProgressView()
                                                 .controlSize(.small)
                                                 .tint(Theme.error)
@@ -111,13 +111,13 @@ struct FidoApprovalOverlay: View {
                                     .frame(maxWidth: .infinity)
                                 }
                                 .buttonStyle(GlassDenyButtonStyle())
-                                .disabled(isInFlight)
+                                .disabled(isBusy)
 
                                 Button {
                                     Task { await fidoState.approveWithAuthentication(request.id) }
                                 } label: {
                                     HStack(spacing: 6) {
-                                        if isInFlight {
+                                        if isBusy {
                                             ProgressView()
                                                 .controlSize(.small)
                                                 .tint(.white)
@@ -129,7 +129,7 @@ struct FidoApprovalOverlay: View {
                                     .frame(maxWidth: .infinity)
                                 }
                                 .buttonStyle(GlassApproveButtonStyle())
-                                .disabled(isInFlight)
+                                .disabled(isBusy)
                             }
                         }
                     }
@@ -150,11 +150,17 @@ struct FidoApprovalOverlay: View {
 
 private struct CountdownView: View {
     let expiresAt: Date
+    let requestId: String
 
     @State private var remaining: TimeInterval = 0
     @State private var totalDuration: TimeInterval = 30
 
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private func tick() {
+        remaining = expiresAt.timeIntervalSinceNow
+        if remaining <= 0 { FidoApprovalState.shared.dropExpired() }
+    }
 
     var body: some View {
         HStack(spacing: 4) {
@@ -180,10 +186,17 @@ private struct CountdownView: View {
         .onAppear {
             remaining = expiresAt.timeIntervalSinceNow
             totalDuration = max(remaining, 1)
+            FidoApprovalState.shared.dropExpired()
         }
-        .onReceive(timer) { _ in
+        .onChange(of: expiresAt) { _, _ in
             remaining = expiresAt.timeIntervalSinceNow
+            totalDuration = max(remaining, 1)
         }
+        .onChange(of: requestId) { _, _ in
+            remaining = expiresAt.timeIntervalSinceNow
+            totalDuration = max(remaining, 1)
+        }
+        .onReceive(timer) { _ in tick() }
     }
 }
 
@@ -301,12 +314,10 @@ final class OrbFidoMonitor {
             var delay: Double = 2
             while !Task.isCancelled {
                 let started = Date()
-                if let pending = try? await OrbCore.shared.fidoPending() {
-                    for payload in pending { FidoApprovalState.shared.handleSignRequest(payload) }
-                }
+                await FidoApprovalState.shared.syncPending()
                 if Task.isCancelled { break }
                 let stream = OrbCore.shared.streamControl(missionId: nil, kinds: ["fido"], generation: generation) { type, data in
-                    if type == "fido_sign_request" { FidoApprovalState.shared.handleSignRequest(data) }
+                    if type == "fido_sign_request" { FidoApprovalState.shared.handleSignRequest(data, dropIfExpiredAt: Date()) }
                 }
                 await withTaskCancellationHandler { await stream.value } onCancel: { stream.cancel() }
                 if Task.isCancelled { break }
