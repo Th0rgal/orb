@@ -1,7 +1,10 @@
 /-
   OrbNode.Transfer: Machine-Transfer Checkpoints (`shared/machine_transfer.rs`) & `tar+zstd`
   Bulk-Copy Pack/Unpack (`src/machine_transfer_archive.rs`) for `sandboxed-node`.
+  Supports portable workspace symlinks (`links` + `skipped`), Git repository `.transfer-git.bundle`
+  preservation & restoration, overlap/escape confinement, and block/bulk resume.
 -/
+import Std.Data.HashMap
 import LeanSys.Auth
 import OrbBin.PosixExt
 import OrbBin.Json
@@ -17,24 +20,124 @@ open OrbNode.FileBrowser
 def transferBlockBytes : Nat := 1024 * 1024
 def maxTransferBytes : UInt64 := 10 * 1024 * 1024 * 1024
 def maxTransferFiles : Nat := 50000
+def maxTransferRows : Nat := 2000
+def excludedListedCap : Nat := 5000
+
+def outsideLinkReason : String := "link points outside the workspace"
+def unusualLinkReason : String := "link target is not portable"
+def specialFileReason : String := "socket, pipe or device"
 
 def isProtectedSegment (name : String) : Bool :=
   let n := name.toLower
-  n == ".env" || n.startsWith ".env." ||
-  n == ".ssh" || n == ".aws" || n == ".gnupg" || n == ".git" ||
-  n == "credentials.json" || n == ".credentials.json" || n == "auth.json" ||
-  n == "id_rsa" || n == "id_ed25519" || n == ".git-credentials" ||
-  n == ".gemini" || n == ".claude" || n == ".codex" || n == ".grok" ||
-  n.endsWith ".pem" || n.endsWith ".key"
+  n == ".git" || n == ".transfers" || n == ".transfer-git.bundle" ||
+  n == ".ssh" || n == ".aws" || n == ".codex" || n == ".claude" ||
+  n == ".opencode" || n == ".grok" || n == ".gemini" || n == ".gnupg" ||
+  n == ".npmrc" || n == ".netrc" || n == ".pypirc" || n == ".envrc" ||
+  n == ".git-credentials" || n == "secrets" || n == "secrets.json" ||
+  n == "secrets.yaml" || n == "secrets.yml" || n == "credentials.json" ||
+  n == ".credentials.json" || n == "auth.json" || n == "opencode.json" ||
+  n == ".env" || (n.startsWith ".env." && !n.endsWith ".example") ||
+  n.endsWith ".pem" || n.endsWith ".key" || n.endsWith ".p12" || n.endsWith ".pfx" ||
+  n.startsWith "id_rsa" || n.startsWith "id_ed25519" ||
+  (n.splitOn "credentials").length > 1
 
-def isRebuildableSegment (name : String) : Bool :=
-  name == "node_modules" || name == "target" || name == ".lake" ||
-  name == ".turbo-lean" || name == "__pycache__" || name == ".venv" || name == ".cache"
+def isRebuildableSegment (name : String) (topLevel : Bool := false) : Bool :=
+  let n := name.toLower
+  n == "node_modules" || n == "target" || n == ".next" || n == ".cache" ||
+  n == "__pycache__" || n == ".venv" || n == ".lake" || n == ".turbo-lean" ||
+  (topLevel && (
+    n == ".rustup" || n == ".cargo" || n == ".elan" || n == ".npm" ||
+    n == ".nvm" || n == ".bun" || n == ".deno" || n == ".pnpm-store" ||
+    n == ".gradle" || n == ".m2" || n == ".pyenv" || n == ".rbenv"))
+
+def isRebuildableRel (rel : String) : Bool :=
+  rel == ".local/share/opencode/tool-output" ||
+  rel == ".local/share/opencode/log" ||
+  rel == ".local/share/opencode/snapshot"
+
+def isRepositoryRel (rel : String) : Bool :=
+  rel == ".git" || rel.endsWith "/.git"
 
 def validRelativeCheckpointPath (raw : String) : Bool :=
   !raw.isEmpty && !raw.startsWith "/" && !raw.endsWith "/" && !raw.contains '\\' &&
+  !raw.contains '\x00' &&
   (raw.splitOn "/").all fun seg => !seg.isEmpty && seg != "." && seg != ".."
 
+def checkpointParentDepth (path : String) : Nat :=
+  let segs := path.splitOn "/"
+  if segs.length == 0 then 0 else segs.length - 1
+
+/-- `contained_target` (`shared/machine_transfer.rs`): relative target whose `..` components only lead
+    and never climb above the workspace root (`up <= depth(path)`). -/
+def containedLinkTarget (path target : String) : Bool := Id.run do
+  if target.isEmpty || target.length > 4096 || target.contains '\\' || target.contains '\x00' || target.startsWith "/" then
+    return false
+  let mut up : Nat := 0
+  let mut names : Nat := 0
+  for seg in target.splitOn "/" do
+    if seg.isEmpty || seg == "." then
+      if seg.isEmpty then return false
+    else if seg == ".." then
+      if names > 0 then return false
+      up := up + 1
+    else
+      names := names + 1
+  return up ≤ checkpointParentDepth path
+
+private def readSymlinkTarget (linkPath : System.FilePath) : IO (Option String) := do
+  let res ← (IO.Process.output { cmd := "readlink", args := #[linkPath.toString] }).toBaseIO
+  match res with
+  | .ok out =>
+    if out.exitCode != 0 then return none
+    let clean := (out.stdout.dropEndWhile (fun c => c == '\n' || c == '\r')).toString
+    if clean.isEmpty then return none else return some clean
+  | .error _ => return none
+
+/-- Rewrite portable source symlink target (`portable_target` in `shared/machine_transfer.rs`). -/
+def portableLinkTarget (roots : Array String) (relPath rawTarget : String) : Except String String := do
+  if rawTarget.isEmpty || rawTarget.contains '\\' || rawTarget.contains '\x00' then
+    throw unusualLinkReason
+  if !rawTarget.startsWith "/" then
+    if containedLinkTarget relPath rawTarget then
+      return rawTarget
+    let parentSegs := (relPath.splitOn "/").dropLast
+    let mut level : Nat := parentSegs.length
+    let mut escapes := false
+    for seg in rawTarget.splitOn "/" do
+      if seg == ".." then
+        if level == 0 then escapes := true
+        level := level - 1
+      else if seg != "." && !seg.isEmpty then
+        level := level + 1
+    throw (if escapes then outsideLinkReason else unusualLinkReason)
+  let mut inside? : Option String := none
+  for r in roots do
+    let cleanR := (r.dropEndWhile (· == '/')).toString
+    if rawTarget == cleanR then
+      inside? := some ""
+      break
+    else if rawTarget.startsWith (cleanR ++ "/") then
+      inside? := some ((rawTarget.drop (cleanR.length + 1)).toString)
+      break
+  let some inside := inside?
+    | throw outsideLinkReason
+  if !inside.isEmpty && !validRelativeCheckpointPath inside then
+    throw unusualLinkReason
+  let d := checkpointParentDepth relPath
+  let up := String.intercalate "/" (List.replicate d "..")
+  let rewritten :=
+    if inside.isEmpty then
+      if up.isEmpty then "." else up
+    else if up.isEmpty then
+      inside
+    else
+      s!"{up}/{inside}"
+  if containedLinkTarget relPath rewritten then
+    return rewritten
+  else
+    throw unusualLinkReason
+
+/-- Confine `rel` beneath `root`, verifying `root` and every existing component is not a symlink. -/
 def confinedCheckpointPath (root : System.FilePath) (rel : String) : IO (Except String System.FilePath) := do
   if !validRelativeCheckpointPath rel then
     return .error "Invalid checkpoint path"
@@ -48,6 +151,30 @@ def confinedCheckpointPath (root : System.FilePath) (rel : String) : IO (Except 
     if st.exists_ && st.isSymlink then
       return .error s!"Symlink is not transferable: {rel}"
   return .ok cur
+
+/-- Confine parent directories for creating or verifying a symlink at `rel` beneath `root`
+    (every ancestor must be a non-symlink directory; the final component itself may be a symlink). -/
+private def confinedSymlinkParent (root : System.FilePath) (rel : String) :
+    IO (Except String (System.FilePath × System.FilePath)) := do
+  if !validRelativeCheckpointPath rel then
+    return .error "Invalid checkpoint path"
+  let rst ← statPath root.toString
+  if rst.exists_ && rst.isSymlink then
+    return .error "Checkpoint root is a symlink"
+  let segs := rel.splitOn "/"
+  let parentSegs := segs.dropLast
+  let some leaf := segs.getLast?
+    | return .error "Invalid link path"
+  let mut par := root
+  for seg in parentSegs do
+    par := par / seg
+    let st ← statPath par.toString
+    if st.exists_ then
+      if st.isSymlink then
+        return .error s!"Symlink ancestor is not transferable: {rel}"
+      if !st.isDir then
+        return .error s!"Checkpoint mismatch: {rel}"
+  return .ok (par, par / leaf)
 
 def detectTransferHarnesses (ma : ManagedAuthConfig) : IO (Array String) := do
   let adv ← advertisedManagedAuth ma
@@ -103,6 +230,8 @@ structure TransferManifest where
   excluded : Array String := #[]
   bytes    : UInt64 := 0
   links    : Array (String × String) := #[]
+  skipped  : Array (String × String) := #[]
+  unlisted : Nat := 0
   deriving Repr, BEq
 
 def TransferManifest.toJson (m : TransferManifest) : JVal := Id.run do
@@ -114,6 +243,11 @@ def TransferManifest.toJson (m : TransferManifest) : JVal := Id.run do
   if !m.links.isEmpty then
     fields := fields.push ("links", .arr (m.links.map fun (p, t) =>
       .obj #[("path", .str p), ("target", .str t)]))
+  if !m.skipped.isEmpty then
+    fields := fields.push ("skipped", .arr (m.skipped.map fun (p, r) =>
+      .obj #[("path", .str p), ("reason", .str r)]))
+  if m.unlisted > 0 then
+    fields := fields.push ("unlisted", JVal.nat m.unlisted)
   return .obj fields
 
 def TransferManifest.fromJson? (v : JVal) : Option TransferManifest := do
@@ -127,15 +261,27 @@ def TransferManifest.fromJson? (v : JVal) : Option TransferManifest := do
   let mut links : Array (String × String) := #[]
   if let some rl := v.fieldArr? "links" then
     for l in rl do
-      if let (some p, some t) := (l.fieldStr? "path", l.fieldStr? "target") then
-        links := links.push (p, t)
-  return { files, excluded, bytes, links }
+      let p ← l.fieldStr? "path"
+      let t ← l.fieldStr? "target"
+      links := links.push (p, t)
+  let mut skipped : Array (String × String) := #[]
+  if let some rs := v.fieldArr? "skipped" then
+    for s in rs do
+      let p ← s.fieldStr? "path"
+      let r ← s.fieldStr? "reason"
+      skipped := skipped.push (p, r)
+  let unlisted := (v.fieldNat? "unlisted").getD 0
+  return { files, excluded, bytes, links, skipped, unlisted }
 
+/-- Full `shared/machine_transfer.rs::validate` check: validates files, links, target containment,
+    duplicate paths, and file/link ancestor overlaps. -/
 def validateManifest (m : TransferManifest) : Except String Unit := do
-  if m.files.size + m.links.size > maxTransferFiles then
+  if (renderCompact m.toJson).utf8ByteSize > 8 * 1024 * 1024 then
+    throw "Workspace inventory exceeds 8 MiB"
+  if m.files.size > maxTransferFiles || m.files.size + m.links.size > maxTransferFiles || m.skipped.size > maxTransferFiles then
     throw "Too many files"
   let mut total : UInt64 := 0
-  let mut seen : Array String := #[]
+  let mut seen : Std.HashMap String Unit := {}
   for f in m.files do
     if !validRelativeCheckpointPath f.path then throw "Invalid checkpoint path"
     let checkPath :=
@@ -144,14 +290,30 @@ def validateManifest (m : TransferManifest) : Except String Unit := do
       else f.path
     if !checkPath.isEmpty && (checkPath.splitOn "/").any isProtectedSegment then
       throw "Excluded path in manifest"
-    if seen.contains f.path then throw "Duplicate path in manifest"
+    if seen.contains f.path then throw "Invalid manifest"
     if f.sha256.length != 64 || !f.sha256.all (fun c => ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f') || ('A' ≤ c && c ≤ 'F')) then
-      throw "Invalid manifest sha256"
-    seen := seen.push f.path
+      throw "Invalid manifest"
+    seen := seen.insert f.path ()
     total := total + f.bytes
     if total > maxTransferBytes then throw "Checkpoint exceeds 10 GiB"
   if total != m.bytes then
     throw "Manifest size mismatch"
+  for (lp, lt) in m.links do
+    if !validRelativeCheckpointPath lp then throw "Invalid checkpoint path"
+    if (lp.splitOn "/").any isProtectedSegment then
+      throw "Excluded path in manifest"
+    if seen.contains lp || !containedLinkTarget lp lt then
+      throw "Invalid manifest"
+    seen := seen.insert lp ()
+  let allPaths := (m.files.map (·.path)) ++ (m.links.map Prod.fst)
+  for p in allPaths do
+    let segs := p.splitOn "/"
+    if segs.length > 1 then
+      let mut prefixStr := ""
+      for seg in segs.dropLast do
+        prefixStr := if prefixStr.isEmpty then seg else s!"{prefixStr}/{seg}"
+        if seen.contains prefixStr then
+          throw "Overlapping checkpoint paths"
 
 private def loadSelection (area : System.FilePath) : IO (Array String × Array String) := do
   let selFile := area / "selection.json"
@@ -162,50 +324,170 @@ private def loadSelection (area : System.FilePath) : IO (Array String × Array S
   let inclList := ((jv.fieldArr? "include").getD #[]).filterMap JVal.asStr?
   return (omitList, inclList)
 
+private def gitIgnoredPaths (dir : System.FilePath) (rel : String) : IO (Option (Std.HashMap String Unit)) := do
+  let gitMeta ← statPath (dir / ".git").toString
+  if !gitMeta.exists_ then return none
+  let r ← (IO.Process.output {
+    cmd := "git"
+    args := #[
+      "-c", "core.hooksPath=/dev/null",
+      "-c", "core.fsmonitor=false",
+      "-C", dir.toString,
+      "ls-files", "--others", "--ignored", "--exclude-standard", "--directory"
+    ]
+    env := #[("GIT_TERMINAL_PROMPT", some "0"), ("GIT_OPTIONAL_LOCKS", some "0")]
+  }).toBaseIO
+  let mut set : Std.HashMap String Unit := {}
+  if let .ok out := r then
+    if out.exitCode == 0 then
+      for line in out.stdout.splitOn "\n" do
+        let p := (line.trimAscii.dropEndWhile (· == '/')).toString
+        if !p.isEmpty then
+          let full := if rel.isEmpty then p else s!"{rel}/{p}"
+          set := set.insert full ()
+  return some set
+
 private def walkWorkspace
-    (sourceRoot : System.FilePath) (omitList inclList : Array String) :
+    (sourceRoot : System.FilePath) (roots : Array String) (omitList inclList : Array String) :
     IO (Except String TransferManifest) := do
   let rst ← statPath sourceRoot.toString
   if !rst.exists_ then
     return .error "Source workspace directory does not exist"
   if rst.isSymlink || !rst.isDir then
     return .error "Source workspace unavailable"
-  let mut pending : Array (System.FilePath × String × Bool) := #[(sourceRoot, "", false)]
+  let rootIgnored := (← gitIgnoredPaths sourceRoot "").getD {}
+  let mut pending : Array (System.FilePath × String × Bool × Std.HashMap String Unit) :=
+    #[(sourceRoot, "", false, rootIgnored)]
   let mut files : Array TransferEntry := #[]
+  let mut links : Array (String × String) := #[]
+  let mut skipped : Array (String × String) := #[]
   let mut excluded : Array String := #[]
+  let mut unlisted : Nat := 0
   let mut totalBytes : UInt64 := 0
   while !pending.isEmpty do
-    let (dir, relPfx, chosen) := pending.back!
+    let (dir, relPfx, chosen, ignoredSet) := pending.back!
     pending := pending.pop
     let .ok rawEntries ← dir.readDir |>.toBaseIO
       | return .error s!"Failed reading {dir}"
     let sorted := rawEntries.qsort (fun a b => a.fileName < b.fileName)
     for item in sorted do
+      if item.fileName.contains '\\' then
+        return .error "Invalid checkpoint path"
       let rel := if relPfx.isEmpty then item.fileName else s!"{relPfx}/{item.fileName}"
       let st ← statPath item.path.toString
       let incHere := chosen || inclList.contains rel
-      let isExcl :=
-        isProtectedSegment item.fileName ||
-        omitList.contains rel ||
-        (!incHere && isRebuildableSegment item.fileName)
-      if isExcl then
-        if excluded.size < 5000 || item.fileName == ".git" then
+      let topLevel := !(rel.contains '/')
+      let isLeftBehind :=
+        if isProtectedSegment item.fileName then true
+        else if omitList.contains rel then true
+        else if incHere then false
+        else if isRebuildableSegment item.fileName topLevel || isRebuildableRel rel then true
+        else if ignoredSet.contains rel then true
+        else false
+      if isLeftBehind then
+        if isRepositoryRel rel || excluded.size < excludedListedCap then
           excluded := excluded.push rel
+        else
+          unlisted := unlisted + 1
+        if excluded.size > maxTransferFiles then
+          return .error "Too many repositories"
       else if st.isSymlink then
-        pure ()
+        match ← readSymlinkTarget item.path with
+        | some rawTarget =>
+          match portableLinkTarget roots rel rawTarget with
+          | .ok portable => links := links.push (rel, portable)
+          | .error reason => skipped := skipped.push (rel, reason)
+        | none =>
+          skipped := skipped.push (rel, unusualLinkReason)
+        if files.size + links.size > maxTransferFiles || skipped.size > maxTransferFiles then
+          return .error "Workspace exceeds transfer limit (10 GiB / 50,000 files)"
       else if st.isDir then
-        pending := pending.push (item.path, rel, incHere)
+        let ownIgnored? ← gitIgnoredPaths item.path rel
+        pending := pending.push (item.path, rel, incHere, ownIgnored?.getD ignoredSet)
       else if st.isReg then
+        let beforeMd? ← (item.path.metadata |>.toBaseIO).map (fun r => r.toOption)
         let .ok bytes ← IO.FS.readBinFile item.path |>.toBaseIO
           | return .error s!"Failed reading {rel}"
+        let afterSt ← statPath item.path.toString
+        let afterMd? ← (item.path.metadata |>.toBaseIO).map (fun r => r.toOption)
+        let changed :=
+          !afterSt.exists_ || afterSt.isSymlink || !afterSt.isReg ||
+          match beforeMd?, afterMd? with
+          | some bmd, some amd =>
+            amd.byteSize != bytes.size.toUInt64 || amd.modified != bmd.modified
+          | _, _ => true
+        if changed then
+          return .error s!"File changed during snapshot: {rel}"
         let sha := bytesToHexLower (sha256Bytes bytes)
         let exec := (st.mode &&& 0o111) != 0
         totalBytes := totalBytes + bytes.size.toUInt64
-        if totalBytes > maxTransferBytes || files.size + 1 > maxTransferFiles then
+        if totalBytes > maxTransferBytes || files.size + links.size + 1 > maxTransferFiles then
           return .error "Workspace exceeds transfer limit (10 GiB / 50,000 files)"
         files := files.push { path := rel, bytes := bytes.size.toUInt64, sha256 := sha, executable := exec }
+      else
+        skipped := skipped.push (rel, specialFileReason)
   let sortedFiles := files.qsort (fun a b => a.path < b.path)
-  return .ok { files := sortedFiles, excluded := excluded, bytes := totalBytes }
+  let sortedLinks := links.qsort (fun a b => a.1 < b.1)
+  let sortedSkipped := skipped.qsort (fun a b => a.1 < b.1)
+  let sortedExcl := excluded.qsort (· < ·)
+  return .ok {
+    files := sortedFiles
+    excluded := sortedExcl
+    bytes := totalBytes
+    links := sortedLinks
+    skipped := sortedSkipped
+    unlisted := unlisted
+  }
+
+private def resolveCanonicalSource (src : System.FilePath) : IO (Except String (System.FilePath × Array String)) := do
+  let st ← statPath src.toString
+  if !st.exists_ then
+    return .error "Source workspace directory does not exist"
+  let r ← (IO.FS.realPath src).toBaseIO
+  match r with
+  | .error e => return .error (toString e)
+  | .ok canon =>
+    let mut roots : Array String := #[canon.toString]
+    if src.toString != canon.toString then
+      roots := roots.push src.toString
+    return .ok (canon, roots)
+
+private def normalizeShowRefLines (s : String) : Array String :=
+  let lines := (s.splitOn "\n").map (·.trimAscii.toString) |>.filter (fun ln => !ln.isEmpty && !ln.endsWith " HEAD")
+  lines.toArray.qsort (· < ·)
+
+private def restoreManifestLinks (root : System.FilePath) (links : Array (String × String)) :
+    IO (Except String Unit) := do
+  for (lp, lt) in links do
+    let (par, linkDest) ← match ← confinedSymlinkParent root lp with
+      | .ok v => pure v
+      | .error e => return .error e
+    IO.FS.createDirAll par
+    let lst ← statPath linkDest.toString
+    if lst.exists_ then
+      if lst.isSymlink then
+        match ← readSymlinkTarget linkDest with
+        | some curTarget =>
+          if curTarget != lt then
+            return .error s!"Checkpoint mismatch: {lp}"
+        | none => return .error s!"Checkpoint mismatch: {lp}"
+      else
+        return .error s!"Checkpoint mismatch: {lp}"
+    else
+      let r ← IO.Process.output { cmd := "ln", args := #["-s", lt, linkDest.toString] }
+      if r.exitCode != 0 then
+        return .error s!"Failed creating symlink {lp}: {r.stderr.trimAscii}"
+  return .ok ()
+
+private def runGitCmd (cwd : System.FilePath) (args : Array String) : IO (Except String Unit) := do
+  let r ← IO.Process.output {
+    cmd := "git"
+    args := #["-c", "core.hooksPath=/dev/null", "-C", cwd.toString] ++ args
+    env := #[("GIT_TERMINAL_PROMPT", some "0")]
+  }
+  if r.exitCode != 0 then
+    return .error "Git checkpoint failed; inspect the repository before moving"
+  return .ok ()
 
 def operateTransfer
     (area : System.FilePath) (source? : Option System.FilePath) (opJson : JVal) :
@@ -216,27 +498,48 @@ def operateTransfer
   let opName := (opJson.fieldStr? "op").getD ""
   match opName with
   | "inventory" =>
-    let some src := source? | return .error "Source workspace unavailable"
-    match ← walkWorkspace src #[] #[] with
+    let some rawSrc := source? | return .error "Source workspace unavailable"
+    let (src, roots) ← match ← resolveCanonicalSource rawSrc with
+      | .ok v => pure v
+      | .error e => return .error e
+    match ← walkWorkspace src roots #[] #[] with
     | .error e => return .error e
     | .ok m =>
-      let rows := m.files.map fun f => JVal.obj #[
+      let fileRows := m.files.map fun f => JVal.obj #[
         ("path", .str f.path),
         ("folder", .bool false),
         ("state", .str "moved"),
         ("bytes", JVal.uint64 f.bytes),
         ("files", JVal.nat 1)
       ]
+      let linkRows := m.links.map fun (lp, _) => JVal.obj #[
+        ("path", .str lp),
+        ("folder", .bool false),
+        ("state", .str "moved"),
+        ("bytes", JVal.uint64 0),
+        ("files", JVal.nat 1)
+      ]
+      let rows := (fileRows ++ linkRows).extract 0 (min maxTransferRows (fileRows.size + linkRows.size))
       return .ok (.obj #[
-        ("bytes", JVal.uint64 m.bytes),
-        ("files", JVal.nat m.files.size),
         ("rows", .arr rows),
-        ("truncated", .bool false),
-        ("hidden", JVal.nat 0)
+        ("bytes", JVal.uint64 m.bytes),
+        ("files", JVal.nat (m.files.size + m.links.size)),
+        ("reserved", .obj #[("bytes", JVal.uint64 0), ("files", JVal.nat 0)]),
+        ("truncated", .bool (fileRows.size + linkRows.size > maxTransferRows)),
+        ("protected", JVal.nat m.excluded.size),
+        ("limits", .obj #[("bytes", JVal.uint64 maxTransferBytes), ("files", JVal.nat maxTransferFiles)])
       ])
   | "select" =>
     let omitList := ((opJson.fieldArr? "omit").getD #[]).filterMap JVal.asStr?
     let inclList := ((opJson.fieldArr? "include").getD #[]).filterMap JVal.asStr?
+    if ← manifestFile.pathExists then
+      let (curOmit, curIncl) ← loadSelection area
+      if curOmit == omitList && curIncl == inclList then
+        return .ok (.obj #[("ok", .bool true)])
+      else
+        return .error "Workspace snapshot already taken; cancel to choose again"
+    if omitList.size + inclList.size > maxTransferRows then
+      return .error "Too many selected paths"
     for p in omitList ++ inclList do
       if !validRelativeCheckpointPath p then return .error "Invalid checkpoint path"
     if inclList.any (fun p => (p.splitOn "/").any isProtectedSegment) then
@@ -252,40 +555,104 @@ def operateTransfer
       let .ok raw ← IO.FS.readFile manifestFile |>.toBaseIO | return .error "Failed reading manifest"
       let .ok jv := OrbBin.Json.parse raw | return .error "Corrupt manifest"
       return .ok jv
-    let some src := source? | return .error "Source workspace unavailable"
+    let some rawSrc := source? | return .error "Source workspace unavailable"
+    let (src, roots) ← match ← resolveCanonicalSource rawSrc with
+      | .ok v => pure v
+      | .error e => return .error e
+    if area.toString == src.toString || area.toString.startsWith (src.toString ++ "/") then
+      return .error "Checkpoint directory must be outside the workspace"
     let (omitList, inclList) ← loadSelection area
-    let m ← match ← walkWorkspace src omitList inclList with
+    let mut m ← match ← walkWorkspace src roots omitList inclList with
       | .ok v => pure v
       | .error e => return .error e
     if ← root.pathExists then
       let _ ← IO.Process.output { cmd := "rm", args := #["-rf", root.toString] }
     IO.FS.createDirAll root
     for f in m.files do
-      let srcFile := src / f.path
-      let dstFile := root / f.path
+      let srcFile ← match ← confinedCheckpointPath src f.path with
+        | .ok v => pure v
+        | .error e => return .error e
+      let dstFile ← match ← confinedCheckpointPath root f.path with
+        | .ok v => pure v
+        | .error e => return .error e
       if let some par := dstFile.parent then IO.FS.createDirAll par
       let .ok bytes ← IO.FS.readBinFile srcFile |>.toBaseIO
         | return .error s!"Failed copying {f.path}"
-      if bytesToHexLower (sha256Bytes bytes) != f.sha256 then
+      if bytes.size.toUInt64 != f.bytes || bytesToHexLower (sha256Bytes bytes) != f.sha256 then
         return .error s!"File changed during snapshot: {f.path}"
       IO.FS.writeBinFile dstFile bytes
       let _ ← chmod dstFile.toString (if f.executable then 0o700 else 0o600)
+    let afterWalk ← match ← walkWorkspace src roots omitList inclList with
+      | .ok v => pure v
+      | .error e => return .error e
+    if afterWalk != m then
+      return .error "Workspace changed during snapshot; stop all writers and retry"
+    let repos := m.excluded.filter isRepositoryRel
+    for gitRel in repos do
+      let repoRel :=
+        if gitRel == ".git" then ""
+        else (gitRel.dropEnd 5).toString
+      let repoDir := if repoRel.isEmpty then src else src / repoRel
+      let bundleRel := if repoRel.isEmpty then ".transfer-git.bundle" else s!"{repoRel}/.transfer-git.bundle"
+      let bundleDst := root / bundleRel
+      if let some par := bundleDst.parent then IO.FS.createDirAll par
+      let refsOut ← IO.Process.output { cmd := "git", args := #["-C", repoDir.toString, "show-ref"] }
+      if refsOut.exitCode != 0 && refsOut.exitCode != 1 then
+        return .error "Cannot read Git history"
+      if refsOut.exitCode == 0 then
+        let bOut ← IO.Process.output {
+          cmd := "git"
+          args := #["-C", repoDir.toString, "bundle", "create", bundleDst.toString, "--all"]
+        }
+        if bOut.exitCode != 0 then
+          return .error "Could not checkpoint Git history"
+        let .ok bBytes ← IO.FS.readBinFile bundleDst |>.toBaseIO
+          | return .error "Could not read Git bundle"
+        if m.bytes + bBytes.size.toUInt64 > maxTransferBytes then
+          return .error "Git history exceeds transfer size or available disk space"
+        let bSha := bytesToHexLower (sha256Bytes bBytes)
+        m := {
+          m with
+          bytes := m.bytes + bBytes.size.toUInt64
+          files := m.files.push {
+            path := bundleRel
+            bytes := bBytes.size.toUInt64
+            sha256 := bSha
+            executable := false
+          }
+        }
+    if let .error e := validateManifest m then
+      return .error e
     let mJson := m.toJson
     IO.FS.writeFile manifestFile (renderCompact mJson)
     return .ok mJson
   | "check_source" =>
-    let some src := source? | return .error "Source workspace unavailable"
+    let some rawSrc := source? | return .error "Source workspace unavailable"
+    let (src, roots) ← match ← resolveCanonicalSource rawSrc with
+      | .ok v => pure v
+      | .error e => return .error e
     if !(← manifestFile.pathExists) then return .error "Manifest not found"
     let .ok raw ← IO.FS.readFile manifestFile |>.toBaseIO | return .error "Failed reading manifest"
     let .ok jv := OrbBin.Json.parse raw | return .error "Corrupt manifest"
     let some expected := TransferManifest.fromJson? jv | return .error "Corrupt manifest"
     let (omitList, inclList) ← loadSelection area
-    match ← walkWorkspace src omitList inclList with
+    match ← walkWorkspace src roots omitList inclList with
     | .error e => return .error e
     | .ok cur =>
       let expPlain := expected.files.filter (fun f => !f.path.endsWith ".transfer-git.bundle")
-      if cur.files != expPlain then
+      if cur.files != expPlain || cur.links != expected.links then
         return .error "Source files changed after preparation; cancel and prepare again"
+      for bEntry in expected.files.filter (fun f => f.path.endsWith ".transfer-git.bundle") do
+        let repoRel :=
+          if bEntry.path == ".transfer-git.bundle" then ""
+          else (bEntry.path.dropEnd 21).toString
+        let repoDir := if repoRel.isEmpty then src else src / repoRel
+        let refsOut ← IO.Process.output { cmd := "git", args := #["-C", repoDir.toString, "show-ref"] }
+        let bundleOut ← IO.Process.output { cmd := "git", args := #["bundle", "list-heads", (root / bEntry.path).toString] }
+        if refsOut.exitCode != 0 || bundleOut.exitCode != 0 then
+          return .error "Git source is no longer available"
+        if normalizeShowRefLines refsOut.stdout != normalizeShowRefLines bundleOut.stdout then
+          return .error "Git history changed after preparation; prepare again"
       return .ok (.obj #[("unchanged", .bool true)])
   | "stage" =>
     let some mVal := opJson.field? "manifest" | return .error "missing manifest"
@@ -301,12 +668,14 @@ def operateTransfer
       IO.FS.writeFile manifestFile (renderCompact m.toJson)
     let mut recvd : Array (String × JVal) := #[]
     for f in m.files do
-      let fp := root / f.path
-      let sz ← if ← fp.pathExists then
-        match ← fp.metadata |>.toBaseIO with
-        | .ok md => pure (min md.byteSize f.bytes)
+      let sz ← match ← confinedCheckpointPath root f.path with
+        | .ok fp =>
+          if ← fp.pathExists then
+            match ← fp.metadata |>.toBaseIO with
+            | .ok md => pure (min md.byteSize f.bytes)
+            | .error _ => pure 0
+          else pure 0
         | .error _ => pure 0
-      else pure 0
       let aligned := if sz == f.bytes then sz else (sz / transferBlockBytes.toUInt64) * transferBlockBytes.toUInt64
       recvd := recvd.push (f.path, JVal.uint64 aligned)
     let sealed ← (area / "verified").pathExists
@@ -333,6 +702,8 @@ def operateTransfer
     let some p := opJson.fieldStr? "path" | return .error "missing path"
     let off := (opJson.fieldUInt64? "offset").getD 0
     let some dataB64 := opJson.fieldStr? "data" | return .error "missing data"
+    if dataB64.length > transferBlockBytes * 2 then
+      return .error "Oversized block"
     if !(← manifestFile.pathExists) then return .error "Manifest not found"
     let .ok raw ← IO.FS.readFile manifestFile |>.toBaseIO | return .error "Failed reading manifest"
     let .ok jv := OrbBin.Json.parse raw | return .error "Corrupt manifest"
@@ -378,10 +749,32 @@ def operateTransfer
         if fb.size.toUInt64 != f.bytes || bytesToHexLower (sha256Bytes fb) != f.sha256.toLower then
           return .error s!"Checkpoint mismatch: {f.path}"
         let _ ← chmod fp.toString (if f.executable then 0o700 else 0o600)
-      for (lp, lt) in m.links do
-        let linkDest := root / lp
-        if let some par := linkDest.parent then IO.FS.createDirAll par
-        let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", lt, linkDest.toString] }
+      if let .error e ← restoreManifestLinks root m.links then
+        return .error e
+      let mut idx : Nat := 0
+      for f in m.files do
+        let fname := (f.path.splitOn "/").getLastD ""
+        if fname == ".transfer-git.bundle" then
+          let bundlePath ← match ← confinedCheckpointPath root f.path with
+            | .ok v => pure v
+            | .error e => return .error e
+          let some working := bundlePath.parent
+            | return .error "Invalid repository path"
+          let tmpRepo := area / s!"git-restore-{idx}"
+          if ← tmpRepo.pathExists then
+            let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRepo.toString] }
+          if let .error e ← runGitCmd area #["clone", "--mirror", bundlePath.toString, tmpRepo.toString] then
+            return .error e
+          if let .error e ← runGitCmd tmpRepo #["config", "--remove-section", "remote.origin"] then
+            return .error e
+          let dotGit := working / ".git"
+          if !(← dotGit.pathExists) then
+            IO.FS.rename tmpRepo dotGit
+          if let .error e ← runGitCmd working #["config", "core.bare", "false"] then
+            return .error e
+          if let .error e ← runGitCmd working #["reset", "--mixed", "HEAD"] then
+            return .error e
+        idx := idx + 1
       IO.FS.writeFile (area / "verified") mDigest
     return .ok (.obj #[
       ("root", .str root.toString),

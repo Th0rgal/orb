@@ -471,28 +471,70 @@ def validateLeanBuildPayload (payload : JVal) (allowlist : Array String) : Excep
          (pat.splitOn "/").any (fun seg => seg.isEmpty || seg == "." || seg == "..") then
         throw s!"unsafe artifact pattern '{pat}'"
 
-/-- Materialize `<workDir>/checkouts/<repo_hash16>/<commit>` (or complete bundle dir) and apply overlay. -/
-def materializeLeanCheckout (workDir : String) (src : JVal) (logPath : String) : IO (Except String String) := do
+/-- Verify every existing ancestor component of `relPath`'s parent below `checkoutRoot` is a real
+    (non-symlink) directory before creating directories, deleting files, or writing bundle overlays. -/
+private def requireSafeBundleParent (checkoutRoot : System.FilePath) (relPath label : String) :
+    IO (Except String System.FilePath) := do
+  let rst ← statPath checkoutRoot.toString
+  if !rst.exists_ || rst.isSymlink || !rst.isDir then
+    return .error s!"{label} root must be a real directory"
+  let segs := relPath.splitOn "/"
+  if segs.isEmpty || segs.any (fun s => s.isEmpty || s == "." || s == "..") then
+    return .error s!"{label} contains invalid path component: {relPath}"
+  let parentSegs := segs.dropLast
+  let mut cur := checkoutRoot
+  for seg in parentSegs do
+    cur := cur / seg
+    let st ← statPath cur.toString
+    if st.exists_ then
+      if st.isSymlink then
+        return .error s!"{label} must not traverse a symlink: {cur}"
+      if !st.isDir then
+        return .error s!"{label} ancestor is not a directory: {cur}"
+  return .ok cur
+
+/-- Materialize an isolated per-job `lean_build` checkout under
+    `<work_dir>/checkouts/<repo_hash16>/jobs/<job_id>` (seeding shared base commits into
+    `<work_dir>/checkouts/<repo_hash16>/seed-<commit>`), so concurrent builds of the same
+    repository/commit never reset, clean, or overwrite each other's working tree. -/
+def materializeLeanCheckout
+    (workDir : String) (src : JVal) (logPath : String) (jobId? : Option String := none) :
+    IO (Except String String) := do
   let repo := ((src.fieldStr? "repo").getD "").trimAscii.toString
   let commit := (src.fieldStr? "commit").getD ""
   let repoHash16 := (bytesToHexLower (sha256Bytes repo.toUTF8)).take 16 |>.toString
   let shardDir := System.FilePath.mk workDir / "checkouts" / repoHash16
   IO.FS.createDirAll shardDir
+  let jobSub ← match jobId? with
+    | some jid => pure jid
+    | none => newUuidV4
+  let jobsRoot := shardDir / "jobs"
+  IO.FS.createDirAll jobsRoot
+  let dest := jobsRoot / jobSub
+  let dstSt ← statPath dest.toString
+  if dstSt.isSymlink then
+    return .error "job checkout path must not be a symlink"
+  if dstSt.exists_ then
+    let _ ← IO.Process.output { cmd := "rm", args := #["-rf", dest.toString] }
   let bundle? := (src.field? "bundle").filter (· != .null)
   let isComplete := bundle?.bind (·.fieldBool? "complete") |>.getD false
-  let dest : System.FilePath ←
-    if isComplete then
-      let msha := bundle?.bind (·.fieldStr? "manifest_sha256") |>.getD "bundle"
-      let d := shardDir / s!"{commit}-source-{msha}"
-      let st ← statPath d.toString
-      if st.isSymlink then return .error "complete source checkout must not be a symlink"
-      if st.exists_ then
-        let _ ← IO.Process.output { cmd := "rm", args := #["-rf", d.toString] }
-      IO.FS.createDirAll d
-      pure d
-    else
-      let d := shardDir / commit
-      if !(← d.isDir) then
+  if isComplete then
+    IO.FS.createDirAll dest
+  else
+    let seedDir := shardDir / s!"seed-{commit}"
+    let seedLock := shardDir / s!".seed-{commit}.lock"
+    let mut lockFd : UInt32 := 0xFFFFFFFF
+    for _ in [0:600] do
+      if lockFd == 0xFFFFFFFF then
+        let fd ← flockExclusiveNb seedLock.toString
+        if fd != 0xFFFFFFFF then
+          lockFd := fd
+        else
+          IO.sleep 100
+    if lockFd == 0xFFFFFFFF then
+      return .error "timed out acquiring seed checkout lock"
+    try
+      if !(← seedDir.isDir) then
         let nonce ← newUuidV4
         let tmp := shardDir / s!".tmp-{commit}-{nonce}"
         IO.FS.createDirAll tmp
@@ -533,33 +575,56 @@ def materializeLeanCheckout (workDir : String) (src : JVal) (logPath : String) :
             let _ ← IO.FS.writeFile logPath s!"git fetch failed: {r2.stderr}\n"
             return .error s!"git fetch failed for {repo}@{commit}: {r2.stderr.trimAscii}"
         try
-          IO.FS.rename tmp d
-        catch _ =>
+          IO.FS.rename tmp seedDir
+        catch e =>
           let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmp.toString] }
-      else
-        let _ ← IO.Process.output { cmd := "git", args := #["reset", "--hard", "--quiet", commit], cwd := some d.toString }
-        let _ ← IO.Process.output { cmd := "git", args := #["clean", "-fdx", "--quiet"], cwd := some d.toString }
-      pure d
+          if !(← seedDir.isDir) then
+            return .error s!"failed finalizing seed checkout: {e}"
+      let cpRes ← IO.Process.output { cmd := "cp", args := #["-a", seedDir.toString, dest.toString] }
+      if cpRes.exitCode != 0 then
+        return .error s!"failed cloning isolated job checkout: {cpRes.stderr.trimAscii}"
+    finally
+      closeFdRaw (Int32.ofBitVec (BitVec.ofNat 32 lockFd.toNat))
   if let some bnd := bundle? then
     let deleted := ((bnd.fieldArr? "deleted_paths").getD #[]).filterMap JVal.asStr?
     for dp in deleted do
       if bundlePathIsSafe dp then
-        let target := dest / dp
-        let st ← statPath target.toString
-        if st.exists_ && !st.isSymlink && st.isReg then
-          try IO.FS.removeFile target catch _ => pure ()
+        match ← requireSafeBundleParent dest dp "source bundle deletion" with
+        | .error e =>
+          let _ ← IO.Process.output { cmd := "rm", args := #["-rf", dest.toString] }
+          return .error e
+        | .ok _ =>
+          let target := dest / dp
+          let st ← statPath target.toString
+          if st.exists_ then
+            if st.isReg || st.isSymlink then
+              try IO.FS.removeFile target catch _ => pure ()
+            else
+              let _ ← IO.Process.output { cmd := "rm", args := #["-rf", dest.toString] }
+              return .error s!"source bundle deletion must target a file: {dp}"
     for f in (bnd.fieldArr? "files").getD #[] do
       if let (some fp, some b64) := (f.fieldStr? "path", f.fieldStr? "data_base64") then
         if bundlePathIsSafe fp then
-          if let some decoded := base64Decode? b64 then
-            let target := dest / fp
-            if let some par := target.parent then IO.FS.createDirAll par
-            let tst ← statPath target.toString
-            if tst.isSymlink then
-              return .error s!"refusing symlinked target in source bundle: {fp}"
-            IO.FS.writeBinFile target decoded
-            if f.fieldBool? "executable" == some true then
-              let _ ← chmod target.toString 0o755
+          let some decoded := base64Decode? b64
+            | let _ ← IO.Process.output { cmd := "rm", args := #["-rf", dest.toString] }
+              return .error s!"invalid bundle base64 for '{fp}'"
+          let par ← match ← requireSafeBundleParent dest fp "source bundle destination" with
+            | .ok p => pure p
+            | .error e =>
+              let _ ← IO.Process.output { cmd := "rm", args := #["-rf", dest.toString] }
+              return .error e
+          IO.FS.createDirAll par
+          let target := dest / fp
+          let tst ← statPath target.toString
+          if tst.isSymlink then
+            let _ ← IO.Process.output { cmd := "rm", args := #["-rf", dest.toString] }
+            return .error s!"refusing symlinked target in source bundle: {fp}"
+          if tst.exists_ && tst.isDir then
+            let _ ← IO.Process.output { cmd := "rm", args := #["-rf", dest.toString] }
+            return .error s!"source bundle destination is a directory: {fp}"
+          IO.FS.writeBinFile target decoded
+          if f.fieldBool? "executable" == some true then
+            let _ ← chmod target.toString 0o755
   return .ok dest.toString
 
 /-- Build confined `lean_build` environment (`cache_env_for_repo` + concurrency budget + allowlisted env). -/

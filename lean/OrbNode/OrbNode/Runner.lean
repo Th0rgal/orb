@@ -177,17 +177,172 @@ def sliceJobLogBytes (rawLog : ByteArray) (offset : Nat) (maxBytes : Nat := 2621
     data := text
   }
 
-/-! ### Live Process-Group Job State & Reconciler -/
+/-! ### Live Process-Group Job State, Linux `/proc` Child-Tool Inspection, & Reconciler -/
+
+/-- Compute deadline (`Option UInt64` seconds) for a job payload (`src/node/runner.rs:1312-1316`):
+    non-side `raw_command` jobs with `long_running == true` have NO deadline when `timeout_secs` is
+    absent, and honor an explicit `timeout_secs` without clamping to `maxJobSecs`. -/
+def computeJobTimeoutSecs (kind : String) (payload : JVal) (maxJobSecs : UInt64) : Option UInt64 :=
+  let side := (payload.fieldBool? "side_question").getD false
+  let longRunning := (payload.fieldBool? "long_running").getD false
+  if kind == "raw_command" && longRunning && !side then
+    (payload.fieldUInt64? "timeout_secs").map (fun s => max 1 s)
+  else
+    let raw := (payload.fieldUInt64? "timeout_secs").getD maxJobSecs
+    some (max 1 (min maxJobSecs raw))
+
+private structure ProcStatEntry where
+  ppid    : UInt32
+  comm    : String
+  cmdline : String
+
+private def isHarnessProc (e : ProcStatEntry) : Bool :=
+  let c := e.comm
+  let cmd := e.cmdline
+  if c == "opencode" || c == "claude" || c == "codex" || c == "grok" ||
+     c == "agy" || c == "antigravity" || c == "vibe-acp" then true
+  else if c == "node" || c == "bun" then
+    (cmd.splitOn "opencode").length > 1 || (cmd.splitOn "claude").length > 1 ||
+    (cmd.splitOn "codex").length > 1 || (cmd.splitOn "grok").length > 1 ||
+    (cmd.splitOn "antigravity").length > 1 || (cmd.splitOn "agy").length > 1
+  else false
+
+private def isAuxHarnessHelper (e : ProcStatEntry) : Bool :=
+  let c := e.comm
+  let cmd := e.cmdline
+  (c.splitOn "mcp").length > 1 ||
+  (cmd.splitOn "sandboxed-mcp").length > 1 ||
+  (cmd.splitOn "control_mcp").length > 1 ||
+  (cmd.splitOn "mcp-stdio").length > 1 ||
+  (cmd.splitOn "--mcp").length > 1 ||
+  (c == "cat" && (cmd == "cat" || cmd.startsWith "cat ")) ||
+  c == "systemd-run" || c == "nsenter" || c == "script" || c == "sandboxed-launch" ||
+  (cmd.splitOn ".sandboxed-sh-opencode-cmd.sh").length > 1 ||
+  (cmd.splitOn "orb-native-plan").length > 1
+
+/-- Inspect `/proc` process subtree below `rootPid` (`src/node/tool_interrupt.rs`) and return active
+    descendant child-tool PIDs (never including `rootPid`, harness PIDs, or MCP stdio sidecars). -/
+def collectInflightChildToolPids (rootPid : UInt64) : IO (Array UInt32) := do
+  let procRoot := System.FilePath.mk "/proc"
+  if !(← procRoot.isDir) || rootPid == 0 then return #[]
+  let .ok entries ← procRoot.readDir |>.toBaseIO | return #[]
+  let mut table : Std.HashMap UInt32 ProcStatEntry := {}
+  let mut children : Std.HashMap UInt32 (Array UInt32) := {}
+  for item in entries do
+    if let some pidNat := item.fileName.toNat? then
+      let pid := pidNat.toUInt32
+      if let .ok statRaw ← IO.FS.readFile (item.path / "stat") |>.toBaseIO then
+        let partsOpen := statRaw.splitOn "("
+        if partsOpen.length ≥ 2 then
+          let afterOpen := String.intercalate "(" partsOpen.tail!
+          let partsClose := afterOpen.splitOn ") "
+          if partsClose.length ≥ 2 then
+            let rest := partsClose.getLast!
+            let comm := String.intercalate ") " partsClose.dropLast
+            let fields := (rest.splitOn " ").filter (fun s => !s.isEmpty)
+            if let st :: ppidStr :: _ := fields then
+              if st != "Z" && st != "X" then
+                if let some ppidNat := ppidStr.toNat? then
+                  let ppid := ppidNat.toUInt32
+                  let cmdline ← match ← IO.FS.readBinFile (item.path / "cmdline") |>.toBaseIO with
+                    | .ok b =>
+                      let s := String.fromUTF8? (b.foldl (fun acc x => if x == 0 then acc.push 32 else acc.push x) ByteArray.empty) |>.getD ""
+                      pure s.trimAscii.toString
+                    | .error _ => pure ""
+                  table := table.insert pid { ppid, comm, cmdline }
+                  let curKids := (children.get? ppid).getD #[]
+                  children := children.insert ppid (curKids.push pid)
+  let rootU32 := rootPid.toUInt32
+  let mut subtree : Std.HashMap UInt32 Unit := {}
+  let mut stack : Array UInt32 := #[rootU32]
+  while !stack.isEmpty do
+    let p := stack.back!
+    stack := stack.pop
+    if !subtree.contains p then
+      subtree := subtree.insert p ()
+      if let some kids := children.get? p then
+        stack := stack ++ kids
+  if subtree.isEmpty then return #[]
+  let mut harnessPids : Std.HashMap UInt32 Unit := {}
+  for (p, _) in subtree.toList do
+    if let some info := table.get? p then
+      if isHarnessProc info then
+        harnessPids := harnessPids.insert p ()
+  let mut candidateRoots : Array UInt32 := #[]
+  if !harnessPids.isEmpty then
+    for (hp, _) in harnessPids.toList do
+      if let some kids := children.get? hp then
+        for k in kids do
+          if !harnessPids.contains k then
+            candidateRoots := candidateRoots.push k
+  else
+    for (p, _) in subtree.toList do
+      if p != rootU32 then
+        candidateRoots := candidateRoots.push p
+  let mut toolPids : Array UInt32 := #[]
+  let mut seenTools : Std.HashMap UInt32 Unit := {}
+  let mut toolStack := candidateRoots
+  while !toolStack.isEmpty do
+    let p := toolStack.back!
+    toolStack := toolStack.pop
+    if !seenTools.contains p && p != rootU32 && !harnessPids.contains p then
+      seenTools := seenTools.insert p ()
+      if let some info := table.get? p then
+        if isAuxHarnessHelper info then
+          if harnessPids.isEmpty then
+            if let some kids := children.get? p then
+              toolStack := toolStack ++ kids
+        else
+          toolPids := toolPids.push p
+          if let some kids := children.get? p then
+            toolStack := toolStack ++ kids
+  return toolPids.qsort (· < ·)
+
+def sigintInflightChildTools (rootPid : UInt64) : IO Nat := do
+  let pids ← collectInflightChildToolPids rootPid
+  let mut count : Nat := 0
+  let revPids := pids.reverse
+  for p in revPids do
+    if p > 1 then
+      let rc ← killSig (Int64.ofNat p.toNat) 2
+      if rc == 0 then
+        count := count + 1
+  return count
+
+structure LaunchingSlot where
+  forced    : Bool
+  sideLane  : Bool
+  coordLane : Bool
+  missionId : String
+  trackBg   : Bool
+  deriving Repr, Inhabited
 
 structure LiveProc where
-  pid         : UInt64
-  startedEp   : UInt64
-  timeoutSecs : UInt64
-  forced      : Bool
-  sideLane    : Bool
-  coordLane   : Bool
-  artifacts   : Array String
-  cwd         : String
+  pid              : UInt64
+  startedEp        : UInt64
+  timeoutSecs?     : Option UInt64
+  forced           : Bool
+  sideLane         : Bool
+  coordLane        : Bool
+  artifacts        : Array String
+  cwd              : String
+  isolatedCheckout : Option String := none
+  steerAfterTool   : Bool := false
+  deriving Repr, Inhabited
+
+structure PreparedJobSpec where
+  jid              : String
+  forced           : Bool
+  sideLane         : Bool
+  coordLane        : Bool
+  timeoutSecs?     : Option UInt64
+  logPath          : String
+  cwd              : String
+  isolatedCheckout : Option String
+  prog             : String
+  args             : Array String
+  envKv            : Array String
+  artifacts        : Array String
   deriving Repr, Inhabited
 
 structure NodeRuntime where
@@ -196,21 +351,97 @@ structure NodeRuntime where
   activeExecMain : UInt32 := 0
   activeExecSide : UInt32 := 0
   ledger         : Ledger
+  launching      : Std.HashMap String LaunchingSlot := {}
   liveProcs      : Std.HashMap String LiveProc := {}
   queueOrder     : Array String := #[]
 
 def activeRegularCount (rt : NodeRuntime) : UInt32 :=
-  rt.activeExecMain + rt.liveProcs.fold (fun acc _ lp =>
+  rt.activeExecMain +
+  rt.launching.fold (fun acc _ sl =>
+    if !sl.forced && !sl.sideLane && !sl.coordLane then acc + 1 else acc) 0 +
+  rt.liveProcs.fold (fun acc _ lp =>
     if !lp.forced && !lp.sideLane && !lp.coordLane then acc + 1 else acc) 0
 
 def activeSideCount (rt : NodeRuntime) : UInt32 :=
-  rt.activeExecSide + rt.liveProcs.fold (fun acc _ lp => if lp.sideLane then acc + 1 else acc) 0
+  rt.activeExecSide +
+  rt.launching.fold (fun acc _ sl => if sl.sideLane then acc + 1 else acc) 0 +
+  rt.liveProcs.fold (fun acc _ lp => if lp.sideLane then acc + 1 else acc) 0
 
 def activeForcedCount (rt : NodeRuntime) : UInt32 :=
+  rt.launching.fold (fun acc _ sl => if sl.forced then acc + 1 else acc) 0 +
   rt.liveProcs.fold (fun acc _ lp => if lp.forced then acc + 1 else acc) 0
 
 def activeCoordCount (rt : NodeRuntime) : UInt32 :=
+  rt.launching.fold (fun acc _ sl => if sl.coordLane then acc + 1 else acc) 0 +
   rt.liveProcs.fold (fun acc _ lp => if lp.coordLane then acc + 1 else acc) 0
+
+/-- Check whether workspace `wsMissionId` currently has any queued, launching, or running
+    ordinary background job (`!side_question && companion_of.isNone`) on this node. -/
+def hasWorkspaceBackgroundWork (rt : NodeRuntime) (wsMissionId : String) : Bool := Id.run do
+  for (_, sl) in rt.launching.toList do
+    if sl.missionId == wsMissionId && sl.trackBg then
+      return true
+  for (jid, _) in rt.liveProcs.toList do
+    if let some rec := rt.ledger.jobs.get? jid then
+      if rec.missionId == wsMissionId then
+        if let .ok payload := OrbBin.Json.parse rec.payloadJson then
+          let kind := (payload.fieldStr? "kind").getD "raw_command"
+          if kind == "lean_build" then
+            return true
+          let side := (payload.fieldBool? "side_question").getD false
+          let comp? := (payload.fieldStr? "companion_of").filter (fun s => !s.isEmpty)
+          if !side && comp?.isNone then
+            return true
+  for qid in rt.queueOrder do
+    if let some rec := rt.ledger.jobs.get? qid then
+      if rec.state == .queued && rec.missionId == wsMissionId then
+        if let .ok payload := OrbBin.Json.parse rec.payloadJson then
+          let kind := (payload.fieldStr? "kind").getD "raw_command"
+          if kind == "lean_build" then
+            return true
+          let side := (payload.fieldBool? "side_question").getD false
+          let comp? := (payload.fieldStr? "companion_of").filter (fun s => !s.isEmpty)
+          if !side && comp?.isNone then
+            return true
+  return false
+
+/-- Decide whether a queued job can be admitted right now and on which lane (`sideLane`, `coordLane`)
+    by delegating directly to `Orb.Kernel.nodeLaneStep` (`orb_node_lane_step`). -/
+def decideQueuedAdmission (rt : NodeRuntime) (payload : JVal) : Option (Bool × Bool × Bool) :=
+  let kind := (payload.fieldStr? "kind").getD "raw_command"
+  let (isSide, isCoordPrio, hasWsBg, isChild, isNativeGoal, trackBg) :=
+    if kind == "lean_build" then
+      (false, false, false, false, false, true)
+    else
+      let side := (payload.fieldBool? "side_question").getD false
+      let coord := (payload.fieldBool? "coordinator_priority").getD false
+      let child := (payload.fieldBool? "is_child_worker").getD false
+      let goal := (payload.fieldBool? "native_goal").getD false
+      let comp? := ((payload.fieldStr? "companion_of") >>= parseUuidCanonical?).orElse
+        (fun _ => (payload.fieldStr? "companion_of").filter (fun s => !s.isEmpty))
+      let wsBg := match comp? with
+        | some wsId => hasWorkspaceBackgroundWork rt wsId
+        | none => false
+      (side, coord, wsBg, child, goal, !side && comp?.isNone)
+  let mainMax := rt.cfg.capacityTotal
+  let effMainRun := min mainMax (activeRegularCount rt + rt.shrinkDebt)
+  let sideMax := rt.cfg.sideCapacity
+  let sideRun := min sideMax (activeSideCount rt)
+  let coordMax := rt.cfg.coordinatorCapacity
+  let coordRun := min coordMax (activeCoordCount rt)
+  let code := Orb.Kernel.nodeLaneStep
+    (if isSide then 1 else 0)
+    (if isCoordPrio then 1 else 0)
+    (if hasWsBg then 1 else 0)
+    (if isChild then 1 else 0)
+    (if isNativeGoal then 1 else 0)
+    effMainRun mainMax sideRun sideMax coordRun coordMax
+  match code with
+  | 258 => some (true, false, trackBg)   -- AdmitSide
+  | 260 => some (false, true, trackBg)   -- AdmitCompanion (uses coordinator/companion pool)
+  | 259 => some (false, true, trackBg)   -- AdmitCoordinator
+  | 257 => some (false, false, trackBg)  -- AdmitMain
+  | _   => none
 
 /-- Apply operator-authorized live capacity resize via `Orb.Kernel.nodeResizeStep` + `OrbNode.Spec`. -/
 def resizeCapacity
@@ -273,7 +504,7 @@ def buildHeartbeatJson (rt : NodeRuntime) : IO JVal := do
   let leanReady ← detectLeanRuntimeReady rt.cfg.workDir
   let labels := if leanReady then rt.cfg.labels else rt.cfg.labels.filter (· != "lean")
   let activeReg := activeRegularCount rt
-  let activeAsync := rt.liveProcs.size.toUInt32
+  let activeAsync := (rt.launching.size + rt.liveProcs.size).toUInt32
   let capAvail : UInt32 :=
     if rt.cfg.capacityTotal > activeReg + rt.shrinkDebt then
       rt.cfg.capacityTotal - (activeReg + rt.shrinkDebt)
@@ -324,55 +555,41 @@ private def flattenEnvKv (pairs : Array (String × String)) : Array String := Id
 private def mergeEnvPair (pairs : Array (String × String)) (k v : String) : Array (String × String) :=
   (pairs.filter (fun (ek, _) => ek != k)).push (k, v)
 
-private def startQueuedJob (rt : NodeRuntime) (jid : String) (forcedOverride : Bool := false) :
-    IO NodeRuntime := do
-  let some rec := rt.ledger.jobs.get? jid
-    | return rt
-  if rec.state != .queued then return rt
-  let .ok payload := OrbBin.Json.parse rec.payloadJson
-    | return rt
+private def cleanupIsolatedCheckout (iso? : Option String) : IO Unit := do
+  if let some dir := iso? then
+    if !dir.isEmpty then
+      let _ ← IO.Process.output { cmd := "rm", args := #["-rf", dir] }
+
+/-- Materialize checkout & environment outside `Std.Mutex NodeRuntime` so slow `git fetch` or
+    archive extraction never blocks `/heartbeat`, `/cancel`, `/jobs/:id/log`, or timeouts. -/
+def prepareJobOutsideLock
+    (cfg : NodeConfig) (jid missionId : String) (payload : JVal) (logPath : String)
+    (forced sideLane coordLane : Bool) : IO (Except String PreparedJobSpec) := do
   let kind := (payload.fieldStr? "kind").getD "raw_command"
-  let missionDir := (System.FilePath.mk rt.cfg.workDir / rec.missionId).toString
+  let missionDir := (System.FilePath.mk cfg.workDir / missionId).toString
   IO.FS.createDirAll missionDir
-  let logPath := rec.logPath?.getD ((System.FilePath.mk rt.cfg.workDir / "logs" / s!"{jid}.log").toString)
-  let timeout := min rt.cfg.maxJobSecs ((payload.fieldUInt64? "timeout_secs").getD rt.cfg.maxJobSecs)
-  let sideLane := (payload.fieldBool? "side_question").getD false
-  let coordLane := (payload.fieldBool? "coordinator_priority").getD false
-  let forced := forcedOverride || rec.forced
+  let timeoutSecs? := computeJobTimeoutSecs kind payload cfg.maxJobSecs
   let mut cwd := missionDir
+  let mut isolatedCheckout : Option String := none
   let mut prog := "bash"
   let mut args : Array String := #[]
   let mut envPairs : Array (String × String) := #[]
   let mut artifacts : Array String := #[]
-  let nowTs ← nowRfc3339
   if kind == "lean_build" then
     let some srcObj := payload.field? "source"
-      | match ← rt.ledger.updateJob jid (fun r => .ok {
-            r with state := .failed, finishedAt? := some nowTs, error? := some "missing source", forced := forced
-          }) with
-        | .ok (l', _) => return { rt with ledger := l' }
-        | .error _ => return rt
-    let checkoutDir ← match ← materializeLeanCheckout rt.cfg.workDir srcObj logPath with
+      | return .error "missing source"
+    let checkoutDir ← match ← materializeLeanCheckout cfg.workDir srcObj logPath (some jid) with
       | .ok d => pure d
-      | .error err =>
-        match ← rt.ledger.updateJob jid (fun r => .ok {
-            r with state := .failed, finishedAt? := some nowTs, logPath? := some logPath,
-                   error? := some err, forced := forced
-          }) with
-        | .ok (l', _) => return { rt with ledger := l' }
-        | .error _ => return rt
+      | .error err => return .error err
+    isolatedCheckout := some checkoutDir
     cwd := checkoutDir
     if let some cwdRelRaw := payload.fieldStr? "cwd_rel" then
       let cwdRel := (cwdRelRaw.dropWhile (· == '/') |>.dropEndWhile (· == '/')).toString
       if !cwdRel.isEmpty && relPathIsSafe cwdRel then
         let sub := System.FilePath.mk checkoutDir / cwdRel
         if !(← sub.isDir) then
-          match ← rt.ledger.updateJob jid (fun r => .ok {
-              r with state := .failed, finishedAt? := some nowTs,
-                     error? := some s!"cwd_rel '{cwdRel}' does not exist in checkout", forced := forced
-            }) with
-          | .ok (l', _) => return { rt with ledger := l' }
-          | .error _ => return rt
+          cleanupIsolatedCheckout isolatedCheckout
+          return .error s!"cwd_rel '{cwdRel}' does not exist in checkout"
         cwd := sub.toString
     let cmdParts := ((payload.fieldArr? "command").getD #[]).filterMap JVal.asStr?
     if h : 0 < cmdParts.size then
@@ -381,20 +598,20 @@ private def startQueuedJob (rt : NodeRuntime) (jid : String) (forcedOverride : B
     else
       prog := "true"
     let usesFanout := prog != "turbo-lean" || args.contains "build"
-    let st ← OrbNode.Posix.hostStats rt.cfg.workDir
+    let st ← OrbNode.Posix.hostStats cfg.workDir
     let repo := (srcObj.fieldStr? "repo").getD ""
     let payloadEnv := ((payload.field? "env") >>= JVal.asObj?).getD #[]
-    envPairs ← buildLeanJobEnv rt.cfg.workDir repo st.cpuTotal rt.cfg.capacityTotal
-      rt.cfg.envAllowlist usesFanout payloadEnv
-    envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" rec.missionId
+    envPairs ← buildLeanJobEnv cfg.workDir repo st.cpuTotal cfg.capacityTotal
+      cfg.envAllowlist usesFanout payloadEnv
+    envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" missionId
     envPairs := mergeEnvPair envPairs "SANDBOXED_JOB_ID" jid
     if let some arts := payload.fieldArr? "artifacts" then
       artifacts := arts.filterMap JVal.asStr?
   else
     let cmdStr := (payload.fieldStr? "command").getD "true"
     args := #["-lc", cmdStr]
-    envPairs ← prepareSharedMissionEnv rt.cfg.workDir missionDir
-    envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" rec.missionId
+    envPairs ← prepareSharedMissionEnv cfg.workDir missionDir
+    envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" missionId
     envPairs := mergeEnvPair envPairs "SANDBOXED_JOB_ID" jid
     if let some envObj := (payload.field? "env") >>= JVal.asObj? then
       for (ek, ev) in envObj do
@@ -402,45 +619,120 @@ private def startQueuedJob (rt : NodeRuntime) (jid : String) (forcedOverride : B
           envPairs := mergeEnvPair envPairs ek sv
     let reqProfiles := ((payload.fieldArr? "managed_auth").getD #[]).filterMap JVal.asStr?
     if !reqProfiles.isEmpty then
-      match ← prepareManagedAuthWorkspace rt.cfg.managedAuth reqProfiles missionDir with
-      | .error err =>
-        match ← rt.ledger.updateJob jid (fun r => .ok {
-            r with state := .failed, finishedAt? := some nowTs, error? := some err, forced := forced
-          }) with
-        | .ok (l', _) => return { rt with ledger := l' }
-        | .error _ => return rt
+      match ← prepareManagedAuthWorkspace cfg.managedAuth reqProfiles missionDir with
+      | .error err => return .error err
       | .ok authEnv =>
         for (ak, av) in authEnv do
           envPairs := mergeEnvPair envPairs ak av
-  let nowEp ← OrbNode.Posix.nowEpoch
-  let envKv := flattenEnvKv envPairs
-  match ← (OrbNode.Posix.spawnJobPgrp prog args envKv cwd logPath).toBaseIO with
-  | .error e =>
-    match ← rt.ledger.updateJob jid (fun r => .ok {
-      r with state := .failed, finishedAt? := some nowTs, error? := some (toString e), forced := forced
-    }) with
-    | .ok (l', _) => return { rt with ledger := l' }
-    | .error _ => return rt
-  | .ok pid =>
-    match ← rt.ledger.updateJob jid (fun r => .ok {
-      r with state := .running, startedAt? := some nowTs, logPath? := some logPath, forced := forced
-    }) with
-    | .ok (l', _) =>
-      let lp : LiveProc := {
-        pid := pid
-        startedEp := nowEp
-        timeoutSecs := max 1 timeout
-        forced := forced
-        sideLane := sideLane
-        coordLane := coordLane
-        artifacts := artifacts
-        cwd := cwd
-      }
-      return { rt with ledger := l', liveProcs := rt.liveProcs.insert jid lp }
-    | .error _ => return rt
+  return .ok {
+    jid := jid
+    forced := forced
+    sideLane := sideLane
+    coordLane := coordLane
+    timeoutSecs? := timeoutSecs?
+    logPath := logPath
+    cwd := cwd
+    isolatedCheckout := isolatedCheckout
+    prog := prog
+    args := args
+    envKv := flattenEnvKv envPairs
+    artifacts := artifacts
+  }
 
-/-- Reap exited/timed-out process groups (`-pgid` zero-orphan kill) and dispatch eligible queued jobs. -/
-def tickRuntime (rt0 : NodeRuntime) : IO NodeRuntime := do
+/-- Commit a `PreparedJobSpec` into `NodeRuntime` (clearing its `launching` reservation and spawning `-pgid`
+    unless cancelled while preparing). -/
+def commitPreparedJob
+    (rt0 : NodeRuntime) (jid : String) (prepRes : Except String PreparedJobSpec) : IO NodeRuntime := do
+  let wasLaunching := rt0.launching.get? jid
+  let mut rt := { rt0 with launching := rt0.launching.erase jid }
+  let releaseDebt (r : NodeRuntime) : NodeRuntime :=
+    match wasLaunching with
+    | some sl =>
+      if !sl.forced && !sl.sideLane && !sl.coordLane && r.shrinkDebt > 0 then
+        { r with shrinkDebt := r.shrinkDebt - 1 }
+      else r
+    | none => r
+  let some cur := rt.ledger.jobs.get? jid
+    | if let .ok spec := prepRes then cleanupIsolatedCheckout spec.isolatedCheckout
+      return releaseDebt rt
+  if cur.state != .queued then
+    if let .ok spec := prepRes then cleanupIsolatedCheckout spec.isolatedCheckout
+    return releaseDebt rt
+  let nowTs ← nowRfc3339
+  match prepRes with
+  | .error errMsg =>
+    if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
+      r with state := .failed, finishedAt? := some nowTs, error? := some errMsg
+    }) then
+      rt := { rt with ledger := l' }
+    return releaseDebt rt
+  | .ok spec =>
+    let nowEp ← OrbNode.Posix.nowEpoch
+    match ← (OrbNode.Posix.spawnJobPgrp spec.prog spec.args spec.envKv spec.cwd spec.logPath).toBaseIO with
+    | .error e =>
+      cleanupIsolatedCheckout spec.isolatedCheckout
+      if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
+        r with state := .failed, finishedAt? := some nowTs, error? := some (toString e), forced := spec.forced
+      }) then
+        rt := { rt with ledger := l' }
+      return releaseDebt rt
+    | .ok pid =>
+      match ← rt.ledger.updateJob jid (fun r => .ok {
+        r with state := .running, startedAt? := some nowTs, logPath? := some spec.logPath, forced := spec.forced
+      }) with
+      | .ok (l', _) =>
+        let lp : LiveProc := {
+          pid := pid
+          startedEp := nowEp
+          timeoutSecs? := spec.timeoutSecs?
+          forced := spec.forced
+          sideLane := spec.sideLane
+          coordLane := spec.coordLane
+          artifacts := spec.artifacts
+          cwd := spec.cwd
+          isolatedCheckout := spec.isolatedCheckout
+        }
+        return { rt with ledger := l', liveProcs := rt.liveProcs.insert jid lp }
+      | .error _ =>
+        OrbNode.Posix.killPgrp pid 9
+        discard <| OrbNode.Posix.pollPid pid
+        cleanupIsolatedCheckout spec.isolatedCheckout
+        return releaseDebt rt
+
+private def startQueuedJobSync
+    (rt : NodeRuntime) (jid : String) (payloadOverride? : Option JVal := none)
+    (forced : Bool := false) (sideLane : Bool := false) (coordLane : Bool := false)
+    (trackBg : Bool := true) : IO NodeRuntime := do
+  let some rec := rt.ledger.jobs.get? jid
+    | return rt
+  if rec.state != .queued then return rt
+  let payload ← match payloadOverride? with
+    | some pv => pure pv
+    | none =>
+      match OrbBin.Json.parse rec.payloadJson with
+      | .ok pv => pure pv
+      | .error _ => return rt
+  let logPath := rec.logPath?.getD ((System.FilePath.mk rt.cfg.workDir / "logs" / s!"{jid}.log").toString)
+  let sl : LaunchingSlot := { forced, sideLane, coordLane, missionId := rec.missionId, trackBg }
+  let rtReserved := { rt with launching := rt.launching.insert jid sl }
+  let prepRes ← prepareJobOutsideLock rtReserved.cfg jid rec.missionId payload logPath forced sideLane coordLane
+  commitPreparedJob rtReserved jid prepRes
+
+structure PendingAsyncLaunch where
+  cfg       : NodeConfig
+  jid       : String
+  missionId : String
+  payload   : JVal
+  logPath   : String
+  forced    : Bool
+  sideLane  : Bool
+  coordLane : Bool
+
+/-- Reap exited/timed-out/steered process groups (`-pgid` zero-orphan kill) and reserve lane slots for
+    eligible queued jobs, returning `(updatedRuntime, jobsToLaunchOutsideLock)`. -/
+def tickRuntimeReserve
+    (rt0 : NodeRuntime) (payloadHints : Std.HashMap String JVal := {}) :
+    IO (NodeRuntime × Array PendingAsyncLaunch) := do
   let mut rt := rt0
   let nowEp ← OrbNode.Posix.nowEpoch
   for (jid, lp) in rt.liveProcs.toList do
@@ -451,6 +743,7 @@ def tickRuntime (rt0 : NodeRuntime) : IO NodeRuntime := do
       let codeInt : Int := if codeU32 == 0xFFFFFFFF then -1 else Int.ofNat codeU32.toNat
       OrbNode.Posix.killPgrp lp.pid 9
       let arts ← collectArtifactsConfined lp.cwd lp.artifacts
+      cleanupIsolatedCheckout lp.isolatedCheckout
       let nowTs ← nowRfc3339
       let nextState : JobState := if codeInt == 0 then .succeeded else .failed
       if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
@@ -464,36 +757,99 @@ def tickRuntime (rt0 : NodeRuntime) : IO NodeRuntime := do
       rt := { rt with liveProcs := rt.liveProcs.erase jid }
       if !lp.forced && !lp.sideLane && !lp.coordLane && rt.shrinkDebt > 0 then
         rt := { rt with shrinkDebt := rt.shrinkDebt - 1 }
-    else if nowEp > lp.startedEp + lp.timeoutSecs then
-      OrbNode.Posix.killPgrp lp.pid 15
-      OrbNode.Posix.killPgrp lp.pid 9
-      discard <| OrbNode.Posix.pollPid lp.pid
-      let nowTs ← nowRfc3339
-      if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
-        r with
-        state := .failed
-        exitCode? := some 124
-        finishedAt? := some nowTs
-        error? := some s!"job timed out after {lp.timeoutSecs}s"
-      }) then
-        rt := { rt with ledger := l' }
-      rt := { rt with liveProcs := rt.liveProcs.erase jid }
+    else if let some limitSecs := lp.timeoutSecs? then
+      if nowEp > lp.startedEp + limitSecs then
+        OrbNode.Posix.killPgrp lp.pid 15
+        OrbNode.Posix.killPgrp lp.pid 9
+        discard <| OrbNode.Posix.pollPid lp.pid
+        cleanupIsolatedCheckout lp.isolatedCheckout
+        let nowTs ← nowRfc3339
+        if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
+          r with
+          state := .failed
+          exitCode? := some 124
+          finishedAt? := some nowTs
+          error? := some s!"job timed out after {limitSecs}s"
+        }) then
+          rt := { rt with ledger := l' }
+        rt := { rt with liveProcs := rt.liveProcs.erase jid }
+      else if lp.steerAfterTool then
+        let inflight ← collectInflightChildToolPids lp.pid
+        if inflight.isEmpty then
+          OrbNode.Posix.killPgrp lp.pid 15
+          OrbNode.Posix.killPgrp lp.pid 9
+          discard <| OrbNode.Posix.pollPid lp.pid
+          cleanupIsolatedCheckout lp.isolatedCheckout
+          let nowTs ← nowRfc3339
+          let cInfo : JobCancellation := {
+            actor := "core", reason := "Steered immediately after tool call completed", requestedAt := nowTs
+          }
+          if let .ok (l', _) ← rt.ledger.updateJob jid (fun r =>
+            if r.state.isTerminal then .ok r
+            else .ok { r with state := .cancelled, finishedAt? := some nowTs, cancellation? := some cInfo }) then
+            rt := { rt with ledger := l' }
+          rt := { rt with liveProcs := rt.liveProcs.erase jid }
+          if !lp.forced && !lp.sideLane && !lp.coordLane && rt.shrinkDebt > 0 then
+            rt := { rt with shrinkDebt := rt.shrinkDebt - 1 }
+    else if lp.steerAfterTool then
+      let inflight ← collectInflightChildToolPids lp.pid
+      if inflight.isEmpty then
+        OrbNode.Posix.killPgrp lp.pid 15
+        OrbNode.Posix.killPgrp lp.pid 9
+        discard <| OrbNode.Posix.pollPid lp.pid
+        cleanupIsolatedCheckout lp.isolatedCheckout
+        let nowTs ← nowRfc3339
+        let cInfo : JobCancellation := {
+          actor := "core", reason := "Steered immediately after tool call completed", requestedAt := nowTs
+        }
+        if let .ok (l', _) ← rt.ledger.updateJob jid (fun r =>
+          if r.state.isTerminal then .ok r
+          else .ok { r with state := .cancelled, finishedAt? := some nowTs, cancellation? := some cInfo }) then
+          rt := { rt with ledger := l' }
+        rt := { rt with liveProcs := rt.liveProcs.erase jid }
+        if !lp.forced && !lp.sideLane && !lp.coordLane && rt.shrinkDebt > 0 then
+          rt := { rt with shrinkDebt := rt.shrinkDebt - 1 }
   let mut remQueue : Array String := #[]
+  let mut toLaunch : Array PendingAsyncLaunch := #[]
   for jid in rt.queueOrder do
     if let some rec := rt.ledger.jobs.get? jid then
-      if rec.state == .queued then
-        let .ok payload := OrbBin.Json.parse rec.payloadJson | continue
-        let side := (payload.fieldBool? "side_question").getD false
-        let coord := (payload.fieldBool? "coordinator_priority").getD false
-        let canRun :=
-          if side then activeSideCount rt < rt.cfg.sideCapacity
-          else if coord then activeCoordCount rt < rt.cfg.coordinatorCapacity
-          else activeRegularCount rt + rt.shrinkDebt < rt.cfg.capacityTotal
-        if canRun then
-          rt ← startQueuedJob rt jid false
-        else
-          remQueue := remQueue.push jid
-  return { rt with queueOrder := remQueue }
+      if rec.state == .queued && !rt.launching.contains jid then
+        let payload? := (payloadHints.get? jid).orElse (fun _ =>
+          match OrbBin.Json.parse rec.payloadJson with
+          | .ok pv => some pv
+          | .error _ => none)
+        if let some payload := payload? then
+          match decideQueuedAdmission rt payload with
+          | some (sideLane, coordLane, trackBg) =>
+            let logPath := rec.logPath?.getD ((System.FilePath.mk rt.cfg.workDir / "logs" / s!"{jid}.log").toString)
+            let sl : LaunchingSlot := {
+              forced := false, sideLane, coordLane, missionId := rec.missionId, trackBg
+            }
+            rt := { rt with launching := rt.launching.insert jid sl }
+            toLaunch := toLaunch.push {
+              cfg := rt.cfg
+              jid := jid
+              missionId := rec.missionId
+              payload := payload
+              logPath := logPath
+              forced := false
+              sideLane := sideLane
+              coordLane := coordLane
+            }
+          | none =>
+            remQueue := remQueue.push jid
+  return ({ rt with queueOrder := remQueue }, toLaunch)
+
+/-- Synchronous `tickRuntime` wrapper (used by single-threaded `SelfTest` / `handleRequest`). -/
+def tickRuntime
+    (rt0 : NodeRuntime) (payloadHints : Std.HashMap String JVal := {}) : IO NodeRuntime := do
+  let (rtReserved, launches) ← tickRuntimeReserve rt0 payloadHints
+  let mut rt := rtReserved
+  for item in launches do
+    let prepRes ← prepareJobOutsideLock item.cfg item.jid item.missionId item.payload item.logPath
+      item.forced item.sideLane item.coordLane
+    rt ← commitPreparedJob rt item.jid prepRes
+  return rt
 
 def cancelJob (rt : NodeRuntime) (jid actor reason : String) : IO (Except String (NodeRuntime × JobRecord)) := do
   let some _cur := rt.ledger.jobs.get? jid
@@ -504,31 +860,88 @@ def cancelJob (rt : NodeRuntime) (jid actor reason : String) : IO (Except String
     if actor == "core" || actor == "operator" || actor == "startup_watchdog" || actor == "provider_error" then actor
     else "unknown"
   let cInfo : JobCancellation := { actor := cleanActor, reason := cleanReason, requestedAt := nowTs }
+  let mut releasedRegular := false
   if let some lp := rt.liveProcs.get? jid then
     OrbNode.Posix.killPgrp lp.pid 15
     OrbNode.Posix.killPgrp lp.pid 9
     discard <| OrbNode.Posix.pollPid lp.pid
+    cleanupIsolatedCheckout lp.isolatedCheckout
+    if !lp.forced && !lp.sideLane && !lp.coordLane then
+      releasedRegular := true
+  if let some sl := rt.launching.get? jid then
+    if !sl.forced && !sl.sideLane && !sl.coordLane then
+      releasedRegular := true
   let nextProcs := rt.liveProcs.erase jid
+  let nextLaunching := rt.launching.erase jid
   let nextQueue := rt.queueOrder.filter (· != jid)
+  let nextDebt := if releasedRegular && rt.shrinkDebt > 0 then rt.shrinkDebt - 1 else rt.shrinkDebt
   match ← rt.ledger.updateJob jid (fun r =>
     if r.state.isTerminal then .ok r
     else .ok { r with state := .cancelled, finishedAt? := some nowTs, cancellation? := some cInfo }) with
   | .error e => return .error e
   | .ok (l', updated) =>
-    return .ok ({ rt with ledger := l', liveProcs := nextProcs, queueOrder := nextQueue }, updated)
+    return .ok ({
+      rt with
+      ledger := l'
+      launching := nextLaunching
+      liveProcs := nextProcs
+      queueOrder := nextQueue
+      shrinkDebt := nextDebt
+    }, updated)
+
+/-- Reserve the force slot for a queued job (`POST /jobs/:id/force`), returning a `PendingAsyncLaunch`
+    so concurrent callers materialize checkouts outside `Std.Mutex NodeRuntime`. -/
+def reserveForceJob (rt : NodeRuntime) (jid : String) :
+    Except String (NodeRuntime × PendingAsyncLaunch × JobRecord) := do
+  let some cur := rt.ledger.jobs.get? jid
+    | throw "not_found"
+  if cur.state != .queued || rt.launching.contains jid then
+    throw "not_queued"
+  if activeForcedCount rt >= 1 then
+    throw "force_slot_busy"
+  let .ok payload := OrbBin.Json.parse cur.payloadJson
+    | throw "corrupt_payload"
+  let side := (payload.fieldBool? "side_question").getD false
+  let comp? := (payload.fieldStr? "companion_of").filter (fun s => !s.isEmpty)
+  let kind := (payload.fieldStr? "kind").getD "raw_command"
+  let trackBg := kind == "lean_build" || (!side && comp?.isNone)
+  let logPath := cur.logPath?.getD ((System.FilePath.mk rt.cfg.workDir / "logs" / s!"{jid}.log").toString)
+  let sl : LaunchingSlot := {
+    forced := true, sideLane := false, coordLane := false, missionId := cur.missionId, trackBg
+  }
+  let rt' := {
+    rt with
+    queueOrder := rt.queueOrder.filter (· != jid)
+    launching := rt.launching.insert jid sl
+  }
+  let launch : PendingAsyncLaunch := {
+    cfg := rt.cfg
+    jid := jid
+    missionId := cur.missionId
+    payload := payload
+    logPath := logPath
+    forced := true
+    sideLane := false
+    coordLane := false
+  }
+  return (rt', launch, cur)
 
 def forceJob (rt : NodeRuntime) (jid : String) : IO (Except String (NodeRuntime × JobRecord)) := do
-  let some cur := rt.ledger.jobs.get? jid
-    | return .error "not_found"
-  if cur.state != .queued then
-    return .error "not_queued"
-  if activeForcedCount rt >= 1 then
-    return .error "force_slot_busy"
-  let rt' ← startQueuedJob { rt with queueOrder := rt.queueOrder.filter (· != jid) } jid true
-  let updated := (rt'.ledger.jobs.get? jid).getD cur
-  return .ok (rt', updated)
+  match reserveForceJob rt jid with
+  | .error e => return .error e
+  | .ok (rtReserved, launch, cur) =>
+    let prepRes ← prepareJobOutsideLock launch.cfg launch.jid launch.missionId launch.payload launch.logPath
+      launch.forced launch.sideLane launch.coordLane
+    let rt' ← commitPreparedJob rtReserved jid prepRes
+    let updated := (rt'.ledger.jobs.get? jid).getD cur
+    return .ok (rt', updated)
 
-def interruptJob (rt : NodeRuntime) (jid mode : String) : IO (Except String (NodeRuntime × JVal)) := do
+/-- Interrupt or steer a running/queued job (`src/node/runner.rs::interrupt_job`):
+    - `interrupt_now`: sends `SIGINT` to in-flight child tools, waits briefly, and cancels the turn.
+    - `steer_between_tools`: cancels immediately when no child tool is active (`deferred_until_tool_finishes: false`);
+      when a child tool IS active under `lp.pid`, sets `lp.steerAfterTool := true` (`deferred_until_tool_finishes: true`)
+      so the reconciler/watcher cancels the turn right as the child tool finishes! -/
+def interruptJob (rt : NodeRuntime) (jid mode : String) : IO (Except String (NodeRuntime × JVal × Option UInt64)) := do
   let some cur := rt.ledger.jobs.get? jid
     | return .error "not_found"
   if cur.state == .queued then
@@ -541,7 +954,7 @@ def interruptJob (rt : NodeRuntime) (jid mode : String) : IO (Except String (Nod
         ("accepted", .bool true),
         ("signalled_pids", JVal.nat 0),
         ("deferred_until_tool_finishes", .bool false)
-      ])
+      ], none)
   if cur.state != .running then
     return .ok (rt, .obj #[
       ("job_id", .str jid),
@@ -549,54 +962,88 @@ def interruptJob (rt : NodeRuntime) (jid mode : String) : IO (Except String (Nod
       ("accepted", .bool false),
       ("signalled_pids", JVal.nat 0),
       ("deferred_until_tool_finishes", .bool false)
-    ])
+    ], none)
+  let some lp := rt.liveProcs.get? jid
+    | return .ok (rt, .obj #[
+        ("job_id", .str jid),
+        ("state", .str cur.state.asString),
+        ("accepted", .bool false),
+        ("signalled_pids", JVal.nat 0),
+        ("deferred_until_tool_finishes", .bool false)
+      ], none)
   if mode == "steer_between_tools" then
-    return .ok (rt, .obj #[
-      ("job_id", .str jid),
-      ("state", .str cur.state.asString),
-      ("accepted", .bool true),
-      ("signalled_pids", JVal.nat 0),
-      ("deferred_until_tool_finishes", .bool true)
-    ])
-  let mut sigCount : Nat := 0
-  if let some lp := rt.liveProcs.get? jid then
-    OrbNode.Posix.killPgrp lp.pid 2
-    sigCount := 1
-  return .ok (rt, .obj #[
-    ("job_id", .str jid),
-    ("state", .str cur.state.asString),
-    ("accepted", .bool (sigCount > 0)),
-    ("signalled_pids", JVal.nat sigCount),
-    ("deferred_until_tool_finishes", .bool false)
-  ])
-
-/-- Run cleared-env synchronous `POST /execute` command under `<workDir>/<missionId>`. -/
-def execClearedLeaseCommand (workDir missionId command : String) (maxJobSecs : UInt64) : IO JVal := do
-  let missionDir := (System.FilePath.mk workDir / missionId).toString
-  IO.FS.createDirAll missionDir
-  let mut envPairs ← prepareSharedMissionEnv workDir missionDir
-  envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" missionId
-  let mut envArgs : Array String := #["-i"]
-  for (k, v) in envPairs do
-    envArgs := envArgs.push s!"{k}={v}"
-  let hasTimeout ← do
-    let r ← (IO.Process.output { cmd := "timeout", args := #["--version"] }).toBaseIO
-    pure (match r with | .ok o => o.exitCode == 0 | .error _ => false)
-  if hasTimeout then
-    envArgs := envArgs ++ #["timeout", "-k", "5", s!"{max 1 maxJobSecs}s", "bash", "-lc", command]
+    let inflight ← collectInflightChildToolPids lp.pid
+    if inflight.isEmpty then
+      match ← cancelJob rt jid "core" "Steered between tool calls" with
+      | .error e => return .error e
+      | .ok (rt', updated) =>
+        return .ok (rt', .obj #[
+          ("job_id", .str jid),
+          ("state", .str updated.state.asString),
+          ("accepted", .bool true),
+          ("signalled_pids", JVal.nat 0),
+          ("deferred_until_tool_finishes", .bool false)
+        ], none)
+    else
+      let lpSteered := { lp with steerAfterTool := true }
+      let rt' := { rt with liveProcs := rt.liveProcs.insert jid lpSteered }
+      return .ok (rt', .obj #[
+        ("job_id", .str jid),
+        ("state", .str "running"),
+        ("accepted", .bool true),
+        ("signalled_pids", JVal.nat 0),
+        ("deferred_until_tool_finishes", .bool true)
+      ], some lp.pid)
   else
-    envArgs := envArgs ++ #["bash", "-lc", command]
-  let out ← IO.Process.output {
-    cmd := "env"
-    args := envArgs
-    cwd := some missionDir
-  }
-  return .obj #[
-    ("accepted", .bool true),
-    ("exit_code", JVal.int (Int.ofNat out.exitCode.toNat)),
-    ("stdout", .str out.stdout),
-    ("stderr", .str out.stderr)
-  ]
+    let sigCount ← sigintInflightChildTools lp.pid
+    if sigCount > 0 then
+      IO.sleep 60
+    match ← cancelJob rt jid "core" "Interrupted in-flight tool via SIGINT for immediate controller steering" with
+    | .error e => return .error e
+    | .ok (rt', updated) =>
+      return .ok (rt', .obj #[
+        ("job_id", .str jid),
+        ("state", .str updated.state.asString),
+        ("accepted", .bool true),
+        ("signalled_pids", JVal.nat sigCount),
+        ("deferred_until_tool_finishes", .bool false)
+      ], none)
+
+/-- Run cleared-env synchronous `POST /execute` command under `<workDir>/<missionId>`, fenced via `jobs.db`. -/
+def execClearedLeaseCommand
+    (workDir : String) (hasSqlite3 : Bool) (missionId command : String) (maxJobSecs : UInt64) :
+    IO (Except String JVal) := do
+  let execId ← newUuidV4
+  if let .error fenceErr ← acquireExecFenceReceipt workDir hasSqlite3 execId missionId then
+    return .error fenceErr
+  try
+    let missionDir := (System.FilePath.mk workDir / missionId).toString
+    IO.FS.createDirAll missionDir
+    let mut envPairs ← prepareSharedMissionEnv workDir missionDir
+    envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" missionId
+    let mut envArgs : Array String := #["-i"]
+    for (k, v) in envPairs do
+      envArgs := envArgs.push s!"{k}={v}"
+    let hasTimeout ← do
+      let r ← (IO.Process.output { cmd := "timeout", args := #["--version"] }).toBaseIO
+      pure (match r with | .ok o => o.exitCode == 0 | .error _ => false)
+    if hasTimeout then
+      envArgs := envArgs ++ #["timeout", "-k", "5", s!"{max 1 maxJobSecs}s", "bash", "-lc", command]
+    else
+      envArgs := envArgs ++ #["bash", "-lc", command]
+    let out ← IO.Process.output {
+      cmd := "env"
+      args := envArgs
+      cwd := some missionDir
+    }
+    return .ok (.obj #[
+      ("accepted", .bool true),
+      ("exit_code", JVal.int (Int.ofNat out.exitCode.toNat)),
+      ("stdout", .str out.stdout),
+      ("stderr", .str out.stderr)
+    ])
+  finally
+    releaseExecFenceReceipt workDir hasSqlite3 execId missionId
 
 /-- Single-threaded synchronous `POST /execute` helper (used by direct `handleRequest` tests). -/
 def runSyncExecute (rt : NodeRuntime) (missionId command : String) (sideLane : Bool := false) : IO (Nat × JVal) := do
@@ -605,7 +1052,8 @@ def runSyncExecute (rt : NodeRuntime) (missionId command : String) (sideLane : B
       return (429, .str "node side-lane capacity exhausted")
   else if activeRegularCount rt + rt.shrinkDebt >= rt.cfg.capacityTotal then
     return (429, .str "node capacity exhausted")
-  let resp ← execClearedLeaseCommand rt.cfg.workDir missionId command rt.cfg.maxJobSecs
-  return (200, resp)
+  match ← execClearedLeaseCommand rt.cfg.workDir rt.ledger.hasSqlite3 missionId command rt.cfg.maxJobSecs with
+  | .ok resp => return (200, resp)
+  | .error fenceErr => return (503, .str fenceErr)
 
 end OrbNode.Runner

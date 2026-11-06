@@ -404,4 +404,49 @@ def missionHasLiveJobs (l : Ledger) (missionId : String) : Bool :=
 
 end Ledger
 
+/-- Strip `source.archive.data_base64` before persisting `payload_json` to durable stores (`persisted_payload_json`). -/
+def sanitizePersistedPayload (payloadVal : JVal) : JVal :=
+  match payloadVal with
+  | .obj fields =>
+    if (payloadVal.fieldStr? "kind") == some "lean_build" then
+      .obj (fields.map fun (k, v) =>
+        if k == "source" then
+          match v with
+          | .obj sFields =>
+            (k, .obj (sFields.map fun (sk, sv) =>
+              if sk == "archive" then
+                match sv with
+                | .obj aFields =>
+                  (sk, .obj (aFields.map fun (ak, av) =>
+                    if ak == "data_base64" then (ak, .str "") else (ak, av)))
+                | other => (sk, other)
+              else (sk, sv)))
+          | other => (k, other)
+        else (k, v))
+    else payloadVal
+  | other => other
+
+/-- Fence synchronous `POST /execute` admission against `rolling_upgrade_nodes.py`'s `BEGIN IMMEDIATE`
+    transaction on `jobs.db`: inserts a temporary `running` row into `jobs.db` before execution
+    starts (failing closed if `jobs.db` is write-locked) and removes it on completion. -/
+def acquireExecFenceReceipt (workDir : String) (hasSqlite3 : Bool) (execId missionId : String) :
+    IO (Except String Unit) := do
+  if !hasSqlite3 then return .ok ()
+  let nowTs ← nowRfc3339
+  let execRec : JobRecord := {
+    jobId := execId
+    missionId := missionId
+    payloadJson := "{\"kind\":\"sync_execute\"}"
+    state := .running
+    createdAt := nowTs
+    startedAt? := some nowTs
+  }
+  syncJobToLegacySqlite workDir hasSqlite3 execRec 1500
+
+def releaseExecFenceReceipt (workDir : String) (hasSqlite3 : Bool) (execId missionId : String) : IO Unit := do
+  if !hasSqlite3 then return
+  let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
+  let sql := s!"DELETE FROM jobs WHERE id = {sqlEsc execId} AND mission_id = {sqlEsc missionId};"
+  discard <| (IO.Process.output { cmd := "sqlite3", args := #["-cmd", ".timeout 5000", dbPath, sql] }).toBaseIO
+
 end OrbNode.Store

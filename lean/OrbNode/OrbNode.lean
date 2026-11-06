@@ -7,5 +7,6 @@ import OrbNode.Dial
 import OrbNode.LeanBuild
 import OrbNode.FileBrowser
 import OrbNode.Transfer
+import OrbNode.ProjectContext
 import OrbNode.Runner
 import OrbNode.Server

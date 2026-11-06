@@ -14,6 +14,7 @@ import OrbNode.Dial
 import OrbNode.LeanBuild
 import OrbNode.FileBrowser
 import OrbNode.Transfer
+import OrbNode.ProjectContext
 import OrbNode.Runner
 
 namespace OrbNode.Server
@@ -27,6 +28,7 @@ open OrbNode.Store
 open OrbNode.LeanBuild
 open OrbNode.FileBrowser
 open OrbNode.Transfer
+open OrbNode.ProjectContext
 open OrbNode.Runner
 
 structure HttpRequest where
@@ -188,30 +190,6 @@ private def readLogTail64K (logPath? : Option String) : IO (Option String) := do
   let sub := bytes.extract start bytes.size
   return some (String.fromUTF8? sub |>.getD "")
 
-private def prepareProjectContext (workDir : String) (jv : JVal) : IO (Except String JVal) := do
-  let endpoint := ((jv.fieldStr? "endpoint").getD "").trimAscii.toString
-  let token := (jv.fieldStr? "token").getD ""
-  let project := ((jv.fieldStr? "project").getD "").trimAscii.toString
-  if endpoint.isEmpty then return .error "missing endpoint"
-  if project.isEmpty || project == "." || project == ".." ||
-     project.contains '/' || project.contains '\\' then
-    return .error "invalid project"
-  let key := bytesToHexLower (sha256Bytes endpoint.toUTF8)
-  let base := System.FilePath.mk workDir / "project-context" / key / project
-  let filesDir := base / "files"
-  let stateDir := base / "state"
-  IO.FS.createDirAll filesDir
-  if let .error e ← ensurePrivateDir0700 stateDir then
-    return .error e
-  let connDoc := renderCompact (.obj #[
-    ("endpoint", .str endpoint),
-    ("token", .str token),
-    ("project", .str project)
-  ])
-  if let .error e ← writeAtomicPrivate0600 (stateDir / "connection.json") connDoc.toUTF8 then
-    return .error e
-  return .ok (.obj #[("root", .str filesDir.toString), ("manifest", .arr #[])])
-
 private def scanSoftwareInventory : IO JVal := do
   let candidates := #[
     ("sandboxed-node", "sandboxed-node", "--version"),
@@ -269,111 +247,116 @@ private def discoverAntigravityModels (ma : ManagedAuthConfig) (slot? : Option S
       | .ok (.arr xs) => return .ok (.arr xs)
       | _ => return .ok (.arr #[])
 
-/-- Core route dispatcher over `NodeRuntime` (excludes `POST /execute` when running under `Std.Mutex`
-    so synchronous lease commands execute outside the lock; `handleRequest` still supports `/execute` directly). -/
-def handleNonExecRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRuntime × HttpResponse) := do
-  let rt ← tickRuntime rt0
+/-- Core route dispatcher over `NodeRuntime` returning `(updatedRuntime, response, pendingLaunches, steerWatchers)`
+    so `handleRequestConcurrent` runs blocking checkout preparation and tool-steer watchers outside `Std.Mutex`. -/
+def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
+    IO (NodeRuntime × HttpResponse × Array PendingAsyncLaunch × Array (String × UInt64)) := do
+  let (rt, preLaunches) ← tickRuntimeReserve rt0
   if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
-    return (rt, textResp 401 "invalid node token")
+    return (rt, textResp 401 "invalid node token", preLaunches, #[])
   let segs := (req.path.splitOn "/").filter (fun s => !s.isEmpty)
   let nowEp ← OrbNode.Posix.nowEpoch
   match req.method, segs with
   | "GET", ["heartbeat"] =>
     let hb ← buildHeartbeatJson rt
-    return (rt, jsonResp 200 hb)
+    return (rt, jsonResp 200 hb, preLaunches, #[])
   | "POST", ["capacity"] =>
     let some bodyStr := String.fromUTF8? req.body
-      | return (rt, textResp 400 "invalid UTF-8 body")
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
     let .ok jv := OrbBin.Json.parse bodyStr
-      | return (rt, textResp 400 "invalid JSON body")
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
     let some leaseTok := jv.fieldStr? "lease_token"
-      | return (rt, textResp 400 "missing lease_token")
+      | return (rt, textResp 400 "missing lease_token", preLaunches, #[])
     match verifyLeaseToken leaseTok rt.cfg.token rt.cfg.tokenPrevious? rt.cfg.nodeId .nodeCapacity nowEp none with
-    | .error msg => return (rt, textResp 400 msg)
+    | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
     | .ok claims =>
       if claims.missionId != "00000000-0000-0000-0000-000000000000" then
-        return (rt, textResp 400 "node:capacity lease must use nil mission_id")
+        return (rt, textResp 400 "node:capacity lease must use nil mission_id", preLaunches, #[])
       let some targetCap := jv.fieldNat? "capacity"
-        | return (rt, textResp 400 "missing capacity")
+        | return (rt, textResp 400 "missing capacity", preLaunches, #[])
       let targetCoord? := (jv.fieldNat? "coordinator_capacity").map (·.toUInt32)
       match ← resizeCapacity rt targetCap.toUInt32 targetCoord? true with
-      | .error msg => return (rt, textResp 400 msg)
+      | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
       | .ok rt' =>
-        let hb ← buildHeartbeatJson rt'
-        return (rt', jsonResp 200 hb)
+        let (rtTicked, postLaunches) ← tickRuntimeReserve rt'
+        let hb ← buildHeartbeatJson rtTicked
+        return (rtTicked, jsonResp 200 hb, preLaunches ++ postLaunches, #[])
   | "POST", ["jobs"] =>
     if req.body.size > 54525952 then
-      return (rt, textResp 413 "payload too large")
+      return (rt, textResp 413 "payload too large", preLaunches, #[])
     let some bodyStr := String.fromUTF8? req.body
-      | return (rt, textResp 400 "invalid UTF-8 body")
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
     let .ok jv := OrbBin.Json.parse bodyStr
-      | return (rt, textResp 400 "invalid JSON body")
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
     let (some rawJobId, some rawMissionId, some leaseTok, some payloadVal) :=
         (jv.fieldStr? "job_id", jv.fieldStr? "mission_id", jv.fieldStr? "lease_token", jv.field? "payload")
-      | return (rt, textResp 400 "missing job_id, mission_id, lease_token, or payload")
+      | return (rt, textResp 400 "missing job_id, mission_id, lease_token, or payload", preLaunches, #[])
     let (some jobId, some missionId) := (parseUuidCanonical? rawJobId, parseUuidCanonical? rawMissionId)
-      | return (rt, textResp 400 "job_id and mission_id must be valid UUIDs")
+      | return (rt, textResp 400 "job_id and mission_id must be valid UUIDs", preLaunches, #[])
     match verifyLeaseToken leaseTok rt.cfg.token rt.cfg.tokenPrevious? rt.cfg.nodeId .jobSubmit nowEp none with
-    | .error msg => return (rt, textResp 400 msg)
+    | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
     | .ok claims =>
       if claims.missionId != missionId then
-        return (rt, textResp 400 "lease is scoped to a different mission")
+        return (rt, textResp 400 "lease is scoped to a different mission", preLaunches, #[])
       if let some cid := claims.jobId? then
         if cid != jobId then
-          return (rt, textResp 400 "lease is scoped to a different job")
+          return (rt, textResp 400 "lease is scoped to a different job", preLaunches, #[])
       let kind := (payloadVal.fieldStr? "kind").getD "raw_command"
       if kind == "lean_build" then
         if let .error err := validateLeanBuildPayload payloadVal rt.cfg.envAllowlist then
-          return (rt, textResp 422 err)
+          return (rt, textResp 422 err, preLaunches, #[])
         let st ← OrbNode.Posix.hostStats rt.cfg.workDir
         let estDisk := (payloadVal.fieldUInt64? "estimated_disk_bytes").getD 0
         let availAfterEst := if st.diskAvailBytes > estDisk then st.diskAvailBytes - estDisk else 0
         if verifyNodeCapacityDisk rt.cfg.capacityTotal rt.cfg.coordinatorCapacity availAfterEst rt.cfg.minFreeDiskBytes 0 0 != 1 then
-          return (rt, textResp 422 "insufficient free disk space below min_free_disk_bytes floor")
+          return (rt, textResp 422 "insufficient free disk space below min_free_disk_bytes floor", preLaunches, #[])
       else if kind == "raw_command" then
         let longRunning := (payloadVal.fieldBool? "long_running").getD false
         if !longRunning then
           let reqAuth := ((payloadVal.fieldArr? "managed_auth").getD #[]).filterMap JVal.asStr?
           if !reqAuth.isEmpty then
             if let .error err ← validateManagedAuthRequest rt.cfg.managedAuth reqAuth then
-              return (rt, textResp 422 err)
+              return (rt, textResp 422 err, preLaunches, #[])
       else
-        return (rt, textResp 422 s!"unknown job kind '{kind}'")
+        return (rt, textResp 422 s!"unknown job kind '{kind}'", preLaunches, #[])
       if rt.ledger.jobs.contains jobId then
-        return (rt, textResp 409 s!"job {jobId} already exists")
+        return (rt, textResp 409 s!"job {jobId} already exists", preLaunches, #[])
       if rt.queueOrder.size >= rt.cfg.maxQueued then
-        return (rt, textResp 429 "node job queue full")
+        return (rt, textResp 429 "node job queue full", preLaunches, #[])
       let nowTs ← nowRfc3339
       let logPath := (System.FilePath.mk rt.cfg.workDir / "logs" / s!"{jobId}.log").toString
+      let persistedPayload := sanitizePersistedPayload payloadVal
       let jobRec : JobRecord := {
         jobId := jobId
         missionId := missionId
-        payloadJson := renderCompact payloadVal
+        payloadJson := renderCompact persistedPayload
         state := .queued
         createdAt := nowTs
         logPath? := some logPath
       }
       match ← rt.ledger.insertQueued jobRec with
-      | .error "duplicate_job_id" => return (rt, textResp 409 s!"job {jobId} already exists")
-      | .error msg => return (rt, textResp 503 msg)
+      | .error "duplicate_job_id" => return (rt, textResp 409 s!"job {jobId} already exists", preLaunches, #[])
+      | .error msg => return (rt, textResp 503 msg, preLaunches, #[])
       | .ok l' =>
         let rtQueued := { rt with ledger := l', queueOrder := rt.queueOrder.push jobId }
-        let rtTicked ← tickRuntime rtQueued
-        return (rtTicked, jsonResp 202 (.obj #[("job_id", .str jobId), ("state", .str "queued")]))
+        let hints : Std.HashMap String JVal := ({} : Std.HashMap String JVal).insert jobId payloadVal
+        let (rtReserved, postLaunches) ← tickRuntimeReserve rtQueued hints
+        return (rtReserved, jsonResp 202 (.obj #[("job_id", .str jobId), ("state", .str "queued")]),
+          preLaunches ++ postLaunches, #[])
   | "GET", ["jobs"] =>
     let lim := (req.query? "limit" >>= String.toNat?).getD 20
     let recs := rt.ledger.listRecent lim
-    return (rt, jsonResp 200 (.arr (recs.map (fun r => r.toStatusJson none))))
+    return (rt, jsonResp 200 (.arr (recs.map (fun r => r.toStatusJson none))), preLaunches, #[])
   | "GET", ["jobs", jid] =>
     let key := (parseUuidCanonical? jid).getD jid
     let some rec := rt.ledger.jobs.get? key
-      | return (rt, textResp 404 "job not found")
+      | return (rt, textResp 404 "job not found", preLaunches, #[])
     let tail? ← readLogTail64K rec.logPath?
-    return (rt, jsonResp 200 (rec.toStatusJson tail?))
+    return (rt, jsonResp 200 (rec.toStatusJson tail?), preLaunches, #[])
   | "GET", ["jobs", jid, "log"] =>
     let key := (parseUuidCanonical? jid).getD jid
     let some rec := rt.ledger.jobs.get? key
-      | return (rt, textResp 404 "job not found")
+      | return (rt, textResp 404 "job not found", preLaunches, #[])
     let off := (req.query? "offset" >>= String.toNat?).getD 0
     let maxB := (req.query? "max_bytes" >>= String.toNat?).getD 262144
     let rawBytes ← match rec.logPath? with
@@ -392,20 +375,21 @@ def handleNonExecRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRunti
       ("log_len", JVal.uint64 sl.logLen),
       ("data", .str sl.data),
       ("state", .str rec.state.asString)
-    ]))
+    ]), preLaunches, #[])
   | "POST", ["jobs", jid, "cancel"] =>
     let key := (parseUuidCanonical? jid).getD jid
     let actor := (req.header? "x-sandboxed-cancel-actor").getD "unknown"
     let reason := (req.header? "x-sandboxed-cancel-reason").getD "Cancellation requested without reason"
     match ← cancelJob rt key actor reason with
-    | .error "not_found" => return (rt, textResp 404 s!"job {key} not found")
-    | .error msg => return (rt, textResp 500 msg)
+    | .error "not_found" => return (rt, textResp 404 s!"job {key} not found", preLaunches, #[])
+    | .error msg => return (rt, textResp 500 msg, preLaunches, #[])
     | .ok (rt', updated) =>
-      return (rt', jsonResp 200 (.obj #[
+      let (rtTicked, postLaunches) ← tickRuntimeReserve rt'
+      return (rtTicked, jsonResp 200 (.obj #[
         ("job_id", .str key),
         ("state", .str updated.state.asString),
         ("cancel_requested", .bool true)
-      ]))
+      ]), preLaunches ++ postLaunches, #[])
   | "POST", ["jobs", jid, "interrupt"] =>
     let key := (parseUuidCanonical? jid).getD jid
     let mode ← match String.fromUTF8? req.body with
@@ -415,124 +399,127 @@ def handleNonExecRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRunti
         | .error _ => pure "interrupt_now"
       | none => pure "interrupt_now"
     match ← interruptJob rt key mode with
-    | .error "not_found" => return (rt, textResp 404 s!"job {key} not found")
-    | .error msg => return (rt, textResp 500 msg)
-    | .ok (rt', respObj) => return (rt', jsonResp 200 respObj)
+    | .error "not_found" => return (rt, textResp 404 s!"job {key} not found", preLaunches, #[])
+    | .error msg => return (rt, textResp 500 msg, preLaunches, #[])
+    | .ok (rt', respObj, watchPid?) =>
+      let watchers := match watchPid? with | some p => #[(key, p)] | none => #[]
+      let (rtTicked, postLaunches) ← tickRuntimeReserve rt'
+      return (rtTicked, jsonResp 200 respObj, preLaunches ++ postLaunches, watchers)
   | "POST", ["jobs", jid, "force"] =>
     let key := (parseUuidCanonical? jid).getD jid
     let some bodyStr := String.fromUTF8? req.body
-      | return (rt, textResp 400 "invalid UTF-8 body")
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
     let .ok jv := OrbBin.Json.parse bodyStr
-      | return (rt, textResp 400 "invalid JSON body")
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
     let (some rawMissionId, some leaseTok) := (jv.fieldStr? "mission_id", jv.fieldStr? "lease_token")
-      | return (rt, textResp 400 "missing mission_id or lease_token")
+      | return (rt, textResp 400 "missing mission_id or lease_token", preLaunches, #[])
     let missionId := (parseUuidCanonical? rawMissionId).getD rawMissionId
     match verifyLeaseToken leaseTok rt.cfg.token rt.cfg.tokenPrevious? rt.cfg.nodeId .jobForce nowEp (some key) with
-    | .error msg => return (rt, textResp 400 msg)
+    | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
     | .ok claims =>
       if claims.missionId != missionId then
-        return (rt, textResp 400 "lease is scoped to a different mission")
+        return (rt, textResp 400 "lease is scoped to a different mission", preLaunches, #[])
       let some rec := rt.ledger.jobs.get? key
-        | return (rt, textResp 404 s!"job {key} not found")
+        | return (rt, textResp 404 s!"job {key} not found", preLaunches, #[])
       if rec.missionId != missionId then
-        return (rt, textResp 400 "job belongs to a different mission")
-      match ← forceJob rt key with
-      | .error "not_found" => return (rt, textResp 404 s!"job {key} not found")
-      | .error "not_queued" => return (rt, textResp 409 s!"job {key} is not queued")
-      | .error "force_slot_busy" => return (rt, textResp 409 "Force-start slot is already in use on this node")
-      | .error msg => return (rt, textResp 500 msg)
-      | .ok (rt', updated) =>
+        return (rt, textResp 400 "job belongs to a different mission", preLaunches, #[])
+      match reserveForceJob rt key with
+      | .error "not_found" => return (rt, textResp 404 s!"job {key} not found", preLaunches, #[])
+      | .error "not_queued" => return (rt, textResp 409 s!"job {key} is not queued", preLaunches, #[])
+      | .error "force_slot_busy" => return (rt, textResp 409 "Force-start slot is already in use on this node", preLaunches, #[])
+      | .error msg => return (rt, textResp 500 msg, preLaunches, #[])
+      | .ok (rt', forceLaunch, updated) =>
         return (rt', jsonResp 200 (.obj #[
           ("job_id", .str key),
           ("state", .str updated.state.asString),
           ("forced", .bool true)
-        ]))
+        ]), preLaunches.push forceLaunch, #[])
   | "POST", ["jobs", jid, "files"] =>
     let key := (parseUuidCanonical? jid).getD jid
     let some rec := rt.ledger.jobs.get? key
-      | return (rt, textResp 404 "Job not found")
+      | return (rt, textResp 404 "Job not found", preLaunches, #[])
     let some bodyStr := String.fromUTF8? req.body
-      | return (rt, textResp 400 "invalid UTF-8 body")
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
     let .ok reqJson := OrbBin.Json.parse bodyStr
-      | return (rt, textResp 400 "invalid JSON body")
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
     let missionDir := (System.FilePath.mk rt.cfg.workDir / rec.missionId).toString
     match ← executeFileBrowser missionDir reqJson with
-    | .ok v => return (rt, jsonResp 200 v)
-    | .error msg => return (rt, textResp 400 msg)
+    | .ok v => return (rt, jsonResp 200 v, preLaunches, #[])
+    | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
   | "GET", ["fs", "list"] =>
     let rawPath := (req.query? "path").getD ""
     match ← listNodeFsDir rt.cfg.workDir rawPath with
-    | .ok v => return (rt, jsonResp 200 v)
-    | .error msg => return (rt, textResp 400 msg)
+    | .ok v => return (rt, jsonResp 200 v, preLaunches, #[])
+    | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
   | "POST", ["fs", "mkdir"] =>
     let some bodyStr := String.fromUTF8? req.body
-      | return (rt, textResp 400 "invalid UTF-8 body")
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
     let .ok jv := OrbBin.Json.parse bodyStr
-      | return (rt, textResp 400 "invalid JSON body")
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
     let some p := jv.fieldStr? "path"
-      | return (rt, textResp 400 "missing path")
+      | return (rt, textResp 400 "missing path", preLaunches, #[])
     let target := resolveNodeFsPath rt.cfg.workDir p
     match ← (IO.FS.createDirAll target).toBaseIO with
-    | .ok () => return (rt, jsonResp 200 (.obj #[("ok", .bool true)]))
-    | .error e => return (rt, textResp 400 s!"Cannot create directory '{target}': {e}")
+    | .ok () => return (rt, jsonResp 200 (.obj #[("ok", .bool true)]), preLaunches, #[])
+    | .error e => return (rt, textResp 400 s!"Cannot create directory '{target}': {e}", preLaunches, #[])
   | "POST", ["uploads"] =>
     if req.body.size > 30 * 1024 * 1024 then
-      return (rt, textResp 413 "payload too large")
+      return (rt, textResp 413 "payload too large", preLaunches, #[])
     let some bodyStr := String.fromUTF8? req.body
-      | return (rt, textResp 400 "invalid UTF-8 body")
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
     let .ok jv := OrbBin.Json.parse bodyStr
-      | return (rt, textResp 400 "invalid JSON body")
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
     match ← storeSingleUpload rt.cfg.workDir jv with
-    | .ok receipt => return (rt, jsonResp 200 receipt)
-    | .error msg => return (rt, textResp 400 msg)
+    | .ok receipt => return (rt, jsonResp 200 receipt, preLaunches, #[])
+    | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
   | "POST", ["uploads", "sessions"] =>
     let some bodyStr := String.fromUTF8? req.body
-      | return (rt, textResp 400 "invalid UTF-8 body")
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
     let .ok jv := OrbBin.Json.parse bodyStr
-      | return (rt, textResp 400 "invalid JSON body")
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
     match ← initOrStatusUploadSession rt.cfg.workDir jv with
-    | .ok status => return (rt, jsonResp 200 status)
-    | .error msg => return (rt, textResp 400 msg)
+    | .ok status => return (rt, jsonResp 200 status, preLaunches, #[])
+    | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
   | "PUT", ["uploads", "sessions", uid, "chunks", idxStr] =>
     if req.body.size > maxChunkBytes then
-      return (rt, textResp 413 "chunk too large")
+      return (rt, textResp 413 "chunk too large", preLaunches, #[])
     let some idx := idxStr.toNat?
-      | return (rt, textResp 400 "invalid chunk index")
+      | return (rt, textResp 400 "invalid chunk index", preLaunches, #[])
     match ← writeUploadSessionChunk rt.cfg.workDir uid idx req.body with
-    | .ok status => return (rt, jsonResp 200 status)
-    | .error msg => return (rt, textResp 400 msg)
+    | .ok status => return (rt, jsonResp 200 status, preLaunches, #[])
+    | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
   | "POST", ["uploads", "sessions", uid, "complete"] =>
     match ← completeUploadSession rt.cfg.workDir uid with
-    | .ok receipt => return (rt, jsonResp 200 receipt)
-    | .error msg => return (rt, textResp 400 msg)
+    | .ok receipt => return (rt, jsonResp 200 receipt, preLaunches, #[])
+    | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
   | "DELETE", ["uploads", "sessions", uid] =>
     match ← cancelUploadSession rt.cfg.workDir uid with
-    | .ok () => return (rt, { status := 204, contentType := "text/plain; charset=utf-8", body := ByteArray.empty })
-    | .error msg => return (rt, textResp 400 msg)
+    | .ok () => return (rt, { status := 204, contentType := "text/plain; charset=utf-8", body := ByteArray.empty }, preLaunches, #[])
+    | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
   | "GET", ["machine-transfer", "capabilities"] =>
     let harnesses ← detectTransferHarnesses rt.cfg.managedAuth
     return (rt, jsonResp 200 (.obj #[
       ("version", JVal.nat 2),
       ("harnesses", .arr (harnesses.map .str)),
       ("features", .arr #[.str "links", .str "selection", .str "archive-zstd-v1"])
-    ]))
+    ]), preLaunches, #[])
   | "POST", ["machine-transfer", "files"] =>
     if req.body.size > 16 * 1024 * 1024 then
-      return (rt, textResp 413 "payload too large")
+      return (rt, textResp 413 "payload too large", preLaunches, #[])
     let some bodyStr := String.fromUTF8? req.body
-      | return (rt, textResp 400 "invalid UTF-8 body")
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
     let .ok jv := OrbBin.Json.parse bodyStr
-      | return (rt, textResp 400 "invalid JSON body")
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
     let (some rawMid, some rawTid, some side, some opVal) :=
         (jv.fieldStr? "mission_id", jv.fieldStr? "transfer_id", jv.fieldStr? "side", jv.field? "operation")
-      | return (rt, textResp 400 "missing mission_id, transfer_id, side, or operation")
+      | return (rt, textResp 400 "missing mission_id, transfer_id, side, or operation", preLaunches, #[])
     let (some mid, some tid) := (parseUuidCanonical? rawMid, parseUuidCanonical? rawTid)
-      | return (rt, textResp 400 "invalid UUID")
+      | return (rt, textResp 400 "invalid UUID", preLaunches, #[])
     if side != "source" && side != "destination" then
-      return (rt, textResp 400 "Invalid side")
+      return (rt, textResp 400 "Invalid side", preLaunches, #[])
     let srcMid := ((jv.fieldStr? "source_mission_id") >>= parseUuidCanonical?).getD mid
     if rt.ledger.missionHasLiveJobs mid || rt.ledger.missionHasLiveJobs srcMid then
-      return (rt, textResp 409 "Source execution has not terminated")
+      return (rt, textResp 409 "Source execution has not terminated", preLaunches, #[])
     let area := System.FilePath.mk rt.cfg.workDir / ".transfers" / tid / side
     let srcTransfer? := (jv.fieldStr? "source_transfer") >>= parseUuidCanonical?
     let sourceDir := match srcTransfer? with
@@ -545,88 +532,143 @@ def handleNonExecRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRunti
       if !sst.exists_ && wst.exists_ && wst.isDir && !wst.isSymlink then
         IO.FS.createDirAll sourceDir
     match ← operateTransfer area (some sourceDir) opVal with
-    | .ok res => return (rt, jsonResp 200 res)
-    | .error msg => return (rt, textResp 409 msg)
+    | .ok res => return (rt, jsonResp 200 res, preLaunches, #[])
+    | .error msg => return (rt, textResp 409 msg, preLaunches, #[])
   | "POST", ["machine-transfer", "archive", "pack"] =>
     let some bodyStr := String.fromUTF8? req.body
-      | return (rt, textResp 400 "invalid UTF-8 body")
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
     let .ok jv := OrbBin.Json.parse bodyStr
-      | return (rt, textResp 400 "invalid JSON body")
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
     let (some rawMid, some rawTid) := (jv.fieldStr? "mission_id", jv.fieldStr? "transfer_id")
-      | return (rt, textResp 400 "missing mission_id or transfer_id")
+      | return (rt, textResp 400 "missing mission_id or transfer_id", preLaunches, #[])
     let (some mid, some tid) := (parseUuidCanonical? rawMid, parseUuidCanonical? rawTid)
-      | return (rt, textResp 400 "invalid UUID")
+      | return (rt, textResp 400 "invalid UUID", preLaunches, #[])
     let srcMid := ((jv.fieldStr? "source_mission_id") >>= parseUuidCanonical?).getD mid
     if rt.ledger.missionHasLiveJobs mid || rt.ledger.missionHasLiveJobs srcMid then
-      return (rt, textResp 409 "Source execution has not terminated")
+      return (rt, textResp 409 "Source execution has not terminated", preLaunches, #[])
     let area := System.FilePath.mk rt.cfg.workDir / ".transfers" / tid / "source"
     match ← packTransferArchive area with
     | .ok zstBytes =>
-      return (rt, { status := 200, contentType := "application/zstd", body := zstBytes })
+      return (rt, { status := 200, contentType := "application/zstd", body := zstBytes }, preLaunches, #[])
     | .error msg =>
-      return (rt, textResp 409 msg)
+      return (rt, textResp 409 msg, preLaunches, #[])
   | "POST", ["machine-transfer", "archive", "unpack"] =>
     let (some rawMid, some rawTid) := (req.query? "mission_id", req.query? "transfer_id")
-      | return (rt, textResp 400 "missing mission_id or transfer_id query parameter")
+      | return (rt, textResp 400 "missing mission_id or transfer_id query parameter", preLaunches, #[])
     let (some mid, some tid) := (parseUuidCanonical? rawMid, parseUuidCanonical? rawTid)
-      | return (rt, textResp 400 "invalid UUID")
+      | return (rt, textResp 400 "invalid UUID", preLaunches, #[])
     if rt.ledger.missionHasLiveJobs mid then
-      return (rt, textResp 409 "Source execution has not terminated")
+      return (rt, textResp 409 "Source execution has not terminated", preLaunches, #[])
     let area := System.FilePath.mk rt.cfg.workDir / ".transfers" / tid / "destination"
     match ← unpackTransferArchive area req.body with
-    | .ok written => return (rt, jsonResp 200 (.obj #[("ok", .bool true), ("bytes", JVal.uint64 written)]))
-    | .error msg => return (rt, textResp 409 msg)
+    | .ok written => return (rt, jsonResp 200 (.obj #[("ok", .bool true), ("bytes", JVal.uint64 written)]), preLaunches, #[])
+    | .error msg => return (rt, textResp 409 msg, preLaunches, #[])
   | "POST", ["machine-transfer", "browse"] =>
     let some bodyStr := String.fromUTF8? req.body
-      | return (rt, textResp 400 "invalid UTF-8 body")
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
     let .ok jv := OrbBin.Json.parse bodyStr
-      | return (rt, textResp 400 "invalid JSON body")
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
     let (some rawTid, some opVal) := (jv.fieldStr? "transfer_id", jv.field? "operation")
-      | return (rt, textResp 400 "missing transfer_id or operation")
+      | return (rt, textResp 400 "missing transfer_id or operation", preLaunches, #[])
     let some tid := parseUuidCanonical? rawTid
-      | return (rt, textResp 400 "invalid transfer_id UUID")
+      | return (rt, textResp 400 "invalid transfer_id UUID", preLaunches, #[])
     let area := System.FilePath.mk rt.cfg.workDir / ".transfers" / tid / "destination"
     if !(← (area / "verified").pathExists) then
-      return (rt, textResp 409 "Workspace is not verified")
+      return (rt, textResp 409 "Workspace is not verified", preLaunches, #[])
     match ← executeFileBrowser (area / "workspace").toString opVal with
-    | .ok res => return (rt, jsonResp 200 res)
-    | .error msg => return (rt, textResp 409 msg)
+    | .ok res => return (rt, jsonResp 200 res, preLaunches, #[])
+    | .error msg => return (rt, textResp 409 msg, preLaunches, #[])
   | "PUT", ["managed-auth", "antigravity"] =>
     let some bodyStr := String.fromUTF8? req.body
-      | return (rt, textResp 400 "invalid UTF-8 body")
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
     let .ok jv := OrbBin.Json.parse bodyStr
-      | return (rt, textResp 400 "invalid JSON body")
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
     let slot? := req.query? "slot"
     let updateDefault := match req.query? "default" with
       | some "false" | some "0" => false
       | _ => true
     match ← installAntigravityAuth rt.cfg.managedAuth slot? updateDefault jv with
-    | .ok res => return (rt, jsonResp 200 res)
+    | .ok res => return (rt, jsonResp 200 res, preLaunches, #[])
     | .error msg =>
-      if msg.startsWith "conflict:" then return (rt, textResp 409 (msg.drop 9).toString)
-      else if msg.startsWith "bad_request:" then return (rt, textResp 400 (msg.drop 12).toString)
-      else return (rt, textResp 500 msg)
+      if msg.startsWith "conflict:" then return (rt, textResp 409 (msg.drop 9).toString, preLaunches, #[])
+      else if msg.startsWith "bad_request:" then return (rt, textResp 400 (msg.drop 12).toString, preLaunches, #[])
+      else return (rt, textResp 500 msg, preLaunches, #[])
   | "GET", ["antigravity", "models"] =>
     match ← discoverAntigravityModels rt.cfg.managedAuth (req.query? "slot") with
-    | .ok res => return (rt, jsonResp 200 res)
-    | .error (code, msg) => return (rt, textResp code msg)
+    | .ok res => return (rt, jsonResp 200 res, preLaunches, #[])
+    | .error (code, msg) => return (rt, textResp code msg, preLaunches, #[])
   | "GET", ["software"] =>
     let inv ← scanSoftwareInventory
-    return (rt, jsonResp 200 inv)
+    return (rt, jsonResp 200 inv, preLaunches, #[])
   | "POST", ["software", "updates"] =>
-    return (rt, textResp 400 "Automated self-updates are managed out-of-band on native Lean nodes")
+    return (rt, textResp 400 "Automated self-updates are managed out-of-band on native Lean nodes", preLaunches, #[])
   | "POST", ["software", "updates", "cancel"] =>
-    return (rt, jsonResp 200 (.obj #[("ok", .bool true)]))
+    return (rt, jsonResp 200 (.obj #[("ok", .bool true)]), preLaunches, #[])
   | "POST", ["project-context", "prepare"] =>
     let some bodyStr := String.fromUTF8? req.body
-      | return (rt, textResp 400 "invalid UTF-8 body")
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
     let .ok jv := OrbBin.Json.parse bodyStr
-      | return (rt, textResp 400 "invalid JSON body")
-    match ← prepareProjectContext rt.cfg.workDir jv with
-    | .ok res => return (rt, jsonResp 200 res)
-    | .error msg => return (rt, textResp 400 msg)
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
+    match ← prepareNodeProjectContext rt.cfg.workDir jv with
+    | .ok res => return (rt, jsonResp 200 res, preLaunches, #[])
+    | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
   | _, _ =>
-    return (rt, textResp 404 "route not found")
+    return (rt, textResp 404 "route not found", preLaunches, #[])
+
+/-- Synchronous wrapper over `handleNonExecRequestCore` (used by `SelfTest` / `handleRequest`). -/
+def handleNonExecRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRuntime × HttpResponse) := do
+  let (rtReserved, resp, launches, _) ← handleNonExecRequestCore rt0 req
+  let mut rt := rtReserved
+  for item in launches do
+    let prepRes ← prepareJobOutsideLock item.cfg item.jid item.missionId item.payload item.logPath
+      item.forced item.sideLane item.coordLane
+    rt ← commitPreparedJob rt item.jid prepRes
+  return (rt, resp)
+
+/-- Spawn background `IO.asTask` workers for `PendingAsyncLaunch` items outside `Std.Mutex NodeRuntime`. -/
+private partial def spawnAsyncLaunches (mtx : Std.Mutex NodeRuntime) (launches : Array PendingAsyncLaunch) : IO Unit := do
+  for item in launches do
+    let _ ← IO.asTask do
+      let prepRes ← prepareJobOutsideLock item.cfg item.jid item.missionId item.payload item.logPath
+        item.forced item.sideLane item.coordLane
+      let more ← mtx.atomically do
+        let rt ← get
+        let rtCommitted ← commitPreparedJob rt item.jid prepRes
+        let (rtNext, nextLaunches) ← tickRuntimeReserve rtCommitted
+        set rtNext
+        return nextLaunches
+      if !more.isEmpty then
+        spawnAsyncLaunches mtx more
+
+/-- Spawn background `100ms` watcher for `steer_between_tools` so turn cancellation triggers promptly
+    even when no HTTP traffic arrives before the next `tcpAccept` timeout. -/
+private def spawnSteerWatchers (mtx : Std.Mutex NodeRuntime) (watchers : Array (String × UInt64)) : IO Unit := do
+  for (jid, rootPid) in watchers do
+    let _ ← IO.asTask do
+      let mut done := false
+      while !done do
+        IO.sleep 100
+        let stillActive ← mtx.atomically do
+          let rt ← get
+          match rt.liveProcs.get? jid with
+          | some lp => return (lp.pid == rootPid && lp.steerAfterTool)
+          | none => return false
+        if !stillActive then
+          done := true
+        else
+          let inflight ← collectInflightChildToolPids rootPid
+          if inflight.isEmpty then
+            IO.sleep 120
+            let nextLaunches ← mtx.atomically do
+              let rt ← get
+              if let .ok (rt', _) ← cancelJob rt jid "core" "Steered immediately after tool call completed" then
+                let (rtNext, more) ← tickRuntimeReserve rt'
+                set rtNext
+                return more
+              return #[]
+            if !nextLaunches.isEmpty then
+              spawnAsyncLaunches mtx nextLaunches
+            done := true
 
 /-- Direct single-threaded route handler over `NodeRuntime` (used by `SelfTest`). -/
 def handleRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRuntime × HttpResponse) := do
@@ -656,69 +698,103 @@ def handleRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRuntime × H
   else
     handleNonExecRequest rt0 req
 
-/-- Concurrent `Std.Mutex NodeRuntime` route handler so `POST /execute` runs outside the lock
-    and never blocks concurrent `GET /heartbeat` or `GET /jobs/:id/log` requests. -/
+/-- Concurrent `Std.Mutex NodeRuntime` route handler:
+    - `POST /execute`, `POST /project-context/prepare`, and async job checkout preparation ALL execute
+      outside `Std.Mutex NodeRuntime` so slow network/git/command I/O never blocks `/heartbeat`, `/cancel`,
+      `/jobs/:id/log`, or deadline enforcement! -/
 def handleRequestConcurrent (mtx : Std.Mutex NodeRuntime) (req : HttpRequest) : IO HttpResponse := do
   let segs := (req.path.splitOn "/").filter (fun s => !s.isEmpty)
   if req.method == "POST" && segs == ["execute"] then
-    let prep ← mtx.atomically do
-      let rt ← tickRuntime (← get)
+    let (prep, preLaunches) ← mtx.atomically do
+      let (rt, preL) ← tickRuntimeReserve (← get)
       set rt
       if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
-        return Except.error (textResp 401 "invalid node token")
+        return (Except.error (textResp 401 "invalid node token"), preL)
       let some bodyStr := String.fromUTF8? req.body
-        | return Except.error (textResp 400 "invalid UTF-8 body")
+        | return (Except.error (textResp 400 "invalid UTF-8 body"), preL)
       let .ok jv := OrbBin.Json.parse bodyStr
-        | return Except.error (textResp 400 "invalid JSON body")
+        | return (Except.error (textResp 400 "invalid JSON body"), preL)
       let (some rawMid, some leaseTok, some command) :=
           (jv.fieldStr? "mission_id", jv.fieldStr? "lease_token", jv.fieldStr? "command")
-        | return Except.error (textResp 400 "missing mission_id, lease_token, or command")
+        | return (Except.error (textResp 400 "missing mission_id, lease_token, or command"), preL)
       let missionId := (parseUuidCanonical? rawMid).getD rawMid
       let nowEp ← OrbNode.Posix.nowEpoch
       match verifyLeaseToken leaseTok rt.cfg.token rt.cfg.tokenPrevious? rt.cfg.nodeId .missionExecute nowEp none with
-      | .error msg => return Except.error (textResp 400 msg)
+      | .error msg => return (Except.error (textResp 400 msg), preL)
       | .ok claims =>
         if claims.missionId != missionId then
-          return Except.error (textResp 400 "lease mission_id mismatch")
+          return (Except.error (textResp 400 "lease mission_id mismatch"), preL)
         let sideLane := (jv.fieldBool? "side_lane").getD false
         if sideLane then
           if activeSideCount rt >= rt.cfg.sideCapacity then
-            return Except.error (textResp 429 "node side-lane capacity exhausted")
+            return (Except.error (textResp 429 "node side-lane capacity exhausted"), preL)
           set { rt with activeExecSide := rt.activeExecSide + 1 }
         else
           if activeRegularCount rt + rt.shrinkDebt >= rt.cfg.capacityTotal then
-            return Except.error (textResp 429 "node capacity exhausted")
+            return (Except.error (textResp 429 "node capacity exhausted"), preL)
           set { rt with activeExecMain := rt.activeExecMain + 1 }
-        return Except.ok (rt.cfg.workDir, missionId, command, rt.cfg.maxJobSecs, sideLane)
+        return (Except.ok (rt.cfg.workDir, rt.ledger.hasSqlite3, missionId, command, rt.cfg.maxJobSecs, sideLane), preL)
+    if !preLaunches.isEmpty then
+      spawnAsyncLaunches mtx preLaunches
     match prep with
     | .error errResp => return errResp
-    | .ok (workDir, missionId, command, maxJobSecs, sideLane) =>
+    | .ok (workDir, hasSqlite3, missionId, command, maxJobSecs, sideLane) =>
       try
-        let outVal ← execClearedLeaseCommand workDir missionId command maxJobSecs
-        return jsonResp 200 outVal
+        match ← execClearedLeaseCommand workDir hasSqlite3 missionId command maxJobSecs with
+        | .ok outVal => return jsonResp 200 outVal
+        | .error fenceErr => return textResp 503 fenceErr
       finally
-        mtx.atomically do
+        let postLaunches ← mtx.atomically do
           let rt ← get
-          if sideLane then
-            set { rt with activeExecSide := if rt.activeExecSide > 0 then rt.activeExecSide - 1 else 0 }
-          else
-            let nextMain := if rt.activeExecMain > 0 then rt.activeExecMain - 1 else 0
-            let nextDebt := if rt.shrinkDebt > 0 then rt.shrinkDebt - 1 else 0
-            set { rt with activeExecMain := nextMain, shrinkDebt := nextDebt }
-  else
-    mtx.atomically do
+          let rtReleased :=
+            if sideLane then
+              { rt with activeExecSide := if rt.activeExecSide > 0 then rt.activeExecSide - 1 else 0 }
+            else
+              let nextMain := if rt.activeExecMain > 0 then rt.activeExecMain - 1 else 0
+              let nextDebt := if rt.shrinkDebt > 0 then rt.shrinkDebt - 1 else 0
+              { rt with activeExecMain := nextMain, shrinkDebt := nextDebt }
+          let (rtNext, nextL) ← tickRuntimeReserve rtReleased
+          set rtNext
+          return nextL
+        if !postLaunches.isEmpty then
+          spawnAsyncLaunches mtx postLaunches
+  else if req.method == "POST" && segs == ["project-context", "prepare"] then
+    let authCheck ← mtx.atomically do
       let rt ← get
-      let (rt', resp) ← handleNonExecRequest rt req
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return Except.error (textResp 401 "invalid node token")
+      return Except.ok rt.cfg.workDir
+    match authCheck with
+    | .error errResp => return errResp
+    | .ok workDir =>
+      let some bodyStr := String.fromUTF8? req.body
+        | return textResp 400 "invalid UTF-8 body"
+      let .ok jv := OrbBin.Json.parse bodyStr
+        | return textResp 400 "invalid JSON body"
+      match ← prepareNodeProjectContext workDir jv with
+      | .ok res => return jsonResp 200 res
+      | .error msg => return textResp 400 msg
+  else
+    let (resp, launches, watchers) ← mtx.atomically do
+      let rt ← get
+      let (rt', r, ls, ws) ← handleNonExecRequestCore rt req
       set rt'
-      return resp
+      return (r, ls, ws)
+    if !launches.isEmpty then
+      spawnAsyncLaunches mtx launches
+    if !watchers.isEmpty then
+      spawnSteerWatchers mtx watchers
+    return resp
 
 /-- Serve HTTP/1.1 requests concurrently on `rt.cfg.bindHost:rt.cfg.bindPort` until `SIGTERM`/`SIGINT`
-    (or `410 Gone` from dial-out relay), reloading capacity on `SIGHUP`. -/
+    (or `410 Gone` from dial-out relay), reloading capacity on `SIGHUP` and running background
+    2-second project-context replica synchronization. -/
 def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCredential := none) : IO UInt32 := do
   OrbNode.Posix.installSignals
   let lfd ← OrbNode.Posix.tcpListen rtInit.cfg.bindHost rtInit.cfg.bindPort
   let mtx ← Std.Mutex.new rtInit
   let goneRef ← IO.mkRef false
+  let _ ← startProjectContextDaemon rtInit.cfg.workDir goneRef
   if let some cred := dialCred? then
     let _ ← OrbNode.Dial.spawnRelay cred rtInit.cfg.bindPort goneRef
   try
@@ -726,14 +802,23 @@ def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCr
       let sigs ← OrbNode.Posix.pollSignals
       if (sigs &&& 1) != 0 then break
       if (sigs &&& 2) != 0 then
-        mtx.atomically do
+        let launches ← mtx.atomically do
           let rt ← get
-          set (← reloadCapacityFromFiles rt)
+          let rtReloaded ← reloadCapacityFromFiles rt
+          let (rtNext, ls) ← tickRuntimeReserve rtReloaded
+          set rtNext
+          return ls
+        if !launches.isEmpty then
+          spawnAsyncLaunches mtx launches
       let cfd ← OrbNode.Posix.tcpAccept lfd 200
       if cfd == 0xFFFFFFFF then
-        mtx.atomically do
+        let launches ← mtx.atomically do
           let rt ← get
-          set (← tickRuntime rt)
+          let (rtNext, ls) ← tickRuntimeReserve rt
+          set rtNext
+          return ls
+        if !launches.isEmpty then
+          spawnAsyncLaunches mtx launches
       else
         let _ ← IO.asTask do
           try
@@ -748,6 +833,7 @@ def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCr
           finally
             OrbNode.Posix.fdClose cfd
   finally
+    goneRef.set true
     OrbNode.Posix.fdClose lfd
   return 0
 

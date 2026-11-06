@@ -346,7 +346,15 @@ def runTests : IO UInt32 := do
   check "POST /uploads/sessions/:id/complete verifies SHA-256"
     (rUpDone.status == 200 && upRec.fieldStr? "sha256" == some (bytesToHexLower (sha256Bytes upBytes)))
 
-  -- 8. Machine-transfer `snapshot -> pack -> stage -> unpack -> verify -> browse`
+  -- 8. Machine-transfer `snapshot -> pack -> stage -> unpack -> verify -> browse` (including Git history & portable links)
+  let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", "visible.txt", (mDir / "rel-link.txt").toString] }
+  let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", "/etc/hosts", (mDir / "outside-link.txt").toString] }
+  let _ ← IO.Process.output { cmd := "git", args := #["init", "--quiet"], cwd := some mDir.toString }
+  let _ ← IO.Process.output { cmd := "git", args := #["config", "user.email", "test@orb.dev"], cwd := some mDir.toString }
+  let _ ← IO.Process.output { cmd := "git", args := #["config", "user.name", "Orb Test"], cwd := some mDir.toString }
+  let _ ← IO.Process.output { cmd := "git", args := #["add", "visible.txt"], cwd := some mDir.toString }
+  let _ ← IO.Process.output { cmd := "git", args := #["commit", "-m", "initial", "--quiet"], cwd := some mDir.toString }
+
   let tid := "44444444-4444-4444-8444-444444444444"
   let snapBody := renderCompact (.obj #[
     ("mission_id", .str missionId),
@@ -361,8 +369,35 @@ def runTests : IO UInt32 := do
   rt := rt14
   let .ok manifestJson := OrbBin.Json.parse (String.fromUTF8! rSnap.body)
     | throw (IO.userError "transfer snapshot invalid JSON")
-  check "machine-transfer snapshot excludes .env and captures visible.txt"
-    (rSnap.status == 200 && ((manifestJson.fieldArr? "excluded").getD #[]).any (fun v => v.asStr? == some ".env"))
+  check "machine-transfer snapshot excludes .env, captures .transfer-git.bundle & portable link, skips outside link"
+    (rSnap.status == 200 &&
+     ((manifestJson.fieldArr? "excluded").getD #[]).any (fun v => v.asStr? == some ".env") &&
+     ((manifestJson.fieldArr? "files").getD #[]).any (fun v => v.fieldStr? "path" == some ".transfer-git.bundle") &&
+     ((manifestJson.fieldArr? "links").getD #[]).any (fun v => v.fieldStr? "path" == some "rel-link.txt") &&
+     ((manifestJson.fieldArr? "skipped").getD #[]).any (fun v => v.fieldStr? "path" == some "outside-link.txt"))
+
+  -- Malicious symlink traversal manifest rejected in `validateManifest` / `stage`
+  let badTid := "44444444-4444-4444-8444-444444444499"
+  let badLinkStage := renderCompact (.obj #[
+    ("mission_id", .str missionId),
+    ("transfer_id", .str badTid),
+    ("side", .str "destination"),
+    ("operation", .obj #[
+      ("op", .str "stage"),
+      ("manifest", .obj #[
+        ("files", .arr #[]),
+        ("excluded", .arr #[]),
+        ("bytes", JVal.uint64 0),
+        ("links", .arr #[.obj #[("path", .str "../escape"), ("target", .str "visible.txt")]])
+      ])
+    ])
+  ])
+  let (rt14b, rBadStage) ← handleRequest rt {
+    method := "POST", rawPath := "/machine-transfer/files", path := "/machine-transfer/files",
+    query := #[], headers := authHdrs, body := badLinkStage.toUTF8
+  }
+  rt := rt14b
+  check "machine-transfer stage rejects ../ link traversal in manifest" (rBadStage.status == 409)
 
   let packBody := renderCompact (.obj #[("mission_id", .str missionId), ("transfer_id", .str tid)])
   let (rt15, rPack) ← handleRequest rt {
@@ -408,7 +443,11 @@ def runTests : IO UInt32 := do
     query := #[], headers := authHdrs, body := verifyBody.toUTF8
   }
   rt := rt18
-  check "machine-transfer verify seals destination checkpoint" (rVer.status == 200)
+  let restoredWs := System.FilePath.mk tmpRoot / ".transfers" / tid / "destination" / "workspace"
+  let gitLogOut ← IO.Process.output { cmd := "git", args := #["-C", restoredWs.toString, "log", "--oneline"] }
+  let relLinkSt ← OrbBin.PosixExt.statPath (restoredWs / "rel-link.txt").toString
+  check "machine-transfer verify seals destination checkpoint, restores .git history & portable symlink"
+    (rVer.status == 200 && gitLogOut.exitCode == 0 && (gitLogOut.stdout.splitOn "initial").length > 1 && relLinkSt.isSymlink)
 
   let browseBody := renderCompact (.obj #[
     ("transfer_id", .str tid),
@@ -424,7 +463,141 @@ def runTests : IO UInt32 := do
   check "machine-transfer browse reads verified destination file"
     (rBrw.status == 200 && brwJson.fieldStr? "content" == some "hello-browser")
 
-  -- 9. `PUT /managed-auth/antigravity` + `POST /project-context/prepare`
+  -- 9. `long_running` timeout rules, `companion_of` lane admission (`Orb.Kernel.nodeLaneStep`), and `steer_between_tools`
+  let lrNone := OrbNode.Runner.computeJobTimeoutSecs "raw_command" (.obj #[("long_running", .bool true)]) 14400
+  let lrExplicit := OrbNode.Runner.computeJobTimeoutSecs "raw_command" (.obj #[("long_running", .bool true), ("timeout_secs", JVal.uint64 90000)]) 14400
+  let lrSide := OrbNode.Runner.computeJobTimeoutSecs "raw_command" (.obj #[("long_running", .bool true), ("side_question", .bool true)]) 14400
+  let regClamped := OrbNode.Runner.computeJobTimeoutSecs "raw_command" (.obj #[("long_running", .bool false), ("timeout_secs", JVal.uint64 90000)]) 14400
+  check "computeJobTimeoutSecs honors unbounded/explicit long_running deadlines and clamps regular/side jobs"
+    (lrNone == none && lrExplicit == some 90000 && lrSide == some 14400 && regClamped == some 14400)
+
+  -- Resize node capacity down to 1 so a single background job saturates main pool, then test `companion_of` admission
+  let cap1Lease := signLeaseToken "sec-primary-123" {
+    missionId := "00000000-0000-0000-0000-000000000000"
+    nodeId := "test-node"
+    scope := .nodeCapacity
+    expiresAt := nowEp + 600
+  }
+  let (rtCap1, rCap1) ← handleRequest rt {
+    method := "POST", rawPath := "/capacity", path := "/capacity", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[("lease_token", .str cap1Lease), ("capacity", JVal.nat 1), ("coordinator_capacity", JVal.nat 2)])).toUTF8
+  }
+  rt := rtCap1
+  check "POST /capacity sets capacity=1, coordinator_capacity=2" (rCap1.status == 200)
+
+  let bgJobId := "55555555-5555-4555-8555-555555555551"
+  let compJobId := "55555555-5555-4555-8555-555555555552"
+  let bgBody := renderCompact (.obj #[
+    ("job_id", .str bgJobId),
+    ("mission_id", .str missionId),
+    ("lease_token", .str submitLease),
+    ("payload", .obj #[
+      ("kind", .str "raw_command"),
+      ("command", .str "sleep 0.6; i=0; while [ $i -lt 500000 ]; do i=$((i+1)); done"),
+      ("long_running", .bool true)
+    ])
+  ])
+  let (rtBg, rBg) ← handleRequest rt {
+    method := "POST", rawPath := "/jobs", path := "/jobs",
+    query := #[], headers := authHdrs, body := bgBody.toUTF8
+  }
+  rt := rtBg
+  check "background job running in saturated main slot (capacity=1)"
+    (rBg.status == 202 && (rt.ledger.jobs.get? bgJobId).map (·.state) == some .running)
+
+  let compMissionId := "66666666-6666-4666-8666-666666666666"
+  let compLease := signLeaseToken "sec-primary-123" {
+    missionId := compMissionId
+    nodeId := "test-node"
+    scope := .jobSubmit
+    expiresAt := nowEp + 600
+  }
+  let compBody := renderCompact (.obj #[
+    ("job_id", .str compJobId),
+    ("mission_id", .str compMissionId),
+    ("lease_token", .str compLease),
+    ("payload", .obj #[
+      ("kind", .str "raw_command"),
+      ("command", .str "printf companion-admitted"),
+      ("companion_of", .str missionId),
+      ("coordinator_priority", .bool false)
+    ])
+  ])
+  let (rtComp, rComp) ← handleRequest rt {
+    method := "POST", rawPath := "/jobs", path := "/jobs",
+    query := #[], headers := authHdrs, body := compBody.toUTF8
+  }
+  rt := rtComp
+  check "companion_of turn immediately admitted on coordinator/companion lane despite full main slot"
+    (rComp.status == 202 &&
+     (rt.ledger.jobs.get? compJobId).map (·.state) == some .running &&
+     (rt.liveProcs.get? compJobId).map (·.coordLane) == some true)
+
+  -- Exercise `steer_between_tools` while `sleep 1.2` child tool is active under `bgJobId`
+  IO.sleep 150
+  let (rtSteer, rSteer) ← handleRequest rt {
+    method := "POST", rawPath := s!"/jobs/{bgJobId}/interrupt", path := s!"/jobs/{bgJobId}/interrupt",
+    query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[("mode", .str "steer_between_tools")])).toUTF8
+  }
+  rt := rtSteer
+  let .ok steerJson := OrbBin.Json.parse (String.fromUTF8! rSteer.body)
+    | throw (IO.userError "interrupt invalid JSON")
+  check "steer_between_tools defers while child sleep tool is active"
+    (rSteer.status == 200 &&
+     steerJson.fieldBool? "accepted" == some true &&
+     steerJson.fieldBool? "deferred_until_tool_finishes" == some true)
+
+  for _ in [0:60] do
+    IO.sleep 30
+    rt ← tickRuntime rt
+    if (rt.ledger.jobs.get? bgJobId).map (·.state) == some .cancelled &&
+       (rt.ledger.jobs.get? compJobId).map (·.state) == some .succeeded then
+      break
+  check "steer_between_tools cancels background turn after child tool completes & companion succeeds"
+    ((rt.ledger.jobs.get? bgJobId).map (·.state) == some .cancelled &&
+     (rt.ledger.jobs.get? compJobId).map (·.state) == some .succeeded)
+
+  -- 10. Source-bundle ancestor symlink confinement check (`materializeLeanCheckout`)
+  let symSeedDir := System.FilePath.mk tmpRoot / "sym-seed-repo"
+  IO.FS.createDirAll symSeedDir
+  let _ ← IO.Process.output { cmd := "git", args := #["init", "--quiet"], cwd := some symSeedDir.toString }
+  let _ ← IO.Process.output { cmd := "git", args := #["config", "user.email", "test@orb.dev"], cwd := some symSeedDir.toString }
+  let _ ← IO.Process.output { cmd := "git", args := #["config", "user.name", "Orb Test"], cwd := some symSeedDir.toString }
+  let outsideVictimDir := System.FilePath.mk tmpRoot / "outside-victim"
+  IO.FS.createDirAll outsideVictimDir
+  let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", outsideVictimDir.toString, (symSeedDir / "escape").toString] }
+  let _ ← IO.Process.output { cmd := "git", args := #["add", "escape"], cwd := some symSeedDir.toString }
+  let _ ← IO.Process.output { cmd := "git", args := #["commit", "-m", "symlink", "--quiet"], cwd := some symSeedDir.toString }
+  let headRes ← IO.Process.output { cmd := "git", args := #["rev-parse", "HEAD"], cwd := some symSeedDir.toString }
+  let symCommit := headRes.stdout.trimAscii.toString
+  -- Pre-populate `seed-<symCommit>` to test overlay confinement without network git fetch
+  let fakeRepoUrl := "https://github.com/Th0rgal/symlink-escape-test.git"
+  let fakeHash16 := (bytesToHexLower (sha256Bytes fakeRepoUrl.toUTF8)).take 16 |>.toString
+  let fakeShard := System.FilePath.mk tmpRoot / "checkouts" / fakeHash16
+  IO.FS.createDirAll fakeShard
+  let _ ← IO.Process.output { cmd := "cp", args := #["-a", symSeedDir.toString, (fakeShard / s!"seed-{symCommit}").toString] }
+  let escBytes := "owned".toUTF8
+  let escSha := bytesToHexLower (sha256Bytes escBytes)
+  let escBundle := JVal.obj #[
+    ("repo", .str fakeRepoUrl),
+    ("commit", .str symCommit),
+    ("bundle", .obj #[
+      ("complete", .bool false),
+      ("manifest_sha256", .str (bundleManifestSha256 #[("escape/pwn.txt", escSha)] false)),
+      ("files", .arr #[.obj #[
+        ("path", .str "escape/pwn.txt"),
+        ("sha256", .str escSha),
+        ("data_base64", .str (base64Encode escBytes false true))
+      ]])
+    ])
+  ]
+  let escRes ← materializeLeanCheckout tmpRoot escBundle (s!"{tmpRoot}/logs/esc.log") (some "esc-job")
+  let pwnExists ← (outsideVictimDir / "pwn.txt").pathExists
+  check "materializeLeanCheckout rejects source-bundle write through symlinked ancestor directory"
+    ((match escRes with | .error _ => true | .ok _ => false) && !pwnExists)
+
+  -- 11. `PUT /managed-auth/antigravity` + live HTTP `POST /project-context/prepare` sync
   let agCred := renderCompact (.obj #[
     ("access_token", .str "tok-a"),
     ("refresh_token", .str "tok-r"),
@@ -441,16 +614,58 @@ def runTests : IO UInt32 := do
   check "PUT /managed-auth/antigravity provisions 0600 default + slot1"
     (rAg.status == 200 && ((agJson.fieldArr? "managed_auth").getD #[]).size == 2)
 
+  -- Spin up an ephemeral local HTTP context server on `127.0.0.1:19489` serving `GET .../manifest` & `GET .../blobs/<sha>`
+  let ctxBlobBytes := "synced-context-guide".toUTF8
+  let ctxBlobHash := bytesToHexLower (sha256Bytes ctxBlobBytes)
+  let ctxManifestWire := renderCompact (.obj #[
+    ("revision", JVal.uint64 3),
+    ("entries", .obj #[
+      ("GUIDE.md", .obj #[
+        ("hash", .str ctxBlobHash),
+        ("directory", .bool false),
+        ("revision", JVal.uint64 3),
+        ("size", JVal.uint64 ctxBlobBytes.size.toUInt64)
+      ])
+    ])
+  ])
+  let mockLfd ← OrbNode.Posix.tcpListen "127.0.0.1" 19489
+  let mockTask ← IO.asTask do
+    for _ in [0:2] do
+      let cfd ← OrbNode.Posix.tcpAccept mockLfd 3000
+      if cfd != 0xFFFFFFFF then
+        if let .ok mreq ← OrbNode.Server.readHttpRequest cfd then
+          if mreq.path.endsWith "/manifest" then
+            discard <| OrbNode.Posix.fdWriteAll cfd
+              (OrbNode.Server.encodeHttpResponse { status := 200, contentType := "application/json", body := ctxManifestWire.toUTF8 })
+          else if mreq.path.endsWith s!"/blobs/{ctxBlobHash}" then
+            discard <| OrbNode.Posix.fdWriteAll cfd
+              (OrbNode.Server.encodeHttpResponse { status := 200, contentType := "application/octet-stream", body := ctxBlobBytes })
+          else
+            discard <| OrbNode.Posix.fdWriteAll cfd (OrbNode.Server.encodeHttpResponse (OrbNode.Server.textResp 404 "not found"))
+        OrbNode.Posix.fdClose cfd
+    OrbNode.Posix.fdClose mockLfd
   let (_, rPc) ← handleRequest rt {
     method := "POST", rawPath := "/project-context/prepare", path := "/project-context/prepare",
     query := #[], headers := authHdrs,
     body := (renderCompact (.obj #[
-      ("endpoint", .str "https://core.example"),
+      ("endpoint", .str "http://127.0.0.1:19489"),
       ("token", .str "tok-pc"),
       ("project", .str "demo")
     ])).toUTF8
   }
-  check "POST /project-context/prepare writes 0600 connection.json" (rPc.status == 200)
+  let _ ← IO.wait mockTask
+  let .ok pcJson := OrbBin.Json.parse (String.fromUTF8! rPc.body)
+    | throw (IO.userError "project-context prepare invalid JSON")
+  let pcRoot := (pcJson.fieldStr? "root").getD ""
+  let guideText ← if ← (System.FilePath.mk pcRoot / "GUIDE.md").pathExists then
+    IO.FS.readFile (System.FilePath.mk pcRoot / "GUIDE.md")
+  else pure ""
+  let pcManifest? := pcJson.field? "manifest"
+  check "POST /project-context/prepare syncs remote manifest + blob and returns {root, manifest: {revision, entries}}"
+    (rPc.status == 200 &&
+     guideText == "synced-context-guide" &&
+     (pcManifest?.bind (·.fieldUInt64? "revision")).isSome &&
+     (pcManifest?.bind (·.field? "entries") >>= JVal.asObj?).isSome)
 
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get
