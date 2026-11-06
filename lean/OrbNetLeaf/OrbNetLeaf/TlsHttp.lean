@@ -436,7 +436,7 @@ def http2Or3RequestViaCurl
     let mut outBytes := ByteArray.empty
     while true do
       if ← hdrDumpExceedsCap hdrFile 65536 then
-        let _ ← LeanSys.Posix.killPid child'.pid.toInt32 9
+        child'.kill
         let _ ← child'.wait
         try IO.FS.removeFile hdrFile catch _ => pure ()
         return .error "curl response header dump exceeds 64 KiB cap"
@@ -444,7 +444,7 @@ def http2Or3RequestViaCurl
       if chunk.isEmpty then break
       outBytes := outBytes ++ chunk
       if outBytes.size > stdoutCap then
-        let _ ← LeanSys.Posix.killPid child'.pid.toInt32 9
+        child'.kill
         let _ ← child'.wait
         try IO.FS.removeFile hdrFile catch _ => pure ()
         return .error s!"curl ({verFlag}) response exceeded maxRespBytes {maxRespBytes}"
