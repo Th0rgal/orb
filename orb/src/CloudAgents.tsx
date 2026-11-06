@@ -178,7 +178,7 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
   const seed = () => p.launch ?? cloudLaunchSeeds.get(p.id);
   const [children,setChildren]=createSignal<{id:string;title:string;status:string}[]>([]);
   const [execution, setExecution] = createSignal<CloudExecution>(); const [accounts, setAccounts] = createSignal<CloudAccount[]>([]);
-  const [error, setError] = createSignal(''); const [busy, setBusy] = createSignal(false);
+  const [loadError, setLoadError] = createSignal(''); const [error, setError] = createSignal(''); const [busy, setBusy] = createSignal(false);
   const [model,setModel]=createSignal(''),[modelParams,setModelParams]=createSignal<ModelParam[]>([]);
   let initializedFor = '';
   createEffect(()=>{
@@ -189,29 +189,30 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
       setModelParams(e.turns.at(-1)?.model_params ?? e.selection.model_params ?? []);
     }
   });
-  let attempt: {signature: string; text: string; key: string; model:string; params:ModelParam[]} | undefined; let stopPoll: (() => void) | undefined; let stopFastPoll: (() => void) | undefined; let disposed = false; let refreshing: Promise<void> | undefined;
-  const refresh = (): Promise<void> => {
-    if (refreshing) return refreshing;
+  let attempt: {signature: string; text: string; key: string; model:string; params:ModelParam[]} | undefined; let stopPoll: (() => void) | undefined; let stopFastPoll: (() => void) | undefined; let disposed = false; let refreshing: Promise<void> | undefined; let queuedManual = false;
+  const refresh = (manual = false): Promise<void> => {
+    if (manual) setLoadError('');
+    if (refreshing) { queuedManual ||= manual; return refreshing; }
     refreshing = (async () => {
       try { const [e, m] = await Promise.all([cloudExecution(p.id), getMission(p.id)]);
-        if (!disposed) { setExecution(old => JSON.stringify(old) === JSON.stringify(e) ? old : e); p.onMission?.(m); setError(''); }
+        if (!disposed) { setExecution(old => JSON.stringify(old) === JSON.stringify(e) ? old : e); p.onMission?.(m); setLoadError(''); }
         if(e.selection.provider==='hermes') {
           const result=await api<{missions:{id:string;title:string;status:string}[]}>(`/api/control/missions/${p.id}/cloud/children`);
           if(!disposed)setChildren(result.missions);
         }
-      } catch(e) { if (!disposed) setError(`Connection lost. Last observed state is preserved. ${String(e)}`); }
-      finally { refreshing = undefined; }
+      } catch(e) { if (!disposed) setLoadError(`Connection lost. Last observed state is preserved. ${String(e)}`); }
+      finally { refreshing = undefined; if (!disposed && queuedManual) { queuedManual = false; void refresh(true); } }
     })();
     return refreshing;
   };
   const working = (t: {phase: string}) => ['queued', 'submitting', 'running', 'waiting_user', 'cancel_requested'].includes(t.phase);
   const active = () => execution()?.turns.some(working) ?? false;
   onMount(() => {
-    void cloudAccounts().then(value => { if (!disposed) setAccounts(value); }).catch(e => { if (!disposed) setError(String(e)); });
+    void cloudAccounts().then(value => { if (!disposed) setAccounts(value); }).catch(e => { if (!disposed) setLoadError(String(e)); });
     if (!p.id) return;
     void refresh();
-    stopPoll = pollWhileVisible(refresh, 2500);
-    stopFastPoll = pollWhileVisible(() => (active() || !execution() ? refresh() : undefined), 750);
+    stopPoll = pollWhileVisible(() => refresh(false), 2500);
+    stopFastPoll = pollWhileVisible(() => (active() || !execution() ? refresh(false) : undefined), 750);
   });
   onCleanup(() => { disposed = true; stopPoll?.(); stopFastPoll?.(); if (p.id) p.onMission?.(null); });
   createEffect(() => { if (execution()?.turns.length) cloudLaunchSeeds.delete(p.id); });
@@ -240,13 +241,13 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
   };
   // A sent row is replaced by the turn the provider opens for it.
   createEffect(() => { const n = execution()?.turns.length ?? 0; setOutgoing(rows => { const kept = rows.filter(r => n <= r.turns); return kept.length === rows.length ? rows : kept; }); });
-  const cancel = async () => { setBusy(true); try { await api(`/api/control/missions/${p.id}/cloud/cancel`, {method:'POST'}); } catch(e) { setError(String(e)); } finally { setBusy(false); } };
+  const cancel = async () => { setBusy(true); setError(''); try { await api(`/api/control/missions/${p.id}/cloud/cancel`, {method:'POST'}); } catch(e) { setError(String(e)); } finally { setBusy(false); } };
   const approve = async (run_id:string, request_id:string|undefined, choice:string) => {
-    setBusy(true);
+    setBusy(true); setError('');
     try {await api(`/api/control/missions/${p.id}/cloud/approval`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id,request_id,choice})});await refresh();}
     catch(e){setError(String(e));}finally{setBusy(false);}
   };
-  const download = async (path: string) => { try { const result = await api<{url?:string; content_base64?:string; name?:string}>(`/api/control/missions/${p.id}/cloud/artifact?path=${encodeURIComponent(path)}`); if (result.content_base64) { const bytes = Uint8Array.from(atob(result.content_base64), c => c.charCodeAt(0)); const blob = URL.createObjectURL(new Blob([bytes], {type:'application/octet-stream'})); const link = document.createElement('a'); link.href = blob; link.download = result.name ?? 'artifact'; link.click(); setTimeout(() => URL.revokeObjectURL(blob), 10000); return; } const url = safeCloudUrl(result.url); if (!url) throw new Error('Invalid artifact URL'); await openExternalUrl(url); } catch(e) {setError(String(e));} };
+  const download = async (path: string) => { setError(''); try { const result = await api<{url?:string; content_base64?:string; name?:string}>(`/api/control/missions/${p.id}/cloud/artifact?path=${encodeURIComponent(path)}`); if (result.content_base64) { const bytes = Uint8Array.from(atob(result.content_base64), c => c.charCodeAt(0)); const blob = URL.createObjectURL(new Blob([bytes], {type:'application/octet-stream'})); const link = document.createElement('a'); link.href = blob; link.download = result.name ?? 'artifact'; link.click(); setTimeout(() => URL.revokeObjectURL(blob), 10000); return; } const url = safeCloudUrl(result.url); if (!url) throw new Error('Invalid artifact URL'); await openExternalUrl(url); } catch(e) {setError(String(e));} };
   const launchItems = (): StreamItem[] => { const s = seed(); return s && !execution()?.turns.length ? [{ kind: 'user', key: 'launch:prompt', text: s.prompt, images: s.images }] : []; };
   const launchPending = () => !execution()?.turns.length && !!seed();
   const items = (): StreamItem[] => [...launchItems(), ...(execution()?.turns ?? []).flatMap(t => turnToStreamItems(t, working(t))),
@@ -275,12 +276,13 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
       : t.result ? 'Writing…' : (t.detail ?? 'Working…');
   };
   return <><div class="scroll" ref={el => { scroller = el; pin.ref(el); }} onScroll={pin.onScroll}><div class="col">
-    <ErrorToast error={error()} title="Couldn’t load the conversation" onDismiss={() => setError('')} />
+    <ErrorToast error={loadError()} title="Couldn’t load the conversation" background action={{ label: 'Retry', run: () => refresh(true) }} />
+    <ErrorToast error={error()} onDismiss={() => setError('')} />
     <Show when={execution() || seed()} fallback={<div class="sk-transcript" role="status" aria-label="Loading conversation" aria-busy="true"><div class="sk-lines" aria-hidden="true"><i style={{ width: "58%" }} /><i style={{ width: "86%" }} /><i style={{ width: "72%" }} /></div></div>}>
       <Transcript sizeKey={`m:${p.id || 'launch'}`} items={items()} pending={launchPending() || (active() && !outgoing().length)} sending={outgoing().at(-1)?.id} working={launchPending() || active() || outgoing().length > 0} workingLabel={progress() ?? (launchPending() ? 'Working…' : 'Sending…')}/>
     </Show>
     <Show when={execution()}>{e => <>
-      <Show when={children().length}><div aria-label="Delegated missions"><For each={children()}>{child=><p><button class="na-drop-btn" onClick={()=>void getMission(child.id).then(m=>p.onOpenMission?.(m)).catch(e=>setError(String(e)))}>{child.title || child.id}</button> · {child.status}</p>}</For></div></Show>
+      <Show when={children().length}><div aria-label="Delegated missions"><For each={children()}>{child=><p><button class="na-drop-btn" onClick={()=>{setError('');void getMission(child.id).then(m=>p.onOpenMission?.(m)).catch(e=>setError(String(e)));}}>{child.title || child.id}</button> · {child.status}</p>}</For></div></Show>
       <For each={e().turns}>{turn => <>
         <Show when={turn.detail && !working(turn)}><p class="cloud-note">{turn.detail}</p></Show>
         <For each={turn.branches}>{branch => <p>{branch.branch} <Show when={safeCloudUrl(branch.prUrl)}>{url => <a href={url()} target="_blank" rel="noopener noreferrer">View pull request</a>}</Show></p>}</For>

@@ -2,6 +2,7 @@ import { createSignal, For } from "solid-js";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 import { clearConnection, setConnection } from "../src/api";
+import { CloudConversation } from "../src/CloudAgents";
 import { CloudProviders } from "../src/CloudProviders";
 import { ErrorToast, notify } from "../src/toast";
 
@@ -194,6 +195,56 @@ describe("unified workspace ErrorToast & Toaster", () => {
       // Manual Refresh button on Inference dispatches orb:providers-refresh -> surfaces the error again.
       window.dispatchEvent(new Event("orb:providers-refresh"));
       await vi.waitFor(() => expect(screen.getByText("Couldn’t load cloud accounts")).toBeTruthy());
+    } finally {
+      fetcher.mockRestore();
+      clearConnection();
+      vi.useRealTimers();
+    }
+  });
+
+  it("suppresses dismissed CloudConversation poll errors across 750ms/2.5s polls while surfacing explicit action failures", async () => {
+    vi.useFakeTimers();
+    setConnection("https://test.invalid", "tok");
+    let failPoll = false;
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/cloud/accounts")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      if (url.includes("/cloud/artifact")) {
+        throw new Error("Artifact storage offline");
+      }
+      if (failPoll) throw new Error("Gateway down");
+      if (url.includes("/cloud")) {
+        return new Response(
+          JSON.stringify({
+            mission_id: "cm-1",
+            selection: { provider: "cursor_cloud", account: "acc-1" },
+            turns: [{ key: "t1", prompt: "hello", phase: "completed", steps: [], branches: [], artifacts: [{ path: "report.txt" }] }],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ id: "cm-1", title: "Cloud", history: [], created_at: "", updated_at: "" }), { status: 200 });
+    });
+    try {
+      render(() => <CloudConversation id="cm-1" />);
+      await vi.waitFor(() => expect(screen.getByRole("button", { name: "Download report.txt" })).toBeTruthy());
+
+      failPoll = true;
+      await vi.advanceTimersByTimeAsync(2_500);
+      await vi.waitFor(() => expect(screen.getByText("Couldn’t load the conversation")).toBeTruthy());
+
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+      expect(screen.queryByRole("alert")).toBeNull();
+
+      // Subsequent polls stay suppressed.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(screen.queryByRole("alert")).toBeNull();
+
+      // Explicit artifact download failure still surfaces its own toast.
+      fireEvent.click(screen.getByRole("button", { name: "Download report.txt" }));
+      await vi.waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Artifact storage offline"));
     } finally {
       fetcher.mockRestore();
       clearConnection();
