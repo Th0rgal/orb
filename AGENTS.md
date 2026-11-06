@@ -106,9 +106,8 @@ ships to testers:
 | `lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean` | Formal Lean 4 (`v4.35.0`) orchestration, proxy, mission lifecycle & cross-client projection kernel (`0 import Lean`, `0 sorryAx`, exports recorded in `shared/orb-spec/kernel_abi.json`, including `lean-sys`, compiled via `shared/orb-spec/cabi/orb_kernel_unboxed.c` into `liborb_spec_cabi.a` with zero `lean`/`lake`/`elan` build-time invocation and zero hand-written C fallback) |
 | `orb/` | Orb desktop client: SolidJS + Vite in `orb/src`, Tauri v2 shell in `orb/src-tauri` |
 | `ios_dashboard/` | iOS app (SwiftUI, generated with XcodeGen from `project.yml`); the Orb UI lives in `SandboxedDashboard/Orb` |
-| `dashboard/` | Next.js web dashboard (admin console, served by the Docker image) |
+| `android_dashboard/` | Android app (Jetpack Compose + shared JNI kernel) |
 | `docs-site/` | Nextra documentation site |
-| `android_dashboard/` | Android app |
 | `shared/` | Rust sources included by both the backend and `orb/src-tauri` via `#[path]` |
 | `catalog/`, `capabilities/` | Model catalog snapshots (compiled in by `build.rs`) and the capability matrix checked in CI |
 | `scripts/`, `deploy/`, `docker/` | Operational scripts (some are embedded with `include_str!`), systemd units, Docker entrypoint |
@@ -125,7 +124,6 @@ cargo test --locked --workspace
 scripts/harness_contract_tests.sh
 scripts/check-capability-matrix.sh
 (cd orb && pnpm install --frozen-lockfile && pnpm build && pnpm test && pnpm test:browser)
-(cd dashboard && bun install --frozen-lockfile && bun run test:unit && bun run build)
 ```
 
 CI enforces formatting (`cargo fmt --check`); run it before pushing.

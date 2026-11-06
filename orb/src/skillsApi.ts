@@ -108,6 +108,56 @@ export interface LibraryStatus {
 export const getLibraryStatus = () => api<LibraryStatus>("/api/library/status");
 /** Pull from the remote. */
 export const syncLibrary = () => apiText("/api/library/sync", { method: "POST" });
+/** Reset local Library checkout to match the remote branch (`POST /api/library/force-sync`). */
+export const forceSyncLibrary = () => apiText("/api/library/force-sync", { method: "POST" });
+/** Force-push local Library commits over a diverged remote branch (`POST /api/library/force-push`). */
+export const forcePushLibrary = () => apiText("/api/library/force-push", { method: "POST" });
+
+export interface UpdateLibraryRemoteResult {
+  library_remote: string | null;
+  library_reinitialized: boolean;
+  library_error?: string;
+}
+
+export function normalizeLibraryRemote(remote?: string | null): string {
+  return (remote ?? "").trim().replace(/\/+$/, "").replace(/\.git$/i, "").toLowerCase();
+}
+
+export function sameLibraryRemote(a?: string | null, b?: string | null): boolean {
+  const na = normalizeLibraryRemote(a);
+  const nb = normalizeLibraryRemote(b);
+  return na.length > 0 && na === nb;
+}
+
+export function needsLibraryRemoteInit(
+  nextRemote: string | null,
+  activeRepoRemote?: string | null,
+  failedInitRemote?: string | null,
+): boolean {
+  if (!nextRemote || !nextRemote.trim()) return false;
+  if (failedInitRemote && sameLibraryRemote(nextRemote, failedInitRemote)) return true;
+  return !sameLibraryRemote(nextRemote, activeRepoRemote);
+}
+
+export function updateLibraryRemote(
+  libraryRemote: string | null,
+  forceReinitialize = false,
+): Promise<UpdateLibraryRemoteResult> {
+  return api<UpdateLibraryRemoteResult>("/api/settings/library-remote", {
+    method: "PUT",
+    ...json(
+      forceReinitialize
+        ? { library_remote: libraryRemote, force_reinitialize: true }
+        : { library_remote: libraryRemote },
+    ),
+  });
+}
+
+export function isDivergedLibraryError(err: unknown): boolean {
+  if (err instanceof ApiError && err.status === 409) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("DIVERGED_HISTORY") || /\bdiverged\b/i.test(msg);
+}
 
 /** Commit the Library and push it, so a save lands in the repo. */
 export async function commitAndPush(message: string): Promise<void> {

@@ -12,9 +12,9 @@ This guide walks you through connecting **Orb** (macOS and iOS) to your **Core**
    - **Docker**: `http://localhost:3000` (see [install-docker.md](install-docker.md))
    - **Native Linux Server**: e.g. `https://orb.thomas.md` or `https://agent-backend.example.com` (see [install-native.md](install-native.md))
 2. **Orb Client**:
-   - **macOS Desktop**: Located in [`../orb/`](../orb/README.md) (`pnpm install && pnpm tauri dev`)
-   - **iOS App**: Located in [`../ios_dashboard/`](../ios_dashboard/README.md) (SwiftUI, generated via XcodeGen)
-   - **Web Admin Console**: Located in `../dashboard/` (bundled in the Docker image on port 3000)
+   - **Desktop (`orb/`)**: Located in [`../orb/`](../orb/README.md) (`pnpm install && pnpm tauri dev`)
+   - **iOS App (`ios_dashboard/`)**: Located in [`../ios_dashboard/`](../ios_dashboard/README.md) (SwiftUI, generated via XcodeGen)
+   - **Android App (`android_dashboard/`)**: Located in [`../android_dashboard/`](../android_dashboard/README.md) (Jetpack Compose)
 
 ## 2. Connect to Your Backend
 

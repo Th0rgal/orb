@@ -117,9 +117,9 @@ Put Nginx or Caddy in front of `127.0.0.1:3000` with TLS (for example at `https:
 
 | Client | How to connect |
 | --- | --- |
-| **Orb Desktop (macOS)** | Run `pnpm install && pnpm tauri dev` in `orb/`, then enter your server URL in **Settings → Client → Backend** |
+| **Orb Desktop** | Run `pnpm install && pnpm tauri dev` in `orb/`, then enter your server URL in **Settings → Account** |
 | **Orb iOS** | Build `ios_dashboard/` via XcodeGen (`SandboxedDashboard` scheme, product name `Orb`) and sign in to your server URL |
-| **Web Admin Console** | Deploy `dashboard/` to Vercel (`NEXT_PUBLIC_API_URL`) or run `bun dev` locally |
+| **Orb Android** | Build `android_dashboard/` (`./gradlew :app:assembleDebug`) and sign in to your server URL |
 | **Hermes Coordinator** | Point Hermes's MCP server config at `/usr/local/bin/sandboxed-mcp` |
 
 For full bare-metal details (cgroup slices, disk-backed container `/tmp`, CLIProxyAPI Plus, and optional workspace exit nodes), see [`docs/install-native.md`](https://github.com/Th0rgal/orb/blob/master/docs/install-native.md).

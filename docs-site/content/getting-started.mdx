@@ -13,9 +13,9 @@ This guide walks you through connecting **Orb** (macOS and iOS) to your **Core**
    - **Docker**: `http://localhost:3000` (see [Docker Install](/install-docker))
    - **Remote Linux server**: e.g., `https://orb.thomas.md` or `https://agent-backend.example.com` (see [Server Setup](/setup))
 2. **Orb Client**:
-   - **macOS Desktop (`orb/`)**: Tauri v2 + SolidJS native app (`pnpm install && pnpm tauri dev`)
+   - **Desktop (`orb/`)**: Tauri v2 + SolidJS native app (`pnpm install && pnpm tauri dev`)
    - **iOS App (`ios_dashboard/`)**: SwiftUI app generated via XcodeGen (`xcodegen generate && open SandboxedDashboard.xcodeproj`)
-   - **Web Admin Console (`dashboard/`)**: Bundled in Docker on port 3000 or deployed separately
+   - **Android App (`android_dashboard/`)**: Jetpack Compose app (`./gradlew :app:assembleDebug`)
 
 <DesktopShowcase
   src="/images/orb-desktop.webp"

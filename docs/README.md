@@ -14,8 +14,8 @@
 
 ## 1. Quick Start & Installation
 
-- **[Getting Started](getting-started.md)** — Connect Orb (macOS & iOS) to your backend, configure subscriptions/harnesses, and launch your first agent.
-- **[Docker Installation](install-docker.md)** — Run the backend, web admin console, and pre-installed CLIs in a single container.
+- **[Getting Started](getting-started.md)** — Connect Orb (desktop, iOS & Android) to your backend, configure subscriptions/harnesses, and launch your first agent.
+- **[Docker Installation](install-docker.md)** — Run the Core backend and pre-installed CLIs in a single container.
 - **[Native Ubuntu 24.04 Installation](install-native.md)** — Bare-metal systemd setup with `systemd-nspawn` containers, `missions.slice` cgroups, and optional private networking. See [Lean-Mesh](LEAN_MESH.md) for the deployed fleet.
 
 ## 2. Orb Client & Mission Capabilities
@@ -70,7 +70,7 @@
 - **[Streaming Contract](STREAMING.md)** — Canonical SSE, WebSocket, and historical event replay contract.
 - **[Workspace API](WORKSPACE_API.md)** — Workspace CRUD, container builds, command execution, and diagnostics.
 - **[Backend API](BACKEND_API.md)** — Harness discovery and configuration endpoints.
-- **[Capability Matrix](CAPABILITY_MATRIX.md)** — CI-enforced feature parity across API, Web, and iOS (`capabilities/matrix.v1.json`).
+- **[Capability Matrix](CAPABILITY_MATRIX.md)** — CI-enforced feature parity across API, Orb Desktop, iOS, and Android (`capabilities/matrix.v1.json`).
 
 ---
 

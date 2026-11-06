@@ -60,7 +60,7 @@ fn is_default_host_workspace(workspace: &workspace::Workspace) -> bool {
     workspace.id == DEFAULT_WORKSPACE_ID && workspace.workspace_type == WorkspaceType::Host
 }
 
-async fn sync_all_workspaces(state: &super::routes::AppState, library: &LibraryStore) {
+pub(super) async fn sync_all_workspaces(state: &super::routes::AppState, library: &LibraryStore) {
     use futures::stream::{self, StreamExt};
 
     let workspaces = state.workspaces.list().await;
@@ -115,13 +115,12 @@ fn same_remote(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
-async fn ensure_library(
-    state: &super::routes::AppState,
+fn resolve_requested_remote(
     headers: &HeaderMap,
-) -> Result<Arc<LibraryStore>, (StatusCode, String)> {
+    configured: Option<String>,
+) -> Result<String, (StatusCode, String)> {
     // The configured remote is the only Library: Core's git identity pushes
     // to it, so a different remote named per request is refused.
-    let configured = state.settings.get_library_remote().await;
     let remote = match (extract_library_remote(headers), configured) {
         (Some(r), Some(c)) if !same_remote(&r, &c) => {
             return Err((
@@ -132,15 +131,21 @@ async fn ensure_library(
         (Some(r), None) => Some(r),
         (_, configured) => configured,
     };
-    let remote = remote.ok_or_else(|| {
+    remote.ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "Library not configured. Set a Git repo in Settings.".to_string(),
         )
-    })?;
+    })
+}
 
+async fn ensure_library(
+    state: &super::routes::AppState,
+    headers: &HeaderMap,
+) -> Result<Arc<LibraryStore>, (StatusCode, String)> {
     {
         let library_guard = state.library.read().await;
+        let remote = resolve_requested_remote(headers, state.settings.get_library_remote().await)?;
         if let Some(library) = library_guard.as_ref() {
             if library.remote() == remote {
                 return Ok(Arc::clone(library));
@@ -149,6 +154,7 @@ async fn ensure_library(
     }
 
     let mut library_guard = state.library.write().await;
+    let remote = resolve_requested_remote(headers, state.settings.get_library_remote().await)?;
     if let Some(library) = library_guard.as_ref() {
         if library.remote() == remote {
             return Ok(Arc::clone(library));

@@ -5679,20 +5679,26 @@ mod tests {
         std::fs::create_dir_all(locked_shard.join("blobs")).unwrap();
         std::fs::write(locked_shard.join("state.db"), b"sqlite").unwrap();
         std::fs::write(locked_shard.join("blobs/blob2"), vec![7_u8; 8192]).unwrap();
-        let held_shard_lock = std::fs::OpenOptions::new()
+        let held_shard_lock_file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(locked_shard.with_extension("lock"))
             .unwrap();
-        fs2::FileExt::lock_shared(&held_shard_lock).unwrap();
-        let held_shard_lock_second = std::fs::OpenOptions::new()
+        fs2::FileExt::lock_shared(&held_shard_lock_file).unwrap();
+        let held_shard_lock = FileLock {
+            file: held_shard_lock_file,
+        };
+        let held_shard_lock_second_file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(locked_shard.with_extension("lock"))
             .unwrap();
-        fs2::FileExt::lock_shared(&held_shard_lock_second).unwrap();
+        fs2::FileExt::lock_shared(&held_shard_lock_second_file).unwrap();
+        let held_shard_lock_second = FileLock {
+            file: held_shard_lock_second_file,
+        };
 
         let stale_staging =
             turbo_lean_staging_base_dir(dir.path(), Some("https://github.com/org/repo-a"))

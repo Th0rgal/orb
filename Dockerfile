@@ -1,7 +1,7 @@
 # =============================================================================
 # sandboxed.sh — All-in-One Docker Image
 # =============================================================================
-# Multi-stage build: Rust backend + Next.js dashboard + runtime with AI CLIs
+# Multi-stage build: Rust Core backend + runtime with AI CLIs
 # Formerly known as "Open Agent"
 #
 # Build:   docker build -t sandboxed-sh .
@@ -33,25 +33,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && for bin in $BINARIES; do cp "target/release/$bin" /out/; done
 
 # ---------------------------------------------------------------------------
-# Stage 2: Dashboard builder
-# ---------------------------------------------------------------------------
-FROM oven/bun:1 AS dashboard-builder
-
-WORKDIR /build/dashboard
-
-COPY dashboard/package.json dashboard/bun.lock ./
-RUN bun install --frozen-lockfile
-
-COPY dashboard/ .
-
-# Empty API URL — the Caddyfile proxies /api to the backend at runtime
-ENV NEXT_PUBLIC_API_URL=""
-# standalone output for Docker (not needed for Vercel)
-ENV STANDALONE=true
-RUN bun run build
-
-# ---------------------------------------------------------------------------
-# Stage 3: Runtime (Ubuntu 24.04 for native debootstrap support)
+# Stage 2: Runtime (Ubuntu 24.04 for native debootstrap support)
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS runtime
 
@@ -72,7 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Add plucky (25.04) script for future Ubuntu releases
     && ln -sf gutsy /usr/share/debootstrap/scripts/plucky
 
-# -- Node.js 20 (for Next.js standalone runtime) ------------------------------
+# -- Node.js 20 (for Claude Code CLI & MCP servers) ----------------------------
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -87,11 +69,6 @@ RUN curl -fsSL https://bun.sh/install | bash \
 
 # -- Copy Rust binaries from builder -----------------------------------------
 COPY --from=rust-builder /out/ /usr/local/bin/
-
-# -- Copy dashboard standalone build ------------------------------------------
-COPY --from=dashboard-builder /build/dashboard/.next/standalone /opt/dashboard
-COPY --from=dashboard-builder /build/dashboard/.next/static /opt/dashboard/.next/static
-COPY --from=dashboard-builder /build/dashboard/public /opt/dashboard/public
 
 # -- Pre-install AI harness CLIs (optional — agents still work if these fail) -
 # Uses bun for global installs (faster than npm, and our preferred package manager)

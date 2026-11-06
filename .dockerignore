@@ -8,14 +8,12 @@ crates/**/.lake/
 .git/
 .gitignore
 
-# Node modules (rebuilt in Docker)
-dashboard/node_modules/
-dashboard/.next/
-
 # Documentation & non-essential
 docs/
 docs-site/
+orb/
 ios_dashboard/
+android_dashboard/
 *.md
 LICENSE
 

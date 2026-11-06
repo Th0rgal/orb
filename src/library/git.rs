@@ -177,38 +177,56 @@ pub async fn ensure_remote(path: &Path, remote: &str) -> Result<()> {
         }
     }
 
-    // Fetch from the new remote
-    tracing::info!("Fetching from new remote");
-    let mut cmd = trusted_git_at(path);
-    cmd.current_dir(path).args(["fetch", "origin"]);
-    apply_ssh_config(&mut cmd);
-    let output = cmd.output().await.context("Failed to execute git fetch")?;
+    // Fetch and checkout the new remote's default branch. If switching fails,
+    // restore the previous `origin` URL so a subsequent retry still sees the
+    // unswitched checkout and re-runs `ensure_remote` cleanly.
+    let switch_result: Result<()> = async {
+        tracing::info!("Fetching from new remote");
+        let mut cmd = trusted_git_at(path);
+        cmd.current_dir(path).args(["fetch", "origin"]);
+        apply_ssh_config(&mut cmd);
+        let output = cmd.output().await.context("Failed to execute git fetch")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git fetch failed: {}", stderr);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("git fetch failed: {}", stderr);
+        }
+
+        // Try to find the default branch (main or master)
+        let default_branch = detect_default_branch(path).await?;
+
+        // Reset to the new remote's default branch
+        tracing::info!(branch = %default_branch, "Resetting to remote's default branch");
+        let output = git()
+            .current_dir(path)
+            .args([
+                "checkout",
+                "-B",
+                &default_branch,
+                &format!("origin/{}", default_branch),
+            ])
+            .output()
+            .await
+            .context("Failed to execute git checkout")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("git checkout failed: {}", stderr);
+        }
+
+        Ok(())
     }
+    .await;
 
-    // Try to find the default branch (main or master)
-    let default_branch = detect_default_branch(path).await?;
-
-    // Reset to the new remote's default branch
-    tracing::info!(branch = %default_branch, "Resetting to remote's default branch");
-    let output = git()
-        .current_dir(path)
-        .args([
-            "checkout",
-            "-B",
-            &default_branch,
-            &format!("origin/{}", default_branch),
-        ])
-        .output()
-        .await
-        .context("Failed to execute git checkout")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git checkout failed: {}", stderr);
+    if let Err(err) = switch_result {
+        if let Some(prev) = current.as_deref() {
+            let _ = git()
+                .current_dir(path)
+                .args(["remote", "set-url", "origin", prev])
+                .output()
+                .await;
+        }
+        return Err(err);
     }
 
     Ok(())
@@ -631,5 +649,68 @@ async fn get_ahead_behind(path: &Path) -> Result<(u32, u32)> {
         Ok((ahead, behind))
     } else {
         Ok((0, 0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ensure_remote_restores_previous_origin_when_fetch_fails() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let old_remote = tmp.path().join("old-remote.git");
+        let seed = tmp.path().join("seed");
+        let checkout = tmp.path().join("library");
+
+        let ok = std::process::Command::new("git")
+            .args(["init", "--bare", &old_remote.to_string_lossy()])
+            .status()
+            .expect("git init bare");
+        assert!(ok.success());
+
+        let ok = std::process::Command::new("git")
+            .args([
+                "clone",
+                &old_remote.to_string_lossy(),
+                &seed.to_string_lossy(),
+            ])
+            .status()
+            .expect("git clone seed");
+        assert!(ok.success());
+
+        std::fs::write(seed.join("README.md"), "seed\n").expect("write seed");
+        for args in [
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["add", "."],
+            vec!["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+            vec!["branch", "-M", "main"],
+            vec!["push", "-u", "origin", "main"],
+        ] {
+            let ok = std::process::Command::new("git")
+                .current_dir(&seed)
+                .args(args)
+                .status()
+                .expect("seed git step");
+            assert!(ok.success());
+        }
+
+        clone_if_needed(&checkout, &old_remote.to_string_lossy())
+            .await
+            .expect("initial clone");
+        assert_eq!(
+            get_remote(&checkout).await.expect("origin"),
+            old_remote.to_string_lossy()
+        );
+
+        let missing_remote = tmp.path().join("missing-remote.git");
+        let err = ensure_remote(&checkout, &missing_remote.to_string_lossy()).await;
+        assert!(err.is_err(), "switching to missing remote must fail");
+        assert_eq!(
+            get_remote(&checkout).await.expect("origin restored"),
+            old_remote.to_string_lossy(),
+            "failed remote switch must restore previous origin so retry still runs ensure_remote"
+        );
     }
 }
