@@ -897,7 +897,10 @@ object OrbWarmSyncCoordinator {
                     val curSnap = btwSnapshots[btwParentId]
                     if (curSnap?.boundMission?.id != missionId) {
                         val seededBound = OrbRow(missionId, mapOf("id" to missionId, "status" to "running"))
-                        btwSnapshots[btwParentId] = (curSnap ?: OrbWarmBtwSnapshot()).copy(boundMission = seededBound)
+                        btwSnapshots[btwParentId] = (curSnap ?: OrbWarmBtwSnapshot()).copy(
+                            boundMission = seededBound,
+                            openTurn = null,
+                        )
                         dirtyBtwParents.add(btwParentId)
                         checkedCleanBtwParents.remove(btwParentId)
                         shouldReconcile = true

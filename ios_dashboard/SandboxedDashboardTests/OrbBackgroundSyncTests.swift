@@ -186,4 +186,19 @@ final class OrbBackgroundSyncTests: XCTestCase {
             )
         )
     }
+
+    func testNoteExternalSessionHintRebindsAlreadyBoundStore() {
+        let parentId = "parent-rebind-\(UUID().uuidString)"
+        let sessionKey = OrbBtwConfig.sessionKey(parentId)
+        defer { UserDefaults.standard.removeObject(forKey: sessionKey) }
+
+        let store = OrbBtwStore.shared(parentId)
+        store.sent(to: "btw-old")
+        XCTAssertEqual(store.boundID, "btw-old")
+
+        store.noteExternalSessionHint(missionId: "btw-new")
+        XCTAssertEqual(store.boundID, "btw-new")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: sessionKey), "btw-new")
+        XCTAssertEqual(OrbBtwStore.knownBoundIdsByParent(candidates: [parentId])[parentId], "btw-new")
+    }
 }

@@ -372,9 +372,12 @@ final class OrbBtwStore {
         guard !missionId.isEmpty else { return }
         if boundID != missionId {
             UserDefaults.standard.set(missionId, forKey: OrbBtwConfig.sessionKey(parent))
-            if boundID == nil {
-                bound = .object(["id": .string(missionId), "status": .string("running")])
-            }
+            bound = .object(["id": .string(missionId), "status": .string("running")])
+            boundTurnCount = 0
+            boundMaxSequence = 0
+            boundDeliveredMessages = []
+            open = nil
+            isWarmCaughtUp = false
             if warmFollowWanted {
                 syncStreamSubscription()
             }

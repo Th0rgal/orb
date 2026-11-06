@@ -19,7 +19,9 @@ import {
   peekWarmBtwState,
   reconcileBtwServerHistory,
   resetWarmBtwForTest,
+  watchBtw,
 } from "../src/btwAgent";
+import { sideQuestionKey } from "../src/sideQuestionStorage";
 import {
   applyLiveEventsToTranscriptCache,
   attachMissionStream,
@@ -733,5 +735,215 @@ describe("warm background sync & off-mode quickness", () => {
     // Turn 1's repairedFinal answer MUST remain intact (never shrunk back to `closingLine`):
     expect(warmAfterTurn2?.history[0]?.answer).toBe(fullTurn1Answer);
     expect(warmAfterTurn2?.history[1]?.answer).toBe("Short follow-up answer.");
+  });
+
+  it("does not duplicate turns when watchBtw completes over HTTP before the warm stream delivers terminal events", async () => {
+    setConnection("http://dedup.test", "jwt-tok");
+    setMultiplexSyncEnabledForTest(true);
+    vi.stubGlobal("WebSocket", FakeSyncSocket as unknown as typeof WebSocket);
+    setBackgroundSyncMode("auto");
+    const parentId = "m-parent-dedup";
+    const childId = "m-btw-dedup";
+    let childStatus = "active";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/queue?")) return Response.json([]);
+        if (url.includes("/snapshot?")) return new Response("none", { status: 404 });
+        if (url.includes("/api/control/missions?tag=")) {
+          return Response.json([
+            {
+              id: childId,
+              status: childStatus,
+              backend: "opencode",
+              model_override: "builtin/smart",
+              tags: [`btw-parent:${parentId}`],
+              created_at: "2026-11-06T12:00:00Z",
+              updated_at: "2026-11-06T12:00:10Z",
+              history: [],
+              title: null,
+            },
+          ]);
+        }
+        if (url.includes(`/missions/${childId}/events?`)) {
+          const rows =
+            childStatus === "awaiting_user"
+              ? [
+                  {
+                    id: 10,
+                    mission_id: childId,
+                    sequence: 10,
+                    event_type: "user_message",
+                    event_id: "u-dedup-1",
+                    content: "Check status",
+                    timestamp: "2026-11-06T12:00:01Z",
+                    metadata: {},
+                  },
+                  {
+                    id: 15,
+                    mission_id: childId,
+                    sequence: 15,
+                    event_type: "assistant_message",
+                    event_id: "a-dedup-1",
+                    content: "Status is healthy.",
+                    timestamp: "2026-11-06T12:00:05Z",
+                    metadata: {},
+                  },
+                ]
+              : [
+                  {
+                    id: 10,
+                    mission_id: childId,
+                    sequence: 10,
+                    event_type: "user_message",
+                    event_id: "u-dedup-1",
+                    content: "Check status",
+                    timestamp: "2026-11-06T12:00:01Z",
+                    metadata: {},
+                  },
+                ];
+          const maxSeq = String(rows.at(-1)?.sequence ?? 10);
+          return new Response(JSON.stringify(rows), {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "X-Orb-Events-Protocol": "1",
+              "X-Has-More": "false",
+              "X-Next-Cursor": maxSeq,
+              "X-Page-Max-Sequence": maxSeq,
+              "X-Max-Sequence": maxSeq,
+            },
+          });
+        }
+        if (url.includes(`/missions/${childId}`)) {
+          return Response.json({
+            id: childId,
+            status: childStatus,
+            backend: "opencode",
+            model_override: "builtin/smart",
+            tags: [`btw-parent:${parentId}`],
+            created_at: "2026-11-06T12:00:00Z",
+            updated_at: "2026-11-06T12:00:10Z",
+            history: [],
+            title: null,
+          });
+        }
+        if (url.includes(`/missions/${parentId}/events?`)) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: 1,
+                mission_id: parentId,
+                sequence: 1,
+                event_type: "user_message",
+                event_id: "u-parent-1",
+                content: "Main work",
+                timestamp: "2026-11-06T11:59:00Z",
+                metadata: {},
+              },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": "1",
+                "X-Page-Max-Sequence": "1",
+                "X-Max-Sequence": "1",
+              },
+            },
+          );
+        }
+        return Response.json({ id: parentId, tags: [] });
+      }),
+    );
+
+    const releaseParent = retainTranscript(parentId);
+    await loadTranscript(parentId);
+    const detachParent = attachMissionStream(parentId, {
+      onEvent: () => {},
+      onBatch: () => {},
+      onLagged: () => {},
+      onReady: () => {},
+      onDisconnected: () => {},
+    });
+
+    await vi.waitFor(() => expect(FakeSyncSocket.instances).toHaveLength(1));
+    const sock = FakeSyncSocket.instances[0];
+
+    // Seed warm entry while the side turn is still active:
+    await reconcileBtwServerHistory(parentId, []);
+    await vi.waitFor(() =>
+      expect(sock.sent).toContainEqual(
+        expect.objectContaining({ op: "subscribe", mission_id: childId }),
+      ),
+    );
+
+    // Simulate watchBtw observing terminal HTTP state before the warm stream delivers it:
+    childStatus = "awaiting_user";
+    localStorage.setItem(
+      "agent:" + sideQuestionKey(parentId),
+      JSON.stringify({
+        id: childId,
+        question: "Check status",
+        harness: "opencode",
+        model: "builtin/smart",
+        local: false,
+        active: true,
+        baseline: 0,
+      }),
+    );
+    const watchEvents: Array<{ type: string; answer?: string }> = [];
+    await watchBtw(parentId, new AbortController().signal, (ev) => watchEvents.push(ev));
+    expect(watchEvents.at(-1)).toEqual({ type: "done", answer: "Status is healthy." });
+    expect(peekWarmBtwState(parentId)?.history).toHaveLength(1);
+    expect(peekWarmBtwState(parentId)?.history[0]?.id).toBe(`btw:${childId}:10`);
+
+    detachParent();
+    releaseParent();
+
+    // Now the warm WebSocket stream delivers the same turn's events & terminal status:
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "user_message",
+        mission_id: childId,
+        id: "u-dedup-1",
+        sequence: 10,
+        content: "Check status",
+        at: "2026-11-06T12:00:01Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "assistant_message",
+        mission_id: childId,
+        id: "a-dedup-1",
+        sequence: 15,
+        content: "Status is healthy.",
+        success: true,
+        at: "2026-11-06T12:00:05Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "mission_status_changed",
+        mission_id: childId,
+        status: "awaiting_user",
+      }),
+    });
+
+    await new Promise((r) => setTimeout(r, 20));
+
+    const finalWarm = peekWarmBtwState(parentId);
+    expect(finalWarm?.clean).toBe(true);
+    expect(finalWarm?.history).toHaveLength(1);
+    expect(finalWarm?.history[0]).toMatchObject({
+      id: `btw:${childId}:10`,
+      question: "Check status",
+      answer: "Status is healthy.",
+    });
   });
 });

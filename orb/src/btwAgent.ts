@@ -361,7 +361,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
    if(maxSeq>0)s.lastSequence=maxSeq;
    delete s.queuedCursor;
    delete s.brokenSession;save(parent,s);
-   recordWarmBtwTurnCompleted(parent,{id:`btw:${s.id}:${maxSeq||Date.now()}`,question:s.question,answer:text,...(result.narration.length?{narration:result.narration}:{}),...(reportedStart?{at:reportedStart}:{})},s.id);
+   recordWarmBtwTurnCompleted(parent,{id:`btw:${s.id}:${activeUserSeq??maxSeq??Date.now()}`,question:s.question,answer:text,...(result.narration.length?{narration:result.narration}:{}),...(reportedStart?{at:reportedStart}:{})},s.id);
    receive({type:'done',answer:text,...(result.narration.length?{narration:result.narration}:{})});return;
   }
   await new Promise<void>(resolve=>{
@@ -1149,19 +1149,33 @@ function reduceLiveBtwStreamEvents(
  }
 
  const childPrefix = `btw:${childMissionId}:`;
+ const priorChildRows = entry.history.filter(row => row.id?.startsWith(childPrefix));
  const priorById = new Map<string, SideExchange>();
- for (const row of entry.history) {
+ for (const row of priorChildRows) {
   if (row.id) priorById.set(row.id, row);
  }
+ const consumedPriorChildRows = new Set<SideExchange>();
  const childTurns: SideExchange[] = parsed.turns.map(({ sortAt: _sortAt, ...turn }) => {
-  const prev = turn.id ? priorById.get(turn.id) : undefined;
+  let prev = turn.id ? priorById.get(turn.id) : undefined;
+  if (!prev) {
+   prev = priorChildRows.find(
+    r =>
+     !consumedPriorChildRows.has(r) &&
+     r.question.trim() === turn.question.trim() &&
+     (r.answer.trim() === turn.answer.trim() ||
+      (r.answer.length > turn.answer.length && r.answer.endsWith(turn.answer))),
+   );
+  }
+  if (prev) consumedPriorChildRows.add(prev);
   return prev && prev.answer.length > turn.answer.length && prev.answer.endsWith(turn.answer)
    ? { ...turn, answer: prev.answer, ...(prev.narration ? { narration: prev.narration } : {}) }
    : turn;
  });
  const childTurnIds = new Set(childTurns.map(t => t.id));
  const preserved = entry.history.filter(
-  row => !row.id?.startsWith(childPrefix) || !childTurnIds.has(row.id),
+  row =>
+   !row.id?.startsWith(childPrefix) ||
+   (!childTurnIds.has(row.id) && !consumedPriorChildRows.has(row)),
  );
  entry.history = [...preserved, ...childTurns].slice(-BTW_HISTORY_LIMIT);
  entry.activeSession = parsed.active;
