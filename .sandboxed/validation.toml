@@ -1,0 +1,83 @@
+version = 1
+project = "orb"
+profile = "state-machines-r0-r8"
+
+[[gates]]
+id = "state-inventory"
+description = "Verify SM-01..SM-27 and G-ORB-1..G-ORB-8 obligation inventory and validation DAG"
+command = ["python3", "scripts/check_state_inventory.py"]
+required = true
+mode = "incremental"
+reuse = true
+timeout_secs = 120
+artifacts = ["docs/specs/state-machine-inventory.md", ".sandboxed/validation.toml"]
+
+[[gates]]
+id = "fmt"
+description = "Check workspace Rust formatting"
+command = ["cargo", "fmt", "--all", "--", "--check"]
+required = true
+mode = "incremental"
+reuse = true
+timeout_secs = 300
+
+[[gates]]
+id = "policy-scripts"
+description = "Run repository Python policy and generator unit suites"
+command = ["python3", "-m", "unittest", "discover", "-v", "-s", "scripts", "-p", "test_*.py"]
+dependencies = ["state-inventory"]
+required = true
+mode = "incremental"
+reuse = true
+timeout_secs = 600
+
+[[gates]]
+id = "kernel-abi-check"
+description = "Verify generated C-ABI/WASM/JNI/Swift/Rust kernel bindings and coverage registry"
+command = ["python3", "scripts/gen_kernel_bindings.py", "--check"]
+dependencies = ["state-inventory"]
+required = true
+mode = "incremental"
+reuse = true
+timeout_secs = 300
+
+[[gates]]
+id = "capability-matrix"
+description = "Validate capability matrix and surface contract evidence"
+command = ["bash", "scripts/check-capability-matrix.sh"]
+dependencies = ["state-inventory"]
+required = true
+mode = "incremental"
+reuse = true
+timeout_secs = 300
+
+[[gates]]
+id = "rust-workspace-tests"
+description = "Certifying Rust workspace test suite"
+command = ["cargo", "test", "--locked", "-j", "1", "--workspace"]
+dependencies = ["fmt", "policy-scripts", "kernel-abi-check", "capability-matrix"]
+required = true
+mode = "clean"
+reuse = false
+timeout_secs = 3600
+
+[[gates]]
+id = "harness-contract"
+description = "Certifying harness contract test suite"
+command = ["bash", "scripts/harness_contract_tests.sh"]
+dependencies = ["fmt", "policy-scripts"]
+required = true
+mode = "clean"
+reuse = false
+timeout_secs = 1800
+
+[[gates]]
+id = "orb-client-unit"
+description = "Certifying Orb desktop unit test suite"
+command = ["pnpm", "test"]
+cwd = "orb"
+dependencies = ["state-inventory", "kernel-abi-check"]
+required = true
+mode = "clean"
+reuse = false
+timeout_secs = 1200
