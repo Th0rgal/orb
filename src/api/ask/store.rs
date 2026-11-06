@@ -311,6 +311,11 @@ impl AskStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn has_turn_lock(&self, thread_id: &Uuid) -> bool {
+        self.turn_locks.contains_key(thread_id)
+    }
+
+    #[cfg(test)]
     pub(crate) fn delivery_locks_len(&self) -> usize {
         self.delivery_locks.len()
     }
