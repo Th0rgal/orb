@@ -199,7 +199,7 @@ def parseHttpResponseWire
     let hdrBytes := cursor.extract 0 (bodyStart - 4)
     let some hdrStr := String.fromUTF8? hdrBytes
       | throw "non-UTF8 HTTP response headers"
-    let (statusCode, parsedHeaders, hasTe, isPureChunked, contentLen?) ← parseHttpHeaderBlock hdrStr false
+    let (statusCode, parsedHeaders, hasTe, isPureChunked, contentLen?) ← parseHttpHeaderBlock hdrStr true
     let remLen := cursor.size - bodyStart
     if verifySliceBounds bodyStart.toUInt64 remLen.toUInt64 cap != 1 then
       throw "invalid HTTP response body slice"
@@ -288,8 +288,6 @@ def parseCurlDumpHeadersAndBody
     (maxBodyBytes : Nat := 16777216)
     (requestMethod : String := "GET") :
     Except String HttpsResponse := do
-  if decodedBody.size > maxBodyBytes then
-    throw s!"HTTP response body ({decodedBody.size}) exceeds maxBodyBytes ({maxBodyBytes})"
   let some dumpStr := String.fromUTF8? hdrDump
     | throw "non-UTF8 curl response headers"
   let blocks := (dumpStr.splitOn "\r\n\r\n").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
@@ -299,6 +297,8 @@ def parseCurlDumpHeadersAndBody
   let (statusCode, parsedHeaders, hasTe, _, contentLen?) ← parseHttpHeaderBlock lastHttpBlock true
   if isBodylessHttpResponse requestMethod statusCode then
     return { status := statusCode, headers := parsedHeaders, body := ByteArray.empty }
+  if decodedBody.size > maxBodyBytes then
+    throw s!"HTTP response body ({decodedBody.size}) exceeds maxBodyBytes ({maxBodyBytes})"
   if !hasTe then
     if let some cl := contentLen? then
       if decodedBody.size != cl then
@@ -336,17 +336,19 @@ def http2Or3RequestViaCurl
     let hex := "0123456789abcdef".toList.toArray
     nonceHex := nonceHex.push (hex[(v / 16) % 16]!) |>.push (hex[v % 16]!)
   let hdrFile : System.FilePath := s!"/tmp/orb_curl_hdr_{nonceHex}.tmp"
+  let isHead := asciiEqIgnoreCase method "HEAD"
   let verFlag := match version with
     | .http2 => "--http2"
     | .http3 => "--http3"
   let mut args : Array String := #[
-    "--silent", "--show-error", "--dump-header", hdrFile.toString,
+    "--globoff", "--silent", "--show-error", "--dump-header", hdrFile.toString,
     "--max-time", toString (if timeoutSecs == 0 then 1 else timeoutSecs),
-    "--max-filesize", toString maxRespBytes,
-    verFlag, "-X", method
+    verFlag
   ]
-  if asciiEqIgnoreCase method "HEAD" then
-    args := args.push "--head"
+  if isHead then
+    args := args.push "--head" |>.push "--output" |>.push "/dev/null"
+  else
+    args := args.push "--max-filesize" |>.push (toString maxRespBytes) |>.push "-X" |>.push method
   for (hk, hv) in headers do
     args := args.push "-H"
     args := args.push s!"{hk}: {hv}"
@@ -355,21 +357,22 @@ def http2Or3RequestViaCurl
   try
     let child ← IO.Process.spawn {
       cmd := "/usr/bin/curl"
-      args := if body.isEmpty then args else args.push "--data-binary" |>.push "@-"
+      args := if isHead || body.isEmpty then args else args.push "--data-binary" |>.push "@-"
       stdin := .piped
       stdout := .piped
       stderr := .piped
     }
-    if !body.isEmpty then
+    if !isHead && !body.isEmpty then
       child.stdin.write body
       child.stdin.flush
     let (_, child') ← child.takeStdin
+    let stdoutCap := if isHead then 65536 else maxRespBytes
     let mut outBytes := ByteArray.empty
     while true do
       let chunk ← child'.stdout.read 65536
       if chunk.isEmpty then break
       outBytes := outBytes ++ chunk
-      if outBytes.size > maxRespBytes then
+      if outBytes.size > stdoutCap then
         try IO.FS.removeFile hdrFile catch _ => pure ()
         return .error s!"curl ({verFlag}) response exceeded maxRespBytes {maxRespBytes}"
     let errStr ← child'.stderr.readToEnd
@@ -379,7 +382,9 @@ def http2Or3RequestViaCurl
       return .error s!"curl ({verFlag}) exited with {code}: {errStr.trimAscii.toString}"
     let hdrBytes ← IO.FS.readBinFile hdrFile
     try IO.FS.removeFile hdrFile catch _ => pure ()
-    return parseCurlDumpHeadersAndBody hdrBytes outBytes maxRespBytes method
+    if hdrBytes.size > 65536 then
+      return .error "curl response header dump exceeds 64 KiB cap"
+    return parseCurlDumpHeadersAndBody hdrBytes (if isHead then ByteArray.empty else outBytes) maxRespBytes method
   catch e =>
     try IO.FS.removeFile hdrFile catch _ => pure ()
     return .error s!"curl ({verFlag}) execution failed: {e}"

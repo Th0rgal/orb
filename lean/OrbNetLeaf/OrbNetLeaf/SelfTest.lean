@@ -165,4 +165,15 @@ def main : IO Unit := do
   assertTrue "Curl HEAD response with nonzero Content-Length succeeds"
     (curlHeadResp.status == 200 && curlHeadResp.body.isEmpty)
 
+  let wireHeadTe := ("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nContent-Length: 99999\r\n\r\n").toUTF8
+  let .ok parsedHeadTe := parseHttpResponseWire wireHeadTe 4096 false "HEAD"
+    | throw (IO.userError "parseHttpResponseWire HEAD with Transfer-Encoding: gzip failed")
+  assertTrue "HEAD response with Transfer-Encoding: gzip metadata succeeds with empty body"
+    (parsedHeadTe.status == 200 && parsedHeadTe.body.isEmpty)
+
+  let .ok curlHeadSmallCap := parseCurlDumpHeadersAndBody wireHead ("HTTP/1.1 200 OK\r\n".toUTF8) 4 "HEAD"
+    | throw (IO.userError "parseCurlDumpHeadersAndBody HEAD small maxBodyBytes failed")
+  assertTrue "Curl HEAD response ignores non-body stdout bytes before maxBodyBytes check"
+    (curlHeadSmallCap.status == 200 && curlHeadSmallCap.body.isEmpty)
+
   IO.println "[OrbNetLeaf] ALL SELF-TESTS PASSED"
