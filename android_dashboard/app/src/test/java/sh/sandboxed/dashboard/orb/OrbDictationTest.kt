@@ -1,7 +1,10 @@
 package sh.sandboxed.dashboard.orb
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -264,4 +267,99 @@ class OrbDictationTest {
         assertEquals(gen2, stoppedGen)
         assertArrayEquals(ByteArray(5) { 0x33 }, extractWavPcm(wav2))
     }
+
+    private fun overlappingTranscriptionOutcomeIsFenced(staleOutcome: () -> String) = runBlocking {
+        val reads = List(2) { CountDownLatch(1) }
+        val sources = List(2) { index ->
+            FakeAudioSource(bufferSize = 16) { call, buf, _ ->
+                if (call == 1) {
+                    buf[0] = (index + 1).toByte()
+                    1
+                } else {
+                    reads[index].countDown()
+                    -1
+                }
+            }
+        }
+        val sourceIndex = AtomicInteger(0)
+        val recorder = OrbSparkRecorder(sourceFactory = { sources[sourceIndex.getAndIncrement()] })
+        val gen1Entered = CompletableDeferred<Unit>()
+        val releaseGen1 = CompletableDeferred<Unit>()
+        val gen2Entered = CompletableDeferred<Unit>()
+        val releaseGen2 = CompletableDeferred<Unit>()
+        val transcribeCalls = AtomicInteger(0)
+        var inputText = "draft"
+        var phase = OrbAndroidDictationPhase.Idle
+        var fallbacks = 0
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
+        val coordinator = OrbSparkDictationSessionCoordinator(
+            recorder = recorder,
+            transcribeWav = {
+                if (transcribeCalls.incrementAndGet() == 1) {
+                    gen1Entered.complete(Unit)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                        releaseGen1.await()
+                        staleOutcome()
+                    }
+                } else {
+                    gen2Entered.complete(Unit)
+                    releaseGen2.await()
+                    "fresh transcript"
+                }
+            },
+            onPhaseChange = { phase = it },
+            onAppendTranscript = { inputText += " $it" },
+            onFallbackSystemSpeech = { fallbacks++; phase = OrbAndroidDictationPhase.Listening },
+        )
+        try {
+            assertTrue(coordinator.startRecording())
+            val gen1 = recorder.currentGeneration
+            assertTrue(reads[0].await(2, TimeUnit.SECONDS))
+            coordinator.finishRecording(scope)
+            gen1Entered.await()
+            val staleJob = coordinator.activeTranscribeJob!!
+            assertEquals(OrbAndroidDictationPhase.Transcribing, phase)
+            coordinator.cancel()
+            assertTrue(staleJob.isCancelled)
+            assertEquals(OrbAndroidDictationPhase.Idle, phase)
+            assertFalse(recorder.isCurrentGeneration(gen1))
+
+            assertTrue(coordinator.startRecording())
+            assertTrue(reads[1].await(2, TimeUnit.SECONDS))
+            coordinator.finishRecording(scope)
+            gen2Entered.await()
+            val freshJob = coordinator.activeTranscribeJob!!
+            assertEquals(OrbAndroidDictationPhase.Transcribing, phase)
+
+            releaseGen1.complete(Unit)
+            staleJob.join()
+            assertEquals("draft", inputText)
+            assertEquals(OrbAndroidDictationPhase.Transcribing, phase)
+            assertEquals(0, fallbacks)
+            assertEquals(freshJob, coordinator.activeTranscribeJob)
+
+            releaseGen2.complete(Unit)
+            freshJob.join()
+            assertEquals("draft fresh transcript", inputText)
+            assertEquals(OrbAndroidDictationPhase.Idle, phase)
+            assertEquals(0, fallbacks)
+        } finally {
+            releaseGen1.complete(Unit)
+            releaseGen2.complete(Unit)
+            coordinator.cancel()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun cancelledGen1SuccessCannotOverwriteGen2Transcribing() =
+        overlappingTranscriptionOutcomeIsFenced { "stale transcript" }
+
+    @Test
+    fun cancelledGen1FailureCannotFallbackDuringGen2Transcribing() =
+        overlappingTranscriptionOutcomeIsFenced { throw java.io.IOException("stale failure") }
+
+    @Test
+    fun cancelledGen1EmptyCannotFallbackDuringGen2Transcribing() =
+        overlappingTranscriptionOutcomeIsFenced { "" }
 }

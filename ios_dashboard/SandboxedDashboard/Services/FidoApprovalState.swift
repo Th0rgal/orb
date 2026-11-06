@@ -66,6 +66,14 @@ final class FidoApprovalState {
         }
     }
 
+    func removeResolvedRequest(_ requestId: String) {
+        let wasHead = pendingRequests.first?.id == requestId
+        pendingRequests.removeAll { $0.id == requestId }
+        if wasHead || pendingRequests.isEmpty {
+            lastError = nil
+        }
+    }
+
     // MARK: - Approve / Deny
 
     /// Manual approval from the overlay: always gated by Face ID / Touch ID with a
@@ -106,7 +114,7 @@ final class FidoApprovalState {
             try await api.fidoRespond(requestId: requestId, approved: true)
             Self.recordApproval(requestId, .approved, method: .deviceOwner)
             OrbHaptics.success()
-            pendingRequests.removeAll { $0.id == requestId }
+            removeResolvedRequest(requestId)
         } catch is CancellationError {
             if let onFailureRequest, !pendingRequests.contains(where: { $0.id == requestId }) {
                 pendingRequests.append(onFailureRequest)
@@ -114,7 +122,7 @@ final class FidoApprovalState {
             lastError = "Response interrupted. Retry approval or deny."
         } catch {
             if Self.isTerminalRespondError(error) {
-                pendingRequests.removeAll { $0.id == requestId }
+                removeResolvedRequest(requestId)
             } else {
                 if let onFailureRequest, !pendingRequests.contains(where: { $0.id == requestId }) {
                     pendingRequests.append(onFailureRequest)
@@ -132,12 +140,12 @@ final class FidoApprovalState {
         do {
             try await api.fidoRespond(requestId: requestId, approved: false)
             Self.recordApproval(requestId, .denied, method: .none)
-            pendingRequests.removeAll { $0.id == requestId }
+            removeResolvedRequest(requestId)
         } catch is CancellationError {
             lastError = "Response interrupted. Retry approval or deny."
         } catch {
             if Self.isTerminalRespondError(error) {
-                pendingRequests.removeAll { $0.id == requestId }
+                removeResolvedRequest(requestId)
             } else {
                 lastError = error.localizedDescription
             }

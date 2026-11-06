@@ -82,4 +82,30 @@ final class FidoApprovalTests: XCTestCase {
         XCTAssertEqual(request.workspace, "verity")
         XCTAssertEqual(try JSONDecoder().decode(FidoPendingResponse.self, from: Data(#"{"requests":[]}"#.utf8)).payloads.count, 0)
     }
+
+    @MainActor
+    func testRemoveResolvedRequestClearsStaleHeadErrorForNextQueuedPrompt() {
+        let state = FidoApprovalState.shared
+        state.pendingRequests.removeAll()
+        state.lastError = nil
+        let saved = state.autoApprovalRules
+        state.autoApprovalRules = []
+        defer {
+            state.pendingRequests.removeAll()
+            state.lastError = nil
+            state.autoApprovalRules = saved
+        }
+
+        var second = event
+        second["request_id"] = "6f1c0e8a-0000-4000-8000-000000000002"
+        state.handleSignRequest(event)
+        state.lastError = "Authentication cancelled or failed."
+        state.handleSignRequest(second)
+        XCTAssertEqual(state.pendingRequests.count, 2)
+        XCTAssertEqual(state.lastError, "Authentication cancelled or failed.")
+
+        state.removeResolvedRequest("6f1c0e8a-0000-4000-8000-000000000001")
+        XCTAssertEqual(state.pendingRequests.map(\.id), ["6f1c0e8a-0000-4000-8000-000000000002"])
+        XCTAssertNil(state.lastError)
+    }
 }

@@ -9,7 +9,14 @@ import android.media.MediaRecorder
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
@@ -21,6 +28,7 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /** Dictation language, stored like iOS `orb.dictationLanguage`; empty = device language. */
 object OrbDictationSettings {
@@ -170,7 +178,14 @@ class OrbSparkRecorder(
         onResult: (String?) -> Unit,
     ): Boolean {
         if (!isCurrentGeneration(generation)) return false
-        val text = runCatching { transcribe(wav) }.getOrNull()
+        val text = try {
+            transcribe(wav)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Throwable) {
+            null
+        }
+        currentCoroutineContext().ensureActive()
         val shouldPublish = synchronized(stateLock) {
             isCurrentGeneration(generation)
         }
@@ -348,6 +363,94 @@ object OrbSparkTranscriber {
                 throw OrbError(OrbJSON.str(dict, "error", "message") ?: "Transcription failed (HTTP ${resp.code})", resp.code)
             }
             OrbJSON.rawStr(dict, "text")?.trim().orEmpty()
+        }
+    }
+}
+
+class OrbSparkDictationSessionCoordinator(
+    val recorder: OrbSparkRecorder = OrbSparkRecorder(),
+    private val transcribeWav: suspend (ByteArray) -> String,
+    private val onPhaseChange: (OrbAndroidDictationPhase) -> Unit,
+    private val onAppendTranscript: (String) -> Unit,
+    private val onFallbackSystemSpeech: () -> Unit,
+) {
+    private val transcribeJobRef = AtomicReference<Job?>(null)
+
+    val activeTranscribeJob: Job?
+        get() = transcribeJobRef.get()
+
+    fun cancelActiveTranscription() {
+        transcribeJobRef.getAndSet(null)?.cancel()
+    }
+
+    fun startRecording(): Boolean {
+        cancelActiveTranscription()
+        val startedGenBefore = recorder.currentGeneration
+        if (!recorder.start()) {
+            if (recorder.currentGeneration > startedGenBefore && recorder.isCurrentGeneration(recorder.currentGeneration)) {
+                onFallbackSystemSpeech()
+            }
+            return false
+        }
+        val startedGen = recorder.currentGeneration
+        return recorder.runIfCurrent(startedGen) {
+            onPhaseChange(OrbAndroidDictationPhase.Recording)
+        }
+    }
+
+    fun finishRecording(scope: CoroutineScope) {
+        val genAtStop = recorder.currentGeneration
+        val session = recorder.stopSession()
+        if (session == null) {
+            recorder.runIfCurrent(genAtStop) {
+                onPhaseChange(OrbAndroidDictationPhase.Idle)
+            }
+            return
+        }
+        val (generation, wavBytes) = session
+        if (!recorder.runIfCurrent(generation) { onPhaseChange(OrbAndroidDictationPhase.Transcribing) }) {
+            return
+        }
+        cancelActiveTranscription()
+        val launched = scope.launch(start = CoroutineStart.LAZY) {
+            recorder.transcribeSession(
+                generation = generation,
+                wav = wavBytes,
+                transcribe = transcribeWav,
+                onResult = { text ->
+                    recorder.runIfCurrent(generation) {
+                        val trimmed = text?.trim().orEmpty()
+                        if (trimmed.isNotEmpty()) {
+                            onAppendTranscript(trimmed)
+                            onPhaseChange(OrbAndroidDictationPhase.Idle)
+                        } else {
+                            onFallbackSystemSpeech()
+                        }
+                    }
+                },
+            )
+        }
+        launched.invokeOnCompletion {
+            transcribeJobRef.compareAndSet(launched, null)
+        }
+        transcribeJobRef.set(launched)
+        if (!recorder.isCurrentGeneration(generation)) {
+            transcribeJobRef.compareAndSet(launched, null)
+            launched.cancel()
+            return
+        }
+        launched.start()
+        if (!recorder.isCurrentGeneration(generation)) {
+            transcribeJobRef.compareAndSet(launched, null)
+            launched.cancel()
+        }
+    }
+
+    fun cancel(resetPhase: Boolean = true) {
+        cancelActiveTranscription()
+        recorder.cancel()
+        if (resetPhase) {
+            onPhaseChange(OrbAndroidDictationPhase.Idle)
         }
     }
 }
