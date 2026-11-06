@@ -1,0 +1,24 @@
+# Local relay forwarding signed dgx-spark mesh heartbeats from 10.88.0.1:51889
+# to 127.0.0.1:3000 (prod, required) and 127.0.0.1:3002 (dev, best-effort).
+#
+# Install on agent-core:
+#   install -m 0755 scripts/security/lean-mesh-heartbeat-relay /usr/local/sbin/lean-mesh-heartbeat-relay
+#   cp deploy/systemd/lean-mesh-heartbeat-relay.service /etc/systemd/system/lean-mesh-heartbeat-relay.service
+#   mkdir -p /etc/systemd/system/lean-mesh-heartbeat-relay.service.d
+#   cp deploy/systemd/10-paloma-vault-mounts.conf /etc/systemd/system/lean-mesh-heartbeat-relay.service.d/10-paloma-vault-mounts.conf
+#   systemctl daemon-reload && systemctl enable --now lean-mesh-heartbeat-relay.service
+
+[Unit]
+Description=Lean-Mesh Sovereign Heartbeat Local Relay (10.88.0.1:51889 -> 127.0.0.1:3002/3000)
+After=lean-mesh.service
+Wants=lean-mesh.service
+RequiresMountsFor=/mnt/paloma-vault /etc/open_agent
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/lean-mesh-heartbeat-relay
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

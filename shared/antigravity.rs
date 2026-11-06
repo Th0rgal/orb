@@ -62,6 +62,17 @@ pub fn normalize_model_and_effort<'a>(
     (normalized_model, effective_effort)
 }
 
+/// Resolve `(model, effort)` to the exact `--model` identifier passed to `agy`
+/// (for example `("agy-model", Some("low")) -> Some("agy-model-low")`).
+pub fn effective_cli_model<'a>(model: Option<&'a str>, effort: Option<&'a str>) -> Option<&'a str> {
+    match normalize_model_and_effort(model, effort) {
+        (Some("agy-model"), Some("low")) => Some("agy-model-low"),
+        (Some("agy-model"), Some("medium")) => Some("agy-model-medium"),
+        (Some("agy-model"), _) => Some("agy-model-high"),
+        (other, _) => other,
+    }
+}
+
 pub fn args_with_effort(
     model: Option<&str>,
     effort: Option<&str>,
@@ -73,27 +84,22 @@ pub fn args_with_effort(
         "stream-json".into(),
         "--dangerously-skip-permissions".into(),
     ];
-    let (model, effort) = normalize_model_and_effort(model, effort);
-    match model {
+    let (normalized_model, effort) = normalize_model_and_effort(model, effort);
+    match (effective_cli_model(model, effort), normalized_model) {
         // Native `agy` CLI exposes Gemini 4 Carbon exclusively as effort-baked
         // model IDs (`agy-model-low`, `agy-model-medium`, `agy-model-high`) and
         // rejects `--model agy-model --effort <level>` with:
         //   `--effort is not supported for model "agy-model"`.
-        Some("agy-model") => {
-            let cli_model = match effort {
-                Some("low") => "agy-model-low",
-                Some("medium") => "agy-model-medium",
-                _ => "agy-model-high",
-            };
+        (Some(cli_model), Some("agy-model")) => {
             args.extend(["--model".into(), cli_model.into()]);
         }
-        Some(model) => {
-            args.extend(["--model".into(), model.into()]);
+        (Some(cli_model), _) => {
+            args.extend(["--model".into(), cli_model.into()]);
             if let Some(effort) = effort {
                 args.extend(["--effort".into(), effort.into()]);
             }
         }
-        None => {
+        (None, _) => {
             if let Some(effort) = effort {
                 args.extend(["--effort".into(), effort.into()]);
             }

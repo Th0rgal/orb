@@ -29,6 +29,12 @@ const SUBMIT_JOB_TIMEOUT: Duration = Duration::from_secs(30);
 /// Job status/cancel calls are cheap lookups.
 const JOB_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AntigravityPushReceipt {
+    pub accepted: bool,
+    pub managed_auth: Vec<String>,
+}
+
 #[derive(Clone)]
 pub struct RemoteNodeClient {
     http: reqwest::Client,
@@ -80,17 +86,58 @@ impl RemoteNodeClient {
         token: &str,
         credential: &crate::antigravity_auth::Credential,
     ) -> Result<bool, RemoteNodeError> {
+        self.push_antigravity_credential_slot(node, token, credential, None, true)
+            .await
+            .map(|receipt| receipt.accepted)
+    }
+
+    /// Hand the node a specific Antigravity account slot (`?slot=<id>&default=<bool>`),
+    /// returning the node's advertised `managed_auth` profiles so Core knows
+    /// whether the node supports isolated `antigravity:<slot>` profiles.
+    pub async fn push_antigravity_credential_slot(
+        &self,
+        node: &RemoteNodeConfig,
+        token: &str,
+        credential: &crate::antigravity_auth::Credential,
+        slot: Option<&str>,
+        update_default: bool,
+    ) -> Result<AntigravityPushReceipt, RemoteNodeError> {
+        let mut url = format!("{}/managed-auth/antigravity", node.base_url);
+        if let Some(slot) = slot.filter(|s| !s.is_empty()) {
+            let encoded = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("slot", slot)
+                .append_pair("default", if update_default { "true" } else { "false" })
+                .finish();
+            url.push('?');
+            url.push_str(&encoded);
+        }
         let response = self
             .http
-            .put(format!("{}/managed-auth/antigravity", node.base_url))
+            .put(url)
             .bearer_auth(token)
             .json(credential)
             .send()
             .await
             .map_err(transport_error)?;
         match response.status().as_u16() {
-            200..=299 => Ok(true),
-            404 | 405 | 409 => Ok(false),
+            200..=299 => {
+                let value: serde_json::Value = response.json().await.unwrap_or_default();
+                let managed_auth = value["managed_auth"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect();
+                Ok(AntigravityPushReceipt {
+                    accepted: true,
+                    managed_auth,
+                })
+            }
+            404 | 405 | 409 => Ok(AntigravityPushReceipt {
+                accepted: false,
+                managed_auth: Vec::new(),
+            }),
             status => Err(RemoteNodeError::Rejected {
                 status,
                 body: response.text().await.unwrap_or_default(),

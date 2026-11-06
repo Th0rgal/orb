@@ -24,6 +24,22 @@ pub fn compute_host_prefill_deadline_ms(
     prefill_deadline_ms(prompt_tokens, base_ms, per_k_tokens_ms, max_prefill_ms)
 }
 
+pub fn verify_host_model_account_admit(
+    cand_id: u32,
+    ineligible: bool,
+    entitlement: ModelAccountEntitlement,
+    require_entitled: bool,
+) -> bool {
+    model_account_admitted(cand_id, ineligible, entitlement, require_entitled)
+}
+
+pub fn select_host_model_account(
+    model_is_eap_gated: bool,
+    candidates: &[ModelAccountCandidate],
+) -> Option<u32> {
+    select_best_model_account(model_is_eap_gated, candidates)
+}
+
 pub fn select_host_stream_isa_with_caps(caps: u64, max_requested: u8) -> u8 {
     stream_simd::select_verified_stream_isa_with_caps(caps, max_requested)
 }
@@ -445,5 +461,38 @@ mod tests {
             WireTranscriptSliceError::FoldRejected(v)
                 if !v.admitted && v.action_code == 3 && v.gap_buffered
         ));
+    }
+
+    #[test]
+    fn host_model_account_selection_binds_to_lean_kernel() {
+        let lacks = ModelAccountCandidate {
+            cand_id: 1,
+            ineligible: false,
+            entitlement: ModelAccountEntitlement::LacksModel,
+            has_pool_quota: true,
+            priority_rank: 0,
+            usable_in_secs: 0,
+        };
+        let entitled = ModelAccountCandidate {
+            cand_id: 2,
+            ineligible: false,
+            entitlement: ModelAccountEntitlement::Entitled,
+            has_pool_quota: true,
+            priority_rank: 3,
+            usable_in_secs: 0,
+        };
+        assert!(!verify_host_model_account_admit(
+            1,
+            false,
+            ModelAccountEntitlement::LacksModel,
+            true
+        ));
+        assert!(verify_host_model_account_admit(
+            2,
+            false,
+            ModelAccountEntitlement::Entitled,
+            true
+        ));
+        assert_eq!(select_host_model_account(true, &[lacks, entitled]), Some(2));
     }
 }

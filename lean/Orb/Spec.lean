@@ -8615,4 +8615,211 @@ theorem utf8Utf16Window_continuation_and_surrogate_atomic
       ite_false, ite_true, hs40, hs44, Bool.false_or, hbudget, Bool.or_true]
     rw [h0, pack32_hi 0 u16Units, toUInt32_toUInt64]
 
+-- ===========================================================================
+-- Antigravity EAP Model-Compatible Account Selection (`orb_model_account_admit`
+-- & `orb_model_account_score`)
+-- ===========================================================================
+
+structure ModelAccountCheck where
+  candId          : UInt32
+  ineligible      : UInt8
+  entitlement     : UInt8
+  requireEntitled : UInt8
+  deriving Repr, DecidableEq
+
+def ModelAccountCheck.Admissible (c : ModelAccountCheck) : Bool :=
+  c.candId != 0 &&
+  c.ineligible == 0 &&
+  (c.entitlement == 2 || (c.entitlement == 1 && c.requireEntitled == 0))
+
+def modelAccountMetaGate : MetaGateSpec ModelAccountCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    modelAccountAdmit c.candId c.ineligible c.entitlement c.requireEntitled == 1
+  sound c h := by
+    unfold ModelAccountCheck.Admissible
+    unfold modelAccountAdmit at h
+    cases hm : (c.candId != 0 && c.ineligible == 0 &&
+        (c.entitlement == 2 || (c.entitlement == 1 && c.requireEntitled == 0)))
+    · simp [hm] at h
+    · rfl
+  complete c h := by
+    unfold ModelAccountCheck.Admissible at h
+    unfold modelAccountAdmit
+    simp [h]
+  posWitness := ⟨2, 0, 2, 1⟩
+  negWitness := ⟨1, 0, 1, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def modelAccountScopedAuthority : ScopedAuthority ModelAccountCheck where
+  admit c :=
+    modelAccountAdmit c.candId c.ineligible c.entitlement c.requireEntitled == 1
+  scopeValid c := c.Admissible
+  sound c h := modelAccountMetaGate.sound c h
+
+/-- Corollary (`ScopedAuthority` — `orb_model_account_admit`):
+    1. Any account whose catalog/probe lacks the model (`entitlement == 0`) is rejected (`0`).
+    2. Any ineligible/unverified account (`ineligible == 1`) is rejected (`0`).
+    3. When `requireEntitled == 1` (EAP-gated models such as Gemini 4 Carbon / `agy-model-*`
+       or pools with at least one positively entitled account), an `Unknown` account
+       (`entitlement == 1`) is strictly rejected (`0`) regardless of configured priority. -/
+theorem model_account_rejects_incompatible_and_eap_unknown
+    (candId : UInt32) (inelig ent reqEnt : UInt8) :
+    modelAccountAdmit candId inelig 0 reqEnt = 0 ∧
+    modelAccountAdmit candId 1 ent reqEnt = 0 ∧
+    modelAccountAdmit candId inelig 1 1 = 0 ∧
+    modelAccountAdmit 0 inelig ent reqEnt = 0 := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · unfold modelAccountAdmit
+    cases hc : (candId != 0) <;> cases hi : (inelig == 0) <;> simp [hc, hi]
+  · unfold modelAccountAdmit
+    cases hc : (candId != 0) <;> simp [hc]
+  · unfold modelAccountAdmit
+    cases hc : (candId != 0) <;> cases hi : (inelig == 0) <;> simp [hc, hi]
+  · unfold modelAccountAdmit; rfl
+
+private theorem nat_or_lt_pow2 {a b m : Nat}
+    (ha : a < 2 ^ m) (hb : b < 2 ^ m) :
+    (a ||| b) < 2 ^ m :=
+  Nat.bitwise_lt_two_pow ha hb
+
+private theorem u64_toNat_or (x y : UInt64) : (x ||| y).toNat = (x.toNat ||| y.toNat) :=
+  BitVec.toNat_or x.toBitVec y.toBitVec
+
+/-- Corollary (`ScopedAuthority` & `ClockDiscipline` — `orb_model_account_score`):
+    Every admissible `Entitled` (`entitlement = 2`) account strictly beats every admissible
+    `Unknown` (`entitlement = 1`) account (`scoreEnt < scoreUnk < UInt64.max`), even if the
+    `Entitled` account's quota pool is currently cooling (`hasQuotaEnt = 0`, arbitrary `waitEnt`,
+    arbitrary `rankEnt`) while the `Unknown` account has top priority (`rankUnk = 0`) and full quota. -/
+theorem model_account_entitled_strictly_dominates_unknown
+    (idEnt idUnk : UInt32) (reqEnt hasQuotaEnt hasQuotaUnk : UInt8)
+    (rankEnt waitEnt rankUnk waitUnk : UInt32)
+    (hadmEnt : modelAccountAdmit idEnt 0 2 reqEnt = 1)
+    (hadmUnk : modelAccountAdmit idUnk 0 1 0 = 1) :
+    modelAccountScore idEnt 0 2 reqEnt hasQuotaEnt rankEnt waitEnt <
+      modelAccountScore idUnk 0 1 0 hasQuotaUnk rankUnk waitUnk ∧
+    modelAccountScore idUnk 0 1 0 hasQuotaUnk rankUnk waitUnk < 0xFFFFFFFFFFFFFFFF := by
+  unfold modelAccountScore
+  have he0 : (modelAccountAdmit idEnt 0 2 reqEnt == 0) = false := by simp [hadmEnt]
+  have hu0 : (modelAccountAdmit idUnk 0 1 0 == 0) = false := by simp [hadmUnk]
+  simp only [he0, hu0, Bool.false_eq_true, ↓reduceIte]
+  have hrEnt : (if rankEnt ≤ 65535 then rankEnt.toUInt64 else (65535 : UInt64)).toNat < 2 ^ 50 := by
+    by_cases h : rankEnt ≤ 65535
+    · simp only [h, ↓reduceIte]
+      have h1 : rankEnt.toNat ≤ 65535 := UInt32.le_iff_toNat_le.mp h
+      have h2 : rankEnt.toUInt64.toNat = rankEnt.toNat := UInt32.toNat_toUInt64 rankEnt
+      omega
+    · simp only [h, ↓reduceIte]; decide
+  have hwaitEnt_lt : (if hasQuotaEnt == 1 then (0 : UInt64) else waitEnt.toUInt64 <<< 16).toNat < 2 ^ 50 := by
+    by_cases hq : hasQuotaEnt == 1
+    · simp [hq]
+    · simp only [hq, Bool.false_eq_true, ↓reduceIte]
+      have hw32 : waitEnt.toNat < 2 ^ 32 := waitEnt.toNat_lt_size
+      have hw64 : waitEnt.toUInt64.toNat = waitEnt.toNat := UInt32.toNat_toUInt64 waitEnt
+      have hsh : (waitEnt.toUInt64 <<< 16).toNat = waitEnt.toNat * 65536 := by
+        rw [UInt64.toNat_shiftLeft, hw64]
+        change (waitEnt.toNat <<< 16) % UInt64.size = waitEnt.toNat * 65536
+        rw [Nat.shiftLeft_eq]
+        exact Nat.mod_eq_of_lt (by unfold UInt64.size; omega)
+      omega
+  have hqEnt_lt : (if hasQuotaEnt == 1 then (0 : UInt64) else (1 : UInt64) <<< 49).toNat < 2 ^ 50 := by
+    cases hasQuotaEnt == 1 <;> decide
+  have lhs_lt :
+      (((if (2 : UInt8) == 2 then (0 : UInt64) else (1 : UInt64) <<< 50) |||
+        (if hasQuotaEnt == 1 then (0 : UInt64) else (1 : UInt64) <<< 49) |||
+        (if hasQuotaEnt == 1 then (0 : UInt64) else waitEnt.toUInt64 <<< 16) |||
+        (if rankEnt ≤ 65535 then rankEnt.toUInt64 else (65535 : UInt64)))).toNat < 2 ^ 50 := by
+    have he2 : ((2 : UInt8) == 2) = true := rfl
+    simp only [he2, ↓reduceIte]
+    rw [u64_toNat_or, u64_toNat_or, u64_toNat_or]
+    have h0 : (0 : UInt64).toNat < 2 ^ 50 := by decide
+    exact nat_or_lt_pow2 (nat_or_lt_pow2 (nat_or_lt_pow2 h0 hqEnt_lt) hwaitEnt_lt) hrEnt
+  have rhs_ge :
+      2 ^ 50 ≤
+      (((if (1 : UInt8) == 2 then (0 : UInt64) else (1 : UInt64) <<< 50) |||
+        (if hasQuotaUnk == 1 then (0 : UInt64) else (1 : UInt64) <<< 49) |||
+        (if hasQuotaUnk == 1 then (0 : UInt64) else waitUnk.toUInt64 <<< 16) |||
+        (if rankUnk ≤ 65535 then rankUnk.toUInt64 else (65535 : UInt64)))).toNat := by
+    have he1 : ((1 : UInt8) == 2) = false := rfl
+    simp only [he1, Bool.false_eq_true, ↓reduceIte]
+    rw [u64_toNat_or, u64_toNat_or, u64_toNat_or]
+    apply Nat.ge_two_pow_of_testBit
+    rw [Nat.testBit_or, Nat.testBit_or, Nat.testBit_or]
+    have hb50 : (((1 : UInt64) <<< 50).toNat).testBit 50 = true := by decide
+    rw [hb50]
+    simp
+  have hrUnk : (if rankUnk ≤ 65535 then rankUnk.toUInt64 else (65535 : UInt64)).toNat < 2 ^ 51 := by
+    by_cases h : rankUnk ≤ 65535
+    · simp only [h, ↓reduceIte]
+      have h1 : rankUnk.toNat ≤ 65535 := UInt32.le_iff_toNat_le.mp h
+      have h2 : rankUnk.toUInt64.toNat = rankUnk.toNat := UInt32.toNat_toUInt64 rankUnk
+      omega
+    · simp only [h, ↓reduceIte]; decide
+  have hwaitUnk_lt : (if hasQuotaUnk == 1 then (0 : UInt64) else waitUnk.toUInt64 <<< 16).toNat < 2 ^ 51 := by
+    by_cases hq : hasQuotaUnk == 1
+    · simp [hq]
+    · simp only [hq, Bool.false_eq_true, ↓reduceIte]
+      have hw32 : waitUnk.toNat < 2 ^ 32 := waitUnk.toNat_lt_size
+      have hw64 : waitUnk.toUInt64.toNat = waitUnk.toNat := UInt32.toNat_toUInt64 waitUnk
+      have hsh : (waitUnk.toUInt64 <<< 16).toNat = waitUnk.toNat * 65536 := by
+        rw [UInt64.toNat_shiftLeft, hw64]
+        change (waitUnk.toNat <<< 16) % UInt64.size = waitUnk.toNat * 65536
+        rw [Nat.shiftLeft_eq]
+        exact Nat.mod_eq_of_lt (by unfold UInt64.size; omega)
+      omega
+  have hqUnk_lt : (if hasQuotaUnk == 1 then (0 : UInt64) else (1 : UInt64) <<< 49).toNat < 2 ^ 51 := by
+    cases hasQuotaUnk == 1 <;> decide
+  have rhs_lt :
+      (((if (1 : UInt8) == 2 then (0 : UInt64) else (1 : UInt64) <<< 50) |||
+        (if hasQuotaUnk == 1 then (0 : UInt64) else (1 : UInt64) <<< 49) |||
+        (if hasQuotaUnk == 1 then (0 : UInt64) else waitUnk.toUInt64 <<< 16) |||
+        (if rankUnk ≤ 65535 then rankUnk.toUInt64 else (65535 : UInt64)))).toNat < 2 ^ 51 := by
+    have he1 : ((1 : UInt8) == 2) = false := rfl
+    simp only [he1, Bool.false_eq_true, ↓reduceIte]
+    rw [u64_toNat_or, u64_toNat_or, u64_toNat_or]
+    have h50 : ((1 : UInt64) <<< 50).toNat < 2 ^ 51 := by decide
+    exact nat_or_lt_pow2 (nat_or_lt_pow2 (nat_or_lt_pow2 h50 hqUnk_lt) hwaitUnk_lt) hrUnk
+  have hmax : (0xFFFFFFFFFFFFFFFF : UInt64).toNat = 2 ^ 64 - 1 := by decide
+  exact ⟨
+    UInt64.lt_iff_toNat_lt.mpr (by omega),
+    UInt64.lt_iff_toNat_lt.mpr (by omega)
+  ⟩
+
+/-- End-to-end `uruk` Gemini 4 Carbon regression witness (`orb_model_account_admit` +
+    `orb_model_account_score` + `orb_route_argmin_step`):
+    - Candidate 1 (`her3sy`, `priorityRank = 0`): high-priority general account without Carbon
+      (either `entitlement = 0 (LacksModel)` or `entitlement = 1 (Unknown)` before reconciliation)
+      with full Gemini/Claude quota (`hasPoolQuota = 1`).
+    - Candidate 2 (`marchand`, `priorityRank = 1`): lower-priority account with Carbon EAP access
+      (`entitlement = 2 (Entitled)`), regular Gemini pool exhausted, Carbon pool available (`hasPoolQuota = 1`).
+    Folding through `routeArgminStep` rejects `her3sy` in BOTH `LacksModel` and `Unknown` states and
+    selects `marchand` (`bestId = 2`). When NO account offers Carbon (`LacksModel` on all),
+    `routeArgminStep` returns `hasBest = 0` (`bestId = 0`) instead of dispatching an incompatible account. -/
+theorem uruk_carbon_eap_selection_and_fail_closed_witness :
+    let admHer3syLacks := modelAccountAdmit 1 0 0 1
+    let admHer3syUnk   := modelAccountAdmit 1 0 1 1
+    let admMarchand    := modelAccountAdmit 2 0 2 1
+    let scHer3syUnk    := modelAccountScore 1 0 1 0 1 0 0
+    let scMarchand     := modelAccountScore 2 0 2 0 1 1 0
+    let step1Lacks     := routeArgminStep 0 0 0xFFFFFFFFFFFFFFFF 1 0 admHer3syLacks
+    let step2AfterLacks := routeArgminStep
+                            ((step1Lacks &&& 1).toUInt8)
+                            ((step1Lacks >>> 32).toUInt32)
+                            0xFFFFFFFFFFFFFFFF
+                            2 scMarchand admMarchand
+    let step1UnkPool   := routeArgminStep 0 0 0xFFFFFFFFFFFFFFFF 1 scHer3syUnk (modelAccountAdmit 1 0 1 0)
+    let step2AfterUnk  := routeArgminStep
+                            ((step1UnkPool &&& 1).toUInt8)
+                            ((step1UnkPool >>> 32).toUInt32)
+                            scHer3syUnk
+                            2 scMarchand (modelAccountAdmit 2 0 2 0)
+    admHer3syLacks = 0 ∧
+    admHer3syUnk = 0 ∧
+    admMarchand = 1 ∧
+    (step2AfterLacks >>> 32).toUInt32 = 2 ∧
+    (step2AfterUnk >>> 32).toUInt32 = 2 ∧
+    (step1Lacks &&& 1) = 0 := by
+  decide
+
 end Orb.Spec
