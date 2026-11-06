@@ -519,4 +519,19 @@ def verify_cgroup_v2_live_budget (seed : UInt64 := 0) : UInt64 :=
   if (seed &&& 1) == 0 then (callExportU64? "leansys_verify_cgroup_v2_budget" #[0, 0, 0, 0]).getD 0
   else (callExportU64? "leansys_verify_cgroup_v2_budget" #[0, 1, 0, 1]).getD 0
 
+/-- R2-A epoch fence: matching fences admit (`257`) and publish `revision + 1`; a stale live revision is rejected. -/
+def observe_epoch_fence_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_epoch_fence_step" #[11, 11, 3, 3, 5, 5, 10, 10, 11]).getD 0
+  else (callExportU64? "orb_epoch_fence_step" #[11, 11, 3, 3, 5, 5, 10, 9, 11]).getD 0
+
+/-- R2-A effect outbox: a fenced `Accept` delivers; `Claim` out of sticky `Uncertain` is refused. -/
+def observe_effect_outbox_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_effect_outbox_step" #[1, 0, 2, 1, 9, 9]).getD 0
+  else (callExportU64? "orb_effect_outbox_step" #[4, 0, 1, 1, 9, 9]).getD 0
+
+/-- R2-A crash boundary: a consistent WAL reattaches one writer; `acked > queued` fails closed. -/
+def observe_crash_boundary_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_crash_boundary_step" #[5, 2, 1, 0, 9, 9, 0, 7]).getD 0
+  else (callExportU64? "orb_crash_boundary_step" #[2, 5, 1, 0, 9, 9, 0, 7]).getD 0
+
 end OrbCore.HostObservers

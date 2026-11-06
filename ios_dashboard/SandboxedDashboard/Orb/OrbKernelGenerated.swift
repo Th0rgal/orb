@@ -419,6 +419,15 @@ internal func orb_fts5_lexer_step(_ state: UInt32, _ charClass: UInt32, _ tokenL
 @_silgen_name("orb_utf8_utf16_window_step")
 internal func orb_utf8_utf16_window_step(_ byteIdx: UInt32, _ byteLen: UInt32, _ leadByte: UInt32, _ utf16Units: UInt32, _ maxUtf16Units: UInt32) -> UInt64
 
+@_silgen_name("orb_epoch_fence_step")
+internal func orb_epoch_fence_step(_ durableOwnerEpoch: UInt64, _ liveOwnerEpoch: UInt64, _ durableRunGeneration: UInt64, _ liveRunGeneration: UInt64, _ durableBootEpoch: UInt64, _ liveBootEpoch: UInt64, _ durableRevision: UInt32, _ liveRevision: UInt32, _ writerOwnerEpoch: UInt64) -> UInt64
+
+@_silgen_name("orb_effect_outbox_step")
+internal func orb_effect_outbox_step(_ phase: UInt8, _ delivered: UInt8, _ op: UInt8, _ fenceMatches: UInt8, _ attemptEpoch: UInt64, _ nodeBootEpoch: UInt64) -> UInt64
+
+@_silgen_name("orb_crash_boundary_step")
+internal func orb_crash_boundary_step(_ durableQueued: UInt32, _ durableAcked: UInt32, _ stateRevision: UInt64, _ volatileInFlight: UInt32, _ leaseBootEpoch: UInt64, _ nodeBootEpoch: UInt64, _ volatileLeaseOwner: UInt32, _ reqOwner: UInt32) -> UInt64
+
 enum OrbKernel {
     struct WorkfoldVerdict: Equatable, Sendable {
         let foldItem: Bool

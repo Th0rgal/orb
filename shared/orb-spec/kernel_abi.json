@@ -5018,6 +5018,59 @@
         }
       ],
       "internal": true
+    },
+    {
+      "name": "orb_epoch_fence_step",
+      "ret": "uint64_t",
+      "params": [
+        { "name": "durableOwnerEpoch", "type": "uint64_t" },
+        { "name": "liveOwnerEpoch", "type": "uint64_t" },
+        { "name": "durableRunGeneration", "type": "uint64_t" },
+        { "name": "liveRunGeneration", "type": "uint64_t" },
+        { "name": "durableBootEpoch", "type": "uint64_t" },
+        { "name": "liveBootEpoch", "type": "uint64_t" },
+        { "name": "durableRevision", "type": "uint32_t" },
+        { "name": "liveRevision", "type": "uint32_t" },
+        { "name": "writerOwnerEpoch", "type": "uint64_t" }
+      ],
+      "jni": {
+        "method": "orbEpochFenceStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_effect_outbox_step",
+      "ret": "uint64_t",
+      "params": [
+        { "name": "phase", "type": "uint8_t" },
+        { "name": "delivered", "type": "uint8_t" },
+        { "name": "op", "type": "uint8_t" },
+        { "name": "fenceMatches", "type": "uint8_t" },
+        { "name": "attemptEpoch", "type": "uint64_t" },
+        { "name": "nodeBootEpoch", "type": "uint64_t" }
+      ],
+      "jni": {
+        "method": "orbEffectOutboxStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_crash_boundary_step",
+      "ret": "uint64_t",
+      "params": [
+        { "name": "durableQueued", "type": "uint32_t" },
+        { "name": "durableAcked", "type": "uint32_t" },
+        { "name": "stateRevision", "type": "uint64_t" },
+        { "name": "volatileInFlight", "type": "uint32_t" },
+        { "name": "leaseBootEpoch", "type": "uint64_t" },
+        { "name": "nodeBootEpoch", "type": "uint64_t" },
+        { "name": "volatileLeaseOwner", "type": "uint32_t" },
+        { "name": "reqOwner", "type": "uint32_t" }
+      ],
+      "jni": {
+        "method": "orbCrashBoundaryStep",
+        "ret": "jlong"
+      }
     }
   ]
 }

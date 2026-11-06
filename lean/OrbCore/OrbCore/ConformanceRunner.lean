@@ -1,6 +1,6 @@
 /-
   OrbCore.ConformanceRunner: Pure-Lean Shared Kernel Conformance & Fixture Runner (`orb-spec-runner`)
-  covering all 164 C-ABI exports in `shared/orb-spec/kernel_abi.json` and shared projection fixtures.
+   covering all 167 C-ABI exports in `shared/orb-spec/kernel_abi.json` and shared projection fixtures.
 -/
 import Orb.Kernel
 import LeanSys.Spec
@@ -10,7 +10,7 @@ namespace OrbCore.ConformanceRunner
 
 open OrbBin.Json
 
--- Direct `@[extern]` imports to all 164 exported C-ABI symbols of `Orb.Kernel` and `LeanSys.Spec`.
+-- Direct `@[extern]` imports to all 167 exported C-ABI symbols of `Orb.Kernel` and `LeanSys.Spec`.
 @[extern "orb_verify_writer_reuse"]
 private opaque c_fn_0 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt8) : UInt8
 @[extern "orb_verify_lease_mode"]
@@ -339,6 +339,12 @@ private opaque c_fn_161 (a0 : UInt32) (a1 : UInt32) (a2 : UInt32) (a3 : UInt32) 
 private opaque c_fn_162 (a0 : UInt32) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) : UInt8
 @[extern "orb_model_account_score"]
 private opaque c_fn_163 (a0 : UInt32) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt32) (a6 : UInt32) : UInt64
+@[extern "orb_epoch_fence_step"]
+private opaque c_fn_164 (a0 : UInt64) (a1 : UInt64) (a2 : UInt64) (a3 : UInt64) (a4 : UInt64) (a5 : UInt64) (a6 : UInt32) (a7 : UInt32) (a8 : UInt64) : UInt64
+@[extern "orb_effect_outbox_step"]
+private opaque c_fn_165 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt64) (a5 : UInt64) : UInt64
+@[extern "orb_crash_boundary_step"]
+private opaque c_fn_166 (a0 : UInt32) (a1 : UInt32) (a2 : UInt64) (a3 : UInt32) (a4 : UInt64) (a5 : UInt64) (a6 : UInt32) (a7 : UInt32) : UInt64
 
 private def callExportChunk0? (sym : String) (args : Array UInt64) : Option UInt64 :=
   if sym == "orb_verify_writer_reuse" && args.size == 6 then some ((c_fn_0 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8).toUInt64)
@@ -523,9 +529,12 @@ private def callExportChunk6? (sym : String) (args : Array UInt64) : Option UInt
   else if sym == "orb_utf8_utf16_window_step" && args.size == 5 then some (c_fn_161 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!).toUInt32 (args[3]!).toUInt32 (args[4]!).toUInt32)
   else if sym == "orb_model_account_admit" && args.size == 4 then some ((c_fn_162 (args[0]!).toUInt32 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8).toUInt64)
   else if sym == "orb_model_account_score" && args.size == 7 then some (c_fn_163 (args[0]!).toUInt32 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt32 (args[6]!).toUInt32)
+  else if sym == "orb_epoch_fence_step" && args.size == 9 then some (c_fn_164 (args[0]!) (args[1]!) (args[2]!) (args[3]!) (args[4]!) (args[5]!) (args[6]!).toUInt32 (args[7]!).toUInt32 (args[8]!))
+  else if sym == "orb_effect_outbox_step" && args.size == 6 then some (c_fn_165 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!) (args[5]!))
+  else if sym == "orb_crash_boundary_step" && args.size == 8 then some (c_fn_166 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!) (args[3]!).toUInt32 (args[4]!) (args[5]!) (args[6]!).toUInt32 (args[7]!).toUInt32)
   else none
 
-/-- Dispatch any of the 164 C-ABI exports by symbol name and `UInt64` argument vector. -/
+/-- Dispatch any of the 167 C-ABI exports by symbol name and `UInt64` argument vector. -/
 def callExportU64? (sym : String) (args : Array UInt64) : Option UInt64 :=
   (callExportChunk0? sym args) <|> (callExportChunk1? sym args) <|> (callExportChunk2? sym args) <|> (callExportChunk3? sym args) <|> (callExportChunk4? sym args) <|> (callExportChunk5? sym args) <|> (callExportChunk6? sym args)
 

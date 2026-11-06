@@ -163,6 +163,9 @@
     "orb_fts5_lexer_step",
     "orb_utf8_utf16_window_step",
     "orb_model_account_admit",
-    "orb_model_account_score"
+    "orb_model_account_score",
+    "orb_epoch_fence_step",
+    "orb_effect_outbox_step",
+    "orb_crash_boundary_step"
   ]
 }

@@ -6,7 +6,7 @@
   4. All 9 `OrbCore.Harness` contract tests.
   5. `/v1/*` `OrbCore.Proxy` pre-first-byte `429`/`503` failover + hop-by-hop header sanitization.
   6. Live HTTP/1.1 + WebSocket dispatch (`/api/health`, `/api/auth/login` with `SANDBOXED_USERS`, `/v1/*` auth, `/api/privilege-access/verify-and-log` fail-closed vs valid lease, `/api/console/ws` `401` without JWT and `101` echoing `Sec-WebSocket-Protocol: jwt.<token>`).
-  7. All 82 `OrbCore.HostTests` & optional `--emit-evidence-log <path>` receipt generation.
+  7. All 83 `OrbCore.HostTests` & optional `--emit-evidence-log <path>` receipt generation.
 -/
 import OrbCore
 
@@ -430,13 +430,13 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   closeCoreStore store
   IO.FS.removeDirAll tmpRoot
 
-  -- 7. Host evidence suite (`82/82` host tests)
+  -- 7. Host evidence suite (`83/83` host tests)
   let hostOk ← runAllHostTests emitLogPath?
   if !hostOk then
     IO.eprintln "[orb-core-test] FAIL: OrbCore.HostTests failed"
     return 1
 
-  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":5,\"harness_contracts\":9,\"host_tests\":82}"
+  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":5,\"harness_contracts\":9,\"host_tests\":83}"
   return 0
 
 end OrbCore.SelfTest
