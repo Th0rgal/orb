@@ -50,6 +50,10 @@ export interface TransferFileResponse {
   local?: boolean;
 }
 
+export function didServerCascadeFolderTransfer(res: TransferFileResponse | void | undefined): boolean {
+  return Boolean(res && typeof res === "object" && !res.local && Array.isArray(res.moved_missions) && typeof res.moved_crons === "number");
+}
+
 /** Files and folders share one transfer; another project receives a copy before the source is removed. */
 export async function transferProjectFile(slug: string, path: string, destination: string, copy = false, project = slug): Promise<TransferFileResponse | void> {
   const version = connectionVersion();

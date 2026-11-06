@@ -1,16 +1,56 @@
-   Compiling sandboxed_sh v1.3.0 (/var/lib/sandboxed-node/work/9c44a457-5ffd-4ea6-bde4-12b97183bd0f/orb)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-mission-moves)
+warning: unused import: `super::*`
+   --> src/node/tool_interrupt.rs:276:9
+    |
+276 |     use super::*;
+    |         ^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:433:5
+    |
+432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
+    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
+433 | /     {
+434 | |         let conn = state
+435 | |             .projects
+436 | |             .connection
+...   |
+439 | |         require_no_accepted_actions(&conn)?;
+440 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:627:5
+    |
+626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
+    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
+627 |     receipt.phase = Phase::Purged;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `source`
+   --> src/api/control/workspace_purge.rs:405:5
+    |
+405 |     source: &FsPath,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
 warning: function `populate_activity` is never used
-    --> src/api/control/mission_list.rs:1177:21
+    --> src/api/control/mission_list.rs:1192:21
      |
-1177 | pub(super) async fn populate_activity(control: &ControlState, missions...
+1192 | pub(super) async fn populate_activity(control: &ControlState, missions...
      |                     ^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: function `merge_text_stream_fragment` is never used
-  --> src/api/control/streaming.rs:87:15
+  --> src/api/control/streaming.rs:88:15
    |
-87 | pub(super) fn merge_text_stream_fragment(buffer: &mut String, fragment: ...
+88 | pub(super) fn merge_text_stream_fragment(buffer: &mut String, fragment: ...
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: function `apply_text_ops` is never used
@@ -159,27 +199,73 @@ warning: method `note_activity` is never used
 60 |     pub fn note_activity(&self) {
    |            ^^^^^^^^^^^^^
 
-warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 36.95s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
+warning: function `scope_oom_killed` is never used
+    --> src/node/runner.rs:2124:10
+     |
+2124 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+     |          ^^^^^^^^^^^^^^^^
+
+warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 3m 05s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::control::dispatch_admission_tests::remote_submission_rejects_closed_snapshots_and_records_host_observations ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3790 filtered out; finished in 0.84s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3786 filtered out; finished in 0.15s
+
+warning: unused import: `super::*`
+   --> src/node/tool_interrupt.rs:276:9
+    |
+276 |     use super::*;
+    |         ^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:433:5
+    |
+432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
+    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
+433 | /     {
+434 | |         let conn = state
+435 | |             .projects
+436 | |             .connection
+...   |
+439 | |         require_no_accepted_actions(&conn)?;
+440 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:627:5
+    |
+626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
+    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
+627 |     receipt.phase = Phase::Purged;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `source`
+   --> src/api/control/workspace_purge.rs:405:5
+    |
+405 |     source: &FsPath,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: function `populate_activity` is never used
-    --> src/api/control/mission_list.rs:1177:21
+    --> src/api/control/mission_list.rs:1192:21
      |
-1177 | pub(super) async fn populate_activity(control: &ControlState, missions...
+1192 | pub(super) async fn populate_activity(control: &ControlState, missions...
      |                     ^^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: function `merge_text_stream_fragment` is never used
-  --> src/api/control/streaming.rs:87:15
+  --> src/api/control/streaming.rs:88:15
    |
-87 | pub(super) fn merge_text_stream_fragment(buffer: &mut String, fragment: ...
+88 | pub(super) fn merge_text_stream_fragment(buffer: &mut String, fragment: ...
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: function `apply_text_ops` is never used
@@ -328,9 +414,15 @@ warning: method `note_activity` is never used
 60 |     pub fn note_activity(&self) {
    |            ^^^^^^^^^^^^^
 
-warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.19s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
+warning: function `scope_oom_killed` is never used
+    --> src/node/runner.rs:2124:10
+     |
+2124 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+     |          ^^^^^^^^^^^^^^^^
+
+warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 0.52s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 14 tests
 test api::control::fork::tests::an_edited_message_replaces_the_rest_of_the_conversation ... ok
@@ -348,14 +440,14 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3777 filtered out; finished in 0.50s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3773 filtered out; finished in 0.08s
 
-    Finished `test` profile [unoptimized] target(s) in 0.09s
-     Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-70c0d7a6354c9bb7)
+    Finished `test` profile [unoptimized] target(s) in 0.06s
+     Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-182c0985b80e13af)
 
 running 2 tests
 test missing_extra_duplicate_nontext_and_imported_symbols_fail ... ok
 test real_object_and_archive_mutations_are_rejected ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.43s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.44s
 

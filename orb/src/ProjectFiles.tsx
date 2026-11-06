@@ -8,7 +8,7 @@ import {nativeComposerDrop} from "./composerDrop";
 import {importProjectFiles} from "./projectFileImport";
 import {backgroundUploads,cancelBackgroundUpload,formatFileSize,pauseBackgroundUpload,resumeBackgroundUpload,type UploadSource} from "./uploads";
 import {subscribeProjectContext} from "./projectContext";
-import { assertFolderHasNoWork, folderWorkError, moveFolderWork, makeFileReference, readFileReference, makeCronReference, readCronReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
+import { assertFolderHasNoWork, didServerCascadeFolderTransfer, folderWorkError, moveFolderWork, makeFileReference, readFileReference, makeCronReference, readCronReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
 import { FolderActivityIcon, folderActivity } from "./FolderActivity";
 import { createSidebarRequests } from "./sidebarRequests";
 import { folderLabel, setFolderLabel } from "./folderLabels";
@@ -715,7 +715,7 @@ export function LiveProjectsSection(p: {
         { kind: "file", fromProject: target.slug, toProject: target.slug, path: destination, fromPath: target.path, directory: !!target.directory },
         async () => {
           const res = await transferProjectFile(target.slug, target.path, destination);
-          serverCascaded = Boolean(res && typeof res === "object" && !res.local && Array.isArray(res.moved_missions) && typeof res.moved_crons === "number");
+          serverCascaded = didServerCascadeFolderTransfer(res);
         },
         label,
       );
@@ -771,7 +771,7 @@ export function LiveProjectsSection(p: {
       const transfer = async () => {
         if (other && item.directory && !item.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
         const res = await transferProjectFile(item.slug, item.path, destination, item.copy, slug);
-        serverCascaded = Boolean(res && typeof res === "object" && !res.local && Array.isArray(res.moved_missions) && typeof res.moved_crons === "number");
+        serverCascaded = didServerCascadeFolderTransfer(res);
       };
       const moveKey = fileMoveKey(item.slug, item.path);
       // A move shows at its destination at once; a copy waits for the server.
@@ -1478,15 +1478,15 @@ export function LiveProjectsSection(p: {
         try {
           const other = item.slug !== targetSlug;
           const destination = other ? [targetPath, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, targetPath, false);
-          let localTransfer = false;
+          let serverCascaded = false;
           await moveFile(item, destination, async () => {
             if (other && !bundle.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
             const res = await transferProjectFile(item.slug, item.path, destination, bundle.copy, targetSlug);
-            localTransfer = res?.local === true;
+            serverCascaded = didServerCascadeFolderTransfer(res);
           });
           if (!bundle.copy) {
             movedFolders.set(`${item.slug}:${item.path}`, { destSlug: targetSlug, destPath: destination });
-            await folderMoved(item.slug, item.path, destination, targetSlug, localTransfer);
+            await folderMoved(item.slug, item.path, destination, targetSlug, false, serverCascaded);
           }
           await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(targetSlug, targetPath, true)]);
         } catch (err) { failures.push(`${fileBaseName(item.path)}: ${err instanceof Error ? err.message : String(err)}`); }

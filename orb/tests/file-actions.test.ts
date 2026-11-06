@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { fileDestination, folderWorkError, readFileReference, transferProjectFile } from "../src/fileActions";
+import { didServerCascadeFolderTransfer, fileDestination, folderWorkError, readFileReference, transferProjectFile } from "../src/fileActions";
 import { setApiUrl } from "../src/api";
 import { resetMissionHierarchy } from "../src/missionHierarchy";
 afterEach(() => { vi.restoreAllMocks(); resetMissionHierarchy(); });
@@ -114,6 +114,10 @@ it("marks local-context transfers with { local: true } so desktop callers reloca
   const fetch = vi.spyOn(globalThis, "fetch");
   const res = await transferProjectFile("test", "notes", "archive", false);
   expect(res).toEqual({ local: true });
+  expect(didServerCascadeFolderTransfer(res)).toBe(false);
+  expect(didServerCascadeFolderTransfer({ path: "archive", moved_missions: [] })).toBe(false);
+  expect(didServerCascadeFolderTransfer({ path: "archive", moved_missions: [], moved_crons: 0 })).toBe(true);
+  expect(didServerCascadeFolderTransfer({ local: true, moved_missions: [], moved_crons: 0 })).toBe(false);
   expect(spy).toHaveBeenCalledWith("test", "move", "notes", "archive", undefined, undefined);
   expect(fetch).not.toHaveBeenCalled();
 });

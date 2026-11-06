@@ -4476,6 +4476,12 @@ async fn assert_startup_identity_recovery(preceding_sweep: bool) {
     })
     .await
     .expect("receipt recovery must not suppress restart of an old Active mission");
+    // Startup recovery immediately enqueues `ControlCommand::ResumeMission` after
+    // emitting `Interrupted`, which briefly writes a transient `preparing`/`pending`
+    // receipt under `DISPATCH_ADMISSION` until `receipt.finish(...)` completes.
+    // Acquire `DISPATCH_ADMISSION` before reading so we observe the settled post-resume
+    // state rather than racing the in-flight auto-resume admission.
+    let _settled = DISPATCH_ADMISSION.lock().await;
     assert!(h
         .state
         .projects
