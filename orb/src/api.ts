@@ -627,6 +627,8 @@ export interface Mission {
   model_effort?: string | null;
   fast_mode?: boolean;
   service_tier?: CodexServiceTier;
+  config_profile?: string | null;
+  session_id?: string | null;
   project?: string | null;
   track?: string | null;
   github_pr?: string | null;
@@ -726,7 +728,12 @@ export async function listBackendModels(): Promise<Record<string, BackendModelOp
   // Route identity comes from the chain store, never provider display labels.
   // Invalid responses must not silently remove an installed harness.
   if (!Array.isArray(chains)) throw new Error("Invalid model routing catalog");
-  return {...data.backends, opencode: chains.map(chain => ({value:chain.id,label:`Routing — ${chain.name}`}))};
+  const chainOptions: BackendModelOption[] = chains.map(chain => ({ value: chain.id, label: `Routing — ${chain.name}` }));
+  const chainIds = new Set(chains.flatMap(chain => [chain.id, chain.id.replace(/^builtin\//, "")]));
+  const directOpencode = (data.backends?.opencode ?? []).filter(
+    opt => opt.value && !chainIds.has(opt.value) && !chainIds.has(opt.value.replace(/^builtin\//, "")) && !opt.label.startsWith("Routing — "),
+  );
+  return { ...data.backends, opencode: [...chainOptions, ...directOpencode] };
 }
 
 
@@ -743,6 +750,25 @@ export function shortModelLabel(label: string): string {
   const tail = label.includes("—") ? label.slice(label.lastIndexOf("—") + 1).trim() : label.trim();
   // "Claude Fable 5.1" → "Fable 5.1"; other vendors keep their family name.
   return tail.replace(/^Claude\s+/, "");
+}
+
+/** Provider/routing prefix before "—", used to group multi-provider model pickers. */
+export function modelLabelGroup(label: string): string | undefined {
+  const idx = label.indexOf("—");
+  if (idx <= 0) return undefined;
+  const head = label.slice(0, idx).trim();
+  return head || undefined;
+}
+
+export function modelPickerItems(models: BackendModelOption[]): { id: string; label: string; description?: string; group?: string }[] {
+  const groups = new Set(models.map(m => modelLabelGroup(m.label)).filter((g): g is string => !!g));
+  const showGroups = groups.size > 1;
+  return models.map(m => ({
+    id: m.value,
+    label: shortModelLabel(m.label),
+    ...(m.description ? { description: m.description } : {}),
+    ...(showGroups && modelLabelGroup(m.label) ? { group: modelLabelGroup(m.label) } : {}),
+  }));
 }
 
 export async function getRemoteNodes(): Promise<RemoteNodesResponse> {
@@ -1868,12 +1894,12 @@ export async function markMissionOpened(id: string): Promise<void> {
  * omitted field leaves the stored effort untouched. */
 export async function updateMissionSettings(
   id: string,
-  body: { model_override?: string; backend?: string; model_effort?: string; service_tier?: CodexServiceTier },
+  body: { model_override?: string; backend?: string; model_effort?: string; service_tier?: CodexServiceTier; resume?: boolean },
 ): Promise<Mission> {
   return api(`/api/control/missions/${id}/settings`, withIdempotencyKey({
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ resume: false, ...body }),
   }));
 }
 

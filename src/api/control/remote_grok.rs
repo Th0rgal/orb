@@ -3927,11 +3927,26 @@ if ses:\n\
             resume_session_id: session_id.clone(),
         }
     } else if mission.backend == "opencode" {
+        let model = match mission
+            .model_override
+            .as_deref()
+            .map(|m| m.strip_prefix("builtin/").unwrap_or(m).trim())
+            .filter(|m| !m.is_empty())
+        {
+            Some(explicit) => explicit.to_string(),
+            None => {
+                let chains = state.chain_store.list().await;
+                chains
+                    .iter()
+                    .find(|c| c.is_default)
+                    .or_else(|| chains.first())
+                    .map(|c| c.id.strip_prefix("builtin/").unwrap_or(&c.id).to_string())
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or_else(|| "smart".to_string())
+            }
+        };
         RemoteHarnessPlan::OpenCode {
-            model: mission
-                .model_override
-                .as_deref()
-                .map(|m| m.strip_prefix("builtin/").unwrap_or(m).to_string()),
+            model: Some(model),
             prompt: prompt.clone(),
             resume_session_id: session_id.clone(),
         }

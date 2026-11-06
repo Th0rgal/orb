@@ -147,4 +147,67 @@ final class OrbLandscapeUITests: XCTestCase {
         XCTAssertTrue(files.descendants(matching: .any)["file.viewer.pdf"].waitForExistence(timeout: 15))
         checkLandscape(files, "pdf-viewer")
     }
+
+    @MainActor func testResourcesDiagramsHaveGenerousViewportInPortraitAndLandscape() throws {
+        let app = launch()
+        tapInPortrait(app, "Settings")
+        tapInPortrait(app, "settings.agents")
+        tapInPortrait(app, "settings.resources")
+
+        let fleetSankey = app.descendants(matching: .any)["resources.fleetSankey"]
+        XCTAssertTrue(fleetSankey.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["resources.timeline"].exists)
+        XCTAssertFalse(app.staticTexts["TIMELINE"].exists, "Bottom timeline footer must not steal vertical space")
+
+        let shotDir = ProcessInfo.processInfo.environment["ORB_SHOT_DIR"]
+        func saveShot(_ name: String) {
+            Thread.sleep(forTimeInterval: 0.6)
+            let shot = XCUIScreen.main.screenshot()
+            let att = XCTAttachment(screenshot: shot); att.name = name; att.lifetime = .keepAlways; add(att)
+            if let dir = shotDir {
+                try? shot.pngRepresentation.write(to: URL(fileURLWithPath: dir).appendingPathComponent("\(name).png"))
+            }
+        }
+
+        saveShot("resources-portrait-fleet-inference")
+        XCTAssertGreaterThanOrEqual(fleetSankey.frame.height, 260, "Portrait Sankey gets generous height")
+        XCTAssertGreaterThanOrEqual(fleetSankey.frame.width, app.windows.firstMatch.frame.width - 44, "Sankey spans nearly full sheet width")
+
+        // Switch to Compute lens in portrait, then back to Inference for a clean banner-free screenshot
+        app.buttons["resources.lens.Compute"].tap()
+        Thread.sleep(forTimeInterval: 3.5)
+        saveShot("resources-portrait-fleet-compute")
+        app.buttons["resources.lens.Inference"].tap()
+        saveShot("resources-portrait-fleet-inference")
+
+        // Rotate to landscape and verify Sankey fits comfortably above the fold without footer clipping
+        checkLandscape(app, "resources-fleet")
+        saveShot("resources-landscape-fleet-inference")
+        let winH = min(app.windows.firstMatch.frame.width, app.windows.firstMatch.frame.height)
+        XCTAssertGreaterThanOrEqual(fleetSankey.frame.height, 200, "Landscape Sankey stays tall")
+        XCTAssertLessThan(fleetSankey.frame.minY, winH * 0.45, "Landscape Sankey starts right below compact controls")
+
+        // Drill down into a mission in portrait -> verify 3-column Mission Flow + Fast-DAG + Landscape
+        XCUIDevice.shared.orientation = .portrait
+        Thread.sleep(forTimeInterval: 0.6)
+        let missionRow = app.buttons["resources.mission.agent-work"]
+        XCTAssertTrue(missionRow.waitForExistence(timeout: 5))
+        missionRow.tap()
+
+        let missionSankey = app.descendants(matching: .any)["resources.missionSankey"]
+        XCTAssertTrue(missionSankey.waitForExistence(timeout: 10))
+        saveShot("resources-portrait-mission-flow")
+        XCTAssertGreaterThanOrEqual(missionSankey.frame.height, 250)
+
+        checkLandscape(app, "resources-mission-flow")
+        saveShot("resources-landscape-mission-flow")
+
+        XCUIDevice.shared.orientation = .portrait
+        Thread.sleep(forTimeInterval: 0.5)
+        app.buttons["resources.submode.DAG"].tap()
+        saveShot("resources-portrait-mission-dag")
+
+        checkLandscape(app, "resources-mission-dag")
+        saveShot("resources-landscape-mission-dag")
+    }
 }

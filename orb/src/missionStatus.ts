@@ -18,8 +18,27 @@ export const QUEUED_STATUSES = set("pending", "queued");
 export const LIVE_STATUSES = set(...RUNNING_STATUSES, ...QUEUED_STATUSES);
 /** In flight, or finished its turn with background work still running. */
 export const WORKING_STATUSES = set(...LIVE_STATUSES, "waiting_background");
-/** PATCH /settings can change the next-turn model. A live turn returns 409. */
-export const SETTINGS_IDLE_STATUSES = set("awaiting_user", "acknowledged", "interrupted", "failed", "not_feasible", "paused", "blocked");
+/** Settled (non-working) mission statuses. Note: PATCH /settings applies on live turns too (next turn). */
+export const SETTINGS_IDLE_STATUSES = set(
+  "awaiting_user",
+  "waiting_user",
+  "waiting_for_user",
+  "needs_input",
+  "awaiting_approval",
+  "acknowledged",
+  "archived",
+  "completed",
+  "succeeded",
+  "interrupted",
+  "cancelled",
+  "failed",
+  "not_feasible",
+  "error",
+  "errored",
+  "timed_out",
+  "paused",
+  "blocked",
+);
 /** Ended with an error the user should see. */
 export const FAILED_STATUSES = set("failed", "not_feasible", "error", "errored", "timed_out");
 /** The turn ended and the conversation waits for the user. */

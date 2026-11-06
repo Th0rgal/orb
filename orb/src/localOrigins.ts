@@ -23,9 +23,9 @@ export async function localOrigins(missionId?:string):Promise<Mission[]>{
  * a desktop build without that field never shows confirmed statuses. */
 export const localPending=(mission:Mission)=>!!mission.local_sync_pending||(mission.local_run_active??mission.status==="active");
 /** Local output wins while syncing; Core still owns mutable next-turn settings.
- * Otherwise a running journal's launch-time effort undoes a successful settings patch. */
+ * Otherwise a running journal's launch-time model or effort undoes a successful settings patch. */
 export function withCoreEffort(local:Mission,core?:Mission):Mission {
- return core ? {...local,model_effort:core.model_effort,service_tier:core.service_tier,fast_mode:core.fast_mode} : local;
+ return core ? {...local,model_override:core.model_override,model_effort:core.model_effort,service_tier:core.service_tier,fast_mode:core.fast_mode} : local;
 }
 let lastObservation=0;
 /** Orders requests and accepted changes made by this window, even within one millisecond. */
