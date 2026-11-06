@@ -470,7 +470,7 @@ it("matches the shared cross-client mission-budget fixture", () => {
   expect(pooledFc.headline).toBe("Sustains until daily reset");
 
   // With 10 live VMs at $10/h total ($1/h each -> $0.50 30m step), $2.50 available, and $1.6667 reserved (10m left),
-  // extensions remain possible for (2.50 - 0.50) / 10 * 3600 = 720s (~12m) before pausing!
+  // 5 discrete 30m extensions are admitted (5 * 180s = 900s = ~15m) before the 6th extension is rejected!
   const upcomingCliff: MissionBudget = {
     ...dailySust,
     pool: {
@@ -489,6 +489,27 @@ it("matches the shared cross-client mission-budget fixture", () => {
     nowMs: Date.parse("2026-11-05T23:45:00Z"),
   });
   expect(upcomingFc.sustainsUntilReset).toBe(true);
-  expect(upcomingFc.leaseCliffSecs).toBeCloseTo(720, 0);
-  expect(upcomingFc.subline).toContain("VM extensions pause in ~12m");
+  expect(upcomingFc.leaseCliffSecs).toBeCloseTo(900, 0);
+  expect(upcomingFc.subline).toContain("VM extensions pause in ~15m");
+
+  // Single $10/h VM, 30m left ($5 reserved), $5 available ($5 30m step):
+  // first trigger in 20m (1,200s) is admitted (+1,800s) and the first rejected trigger is at 50m (3,000s).
+  const singleVmStep: MissionBudget = {
+    ...dailySust,
+    pool: {
+      ...dailySust.pool!,
+      live_machines: 1,
+      reserved_usd: 5.0,
+      available_usd: 5.0,
+      spent_usd: 290.0,
+      carved_usd: 0.0,
+    },
+  };
+  const singleVmFc = computeRunwayForecast({
+    budget: singleVmStep,
+    budgetEnabled: true,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+  });
+  expect(singleVmFc.leaseCliffSecs).toBeCloseTo(3000, 0);
 });

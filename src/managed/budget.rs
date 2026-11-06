@@ -330,11 +330,12 @@ fn machine_pool_spent_in_window(
     if total_spent <= 0.0 {
         return 0.0;
     }
-    // Legacy fallback for persisted machines that changed pools before
-    // `billed_segments` existed: attribute prior pool charges to sequential
-    // pre-handoff intervals instead of spreading them across later ownership.
-    if m.pool_spent_offset > 0.0 || !m.prior_pool_charges.is_empty() {
-        let (legacy_segs, cur_start) = m.legacy_pool_segments(end, total_spent);
+    // Legacy fallback for persisted machines that changed pools or resumed
+    // before `billed_segments` existed: reconstruct sequential pre-handoff /
+    // pre-resume intervals so neither prior-pool charges nor stopped gaps leak
+    // across daily/weekly boundaries.
+    if m.pool_spent_offset > 0.0 || !m.prior_pool_charges.is_empty() || m.cost_before_resume > 0.0 {
+        let (legacy_segs, cur_start, accounted_offset) = m.legacy_pool_segments(end, total_spent);
         let mut sum = 0.0;
         for seg in &legacy_segs {
             if seg.pool_id.as_deref() == Some(pool_id) {
@@ -342,36 +343,13 @@ fn machine_pool_spent_in_window(
             }
         }
         if m.budget_pool_id.as_deref() == Some(pool_id) {
+            let open_cost = (total_spent - accounted_offset).max(0.0);
             let open_start = cur_start.max(m.run_started_at.unwrap_or(m.created_at));
-            sum += segment_cost_in_window(open_start, end.max(open_start), current_here, w0);
+            sum += segment_cost_in_window(open_start, end.max(open_start), open_cost, w0);
         }
         return sum.min(total_here);
     }
-    // Single-pool legacy fallback for persisted machines created before
-    // `billed_segments`: when `cost_before_resume > 0` and `usd_per_hour > 0`,
-    // derive the actual pre-resume active duration from
-    // `cost_before_resume / usd_per_hour` so stopped idle time before
-    // `run_started_at` is excluded from window overlap.
-    let machine_in_window = match m.run_started_at {
-        Some(run_start) if run_start > m.created_at && m.cost_before_resume > 0.0 => {
-            let post_resume = (total_spent - m.cost_before_resume).max(0.0);
-            let inferred_pre_end = if m.usd_per_hour > 0.0 {
-                let billed_ms =
-                    ((m.cost_before_resume / m.usd_per_hour) * 3_600_000.0).round() as i64;
-                (m.created_at + chrono::Duration::milliseconds(billed_ms.max(0))).min(run_start)
-            } else {
-                run_start
-            };
-            let pre_end = m.stopped_at.unwrap_or(inferred_pre_end).max(m.created_at);
-            let pre_in_win =
-                segment_cost_in_window(m.created_at, pre_end, m.cost_before_resume, w0);
-            let post_in_win =
-                segment_cost_in_window(run_start, end.max(run_start), post_resume, w0);
-            pre_in_win + post_in_win
-        }
-        _ => segment_cost_in_window(m.created_at, end, total_spent, w0),
-    };
-    machine_in_window.min(total_here)
+    segment_cost_in_window(m.created_at, end, total_spent, w0).min(total_here)
 }
 
 /// Usage of `pool_id`. `open(mission_id)` tells whether a child pool's owner

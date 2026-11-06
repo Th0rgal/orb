@@ -919,17 +919,23 @@ pub struct BilledRunSegment {
 
 impl ManagedMachine {
     /// Reconstruct sequential `BilledRunSegment`s for pre-upgrade machines that
-    /// changed pools (`pool_spent_offset > 0` / `prior_pool_charges`) before
-    /// `billed_segments` existed, returning `(prior_segments, current_segment_start)`.
+    /// changed pools (`pool_spent_offset > 0` / `prior_pool_charges`) or resumed
+    /// (`cost_before_resume > 0`) before `billed_segments` existed, returning
+    /// `(prior_segments, current_segment_start, accounted_spent_offset)`.
     pub(crate) fn legacy_pool_segments(
         &self,
         seg_end: DateTime<Utc>,
         total_spent: f64,
-    ) -> (Vec<BilledRunSegment>, DateTime<Utc>) {
+    ) -> (Vec<BilledRunSegment>, DateTime<Utc>, f64) {
         let mut segments = Vec::new();
         let bounded_end = seg_end.max(self.created_at);
+        let pre_resume_cap = self
+            .run_started_at
+            .filter(|r| *r > self.created_at && self.cost_before_resume > 0.0);
         let total_span_ms = (bounded_end - self.created_at).num_milliseconds().max(0) as f64;
-        let denom_spent = total_spent.max(self.pool_spent_offset);
+        let denom_spent = total_spent
+            .max(self.pool_spent_offset)
+            .max(self.cost_before_resume);
         let charge_duration_ms = |usd: f64| -> i64 {
             if usd <= 0.0 {
                 return 0;
@@ -944,41 +950,87 @@ impl ManagedMachine {
         };
 
         let mut cur_start = self.created_at;
-        let mut prior_sum = 0.0;
+        let mut accounted_offset = 0.0;
         for (pool_id, usd) in &self.prior_pool_charges {
             if *usd <= 0.0 {
                 continue;
             }
-            prior_sum += *usd;
+            if let Some(run_start) = pre_resume_cap {
+                if accounted_offset >= self.cost_before_resume - 1e-9 && cur_start < run_start {
+                    cur_start = run_start;
+                }
+            }
             let dur_ms = charge_duration_ms(*usd).max(0);
-            let cur_end = (cur_start + chrono::Duration::milliseconds(dur_ms))
+            let mut cur_end = (cur_start + chrono::Duration::milliseconds(dur_ms))
                 .min(bounded_end)
                 .max(cur_start);
+            if let Some(run_start) = pre_resume_cap {
+                if accounted_offset + *usd <= self.cost_before_resume + 1e-9 {
+                    cur_end = cur_end.min(run_start).max(cur_start);
+                }
+            }
             segments.push(BilledRunSegment {
                 pool_id: Some(pool_id.clone()),
                 start: cur_start,
                 end: cur_end,
                 cost_usd: *usd,
             });
+            accounted_offset += *usd;
             cur_start = cur_end;
         }
 
-        let unpooled_gap = (self.pool_spent_offset - prior_sum).max(0.0);
+        let unpooled_gap = (self.pool_spent_offset - accounted_offset).max(0.0);
         if unpooled_gap > 0.0 {
+            if let Some(run_start) = pre_resume_cap {
+                if accounted_offset >= self.cost_before_resume - 1e-9 && cur_start < run_start {
+                    cur_start = run_start;
+                }
+            }
             let dur_ms = charge_duration_ms(unpooled_gap).max(0);
-            let cur_end = (cur_start + chrono::Duration::milliseconds(dur_ms))
+            let mut cur_end = (cur_start + chrono::Duration::milliseconds(dur_ms))
                 .min(bounded_end)
                 .max(cur_start);
+            if let Some(run_start) = pre_resume_cap {
+                if accounted_offset + unpooled_gap <= self.cost_before_resume + 1e-9 {
+                    cur_end = cur_end.min(run_start).max(cur_start);
+                }
+            }
             segments.push(BilledRunSegment {
                 pool_id: None,
                 start: cur_start,
                 end: cur_end,
                 cost_usd: unpooled_gap,
             });
+            accounted_offset += unpooled_gap;
             cur_start = cur_end;
         }
 
-        (segments, cur_start)
+        if let Some(run_start) = pre_resume_cap {
+            let pre_resume_rem = (self.cost_before_resume - accounted_offset).max(0.0);
+            if pre_resume_rem > 0.0 {
+                let dur_ms = charge_duration_ms(pre_resume_rem).max(0);
+                let inferred_end = (cur_start + chrono::Duration::milliseconds(dur_ms))
+                    .min(run_start)
+                    .min(bounded_end)
+                    .max(cur_start);
+                let pre_end = match self.stopped_at {
+                    Some(stopped) if stopped <= run_start => {
+                        stopped.min(bounded_end).max(cur_start)
+                    }
+                    _ => inferred_end,
+                };
+                segments.push(BilledRunSegment {
+                    pool_id: self.budget_pool_id.clone(),
+                    start: cur_start,
+                    end: pre_end,
+                    cost_usd: pre_resume_rem,
+                });
+                accounted_offset += pre_resume_rem;
+            }
+            cur_start = cur_start.max(run_start);
+        }
+
+        (segments, cur_start, accounted_offset)
     }
 
     /// Close the currently open billing interval `[seg_start, seg_end]` under
@@ -993,13 +1045,16 @@ impl ManagedMachine {
         if self.billed_segments.is_empty()
             && self.segment_started_at.is_none()
             && self.segment_spent_offset == 0.0
-            && (self.pool_spent_offset > 0.0 || !self.prior_pool_charges.is_empty())
+            && (self.pool_spent_offset > 0.0
+                || !self.prior_pool_charges.is_empty()
+                || self.cost_before_resume > 0.0)
         {
-            let (legacy_segs, cur_start) = self.legacy_pool_segments(seg_end, spent);
+            let (legacy_segs, cur_start, accounted_offset) =
+                self.legacy_pool_segments(seg_end, spent);
             self.billed_segments.extend(legacy_segs);
             self.segment_started_at =
                 Some(cur_start.max(self.run_started_at.unwrap_or(self.created_at)));
-            self.segment_spent_offset = self.pool_spent_offset;
+            self.segment_spent_offset = accounted_offset;
         }
         let delta = (spent - self.segment_spent_offset).max(0.0);
         let seg_start = self

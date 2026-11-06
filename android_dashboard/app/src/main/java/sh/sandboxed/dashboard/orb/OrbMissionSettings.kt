@@ -496,6 +496,11 @@ data class OrbMissionBudget(
             (etaSecs == null || etaSecs >= resetsInSecs)
         val liveMachineCount = maxOf(1, pool?.liveMachines ?: 1)
         val extensionStepUsd = (shapedCompute / liveMachineCount.toDouble()) * 0.5
+        val admittedExtensions = if (extensionStepUsd > 0.0) {
+            kotlin.math.floor((availableUsd + 1e-6) / extensionStepUsd).toInt()
+        } else {
+            0
+        }
         val avgReservedHours = if (shapedCompute > 0.005) reservedUsd / shapedCompute else 0.0
         val timeToExtendTriggerSecs = maxOf(0.0, (avgReservedHours - 10.0 / 60.0) * 3600.0)
         val leaseCliffSecs: Double? = if (
@@ -505,10 +510,10 @@ data class OrbMissionBudget(
             shapedCompute > 0.005 &&
             availableUsd < runwayUsd - 0.005
         ) {
-            if (availableUsd + 1e-6 < extensionStepUsd) {
+            if (admittedExtensions <= 0) {
                 0.0
             } else {
-                timeToExtendTriggerSecs + ((availableUsd - extensionStepUsd) / shapedCompute) * 3600.0
+                timeToExtendTriggerSecs + admittedExtensions.toDouble() * (1800.0 / liveMachineCount.toDouble())
             }
         } else {
             null

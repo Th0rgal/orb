@@ -6396,6 +6396,47 @@ fn legacy_prior_pool_charges_preserved_across_stop_and_window_boundary() {
             && (ub_cross.lifetime_spent_usd - 20.0).abs() < 0.01,
         "Legacy cross-midnight Pool B should have $20 today and $20 lifetime: {ub_cross:?}"
     );
+
+    // Case C: Pre-upgrade persisted machine that never changed pools, ran
+    // yesterday 22:00-23:00 ($10 `cost_before_resume`), resumed today at 01:00,
+    // and stops at 02:00. Stopping (`close_billing_segment`) must bootstrap
+    // yesterday's $10 pre-resume interval separately so today's segment records
+    // only $10 instead of $20.
+    let mut pool_c = pool("pool_c", 100.0, None);
+    pool_c.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    pools.insert("pool_c".into(), pool_c);
+
+    let mut legacy_resumed = spend_machine(
+        "m-legacy-resumed",
+        "large",
+        Some("pool_c"),
+        "2026-11-04T22:00:00Z",
+        None,
+        0.0,
+    );
+    legacy_resumed.created_at = t_22;
+    legacy_resumed.usd_per_hour = 10.0;
+    legacy_resumed.cost_is_metered = false;
+    legacy_resumed.cost_before_resume = 10.0;
+    legacy_resumed.run_started_at = Some(t_01);
+    legacy_resumed.expires_at = t_02 + chrono::Duration::minutes(30);
+    legacy_resumed.billed_segments.clear();
+    legacy_resumed.segment_started_at = None;
+    legacy_resumed.segment_spent_offset = 0.0;
+
+    legacy_resumed.cost_usd = legacy_resumed.estimated_cost(t_02);
+    legacy_resumed.close_billing_segment(t_02, t_02, t_02);
+    legacy_resumed.state = MachineState::Stopped;
+    legacy_resumed.stopped_at = Some(t_02);
+
+    let resumed_machines = vec![legacy_resumed];
+    let uc_resumed =
+        budget::pool_usage("pool_c", &pools, &resumed_machines, t_02, &is_open).unwrap();
+    assert!(
+        (uc_resumed.spent_usd - 10.0).abs() < 0.01
+            && (uc_resumed.lifetime_spent_usd - 20.0).abs() < 0.01,
+        "Legacy pre-resume $10 yesterday must not be folded into today's segment on close: {uc_resumed:?}"
+    );
 }
 
 #[tokio::test]

@@ -123,8 +123,24 @@ class OrbMissionBudgetTest {
             nowMs = 1_793_922_300_000L,
         )
         assertTrue(upcomingFc.sustainsUntilReset)
-        assertEquals(720.0, upcomingFc.leaseCliffSecs ?: 0.0, 1.0)
-        assertTrue(upcomingFc.subline.contains("VM extensions pause in ~12m"))
+        assertEquals(900.0, upcomingFc.leaseCliffSecs ?: 0.0, 1.0)
+        assertTrue(upcomingFc.subline.contains("VM extensions pause in ~15m"))
+
+        val singleVmStep = dailySust.copy(
+            pool = dailySust.pool!!.copy(
+                liveMachines = 1,
+                spent = 290.0,
+                carved = 0.0,
+                reserved = 5.0,
+                available = 5.0,
+            ),
+        )
+        val singleVmFc = singleVmStep.computeRunwayForecast(
+            bandwidthEnabled = true,
+            budgetEnabled = true,
+            nowMs = 1_793_922_300_000L,
+        )
+        assertEquals(3_000.0, singleVmFc.leaseCliffSecs ?: 0.0, 1.0)
     }
 
     @Test fun validatesVmAndBandwidthInputsAndForecast() {

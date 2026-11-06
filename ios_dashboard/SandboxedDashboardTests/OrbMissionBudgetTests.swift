@@ -105,8 +105,17 @@ final class OrbMissionBudgetTests: XCTestCase {
         upcomingCliff.pool?.available = 2.5
         let upcomingFc = upcomingCliff.computeRunwayForecast(bandwidthEnabled: true, budgetEnabled: true, nowMs: 1_793_922_300_000)
         XCTAssertTrue(upcomingFc.sustainsUntilReset)
-        XCTAssertEqual(upcomingFc.leaseCliffSecs ?? 0, 720, accuracy: 1)
-        XCTAssertTrue(upcomingFc.subline.contains("VM extensions pause in ~12m"))
+        XCTAssertEqual(upcomingFc.leaseCliffSecs ?? 0, 900, accuracy: 1)
+        XCTAssertTrue(upcomingFc.subline.contains("VM extensions pause in ~15m"))
+
+        var singleVmStep = dailySust
+        singleVmStep.pool?.liveMachines = 1
+        singleVmStep.pool?.spent = 290.0
+        singleVmStep.pool?.carved = 0.0
+        singleVmStep.pool?.reserved = 5.0
+        singleVmStep.pool?.available = 5.0
+        let singleVmFc = singleVmStep.computeRunwayForecast(bandwidthEnabled: true, budgetEnabled: true, nowMs: 1_793_922_300_000)
+        XCTAssertEqual(singleVmFc.leaseCliffSecs ?? 0, 3_000, accuracy: 1)
     }
 
     func testValidatesVmAndBandwidthInputsAndForecast() throws {

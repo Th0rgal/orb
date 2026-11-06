@@ -870,14 +870,17 @@ struct OrbMissionBudget: Equatable {
         }()
         let liveMachineCount = max(1, pool?.liveMachines ?? 1)
         let extensionStepUsd = (shapedCompute / Double(liveMachineCount)) * 0.5
+        let admittedExtensions = extensionStepUsd > 0
+            ? Int(floor((availableUsd + 1e-6) / extensionStepUsd))
+            : 0
         let avgReservedHours = shapedCompute > 0.005 ? (reservedUsd / shapedCompute) : 0
         let timeToExtendTriggerSecs = max(0, (avgReservedHours - 10.0 / 60.0) * 3600.0)
         let leaseCliffSecs: Double? = {
             guard capUsd != nil, runwayUsd > 0, reservedUsd > 0.005, shapedCompute > 0.005, availableUsd < runwayUsd - 0.005 else {
                 return nil
             }
-            if availableUsd + 1e-6 < extensionStepUsd { return 0 }
-            return timeToExtendTriggerSecs + ((availableUsd - extensionStepUsd) / shapedCompute) * 3600.0
+            if admittedExtensions <= 0 { return 0 }
+            return timeToExtendTriggerSecs + Double(admittedExtensions) * (1800.0 / Double(liveMachineCount))
         }()
         let unshapedEtaSecs: Double? = (capUsd != nil && runwayUsd > 0 && obsCompute > 0.005)
             ? (runwayUsd / obsCompute) * 3600.0 : nil

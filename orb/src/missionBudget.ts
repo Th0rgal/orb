@@ -848,9 +848,16 @@ export function computeRunwayForecast(opts: {
   // `ManagedManager::auto_extend` runs when a live VM has `<= 10m` remaining on
   // its lease and requests a `30m` extension (`0.5h * perVmUsdPerH`), which
   // `extend()` checks against `available_usd` (`reservation_for(30, usd_per_hour)`).
+  // Spend and shrinking reservation offset 1:1 while running (`availableUsd` stays
+  // constant between extensions), and each admitted 30m extension increases total
+  // reservation by `extensionStepUsd` and advances the next trigger by 30m (1,800s).
+  // The first rejected extension occurs after `floor(availableUsd / extensionStepUsd)`
+  // admitted triggers across the live fleet (`1,800s / liveMachineCount` per step).
   const liveMachineCount = Math.max(1, pool?.live_machines ?? 1);
   const perVmUsdPerH = shapedComputeBurnUsdPerH / liveMachineCount;
   const extensionStepUsd = perVmUsdPerH * 0.5;
+  const admittedExtensions =
+    extensionStepUsd > 0 ? Math.floor((availableUsd + 1e-6) / extensionStepUsd) : 0;
   const avgReservedHours =
     shapedComputeBurnUsdPerH > 0.005 ? reservedUsd / shapedComputeBurnUsdPerH : 0;
   const timeToExtendTriggerSecs = Math.max(0, (avgReservedHours - 10 / 60) * 3600);
@@ -860,9 +867,9 @@ export function computeRunwayForecast(opts: {
     reservedUsd > 0.005 &&
     shapedComputeBurnUsdPerH > 0.005 &&
     availableUsd < runwayUsd - 0.005
-      ? availableUsd + 1e-6 < extensionStepUsd
+      ? admittedExtensions <= 0
         ? 0
-        : timeToExtendTriggerSecs + ((availableUsd - extensionStepUsd) / shapedComputeBurnUsdPerH) * 3600
+        : timeToExtendTriggerSecs + admittedExtensions * (1800 / liveMachineCount)
       : null;
 
   const unshapedEtaSecs =
