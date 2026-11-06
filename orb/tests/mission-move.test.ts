@@ -469,7 +469,7 @@ it("keeps return-to-origin (A -> B -> A) moves pending across a pre-move poll at
   const op2 = allocatePlacementOpId();
   stageOptimisticPlacement(RETURN_ID, "assistant", "Origin", op2);
 
-  // Delayed pre-move poll still showing `Origin` at `placement_revision: 0` (`matchesOptimistic = true`)
+  // Delayed pre-move poll still showing `Origin` at `placement_revision: 0` (matching the optimistic target)
   // MUST NOT clear `pendingOpId = op2`, otherwise Move 1's ack for `FolderB` would overwrite `Origin`!
   const delayedOriginPoll = stickHierarchy({
     id: RETURN_ID,

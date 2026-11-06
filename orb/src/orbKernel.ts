@@ -878,7 +878,6 @@ export type PlacementMergeInput = {
   ackOpId: number;
   sourceKind: PlacementSourceKind;
   hasPlacement: boolean;
-  matchesOptimistic: boolean;
 };
 
 export type PlacementMergeVerdict = {
@@ -897,7 +896,6 @@ export function orbPlacementMergeStep(input: PlacementMergeInput): PlacementMerg
     sat32(input.ackOpId),
     enum8(input.sourceKind),
     b8(input.hasPlacement),
-    b8(input.matchesOptimistic),
   );
   const lo32 = Number(raw & 0xffff_ffffn);
   const status = (lo32 & 0xff) as PlacementStatusCode;

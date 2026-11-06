@@ -401,15 +401,13 @@ enum OrbHierarchy {
             } else {
                 let effProj = hasProjectField ? rawProject : cur.project
                 let effFolder = isNested ? "" : (hasFolderField ? rawFolder : cur.folder)
-                let matchesOpt = cur.pendingOpID != 0 && effProj == cur.project && effFolder == cur.folder
                 let verdict = OrbKernel.placementMergeStep(
                     curRev: cur.revision,
                     incRev: rawRev,
                     pendingOpId: cur.pendingOpID,
                     ackOpId: 0,
                     sourceKind: 0,
-                    hasPlacement: true,
-                    matchesOptimistic: matchesOpt
+                    hasPlacement: true
                 )
                 if verdict.admitted {
                     let nextRev = max(cur.revision, rawRev, UInt64(verdict.nextRev32))
@@ -534,8 +532,7 @@ enum OrbHierarchy {
             pendingOpId: cur.pendingOpID,
             ackOpId: opID,
             sourceKind: 2,
-            hasPlacement: true,
-            matchesOptimistic: false
+            hasPlacement: true
         )
         guard verdict.admitted else { return }
         placements[id] = PlacementState(
@@ -586,8 +583,7 @@ enum OrbHierarchy {
             pendingOpId: cur.pendingOpID,
             ackOpId: ackOpID,
             sourceKind: 3,
-            hasPlacement: false,
-            matchesOptimistic: false
+            hasPlacement: false
         )
         guard verdict.admitted else { return false }
         let prevProj = cur.rollbackProject ?? cur.project
@@ -622,15 +618,13 @@ enum OrbHierarchy {
             let isNested = hasNestedParentLocked(id: item.missionID, payloadParent: nil, directBtw: false)
             let normFolder = isNested ? "" : OrbRow.normalizeFolder(item.folder)
             let normProj = (item.project ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let matchesOpt = cur != nil && cur!.pendingOpID != 0 && normProj == cur!.project && normFolder == cur!.folder
             let verdict = OrbKernel.placementMergeStep(
                 curRev: cur?.revision ?? 0,
                 incRev: item.placementRevision,
                 pendingOpId: cur?.pendingOpID ?? 0,
                 ackOpId: ackOpID,
                 sourceKind: 1,
-                hasPlacement: true,
-                matchesOptimistic: matchesOpt
+                hasPlacement: true
             )
             if !verdict.admitted {
                 if ackOpID != 0, let cur, cur.pendingOpID == ackOpID, item.placementRevision < cur.revision {
@@ -640,8 +634,7 @@ enum OrbHierarchy {
                         pendingOpId: cur.pendingOpID,
                         ackOpId: ackOpID,
                         sourceKind: 3,
-                        hasPlacement: false,
-                        matchesOptimistic: false
+                        hasPlacement: false
                     )
                     if rbVerdict.admitted {
                         let settledProj = cur.rollbackProject ?? cur.project

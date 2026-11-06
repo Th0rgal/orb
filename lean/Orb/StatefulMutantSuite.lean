@@ -474,12 +474,12 @@ theorem kill_node_lane_starve_coordinator_wakeup :
   decide
 
 -- ===========================================================================
--- Family 9: Mission Placement & Optimistic-Move Reconciliation Mutants (M25..M27)
+-- Family 9: Mission Placement & Optimistic-Move Reconciliation Mutants (M25..M28)
 -- ===========================================================================
 
 /-- Mutant 9A (Stale poll snap-back): ignores `pendingOpId != 0` on list polls (`sourceKind == 0`),
-    allowing an in-flight poll carrying pre-move placement (`incRev == curRev`, `matchesOptimistic == 0`)
-    to overwrite the optimistic move and snap the mission back to its old folder/project. -/
+    allowing an in-flight poll carrying pre-move placement (`incRev == curRev`) to overwrite the
+    optimistic move and snap the mission back to its old folder/project. -/
 def mutantPlacementUnfencedStalePoll (p : PlacementMergeCheck) : Bool :=
   if !(decide (p.sourceKind ≤ 3)) then false
   else if p.sourceKind == 2 then
@@ -521,70 +521,45 @@ def mutantPlacementUnboundRollback (p : PlacementMergeCheck) : Bool :=
   else
     decide (p.curRev ≤ p.incRev)
 
-/-- Mutant 9D (Return-to-origin stale poll clears pending op): admits an unacknowledged list poll
-    (`sourceKind == 0`) at `incRev == curRev` merely because `matchesOptimistic == 1`, clearing
-    `pendingOpId` during `A -> B -> A` so Move 1's subsequent ack (`B`) overwrites `A`. -/
-def mutantPlacementReturnToOriginStalePoll (p : PlacementMergeCheck) : Bool :=
-  if !(decide (p.sourceKind ≤ 3)) then false
-  else if p.sourceKind == 2 then
-    p.hasPlacement == 1 && p.ackOpId != 0
-  else if p.sourceKind == 3 then
-    p.pendingOpId != 0 && p.ackOpId == p.pendingOpId
-  else if !(p.hasPlacement == 1) then false
-  else if p.pendingOpId != 0 then
-    decide (p.curRev < p.incRev) ||
-    (p.sourceKind == 1 && p.ackOpId == p.pendingOpId && decide (p.curRev ≤ p.incRev)) ||
-    (p.matchesOptimistic == 1 && p.incRev == p.curRev)
+/-- Mutant 9D (Older ack / intermediate poll clears newer pending op): sets `clearPendingBit(512)`
+    (`lo32 = 1793`) whenever `incRev > curRev` without checking `sourceKind == 0` or
+    `ackOpId < pendingOpId`, prematurely clearing a newer in-flight move during overlapping moves
+    (such as `A -> B -> C -> B`). -/
+def mutantPlacementOlderAckClearsPending (p : PlacementMergeCheck) : UInt32 :=
+  if p.pendingOpId != 0 && decide (p.curRev < p.incRev) && p.hasPlacement == 1 && decide (p.sourceKind ≤ 1) then
+    1793
   else
-    decide (p.curRev ≤ p.incRev)
+    placementMergeLo32 p.curRev p.incRev p.pendingOpId p.ackOpId p.sourceKind p.hasPlacement
 
 theorem kill_placement_unfenced_stale_poll :
-    mutantPlacementUnfencedStalePoll ⟨4, 4, 11, 0, 0, 1, 0⟩ ≠
-      placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1, 0⟩ := by
+    mutantPlacementUnfencedStalePoll ⟨4, 4, 11, 0, 0, 1⟩ ≠
+      placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1⟩ := by
   decide
 
 theorem kill_placement_accepts_older_revision :
-    mutantPlacementAcceptsOlderRevision ⟨5, 4, 0, 0, 0, 1, 0⟩ ≠
-      placementMergeMetaGate.gate ⟨5, 4, 0, 0, 0, 1, 0⟩ := by
+    mutantPlacementAcceptsOlderRevision ⟨5, 4, 0, 0, 0, 1⟩ ≠
+      placementMergeMetaGate.gate ⟨5, 4, 0, 0, 0, 1⟩ := by
   decide
 
 theorem kill_placement_unbound_rollback :
-    mutantPlacementUnboundRollback ⟨4, 4, 12, 11, 3, 1, 0⟩ ≠
-      placementMergeMetaGate.gate ⟨4, 4, 12, 11, 3, 1, 0⟩ := by
+    mutantPlacementUnboundRollback ⟨4, 4, 12, 11, 3, 1⟩ ≠
+      placementMergeMetaGate.gate ⟨4, 4, 12, 11, 3, 1⟩ := by
   decide
 
-theorem kill_placement_return_to_origin_stale_poll :
-    mutantPlacementReturnToOriginStalePoll ⟨4, 4, 11, 0, 0, 1, 1⟩ ≠
-      placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1, 1⟩ := by
+theorem kill_placement_older_ack_clears_pending :
+    mutantPlacementOlderAckClearsPending ⟨0, 1, 3, 1, 1, 1⟩ ≠
+      placementMergeLo32 0 1 3 1 1 1 := by
   decide
 
-/-- Mutant 9E (Repeated-destination older ack / intermediate poll clears newer pending op): sets
-    `clearPendingBit(512)` (`lo32 = 1793`) whenever `matchesOptimistic == 1` on an intermediate poll
-    (`sourceKind == 0`) or older ack (`sourceKind == 1 && ackOpId < pendingOpId`) during `A -> B -> C -> B`,
-    prematurely clearing Move 3 (`-> B`) so Move 2's ack (`-> C`) overwrites the optimistic preview. -/
-def mutantPlacementRepeatedDestClearsPending (p : PlacementMergeCheck) : UInt32 :=
-  if p.pendingOpId != 0 && decide (p.curRev < p.incRev) &&
-      (p.sourceKind == 0 || (p.sourceKind == 1 && p.ackOpId != 0 && decide (p.ackOpId < p.pendingOpId))) then
-    if p.matchesOptimistic == 1 then 1793 else 1281
-  else
-    placementMergeLo32 p.curRev p.incRev p.pendingOpId p.ackOpId
-      p.sourceKind p.hasPlacement p.matchesOptimistic
-
-theorem kill_placement_repeated_dest_older_ack :
-    mutantPlacementRepeatedDestClearsPending ⟨0, 1, 3, 1, 1, 1, 1⟩ ≠
-      placementMergeLo32 0 1 3 1 1 1 1 := by
+theorem kill_placement_intermediate_poll_clears_pending :
+    mutantPlacementOlderAckClearsPending ⟨0, 1, 3, 0, 0, 1⟩ ≠
+      placementMergeLo32 0 1 3 0 0 1 := by
   decide
 
-theorem kill_placement_repeated_dest_intermediate_poll :
-    mutantPlacementRepeatedDestClearsPending ⟨0, 1, 3, 0, 0, 1, 1⟩ ≠
-      placementMergeLo32 0 1 3 0 0 1 1 := by
-  decide
-
-#guard placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1, 0⟩ == false
-#guard placementMergeMetaGate.gate ⟨5, 4, 0, 0, 0, 1, 0⟩ == false
-#guard placementMergeMetaGate.gate ⟨4, 4, 12, 11, 3, 1, 0⟩ == false
-#guard placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1, 1⟩ == false
-#guard ((placementMergeStep 0 1 3 1 1 1 1 &&& 0xFFFFFFFF) &&& 512) == 0
-#guard ((placementMergeStep 0 1 3 0 0 1 1 &&& 0xFFFFFFFF) &&& 512) == 0
+#guard placementMergeMetaGate.gate ⟨4, 4, 11, 0, 0, 1⟩ == false
+#guard placementMergeMetaGate.gate ⟨5, 4, 0, 0, 0, 1⟩ == false
+#guard placementMergeMetaGate.gate ⟨4, 4, 12, 11, 3, 1⟩ == false
+#guard ((placementMergeStep 0 1 3 1 1 1 &&& 0xFFFFFFFF) &&& 512) == 0
+#guard ((placementMergeStep 0 1 3 0 0 1 &&& 0xFFFFFFFF) &&& 512) == 0
 
 end Orb.StatefulMutantSuite

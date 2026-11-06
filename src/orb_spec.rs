@@ -457,7 +457,6 @@ mod tests {
             ack_op_id: 9,
             source_kind: 1,
             has_placement: true,
-            matches_optimistic: true,
         });
         assert!(pm.admitted && pm.clear_pending && pm.evict_other_projects);
         assert_eq!(pm.next_rev32, 3);

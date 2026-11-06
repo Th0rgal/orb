@@ -4779,10 +4779,6 @@
         {
           "name": "hasPlacement",
           "type": "uint8_t"
-        },
-        {
-          "name": "matchesOptimistic",
-          "type": "uint8_t"
         }
       ],
       "jni": {

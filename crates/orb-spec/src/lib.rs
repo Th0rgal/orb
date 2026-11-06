@@ -1562,7 +1562,6 @@ unsafe extern "C" {
         ack_op_id: u32,
         source_kind: u8,
         has_placement: u8,
-        matches_optimistic: u8,
     ) -> u64;
 }
 
@@ -7029,16 +7028,8 @@ pub mod raw_cabi {
         unsafe { super::orb_prefill_deadline_ms(a0, a1, a2, a3) }
     }
     #[inline]
-    pub fn orb_placement_merge_step(
-        a0: u64,
-        a1: u64,
-        a2: u32,
-        a3: u32,
-        a4: u8,
-        a5: u8,
-        a6: u8,
-    ) -> u64 {
-        unsafe { super::orb_placement_merge_step(a0, a1, a2, a3, a4, a5, a6) }
+    pub fn orb_placement_merge_step(a0: u64, a1: u64, a2: u32, a3: u32, a4: u8, a5: u8) -> u64 {
+        unsafe { super::orb_placement_merge_step(a0, a1, a2, a3, a4, a5) }
     }
     pub fn call_u64(symbol: &str, args: &[u64]) -> Option<u64> {
         Some(match symbol {
@@ -8131,14 +8122,13 @@ pub mod raw_cabi {
             "orb_prefill_deadline_ms" if args.len() == 4 => {
                 orb_prefill_deadline_ms(args[0], args[1], args[2], args[3])
             }
-            "orb_placement_merge_step" if args.len() == 7 => orb_placement_merge_step(
+            "orb_placement_merge_step" if args.len() == 6 => orb_placement_merge_step(
                 args[0],
                 args[1],
                 args[2] as u32,
                 args[3] as u32,
                 args[4] as u8,
                 args[5] as u8,
-                args[6] as u8,
             ),
             _ => return None,
         })
@@ -10379,7 +10369,6 @@ pub struct PlacementMergeInput {
     pub ack_op_id: u32,
     pub source_kind: u8,
     pub has_placement: bool,
-    pub matches_optimistic: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10403,7 +10392,6 @@ pub fn placement_merge_step(input: PlacementMergeInput) -> PlacementMergeVerdict
             input.ack_op_id,
             input.source_kind,
             u8::from(input.has_placement),
-            u8::from(input.matches_optimistic),
         )
     };
     let lo32 = (raw & 0xFFFF_FFFF) as u32;
@@ -11119,15 +11107,13 @@ mod stateful_tests {
             ack_op_id: 0,
             source_kind: 0,
             has_placement: true,
-            matches_optimistic: false,
         });
         assert!(!fenced_poll.admitted);
         assert_eq!(fenced_poll.status, 5);
         assert!(!fenced_poll.clear_pending);
         assert_eq!(fenced_poll.next_rev32, 5);
 
-        // Return-to-origin (`A -> B -> A`) pre-move poll at `inc_rev == cur_rev` MUST also stay fenced
-        // (`matches_optimistic = true` does not clear `pending_op_id` on unacknowledged polls).
+        // Return-to-origin (`A -> B -> A`) pre-move poll at `inc_rev == cur_rev` MUST also stay fenced.
         let return_to_origin_poll = placement_merge_step(PlacementMergeInput {
             cur_rev: 5,
             inc_rev: 5,
@@ -11135,7 +11121,6 @@ mod stateful_tests {
             ack_op_id: 0,
             source_kind: 0,
             has_placement: true,
-            matches_optimistic: true,
         });
         assert!(!return_to_origin_poll.admitted);
         assert_eq!(return_to_origin_poll.status, 5);
@@ -11150,7 +11135,6 @@ mod stateful_tests {
             ack_op_id: 7,
             source_kind: 1,
             has_placement: true,
-            matches_optimistic: true,
         });
         assert!(ack.admitted);
         assert_eq!(ack.status, 1);
@@ -11166,7 +11150,6 @@ mod stateful_tests {
             ack_op_id: 0,
             source_kind: 1,
             has_placement: true,
-            matches_optimistic: false,
         });
         assert!(supersede.admitted);
         assert_eq!(supersede.status, 1);
@@ -11183,7 +11166,6 @@ mod stateful_tests {
             ack_op_id: 1,
             source_kind: 1,
             has_placement: true,
-            matches_optimistic: false,
         });
         assert!(earlier_ack.admitted);
         assert_eq!(earlier_ack.status, 1);
@@ -11200,7 +11182,6 @@ mod stateful_tests {
             ack_op_id: 0,
             source_kind: 0,
             has_placement: true,
-            matches_optimistic: false,
         });
         assert!(intermediate_poll.admitted);
         assert_eq!(intermediate_poll.status, 1);
@@ -11209,7 +11190,7 @@ mod stateful_tests {
         assert_eq!(intermediate_poll.next_rev32, 1);
 
         // Repeated-destination (`A -> B -> C -> B`): neither Move 1's ack (`ack_op_id = 1 < pending_op_id = 3`)
-        // nor an intermediate rev-1 poll (`source_kind = 0`) clears `pending_op_id = 3` when `matches_optimistic = true`.
+        // nor an intermediate rev-1 poll (`source_kind = 0`) clears `pending_op_id = 3`.
         let repeated_dest_older_ack = placement_merge_step(PlacementMergeInput {
             cur_rev: 0,
             inc_rev: 1,
@@ -11217,7 +11198,6 @@ mod stateful_tests {
             ack_op_id: 1,
             source_kind: 1,
             has_placement: true,
-            matches_optimistic: true,
         });
         assert!(repeated_dest_older_ack.admitted);
         assert_eq!(repeated_dest_older_ack.status, 1);
@@ -11232,7 +11212,6 @@ mod stateful_tests {
             ack_op_id: 0,
             source_kind: 0,
             has_placement: true,
-            matches_optimistic: true,
         });
         assert!(repeated_dest_intermediate_poll.admitted);
         assert_eq!(repeated_dest_intermediate_poll.status, 1);
@@ -11248,7 +11227,6 @@ mod stateful_tests {
             ack_op_id: 0,
             source_kind: 0,
             has_placement: true,
-            matches_optimistic: false,
         });
         assert!(!older.admitted);
         assert_eq!(older.status, 4);
@@ -11262,7 +11240,6 @@ mod stateful_tests {
             ack_op_id: 7,
             source_kind: 3,
             has_placement: false,
-            matches_optimistic: false,
         });
         assert!(rollback.admitted);
         assert_eq!(rollback.status, 1);

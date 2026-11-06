@@ -155,7 +155,7 @@ uint64_t orb_scroll_policy_step(uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, ui
 uint64_t orb_wire_scroll_slice_step(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t orb_wire_stream_slice_step(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 uint64_t orb_wire_transcript_slice_step(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t, uint64_t, uint64_t, uint32_t, uint8_t, uint8_t, uint8_t);
-uint64_t orb_placement_merge_step(uint64_t, uint64_t, uint32_t, uint32_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_placement_merge_step(uint64_t, uint64_t, uint32_t, uint32_t, uint8_t, uint8_t);
 #ifdef __cplusplus
 }
 #endif

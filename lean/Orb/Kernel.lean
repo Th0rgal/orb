@@ -2854,7 +2854,6 @@ def wireTranscriptSliceStep
     `2 = optimistic_preview` (local user cut/paste or drag-drop preview),
     `3 = rollback` (failed local move rolling back iff `ackOpId == pendingOpId` and `pendingOpId != 0`).
   - `hasPlacement == 1` iff the incoming payload carries explicit placement fields (`project`/`folder`).
-  - `matchesOptimistic == 1` iff the incoming `(project, folder)` equals the optimistic target.
   - Returns a 64-bit word:
     `lo32 = status | admittedBit(256) | clearPendingBit(512) | evictOtherProjectsBit(1024)`,
     `hi32 = nextRev32` (`UInt32` saturating projection of `nextRev`).
@@ -2868,7 +2867,7 @@ def wireTranscriptSliceStep
 def placementMergeLo32
     (curRev incRev : UInt64)
     (pendingOpId ackOpId : UInt32)
-    (sourceKind hasPlacement _matchesOptimistic : UInt8) : UInt32 :=
+    (sourceKind hasPlacement : UInt8) : UInt32 :=
   if !(sourceKind ≤ 3) then 2
   else if sourceKind == 2 then
     if hasPlacement == 1 && ackOpId != 0 then 1281 else 3
@@ -2910,9 +2909,9 @@ def placementMergeHi32
 def placementMergeStep
     (curRev incRev : UInt64)
     (pendingOpId ackOpId : UInt32)
-    (sourceKind hasPlacement matchesOptimistic : UInt8) : UInt64 :=
+    (sourceKind hasPlacement : UInt8) : UInt64 :=
   let lo32 : UInt32 :=
-    placementMergeLo32 curRev incRev pendingOpId ackOpId sourceKind hasPlacement matchesOptimistic
+    placementMergeLo32 curRev incRev pendingOpId ackOpId sourceKind hasPlacement
   let hi32 : UInt32 :=
     placementMergeHi32 curRev incRev pendingOpId ackOpId sourceKind hasPlacement
   lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)

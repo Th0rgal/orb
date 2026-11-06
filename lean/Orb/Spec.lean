@@ -8107,13 +8107,12 @@ theorem wireScrollSliceStep_refines_OrbScroll
 -- ===========================================================================
 
 structure PlacementMergeCheck where
-  curRev            : UInt64
-  incRev            : UInt64
-  pendingOpId       : UInt32
-  ackOpId           : UInt32
-  sourceKind        : UInt8
-  hasPlacement      : UInt8
-  matchesOptimistic : UInt8
+  curRev       : UInt64
+  incRev       : UInt64
+  pendingOpId  : UInt32
+  ackOpId      : UInt32
+  sourceKind   : UInt8
+  hasPlacement : UInt8
   deriving Repr, DecidableEq
 
 def PlacementMergeCheck.Admissible (p : PlacementMergeCheck) : Bool :=
@@ -8131,7 +8130,7 @@ def PlacementMergeCheck.Admissible (p : PlacementMergeCheck) : Bool :=
 
 theorem placementMerge_admit_eq (p : PlacementMergeCheck) :
     (((placementMergeStep p.curRev p.incRev p.pendingOpId p.ackOpId
-        p.sourceKind p.hasPlacement p.matchesOptimistic
+        p.sourceKind p.hasPlacement
       &&& 0xFFFFFFFF) &&& 256) != 0) = p.Admissible := by
   unfold PlacementMergeCheck.Admissible placementMergeStep placementMergeLo32
   rw [pack32_lo]
@@ -8192,12 +8191,12 @@ def placementMergeMetaGate : MetaGateSpec PlacementMergeCheck
     (fun p => p.Admissible = true) where
   gate p :=
     ((placementMergeStep p.curRev p.incRev p.pendingOpId p.ackOpId
-        p.sourceKind p.hasPlacement p.matchesOptimistic
+        p.sourceKind p.hasPlacement
       &&& 0xFFFFFFFF) &&& 256) != 0
   sound p hg := by rw [← placementMerge_admit_eq p]; exact hg
   complete p hadm := by rw [placementMerge_admit_eq p]; exact hadm
-  posWitness := ⟨4, 5, 11, 11, 1, 1, 1⟩
-  negWitness := ⟨4, 4, 11, 0, 0, 1, 0⟩
+  posWitness := ⟨4, 5, 11, 11, 1, 1⟩
+  negWitness := ⟨4, 4, 11, 0, 0, 1⟩
   nonVacuous := rfl
   tight      := rfl
 
@@ -8209,24 +8208,23 @@ structure PlacementNodeState where
   deriving Repr, DecidableEq
 
 structure PlacementMergeEvent where
-  incRev            : UInt64
-  ackOpId           : UInt32
-  sourceKind        : UInt8
-  hasPlacement      : UInt8
-  matchesOptimistic : UInt8
-  incProjectOrd     : UInt32
-  incFolderOrd      : UInt32
+  incRev        : UInt64
+  ackOpId       : UInt32
+  sourceKind    : UInt8
+  hasPlacement  : UInt8
+  incProjectOrd : UInt32
+  incFolderOrd  : UInt32
   deriving Repr, DecidableEq
 
 def effectivePlacementCheck (s : PlacementNodeState) (e : PlacementMergeEvent) :
     PlacementMergeCheck :=
-  ⟨s.rev, e.incRev, s.pendingOpId, e.ackOpId, e.sourceKind, e.hasPlacement, e.matchesOptimistic⟩
+  ⟨s.rev, e.incRev, s.pendingOpId, e.ackOpId, e.sourceKind, e.hasPlacement⟩
 
 def placementMachineStep (s : PlacementNodeState) (e : PlacementMergeEvent) :
     PlacementNodeState × List UInt64 :=
   let chk := effectivePlacementCheck s e
   let w := placementMergeStep chk.curRev chk.incRev chk.pendingOpId chk.ackOpId
-    chk.sourceKind chk.hasPlacement chk.matchesOptimistic
+    chk.sourceKind chk.hasPlacement
   let admit := ((w &&& 0xFFFFFFFF) &&& 256) != 0
   let clearPending := ((w &&& 0xFFFFFFFF) &&& 512) != 0
   if !admit then
@@ -8254,13 +8252,11 @@ def placementMergeMetaStepSpec :
         have h_adm_bool : (((placementMergeStep (effectivePlacementCheck s e).curRev
             (effectivePlacementCheck s e).incRev (effectivePlacementCheck s e).pendingOpId
             (effectivePlacementCheck s e).ackOpId (effectivePlacementCheck s e).sourceKind
-            (effectivePlacementCheck s e).hasPlacement
-            (effectivePlacementCheck s e).matchesOptimistic &&& 0xFFFFFFFF) &&& 256) != 0) = true := by
+            (effectivePlacementCheck s e).hasPlacement &&& 0xFFFFFFFF) &&& 256) != 0) = true := by
           cases hg : (((placementMergeStep (effectivePlacementCheck s e).curRev
             (effectivePlacementCheck s e).incRev (effectivePlacementCheck s e).pendingOpId
             (effectivePlacementCheck s e).ackOpId (effectivePlacementCheck s e).sourceKind
-            (effectivePlacementCheck s e).hasPlacement
-            (effectivePlacementCheck s e).matchesOptimistic &&& 0xFFFFFFFF) &&& 256) != 0)
+            (effectivePlacementCheck s e).hasPlacement &&& 0xFFFFFFFF) &&& 256) != 0)
           · simp [hg] at h_not_nadm
           · rfl
         exact placementMergeMetaGate.sound (effectivePlacementCheck s e) h_adm_bool
@@ -8276,11 +8272,11 @@ def placementMergeMetaStepSpec :
       dsimp [placementMachineStep]
       simp [h_gate]
     traceEvents := [
-      ⟨0, 7, 2, 1, 1, 1, 2⟩,
-      ⟨1, 7, 1, 1, 1, 1, 2⟩
+      ⟨0, 7, 2, 1, 1, 2⟩,
+      ⟨1, 7, 1, 1, 1, 2⟩
     ]
-    posEvent := ⟨2, 0, 0, 1, 0, 2, 0⟩
-    negEvent := ⟨1, 0, 0, 0, 0, 1, 0⟩
+    posEvent := ⟨2, 0, 0, 1, 2, 0⟩
+    negEvent := ⟨1, 0, 0, 0, 1, 0⟩
     reachable_live := by decide
   }
   cost := {
@@ -8306,10 +8302,8 @@ def placementMergeMetaStepSpec :
 
 /-- Key anti-reversion invariants for `orb_placement_merge_step`:
     1. **Pending-op fence (`status = 5`)**: While an optimistic move `pendingOpId != 0` is in flight,
-       ANY list poll (`sourceKind = 0`) at `incRev ≤ curRev` — whether `matchesOptimistic = 0` OR
-       `matchesOptimistic = 1` (e.g., an overlapping `A → B → A` return-to-origin move before either
-       move commits) — is fenced (`lo32 = 5`, `admittedBit = 0`, `clearPendingBit = 0`), preventing
-       snap-back and keeping the pending operation alive until confirmed.
+       ANY list poll (`sourceKind = 0`) at `incRev ≤ curRev` is fenced (`lo32 = 5`, `admittedBit = 0`,
+       `clearPendingBit = 0`), preventing snap-back and keeping return-to-origin (`A → B → A`) pending.
     2. **Monotone settled revision (`status = 4`)**: Once settled (`pendingOpId = 0`), any poll or
        SSE frame with `incRev < curRev` is rejected (`lo32 = 4`, `admittedBit = 0`).
     3. **Authoritative ack clears fence & evicts stale buckets (`lo32 = 1793`)**: A matching ack or
@@ -8319,20 +8313,20 @@ def placementMergeMetaStepSpec :
        (`sourceKind = 0`) and an older acknowledgement (`sourceKind = 1`, `0 < ackOpId < pendingOpId`)
        observing an intermediate revision (`incRev > curRev`) while `pendingOpId != 0` admit (`256`)
        and update the confirmed rollback baseline without clearing `pendingOpId` (`clearPendingBit = 0`),
-       even when `matchesOptimistic = 1` (such as `A → B → C → B`). -/
+       including repeated-destination sequences (`A → B → C → B`). -/
 theorem placement_merge_fences_stale_polls_and_advances_monotonically
-    (curRev incRev : UInt64) (pendingOpId ackOpId : UInt32) (matchesOptimistic : UInt8)
+    (curRev incRev : UInt64) (pendingOpId ackOpId : UInt32)
     (h_pend : pendingOpId != 0)
     (h_le : incRev ≤ curRev) :
-    (placementMergeStep curRev incRev pendingOpId 0 0 1 matchesOptimistic &&& 0xFFFFFFFF) = 5 ∧
+    (placementMergeStep curRev incRev pendingOpId 0 0 1 &&& 0xFFFFFFFF) = 5 ∧
     (incRev < curRev →
-      (placementMergeStep curRev incRev 0 0 0 1 0 &&& 0xFFFFFFFF) = 4) ∧
+      (placementMergeStep curRev incRev 0 0 0 1 &&& 0xFFFFFFFF) = 4) ∧
     (curRev < curRev + 1 →
-      (placementMergeStep curRev (curRev + 1) pendingOpId pendingOpId 1 1 1 &&& 0xFFFFFFFF) = 1793) ∧
+      (placementMergeStep curRev (curRev + 1) pendingOpId pendingOpId 1 1 &&& 0xFFFFFFFF) = 1793) ∧
     (curRev < curRev + 1 →
-      (placementMergeStep curRev (curRev + 1) pendingOpId 0 0 1 matchesOptimistic &&& 0xFFFFFFFF) = 1281) ∧
+      (placementMergeStep curRev (curRev + 1) pendingOpId 0 0 1 &&& 0xFFFFFFFF) = 1281) ∧
     (curRev < curRev + 1 → ackOpId != 0 → ackOpId < pendingOpId →
-      (placementMergeStep curRev (curRev + 1) pendingOpId ackOpId 1 1 matchesOptimistic &&& 0xFFFFFFFF) = 1281) := by
+      (placementMergeStep curRev (curRev + 1) pendingOpId ackOpId 1 1 &&& 0xFFFFFFFF) = 1281) := by
   have h_not_gt : ¬ (curRev < incRev) := UInt64.not_lt.mpr h_le
   have hsk0_3 : ((0 : UInt8) ≤ 3) := by decide
   have hsk1_3 : ((1 : UInt8) ≤ 3) := by decide

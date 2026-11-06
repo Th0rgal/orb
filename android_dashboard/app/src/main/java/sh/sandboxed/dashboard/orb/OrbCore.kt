@@ -469,8 +469,7 @@ object OrbMissionTree {
                     pendingOpId = prev?.pendingOpId ?: 0,
                     ackOpId = opId,
                     sourceKind = 2,
-                    hasPlacement = true,
-                    matchesOptimistic = false
+                    hasPlacement = true
                 )
                 if (!verdict.admitted) {
                     prev
@@ -500,8 +499,7 @@ object OrbMissionTree {
                     pendingOpId = cur.pendingOpId,
                     ackOpId = opId,
                     sourceKind = 3,
-                    hasPlacement = false,
-                    matchesOptimistic = false
+                    hasPlacement = false
                 )
                 if (!verdict.admitted) {
                     cur
@@ -535,18 +533,13 @@ object OrbMissionTree {
             placements.compute(item.missionId) { _, prev ->
                 val curRev = prev?.revision ?: 0L
                 val pendingOp = prev?.pendingOpId ?: 0
-                val matchesOpt = prev != null &&
-                    pendingOp != 0 &&
-                    (prev.optimisticProject ?: prev.project) == incProj &&
-                    (prev.optimisticFolder ?: prev.folder) == incFolder
                 val verdict = OrbKernel.placementMergeStep(
                     curRev = curRev,
                     incRev = item.placementRevision,
                     pendingOpId = pendingOp,
                     ackOpId = ackOpId,
                     sourceKind = 1,
-                    hasPlacement = true,
-                    matchesOptimistic = matchesOpt
+                    hasPlacement = true
                 )
                 if (!verdict.admitted) {
                     if (ackOpId != 0 && prev != null && pendingOp == ackOpId && item.placementRevision < curRev) {
@@ -556,8 +549,7 @@ object OrbMissionTree {
                             pendingOpId = pendingOp,
                             ackOpId = ackOpId,
                             sourceKind = 3,
-                            hasPlacement = false,
-                            matchesOptimistic = false
+                            hasPlacement = false
                         )
                         if (rbVerdict.admitted) {
                             val settledFolder = if (isChild) "" else prev.folder
@@ -747,10 +739,6 @@ object OrbMissionTree {
                 val pendingOp = prev?.pendingOpId ?: 0
                 val candProj = if (hasProjectKey) (rawProject ?: "") else (prev?.project ?: seenFacts[id]?.project ?: "")
                 val candFolder = if (isChild) "" else (rawFolder ?: prev?.folder ?: "")
-                val matchesOpt = prev != null &&
-                    pendingOp != 0 &&
-                    (prev.optimisticProject ?: prev.project) == candProj &&
-                    (prev.optimisticFolder ?: prev.folder) == candFolder
                 if (prev == null) {
                     PlacementState(project = candProj, folder = candFolder, revision = incRev)
                 } else {
@@ -760,8 +748,7 @@ object OrbMissionTree {
                         pendingOpId = pendingOp,
                         ackOpId = 0,
                         sourceKind = 0,
-                        hasPlacement = true,
-                        matchesOptimistic = matchesOpt
+                        hasPlacement = true
                     )
                     if (!verdict.admitted) {
                         resolvedProject = (prev.optimisticProject ?: prev.project).takeIf { it.isNotEmpty() }

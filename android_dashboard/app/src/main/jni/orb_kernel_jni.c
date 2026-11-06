@@ -372,6 +372,6 @@ Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWireTranscriptSliceStep(JNIEnv *env
 }
 
 JNIEXPORT jlong JNICALL
-Java_sh_sandboxed_dashboard_orb_OrbKernel_orbPlacementMergeStep(JNIEnv *env, jclass clazz, jlong curRev, jlong incRev, jint pendingOpId, jint ackOpId, jint sourceKind, jint hasPlacement, jint matchesOptimistic) {
-    return (jlong)orb_placement_merge_step((uint64_t)curRev, (uint64_t)incRev, (uint32_t)pendingOpId, (uint32_t)ackOpId, (uint8_t)sourceKind, (uint8_t)hasPlacement, (uint8_t)matchesOptimistic);
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbPlacementMergeStep(JNIEnv *env, jclass clazz, jlong curRev, jlong incRev, jint pendingOpId, jint ackOpId, jint sourceKind, jint hasPlacement) {
+    return (jlong)orb_placement_merge_step((uint64_t)curRev, (uint64_t)incRev, (uint32_t)pendingOpId, (uint32_t)ackOpId, (uint8_t)sourceKind, (uint8_t)hasPlacement);
 }

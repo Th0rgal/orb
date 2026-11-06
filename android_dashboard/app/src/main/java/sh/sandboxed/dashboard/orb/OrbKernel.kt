@@ -670,8 +670,7 @@ object OrbKernel {
         pendingOpId: Int,
         ackOpId: Int,
         sourceKind: Int,
-        hasPlacement: Int,
-        matchesOptimistic: Int
+        hasPlacement: Int
     ): Long
 
     data class WorkfoldVerdict(val foldItem: Boolean, val foldHasToolNext: Boolean)
@@ -1406,8 +1405,7 @@ object OrbKernel {
         pendingOpId: Int,
         ackOpId: Int,
         sourceKind: Int,
-        hasPlacement: Boolean,
-        matchesOptimistic: Boolean
+        hasPlacement: Boolean
     ): PlacementMergeVerdict {
         requireNative()
         val raw = orbPlacementMergeStep(
@@ -1416,8 +1414,7 @@ object OrbKernel {
             maxOf(0, pendingOpId),
             maxOf(0, ackOpId),
             enum8(sourceKind),
-            bInt(hasPlacement),
-            bInt(matchesOptimistic)
+            bInt(hasPlacement)
         )
         val lo32 = (raw and 0xFFFF_FFFFL).toInt()
         val hi32 = (raw ushr 32) and 0xFFFF_FFFFL

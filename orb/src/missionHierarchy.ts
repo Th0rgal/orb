@@ -139,7 +139,6 @@ function mergeIncomingPlacement(m: HierarchyFields, isPartial = false): Placemen
   }
   const effectiveProject = m.project !== undefined ? incProject : cur.project;
   const effectiveFolder = hasParent ? "" : (m.folder !== undefined ? incFolder : cur.folder);
-  const matchesOptimistic = cur.pendingOpId !== 0 && effectiveProject === cur.project && effectiveFolder === cur.folder;
   const verdict = orbPlacementMergeStep({
     curRev: cur.rev,
     incRev,
@@ -147,7 +146,6 @@ function mergeIncomingPlacement(m: HierarchyFields, isPartial = false): Placemen
     ackOpId: 0,
     sourceKind: 0,
     hasPlacement: true,
-    matchesOptimistic,
   });
   if (!verdict.admitted) return cur;
   const nextRev = Math.max(cur.rev, incRev, verdict.nextRev32);
@@ -201,7 +199,6 @@ export function stageOptimisticPlacement(
     ackOpId: opId,
     sourceKind: 2,
     hasPlacement: true,
-    matchesOptimistic: false,
   });
   if (!verdict.admitted) return;
   placements.set(id, {
@@ -225,7 +222,6 @@ export function rollbackOptimisticPlacement(id: string, ackOpId: number): boolea
     ackOpId,
     sourceKind: 3,
     hasPlacement: false,
-    matchesOptimistic: false,
   });
   if (!verdict.admitted) return false;
   const prior = cur.rollback ?? { project: cur.project, folder: cur.folder, rev: cur.rev };
@@ -252,7 +248,6 @@ export function commitAuthoritativePlacements(items: readonly PlacementCommitInp
     const hasParent = hasNestedParent(id);
     const folder = hasParent ? "" : normalizeMissionFolder(item.folder);
     const proj = normalizeProject(item.project);
-    const matchesOptimistic = !!(cur && cur.pendingOpId !== 0 && proj === cur.project && folder === cur.folder);
     const verdict = orbPlacementMergeStep({
       curRev: cur?.rev ?? 0,
       incRev,
@@ -260,7 +255,6 @@ export function commitAuthoritativePlacements(items: readonly PlacementCommitInp
       ackOpId,
       sourceKind: 1 as PlacementSourceKind,
       hasPlacement: true,
-      matchesOptimistic,
     });
     if (!verdict.admitted) {
       if (ackOpId !== 0 && cur && cur.pendingOpId === ackOpId && incRev < cur.rev && rollbackOptimisticPlacement(id, ackOpId)) {
