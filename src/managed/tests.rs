@@ -6437,6 +6437,54 @@ fn legacy_prior_pool_charges_preserved_across_stop_and_window_boundary() {
             && (uc_resumed.lifetime_spent_usd - 20.0).abs() < 0.01,
         "Legacy pre-resume $10 yesterday must not be folded into today's segment on close: {uc_resumed:?}"
     );
+
+    // Case D: Stopped machine whose segment closed with a $40 estimate across
+    // [22:00 yesterday, 02:00 today] and then received a final metered bill
+    // ($36 downward or $44 upward) in `refresh_usage` (`reconcile_metered_cost`).
+    // Half of the interval lies in today's window, so today's spend must become
+    // $18 (for $36) and $22 (for $44), never stuck at $20 or lumped at 02:00.
+    let mut pool_d = pool("pool_d", 100.0, None);
+    pool_d.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    pools.insert("pool_d".into(), pool_d);
+
+    let mut metered_vm = spend_machine(
+        "m-metered-reconcile",
+        "large",
+        Some("pool_d"),
+        "2026-11-04T22:00:00Z",
+        None,
+        0.0,
+    );
+    metered_vm.created_at = t_22;
+    metered_vm.usd_per_hour = 10.0;
+    metered_vm.cost_is_metered = false;
+    metered_vm.expires_at = t_02 + chrono::Duration::minutes(30);
+    metered_vm.cost_usd = metered_vm.estimated_cost(t_02); // $40.0
+    metered_vm.close_billing_segment(t_02, t_02, t_02);
+    metered_vm.state = MachineState::Stopped;
+    metered_vm.stopped_at = Some(t_02);
+
+    // Provider reports $36.0 final metered charge:
+    metered_vm.cost_usd = 36.0;
+    metered_vm.cost_is_metered = true;
+    metered_vm.reconcile_metered_cost();
+    let ud_down =
+        budget::pool_usage("pool_d", &pools, &[metered_vm.clone()], t_03, &is_open).unwrap();
+    assert!(
+        (ud_down.spent_usd - 18.0).abs() < 0.01
+            && (ud_down.lifetime_spent_usd - 36.0).abs() < 0.01,
+        "Downward metered adjustment ($40 -> $36) must scale today's window spend to $18: {ud_down:?}"
+    );
+
+    // Provider reports $44.0 final metered charge:
+    metered_vm.cost_usd = 44.0;
+    metered_vm.reconcile_metered_cost();
+    let ud_up = budget::pool_usage("pool_d", &pools, &[metered_vm], t_03, &is_open).unwrap();
+    assert!(
+        (ud_up.spent_usd - 22.0).abs() < 0.01
+            && (ud_up.lifetime_spent_usd - 44.0).abs() < 0.01,
+        "Upward metered adjustment ($36 -> $44) must scale [22:00, 02:00] window spend to $22: {ud_up:?}"
+    );
 }
 
 #[tokio::test]

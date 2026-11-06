@@ -1074,6 +1074,69 @@ impl ManagedMachine {
         self.segment_spent_offset = spent;
     }
 
+    /// Reconcile closed `billed_segments` and `prior_pool_charges` for the
+    /// current run (`>= run_started_at` or `created_at`) when `refresh_usage`
+    /// updates a non-live machine's metered `cost_usd` after `stop_inner` or
+    /// `destroy_inner` already closed its run segment with an estimate.
+    pub fn reconcile_metered_cost(&mut self) {
+        if self.state.is_live() || self.billed_segments.is_empty() {
+            return;
+        }
+        let target = self.cost_usd.max(0.0);
+        let diff = target - self.segment_spent_offset;
+        if diff.abs() <= 1e-9 {
+            return;
+        }
+        let run_floor = self.run_started_at.unwrap_or(self.created_at);
+        let run_sum: f64 = self
+            .billed_segments
+            .iter()
+            .filter(|s| s.end > run_floor)
+            .map(|s| s.cost_usd)
+            .sum();
+        if run_sum > 1e-9 {
+            let new_run_sum = (run_sum + diff).max(0.0);
+            let scale = new_run_sum / run_sum;
+            for seg in &mut self.billed_segments {
+                if seg.end > run_floor {
+                    seg.cost_usd *= scale;
+                }
+            }
+        } else if diff > 0.0 {
+            if let Some(last) = self.billed_segments.last_mut() {
+                last.cost_usd += diff;
+            }
+        }
+        self.segment_spent_offset = self.billed_segments.iter().map(|s| s.cost_usd).sum();
+        // Rebuild `prior_pool_charges` and `pool_spent_offset` from the reconciled
+        // closed segments when the machine is terminal (`!is_live()`) so
+        // `prior_here + current_here` (`total_here`) stays aligned with the
+        // metered segment totals even across mid-run pool transfers.
+        let mut rebuilt_prior: Vec<(String, f64)> = Vec::new();
+        let mut non_current_tail = 0;
+        let len = self.billed_segments.len();
+        while non_current_tail < len {
+            let idx = len - 1 - non_current_tail;
+            if self.billed_segments[idx].pool_id == self.budget_pool_id {
+                non_current_tail += 1;
+            } else {
+                break;
+            }
+        }
+        let prior_end_idx = len - non_current_tail;
+        let mut new_pool_offset = 0.0;
+        for seg in &self.billed_segments[..prior_end_idx] {
+            new_pool_offset += seg.cost_usd;
+            if let Some(pid) = &seg.pool_id {
+                if seg.cost_usd > 0.0 {
+                    rebuilt_prior.push((pid.clone(), seg.cost_usd));
+                }
+            }
+        }
+        self.prior_pool_charges = rebuilt_prior;
+        self.pool_spent_offset = new_pool_offset;
+    }
+
     /// Move the VM to `pool`: what it cost so far stays with the old pool,
     /// only future cost is charged to the new one.
     pub fn change_pool(&mut self, pool: Option<String>, now: DateTime<Utc>) {
@@ -5474,19 +5537,22 @@ impl ManagedManager {
                 return Err(ManagedError::new("provider_error", 502, e));
             }
         }
+        let now = Utc::now();
         let m = self
             .update(id, |m| {
+                if !m.cost_is_metered {
+                    m.cost_usd = m.estimated_cost(now);
+                }
+                let stop_end = now.min(m.expires_at).max(m.created_at);
+                m.close_billing_segment(stop_end, now, now);
                 m.state = if failed {
                     MachineState::Failed
                 } else {
                     MachineState::Destroyed
                 };
-                m.destroyed_at = Some(Utc::now());
+                m.destroyed_at = Some(now);
                 if m.provider_id.is_none() {
                     m.ledger_closed = true;
-                }
-                if !m.cost_is_metered {
-                    m.cost_usd = m.estimated_cost(Utc::now());
                 }
             })
             .await
@@ -5513,6 +5579,7 @@ impl ManagedManager {
                     .update(id, |m| {
                         m.cost_usd = m.cost_before_resume + usage.dollars;
                         m.cost_is_metered = true;
+                        m.reconcile_metered_cost();
                         if closed {
                             m.ledger_closed = true;
                         }

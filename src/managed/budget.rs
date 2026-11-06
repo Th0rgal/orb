@@ -303,14 +303,24 @@ fn machine_pool_spent_in_window(
     // Exact ownership-interval accounting whenever billed segments have been
     // recorded across pool changes, stops, or resumes.
     if !m.billed_segments.is_empty() || m.segment_started_at.is_some() {
+        let seg_sum: f64 = m.billed_segments.iter().map(|s| s.cost_usd).sum();
+        let total_spent = machine_spent(m, now);
+        // Defensive fallback if a non-live machine's metered `cost_usd` was
+        // updated without running `reconcile_metered_cost`.
+        let scale = if !m.state.is_live() && seg_sum > 1e-9 && (total_spent - seg_sum).abs() > 1e-6
+        {
+            (total_spent / seg_sum).max(0.0)
+        } else {
+            1.0
+        };
         let mut sum = 0.0;
         for seg in &m.billed_segments {
             if seg.pool_id.as_deref() == Some(pool_id) {
-                sum += segment_cost_in_window(seg.start, seg.end, seg.cost_usd, w0);
+                sum += segment_cost_in_window(seg.start, seg.end, seg.cost_usd * scale, w0);
             }
         }
-        if m.budget_pool_id.as_deref() == Some(pool_id) {
-            let open_cost = (machine_spent(m, now) - m.segment_spent_offset).max(0.0);
+        if m.state.is_live() && m.budget_pool_id.as_deref() == Some(pool_id) {
+            let open_cost = (total_spent - m.segment_spent_offset).max(0.0);
             let seg_start = m
                 .segment_started_at
                 .or(m.run_started_at)
