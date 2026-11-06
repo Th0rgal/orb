@@ -898,12 +898,6 @@ impl WorkspaceStore {
             let workspace = snapshot
                 .get(&id)
                 .ok_or_else(|| conflict(StatusCode::NOT_FOUND, "Workspace not found".into()))?;
-            if workspace.status == WorkspaceStatus::Building {
-                return Err(conflict(
-                    StatusCode::CONFLICT,
-                    "Workspace build already in progress".into(),
-                ));
-            }
             if workspace.workspace_type != WorkspaceType::Container {
                 return Err(conflict(
                     StatusCode::BAD_REQUEST,
@@ -1013,11 +1007,11 @@ impl WorkspaceStore {
             }
             workspace.config["build_generation"] = generation.into();
             workspace.status = WorkspaceStatus::Building;
-            workspace.error_message = None;
             if let Some(distro) = distro {
                 workspace.distro = Some(distro);
             }
             let claimed = workspace.clone();
+            workspace.error_message = None;
             if let Err(error) = write_workspace_snapshot(&storage_path, &next) {
                 drop(lock);
                 return Err(io_error(error));
@@ -1219,7 +1213,7 @@ impl WorkspaceStore {
     }
 
     /// Add a new workspace.
-    pub async fn add(&self, workspace: Workspace) -> Uuid {
+    pub async fn add(&self, workspace: Workspace) -> std::io::Result<Uuid> {
         let id = workspace.id;
         let _writer = self.workspaces.lock_writer().await;
         let storage_path = self.storage_path.clone();
@@ -1228,27 +1222,39 @@ impl WorkspaceStore {
 
         match tokio::task::spawn_blocking(move || -> std::io::Result<HashMap<Uuid, Workspace>> {
             let mut workspace = workspace;
-            stamp_custom_workspace_control_registry(&mut workspace, &working_dir);
             let _storage_lock = open_storage_lock(&storage_path)?;
             let mut next = load_base_workspaces(&storage_path, &in_memory)?;
+            let control_registry_path = working_dir
+                .join(".sandboxed-sh")
+                .join("mission-workspace-roots")
+                .join(format!("{id}.json"));
+            let registry_preexisted = control_registry_path.exists();
+            stamp_custom_workspace_control_registry(&mut workspace, &working_dir);
+            let registry_path = mission_workspace_roots_path(&workspace);
             next.insert(id, workspace);
-            write_workspace_snapshot(&storage_path, &next)?;
+            if let Err(error) = write_workspace_snapshot(&storage_path, &next) {
+                if !registry_preexisted && registry_path == control_registry_path {
+                    let _ = std::fs::remove_file(&registry_path);
+                }
+                return Err(error);
+            }
             Ok(next)
         })
         .await
         {
             Ok(Ok(next)) => {
                 self.workspaces.store(Arc::new(next));
+                Ok(id)
             }
             Ok(Err(e)) => {
                 tracing::error!("Failed to save workspaces to disk: {}", e);
+                Err(e)
             }
             Err(e) => {
                 tracing::error!("Workspace add task panicked: {}", e);
+                Err(std::io::Error::other(e))
             }
         }
-
-        id
     }
 
     pub async fn update_with<F>(&self, id: Uuid, edit: F) -> Result<Workspace, BuildConflict>
@@ -7614,7 +7620,7 @@ WORKING_DIR = "/workspaces/mission-old"
         let store = WorkspaceStore::new(temp.path().to_path_buf()).await;
         let workspace = Workspace::new_container("custom".into(), temp.path().join("mount"));
         std::fs::create_dir_all(&workspace.path).unwrap();
-        let id = store.add(workspace).await;
+        let id = store.add(workspace).await.unwrap();
         let original = store.get(id).await.unwrap();
         let original_root = original.config[CONTROL_REGISTRY_CONFIG_KEY]
             .as_str()
@@ -7650,7 +7656,7 @@ WORKING_DIR = "/workspaces/mission-old"
         let store = WorkspaceStore::new(temp.path().to_path_buf()).await;
         let mut workspace = Workspace::new_container("doomed".into(), temp.path().join("mount"));
         std::fs::create_dir_all(&workspace.path).unwrap();
-        let id = store.add(workspace.clone()).await;
+        let id = store.add(workspace.clone()).await.unwrap();
         workspace = store.get(id).await.unwrap();
         let registry = mission_workspace_roots_path(&workspace);
         assert!(registry.exists());
