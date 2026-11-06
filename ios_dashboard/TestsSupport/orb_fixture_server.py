@@ -296,6 +296,133 @@ def agent_events(mid):
         add('tool_result','BUILD SUCCEEDED','Bash','b1'); add('assistant_message','The build is fixed and the PR is open.')
     return rows
 
+def resources_overview_fixture(rng='6h'):
+    now_ms = int(time.time() * 1000)
+    buckets = 24
+    bucket_s = 900
+    ts = [now_ms - (buckets - 1 - i) * bucket_s * 1000 for i in range(buckets)]
+    inf_s1 = [0.62 + 0.28 * ((i * 5 % 11) / 10.0) for i in range(buckets)]
+    inf_s2 = [0.44 + 0.21 * (((i + 3) * 7 % 9) / 8.0) for i in range(buckets)]
+    inf_s3 = [0.25 + 0.14 * (((i + 6) * 3 % 7) / 6.0) for i in range(buckets)]
+    cpu_s1 = [12.0 + 4.0 * ((i % 6) / 5.0) for i in range(buckets)]
+    cpu_s2 = [16.0 + 8.0 * (((i + 2) % 5) / 4.0) for i in range(buckets)]
+    cpu_s3 = [8.0 + 4.0 * (((i + 4) % 4) / 3.0) for i in range(buckets)]
+    return {
+        'as_of': iso(time.time()),
+        'bucket_seconds': bucket_s,
+        'timestamps_ms': ts,
+        'compute': {
+            'active_vcpu': 42.0,
+            'total_vcpu': 64.0,
+            'hourly_burn_usd': 4.85,
+            'sources': [
+                {'id': 'src-spark', 'label': 'DGX Spark', 'sublabel': '20/20 vCPU', 'total_vcpu': 20.0, 'est_usd_per_h': 1.20, 'series_vcpu': cpu_s1, 'series_usd_per_h': [v * 0.06 for v in cpu_s1]},
+                {'id': 'src-boat', 'label': 'Boat xlarge', 'sublabel': '16/32 vCPU', 'total_vcpu': 16.0, 'est_usd_per_h': 2.85, 'series_vcpu': cpu_s2, 'series_usd_per_h': [v * 0.14 for v in cpu_s2]},
+                {'id': 'src-core', 'label': 'Core host', 'sublabel': '6/12 vCPU', 'total_vcpu': 6.0, 'est_usd_per_h': 0.80, 'series_vcpu': cpu_s3, 'series_usd_per_h': [v * 0.05 for v in cpu_s3]},
+            ],
+        },
+        'inference': {
+            'current_b_tok_per_h': 1.84,
+            'est_usd_per_h': 14.60,
+            'window_est_usd': 72.40,
+            'pools': [
+                {'id': 'pool-claude', 'label': 'Claude Max', 'sublabel': '5h window', 'remaining_pct': 68.0, 'current_b_tok_per_h': 0.92, 'est_usd_per_h': 7.40, 'series_b_tok_per_h': inf_s1, 'series_usd_per_h': [v * 8.0 for v in inf_s1]},
+                {'id': 'pool-codex', 'label': 'Codex Pro', 'sublabel': 'primary', 'remaining_pct': 75.0, 'current_b_tok_per_h': 0.58, 'est_usd_per_h': 4.80, 'series_b_tok_per_h': inf_s2, 'series_usd_per_h': [v * 8.2 for v in inf_s2]},
+                {'id': 'pool-agy', 'label': 'Antigravity', 'sublabel': 'argon-high', 'remaining_pct': 84.0, 'current_b_tok_per_h': 0.34, 'est_usd_per_h': 2.40, 'series_b_tok_per_h': inf_s3, 'series_usd_per_h': [v * 7.0 for v in inf_s3]},
+            ],
+        },
+        'missions': [
+            {'id': 'agent-work', 'title': 'Fix the iOS build', 'status': 'active', 'subagent_total': 14, 'subagent_running': 4, 'vcpu': 22.0, 'compute_usd_per_h': 2.60, 'b_tok_per_h': 0.86, 'inference_usd_per_h': 6.90},
+            {'id': 'boat-parent', 'title': 'Boat matrix kernel', 'status': 'active', 'subagent_total': 9, 'subagent_running': 2, 'vcpu': 14.0, 'compute_usd_per_h': 1.75, 'b_tok_per_h': 0.54, 'inference_usd_per_h': 4.30},
+            {'id': 'long-rich', 'title': 'Lean kernel spec audit', 'status': 'waiting_background', 'subagent_total': 6, 'subagent_running': 1, 'vcpu': 6.0, 'compute_usd_per_h': 0.50, 'b_tok_per_h': 0.44, 'inference_usd_per_h': 3.40},
+        ],
+        'links': [
+            {'kind': 'inference', 'source_id': 'pool-claude', 'mission_id': 'agent-work', 'value': 0.62, 'est_usd_per_h': 5.00, 'degraded': False},
+            {'kind': 'inference', 'source_id': 'pool-claude', 'mission_id': 'long-rich', 'value': 0.30, 'est_usd_per_h': 2.40, 'degraded': False},
+            {'kind': 'inference', 'source_id': 'pool-codex', 'mission_id': 'boat-parent', 'value': 0.40, 'est_usd_per_h': 3.30, 'degraded': False},
+            {'kind': 'inference', 'source_id': 'pool-codex', 'mission_id': 'agent-work', 'value': 0.18, 'est_usd_per_h': 1.50, 'degraded': False},
+            {'kind': 'inference', 'source_id': 'pool-agy', 'mission_id': 'boat-parent', 'value': 0.14, 'est_usd_per_h': 1.00, 'degraded': False},
+            {'kind': 'inference', 'source_id': 'pool-agy', 'mission_id': 'long-rich', 'value': 0.14, 'est_usd_per_h': 1.00, 'degraded': True},
+            {'kind': 'inference', 'source_id': 'pool-agy', 'mission_id': 'agent-work', 'value': 0.06, 'est_usd_per_h': 0.40, 'degraded': False},
+            {'kind': 'compute', 'source_id': 'src-spark', 'mission_id': 'agent-work', 'value': 12.0, 'est_usd_per_h': 0.72, 'degraded': False},
+            {'kind': 'compute', 'source_id': 'src-spark', 'mission_id': 'long-rich', 'value': 6.0, 'est_usd_per_h': 0.48, 'degraded': False},
+            {'kind': 'compute', 'source_id': 'src-boat', 'mission_id': 'boat-parent', 'value': 12.0, 'est_usd_per_h': 2.10, 'degraded': False},
+            {'kind': 'compute', 'source_id': 'src-boat', 'mission_id': 'agent-work', 'value': 6.0, 'est_usd_per_h': 0.75, 'degraded': False},
+            {'kind': 'compute', 'source_id': 'src-core', 'mission_id': 'agent-work', 'value': 4.0, 'est_usd_per_h': 0.55, 'degraded': False},
+            {'kind': 'compute', 'source_id': 'src-core', 'mission_id': 'boat-parent', 'value': 2.0, 'est_usd_per_h': 0.25, 'degraded': False},
+        ],
+    }
+
+def resources_mission_fixture(mid, horizon='6h'):
+    title = MISSIONS.get(mid, {}).get('title', 'Fix the iOS build')
+    pts = 20
+    obs_tok = [0.35 + 0.45 * ((i * 3 % 8) / 7.0) for i in range(pts)]
+    obs_cpu = [8.0 + 14.0 * (((i + 2) * 5 % 9) / 8.0) for i in range(pts)]
+    return {
+        'mission': {
+            'id': mid,
+            'title': title,
+            'status': 'active',
+            'elapsed_secs': 4820,
+            'eta_remaining_secs': 1380,
+        },
+        'available_horizons': [
+            {'id': '1h', 'label': 'Fast-DAG (1h)'},
+            {'id': '6h', 'label': 'Fast-DAG (6h)'},
+            {'id': '24h', 'label': 'Fast-DAG (24h)'},
+        ],
+        'flow': {
+            'inputs': [
+                {'id': 'in-claude', 'kind': 'inference', 'label': 'Claude Max', 'sub': '68% left', 'weight': 0.62, 'est_usd_per_h': 5.0},
+                {'id': 'in-codex', 'kind': 'inference', 'label': 'Codex Pro', 'sub': '75% left', 'weight': 0.24, 'est_usd_per_h': 1.9},
+                {'id': 'in-spark', 'kind': 'compute', 'label': 'DGX Spark', 'sub': '12 vCPU', 'weight': 12.0, 'est_usd_per_h': 0.72},
+                {'id': 'in-boat', 'kind': 'compute', 'label': 'Boat xlarge', 'sub': '10 vCPU', 'weight': 10.0, 'est_usd_per_h': 1.88},
+            ],
+            'tracks': [
+                {'id': 'trk-orch', 'label': 'Orchestrator', 'sub': 'main'},
+                {'id': 'trk-ios', 'label': 'iOS Verify', 'sub': '2 spans'},
+                {'id': 'trk-lean', 'label': 'Kernel Proof', 'sub': '3 spans'},
+            ],
+            'subagents': [
+                {'id': 'sub-1', 'label': 'Planner', 'role': 'coordinator', 'mission_id': mid, 'vcpu': 4.0, 'compute_usd_per_h': 0.40, 'b_tok_per_h': 0.28, 'inference_usd_per_h': 2.30},
+                {'id': 'sub-2', 'label': 'Simulator UI', 'role': 'worker', 'mission_id': mid, 'vcpu': 8.0, 'compute_usd_per_h': 1.10, 'b_tok_per_h': 0.34, 'inference_usd_per_h': 2.70},
+                {'id': 'sub-3', 'label': 'AuditSpec', 'role': 'worker', 'mission_id': mid, 'vcpu': 10.0, 'compute_usd_per_h': 1.10, 'b_tok_per_h': 0.24, 'inference_usd_per_h': 1.90},
+            ],
+            'input_to_track': [
+                {'kind': 'inference', 'source_id': 'in-claude', 'target_id': 'trk-orch', 'weight': 0.28, 'est_usd_per_h': 2.30, 'degraded': False},
+                {'kind': 'inference', 'source_id': 'in-claude', 'target_id': 'trk-ios', 'weight': 0.34, 'est_usd_per_h': 2.70, 'degraded': False},
+                {'kind': 'inference', 'source_id': 'in-codex', 'target_id': 'trk-lean', 'weight': 0.24, 'est_usd_per_h': 1.90, 'degraded': False},
+                {'kind': 'compute', 'source_id': 'in-spark', 'target_id': 'trk-orch', 'weight': 4.0, 'est_usd_per_h': 0.24, 'degraded': False},
+                {'kind': 'compute', 'source_id': 'in-spark', 'target_id': 'trk-lean', 'weight': 8.0, 'est_usd_per_h': 0.48, 'degraded': False},
+                {'kind': 'compute', 'source_id': 'in-boat', 'target_id': 'trk-ios', 'weight': 8.0, 'est_usd_per_h': 1.50, 'degraded': False},
+                {'kind': 'compute', 'source_id': 'in-boat', 'target_id': 'trk-lean', 'weight': 2.0, 'est_usd_per_h': 0.38, 'degraded': False},
+            ],
+            'track_to_subagent': [
+                {'kind': 'inference', 'source_id': 'trk-orch', 'target_id': 'sub-1', 'weight': 0.28, 'est_usd_per_h': 2.30, 'degraded': False},
+                {'kind': 'inference', 'source_id': 'trk-ios', 'target_id': 'sub-2', 'weight': 0.34, 'est_usd_per_h': 2.70, 'degraded': False},
+                {'kind': 'inference', 'source_id': 'trk-lean', 'target_id': 'sub-3', 'weight': 0.24, 'est_usd_per_h': 1.90, 'degraded': False},
+                {'kind': 'compute', 'source_id': 'trk-orch', 'target_id': 'sub-1', 'weight': 4.0, 'est_usd_per_h': 0.40, 'degraded': False},
+                {'kind': 'compute', 'source_id': 'trk-ios', 'target_id': 'sub-2', 'weight': 8.0, 'est_usd_per_h': 1.50, 'degraded': False},
+                {'kind': 'compute', 'source_id': 'trk-lean', 'target_id': 'sub-3', 'weight': 10.0, 'est_usd_per_h': 0.86, 'degraded': False},
+            ],
+        },
+        'dag': {
+            'horizon_secs': 7200,
+            'bars': [
+                {'id': 'b-orch', 'mission_id': mid, 'label': 'Lead Orchestrator', 'section': 'Orchestrator', 'role': 'coordinator', 'node_id': 'core', 'start_offset_secs': 120, 'duration_secs': 4700, 'eta_remaining_secs': 1380, 'state': 'active', 'after_ids': []},
+                {'id': 'b-w1', 'mission_id': mid, 'label': 'Schema & Layout Pass', 'section': 'DGX Spark', 'role': 'worker', 'node_id': 'spark-1', 'start_offset_secs': 300, 'duration_secs': 1600, 'state': 'done', 'after_ids': ['b-orch']},
+                {'id': 'b-w2', 'mission_id': mid, 'label': 'AuditSpec Proof Check', 'section': 'DGX Spark', 'role': 'worker', 'node_id': 'spark-1', 'start_offset_secs': 2050, 'duration_secs': 2770, 'eta_remaining_secs': 900, 'state': 'active', 'after_ids': ['b-w1']},
+                {'id': 'b-w3', 'mission_id': mid, 'label': 'Simulator UI Suite', 'section': 'Boat · xlarge VMs', 'role': 'worker', 'node_id': 'managed-boat-1', 'start_offset_secs': 900, 'duration_secs': 3920, 'eta_remaining_secs': 1200, 'state': 'active', 'after_ids': ['b-orch']},
+            ],
+        },
+        'timeline': {
+            'observed_b_tok_per_h': obs_tok,
+            'observed_inference_usd_per_h': [v * 8.0 for v in obs_tok],
+            'observed_vcpu': obs_cpu,
+            'observed_compute_usd_per_h': [v * 0.11 for v in obs_cpu],
+        },
+    }
+
 synthetic_long_running()
 synthetic_finished_antigravity()
 reset()
@@ -344,6 +471,12 @@ class Handler(BaseHTTPRequestHandler):
         if p=='/api/ai/providers/usage': return self.send({'entries': {'fixture-provider': {'provider_type':'openai', 'codex_primary_used_percent':25}}})
         if p=='/api/cloud/usage': return self.send({'accounts':{}})
         if p=='/api/projects': return self.send({'projects':PROJECTS})
+        if p=='/api/resources/overview':
+            q=parse_qs(u.query)
+            return self.send(resources_overview_fixture(q.get('range',['6h'])[0]))
+        if p.startswith('/api/resources/missions/'):
+            q=parse_qs(u.query)
+            return self.send(resources_mission_fixture(p.split('/')[4], q.get('horizon',['6h'])[0]))
         if p=='/api/control/missions' and FAIL_MISSIONS: return self.send({'error':'fixture: missions unavailable'},500)
         if p=='/api/control/missions':
             time.sleep(LIST_DELAY)

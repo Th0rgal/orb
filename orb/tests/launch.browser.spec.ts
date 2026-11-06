@@ -195,7 +195,7 @@ test("preflight refuses Grok on a node whose server only advertises Claude Code 
  await expect(menu.getByRole("option",{name:/^Grok/})).toContainText("not on DGX Spark");
  await expect(menu.getByRole("option",{name:/^Codex/})).toContainText("not on DGX Spark");
  await expect(menu.getByRole("option",{name:"Claude Code 1 model",exact:true})).toBeVisible();
- await expect(menu.getByRole("option",{name:"OpenCode 1 model",exact:true})).toBeVisible();
+ await expect(menu.getByRole("option",{name:"OpenCode 2 models",exact:true})).toBeVisible();
  await page.screenshot({path:"test-results/orb-harness-menu-remote.png"});
  await page.keyboard.press("Escape");await expect(menu).toHaveCount(0);
  const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
@@ -322,7 +322,7 @@ for(const [phase,node_state,label] of [["observed",undefined,"Remote job accepte
 
 for(const harness of ["claudecode", "opencode"] as const)test(`supported remote ${harness} slow POST preserves selection and opens durable job immediately`,async({page})=>{
  const state=await setup(page,{remoteSuccess:true});await chooseRemote(page);
- await page.getByRole("button",{name:"Grok",exact:true}).click();await page.getByRole("option",{name:harness === "claudecode" ? "Claude Code 1 model" : "OpenCode 1 model",exact:true}).click();
+ await page.getByRole("button",{name:"Grok",exact:true}).click();await page.getByRole("option",{name:harness === "claudecode" ? "Claude Code 1 model" : "OpenCode 2 models",exact:true}).click();
  const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
  await expectGoalTurn(page,".scroll .user");
  await expect(phaseStatus(page)).toContainText("Working on DGX Spark");

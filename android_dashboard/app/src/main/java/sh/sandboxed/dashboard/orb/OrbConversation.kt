@@ -696,6 +696,88 @@ fun OrbConversationPage(
     var selectedConfigProfile by remember(currentMission?.id) {
         mutableStateOf(currentMission?.str("config_profile", "profile") ?: "")
     }
+    var settingsSaveJob by remember(missionId) { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var settingsSaveGeneration by remember(missionId) { mutableStateOf(0) }
+    var settingsSyncedGeneration by remember(missionId) { mutableStateOf(0) }
+    var settingsRemoteRevision by remember(missionId) { mutableStateOf(0) }
+    var confirmedSettingsModel by remember(missionId) { mutableStateOf<String?>(null) }
+
+    fun mergeConfirmedSettingsInto(current: OrbRow?, resp: Map<String, Any?>, targetId: String, keepOptimisticModel: Boolean = false): OrbRow {
+        if (current == null || current.id != targetId) return OrbRow(targetId, resp)
+        val merged = current.raw.toMutableMap()
+        if ((merged["history"] as? List<*>)?.isEmpty() != false) {
+            (resp["history"] as? List<*>)?.takeIf { it.isNotEmpty() }?.let { merged["history"] = it }
+        }
+        val settingsKeys = listOf("backend", "agent", "model_override", "model_effort", "fast_mode", "service_tier", "config_profile", "session_id")
+        if (!keepOptimisticModel) {
+            for (k in settingsKeys) {
+                if (resp.containsKey(k)) merged[k] = resp[k]
+            }
+        }
+        val curEpoch = OrbJSON.dateEpochMs(OrbJSON.str(merged, "updated_at"))
+        val nextEpoch = OrbJSON.dateEpochMs(OrbJSON.str(resp, "updated_at"))
+        if (nextEpoch != null && (curEpoch == null || nextEpoch >= curEpoch)) {
+            merged["updated_at"] = resp["updated_at"]
+        }
+        return OrbRow(targetId, merged)
+    }
+
+    fun persistMissionModelIfNeeded(targetId: String) {
+        val row = currentMission ?: return
+        val storedBackend = row.str("backend", "harness", "backend_id").orEmpty()
+        if (row.id != targetId || storedBackend.startsWith("cloud_")) return
+        if (storedBackend.isNotEmpty() && selectedBackend != storedBackend) return
+        val currentModel = row.str("model_override") ?: ""
+        if ((settingsSaveJob == null && settingsSyncedGeneration == settingsSaveGeneration) || confirmedSettingsModel == null) {
+            confirmedSettingsModel = currentModel
+        }
+        val nextModel = selectedModel.trim()
+        if (nextModel == currentModel) return
+        val updatedRaw = row.raw + ("model_override" to nextModel.ifEmpty { null })
+        currentMission = OrbRow(targetId, updatedRaw)
+        val gen = settingsSaveGeneration + 1
+        settingsSaveGeneration = gen
+        val prior = settingsSaveJob
+        val job = scope.launch {
+            prior?.join()
+            try {
+                val resp = OrbJSON.dict(
+                    core.request(
+                        path = "/api/control/missions/${core.encodeComponent(targetId)}/settings",
+                        method = "PATCH",
+                        body = mapOf("model_override" to nextModel, "resume" to false)
+                    )
+                )
+                if (resp != null && currentMission?.id == targetId) {
+                    confirmedSettingsModel = OrbJSON.str(resp, "model_override") ?: ""
+                    val confirmedRow = mergeConfirmedSettingsInto(currentMission, resp, targetId, keepOptimisticModel = false)
+                    core.upsertMissionInMemory(confirmedRow)
+                    currentMission = mergeConfirmedSettingsInto(currentMission, resp, targetId, keepOptimisticModel = settingsSaveGeneration != gen)
+                }
+                core.refreshMissionsQuietly()
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (currentMission?.id == targetId) {
+                    if (settingsSaveGeneration == gen) {
+                        val fallbackModel = confirmedSettingsModel ?: currentModel
+                        selectedModel = fallbackModel
+                        val latestRaw = currentMission?.raw ?: row.raw
+                        val revertedRow = OrbRow(targetId, latestRaw + ("model_override" to fallbackModel.ifEmpty { null }))
+                        currentMission = revertedRow
+                        core.upsertMissionInMemory(revertedRow)
+                    }
+                    errorMessage = e.message ?: "Could not update model."
+                }
+            } finally {
+                if (gen > settingsSyncedGeneration) settingsSyncedGeneration = gen
+                if (settingsSaveGeneration == gen) {
+                    settingsSaveJob = null
+                    confirmedSettingsModel = null
+                }
+            }
+        }
+        settingsSaveJob = job
+    }
 
     val liveRow = remember(allMissions, missionId, currentMission) {
         if (missionId == null) null
@@ -795,6 +877,8 @@ fun OrbConversationPage(
     suspend fun loadHistory(targetId: String) = historyLoadMutex.withLock {
         val account = OrbDisk.currentScope()
         val streamEpochBefore = live.streamEpoch
+        val settingsGenBefore = settingsSaveGeneration
+        val settingsRemoteRevBefore = settingsRemoteRevision
         var anyFetchOk = false
         var latestDetailForTarget: OrbRow? = null
         try {
@@ -875,10 +959,35 @@ fun OrbConversationPage(
                             existingForCid
                         }
                         if (cid == targetId && detail != null) {
-                            val updatedRow = OrbRow(cid, detail)
-                            latestDetailForTarget = updatedRow
                             withContext(Dispatchers.Main) {
+                                val fetchedEpoch = OrbJSON.dateEpochMs(OrbJSON.str(detail, "updated_at"))
+                                val currentEpoch = OrbJSON.dateEpochMs(currentMission?.str("updated_at"))
+                                val pendingLocal = settingsSaveGeneration != settingsGenBefore || settingsSaveJob != null
+                                val confirmedRemoteStale = settingsRemoteRevision != settingsRemoteRevBefore ||
+                                    (!pendingLocal && fetchedEpoch != null && currentEpoch != null && fetchedEpoch < currentEpoch)
+                                val settingsChangedDuringLoad = pendingLocal || confirmedRemoteStale
+                                val mergedDetail = if (settingsChangedDuringLoad && currentMission?.id == cid) {
+                                    val cur = currentMission!!.raw
+                                    detail + mapOf(
+                                        "backend" to cur["backend"],
+                                        "model_override" to cur["model_override"],
+                                        "updated_at" to (cur["updated_at"] ?: detail["updated_at"])
+                                    )
+                                } else {
+                                    detail
+                                }
+                                val updatedRow = OrbRow(cid, mergedDetail)
+                                latestDetailForTarget = updatedRow
                                 currentMission = updatedRow
+                                if ((confirmedRemoteStale || pendingLocal) && settingsSaveJob == null) {
+                                    core.upsertMissionInMemory(updatedRow)
+                                }
+                                if (!showAgentPicker && !settingsChangedDuringLoad && updatedRow.str("backend")?.startsWith("cloud_") != true) {
+                                    val rowBackend = updatedRow.str("backend", "harness", "backend_id").orEmpty()
+                                    if (rowBackend.isEmpty() || selectedBackend == rowBackend) {
+                                        selectedModel = updatedRow.str("model_override", "model", "model_id") ?: ""
+                                    }
+                                }
                             }
                         }
                         Triple(cid, histRows, mergedEvs)
@@ -987,6 +1096,28 @@ fun OrbConversationPage(
                         }
                         val targetEvents = OrbConversationHistory.forMission(events, id).ifEmpty { events }
                         live.reconcileStored(targetEvents, working = isLive, streamAdvanced = live.streamEpoch != epochBefore)
+                    }
+                    evType == "mission_settings_updated" -> {
+                        val pendingLocalSettings = settingsSaveJob != null || settingsSyncedGeneration < settingsSaveGeneration
+                        val cur = currentMission ?: liveRow
+                        if (!pendingLocalSettings && cur != null) {
+                            val updatedMap = cur.raw.toMutableMap()
+                            OrbJSON.str(parsed, "backend")?.takeIf { it.isNotEmpty() }?.let { updatedMap["backend"] = it }
+                            if (parsed?.containsKey("model_override") == true) {
+                                updatedMap["model_override"] = OrbJSON.str(parsed, "model_override")
+                            }
+                            OrbJSON.str(parsed, "updated_at")?.let { updatedMap["updated_at"] = it }
+                            val updatedRow = OrbRow(id, updatedMap)
+                            settingsRemoteRevision += 1
+                            currentMission = updatedRow
+                            core.upsertMissionInMemory(updatedRow)
+                            if (!showAgentPicker && updatedRow.str("backend")?.startsWith("cloud_") != true) {
+                                val rowBackend = updatedRow.str("backend", "harness", "backend_id").orEmpty()
+                                if (rowBackend.isEmpty() || selectedBackend == rowBackend) {
+                                    selectedModel = updatedRow.str("model_override") ?: ""
+                                }
+                            }
+                        }
                     }
                     evType in setOf("mission_status_changed", "mission_completed", "turn_complete") -> {
                         val newStatus = OrbJSON.str(parsed, "status")
@@ -1175,6 +1306,7 @@ fun OrbConversationPage(
         UsageTelemetry.trackAction(UsageTelemetry.Action.Queue, "composer")
         scope.launch {
             try {
+                settingsSaveJob?.join()
                 val receipt = OrbJSON.dict(
                     core.request(
                         "/api/control/message",
@@ -1326,6 +1458,25 @@ fun OrbConversationPage(
 
                 val existingId = currentMission?.id
                 if (existingId != null) {
+                    settingsSaveJob?.join()
+                    val row = currentMission
+                    val rowBackend = row?.str("backend", "harness", "backend_id").orEmpty()
+                    val persistedModel = row?.str("model_override") ?: ""
+                    val desiredModel = selectedModel.trim()
+                    if (!rowBackend.startsWith("cloud_") && (rowBackend.isEmpty() || selectedBackend == rowBackend) && desiredModel != persistedModel) {
+                        val updated = OrbJSON.dict(
+                            core.request(
+                                path = "/api/control/missions/${core.encodeComponent(existingId)}/settings",
+                                method = "PATCH",
+                                body = mapOf("model_override" to desiredModel, "resume" to false)
+                            )
+                        )
+                        if (updated != null) {
+                            val savedRow = mergeConfirmedSettingsInto(currentMission, updated, existingId)
+                            currentMission = savedRow
+                            core.upsertMissionInMemory(savedRow)
+                        }
+                    }
                     core.request(
                         path = "/api/control/missions/$existingId/message",
                         method = "POST",
@@ -3086,7 +3237,12 @@ fun OrbConversationPage(
                     }
                 }
             }) else null,
-            onDismiss = { if (!isSending) showAgentPicker = false }
+            onDismiss = {
+                if (!isSending) {
+                    showAgentPicker = false
+                    currentMission?.id?.let { persistMissionModelIfNeeded(it) }
+                }
+            }
         )
     }
 

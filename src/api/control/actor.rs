@@ -3285,7 +3285,16 @@ pub(super) async fn control_actor_loop(
                                     .await;
 
                                 if let Ok(updated) = result.as_ref() {
-                                    if let Some(runner)=parallel_runners.get_mut(&id){runner.service_tier=updated.service_tier;runner.fast_mode=updated.fast_mode;}
+                                    if let Some(runner) = parallel_runners.get_mut(&id) {
+                                        runner.backend_id = updated.backend.clone();
+                                        runner.agent_override = updated.agent.clone();
+                                        runner.model_override = updated.model_override.clone();
+                                        runner.model_effort = updated.model_effort.clone();
+                                        runner.fast_mode = updated.fast_mode;
+                                        runner.service_tier = updated.service_tier;
+                                        runner.config_profile = updated.config_profile.clone();
+                                        runner.session_id = updated.session_id.clone();
+                                    }
 
                                     // A running Claude session takes the new effort
                                     // now; any other mission reads it at its next turn.

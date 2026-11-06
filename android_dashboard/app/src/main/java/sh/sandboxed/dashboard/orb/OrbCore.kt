@@ -2113,6 +2113,23 @@ class OrbCore private constructor(context: Context) {
         }
     }
 
+    /** Reconciles an authoritative single-mission update into in-memory and project caches immediately. */
+    fun upsertMissionInMemory(updated: OrbRow) {
+        if (updated.id.isEmpty()) return
+        val current = _missions.value
+        if (current.any { it.id == updated.id }) {
+            _missions.value = current.map { if (it.id == updated.id) updated else it }
+        }
+        val delta = missionDeltaCache
+        if (delta.any { it.id == updated.id }) {
+            missionDeltaCache = delta.map { if (it.id == updated.id) updated else it }
+        }
+        val proj = updated.str("project", "project_id")
+        if (!proj.isNullOrEmpty()) {
+            OrbReadCache.seedProjectRows(proj, listOf(updated), fresh = true)
+        }
+    }
+
     fun onBackground() {
         _isForeground.value = false
         val snapshot = dirtyMissionsSnapshot

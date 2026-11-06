@@ -63,6 +63,29 @@ extension OrbConversation {
                 live.reconcileStored(events, working: working, streamAdvanced: live.streamEpoch != epoch)
                 return
             }
+            if type == "mission_settings_updated" {
+                let pendingLocalSettings = settingsSaveTask != nil || settingsSyncedGeneration < settingsSaveGeneration
+                if !pendingLocalSettings, case var .object(fields) = mission {
+                    if let backend = data["backend"] as? String, !backend.isEmpty { fields["backend"] = .string(backend) }
+                    if data.keys.contains("model_override") {
+                        fields["model_override"] = (data["model_override"] as? String).map(OrbJSON.string) ?? .null
+                    }
+                    if data.keys.contains("service_tier") {
+                        fields["service_tier"] = (data["service_tier"] as? String).map(OrbJSON.string) ?? .null
+                    }
+                    if let updatedAt = data["updated_at"] as? String { fields["updated_at"] = .string(updatedAt) }
+                    let updatedMission = OrbJSON.object(fields)
+                    settingsRemoteRevision &+= 1
+                    mission = updatedMission
+                    OrbReadCache.saveMission(id, value: updatedMission)
+                    if !OrbRow(updatedMission).cloud && !showSelection {
+                        selection.backend = updatedMission["backend"].text
+                        selection.model = updatedMission["model_override"].text
+                        selection.serviceTier = OrbCodexSpeed.of(updatedMission)
+                    }
+                }
+                return
+            }
             if type == "mission_status_changed" {
                 if let newStatus = data["status"] as? String, !newStatus.isEmpty,
                    case var .object(fields) = mission {
@@ -204,6 +227,8 @@ extension OrbConversation {
             let knownCloud = mission != .null && OrbRow(mission).cloud
             let sinceSeq = events.last?.sequence
             let streamEpochBefore = live.streamEpoch
+            let settingsGenBefore = settingsSaveGeneration
+            let settingsRemoteRevBefore = settingsRemoteRevision
             async let valueTask = OrbReadCache.conversation(id, force: force)
             async let batchTask = knownCloud ? nil : (try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: sinceSeq))
             let savedHistory = mission["history"].items
@@ -226,7 +251,23 @@ extension OrbConversation {
                 } else if conversationCursor != nil {
                     fields["history"] = .array(savedHistory)
                 }
+                let fetchedTs = OrbDateCache.parse(fields["updated_at"]?.text ?? "")
+                let currentTs = OrbDateCache.parse(mission["updated_at"].text)
+                let pendingLocal = settingsSaveGeneration != settingsGenBefore || settingsSaveTask != nil
+                let confirmedRemoteStale = settingsRemoteRevision != settingsRemoteRevBefore
+                    || (!pendingLocal && fetchedTs != nil && currentTs != nil && fetchedTs! < currentTs!)
+                let settingsStale = pendingLocal || confirmedRemoteStale
+                if settingsStale {
+                    fields["backend"] = mission["backend"]
+                    fields["model_override"] = mission["model_override"]
+                    fields["service_tier"] = mission["service_tier"]
+                    fields["fast_mode"] = mission["fast_mode"]
+                    if !mission["updated_at"].text.isEmpty { fields["updated_at"] = mission["updated_at"] }
+                }
                 value = .object(fields)
+                if confirmedRemoteStale && settingsSaveTask == nil {
+                    OrbReadCache.saveMission(id, value: value)
+                }
             }
             if mission != value {
                 mission = value
@@ -243,9 +284,12 @@ extension OrbConversation {
                 } catch let e as OrbHTTPError where e.status == 404 { selection.backend = value["backend"].text; selection.model = value["model_override"].text }
             } else if OrbRow(value).cloud { execution = try await OrbReadCache.cloud(id, force: force) }
             if !OrbRow(value).cloud {
-                selection.backend = value["backend"].text
+                if !showSelection && settingsSaveTask == nil && settingsSaveGeneration == settingsGenBefore && settingsRemoteRevision == settingsRemoteRevBefore {
+                    selection.backend = value["backend"].text
+                    selection.model = value["model_override"].text
+                    selection.serviceTier = OrbCodexSpeed.of(value)
+                }
                 selection.node = OrbContinuation.remoteNodeID(for: value) == "core" ? value["remote_node_id"].text : OrbContinuation.remoteNodeID(for: value)
-                if selection.model.isEmpty { selection.model = value["model_override"].text; selection.serviceTier = OrbCodexSpeed.of(value) }
                 if let batch = await batchTask,
                    let merged = await fetchCaughtUpEvents(id: id, existing: events, initialBatch: batch) {
                     events = merged
@@ -442,13 +486,23 @@ extension OrbConversation {
                         body["continue_identity"] = identity
                     }
                     if isCloud { body["cloud_model"] = .string(selection.model); body["cloud_model_params"] = selection.params }
-                    if !isCloud && !selection.model.isEmpty && selection.model != mission["model_override"].text {
-                        guard !working || optimisticPrompt != nil || queueing else { throw OrbHTTPError(status: 409, detail: "Wait for this turn to finish before changing its model.") }
-                        _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/settings", method: "PATCH", body: .object(["model_override": .string(selection.model)]))
+                    if let saveTask = settingsSaveTask { await saveTask.value }
+                    if !isCloud && selection.model != mission["model_override"].text {
+                        let updated = try await api.call("/api/control/missions/\(OrbCore.escape(id))/settings", method: "PATCH", body: .object(["model_override": .string(selection.model), "resume": .bool(false)]))
+                        if updated != .null {
+                            let merged = Self.mergeConfirmedSettings(updated, into: mission)
+                            mission = merged
+                            OrbReadCache.saveMission(id, value: merged)
+                        }
                     }
                     if !isCloud && selection.backend == "codex" && selection.serviceTier != OrbCodexSpeed.of(mission) {
                         try await OrbCodexSpeed.require(model: selection.model.isEmpty ? mission["model_override"].text : selection.model, tier: selection.serviceTier, missionID: id)
-                        _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/settings", method: "PATCH", body: .object(["service_tier": .string(selection.serviceTier)]))
+                        let updated = try await api.call("/api/control/missions/\(OrbCore.escape(id))/settings", method: "PATCH", body: .object(["service_tier": .string(selection.serviceTier), "resume": .bool(false)]))
+                        if updated != .null {
+                            let merged = Self.mergeConfirmedSettings(updated, into: mission)
+                            mission = merged
+                            OrbReadCache.saveMission(id, value: merged)
+                        }
                     }
                     pending = OrbPending(path: "/api/control/message", body: .object(body))
                 } else {
@@ -720,6 +774,102 @@ extension OrbConversation {
         } catch {
             self.error = "Couldn’t run immediately. \(error.localizedDescription)"
         }
+    }
+
+    private static func mergeConfirmedSettings(_ updated: OrbJSON, into current: OrbJSON, keepOptimisticSettings: Bool = false) -> OrbJSON {
+        guard case var .object(base) = current else { return updated }
+        guard case let .object(incoming) = updated else { return current }
+        if base["history"]?.items.isEmpty ?? true, let hist = incoming["history"], !hist.items.isEmpty {
+            base["history"] = hist
+        }
+        let settingsKeys = ["backend", "agent", "model_override", "model_effort", "fast_mode", "service_tier", "config_profile", "session_id"]
+        if !keepOptimisticSettings {
+            for k in settingsKeys {
+                if let v = incoming[k] { base[k] = v }
+            }
+        }
+        if let incomingTs = incoming["updated_at"]?.text, !incomingTs.isEmpty {
+            let curDate = OrbDateCache.parse(base["updated_at"]?.text ?? "")
+            let nextDate = OrbDateCache.parse(incomingTs)
+            if curDate == nil || (nextDate != nil && nextDate! >= curDate!) {
+                base["updated_at"] = .string(incomingTs)
+            }
+        }
+        return .object(base)
+    }
+
+    func scheduleMissionSettingsSave() {
+        guard let id, !isCloud else { return }
+        let storedBackend = mission["backend"].text
+        if !storedBackend.isEmpty && selection.backend != storedBackend { return }
+        let currentModel = mission["model_override"].text
+        let currentTier = OrbCodexSpeed.of(mission)
+        if settingsSaveTask == nil && settingsSyncedGeneration == settingsSaveGeneration {
+            confirmedSettingsBaseline = (model: currentModel, tier: currentTier)
+        } else if confirmedSettingsBaseline == nil {
+            confirmedSettingsBaseline = (model: currentModel, tier: currentTier)
+        }
+        let nextModel = selection.model
+        let nextTier = selection.serviceTier
+        let modelChanged = nextModel != currentModel
+        let tierChanged = selection.backend == "codex" && nextTier != currentTier
+        guard modelChanged || tierChanged else { return }
+
+        if case var .object(fields) = mission {
+            if modelChanged {
+                fields["model_override"] = nextModel.isEmpty ? .null : .string(nextModel)
+            }
+            if tierChanged {
+                fields["service_tier"] = .string(nextTier)
+            }
+            mission = .object(fields)
+        }
+        settingsSaveGeneration &+= 1
+        let gen = settingsSaveGeneration
+        let priorTask = settingsSaveTask
+        let task = Task {
+            if let priorTask { await priorTask.value }
+            defer {
+                if gen > settingsSyncedGeneration { settingsSyncedGeneration = gen }
+                if settingsSaveGeneration == gen {
+                    settingsSaveTask = nil
+                    confirmedSettingsBaseline = nil
+                }
+            }
+            do {
+                let confirmed = confirmedSettingsBaseline ?? (model: currentModel, tier: currentTier)
+                var patch: [String: OrbJSON] = ["resume": .bool(false)]
+                if modelChanged || nextModel != confirmed.model { patch["model_override"] = .string(nextModel) }
+                if selection.backend == "codex" && (tierChanged || nextTier != confirmed.tier) {
+                    try await OrbCodexSpeed.require(model: nextModel.isEmpty ? confirmed.model : nextModel, tier: nextTier, missionID: id)
+                    patch["service_tier"] = .string(nextTier)
+                }
+                let updated = try await api.call("/api/control/missions/\(OrbCore.escape(id))/settings", method: "PATCH", body: .object(patch))
+                if updated != .null, self.id == id {
+                    confirmedSettingsBaseline = (model: updated["model_override"].text, tier: OrbCodexSpeed.of(updated))
+                    let confirmedForCache = Self.mergeConfirmedSettings(updated, into: mission)
+                    OrbReadCache.saveMission(id, value: confirmedForCache)
+                    mission = Self.mergeConfirmedSettings(updated, into: mission, keepOptimisticSettings: settingsSaveGeneration != gen)
+                }
+            } catch {
+                if self.id == id {
+                    if settingsSaveGeneration == gen {
+                        let fallback = confirmedSettingsBaseline ?? (model: currentModel, tier: currentTier)
+                        selection.model = fallback.model
+                        selection.serviceTier = fallback.tier
+                        if case var .object(fields) = mission {
+                            fields["model_override"] = fallback.model.isEmpty ? .null : .string(fallback.model)
+                            if selection.backend == "codex" { fields["service_tier"] = .string(fallback.tier) }
+                            let reverted = OrbJSON.object(fields)
+                            mission = reverted
+                            OrbReadCache.saveMission(id, value: reverted)
+                        }
+                    }
+                    self.error = error.localizedDescription
+                }
+            }
+        }
+        settingsSaveTask = task
     }
 
     func safeURL(_ value: String) -> URL? { guard let url = URL(string: value), url.scheme == "https", url.user == nil, url.password == nil else { return nil }; return url }

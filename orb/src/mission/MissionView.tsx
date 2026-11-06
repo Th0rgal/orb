@@ -1,6 +1,6 @@
 import { missionAssignedNode, missionNode, nodeLabel } from "../machines/nodes";
 import { followProjectFolder, seedDelivered, seededPrompt } from "../localFolder";
-import { canForceSlot, executionPhaseLabel, isArchived, isFailedStatus, isLive, isRunning, isSettingsIdle, remoteJobEnded } from "../missionStatus";
+import { canForceSlot, executionPhaseLabel, isArchived, isFailedStatus, isLive, isRunning, isSettingsIdle, isWorking, remoteJobEnded } from "../missionStatus";
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
 import {CodexSpeedPicker, missionSpeed} from '../CodexSpeedPicker';
@@ -18,7 +18,8 @@ import {createPlanProgress, type PlanProgressData} from "../PlanProgress";
 import { SideQuestions, type SideQuestionsHandle } from "../SideQuestionPanel";
 import { AgentActivity, activityShouldCollapse } from "../AgentActivity";
 import { localRunKnown } from "../localAgents";
-import { ChangeMachine, preloadMachineDestinations } from "../ChangeMachine";
+import { preloadMachineDestinations } from "../ChangeMachine";
+const ChangeMachine = lazy(() => import("../ChangeMachine").then(module => ({ default: module.ChangeMachine })));
 import { adoptTransferredWorkspace } from "../machineTransfer";
 import { NativeInteraction } from "../NativeInteraction";
 import { imagePrompt, stageLocalImages, stageRemoteImages, type DraftImage } from "../imageAttachments";
@@ -26,7 +27,7 @@ import { ErrorToast } from "../toast";
 import { MissionFailure, LaunchStatus, MissionPending, missionPhase, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, missionGoal, dockModelLabel, type LaunchReceipt } from "../missionLaunch";
 import { chipToAttachment, loadAttachItems, mentionedChips, type AttachChip } from "../attach";
 import { shallowEqual } from "../poll";
-import { Show, batch, createMemo, createSignal, createEffect, on, onCleanup, onMount } from "solid-js";
+import { Show, batch, createMemo, createSignal, createEffect, lazy, on, onCleanup, onMount } from "solid-js";
 import { Portal } from "solid-js/web";
 import * as Ic from "../icons";
 import { ForkMission, observeTransferDestination, stopSource, transferForDestination } from "../ForkMission";
@@ -79,6 +80,8 @@ import {
 import { timed } from "../diagnostics";
 import {
   getMission,
+  isConnected,
+  modelPickerItems,
   shortModelLabel,
   cancelMission,
   forceMissionSlot,
@@ -92,7 +95,7 @@ import {
   forkMission,
 } from "../api";
 
-import { harnessChoices, refreshNodeAntigravityModels } from "../harnessPick";
+import { harnessChoices, refreshHarnessChoices, refreshNodeAntigravityModels } from "../harnessPick";
 import { Composer, floatingDock } from "../composer/Composer";
 import { createPinnedScroll } from "./pinnedScroll";
 import { JumpToLatest } from "./JumpToLatest";
@@ -104,11 +107,45 @@ import { notify } from "../toast";
 import { usageTelemetry } from "../usageTelemetry";
 import { fulfillSearchTarget, hasPendingSearchTarget, pendingSearchTarget } from "../searchTarget";
 
+const inflightSettings = new Map<string, Promise<unknown>>();
+function trackMissionSettings<T>(missionId: string, request: Promise<T>): Promise<T> {
+  const prev = inflightSettings.get(missionId) ?? Promise.resolve();
+  const chained = prev.catch(() => undefined).then(() => request);
+  const tracked = chained.then(() => undefined, () => undefined).finally(() => {
+    if (inflightSettings.get(missionId) === tracked) inflightSettings.delete(missionId);
+  });
+  inflightSettings.set(missionId, tracked);
+  return chained;
+}
+function mergeIncomingMission(prev: Mission | null, incoming: Mission): Mission {
+  if (!prev || prev.id !== incoming.id) return incoming;
+  const history = incoming.history?.length ? incoming.history : prev.history;
+  const prevTs = Date.parse(prev.updated_at || "");
+  const nextTs = Date.parse(incoming.updated_at || "");
+  const keepSettings =
+    inflightSettings.has(incoming.id) ||
+    (!Number.isNaN(prevTs) && !Number.isNaN(nextTs) && nextTs < prevTs);
+  if (!keepSettings) return { ...prev, ...incoming, history };
+  return {
+    ...prev,
+    ...incoming,
+    history,
+    backend: prev.backend,
+    agent: prev.agent,
+    model_override: prev.model_override,
+    model_effort: prev.model_effort,
+    fast_mode: prev.fast_mode,
+    service_tier: prev.service_tier,
+    config_profile: prev.config_profile,
+    updated_at: !Number.isNaN(prevTs) && !Number.isNaN(nextTs) && prevTs > nextTs ? prev.updated_at : incoming.updated_at,
+  };
+}
+
 function MissionDock(p: {
   mission: Mission | null;
   items: StreamItem[];
   destination: string;
-  onMission?: (mission: Mission) => void;
+  onMission?: (mission: Mission, authoritative?: boolean) => void;
   onError?: (message: string) => void;
   onFork?: (mission: Mission) => void;
 }) {
@@ -135,22 +172,45 @@ function MissionDock(p: {
   // not rewrite the dock's attributes.
   const idle = createMemo(() => isSettingsIdle(p.mission?.status));
   const models = () => choice()?.models ?? [];
-  const canChangeModel = () => idle() && models().length > 1 && !saving();
+  const canChangeModel = () => !!p.mission && (models().length > 1 || (models().length === 1 && models()[0].value !== modelId()));
   // The mission's own stored effort, normalized against its harness: a mission
   // created before an effort was offered simply has none.
   const effort = () => normalizeEffort(p.mission?.model_effort, p.mission?.backend);
   const efforts = () => supportedEfforts(p.mission?.backend);
   // Effort can change during a turn: a running Claude session applies it at
   // once, any other mission from its next turn.
-  const canChangeEffort = () => !!p.mission && efforts().length > 0 && !saving();
+  const canChangeEffort = () => !!p.mission && efforts().length > 0;
   const pickModel = async (value: string) => {
     const m = p.mission;
     if (!m || value === modelId() || saving()) { setModelOpen(false); return; }
+    const previousModel = m.model_override;
+    const previousUpdatedAt = m.updated_at;
+    const optimisticAt = new Date(Math.max(Date.now(), Date.parse(m.updated_at || "") + 1 || Date.now())).toISOString();
     setSaving(true);
     setModelOpen(false);
+    p.onMission?.({ ...m, model_override: value || null, updated_at: optimisticAt });
     try {
-      p.onMission?.(await updateMissionSettings(m.id, { model_override: value }));
+      const updated = await trackMissionSettings(m.id, updateMissionSettings(m.id, { model_override: value }));
+      const latest = p.mission && p.mission.id === m.id ? p.mission : m;
+      p.onMission?.(
+        {
+          ...latest,
+          backend: updated.backend ?? latest.backend,
+          agent: updated.agent ?? latest.agent,
+          model_override: updated.model_override ?? null,
+          model_effort: updated.model_effort ?? latest.model_effort,
+          fast_mode: updated.fast_mode ?? latest.fast_mode,
+          service_tier: updated.service_tier ?? latest.service_tier,
+          config_profile: updated.config_profile ?? latest.config_profile,
+          session_id: updated.session_id ?? latest.session_id,
+          updated_at: updated.updated_at ?? latest.updated_at,
+        },
+        true,
+      );
     } catch (e) {
+      const latest = p.mission && p.mission.id === m.id ? p.mission : m;
+      const revertedAt = latest.updated_at === optimisticAt ? previousUpdatedAt : latest.updated_at;
+      p.onMission?.({ ...latest, model_override: previousModel, updated_at: revertedAt }, true);
       p.onError?.(e instanceof Error && e.message.includes("409") ? "Stop the current turn before switching models." : launchError(e));
     } finally { setSaving(false); }
   };
@@ -159,11 +219,34 @@ function MissionDock(p: {
   const pickEffort = async (value: string) => {
     const m = p.mission;
     if (!m || value === (effort() ?? "") || saving()) { setEffortOpen(false); return; }
+    const previousEffort = m.model_effort;
+    const previousUpdatedAt = m.updated_at;
+    const optimisticAt = new Date(Math.max(Date.now(), Date.parse(m.updated_at || "") + 1 || Date.now())).toISOString();
     setSaving(true);
     setEffortOpen(false);
+    p.onMission?.({ ...m, model_effort: value || null, updated_at: optimisticAt });
     try {
-      p.onMission?.(await updateMissionSettings(m.id, { model_effort: value }));
+      const updated = await trackMissionSettings(m.id, updateMissionSettings(m.id, { model_effort: value }));
+      const latest = p.mission && p.mission.id === m.id ? p.mission : m;
+      p.onMission?.(
+        {
+          ...latest,
+          backend: updated.backend ?? latest.backend,
+          agent: updated.agent ?? latest.agent,
+          model_override: updated.model_override ?? latest.model_override,
+          model_effort: updated.model_effort ?? null,
+          fast_mode: updated.fast_mode ?? latest.fast_mode,
+          service_tier: updated.service_tier ?? latest.service_tier,
+          config_profile: updated.config_profile ?? latest.config_profile,
+          session_id: updated.session_id ?? latest.session_id,
+          updated_at: updated.updated_at ?? latest.updated_at,
+        },
+        true,
+      );
     } catch (e) {
+      const latest = p.mission && p.mission.id === m.id ? p.mission : m;
+      const revertedAt = latest.updated_at === optimisticAt ? previousUpdatedAt : latest.updated_at;
+      p.onMission?.({ ...latest, model_effort: previousEffort, updated_at: revertedAt }, true);
       p.onError?.(e instanceof Error && e.message.includes("409") ? "Stop the current turn before switching effort." : launchError(e));
     } finally { setSaving(false); }
   };
@@ -195,21 +278,30 @@ function MissionDock(p: {
           <Show
             when={canChangeModel()}
             fallback={
-              <span class="under-model" title={idle() ? modelLabel() : "Stop the current turn to switch models"}>
+              <span class="under-model" title={modelLabel()}>
                 {modelLabel()}
               </span>
             }
           >
             <button
               class={`under-model ${modelOpen() ? "on" : ""}`}
-              title="Model for the next turn"
-              onClick={() => setModelOpen(!modelOpen())}
+              disabled={saving()}
+              title={isWorking(p.mission?.status) ? "Model · applies from the next turn" : "Model for the next turn"}
+              onClick={() => {
+                const opening = !modelOpen();
+                setModelOpen(opening);
+                if (opening && isConnected()) void refreshHarnessChoices();
+                if (opening) {
+                  if (catalogMachine() === "local") void refreshLocalAgents(false);
+                  else void refreshNodeAntigravityModels(catalogMachine());
+                }
+              }}
             >
               {modelLabel()} <Ic.ChevronDown size={10} />
             </button>
             <Show when={modelOpen()}>
               <Picker label="Models" searchLabel="Search models" placement="top-start" selected={modelId()}
-                items={models().map(m => ({id:m.value,label:shortModelLabel(m.label)}))}
+                items={modelPickerItems(models())}
                 onClose={() => setModelOpen(false)} onSelect={value => void pickModel(value)}/>
 
             </Show>
@@ -228,6 +320,7 @@ function MissionDock(p: {
             >
               <button
                 class={`under-model ${effortOpen() ? "on" : ""}`}
+                disabled={saving()}
                 title={idle() ? "Reasoning effort for the next turn" : p.mission?.backend === "claudecode" ? "Reasoning effort · applies to the running session" : "Reasoning effort · applies from the next turn"}
                 aria-label={`Reasoning effort: ${effortLabel(effort(),p.mission?.backend,p.mission?.model_override)}`}
                 onClick={() => setEffortOpen(!effortOpen())}
@@ -248,7 +341,7 @@ function MissionDock(p: {
           <CodexSpeedPicker model={modelId()} value={missionSpeed(p.mission!)} missionId={p.mission!.id} local={catalogMachine()==="local"} disabled={saving()} onChange={tier=>{
             const mission=p.mission; if(!mission||saving())return;
             setSaving(true);
-            void updateMissionSettings(mission.id,{service_tier:tier}).then(updated=>{if(missionSpeed(updated)!==tier)throw new Error('The backend did not save the selected speed. Update it before retrying.');p.onMission?.(updated);}).catch(e=>p.onError?.(launchError(e))).finally(()=>setSaving(false));
+            void trackMissionSettings(mission.id, updateMissionSettings(mission.id,{service_tier:tier})).then(updated=>{if(missionSpeed(updated)!==tier)throw new Error('The backend did not save the selected speed. Update it before retrying.');const latest=p.mission&&p.mission.id===mission.id?p.mission:mission;p.onMission?.({...latest,service_tier:updated.service_tier,fast_mode:updated.fast_mode??latest.fast_mode,session_id:updated.session_id??latest.session_id,updated_at:updated.updated_at??latest.updated_at}, true);}).catch(e=>p.onError?.(launchError(e))).finally(()=>setSaving(false));
           }}/>
         </Show>
         <Show when={p.mission?.backend === "codex"}><MissionCyber mission={p.mission!} onError={p.onError}/></Show>
@@ -288,16 +381,22 @@ export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
   const [error, setError] = createSignal("");
   createEffect(() => {
     const init = p.initial;
-    if (init) setResolved(prev => prev && prev.id === init.id ? { ...prev, ...init } : init);
+    if (init) setResolved(prev => mergeIncomingMission(prev, init));
   });
+  const handleMission = (next: Mission | null, authoritative = false) => {
+    if (next) {
+      setResolved(prev => (authoritative ? { ...prev, ...next, history: next.history?.length ? next.history : (prev?.history ?? []) } : mergeIncomingMission(prev, next)));
+    }
+    p.onMission?.(next, authoritative);
+  };
   onMount(() => {
     if (p.id) void loadTranscript(p.id).catch(swallow("mission.loadTranscript", { mission: p.id }));
     if (!resolved()) void getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e)));
   });
-  return <Show when={Boolean(resolved())} fallback={<Show when={error()} fallback={<ConversationSkeleton />}><div class="scroll"><div class="col"><p role="alert">{error()}</p></div></div></Show>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} />}><CloudConversation id={p.id} onMission={p.onMission} onOpenMission={p.onFork} /></Show></Show>;
+  return <Show when={Boolean(resolved())} fallback={<Show when={error()} fallback={<ConversationSkeleton />}><div class="scroll"><div class="col"><p role="alert">{error()}</p></div></div></Show>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} onMission={handleMission} />}><CloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /></Show></Show>;
 }
 
-export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null) => void; onFork?: (mission: Mission) => void }) {
+export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null, authoritative?: boolean) => void; onFork?: (mission: Mission) => void }) {
   const boundMissionId = p.id;
   const staleMission = () => disposed || Boolean(boundMissionId && p.id !== boundMissionId);
   const receipt = p.launch ?? recalledLaunch(p.id);
@@ -306,11 +405,21 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   createEffect(()=>{if(p.id)onCleanup(retainTranscript(p.id));});
   const cached = p.id ? peekReadyTranscript(p.id) ?? (peekTranscript(p.id)?.detailsPending ? peekTranscript(p.id) : undefined) : undefined;
   const [mission, setMission] = createSignal<Mission | null>(p.initial ?? null, { equals: sameMission });
+  let authoritativeOnce = false;
+  const applyDockMission = (next: Mission, authoritative = false) => {
+    authoritativeOnce = authoritative;
+    setMission(prev => (authoritative ? { ...prev, ...next, history: next.history?.length ? next.history : (prev?.history ?? []) } : next));
+  };
   createEffect(()=>{
     const init = p.initial;
-    if (init) setMission(prev => prev && prev.id === init.id ? { ...prev, ...init, history: init.history?.length ? init.history : prev.history } : init);
+    if (init) setMission(prev => mergeIncomingMission(prev, init));
   });
-  createEffect(() => p.onMission?.(mission()));
+  createEffect(() => {
+    const m = mission();
+    const auth = authoritativeOnce;
+    authoritativeOnce = false;
+    p.onMission?.(m, auth);
+  });
   onCleanup(() => p.onMission?.(null));
   const [items, setItems] = createSignal<StreamItem[]>(cached?.items ?? []);
   const [awaiting, setAwaiting] = createSignal(!cached || !!cached.detailsPending);
@@ -416,7 +525,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     try {
       const next=await getMission(p.id, { fresh, includeHistory: false });
       if(disposed||since!==statusSeen)return;
-      setMission(prev => prev && prev.id === next.id ? { ...next, history: next.history?.length ? next.history : prev.history } : next);
+      setMission(prev => mergeIncomingMission(prev, next));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -581,6 +690,25 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     }
     const stopStream = attachMissionStream(p.id, {
       onEvent: (ev) => {
+        if (ev.type === "mission_settings_updated") {
+          setMission(old => {
+            if (!old) return old;
+            const d = ev.data ?? {};
+            return {
+              ...old,
+              ...(typeof d.backend === "string" ? { backend: d.backend } : {}),
+              ...("agent" in d ? { agent: typeof d.agent === "string" ? d.agent : null } : {}),
+              ...("model_override" in d ? { model_override: typeof d.model_override === "string" ? d.model_override : null } : {}),
+              ...("model_effort" in d ? { model_effort: typeof d.model_effort === "string" ? d.model_effort : null } : {}),
+              ...(typeof d.fast_mode === "boolean" ? { fast_mode: d.fast_mode } : {}),
+              ...("service_tier" in d ? { service_tier: typeof d.service_tier === "string" ? (d.service_tier as Mission["service_tier"]) : undefined } : {}),
+              ...("config_profile" in d ? { config_profile: typeof d.config_profile === "string" ? d.config_profile : null } : {}),
+              ...("session_id" in d ? { session_id: typeof d.session_id === "string" ? d.session_id : null } : {}),
+              ...(typeof d.updated_at === "string" ? { updated_at: d.updated_at } : {}),
+            };
+          });
+          return;
+        }
         if (ev.type === "mission_status_changed" || ev.type === "status") {
           if (ev.type === "mission_status_changed" && typeof ev.data.status === "string") {
             const status = ev.data.status;
@@ -860,6 +988,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const sendMsgOnce = async (text: string, images: DraftImage[], chips: AttachChip[], attemptId: ReturnType<typeof crypto.randomUUID>, explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
     const targetMissionId = boundMissionId || p.id;
     if (!targetMissionId || staleMission()) return false;
+    const pendingSettings = inflightSettings.get(targetMissionId);
+    if (pendingSettings) await pendingSettings;
+    if (staleMission() || p.id !== targetMissionId) return false;
     const optEntry = drafts.find(attemptId);
     setSendError(null);
     if(explicitId&&optimisticList().length&&!drafts.has(explicitId))drafts.clear();
@@ -1331,7 +1462,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           <ErrorToast error={sendError()} title="Couldn’t send your message" onDismiss={() => setSendError(null)}
             action={optimistic() ? { label: "Retry", run: () => { const draft = optimistic(); if (draft?.retry) draft.retry(); else if (draft) void sendMsg(draft.text, draft.images, followAttach(), draft.id); } } : undefined} />
           <ErrorToast error={error() || queueError()} title="Couldn’t load the conversation" onDismiss={() => { setError(null); setQueueError(null); }} />
-          <MissionDock mission={mission()} items={viewItems()} destination={missionDestination(mission(), receipt)} onMission={setMission} onError={setError} onFork={p.onFork} />
+          <MissionDock mission={mission()} items={viewItems()} destination={missionDestination(mission(), receipt)} onMission={applyDockMission} onError={setError} onFork={p.onFork} />
         </div>
       </div>
     </>

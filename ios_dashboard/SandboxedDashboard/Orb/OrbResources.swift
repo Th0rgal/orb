@@ -313,12 +313,15 @@ enum OrbResourcesModel {
             let finalH = heights.reduce(0) { $0 + $1 * compress } + Double(max(0, cols[c].count - 1)) * effPad
             var cursorY = marginY + max(0, (innerH - finalH) / 2)
             var lastLabelBottom = -Double.infinity
+            let labelGap = 3.0
             for i in 0..<cols[c].count {
                 let h = max(4.0, heights[i] * compress)
                 let midY = cursorY + h / 2.0
-                if midY - 7.0 >= lastLabelBottom + 2.0 {
+                let hasSub = (c == 0 || c == columns - 1) && h >= 24.0
+                let labelHalfH = hasSub ? 12.0 : 8.0
+                if midY - labelHalfH >= lastLabelBottom + labelGap {
                     cols[c][i].showLabel = true
-                    lastLabelBottom = midY + 7.0
+                    lastLabelBottom = midY + labelHalfH
                 } else {
                     cols[c][i].showLabel = false
                 }
@@ -573,10 +576,13 @@ enum OrbResourcesModel {
 
 struct OrbResourcesView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     enum MissionSubmode: String {
         case flow
         case dag
     }
+
+    private static let fleetRanges = ["30m", "1h", "6h", "24h", "7d"]
 
     @State private var client = OrbSettingsClient()
     @State private var lens: OrbResourcesModel.Lens = .inference
@@ -592,92 +598,66 @@ struct OrbResourcesView: View {
 
     private static let palette = ["#2f83bf", "#1d9a78", "#7b63cf", "#cf6a2d", "#be4f78", "#22959d"]
 
+    private var isCompactHeight: Bool { verticalSizeClass == .compact }
+
+    private func sankeyCanvasHeight(for viewportHeight: CGFloat, isMission: Bool) -> CGFloat {
+        let base = max(isCompactHeight ? 210 : 280, min(430, viewportHeight * (isCompactHeight ? 0.64 : 0.44)))
+        return isMission ? max(base, 260) : base
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            List {
-                OrbSettingsError(message: error)
+        GeometryReader { viewport in
+            ScrollView {
+                VStack(spacing: isCompactHeight ? 8 : 10) {
+                    if !error.isEmpty {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(OrbStyle.warning)
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(OrbStyle.warning)
+                                .lineLimit(2)
+                            Spacer()
+                            Button("Retry") { Task { await load() } }
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.white)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(OrbStyle.warning.opacity(0.35)))
+                        .accessibilityIdentifier("settings.error")
+                    }
 
-                Section {
-                    HStack(spacing: 8) {
-                        if selectedMissionId != nil {
-                            Button {
-                                selectedMissionId = nil
-                                detail = nil
-                            } label: {
-                                Label("Fleet", systemImage: "chevron.left")
-                                    .font(.caption.weight(.semibold))
-                            }
-                            .buttonStyle(.bordered)
+                    topControlsBar
 
-                            Picker("View", selection: $submode) {
-                                Text("Flow").tag(MissionSubmode.flow)
-                                Text("Fast-DAG").tag(MissionSubmode.dag)
-                            }
-                            .pickerStyle(.segmented)
+                    if let mid = selectedMissionId {
+                        if submode == .flow {
+                            missionFlowCard(missionId: mid, canvasHeight: sankeyCanvasHeight(for: viewport.size.height, isMission: true))
                         } else {
-                            Picker("Lens", selection: $lens) {
-                                Text("Inference").tag(OrbResourcesModel.Lens.inference)
-                                Text("Compute").tag(OrbResourcesModel.Lens.compute)
-                            }
-                            .pickerStyle(.segmented)
-
-                            Picker("Unit", selection: $metric) {
-                                Text(lens == .compute ? "vCPU" : "B tok/h").tag(OrbResourcesModel.Metric.raw)
-                                Text("$").tag(OrbResourcesModel.Metric.usd)
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(maxWidth: 118)
+                            missionDagCard(missionId: mid)
                         }
-                    }
-                    .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
-                }
-
-                if let mid = selectedMissionId {
-                    if submode == .flow {
-                        missionFlowSection(missionId: mid)
                     } else {
-                        missionDagSection(missionId: mid)
+                        fleetFlowCard(canvasHeight: sankeyCanvasHeight(for: viewport.size.height, isMission: false))
                     }
-                } else {
-                    fleetFlowSection
-                }
 
-                consumptionSection
-            }
-            .scrollContentBackground(.hidden)
-            .background(OrbStyle.background)
-
-            // Bottom-anchored Timeline Bar
-            HStack(spacing: 10) {
-                Text("Timeline")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                Spacer()
-                if selectedMissionId != nil, let horizons = detail?["available_horizons"].items, !horizons.isEmpty {
-                    Picker("Horizon", selection: $horizon) {
-                        ForEach(Array(horizons.enumerated()), id: \.offset) { _, h in
-                            Text(h["label"].text).tag(h["id"].text)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 240)
-                } else {
-                    Picker("Range", selection: $range) {
-                        ForEach(["30m", "1h", "6h", "24h", "7d"], id: \.self) { r in
-                            Text(r).tag(r)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 250)
+                    consumptionCard
                 }
+                .padding(.horizontal, isCompactHeight ? 10 : 12)
+                .padding(.top, 6)
+                .padding(.bottom, 16)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(.ultraThinMaterial)
+            .background(OrbStyle.background.ignoresSafeArea())
         }
-        .navigationTitle(selectedMissionId == nil ? "Resources" : (detail?["mission"]["title"].text ?? "Mission DAG"))
+        .background(OrbStyle.background.ignoresSafeArea())
+        .navigationTitle(selectedMissionId == nil ? "Resources" : (detail?["mission"]["title"].text.isEmpty == false ? detail!["mission"]["title"].text : "Mission Flow"))
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                timelineMenuPill
+            }
+        }
         .navigationDestination(item: $openedTranscriptMissionId) { OrbConversation(missionID: $0, project: "", folder: "") }
         .refreshable { await load() }
         .task(id: "\(selectedMissionId ?? "fleet"):\(range):\(horizon)") {
@@ -689,347 +669,681 @@ struct OrbResourcesView: View {
         }
     }
 
-    @ViewBuilder private var fleetFlowSection: some View {
-        Section {
-            if let ov = overview {
-                let stamp = fleetStamp(ov)
-                HStack {
-                    Text(stamp.primary).font(.subheadline.monospacedDigit().weight(.semibold))
-                    if let sec = stamp.secondary {
-                        Text("· \(sec)").font(.caption).foregroundStyle(.secondary)
+    private var timelineMenuPill: some View {
+        Menu {
+            if selectedMissionId != nil {
+                let horizons = detail?["available_horizons"].items ?? []
+                if horizons.isEmpty {
+                    Button {
+                        horizon = "6h"
+                    } label: {
+                        Label("Fast-DAG (6h)", systemImage: "checkmark")
                     }
+                } else {
+                    ForEach(Array(horizons.enumerated()), id: \.offset) { _, h in
+                        let hid = h["id"].text
+                        let lbl = h["label"].text.isEmpty ? hid : h["label"].text
+                        Button {
+                            horizon = hid
+                        } label: {
+                            if horizon == hid {
+                                Label(lbl, systemImage: "checkmark")
+                            } else {
+                                Text(lbl)
+                            }
+                        }
+                    }
+                }
+            } else {
+                ForEach(Self.fleetRanges, id: \.self) { r in
+                    Button {
+                        range = r
+                    } label: {
+                        if range == r {
+                            Label("Last \(r)", systemImage: "checkmark")
+                        } else {
+                            Text("Last \(r)")
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "clock")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(OrbStyle.textSecondary)
+                Text(activeTimelineShortLabel)
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(OrbStyle.textSecondary)
+            }
+            .padding(.horizontal, 9)
+            .frame(height: 28)
+            .background(Color.white.opacity(0.07), in: Capsule())
+            .overlay(Capsule().stroke(OrbStyle.border))
+        }
+        .accessibilityIdentifier("resources.timeline")
+        .accessibilityLabel("Timeline window \(activeTimelineShortLabel)")
+    }
+
+    private var activeTimelineShortLabel: String {
+        if selectedMissionId != nil {
+            if let horizons = detail?["available_horizons"].items,
+               let match = horizons.first(where: { $0["id"].text == horizon }) {
+                let idText = match["id"].text
+                return idText.isEmpty ? horizon : idText
+            }
+            return horizon
+        }
+        return range
+    }
+
+    @ViewBuilder private var topControlsBar: some View {
+        HStack(spacing: 6) {
+            if selectedMissionId != nil {
+                Button {
+                    selectedMissionId = nil
+                    detail = nil
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Fleet")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(OrbStyle.border))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("resources.backFleet")
+
+                compactSegmentGroup(
+                    options: [(MissionSubmode.flow, "Flow"), (MissionSubmode.dag, "DAG")],
+                    selection: $submode,
+                    idPrefix: "resources.submode"
+                )
+
+                if submode == .flow {
+                    Spacer(minLength: 2)
+                    lensAndUnitPills(compact: true)
+                } else {
                     Spacer()
                 }
+            } else {
+                lensAndUnitPills(compact: false)
+            }
+        }
+    }
+
+    @ViewBuilder private func lensAndUnitPills(compact: Bool) -> some View {
+        if compact {
+            compactSegmentGroup(
+                options: [
+                    (OrbResourcesModel.Lens.inference, "Inf"),
+                    (OrbResourcesModel.Lens.compute, "CPU"),
+                ],
+                selection: $lens,
+                idPrefix: "resources.lens",
+                expand: false
+            )
+            compactSegmentGroup(
+                options: [
+                    (OrbResourcesModel.Metric.raw, lens == .compute ? "vCPU" : "tok"),
+                    (OrbResourcesModel.Metric.usd, "$"),
+                ],
+                selection: $metric,
+                idPrefix: "resources.metric",
+                expand: false
+            )
+        } else {
+            compactSegmentGroup(
+                options: [
+                    (OrbResourcesModel.Lens.inference, "Inference"),
+                    (OrbResourcesModel.Lens.compute, "Compute"),
+                ],
+                selection: $lens,
+                idPrefix: "resources.lens",
+                expand: true
+            )
+            compactSegmentGroup(
+                options: [
+                    (OrbResourcesModel.Metric.raw, lens == .compute ? "vCPU" : "B tok/h"),
+                    (OrbResourcesModel.Metric.usd, "$"),
+                ],
+                selection: $metric,
+                idPrefix: "resources.metric",
+                expand: false
+            )
+        }
+    }
+
+    private func compactSegmentGroup<T: Hashable>(
+        options: [(T, String)],
+        selection: Binding<T>,
+        idPrefix: String,
+        expand: Bool = true
+    ) -> some View {
+        HStack(spacing: 2) {
+            ForEach(Array(options.enumerated()), id: \.offset) { _, pair in
+                let active = selection.wrappedValue == pair.0
+                Button {
+                    selection.wrappedValue = pair.0
+                } label: {
+                    Text(pair.1)
+                        .font(.system(size: 12, weight: active ? .semibold : .medium))
+                        .foregroundStyle(active ? Color.white : OrbStyle.textSecondary)
+                        .lineLimit(1)
+                        .padding(.horizontal, expand ? 8 : 9)
+                        .frame(maxWidth: expand ? .infinity : nil)
+                        .frame(height: 26)
+                        .background(
+                            active ? Color.white.opacity(0.12) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("\(idPrefix).\(pair.1)")
+                .accessibilityAddTraits(active ? .isSelected : [])
+            }
+        }
+        .padding(2)
+        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(OrbStyle.border))
+    }
+
+    private func cardContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content()
+        }
+        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(OrbStyle.border))
+    }
+
+    @ViewBuilder private func fleetFlowCard(canvasHeight: CGFloat) -> some View {
+        cardContainer {
+            if let ov = overview {
+                let stamp = fleetStamp(ov)
+                HStack(spacing: 6) {
+                    Text(lens == .compute ? "MACHINES → MISSIONS" : "QUOTA POOLS → MISSIONS")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .tracking(0.4)
+                        .foregroundStyle(OrbStyle.textSecondary)
+                    Spacer(minLength: 8)
+                    HStack(spacing: 4) {
+                        Text(stamp.primary)
+                            .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.white)
+                        if let sec = stamp.secondary {
+                            Text("· \(sec)")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(OrbStyle.textSecondary)
+                        }
+                    }
+                    .lineLimit(1)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+
+                Divider().overlay(OrbStyle.border)
+
                 let sankeyInput = buildOverviewSankey(ov)
                 if sankeyInput.nodes.isEmpty {
-                    Text("No \(lens.rawValue) flow recorded in this window.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 16)
+                    VStack(spacing: 4) {
+                        Text("No \(lens.rawValue) flow recorded in this window")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(OrbStyle.textSecondary)
+                        Text(lens == .compute
+                             ? "Active host runs, remote fleet jobs, and cloud VMs appear here as missions execute."
+                             : "Token throughput and quota-pool usage appear here as missions stream responses.")
+                            .font(.caption2)
+                            .foregroundStyle(OrbStyle.textMuted)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 36)
                 } else {
                     GeometryReader { geo in
+                        let w = max(260, geo.size.width)
+                        let edgeMargin = min(116.0, max(90.0, Double(w) * 0.27))
                         let layout = OrbResourcesModel.computeSankeyLayout(
                             nodes: sankeyInput.nodes,
                             links: sankeyInput.links,
-                            width: max(260, geo.size.width),
-                            height: 220,
+                            width: Double(w),
+                            height: Double(canvasHeight),
                             metric: metric,
-                            marginX: 84
+                            marginX: edgeMargin,
+                            marginY: 12
                         )
                         Canvas { ctx, _ in
-                            for link in layout.links {
-                                var p = Path()
-                                let mx = (link.sourceX + link.targetX) / 2
-                                let syTop = link.y0 - link.sourceWidth / 2
-                                let syBot = link.y0 + link.sourceWidth / 2
-                                let tyTop = link.y1 - link.width / 2
-                                let tyBot = link.y1 + link.width / 2
-                                p.move(to: CGPoint(x: link.sourceX, y: syTop))
-                                p.addCurve(
-                                    to: CGPoint(x: link.targetX, y: tyTop),
-                                    control1: CGPoint(x: mx, y: syTop),
-                                    control2: CGPoint(x: mx, y: tyTop)
-                                )
-                                p.addLine(to: CGPoint(x: link.targetX, y: tyBot))
-                                p.addCurve(
-                                    to: CGPoint(x: link.sourceX, y: syBot),
-                                    control1: CGPoint(x: mx, y: tyBot),
-                                    control2: CGPoint(x: mx, y: syBot)
-                                )
-                                p.closeSubpath()
-                                let col = OrbResourcesModel.hexColor(link.colorHex)
-                                ctx.fill(p, with: .color(col.opacity(0.34)))
-                                if link.degraded {
-                                    ctx.stroke(
-                                        p,
-                                        with: .color(col.opacity(0.65)),
-                                        style: StrokeStyle(lineWidth: 1, dash: [4, 3])
-                                    )
-                                }
-                            }
-                            for node in layout.nodes {
-                                let rect = CGRect(x: node.x0, y: node.y0, width: node.x1 - node.x0, height: max(4, node.y1 - node.y0))
-                                ctx.fill(Path(roundedRect: rect, cornerRadius: 3), with: .color(OrbResourcesModel.hexColor(node.colorHex)))
-                                if node.showLabel {
-                                    let isLeft = node.column == 0
-                                    let tx = isLeft ? node.x0 - 6 : node.x1 + 6
-                                    let label = Text(node.label.prefix(14)).font(.caption2.weight(.medium))
-                                    ctx.draw(label, at: CGPoint(x: tx, y: rect.midY), anchor: isLeft ? .trailing : .leading)
-                                }
-                            }
+                            drawSankey(ctx: &ctx, layout: layout, maxLabelChars: w > 500 ? 22 : 16)
                         }
                     }
-                    .frame(height: 220)
+                    .frame(height: canvasHeight)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .accessibilityIdentifier("resources.fleetSankey")
                 }
 
-                // Tappable mission list for fast 1-tap Fast-DAG drilldown on mobile
-                ForEach(Array(ov["missions"].items.enumerated()), id: \.offset) { _, m in
-                    let mid = m["id"].text
-                    let val = lens == .compute
-                        ? (metric == .usd ? (m["compute_usd_per_h"].doubleValue ?? 0) : (m["vcpu"].doubleValue ?? 0))
-                        : (metric == .usd ? (m["inference_usd_per_h"].doubleValue ?? 0) : (m["b_tok_per_h"].doubleValue ?? 0))
-                    Button {
-                        submode = .flow
-                        selectedMissionId = mid
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(m["title"].text.isEmpty ? String(mid.prefix(8)) : m["title"].text)
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(.primary)
-                                Text("\(OrbResourcesModel.formatLargeNumber(m["subagent_total"].doubleValue ?? 1)) spans · tap for Flow")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                let missions = ov["missions"].items
+                if !missions.isEmpty {
+                    Divider().overlay(OrbStyle.border)
+                    VStack(spacing: 0) {
+                        ForEach(Array(missions.enumerated()), id: \.offset) { idx, m in
+                            if idx > 0 {
+                                Divider().overlay(OrbStyle.border).padding(.leading, 12)
                             }
-                            Spacer()
-                            Text(OrbResourcesModel.formatResourceRate(val, lens: lens, metric: metric))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                            Image(systemName: "chevron.right")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                }
-            } else {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.quaternary)
-                    .frame(height: 200)
-                    .orbShimmer(active: true)
-            }
-        } header: {
-            Text(lens == .compute ? "Machines → Missions" : "Quota Pools → Missions")
-        }
-    }
-
-    @ViewBuilder private func missionDagSection(missionId: String) -> some View {
-        Section {
-            if let det = detail {
-                let bars = parseDagBars(det)
-                let horizonSecs = det["dag"]["horizon_secs"].doubleValue ?? 21600
-                let rows = OrbResourcesModel.layoutDagRows(bars, horizonSecs: horizonSecs)
-
-                let laneCount = rows.count
-                let spanCount = rows.reduce(0) { $0 + $1.spans.count }
-
-                HStack {
-                    Text(laneCount > 0 && spanCount > laneCount ? "\(OrbResourcesModel.formatLargeNumber(Double(laneCount))) lanes · \(OrbResourcesModel.formatLargeNumber(Double(spanCount))) spans" : "\(OrbResourcesModel.formatLargeNumber(Double(spanCount))) spans")
-                        .font(.caption.weight(.semibold))
-                    if let eta = det["mission"]["eta_remaining_secs"].doubleValue, eta > 0 {
-                        Text("· ETA ~\(OrbResourcesModel.formatDurationCompact(eta))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Transcript ↗") {
-                        openedTranscriptMissionId = missionId
-                    }
-                    .font(.caption.weight(.medium))
-                }
-
-                ForEach(rows) { row in
-                    VStack(alignment: .leading, spacing: 4) {
-                        if let sec = row.sectionHeader {
-                            Text(sec.uppercased())
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(.top, 4)
-                        }
-                        Button {
-                            if let subMid = row.bar.missionId, !subMid.isEmpty {
-                                openedTranscriptMissionId = subMid
-                            }
-                        } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(row.bar.label)
-                                        .font(.caption.weight(.medium))
-                                        .foregroundStyle(.primary)
+                            let mid = m["id"].text
+                            let val = lens == .compute
+                                ? (metric == .usd ? (m["compute_usd_per_h"].doubleValue ?? 0) : (m["vcpu"].doubleValue ?? 0))
+                                : (metric == .usd ? (m["inference_usd_per_h"].doubleValue ?? 0) : (m["b_tok_per_h"].doubleValue ?? 0))
+                            Button {
+                                submode = .flow
+                                selectedMissionId = mid
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Circle()
+                                        .fill(statusDotColor(m["status"].text))
+                                        .frame(width: 6, height: 6)
+                                    Text(m["title"].text.isEmpty ? String(mid.prefix(8)) : m["title"].text)
+                                        .font(.system(size: 13, weight: .medium))
+                                        .foregroundStyle(.white)
                                         .lineLimit(1)
-                                    Spacer()
-                                    if row.spans.count > 1 {
-                                        Text("\(row.spans.count)×")
-                                            .font(.caption2.monospacedDigit().weight(.semibold))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    Text(OrbResourcesModel.formatDurationCompact(row.spans.count > 1 ? row.totalDurationSecs : row.bar.durationSecs))
-                                        .font(.caption2.monospacedDigit())
-                                        .foregroundStyle(.secondary)
+                                    Text("· \(OrbResourcesModel.formatLargeNumber(m["subagent_total"].doubleValue ?? 1)) spans")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(OrbStyle.textMuted)
+                                        .lineLimit(1)
+                                    Spacer(minLength: 6)
+                                    Text(OrbResourcesModel.formatResourceRate(val, lens: lens, metric: metric))
+                                        .font(.system(size: 11.5, design: .monospaced))
+                                        .foregroundStyle(OrbStyle.textSecondary)
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(OrbStyle.textMuted)
                                 }
-                                GeometryReader { geo in
-                                    let w = max(40, geo.size.width)
-                                    ZStack(alignment: .leading) {
-                                        Capsule().fill(Color.secondary.opacity(0.12)).frame(height: 8)
-                                        ForEach(Array(row.spans.enumerated()), id: \.offset) { idx, sp in
-                                            let x0 = sp.startFrac * w
-                                            let rawBw = max(5, (sp.endFrac - sp.startFrac) * w)
-                                            let bw: Double = idx + 1 < row.spans.count
-                                                ? max(4, min(rawBw, row.spans[idx + 1].startFrac * w - x0 - 2))
-                                                : rawBw
-                                            Capsule()
-                                                .fill(barColor(sp.bar.state, role: sp.bar.role))
-                                                .frame(width: bw, height: 8)
-                                                .offset(x: x0)
-                                            if let etaEnd = sp.etaEndFrac {
-                                                let ew = max(0, (etaEnd - sp.endFrac) * w)
-                                                Capsule()
-                                                    .fill(barColor(sp.bar.state, role: sp.bar.role).opacity(0.25))
-                                                    .frame(width: ew, height: 8)
-                                                    .offset(x: x0 + bw)
-                                            }
-                                        }
-                                    }
-                                }
-                                .frame(height: 8)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 9)
+                                .contentShape(Rectangle())
                             }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("resources.mission.\(mid)")
                         }
-                        .buttonStyle(.plain)
                     }
                 }
             } else {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.quaternary)
-                    .frame(height: 180)
-                    .orbShimmer(active: true)
+                VStack(spacing: 10) {
+                    HStack {
+                        RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.06)).frame(width: 140, height: 12)
+                        Spacer()
+                        RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.06)).frame(width: 90, height: 12)
+                    }
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.white.opacity(0.05))
+                        .frame(height: canvasHeight - 24)
+                }
+                .padding(12)
+                .orbShimmer(active: true)
             }
-        } header: {
-            Text("Subagent Execution Fast-DAG")
         }
     }
 
-    @ViewBuilder private func missionFlowSection(missionId: String) -> some View {
-        Section {
+    @ViewBuilder private func missionFlowCard(missionId: String, canvasHeight: CGFloat) -> some View {
+        cardContainer {
             if let det = detail {
-                HStack {
+                HStack(spacing: 6) {
+                    Text(lens == .compute ? "MACHINES → TRACKS → SUBAGENTS" : "POOLS → TRACKS → SUBAGENTS")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .tracking(0.4)
+                        .foregroundStyle(OrbStyle.textSecondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 6)
                     if let eta = det["mission"]["eta_remaining_secs"].doubleValue, eta > 0 {
                         Text("ETA ~\(OrbResourcesModel.formatDurationCompact(eta))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(OrbStyle.textSecondary)
                     } else if let el = det["mission"]["elapsed_secs"].doubleValue {
-                        Text("\(OrbResourcesModel.formatDurationCompact(el)) elapsed")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Text("\(OrbResourcesModel.formatDurationCompact(el))")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(OrbStyle.textSecondary)
                     }
-                    Spacer()
-                    Button("Transcript ↗") {
+                    Button {
                         openedTranscriptMissionId = missionId
+                    } label: {
+                        Text("Transcript ↗")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.tint)
                     }
-                    .font(.caption.weight(.medium))
+                    .buttonStyle(.plain)
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+
+                Divider().overlay(OrbStyle.border)
 
                 let sankeyInput = buildMissionFlowSankey(det)
                 if sankeyInput.nodes.isEmpty {
                     Text("No \(lens.rawValue) flow recorded in this window.")
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 16)
+                        .foregroundStyle(OrbStyle.textSecondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 32)
                 } else {
                     GeometryReader { geo in
+                        let w = max(260, geo.size.width)
+                        let edgeMargin = min(96.0, max(68.0, Double(w) * 0.21))
                         let layout = OrbResourcesModel.computeSankeyLayout(
                             nodes: sankeyInput.nodes,
                             links: sankeyInput.links,
-                            width: max(260, geo.size.width),
-                            height: 240,
+                            width: Double(w),
+                            height: Double(canvasHeight),
                             metric: metric,
-                            marginX: 74
+                            marginX: edgeMargin,
+                            marginY: 12
                         )
                         Canvas { ctx, _ in
-                            for link in layout.links {
-                                var p = Path()
-                                let mx = (link.sourceX + link.targetX) / 2
-                                let syTop = link.y0 - link.sourceWidth / 2
-                                let syBot = link.y0 + link.sourceWidth / 2
-                                let tyTop = link.y1 - link.width / 2
-                                let tyBot = link.y1 + link.width / 2
-                                p.move(to: CGPoint(x: link.sourceX, y: syTop))
-                                p.addCurve(to: CGPoint(x: link.targetX, y: tyTop), control1: CGPoint(x: mx, y: syTop), control2: CGPoint(x: mx, y: tyTop))
-                                p.addLine(to: CGPoint(x: link.targetX, y: tyBot))
-                                p.addCurve(to: CGPoint(x: link.sourceX, y: syBot), control1: CGPoint(x: mx, y: tyBot), control2: CGPoint(x: mx, y: syBot))
-                                p.closeSubpath()
-                                let col = OrbResourcesModel.hexColor(link.colorHex)
-                                ctx.fill(p, with: .color(col.opacity(0.34)))
-                            }
-                            for node in layout.nodes {
-                                let rect = CGRect(x: node.x0, y: node.y0, width: node.x1 - node.x0, height: max(4, node.y1 - node.y0))
-                                ctx.fill(Path(roundedRect: rect, cornerRadius: 3), with: .color(OrbResourcesModel.hexColor(node.colorHex)))
-                                if node.showLabel {
-                                    let isLeft = node.column == 0
-                                    let isRight = node.column == 2
-                                    let tx = isLeft ? node.x0 - 5 : (isRight ? node.x1 + 5 : rect.midX)
-                                    let anchor: UnitPoint = isLeft ? .trailing : (isRight ? .leading : .center)
-                                    let label = Text(node.label.prefix(12)).font(.caption2.weight(.medium))
-                                    ctx.draw(label, at: CGPoint(x: tx, y: rect.midY), anchor: anchor)
-                                }
-                            }
+                            drawSankey(ctx: &ctx, layout: layout, maxLabelChars: w > 500 ? 18 : 13)
                         }
                     }
-                    .frame(height: 240)
+                    .frame(height: canvasHeight)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .accessibilityIdentifier("resources.missionSankey")
                 }
             } else {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.quaternary)
-                    .frame(height: 200)
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.white.opacity(0.05))
+                    .frame(height: canvasHeight)
+                    .padding(12)
                     .orbShimmer(active: true)
             }
-        } header: {
-            Text(lens == .compute ? "Machines → Tracks → Subagents" : "Pools → Tracks → Subagents")
         }
     }
 
-    @ViewBuilder private var consumptionSection: some View {
-        Section {
-            if selectedMissionId != nil {
-                HStack(spacing: 8) {
-                    Picker("Lens", selection: $lens) {
-                        Text("Inference").tag(OrbResourcesModel.Lens.inference)
-                        Text("Compute").tag(OrbResourcesModel.Lens.compute)
-                    }
-                    .pickerStyle(.segmented)
+    private func drawSankey(
+        ctx: inout GraphicsContext,
+        layout: OrbResourcesModel.SankeyLayoutResult,
+        maxLabelChars: Int
+    ) {
+        for link in layout.links {
+            var p = Path()
+            let mx = (link.sourceX + link.targetX) / 2
+            let syTop = link.y0 - link.sourceWidth / 2
+            let syBot = link.y0 + link.sourceWidth / 2
+            let tyTop = link.y1 - link.width / 2
+            let tyBot = link.y1 + link.width / 2
+            p.move(to: CGPoint(x: link.sourceX, y: syTop))
+            p.addCurve(
+                to: CGPoint(x: link.targetX, y: tyTop),
+                control1: CGPoint(x: mx, y: syTop),
+                control2: CGPoint(x: mx, y: tyTop)
+            )
+            p.addLine(to: CGPoint(x: link.targetX, y: tyBot))
+            p.addCurve(
+                to: CGPoint(x: link.sourceX, y: syBot),
+                control1: CGPoint(x: mx, y: tyBot),
+                control2: CGPoint(x: mx, y: syBot)
+            )
+            p.closeSubpath()
+            let col = OrbResourcesModel.hexColor(link.colorHex)
+            ctx.fill(p, with: .color(col.opacity(0.36)))
+            if link.degraded {
+                ctx.stroke(
+                    p,
+                    with: .color(col.opacity(0.68)),
+                    style: StrokeStyle(lineWidth: 1, dash: [4, 3])
+                )
+            }
+        }
+        let lastCol = max(1, layout.columns - 1)
+        for node in layout.nodes {
+            let rect = CGRect(x: node.x0, y: node.y0, width: node.x1 - node.x0, height: max(4, node.y1 - node.y0))
+            ctx.fill(Path(roundedRect: rect, cornerRadius: 3), with: .color(OrbResourcesModel.hexColor(node.colorHex)))
+            guard node.showLabel else { continue }
+            let isLeft = node.column == 0
+            let isRight = node.column == lastCol
+            let trimmed = node.label.count > maxLabelChars
+                ? String(node.label.prefix(maxLabelChars - 1)) + "…"
+                : node.label
+            let tx = isLeft ? node.x0 - 6 : (isRight ? node.x1 + 6 : rect.midX)
+            let anchor: UnitPoint = isLeft ? .trailing : (isRight ? .leading : .center)
+            if !isLeft && !isRight {
+                let pillW = Double(trimmed.count) * 6.2 + 12
+                let pillRect = CGRect(x: rect.midX - pillW / 2, y: rect.midY - 8, width: pillW, height: 16)
+                ctx.fill(Path(roundedRect: pillRect, cornerRadius: 4), with: .color(OrbStyle.surface.opacity(0.9)))
+                ctx.stroke(Path(roundedRect: pillRect, cornerRadius: 4), with: .color(OrbStyle.border), lineWidth: 1)
+            }
+            let rateText = OrbResourcesModel.formatResourceRate(
+                metric == .usd ? node.usdValue : node.rawValue,
+                lens: lens,
+                metric: metric
+            )
+            let showSub = (isLeft || isRight) && rect.height >= 24
+            let labelView = Text(trimmed)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white)
+            if showSub {
+                ctx.draw(labelView, at: CGPoint(x: tx, y: rect.midY - 6), anchor: anchor)
+                let subView = Text(rateText)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(OrbStyle.textSecondary)
+                ctx.draw(subView, at: CGPoint(x: tx, y: rect.midY + 6), anchor: anchor)
+            } else {
+                ctx.draw(labelView, at: CGPoint(x: tx, y: rect.midY), anchor: anchor)
+            }
+        }
+    }
 
-                    Picker("Unit", selection: $metric) {
-                        Text(lens == .compute ? "vCPU" : "B tok/h").tag(OrbResourcesModel.Metric.raw)
-                        Text("$").tag(OrbResourcesModel.Metric.usd)
+    @ViewBuilder private func missionDagCard(missionId: String) -> some View {
+        cardContainer {
+            if let det = detail {
+                let bars = parseDagBars(det)
+                let horizonSecs = det["dag"]["horizon_secs"].doubleValue ?? 21600
+                let rows = OrbResourcesModel.layoutDagRows(bars, horizonSecs: horizonSecs)
+                let laneCount = rows.count
+                let spanCount = rows.reduce(0) { $0 + $1.spans.count }
+
+                HStack(spacing: 6) {
+                    Text(laneCount > 0 && spanCount > laneCount
+                         ? "FAST-DAG · \(OrbResourcesModel.formatLargeNumber(Double(laneCount))) LANES · \(OrbResourcesModel.formatLargeNumber(Double(spanCount))) SPANS"
+                         : "FAST-DAG · \(OrbResourcesModel.formatLargeNumber(Double(spanCount))) SPANS")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .tracking(0.4)
+                        .foregroundStyle(OrbStyle.textSecondary)
+                        .lineLimit(1)
+                    if let eta = det["mission"]["eta_remaining_secs"].doubleValue, eta > 0 {
+                        Text("· ETA ~\(OrbResourcesModel.formatDurationCompact(eta))")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(OrbStyle.textSecondary)
                     }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 118)
+                    Spacer(minLength: 6)
+                    Button {
+                        openedTranscriptMissionId = missionId
+                    } label: {
+                        Text("Transcript ↗")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.tint)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+
+                Divider().overlay(OrbStyle.border)
+
+                if rows.isEmpty {
+                    Text("No subagent spans recorded yet.")
+                        .font(.footnote)
+                        .foregroundStyle(OrbStyle.textSecondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 28)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(rows) { row in
+                            if let sec = row.sectionHeader {
+                                Text(sec.uppercased())
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .tracking(0.35)
+                                    .foregroundStyle(OrbStyle.textMuted)
+                                    .padding(.top, 2)
+                            }
+                            Button {
+                                if let subMid = row.bar.missionId, !subMid.isEmpty {
+                                    openedTranscriptMissionId = subMid
+                                }
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack(spacing: 6) {
+                                        Text(row.bar.label)
+                                            .font(.system(size: 12, weight: .medium))
+                                            .foregroundStyle(.white)
+                                            .lineLimit(1)
+                                        Spacer(minLength: 6)
+                                        if row.spans.count > 1 {
+                                            Text("\(row.spans.count)×")
+                                                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                                                .foregroundStyle(OrbStyle.textSecondary)
+                                        }
+                                        Text(OrbResourcesModel.formatDurationCompact(row.spans.count > 1 ? row.totalDurationSecs : row.bar.durationSecs))
+                                            .font(.system(size: 10.5, design: .monospaced))
+                                            .foregroundStyle(OrbStyle.textSecondary)
+                                    }
+                                    GeometryReader { geo in
+                                        let w = max(40, geo.size.width)
+                                        ZStack(alignment: .leading) {
+                                            Capsule().fill(Color.white.opacity(0.08)).frame(height: 8)
+                                            ForEach(Array(row.spans.enumerated()), id: \.offset) { idx, sp in
+                                                let x0 = sp.startFrac * w
+                                                let rawBw = max(5, (sp.endFrac - sp.startFrac) * w)
+                                                let bw: Double = idx + 1 < row.spans.count
+                                                    ? max(4, min(rawBw, row.spans[idx + 1].startFrac * w - x0 - 2))
+                                                    : rawBw
+                                                Capsule()
+                                                    .fill(barColor(sp.bar.state, role: sp.bar.role))
+                                                    .frame(width: bw, height: 8)
+                                                    .offset(x: x0)
+                                                if let etaEnd = sp.etaEndFrac {
+                                                    let ew = max(0, (etaEnd - sp.endFrac) * w)
+                                                    Capsule()
+                                                        .fill(barColor(sp.bar.state, role: sp.bar.role).opacity(0.25))
+                                                        .frame(width: ew, height: 8)
+                                                        .offset(x: x0 + bw)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .frame(height: 8)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(12)
+                }
+            } else {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.white.opacity(0.05))
+                    .frame(height: 200)
+                    .padding(12)
+                    .orbShimmer(active: true)
+            }
+        }
+    }
+
+    @ViewBuilder private var consumptionCard: some View {
+        cardContainer {
+            let values = currentSeriesValues()
+            let peak = values.max() ?? 0
+            let isLoaded = selectedMissionId != nil ? detail != nil : overview != nil
+
+            HStack(spacing: 6) {
+                Text("CONSUMPTION · \(metric == .usd ? "$/H" : (lens == .compute ? "VCPU" : "B TOK/H"))")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .tracking(0.4)
+                    .foregroundStyle(OrbStyle.textSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                if selectedMissionId != nil && submode == .dag {
+                    lensAndUnitPills(compact: true)
+                } else if isLoaded {
+                    Text("Peak \(OrbResourcesModel.formatResourceRate(peak, lens: lens, metric: metric))")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(OrbStyle.textSecondary)
                 }
             }
-            let values = currentSeriesValues()
-            if values.isEmpty {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(.quaternary)
-                    .frame(height: 84)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider().overlay(OrbStyle.border)
+
+            if !isLoaded {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.white.opacity(0.05))
+                    .frame(height: 80)
+                    .padding(12)
+                    .orbShimmer(active: true)
+            } else if values.count < 2 {
+                Text("Waiting for timeline samples…")
+                    .font(.caption)
+                    .foregroundStyle(OrbStyle.textMuted)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 76)
             } else {
-                let peak = values.max() ?? 0
-                HStack {
-                    Text(metric == .usd ? "Est. USD / hour" : (lens == .compute ? "vCPU" : "B tok/h"))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("Peak \(OrbResourcesModel.formatResourceRate(peak, lens: lens, metric: metric))")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
+                let curveH: Double = isCompactHeight ? 72 : 90
                 GeometryReader { geo in
-                    let w = max(60, geo.size.width)
-                    let h = 76.0
+                    let w = max(60, Double(geo.size.width))
                     let denom = peak > 0 ? peak * 1.12 : 1.0
+                    let accent: Color = lens == .compute
+                        ? Color(red: 0.36, green: 0.62, blue: 0.93)
+                        : Color(red: 0.62, green: 0.52, blue: 0.90)
                     Canvas { ctx, _ in
                         var line = Path()
+                        var area = Path()
                         let n = max(1, values.count - 1)
+                        let baseY = curveH - 6
                         for (i, v) in values.enumerated() {
                             let x = (Double(i) / Double(n)) * w
-                            let y = h - (v / denom) * (h - 8)
-                            if i == 0 { line.move(to: CGPoint(x: x, y: y)) }
-                            else { line.addLine(to: CGPoint(x: x, y: y)) }
+                            let y = baseY - (v / denom) * (baseY - 8)
+                            if i == 0 {
+                                line.move(to: CGPoint(x: x, y: y))
+                                area.move(to: CGPoint(x: x, y: baseY))
+                                area.addLine(to: CGPoint(x: x, y: y))
+                            } else {
+                                line.addLine(to: CGPoint(x: x, y: y))
+                                area.addLine(to: CGPoint(x: x, y: y))
+                            }
                         }
-                        ctx.stroke(line, with: .color(lens == .compute ? .blue : .purple), lineWidth: 1.8)
+                        area.addLine(to: CGPoint(x: w, y: baseY))
+                        area.closeSubpath()
+                        ctx.fill(
+                            area,
+                            with: .linearGradient(
+                                Gradient(colors: [accent.opacity(0.24), accent.opacity(0.01)]),
+                                startPoint: CGPoint(x: 0, y: 0),
+                                endPoint: CGPoint(x: 0, y: baseY)
+                            )
+                        )
+                        ctx.stroke(line, with: .color(accent), lineWidth: 1.8)
                     }
                 }
-                .frame(height: 76)
+                .frame(height: curveH)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .accessibilityIdentifier("resources.consumptionChart")
             }
-        } header: {
-            Text("Consumption")
+        }
+    }
+
+    private func statusDotColor(_ status: String) -> Color {
+        switch status {
+        case "active", "running", "waiting_background": return .blue
+        case "completed", "acknowledged", "done": return OrbStyle.success
+        case "blocked", "failed": return OrbStyle.warning
+        default: return OrbStyle.textMuted
         }
     }
 

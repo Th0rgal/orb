@@ -12,15 +12,15 @@ const TABLE: Record<(typeof STATUSES)[number], [boolean, boolean, boolean, boole
   queued:             [false, true,  true,  true,  false, false, false, false, "Queued"],
   waiting_background: [false, false, false, true,  false, false, false, false, "Background work running"],
   awaiting_user:      [false, false, false, false, true,  false, false, true,  "Ready for a follow-up"],
-  waiting_user:       [false, false, false, false, true,  false, false, false, "Ready for a follow-up"],
+  waiting_user:       [false, false, false, false, true,  false, false, true,  "Ready for a follow-up"],
   acknowledged:       [false, false, false, false, false, true,  false, true,  "Ready for a follow-up"],
   blocked:            [false, false, false, false, true,  false, false, true,  "Blocked"],
   paused:             [false, false, false, false, true,  false, false, true,  "Paused"],
-  completed:          [false, false, false, false, true,  true,  false, false, "Completed"],
+  completed:          [false, false, false, false, true,  true,  false, true,  "Completed"],
   failed:             [false, false, false, false, true,  true,  true,  true,  "Failed"],
   not_feasible:       [false, false, false, false, true,  true,  true,  true,  "Not feasible"],
   interrupted:        [false, false, false, false, true,  true,  false, true,  "Interrupted"],
-  cancelled:          [false, false, false, false, true,  true,  false, false, "Interrupted"],
+  cancelled:          [false, false, false, false, true,  true,  false, true,  "Interrupted"],
 };
 
 it.each(STATUSES)("%s", status => {
