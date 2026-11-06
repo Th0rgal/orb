@@ -1,11 +1,12 @@
-import { For, Show, createSignal, type JSX } from "solid-js";
+import { For, Show, Suspense, createSignal, lazy, type JSX } from "solid-js";
 import { isConnected } from "./api";
 import { settingsPageId, settingsSectionFor } from "./settingsNav";
 import { ErrorToast } from "./toast";
-import { ApprovalDevicesPanel } from "./ApprovalDevicesPanel";
-import { PrivilegeAccessPanel } from "./PrivilegeAccessPanel";
-import { MissionAccessPanel } from "./MissionAccessPanel";
 export { SettingsCard, SettingsRow } from "./SettingsCard";
+
+const ApprovalDevicesPanel = lazy(() => import("./ApprovalDevicesPanel").then(m => ({ default: m.ApprovalDevicesPanel })));
+const PrivilegeAccessPanel = lazy(() => import("./PrivilegeAccessPanel").then(m => ({ default: m.PrivilegeAccessPanel })));
+const MissionAccessPanel = lazy(() => import("./MissionAccessPanel").then(m => ({ default: m.MissionAccessPanel })));
 
 /** Page chrome for a settings section: title, one-line subtitle and tabs.
  * The panel inside keeps its own markup; CSS folds its scroll box and title
@@ -53,9 +54,11 @@ export function SecuritySettings() {
       <div class="s-inner">
         <ErrorToast error={error()} title="Security" onDismiss={() => setError("")} />
         <Show when={isConnected()} fallback={<p class="s-lead">Connect to Core on the Account page to manage approvals and access.</p>}>
-          <ApprovalDevicesPanel onError={setError} />
-          <PrivilegeAccessPanel onError={setError} />
-          <MissionAccessPanel onError={setError} />
+          <Suspense>
+            <ApprovalDevicesPanel onError={setError} />
+            <PrivilegeAccessPanel onError={setError} />
+            <MissionAccessPanel onError={setError} />
+          </Suspense>
         </Show>
       </div>
     </div>

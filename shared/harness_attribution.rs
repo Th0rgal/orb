@@ -35,6 +35,17 @@ pub fn claude_settings_arg() -> String {
 /// the key with a startup warning, so Core no longer sends it.
 pub const CODEX_CONFIG_OVERRIDE: &str = "commit_attribution=\"\"";
 
+/// Provider HTTP/header timeout (15 minutes) injected into Orb-managed OpenCode
+/// `provider.<id>.options.timeout` blocks.
+///
+/// Stock `@ai-sdk/openai-compatible` defaults to `300_000` ms (5 min), which
+/// blind-aborted queued private GPU fleet requests (`ProviderHeaderTimeoutError`)
+/// while Core was legitimately waiting for a serialized `dgx-spark` queue turn
+/// (`PROXY_FLEET_SEMANTIC_FIRST_TOKEN_SECS`, default 600 s). Keeping OpenCode's
+/// client timeout strictly above Core's pre-commit semantic + failover budget
+/// ensures Core owns timeout, retry, and waterfall failover decisions.
+pub const OPENCODE_PROXY_PROVIDER_TIMEOUT_MS: u64 = 900_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;

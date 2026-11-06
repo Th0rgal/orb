@@ -33,4 +33,34 @@ class OrbQuotaExhaustedTest {
         val detail: OrbDict = mapOf("antigravity_windows" to listOf(mapOf("label" to "Gemini · 5h", "reset_at" to 2_000_000_000.0)))
         assertEquals(listOf("Gemini · 5h" to 1.0), providerQuotaWindows(detail))
     }
+
+    @Test
+    fun subscriptionResetsMatchSharedFixture() {
+        val spec = OrbSpec.dict("fixtures/subscription-resets.json")
+        val supportsCases = OrbJSON.dictList(spec["supports_cases"])
+        check(supportsCases.isNotEmpty())
+        for (c in supportsCases) {
+            val name = c["name"] as String
+            val provider = OrbJSON.dict(c["provider"])
+            assertEquals(name, c["expected"] as Boolean, supportsSubscriptionReset(provider))
+        }
+        val summaryCases = OrbJSON.dictList(spec["summary_cases"])
+        check(summaryCases.isNotEmpty())
+        for (c in summaryCases) {
+            val name = c["name"] as String
+            val nowSec = (c["nowSec"] as Number).toDouble()
+            val usage = OrbJSON.dict(c["usage"])
+            val got = subscriptionResetSummary(usage, nowSec)
+            val expected = OrbJSON.dict(c["expected"])
+            if (expected == null) {
+                assertEquals(name, null, got)
+            } else {
+                check(got != null) { "Expected non-null summary for $name" }
+                assertEquals(name, (expected["availableCount"] as Number).toInt(), got.availableCount)
+                assertEquals(name, expected["usableNow"] as Boolean, got.usableNow)
+                assertEquals(name, expected["badge"] as String, got.badge)
+                assertEquals(name, expected["detail"] as String, got.detail)
+            }
+        }
+    }
 }

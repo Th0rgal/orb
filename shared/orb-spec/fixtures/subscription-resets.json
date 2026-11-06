@@ -1,0 +1,136 @@
+{
+  "supports_cases": [
+    {
+      "name": "anthropic oauth subscription",
+      "provider": { "provider_type": "anthropic", "uses_oauth": true, "has_oauth": true, "has_api_key": false },
+      "expected": true
+    },
+    {
+      "name": "openai oauth subscription",
+      "provider": { "provider_type": "openai", "uses_oauth": true },
+      "expected": true
+    },
+    {
+      "name": "openai dual key and oauth",
+      "provider": { "provider_type": "openai", "uses_oauth": true, "has_api_key": true, "has_oauth": true },
+      "expected": true
+    },
+    {
+      "name": "anthropic api key only",
+      "provider": { "provider_type": "anthropic", "uses_oauth": true, "has_api_key": true, "has_oauth": false },
+      "expected": false
+    },
+    {
+      "name": "openai non-oauth",
+      "provider": { "provider_type": "openai", "uses_oauth": false, "has_api_key": true },
+      "expected": false
+    },
+    {
+      "name": "xai oauth does not expose reset credits",
+      "provider": { "provider_type": "xai", "uses_oauth": true, "has_oauth": true },
+      "expected": false
+    }
+  ],
+  "summary_cases": [
+    {
+      "name": "absent subscription_resets",
+      "nowSec": 1700000000,
+      "usage": { "provider_type": "anthropic" },
+      "expected": null
+    },
+    {
+      "name": "zero available resets",
+      "nowSec": 1700000000,
+      "usage": {
+        "provider_type": "openai",
+        "subscription_resets": { "available_count": 0, "usable_now": false, "grants": [] }
+      },
+      "expected": null
+    },
+    {
+      "name": "usable anthropic multi-grant reset with expiry",
+      "nowSec": 1700000000,
+      "usage": {
+        "provider_type": "anthropic",
+        "subscription_resets": {
+          "available_count": 2,
+          "usable_now": true,
+          "grants": [
+            {
+              "id": "grant-1",
+              "label": "Promotional reset",
+              "clears": ["5h", "Weekly"],
+              "resets_left": 2,
+              "expires_at": 1700432000,
+              "usable_now": true,
+              "requires_limit": true
+            }
+          ]
+        }
+      },
+      "expected": {
+        "availableCount": 2,
+        "usableNow": true,
+        "badge": "2 resets available",
+        "detail": "Clears 5h and Weekly · expires in 5d"
+      }
+    },
+    {
+      "name": "banked codex reset gated until limit reached",
+      "nowSec": 1700000000,
+      "usage": {
+        "provider_type": "openai",
+        "subscription_resets": {
+          "available_count": 1,
+          "usable_now": false,
+          "unavailable_reason": "Available when a usage limit is reached",
+          "grants": [
+            {
+              "id": "codex-credit-1",
+              "label": "Rate limit reset credit",
+              "clears": ["5h", "Weekly"],
+              "resets_left": 1,
+              "usable_now": false,
+              "requires_limit": true,
+              "unavailable_reason": "Available when a usage limit is reached"
+            }
+          ]
+        }
+      },
+      "expected": {
+        "availableCount": 1,
+        "usableNow": false,
+        "badge": "1 reset available",
+        "detail": "Clears 5h and Weekly · Available when a usage limit is reached"
+      }
+    },
+    {
+      "name": "three-window grant expiring in hours",
+      "nowSec": 1700000000,
+      "usage": {
+        "provider_type": "anthropic",
+        "subscription_resets": {
+          "available_count": 1,
+          "usable_now": true,
+          "grants": [
+            {
+              "id": "grant-opus",
+              "label": "Usage limit reset",
+              "clears": ["5h", "Weekly", "Weekly Sonnet"],
+              "resets_left": 1,
+              "expires_at": 1700010800,
+              "usable_now": true,
+              "requires_limit": false
+            }
+          ]
+        }
+      },
+      "expected": {
+        "availableCount": 1,
+        "usableNow": true,
+        "badge": "1 reset available",
+        "detail": "Clears 5h, Weekly and Weekly Sonnet · expires in 3h"
+      }
+    }
+  ]
+}

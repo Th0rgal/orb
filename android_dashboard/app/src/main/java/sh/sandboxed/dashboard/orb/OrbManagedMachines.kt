@@ -912,7 +912,7 @@ private fun ManagedConfigureProviderDialog(
                         put("api_key", trimmedKey)
                         put("enabled", true)
                     }
-                    if (provider.provider == "hetzner" || provider.provider == "scaleway") {
+                    if (provider.provider == "hetzner" || provider.provider == "scaleway" || provider.provider == "colab") {
                         put("region", region.trim())
                     }
                     if (provider.provider == "scaleway" || provider.provider == "boost") {
@@ -982,6 +982,13 @@ private fun ManagedConfigureProviderDialog(
                         label = "Project ID",
                         value = projectId,
                         onValueChange = { projectId = it }
+                    )
+                }
+                if (provider.provider == "colab") {
+                    OrbMiniField(
+                        label = "colab-api URL (optional)",
+                        value = region,
+                        onValueChange = { region = it }
                     )
                 }
                 if (provider.credentialSource == "settings") {

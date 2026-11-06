@@ -365,6 +365,10 @@ pub(crate) async fn write_opencode_config(
                             json!(crate::api::ai_providers::KIMI_USER_AGENT),
                         );
                         options.insert("headers".to_string(), serde_json::Value::Object(headers));
+                        options.insert(
+                            "timeout".to_string(),
+                            json!(crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS),
+                        );
                         provider_config
                             .insert("options".to_string(), serde_json::Value::Object(options));
 
@@ -437,6 +441,10 @@ pub(crate) async fn write_opencode_config(
                     if let Some(base_url) = &provider.base_url {
                         options.insert("baseURL".to_string(), json!(base_url));
                     }
+                    options.insert(
+                        "timeout".to_string(),
+                        json!(crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS),
+                    );
 
                     // API key: either direct value or env var reference
                     if let Some(api_key) = &provider.api_key {

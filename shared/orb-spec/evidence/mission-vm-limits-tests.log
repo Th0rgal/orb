@@ -1,10 +1,55 @@
-    Finished `test` profile [unoptimized] target(s) in 0.10s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-d791927b4d2534f0)
+   Compiling serde_core v1.0.228
+   Compiling serde_json v1.0.149
+   Compiling memchr v2.8.0
+   Compiling orb-spec v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider/crates/orb-spec)
+    Finished `test` profile [unoptimized] target(s) in 4.18s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
 
 running 1 test
 test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+warning: unused import: `super::*`
+   --> src/node/tool_interrupt.rs:276:9
+    |
+276 |     use super::*;
+    |         ^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:433:5
+    |
+432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
+    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
+433 | /     {
+434 | |         let conn = state
+435 | |             .projects
+436 | |             .connection
+...   |
+439 | |         require_no_accepted_actions(&conn)?;
+440 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:627:5
+    |
+626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
+    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
+627 |     receipt.phase = Phase::Purged;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `source`
+   --> src/api/control/workspace_purge.rs:405:5
+    |
+405 |     source: &FsPath,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: function `populate_activity` is never used
     --> src/api/control/mission_list.rs:1177:21
@@ -166,13 +211,19 @@ warning: method `note_activity` is never used
 60 |     pub fn note_activity(&self) {
    |            ^^^^^^^^^^^^^
 
-warning: `sandboxed_sh` (lib test) generated 13 warnings
-    Finished `test` profile [unoptimized] target(s) in 0.19s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
+warning: function `scope_oom_killed` is never used
+    --> src/node/runner.rs:2124:10
+     |
+2124 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+     |          ^^^^^^^^^^^^^^^^
+
+warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 55.91s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 2 tests
 test managed::tests::mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_usd_budget ... ok
 test managed::tests::mission_vm_limits_bypass_saturated_global_pool_and_enforce_per_provider_caps ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3787 filtered out; finished in 0.03s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3767 filtered out; finished in 0.03s
 

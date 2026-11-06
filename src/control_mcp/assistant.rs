@@ -1830,12 +1830,12 @@ impl AssistantMcp {
         vec![
             ToolDefinition {
                 name: "spawn_managed_machine".to_string(),
-                description: "Rent a fresh, disposable cloud VM across Core's native providers (`boat` default, `boost`, `hetzner`, `vastai`, `scaleway`) and enroll it as a compute node (or raw guest), so you can run a subagent or heavy CPU/GPU/ARM64/macOS/Lean job with Core-enforced ownership, budget caps, and automatic idle reaping. NEVER fetch cloud API keys via `secret_get` to rent VMs directly. Sizes by provider: `boat` (`small` 2 vCPU/4 GB, `default` 4 vCPU/8 GB, `large` 8 vCPU/16 GB, `xlarge` 16 vCPU/32 GB on Zen 5), `boost` (`boost-2vcpu-ubuntu-2604`..`boost-32vcpu-96gb` / `boost-32vcpu-ubuntu-2604` isolated Cloud Hypervisor microVMs with optional warm `.olean` overlay via `repo`/`base_key`/`lean_mode` and `turbo-lean`), `hetzner` (`cpx22`, `cpx32`, `cpx42`, `cpx52`, `cpx62`, `ccx33`, `ccx43` x86_64; `cax31` arm64), `vastai` (`rtx4090`, `a100`, `h100` CUDA GPUs), `scaleway` (`PRO2-S`, `PRO2-M`, `L4-1-24G`, `H100-1-80G`, and `M2-M`/`M2-PRO` Apple Silicon macOS with `allow_24h_commitment=true`). Or pass `cpu`, `ram_gb`, `gpu`, or `arch` and Core picks the cheapest fitting tier. Shortcut: `start_mission(remote_node_id=\"auto-managed:<provider>:<size>\")` spawns and places in one call. Every machine has a TTL (default 60 min, auto-extended while busy, max 720) and is reaped automatically after your mission ends, after 15 min idle while unused (5 min post-job), or at its TTL. Call `destroy_managed_machine` as soon as you are done.".to_string(),
+                description: "Rent a fresh, disposable cloud VM across Core's native providers (`boat` default, `boost`, `hetzner`, `vastai`, `scaleway`, `colab`) and enroll it as a compute node (or raw guest), so you can run a subagent or heavy CPU/GPU/TPU/ARM64/macOS/Lean job with Core-enforced ownership, budget caps, and automatic idle reaping. NEVER fetch cloud API keys via `secret_get` to rent VMs directly. Sizes by provider: `boat` (`small` 2 vCPU/4 GB, `default` 4 vCPU/8 GB, `large` 8 vCPU/16 GB, `xlarge` 16 vCPU/32 GB on Zen 5), `boost` (`boost-2vcpu-ubuntu-2604`..`boost-32vcpu-96gb` / `boost-32vcpu-ubuntu-2604` isolated Cloud Hypervisor microVMs with optional warm `.olean` overlay via `repo`/`base_key`/`lean_mode` and `turbo-lean`), `hetzner` (`cpx22`, `cpx32`, `cpx42`, `cpx52`, `cpx62`, `ccx33`, `ccx43` x86_64; `cax31` arm64), `vastai` (`rtx4090`, `a100`, `h100` CUDA GPUs), `scaleway` (`PRO2-S`, `PRO2-M`, `L4-1-24G`, `H100-1-80G`, and `M2-M`/`M2-PRO` Apple Silicon macOS with `allow_24h_commitment=true`), `colab` (`colab-auto`, `t4`, `l4`, `a100`, `h100` CUDA GPUs and `v5e1`, `v6e1` TPUs via `colab-api`, shadow-priced at ½ Vast.ai). Or pass `cpu`, `ram_gb`, `gpu`, or `arch` and Core picks the cheapest fitting tier. Shortcut: `start_mission(remote_node_id=\"auto-managed:<provider>:<size>\")` spawns and places in one call. Every machine has a TTL (default 60 min, auto-extended while busy, max 720) and is reaped automatically after your mission ends, after 15 min idle while unused (5 min post-job), or at its TTL. Call `destroy_managed_machine` as soon as you are done.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "provider": {"type": "string", "enum": ["boat", "boost", "hetzner", "vastai", "scaleway"], "description": "Cloud provider (default `boat`; `boost` for warm Lean/Ubuntu 26.04 Cloud Hypervisor microVMs up to 32 vCPU/128 GiB, `hetzner` for cheap EU x86_64/arm64 Linux, `vastai` for disposable CUDA GPUs, `scaleway` for EU Linux/GPU or Apple Silicon macOS)."},
-                        "size": {"type": "string", "description": "Provider size tier (e.g. `small`/`default`/`large`/`xlarge` on boat; `boost-4vcpu-ubuntu-2604`/`boost-16vcpu-ubuntu-2604`/`boost-32vcpu-96gb`/`boost-32vcpu-ubuntu-2604` on boost; `cpx42`/`ccx33`/`cax31` on hetzner; `rtx4090`/`a100`/`h100` on vastai; `PRO2-S`/`L4-1-24G`/`M2-M` on scaleway). Omit to pick from cpu/ram_gb/gpu/arch or the provider default."},
+                        "provider": {"type": "string", "enum": ["boat", "boost", "hetzner", "vastai", "scaleway", "colab"], "description": "Cloud provider (default `boat`; `boost` for warm Lean/Ubuntu 26.04 Cloud Hypervisor microVMs up to 32 vCPU/128 GiB, `hetzner` for cheap EU x86_64/arm64 Linux, `vastai` for disposable CUDA GPUs, `scaleway` for EU Linux/GPU or Apple Silicon macOS, `colab` for pooled Google Colab CUDA GPUs & TPUs shadow-priced at ½ Vast.ai)."},
+                        "size": {"type": "string", "description": "Provider size tier (e.g. `small`/`default`/`large`/`xlarge` on boat; `boost-4vcpu-ubuntu-2604`/`boost-16vcpu-ubuntu-2604`/`boost-32vcpu-96gb`/`boost-32vcpu-ubuntu-2604` on boost; `cpx42`/`ccx33`/`cax31` on hetzner; `rtx4090`/`a100`/`h100` on vastai; `PRO2-S`/`L4-1-24G`/`M2-M` on scaleway; `colab-auto`/`t4`/`l4`/`a100`/`h100`/`v5e1`/`v6e1` on colab). Omit to pick from cpu/ram_gb/gpu/arch or the provider default."},
                         "cpu": {"type": "integer", "minimum": 1, "maximum": 128, "description": "Minimum vCPUs needed (alternative to size)."},
                         "ram_gb": {"type": "integer", "minimum": 1, "maximum": 512, "description": "Minimum RAM in GB needed (alternative to size)."},
                         "gpu": {"type": "string", "description": "Optional GPU requirement (e.g. `rtx4090`, `l4`, `a100`, `h100`)."},
@@ -1850,7 +1850,7 @@ impl AssistantMcp {
                         "memory_mib": {"type": "integer", "minimum": 4096, "maximum": 131072, "description": "Only on `boost`: optional custom RAM override in MiB (multiple of 1024, 4096..=131072)."},
                         "retain_vm_for_parent_minutes": {"type": "integer", "minimum": 0, "maximum": 720, "description": "Optional grace window in minutes (0..=720) to keep this VM alive after its child owner finishes while its parent mission is still active, preventing premature owner_completed reaps before parent wakeups."},
                         "pre_stop_hook": {"type": "string", "description": "Optional shell command executed out-of-band on the VM (alongside Orb's automatic non-destructive git WIP-checkpoint) at expires_at - 5m and created_at + 710m before hard-cap kill."},
-                        "provisioning_mode": {"type": "string", "enum": ["worker", "raw"], "description": "Worker installs/enrolls Orb (default). Raw only rents the VM (Boat/Boost): use `exec_raw_managed_machine` for bounded guest ops."},
+                        "provisioning_mode": {"type": "string", "enum": ["worker", "raw"], "description": "Worker installs/enrolls Orb (default). Raw only rents the VM (Boat/Boost/Colab): use `exec_raw_managed_machine` for bounded guest ops."},
                         "from_snapshot": {"type": "string", "description": "Optional Boat/Boost project snapshot (`list_managed_snapshots`), \"latest\" for the newest ready project snapshot, or \"light\"/\"none\" for the clean base image. Omitted defaults to light mode (clean base image, no snapshot files restored)."},
                         "reason": {"type": "string", "description": "Why you need it (shown to the operator and in the cost ledger)."}
                     }
@@ -1874,7 +1874,7 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "list_managed_machines".to_string(),
-                description: "List live managed VMs across configured providers (`boat`, `boost`, `hetzner`, `vastai`, `scaleway`) compactly: name, provider, size, state, project, owner, created_at, expires_at, hard_cap_at, forkable, reap_at, deletable_at, cost so far, plus configured providers (including live `availability` status `available`/`degraded`/`saturated`), today's spend, global running count/caps, `mission_budget`, and your mission's `effective_vm_limits`. Defaults to `scope=\"own_pool\"` (`pool_only=true`) for mission sessions so foreign `budget_pool_id=null` VMs do not clutter sweeps; pass `scope=\"all\"` (`pool_only=false`) for the tenant-wide fleet or `verbose=true` for full rows and 24 h history.".to_string(),
+                description: "List live managed VMs across configured providers (`boat`, `boost`, `hetzner`, `vastai`, `scaleway`, `colab`) compactly: name, provider, size, state, project, owner, created_at, expires_at, hard_cap_at, forkable, reap_at, deletable_at, cost so far, plus configured providers (including live `availability` status `available`/`degraded`/`saturated`), today's spend, global running count/caps, `mission_budget`, and your mission's `effective_vm_limits`. Defaults to `scope=\"own_pool\"` (`pool_only=true`) for mission sessions so foreign `budget_pool_id=null` VMs do not clutter sweeps; pass `scope=\"all\"` (`pool_only=false`) for the tenant-wide fleet or `verbose=true` for full rows and 24 h history.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -8546,6 +8546,14 @@ mod compact_managed_tests {
         assert_eq!(
             parse_auto_managed_spec("auto-managed:scaleway:PRO2-S"),
             Some((Some("scaleway".into()), Some("PRO2-S".into())))
+        );
+        assert_eq!(
+            parse_auto_managed_spec("auto-managed:colab"),
+            Some((Some("colab".into()), None))
+        );
+        assert_eq!(
+            parse_auto_managed_spec("auto-managed:colab:a100"),
+            Some((Some("colab".into()), Some("a100".into())))
         );
     }
 }

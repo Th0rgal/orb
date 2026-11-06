@@ -6406,7 +6406,8 @@ fn cli_proxy_opencode_provider_definition(
         },
         "options": {
             "baseURL": endpoint.openai_v1_url(),
-            "apiKey": endpoint.api_key
+            "apiKey": endpoint.api_key,
+            "timeout": crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS
         }
     }))
 }
@@ -6519,6 +6520,10 @@ fn custom_opencode_provider_definition(
 
     let mut options = serde_json::Map::new();
     options.insert("baseURL".to_string(), serde_json::Value::String(base_url));
+    options.insert(
+        "timeout".to_string(),
+        serde_json::json!(crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS),
+    );
     if let Some(api_key) = provider.api_key.filter(|key| !key.trim().is_empty()) {
         options.insert("apiKey".to_string(), serde_json::Value::String(api_key));
     }
@@ -6686,7 +6691,8 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 });
             let mut options = serde_json::json!({
                 "baseURL": format!("http://{}:{}/v1", host_ip, port),
-                "apiKey": proxy_key
+                "apiKey": proxy_key,
+                "timeout": crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS
             });
             if let Some(mid) = mission_id {
                 options["headers"] = serde_json::json!({
@@ -6722,7 +6728,8 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 });
             let mut options = serde_json::json!({
                 "baseURL": format!("http://{}:{}/v1", host_ip, port),
-                "apiKey": proxy_key
+                "apiKey": proxy_key,
+                "timeout": crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS
             });
             if let Some(mid) = mission_id {
                 options["headers"] = serde_json::json!({
@@ -6762,7 +6769,8 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 });
             let mut options = serde_json::json!({
                 "baseURL": format!("http://{}:{}/v1", host_ip, port),
-                "apiKey": proxy_key
+                "apiKey": proxy_key,
+                "timeout": crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS
             });
             if let Some(mid) = mission_id {
                 options["headers"] = serde_json::json!({
@@ -6883,6 +6891,17 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 if !obj.contains_key(key) {
                     if let Some(value) = def.get(key) {
                         obj.insert(key.to_string(), value.clone());
+                        repaired = true;
+                    }
+                }
+            }
+            if let (Some(existing_opts), Some(def_opts)) = (
+                obj.get_mut("options").and_then(|v| v.as_object_mut()),
+                def.get("options").and_then(|v| v.as_object()),
+            ) {
+                if !existing_opts.contains_key("timeout") {
+                    if let Some(timeout) = def_opts.get("timeout") {
+                        existing_opts.insert("timeout".to_string(), timeout.clone());
                         repaired = true;
                     }
                 }
@@ -12302,6 +12321,10 @@ mod tests {
             definition["options"]["baseURL"],
             "https://spark-de79.gazella-vector.ts.net/v1"
         );
+        assert_eq!(
+            definition["options"]["timeout"],
+            crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS
+        );
         assert!(definition["models"].get("qwen3.5-397b").is_some());
         assert!(definition["models"].get("fast").is_some());
     }
@@ -12539,6 +12562,10 @@ mod tests {
         assert_eq!(
             provider["options"]["headers"][crate::api::proxy_liveness::MISSION_ID_HEADER],
             "00000000-0000-0000-0000-000000000123"
+        );
+        assert_eq!(
+            provider["options"]["timeout"],
+            crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS
         );
         assert_eq!(provider["models"]["k3-256k"]["name"], "k3-256k");
         assert_eq!(

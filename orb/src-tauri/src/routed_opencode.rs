@@ -12,6 +12,7 @@ fn configuration(base: &str, route: &str, mission: &str) -> Value {
             "npm": "@ai-sdk/openai-compatible", "name": "Sandboxed routing",
             "options": {"baseURL": format!("{}/v1",base.trim_end_matches('/')),
                 "apiKey": "{env:ORB_ROUTING_KEY}",
+                "timeout": crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS,
                 "headers": {"x-sandboxed-mission-id": mission}},
             "models": {(route): {
                 "name": route,
@@ -241,6 +242,10 @@ mod tests {
             assert_eq!(
                 c["provider"]["orb-routing"]["options"]["baseURL"],
                 "https://core.test/v1"
+            );
+            assert_eq!(
+                c["provider"]["orb-routing"]["options"]["timeout"],
+                crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS
             );
             assert_eq!(c["enabled_providers"], json!(["orb-routing"]));
         }

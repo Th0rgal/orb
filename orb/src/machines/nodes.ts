@@ -12,7 +12,7 @@ export const missionAssignedNode = (m: Placed): string | undefined => m?.remote_
 import { createSignal } from "solid-js";
 
 type Named = { id: string; display_name?: string | null; labels?: string[] | null; cpu_total?: number | null; mem_total_bytes?: number | null };
-const KNOWN_PROVIDERS = new Set(["boat", "boost", "hetzner", "vastai", "scaleway"]);
+const KNOWN_PROVIDERS = new Set(["boat", "boost", "hetzner", "vastai", "scaleway", "colab"]);
 const [names, setNames] = createSignal<ReadonlyMap<string, string>>(new Map());
 const [providers, setProviders] = createSignal<ReadonlyMap<string, string>>(new Map());
 
@@ -53,6 +53,7 @@ export function managedProviderFleetLabel(provider?: string | null): string {
   if (key === "hetzner") return "Managed (Hetzner)";
   if (key === "vastai") return "Managed (Vast.ai)";
   if (key === "scaleway") return "Managed (Scaleway)";
+  if (key === "colab" || key === "google-colab") return "Managed (Google Colab)";
   return `Managed (${provider})`;
 }
 
@@ -74,7 +75,7 @@ export function groupManagedNodesByProvider<N extends { id?: string; labels?: re
     if (list) list.push(n);
     else buckets.set(key, [n]);
   }
-  const order = ["boat", "boost", "hetzner", "vastai", "scaleway"];
+  const order = ["boat", "boost", "hetzner", "vastai", "scaleway", "colab"];
   for (const key of buckets.keys()) {
     if (!order.includes(key)) order.push(key);
   }

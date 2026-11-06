@@ -399,6 +399,10 @@ pub struct AIProvider {
     /// Whether this provider is enabled
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Automatically redeem a banked subscription reset when all accounts hit
+    /// a usage limit on a mission.
+    #[serde(default)]
+    pub auto_reset_on_limit: bool,
     /// Whether this is the default provider
     #[serde(default)]
     pub is_default: bool,
@@ -462,6 +466,7 @@ impl AIProvider {
             npm_package: None,
             use_for_backends: None,
             enabled: true,
+            auto_reset_on_limit: false,
             is_default: false,
             account_email: None,
             organization_id: None,

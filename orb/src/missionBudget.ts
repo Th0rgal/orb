@@ -17,6 +17,7 @@ export const MANAGED_PROVIDERS = [
   { id: "hetzner", label: "Hetzner" },
   { id: "vastai", label: "Vast.ai" },
   { id: "scaleway", label: "Scaleway" },
+  { id: "colab", label: "Google Colab" },
 ] as const;
 
 export type ManagedProviderId = (typeof MANAGED_PROVIDERS)[number]["id"];
