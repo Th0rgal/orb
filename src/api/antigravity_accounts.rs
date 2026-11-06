@@ -52,6 +52,12 @@ pub(crate) struct Health {
     /// Same for the Gemini 4 Carbon EAP (`agy-model-*`) pool.
     pub carbon_remaining: Option<f64>,
     pub carbon_reset: Option<i64>,
+    /// Positive or negative Carbon EAP entitlement observed live for this auth file.
+    pub carbon_entitled: Option<bool>,
+    /// Authoritative model IDs discovered live for this auth file (via CLIProxyAPI
+    /// `/auth-files/models` or Cloud Code `fetchAvailableModels`), independent of
+    /// `ai_providers.json` reconciliation.
+    pub offered_models: Option<std::collections::HashSet<String>>,
     /// Same for the "Claude and GPT models" pool.
     pub claude_remaining: Option<f64>,
     pub claude_reset: Option<i64>,
@@ -285,6 +291,8 @@ pub(crate) struct Candidate {
     /// Configured priority (larger wins).
     pub priority: i64,
     pub expires_at: i64,
+    pub original_id: Option<uuid::Uuid>,
+    pub identity: String,
 }
 
 fn pool_spent(remaining: Option<f64>, reset: Option<i64>, now: i64) -> bool {
@@ -439,6 +447,8 @@ pub(crate) fn candidates(dir: &Path) -> Vec<Candidate> {
                 .map(|v| base_priority(&v))
                 .unwrap_or(0),
             expires_at: a.oauth.expires_at,
+            original_id: a.original_id,
+            identity: a.identity,
             file: a.file,
         })
         .collect()
@@ -500,10 +510,121 @@ fn pool_usable_again_for_model(health: Option<&Health>, model: &str, now: i64) -
         .unwrap_or(now)
 }
 
-/// Choose the best Antigravity login for a specific requested model, switching
-/// to the only account(s) whose discovered catalog actually offers `model`
-/// (e.g. `agy-model-high` for Gemini 4 Carbon) even when a higher-priority
-/// sibling lacks it or when the entitled account's regular Gemini pool is spent.
+/// True when `model` belongs to an EAP-gated Antigravity model family (such as
+/// Gemini 4 Carbon / `agy-model-*` / `agy-eap*`) that is only offered on
+/// explicitly entitled Google accounts and must never silently fall back to an
+/// unverified/unknown general account.
+pub(crate) fn is_eap_gated_model(model: &str) -> bool {
+    let raw = model
+        .trim()
+        .strip_prefix("antigravity/")
+        .unwrap_or(model.trim());
+    let lower = raw.to_ascii_lowercase();
+    lower == "agy-model"
+        || lower.starts_with("agy-model-")
+        || lower.starts_with("agy-eap")
+        || lower.contains("carbon")
+        || lower.ends_with("-eap")
+}
+
+fn model_list_offers<'a>(mut ids: impl Iterator<Item = &'a str>, catalog_model: &str) -> bool {
+    let carbon = is_carbon(catalog_model);
+    ids.any(|id| {
+        id == catalog_model
+            || (carbon
+                && matches!(
+                    id,
+                    "agy-model" | "agy-model-low" | "agy-model-medium" | "agy-model-high"
+                ))
+    })
+}
+
+fn match_provider_account<'a>(
+    candidate: &Candidate,
+    accounts: &'a [crate::ai_providers::AIProvider],
+) -> Option<&'a crate::ai_providers::AIProvider> {
+    accounts
+        .iter()
+        .find(|a| a.cli_proxy_auth_file.as_deref() == Some(candidate.file.as_str()))
+        .or_else(|| {
+            candidate.original_id.and_then(|orig| {
+                accounts.iter().find(|a| {
+                    a.provider_type == crate::ai_providers::ProviderType::Antigravity
+                        && a.id == orig
+                })
+            })
+        })
+        .or_else(|| {
+            if candidate.identity.is_empty() || candidate.identity == candidate.file {
+                return None;
+            }
+            accounts.iter().find(|a| {
+                a.provider_type == crate::ai_providers::ProviderType::Antigravity
+                    && a.account_email
+                        .as_deref()
+                        .is_some_and(|email| email.eq_ignore_ascii_case(&candidate.identity))
+            })
+        })
+}
+
+/// Compute 3-valued model capability entitlement (`LacksModel`, `Unknown`, `Entitled`)
+/// for `candidate` and `catalog_model` across both live per-auth-file health and
+/// `DiscoveryState` (`model-discovery.json`).
+pub(crate) fn entitlement_for_candidate(
+    candidate: &Candidate,
+    health: Option<&Health>,
+    catalog: Option<(
+        &crate::model_catalog::DiscoveryState,
+        &[crate::ai_providers::AIProvider],
+    )>,
+    catalog_model: &str,
+) -> crate::orb_spec::ModelAccountEntitlement {
+    use crate::orb_spec::ModelAccountEntitlement;
+    let health_verdict = health.and_then(|h| {
+        if let Some(models) = &h.offered_models {
+            return Some(model_list_offers(
+                models.iter().map(String::as_str),
+                catalog_model,
+            ));
+        }
+        if is_carbon(catalog_model) {
+            return h.carbon_entitled;
+        }
+        None
+    });
+    let catalog_verdict = catalog.and_then(|(state, accounts)| {
+        let account = match_provider_account(candidate, accounts)?;
+        let route = crate::model_discovery::route(account);
+        let connection =
+            crate::model_catalog::route_key(&account.id.to_string(), &route.base, &route.profile);
+        let success = state
+            .connections
+            .iter()
+            .find(|o| o.connection == connection)?
+            .last_success
+            .as_ref()?;
+        (success.completeness == crate::model_catalog::Completeness::Complete)
+            .then(|| model_list_offers(success.models.iter().map(|m| m.id.as_str()), catalog_model))
+    });
+    match (health_verdict, catalog_verdict) {
+        (Some(true), _) | (_, Some(true)) => ModelAccountEntitlement::Entitled,
+        (Some(false), _) | (_, Some(false)) => ModelAccountEntitlement::LacksModel,
+        (None, None) => ModelAccountEntitlement::Unknown,
+    }
+}
+
+/// Choose the best Antigravity login for a specific requested model via the
+/// Lean 4 kernel (`orb_model_account_admit` + `orb_model_account_score` +
+/// `orb_route_argmin_step`).
+///
+/// Invariants enforced by Lean:
+/// - `NeedsVerification` (`ineligible`) and `LacksModel` accounts are strictly
+///   rejected on every path (never falling back to an incompatible account when
+///   entitled accounts are spent or absent).
+/// - For EAP-gated models (`agy-model-*` / Gemini 4 Carbon) or whenever at least
+///   one eligible account is positively `Entitled`, `Unknown` accounts (missing
+///   or unreconciled catalog) are strictly rejected so a higher-priority general
+///   account can never preempt an entitled sibling.
 pub(crate) fn choose_for_model<'a>(
     candidates: &'a [Candidate],
     health: &HashMap<String, Health>,
@@ -518,53 +639,112 @@ pub(crate) fn choose_for_model<'a>(
         return choose(candidates, health, now);
     };
     let catalog_model = catalog_model_for_native(model);
-    let mut eligible: Vec<&Candidate> = candidates
-        .iter()
-        .filter(|c| {
-            health
-                .get(&c.file)
-                .is_none_or(|h| h.eligibility != Eligibility::NeedsVerification)
-        })
-        .collect();
-    if let Some((state, accounts)) = catalog {
-        let offering: Vec<&Candidate> = eligible
-            .iter()
-            .copied()
-            .filter(|c| {
-                let Some(account) = accounts
-                    .iter()
-                    .find(|a| a.cli_proxy_auth_file.as_deref() == Some(c.file.as_str()))
-                else {
-                    return true;
-                };
-                let route = crate::model_discovery::route(account);
-                let connection = crate::model_catalog::route_key(
-                    &account.id.to_string(),
-                    &route.base,
-                    &route.profile,
-                );
-                !connection_lacks(state, &connection, catalog_model)
-            })
-            .collect();
-        if !offering.is_empty() {
-            eligible = offering;
-        }
-    }
-    eligible.sort_by(|a, b| {
+    let mut ordered: Vec<&Candidate> = candidates.iter().collect();
+    ordered.sort_by(|a, b| {
         b.priority
             .cmp(&a.priority)
             .then_with(|| b.expires_at.cmp(&a.expires_at))
             .then_with(|| a.file.cmp(&b.file))
     });
-    eligible
+    let kernel_candidates: Vec<crate::orb_spec::ModelAccountCandidate> = ordered
         .iter()
-        .copied()
-        .find(|c| pool_has_quota_for_model(health.get(&c.file), catalog_model, now))
-        .or_else(|| {
-            eligible.iter().copied().min_by_key(|c| {
-                pool_usable_again_for_model(health.get(&c.file), catalog_model, now)
-            })
+        .enumerate()
+        .map(|(rank, c)| {
+            let h = health.get(&c.file);
+            let ineligible = h.is_some_and(|h| h.eligibility == Eligibility::NeedsVerification);
+            let entitlement = entitlement_for_candidate(c, h, catalog, catalog_model);
+            let has_pool_quota = pool_has_quota_for_model(h, catalog_model, now);
+            let usable_at = pool_usable_again_for_model(h, catalog_model, now);
+            let usable_in_secs = usable_at.saturating_sub(now).clamp(0, i64::from(u32::MAX)) as u32;
+            crate::orb_spec::ModelAccountCandidate {
+                cand_id: (rank + 1) as u32,
+                ineligible,
+                entitlement,
+                has_pool_quota,
+                priority_rank: rank.min(u32::MAX as usize) as u32,
+                usable_in_secs,
+            }
         })
+        .collect();
+    let eap_gated = is_eap_gated_model(catalog_model) || is_eap_gated_model(model);
+    let chosen_id = crate::orb_spec::select_host_model_account(eap_gated, &kernel_candidates)?;
+    ordered.get((chosen_id as usize).wrapping_sub(1)).copied()
+}
+
+/// True when at least one eligible candidate in `dir` still has `Unknown`
+/// entitlement for `model` (so an on-demand `refresh_once` may discover EAP access).
+pub(crate) fn has_unknown_candidate_for_model(
+    dir: &Path,
+    work_dir: Option<&Path>,
+    model: &str,
+) -> bool {
+    let candidates = candidates(dir);
+    if candidates.is_empty() {
+        return false;
+    }
+    let map = HEALTH.read().map(|m| m.clone()).unwrap_or_default();
+    let catalog_model = catalog_model_for_native(model);
+    let catalog_and_accounts = work_dir.map(|root| {
+        let catalog = crate::model_catalog::read_state(root);
+        let accounts: Vec<crate::ai_providers::AIProvider> =
+            std::fs::read_to_string(root.join(crate::util::AI_PROVIDERS_PATH))
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default();
+        (catalog, accounts)
+    });
+    let catalog_ref = catalog_and_accounts
+        .as_ref()
+        .map(|(cat, accs)| (cat, accs.as_slice()));
+    candidates.iter().any(|c| {
+        let h = map.get(&c.file);
+        let ineligible = h.is_some_and(|h| h.eligibility == Eligibility::NeedsVerification);
+        !ineligible
+            && entitlement_for_candidate(c, h, catalog_ref, catalog_model)
+                == crate::orb_spec::ModelAccountEntitlement::Unknown
+    })
+}
+
+/// True when any connected, eligible Antigravity login offers Gemini 4 Carbon
+/// (`agy-model-*`), either in `DiscoveryState` or in live per-login `Health`.
+pub(crate) fn any_account_offers_carbon(
+    state: &crate::model_catalog::DiscoveryState,
+    accounts: &[crate::ai_providers::AIProvider],
+) -> bool {
+    if let Ok(map) = HEALTH.read() {
+        if map.values().any(|h| {
+            h.eligibility != Eligibility::NeedsVerification
+                && (h.carbon_entitled == Some(true)
+                    || h.offered_models.as_ref().is_some_and(|models| {
+                        model_list_offers(models.iter().map(String::as_str), "agy-model-high")
+                    }))
+        }) {
+            return true;
+        }
+    }
+    accounts.iter().any(|account| {
+        if !account.enabled
+            || account.provider_type != crate::ai_providers::ProviderType::Antigravity
+            || (!account.has_credentials() && account.cli_proxy_auth_file.is_none())
+            || account
+                .cli_proxy_auth_file
+                .as_deref()
+                .is_some_and(needs_verification)
+        {
+            return false;
+        }
+        let route = crate::model_discovery::route(account);
+        let connection =
+            crate::model_catalog::route_key(&account.id.to_string(), &route.base, &route.profile);
+        state
+            .connections
+            .iter()
+            .find(|o| o.connection == connection)
+            .and_then(|o| o.last_success.as_ref())
+            .is_some_and(|s| {
+                model_list_offers(s.models.iter().map(|m| m.id.as_str()), "agy-model-high")
+            })
+    })
 }
 
 /// The auth file native runs should use for `model` (falling back to the
@@ -744,16 +924,57 @@ fn write_auth_file(path: &Path, value: &Value) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+fn parse_proxy_auth_file_models(payload: &Value) -> Option<std::collections::HashSet<String>> {
+    let items = payload.get("models")?.as_array()?;
+    let mut set = std::collections::HashSet::new();
+    for item in items {
+        let Some(raw) = item.get("id").and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        let id = raw.strip_prefix("antigravity/").unwrap_or(raw);
+        if !id.is_empty() {
+            set.insert(id.to_string());
+        }
+    }
+    (!set.is_empty()).then_some(set)
+}
+
+fn parse_available_models_payload(payload: &Value) -> Option<std::collections::HashSet<String>> {
+    let models = payload.get("models")?.as_object()?;
+    let set: std::collections::HashSet<String> = models
+        .keys()
+        .map(|k| k.trim())
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!set.is_empty()).then_some(set)
+}
+
+fn quota_payload_has_carbon(payload: &Value) -> bool {
+    payload["buckets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| b["modelId"].as_str())
+        .any(is_carbon)
+        || payload["models"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .any(|(id, _)| is_carbon(id))
+}
+
 /// Re-check every connected login once; returns the chosen file when the
 /// native sign-in changed (including the first selection after startup).
 pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
     let dir = super::cli_proxy_accounts::auth_dir()?;
-    let rows = match super::cli_proxy_login::ManagementClient::configured() {
-        Ok(client) => client
+    let mgmt = super::cli_proxy_login::ManagementClient::configured().ok();
+    let rows = match &mgmt {
+        Some(mgmt) => mgmt
             .request(reqwest::Method::GET, "/auth-files", None)
             .await
             .ok(),
-        Err(_) => None,
+        None => None,
     };
     let now = chrono::Utc::now().timestamp();
     for account in super::cli_proxy_accounts::accounts_in(&dir) {
@@ -814,30 +1035,94 @@ pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
             (gemini_remaining, gemini_reset),
             (carbon_remaining, carbon_reset),
             (claude_remaining, claude_reset),
+            offered_models,
+            carbon_entitled,
         ) = if eligibility == Eligibility::Eligible {
             let body = project
                 .as_deref()
                 .map_or_else(|| json!({}), |p| json!({"project": p}));
+            let mut live_models = match &mgmt {
+                Some(mgmt) => {
+                    let query = url::form_urlencoded::Serializer::new(String::new())
+                        .append_pair("name", &account.file)
+                        .finish();
+                    mgmt.request(
+                        reqwest::Method::GET,
+                        &format!("/auth-files/models?{query}"),
+                        None,
+                    )
+                    .await
+                    .ok()
+                    .and_then(|v| parse_proxy_auth_file_models(&v))
+                }
+                None => None,
+            };
+            if live_models.is_none() {
+                live_models = super::antigravity_usage::call(
+                    client,
+                    token,
+                    "fetchAvailableModels",
+                    body.clone(),
+                )
+                .await
+                .ok()
+                .and_then(|v| parse_available_models_payload(&v));
+            }
+            let offered_models =
+                live_models.or_else(|| previous.as_ref().and_then(|h| h.offered_models.clone()));
             match super::antigravity_usage::call(client, token, "retrieveUserQuota", body).await {
-                Ok(quota) => (
-                    gemini_quota(&quota),
-                    pool_quota(&quota, is_carbon),
-                    pool_quota(&quota, is_claude_or_gpt),
-                ),
+                Ok(quota) => {
+                    let has_carbon_bucket = quota_payload_has_carbon(&quota);
+                    let carbon_entitled = if let Some(ref models) = offered_models {
+                        Some(
+                            has_carbon_bucket
+                                || model_list_offers(
+                                    models.iter().map(String::as_str),
+                                    "agy-model-high",
+                                ),
+                        )
+                    } else if has_carbon_bucket {
+                        Some(true)
+                    } else {
+                        previous.as_ref().and_then(|h| h.carbon_entitled)
+                    };
+                    (
+                        gemini_quota(&quota),
+                        pool_quota(&quota, is_carbon),
+                        pool_quota(&quota, is_claude_or_gpt),
+                        offered_models,
+                        carbon_entitled,
+                    )
+                }
                 Err(_) => {
-                    previous
+                    let carbon_entitled = offered_models
                         .as_ref()
-                        .map_or(((None, None), (None, None), (None, None)), |h| {
+                        .map(|models| {
+                            model_list_offers(models.iter().map(String::as_str), "agy-model-high")
+                        })
+                        .or_else(|| previous.as_ref().and_then(|h| h.carbon_entitled));
+                    previous.as_ref().map_or(
+                        (
+                            (None, None),
+                            (None, None),
+                            (None, None),
+                            offered_models.clone(),
+                            carbon_entitled,
+                        ),
+                        |h| {
                             (
                                 (h.gemini_remaining, h.gemini_reset),
                                 (h.carbon_remaining, h.carbon_reset),
                                 (h.claude_remaining, h.claude_reset),
+                                offered_models,
+                                carbon_entitled,
                             )
-                        })
+                        },
+                    )
                 }
             }
         } else {
-            ((None, None), (None, None), (None, None))
+            ((None, None), (None, None), (None, None), None, None)
         };
         set_health(
             &account.file,
@@ -851,6 +1136,8 @@ pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
                 gemini_reset,
                 carbon_remaining,
                 carbon_reset,
+                carbon_entitled,
+                offered_models,
                 claude_remaining,
                 claude_reset,
                 refused_until: previous.as_ref().and_then(|h| h.refused_until),
@@ -907,6 +1194,8 @@ pub(crate) fn note_native_quota_refusal_for_model(
             gemini_reset: None,
             carbon_remaining: None,
             carbon_reset: None,
+            carbon_entitled: None,
+            offered_models: None,
             claude_remaining: None,
             claude_reset: None,
             refused_until: None,
@@ -975,12 +1264,21 @@ pub(crate) fn spawn_refresh_loop(state: std::sync::Arc<super::routes::AppState>)
 }
 
 /// One check of every login, then the new sign-in pushed to every static
-/// node when the choice changed.
+/// node when the choice changed. Legacy nodes (without isolated `antigravity:<slot>`
+/// profiles) with an active job in `job_ledger` are skipped so a running
+/// model-specific job cannot have its single credential overwritten mid-flight.
 pub(crate) async fn refresh_and_sync(state: &super::routes::AppState) {
     if !super::oauth_owner::management_enabled() || refresh_once(&state.http_client).await.is_none()
     {
         return;
     }
+    let active_nodes: std::collections::HashSet<String> =
+        crate::remote_node::job_ledger::load(&state.config.working_dir)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|h| h.node_id)
+            .collect();
     let ids: Vec<String> = state
         .config
         .remote_nodes
@@ -989,6 +1287,22 @@ pub(crate) async fn refresh_and_sync(state: &super::routes::AppState) {
         .map(|n| n.id.clone())
         .collect();
     for id in ids {
+        let supports_slots = state
+            .fleet
+            .get(&id)
+            .and_then(|cached| cached.last_heartbeat)
+            .is_some_and(|hb| {
+                hb.managed_auth
+                    .iter()
+                    .any(|p| p.starts_with("antigravity:"))
+            });
+        if !supports_slots && active_nodes.contains(&id) {
+            tracing::debug!(
+                node = %id,
+                "Skipping background default Antigravity sync on legacy node with active job"
+            );
+            continue;
+        }
         match super::antigravity_native::sync_node(state, &id).await {
             Ok(sync) => tracing::info!(node = %id, ?sync, "Antigravity sign-in switched"),
             Err(error) => {
@@ -1033,6 +1347,7 @@ pub(crate) fn unoffered_in(
 /// Google rolls models out per account (one Ultra login may list Opus 5.5
 /// while another still lists only Opus 4.6), and CLIProxyAPI routes a model
 /// only to the logins that list it.
+#[cfg(test)]
 pub(crate) fn connection_lacks(
     state: &crate::model_catalog::DiscoveryState,
     connection: &str,
@@ -1049,9 +1364,10 @@ pub(crate) fn connection_lacks(
         })
 }
 
-/// True when this account's own discovered catalog lacks the model. Its
-/// requests would land on a sibling login, and that login's 429 would be
-/// charged to this account.
+/// True when this account is inadmissible for `model` under `orb_model_account_admit`:
+/// either its own discovered catalog / live probe lacks `model`, or `model` is
+/// EAP-gated (`agy-model-*` / Gemini 4 Carbon) — or a sibling login positively
+/// offers `model` — while this account has not positively proven entitlement.
 pub(crate) fn account_lacks_model(
     chains_path: &Path,
     account: &crate::ai_providers::AIProvider,
@@ -1060,13 +1376,67 @@ pub(crate) fn account_lacks_model(
     if !CATALOG_SCOPED.contains(&account.provider_type.id()) {
         return false;
     }
+    let catalog_model = catalog_model_for_native(model);
+    let file_health = account.cli_proxy_auth_file.as_deref().and_then(health);
+    let ineligible = file_health
+        .as_ref()
+        .is_some_and(|h| h.eligibility == Eligibility::NeedsVerification);
+    let health_verdict = file_health.as_ref().and_then(|h| {
+        if let Some(models) = &h.offered_models {
+            return Some(model_list_offers(
+                models.iter().map(String::as_str),
+                catalog_model,
+            ));
+        }
+        if is_carbon(catalog_model) {
+            return h.carbon_entitled;
+        }
+        None
+    });
     let route = crate::model_discovery::route(account);
     let connection =
         crate::model_catalog::route_key(&account.id.to_string(), &route.base, &route.profile);
-    with_catalog(chains_path, |state| {
-        connection_lacks(state, &connection, model)
+    let (catalog_verdict, sibling_entitled) = with_catalog(chains_path, |state| {
+        let own = state
+            .connections
+            .iter()
+            .find(|o| o.connection == connection)
+            .and_then(|o| o.last_success.as_ref())
+            .and_then(|s| {
+                (s.completeness == crate::model_catalog::Completeness::Complete).then(|| {
+                    model_list_offers(s.models.iter().map(|m| m.id.as_str()), catalog_model)
+                })
+            });
+        let any_entitled = state
+            .connections
+            .iter()
+            .filter(|o| o.provider_id == "antigravity")
+            .filter_map(|o| o.last_success.as_ref())
+            .any(|s| {
+                s.completeness == crate::model_catalog::Completeness::Complete
+                    && model_list_offers(s.models.iter().map(|m| m.id.as_str()), catalog_model)
+            });
+        (own, any_entitled)
     })
-    .unwrap_or(false)
+    .unwrap_or((None, false));
+    let any_health_entitled = HEALTH.read().ok().is_some_and(|map| {
+        map.values().any(|h| {
+            h.eligibility != Eligibility::NeedsVerification
+                && (h.offered_models.as_ref().is_some_and(|models| {
+                    model_list_offers(models.iter().map(String::as_str), catalog_model)
+                }) || (is_carbon(catalog_model) && h.carbon_entitled == Some(true)))
+        })
+    });
+    let entitlement = match (health_verdict, catalog_verdict) {
+        (Some(true), _) | (_, Some(true)) => crate::orb_spec::ModelAccountEntitlement::Entitled,
+        (Some(false), _) | (_, Some(false)) => crate::orb_spec::ModelAccountEntitlement::LacksModel,
+        (None, None) => crate::orb_spec::ModelAccountEntitlement::Unknown,
+    };
+    let require_entitled = is_eap_gated_model(catalog_model)
+        || is_eap_gated_model(model)
+        || sibling_entitled
+        || any_health_entitled;
+    !crate::orb_spec::verify_host_model_account_admit(1, ineligible, entitlement, require_entitled)
 }
 
 fn with_catalog<T>(
@@ -1127,6 +1497,8 @@ mod tests {
             file: file.into(),
             priority,
             expires_at: 0,
+            original_id: None,
+            identity: file.into(),
         }
     }
 
@@ -1137,6 +1509,8 @@ mod tests {
             gemini_reset: reset,
             carbon_remaining: None,
             carbon_reset: None,
+            carbon_entitled: None,
+            offered_models: None,
             claude_remaining: None,
             claude_reset: None,
             refused_until: None,
@@ -1613,6 +1987,120 @@ mod tests {
             .unwrap()
             .file,
             "antigravity-her3sy.json"
+        );
+    }
+
+    #[test]
+    fn choose_for_model_rejects_unreconciled_unknown_high_priority_account_for_carbon_and_fails_closed(
+    ) {
+        use crate::ai_providers::{AIProvider, ProviderType};
+        use crate::model_catalog::{Completeness, DiscoveryState, Observation, Success};
+
+        // Reproduce the exact `uruk` failure (`ba392cd9-3dbb-4341-bacc-ea12212e6e37`):
+        // `her3sy` (priority 100) has NOT been reconciled into `ai_providers.json` or
+        // has a Partial/empty catalog (`Unknown`), while `marchand` (priority 10)
+        // positively offers Carbon either via live `Health.offered_models` / `carbon_entitled`
+        // or via email-matched `AIProvider` before `cli_proxy_auth_file` binds.
+        let mut marchand_provider = AIProvider::new(ProviderType::Antigravity, "marchand".into());
+        marchand_provider.account_email = Some("thomas@example.com".into());
+        // Intentionally leave `cli_proxy_auth_file = None` to test email/identity matching!
+
+        let route = crate::model_discovery::route(&marchand_provider);
+        let state = DiscoveryState {
+            schema_version: 1,
+            connections: vec![Observation {
+                connection: crate::model_catalog::route_key(
+                    &marchand_provider.id.to_string(),
+                    &route.base,
+                    &route.profile,
+                ),
+                provider_id: "antigravity".into(),
+                access_profile: "oauth".into(),
+                exportable: false,
+                checked_at: chrono::Utc::now(),
+                status: "discovered".into(),
+                diagnostic: None,
+                last_success: Some(Success {
+                    observed_at: chrono::Utc::now(),
+                    completeness: Completeness::Complete,
+                    models: vec![crate::api::providers::ProviderModel {
+                        id: "agy-model-low".into(),
+                        name: "Gemini 4 Carbon (Low)".into(),
+                        description: None,
+                    }],
+                }),
+                fallback_models: vec![],
+            }],
+        };
+
+        let mut c_her3sy = cand("antigravity-her3sy.json", 100);
+        c_her3sy.identity = "her3sy@example.com".into();
+        let mut c_marchand = cand("antigravity-marchand.json", 10);
+        c_marchand.identity = "Thomas@Example.com".into();
+        let candidates = [c_her3sy.clone(), c_marchand.clone()];
+
+        let health_map = HashMap::from([
+            (
+                "antigravity-her3sy.json".into(),
+                h(Eligibility::Eligible, Some(1.0), None),
+            ),
+            (
+                "antigravity-marchand.json".into(),
+                h(Eligibility::Eligible, Some(0.0), Some(9999)),
+            ),
+        ]);
+
+        // 1. Even with `her3sy` completely absent from `accounts` (`Unknown`), Lean
+        //    `orb_model_account_admit` strictly rejects `her3sy` and picks `marchand`.
+        assert_eq!(
+            choose_for_model(
+                &candidates,
+                &health_map,
+                Some((&state, std::slice::from_ref(&marchand_provider))),
+                Some("agy-model-low"),
+                100,
+            )
+            .unwrap()
+            .file,
+            "antigravity-marchand.json"
+        );
+
+        // 2. Even with NO `catalog` at all (`work_dir = None` or fresh startup), live
+        //    `Health.carbon_entitled = Some(true)` selects `marchand` over `her3sy`.
+        let mut live_health = health_map.clone();
+        live_health
+            .get_mut("antigravity-marchand.json")
+            .unwrap()
+            .carbon_entitled = Some(true);
+        assert_eq!(
+            choose_for_model(&candidates, &live_health, None, Some("agy-model-low"), 100)
+                .unwrap()
+                .file,
+            "antigravity-marchand.json"
+        );
+
+        // 3. When NO account is positively entitled to Carbon (both `Unknown` or `LacksModel`),
+        //    `choose_for_model` fails closed (`None`) instead of handing `her3sy` to the node!
+        assert!(
+            choose_for_model(&candidates, &health_map, None, Some("agy-model-low"), 100).is_none()
+        );
+        let mut lacks_health = health_map;
+        lacks_health
+            .get_mut("antigravity-her3sy.json")
+            .unwrap()
+            .offered_models = Some(std::collections::HashSet::from([
+            "gemini-4-argon-low".to_string(),
+            "claude-opus-5-5-low".to_string(),
+        ]));
+        lacks_health
+            .get_mut("antigravity-marchand.json")
+            .unwrap()
+            .offered_models = Some(std::collections::HashSet::from([
+            "gemini-4-argon-low".to_string()
+        ]));
+        assert!(
+            choose_for_model(&candidates, &lacks_health, None, Some("agy-model-low"), 100)
+                .is_none()
         );
     }
 }

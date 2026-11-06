@@ -3399,34 +3399,39 @@ impl MissionRunner {
         let run = mission_store
             .begin_mission_run(self.mission_id, owner_actor_id, None)
             .await?;
-        // A retained idle runner may predate a move away and back. Refresh the
-        // authoritative workspace after acquiring the generation, before spawn.
-        if super::control::machine_transfer::committed(mission_store, self.mission_id)
-            .await?
-            .is_some()
-        {
-            match mission_store.get_mission(self.mission_id).await {
-                Ok(Some(mission)) => {
+        // A retained idle runner may predate a settings update or a move away
+        // and back. Refresh mutable run settings on every durable run, and
+        // require a valid workspace record whenever a machine transfer committed.
+        let transferred =
+            super::control::machine_transfer::committed(mission_store, self.mission_id)
+                .await?
+                .is_some();
+        match mission_store.get_mission(self.mission_id).await {
+            Ok(Some(mission)) => {
+                if transferred {
                     self.workspace_id = mission.workspace_id;
                     self.working_directory = mission.working_directory;
-                    self.session_id = mission.session_id;
-                    self.backend_id = mission.backend;
-                    self.model_override = mission.model_override;
-                    self.model_effort = mission.model_effort;
-                    self.config_profile = mission.config_profile;
-                    self.agent_override = mission.agent;
                 }
-                _ => {
-                    let _ = mission_store
-                        .finish_mission_run(
-                            run.run_id,
-                            run.generation,
-                            Some("transfer_workspace_unavailable"),
-                        )
-                        .await;
-                    return Err("Transferred workspace could not be resolved".into());
-                }
+                self.session_id = mission.session_id;
+                self.backend_id = mission.backend;
+                self.model_override = mission.model_override;
+                self.model_effort = mission.model_effort;
+                self.fast_mode = mission.fast_mode;
+                self.service_tier = mission.service_tier;
+                self.config_profile = mission.config_profile;
+                self.agent_override = mission.agent;
             }
+            _ if transferred => {
+                let _ = mission_store
+                    .finish_mission_run(
+                        run.run_id,
+                        run.generation,
+                        Some("transfer_workspace_unavailable"),
+                    )
+                    .await;
+                return Err("Transferred workspace could not be resolved".into());
+            }
+            _ => {}
         }
         let alive = mission_store
             .heartbeat_mission_run(

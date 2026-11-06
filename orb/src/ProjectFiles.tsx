@@ -15,7 +15,7 @@ import { folderLabel, setFolderLabel } from "./folderLabels";
 import { projectColor } from "./projectAppearance";
 import { ProviderLogo } from "./ProviderLogo";
 import { ContextBadge } from "./ContextBadge";
-import { ContextHistory } from "./ContextHistory";
+const ContextHistory = lazy(() => import("./ContextHistory").then(module => ({ default: module.ContextHistory })));
 import { readProjectFileVersion } from "./projectContext";
 import { makeCutMission, moveMissions, planMissionMoves, readCutMission } from "./missionMove";
 import { RunningWorkers, deleteDescendants, descendantsSentence, pausedMissionIds, requiresDescendantOptIn, runningWorkerIds } from "./deleteRunning";
@@ -76,7 +76,7 @@ import {
   retireClipboardReference,
   writeClipboardReference,
 } from "./clipboard";
-import { CronForm } from "./ControllerSettings";
+const CronForm = lazy(() => import("./ControllerSettings").then(module => ({ default: module.CronForm })));
 import { getProjectCronFromJob } from "./cronSchema";
 import { loadTranscript, prefetchTranscript, selectLivePrefetchIds } from "./missionCache";
 import { cacheCanPrefetch, cachePeek, cachePrefetch, cachePut, cacheRemember } from "./pageCache";

@@ -43,6 +43,15 @@ impl Credential {
         Ok(())
     }
 
+    /// Deterministic, non-secret 16-hex-char account slot identifier derived
+    /// from `SHA-256(refresh_token)` so concurrent node missions bind to their
+    /// selected account (`antigravity:<slot>`) without exposing token material.
+    pub fn slot_id(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(self.refresh_token.trim().as_bytes());
+        hex::encode(&digest[..8])
+    }
+
     /// The file format `agy` reads and writes. `id_token` is optional: the CLI
     /// adds it on its first refresh.
     pub fn native_file(&self) -> serde_json::Value {
@@ -59,6 +68,20 @@ impl Credential {
             }
         })
     }
+}
+
+/// True when `slot` is a safe node-managed account slot identifier (`[a-z0-9]{1,32}`).
+pub fn valid_slot_id(slot: &str) -> bool {
+    (1..=32).contains(&slot.len())
+        && slot
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
+/// True when `profile` (`<home>/.gemini/antigravity-cli`) already holds a
+/// readable native OAuth token file.
+pub fn has_token(profile: &Path) -> bool {
+    existing(&profile.join(TOKEN_FILE)).is_some()
 }
 
 /// Refresh token and expiry (ms) of an existing native file.
@@ -237,7 +260,20 @@ mod tests {
     #[test]
     fn rejects_incomplete_credentials_and_hides_secrets_in_debug() {
         let home = tempfile::tempdir().unwrap();
-        assert!(install(&home.path().join(PROFILE_DIR), &credential("", 1)).is_err());
-        assert!(!format!("{:?}", credential("refresh", 1)).contains("refresh"));
+        let profile = home.path().join(PROFILE_DIR);
+        assert!(!has_token(&profile));
+        assert!(install(&profile, &credential("", 1)).is_err());
+        let cred = credential("refresh-secret-token", 1_000);
+        assert!(!format!("{:?}", cred).contains("refresh-secret-token"));
+        let slot = cred.slot_id();
+        assert_eq!(slot.len(), 16);
+        assert!(valid_slot_id(&slot));
+        assert_eq!(slot, credential("refresh-secret-token", 9_999).slot_id());
+        assert_ne!(slot, credential("other-refresh-token", 1_000).slot_id());
+        assert!(!valid_slot_id(""));
+        assert!(!valid_slot_id("../etc"));
+        assert!(!valid_slot_id("UPPERCASE"));
+        install(&profile, &cred).unwrap();
+        assert!(has_token(&profile));
     }
 }

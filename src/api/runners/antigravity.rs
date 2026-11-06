@@ -98,10 +98,24 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     }
     let cli = crate::api::mission_runner::get_backend_string_setting("antigravity", "cli_path")
         .unwrap_or_else(|| "agy".into());
+    let effective_model = crate::antigravity::effective_cli_model(ctx.model, ctx.model_effort);
     let args =
         crate::antigravity::args_with_effort(ctx.model, ctx.model_effort, ctx.session_id, prompt);
     let exec = crate::workspace_exec::WorkspaceExec::new(ctx.workspace.clone());
     let cwd = crate::workspace::configured_project_dir(ctx.workspace, ctx.work_dir);
+    let thought_home = native_home(ctx.workspace);
+    if let Some(home) = projectable_home(ctx.workspace) {
+        if let Err(error) = crate::api::antigravity_native::ensure_in_home_for_model(
+            &reqwest::Client::new(),
+            &home,
+            Some(ctx.app_working_dir),
+            effective_model,
+        )
+        .await
+        {
+            return AgentResult::failure(error, 0);
+        }
+    }
     let claim = uuid::Uuid::new_v4();
     let run = super::session_update_run();
     match store
@@ -123,14 +137,6 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
             .with_terminal_reason(TerminalReason::NativeContinuityRequired)
         }
         Err(error) => return AgentResult::failure(error, 0),
-    }
-    let thought_home = native_home(ctx.workspace);
-    if let Some(home) = projectable_home(ctx.workspace) {
-        crate::api::antigravity_native::install_in_home_for_model(
-            &home,
-            Some(ctx.app_working_dir),
-            ctx.model,
-        );
     }
     crate::antigravity::clear_historical_error_steps(&thought_home, ctx.session_id);
     let mut child = match exec

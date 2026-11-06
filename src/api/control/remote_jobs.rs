@@ -635,6 +635,27 @@ pub(super) async fn submit_leased_remote_job(
     } else {
         (remote_execution_for_plan(plan, "", ""), None)
     };
+    if let RemoteHarnessPlan::Antigravity { model, effort, .. } = plan {
+        let effective_model =
+            crate::antigravity::effective_cli_model(model.as_deref(), effort.as_deref());
+        match crate::api::antigravity_native::sync_node_for_model(state, &node.id, effective_model)
+            .await
+        {
+            Ok(crate::api::antigravity_native::NodeSync::Ready { profile, .. }) => {
+                execution.managed_auth = vec![profile];
+            }
+            Ok(
+                crate::api::antigravity_native::NodeSync::NoLogin
+                | crate::api::antigravity_native::NodeSync::Unsupported,
+            ) => {}
+            Err(error) => {
+                if let Some(id) = proxy_key_id {
+                    let _ = state.proxy_api_keys.delete(id).await;
+                }
+                return Err(error);
+            }
+        }
+    }
     if let Some(program) = cyber_program {
         execution
             .env
