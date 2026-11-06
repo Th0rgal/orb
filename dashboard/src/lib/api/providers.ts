@@ -87,6 +87,8 @@ export interface AIProvider {
   /** NPM package for custom provider */
   npm_package?: string | null;
   enabled: boolean;
+  /** Automatically redeem a banked subscription reset when all accounts hit a usage limit. */
+  auto_reset_on_limit?: boolean;
   is_default: boolean;
   uses_oauth: boolean;
   auth_methods: AIProviderAuthMethod[];
@@ -278,6 +280,7 @@ export async function updateAIProvider(
     api_key?: string | null;
     base_url?: string | null;
     enabled?: boolean;
+    auto_reset_on_limit?: boolean;
     use_for_backends?: string[];
     /** Account email — set by frontend when server-side userinfo fetch fails */
     account_email?: string;
@@ -345,9 +348,30 @@ export async function oauthCallback(
 // Usage / Rate Limits
 // ---------------------------------------------------------------------------
 
+export interface SubscriptionResetGrant {
+  id: string;
+  label: string;
+  clears?: string[];
+  resets_left: number;
+  expires_at?: number;
+  usable_now: boolean;
+  requires_limit: boolean;
+  unavailable_reason?: string;
+}
+
+export interface SubscriptionResets {
+  available_count: number;
+  usable_now: boolean;
+  grants?: SubscriptionResetGrant[];
+  unavailable_reason?: string;
+}
+
 export interface ProviderUsage {
   provider_type: string;
   provider_name: string;
+  subscription_resets?: SubscriptionResets;
+  reset_redeemed?: boolean;
+  woken_missions?: number;
   account_email?: string | null;
   account_name?: string | null;
   account_picture?: string | null;
@@ -508,6 +532,18 @@ export async function refreshProviderUsage(id: string): Promise<ProviderUsage> {
   return apiGet(
     `/api/ai/providers/${id}/usage?force=true`,
     "Failed to refresh provider usage"
+  );
+}
+
+/** Redeem a banked subscription usage-limit reset on an Anthropic or OpenAI account. */
+export async function resetProviderUsage(
+  id: string,
+  data?: { idempotency_key?: string; grant_id?: string }
+): Promise<ProviderUsage> {
+  return apiPost(
+    `/api/ai/providers/${encodeURIComponent(id)}/reset-usage`,
+    data ?? {},
+    "Failed to redeem subscription usage reset"
   );
 }
 

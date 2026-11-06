@@ -5,10 +5,12 @@ import { canForceSlot, isQueued, queueWaitLabel } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { remoteContinuation } from "./remoteContinuation";
 import { ErrorNotice, isNonResumableError } from "./ErrorNotice";
-import { Show } from "solid-js";
+import { Show, Suspense, lazy } from "solid-js";
 import { ApiError, getApiUrl, type Mission, type RemoteLaunchCapability, type RemoteNodesResponse } from "./api";
 import { goalObjective, GoalTag } from "./goal";
 import type { StreamItem } from "./Transcript";
+
+const LazyQuotaResetAction = lazy(() => import("./SubscriptionResetDialog").then(m => ({ default: m.QuotaResetAction })));
 
 export type LaunchReceipt = { messageKey?:string; prompt: string; images?: DraftImage[]; nodeId: string; destination: string; replacement?: boolean };
 const receiptKey = (id: string) => `orb.launch:${getApiUrl()}:${id}`;
@@ -310,13 +312,16 @@ export function phaseIsQuiet(phase: { label: string; failed?: boolean; moving?: 
  * assistive technology, and anything actionable or failed still draws a
  * compact banner here.
  */
-export function LaunchStatus(p: { destination: string; mission?: Mission | null; activity?: boolean; submitting?: boolean; goal?: string | null; failureInTranscript?: boolean; onResume?: () => void; onCancelRecovery?: () => void; recoveryPending?: boolean; onForceSlot?: () => void; forceSlotPending?: boolean }) {
+export function LaunchStatus(p: { destination: string; mission?: Mission | null; activity?: boolean; submitting?: boolean; goal?: string | null; failureInTranscript?: boolean; onResume?: () => void; onCancelRecovery?: () => void; onResetRedeemed?: () => void; recoveryPending?: boolean; onForceSlot?: () => void; forceSlotPending?: boolean }) {
   const phase = () => p.submitting ? {label:"Starting",moving:true,detail:"Submitting your request…",failed:false} : missionPhase(p.mission ?? null, !!p.activity);
   return <Show when={!phase().failed && !(phase().label === "Queued" && !p.mission?.remote_job && !p.mission?.remote_node_id) && (!phaseIsQuiet(phase()) || (!p.activity && !p.submitting && phase().label === "Starting")) && !(p.activity && phase().label === "Remote job accepted")}>
     <div class={`launch-status ${phase().failed ? "failed" : ""}`} role="status" aria-live="polite">
       <div><Show when={phase().moving}><span class="launch-pulse" aria-hidden="true" /></Show><Show when={p.goal}><GoalTag class="small" /></Show><span>{phase().label} on {p.destination}</span><Show when={p.onForceSlot && canForceSlot(p.mission)}><button type="button" class="force-slot-btn" disabled={p.forceSlotPending} title="Bypass the worker slot queue using the 1-extra operator slot" onClick={() => p.onForceSlot?.()}>{p.forceSlotPending ? "Starting…" : "Run now"}</button></Show></div>
       <Show when={phase().detail}><p>{phase().detail}</p></Show>
       <Show when={phase().label === "Recovery scheduled"}><div class="recovery-actions">
+        <Show when={p.mission && p.mission.recovery?.kind === "quota"}>
+          <Suspense><LazyQuotaResetAction mission={p.mission!} disabled={p.recoveryPending} onResetRedeemed={p.onResetRedeemed} /></Suspense>
+        </Show>
         <Show when={p.onResume}><button type="button" tabIndex={0} disabled={p.recoveryPending} onClick={() => p.onResume?.()}>Resume now</button></Show>
         <Show when={p.onCancelRecovery}><button type="button" tabIndex={0} disabled={p.recoveryPending} onClick={() => p.onCancelRecovery?.()}>Cancel recovery</button></Show>
       </div></Show>

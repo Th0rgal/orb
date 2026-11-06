@@ -1,4 +1,4 @@
-import type { AIProvider, ProviderUsage } from "./api";
+import type { AIProvider, ProviderUsage, SubscriptionResetGrant } from "./api";
 import type { AccountHealthSnapshot } from "./routingApi";
 
 export function codexWindowLabel(minutes: number | undefined, fallback: string) {
@@ -179,12 +179,90 @@ export function usageChips(u: ProviderUsage): UsageChip[] {
 export function hasProviderUsageDetails(u?: ProviderUsage): boolean {
   if (!u) return false;
   return !!(codingPlanWindows(u).length || u.usage_note || u.error || u.status === "needs_reauth" || u.account_email || u.account_name || u.organization || u.unified_status
+    || (u.subscription_resets && u.subscription_resets.available_count > 0)
     || (u.provider_type === "anthropic" && (u.unified_5h_utilization != null || u.unified_7d_utilization != null))
     || (u.provider_type === "openai" && ((u.codex_primary_used_percent != null && u.codex_primary_window_minutes !== 0) || u.requests_limit != null))
     || (u.provider_type === "minimax" && u.model_usage?.length)
     || (u.provider_type === "xai" && (u.xai_plan != null || u.xai_credit_used_percent != null || u.xai_prepaid_usd != null || u.xai_on_demand_used != null))
     || (u.provider_type === "kimi" && (u.kimi_plan != null || kimiWindows(u).length > 0))
     || (u.provider_type === "zai" && u.zai_tokens_percentage != null));
+}
+
+export type SubscriptionResetSummary = {
+  availableCount: number;
+  usableNow: boolean;
+  badge: string;
+  detail: string;
+  grants: SubscriptionResetGrant[];
+};
+
+/**
+ * True for OAuth subscription accounts that support banked usage-limit resets
+ * (Anthropic Claude Pro/Max/Team and OpenAI Codex/ChatGPT).
+ * Spec: shared/orb-spec/fixtures/subscription-resets.json.
+ */
+export function supportsSubscriptionReset(a: Pick<AIProvider, "provider_type" | "uses_oauth" | "has_api_key" | "has_oauth">): boolean {
+  if (!a.uses_oauth) return false;
+  if (a.has_api_key === true && a.has_oauth === false) return false;
+  return a.provider_type === "anthropic" || a.provider_type === "openai";
+}
+
+function formatExpirySpan(expiresAt: number, nowSec: number): string | null {
+  const delta = expiresAt - nowSec;
+  if (!Number.isFinite(delta) || delta <= 0) return null;
+  const mins = Math.round(delta / 60);
+  if (mins < 60) return `expires in ${Math.max(1, mins)}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `expires in ${hours}h`;
+  return `expires in ${Math.round(hours / 24)}d`;
+}
+
+/**
+ * Normalized summary of banked subscription resets on a usage payload; null when
+ * none are available. Spec: shared/orb-spec/fixtures/subscription-resets.json.
+ */
+export function subscriptionResetSummary(u?: Pick<ProviderUsage, "subscription_resets">, nowSec = Date.now() / 1000): SubscriptionResetSummary | null {
+  const resets = u?.subscription_resets;
+  const count = resets?.available_count ?? 0;
+  if (!resets || !Number.isFinite(count) || count <= 0) return null;
+  const availableCount = Math.floor(count);
+  const usableNow = Boolean(resets.usable_now);
+  const grants = Array.isArray(resets.grants) ? resets.grants : [];
+  const primary = grants.find(g => g.usable_now) ?? grants[0];
+  const parts: string[] = [];
+  if (primary?.clears?.length) parts.push(`Clears ${joinNames(primary.clears)}`);
+  const expiry = primary?.expires_at ?? grants.map(g => g.expires_at).find((t): t is number => typeof t === "number" && t > nowSec);
+  if (expiry != null) {
+    const expText = formatExpirySpan(expiry, nowSec);
+    if (expText) parts.push(expText);
+  }
+  if (!usableNow) {
+    const reason = (resets.unavailable_reason || primary?.unavailable_reason || "").trim();
+    if (reason) parts.push(reason);
+  }
+  return {
+    availableCount,
+    usableNow,
+    badge: availableCount === 1 ? "1 reset available" : `${availableCount} resets available`,
+    detail: parts.join(" · "),
+    grants,
+  };
+}
+
+export function usableSubscriptionReset(u?: Pick<ProviderUsage, "subscription_resets">, nowSec = Date.now() / 1000): SubscriptionResetSummary | null {
+  const s = subscriptionResetSummary(u, nowSec);
+  return s?.usableNow ? s : null;
+}
+
+export function formatResetGrantOption(g: SubscriptionResetGrant, nowSec = Date.now() / 1000): string {
+  const parts = [g.label || "Usage limit reset"];
+  if (g.clears?.length) parts.push(`clears ${joinNames(g.clears)}`);
+  if (g.resets_left > 1) parts.push(`${g.resets_left} left`);
+  if (g.expires_at != null) {
+    const exp = formatExpirySpan(g.expires_at, nowSec);
+    if (exp) parts.push(exp);
+  }
+  return parts.join(" · ");
 }
 
 import { orbUsageLimitBadge } from "./orbKernel";

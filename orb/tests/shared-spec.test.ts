@@ -12,6 +12,8 @@ import { archiveOnlyRows, isSupersededInTree, missionTreeRows } from "../src/mis
 import { taskCardView } from "../src/taskList";
 import { compactAgo } from "../src/time";
 import { narrationKeys } from "../src/workModel";
+import { subscriptionResetSummary, supportsSubscriptionReset } from "../src/providerUsage";
+import type { AIProvider, ProviderUsage } from "../src/api";
 
 const SPEC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "shared", "orb-spec");
 const spec = <T>(path: string): T => JSON.parse(readFileSync(join(SPEC_DIR, path), "utf8")) as T;
@@ -136,6 +138,35 @@ describe("shared/orb-spec/fixtures/projection-invariants.json", () => {
       const archiveOnly = archiveOnlyRows(rows.filter(r => r.status === "acknowledged"), main);
       expect(main.some(r => r.id === "target")).toBe(c.expected.show_in_main_tree);
       expect(archiveOnly.some(r => r.id === "target")).toBe(c.expected.show_in_archive_only);
+    });
+  }
+});
+
+describe("shared/orb-spec/fixtures/subscription-resets.json", () => {
+  const fixture = spec<{
+    supports_cases: Array<{ name: string; provider: Partial<AIProvider>; expected: boolean }>;
+    summary_cases: Array<{
+      name: string;
+      nowSec: number;
+      usage: ProviderUsage;
+      expected: { availableCount: number; usableNow: boolean; badge: string; detail: string } | null;
+    }>;
+  }>("fixtures/subscription-resets.json");
+
+  for (const c of fixture.supports_cases) {
+    it(`supportsSubscriptionReset: ${c.name}`, () => {
+      expect(supportsSubscriptionReset(c.provider as AIProvider)).toBe(c.expected);
+    });
+  }
+
+  for (const c of fixture.summary_cases) {
+    it(`subscriptionResetSummary: ${c.name}`, () => {
+      const got = subscriptionResetSummary(c.usage, c.nowSec);
+      if (c.expected === null) {
+        expect(got).toBeNull();
+      } else {
+        expect(got).toMatchObject(c.expected);
+      }
     });
   }
 });

@@ -4355,9 +4355,11 @@ select.orb-select-native:disabled { cursor: default; }
 
 /* Execution settings follow account usage and read as secondary controls. */
 .p-acc-body > .p-native { margin-top:12px;padding-top:10px;color:var(--fg-3); }
+.p-acc-body > .p-native:first-child { margin-top:2px;padding-top:2px;border-top:0; }
 .p-acc-body > .p-rank-row + .p-native { margin-top:2px; }
 .p-acc-body > .p-native .p-native-managed { color:var(--fg-3);font-size:11px; }
 .p-acc-body > .p-native :is(.p-native-models-toggle,.p-native-where,.s-btn) { font-size:11px; }
+.p-reset-badge { color:var(--fg-2);font-weight:500; }
 
 .startup-card { min-height: 14rem; max-width: 30rem; margin: 15vh auto; padding: 2rem; }
 .startup-card button { display: block; margin-top: 1rem; }

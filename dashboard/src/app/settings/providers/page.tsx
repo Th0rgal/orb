@@ -12,6 +12,7 @@ import {
   setDefaultAIProvider,
   getProviderUsage,
   refreshProviderUsage,
+  resetProviderUsage,
   getAllProviderUsage,
   AIProvider,
   AIProviderTypeInfo,
@@ -518,6 +519,9 @@ export default function ProvidersPage() {
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
   const [usageData, setUsageData] = useState<Record<string, ProviderUsage>>({});
   const [usageLoading, setUsageLoading] = useState<Record<string, boolean>>({});
+  const [confirmReset, setConfirmReset] = useState<{ id: string; key: string } | null>(null);
+  const [resetBusyId, setResetBusyId] = useState<string | null>(null);
+  const [resetError, setResetError] = useState<Record<string, string>>({});
   const [usageWindow, setUsageWindow] = useState<UsageWindow>('7d');
   const [editForm, setEditForm] = useState<{
     name?: string;
@@ -1145,6 +1149,114 @@ export default function ProvidersPage() {
                               usage={usageData[provider.id] ?? cachedSeen[provider.id] ?? null}
                               loading={usageLoading[provider.id] ?? false}
                             />
+                            {(() => {
+                              const currentUsage = usageData[provider.id] ?? cachedSeen[provider.id];
+                              const resets = currentUsage?.subscription_resets;
+                              const supportsReset =
+                                provider.uses_oauth &&
+                                !(provider.has_api_key && !provider.has_oauth) &&
+                                (provider.provider_type === 'anthropic' || provider.provider_type === 'openai');
+                              if (!supportsReset && !(resets && resets.available_count > 0)) return null;
+                              const primaryGrant = resets?.grants?.find((g) => g.usable_now) ?? resets?.grants?.[0];
+                              return (
+                                <div className="mt-3 pt-2.5 border-t border-white/[0.04] space-y-2">
+                                  {resets && resets.available_count > 0 && (
+                                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                                      <div className="text-[11px] text-white/60">
+                                        <span className="font-medium text-white/80">
+                                          {resets.available_count === 1
+                                            ? '1 reset available'
+                                            : `${resets.available_count} resets available`}
+                                        </span>
+                                        {primaryGrant?.clears?.length ? (
+                                          <span className="text-white/40">
+                                            {' · '}Clears {primaryGrant.clears.join(', ')}
+                                          </span>
+                                        ) : null}
+                                        {!resets.usable_now && resets.unavailable_reason ? (
+                                          <span className="text-white/40">
+                                            {' · '}{resets.unavailable_reason}
+                                          </span>
+                                        ) : null}
+                                      </div>
+                                      {confirmReset?.id === provider.id ? (
+                                        <div className="flex items-center gap-1.5">
+                                          <button
+                                            type="button"
+                                            disabled={resetBusyId === provider.id}
+                                            onClick={() => setConfirmReset(null)}
+                                            className="px-2 py-1 rounded text-[11px] text-white/50 hover:text-white/80 bg-white/[0.04] cursor-pointer disabled:opacity-50"
+                                          >
+                                            Cancel
+                                          </button>
+                                          <button
+                                            type="button"
+                                            disabled={resetBusyId === provider.id}
+                                            onClick={async () => {
+                                              const idemKey = confirmReset.key;
+                                              setResetBusyId(provider.id);
+                                              setResetError((prev) => ({ ...prev, [provider.id]: '' }));
+                                              try {
+                                                const updated = await resetProviderUsage(provider.id, {
+                                                  idempotency_key: idemKey,
+                                                  grant_id: primaryGrant?.id,
+                                                });
+                                                setUsageData((prev) => ({ ...prev, [provider.id]: updated }));
+                                                setConfirmReset(null);
+                                                void mutateProviders();
+                                                void mutateBulkUsage();
+                                              } catch (err) {
+                                                setResetError((prev) => ({
+                                                  ...prev,
+                                                  [provider.id]: err instanceof Error ? err.message : String(err),
+                                                }));
+                                              } finally {
+                                                setResetBusyId(null);
+                                              }
+                                            }}
+                                            className="px-2 py-1 rounded text-[11px] font-medium text-red-300 bg-red-500/15 hover:bg-red-500/25 cursor-pointer disabled:opacity-50"
+                                          >
+                                            {resetBusyId === provider.id ? 'Resetting…' : 'Confirm reset'}
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          disabled={!resets.usable_now}
+                                          onClick={() =>
+                                            setConfirmReset({
+                                              id: provider.id,
+                                              key: crypto.randomUUID(),
+                                            })
+                                          }
+                                          className="px-2 py-1 rounded text-[11px] text-white/70 hover:text-white bg-white/[0.06] hover:bg-white/[0.1] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                                        >
+                                          Use reset…
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
+                                  {resetError[provider.id] && (
+                                    <div className="text-[11px] text-red-400/80">{resetError[provider.id]}</div>
+                                  )}
+                                  {supportsReset && (
+                                    <label className="flex items-center justify-between gap-2 text-[11px] text-white/50 cursor-pointer select-none">
+                                      <span>Auto-use reset when all accounts hit a usage limit</span>
+                                      <input
+                                        type="checkbox"
+                                        checked={Boolean(provider.auto_reset_on_limit)}
+                                        onChange={async (e) => {
+                                          const next = e.target.checked;
+                                          await updateAIProvider(provider.id, { auto_reset_on_limit: next });
+                                          await mutateProviders();
+                                        }}
+                                        className="rounded border-white/20 bg-white/5"
+                                      />
+                                    </label>
+                                  )}
+                                </div>
+                              );
+                            })()}
                           </div>
                         )}
                       </>

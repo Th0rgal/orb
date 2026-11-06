@@ -174,4 +174,29 @@ final class OrbSettingsTests: XCTestCase {
         XCTAssertTrue(OrbProvidersSettings.canConnectOAuth(dual))
     }
 
+    func testSubscriptionResetsMatchSharedSpec() throws {
+        let spec = try OrbSpec.json("fixtures/subscription-resets.json")
+        for c in try XCTUnwrap(spec["supports_cases"] as? [[String: Any]]) {
+            let name = c["name"] as? String ?? "?"
+            let data = try JSONSerialization.data(withJSONObject: c["provider"] ?? [:])
+            let provider = try JSONDecoder().decode(OrbJSON.self, from: data)
+            XCTAssertEqual(OrbProvidersSettings.supportsSubscriptionReset(provider), c["expected"] as? Bool, name)
+        }
+        for c in try XCTUnwrap(spec["summary_cases"] as? [[String: Any]]) {
+            let name = c["name"] as? String ?? "?"
+            let nowSec = try XCTUnwrap((c["nowSec"] as? NSNumber)?.doubleValue)
+            let data = try JSONSerialization.data(withJSONObject: c["usage"] ?? [:])
+            let usage = try JSONDecoder().decode(OrbJSON.self, from: data)
+            let got = OrbSubscriptionResetSummary.from(usage, now: nowSec)
+            if let expected = c["expected"] as? [String: Any] {
+                XCTAssertEqual(got?.availableCount, expected["availableCount"] as? Int, name)
+                XCTAssertEqual(got?.usableNow, expected["usableNow"] as? Bool, name)
+                XCTAssertEqual(got?.badge, expected["badge"] as? String, name)
+                XCTAssertEqual(got?.detail, expected["detail"] as? String, name)
+            } else {
+                XCTAssertNil(got, name)
+            }
+        }
+    }
+
 }

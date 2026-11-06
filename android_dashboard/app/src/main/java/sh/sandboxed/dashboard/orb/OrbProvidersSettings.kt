@@ -43,12 +43,15 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -245,20 +248,104 @@ internal fun splitProviderDisplayName(provider: OrbRow): ProviderTitleSplit {
     return ProviderTitleSplit(rawName, explicitEmail)
 }
 
+internal data class OrbSubscriptionResetSummary(
+    val availableCount: Int,
+    val usableNow: Boolean,
+    val badge: String,
+    val detail: String,
+    val primaryGrantId: String?
+)
+
+/** Same as desktop `supportsSubscriptionReset`; spec: shared/orb-spec/fixtures/subscription-resets.json. */
+internal fun supportsSubscriptionReset(provider: OrbDict?): Boolean {
+    if (provider == null) return false
+    if (OrbJSON.bool(provider, "uses_oauth") != true) return false
+    if (OrbJSON.bool(provider, "has_api_key") == true && OrbJSON.bool(provider, "has_oauth") == false) return false
+    val pType = OrbJSON.str(provider, "provider_type") ?: OrbJSON.str(provider, "type") ?: ""
+    return pType == "anthropic" || pType == "openai"
+}
+
+internal fun supportsSubscriptionReset(provider: OrbRow): Boolean = supportsSubscriptionReset(provider.raw)
+
+private fun formatResetExpirySpan(expiresAt: Double, nowSec: Double): String? {
+    val delta = expiresAt - nowSec
+    if (!delta.isFinite() || delta <= 0.0) return null
+    val mins = (delta / 60.0).roundToInt()
+    if (mins < 60) return "expires in ${maxOf(1, mins)}m"
+    val hours = (mins / 60.0).roundToInt()
+    if (hours < 48) return "expires in ${hours}h"
+    return "expires in ${(hours / 24.0).roundToInt()}d"
+}
+
+/** Same as desktop `subscriptionResetSummary`; spec: shared/orb-spec/fixtures/subscription-resets.json. */
+internal fun subscriptionResetSummary(
+    detail: OrbDict?,
+    nowSec: Double = System.currentTimeMillis() / 1000.0
+): OrbSubscriptionResetSummary? {
+    val resets = OrbJSON.dict(detail?.get("subscription_resets")) ?: return null
+    val rawCount = OrbJSON.double(resets, "available_count") ?: return null
+    if (!rawCount.isFinite() || rawCount <= 0.0) return null
+    val availableCount = kotlin.math.floor(rawCount).toInt()
+    if (availableCount <= 0) return null
+    val usableNow = OrbJSON.bool(resets, "usable_now") == true
+    val grants = OrbJSON.dictList(resets["grants"])
+    val primary = grants.firstOrNull { OrbJSON.bool(it, "usable_now") == true } ?: grants.firstOrNull()
+    val parts = mutableListOf<String>()
+    if (primary != null) {
+        val clears = OrbJSON.strList(primary, "clears")
+        if (clears.isNotEmpty()) {
+            parts.add("Clears ${joinNames(clears)}")
+        }
+    }
+    val expiry = primary?.let { OrbJSON.double(it, "expires_at") }
+        ?: grants.mapNotNull { OrbJSON.double(it, "expires_at") }.firstOrNull { it > nowSec }
+    if (expiry != null) {
+        formatResetExpirySpan(expiry, nowSec)?.let { parts.add(it) }
+    }
+    if (!usableNow) {
+        val reason = (OrbJSON.str(resets, "unavailable_reason")?.takeIf { it.isNotBlank() }
+            ?: primary?.let { OrbJSON.str(it, "unavailable_reason") })?.trim().orEmpty()
+        if (reason.isNotEmpty()) parts.add(reason)
+    }
+    val grantId = primary?.let { OrbJSON.str(it, "id") }?.takeIf { it.isNotBlank() }
+    return OrbSubscriptionResetSummary(
+        availableCount = availableCount,
+        usableNow = usableNow,
+        badge = if (availableCount == 1) "1 reset available" else "$availableCount resets available",
+        detail = parts.joinToString(" · "),
+        primaryGrantId = grantId
+    )
+}
+
 internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?): String {
     val providerType = provider.str("provider_type", "type") ?: ""
     val statusObj = provider.dict("status")
     val statusType = OrbJSON.str(statusObj, "type") ?: provider.str("status", "state") ?: "ready"
     val detailStatus = OrbJSON.str(detail, "status") ?: ""
     val detailError = OrbJSON.str(detail, "error") ?: ""
+    var showResetBadge = false
     val state = when {
         provider.bool("enabled") == false -> "Disabled"
         detailStatus == "needs_verification" -> "Verification required"
         statusType == "needs_reauth" || detailStatus == "needs_reauth" -> "Reconnect"
         detailError.isNotEmpty() -> "Usage unavailable"
-        else -> quotaStatus(providerQuotaWindows(detail))?.label ?: statusType.replace("_", " ")
+        else -> {
+            val q = quotaStatus(providerQuotaWindows(detail))
+            if (q != null) {
+                showResetBadge = true
+                q.label
+            } else {
+                if (OrbJSON.str(detail, "unified_status")?.trim()?.lowercase() == "rejected") {
+                    showResetBadge = true
+                }
+                statusType.replace("_", " ")
+            }
+        }
     }
-    return if (providerType.isNotEmpty()) "$providerType · $state" else state
+    val resetSuffix = if (showResetBadge) {
+        subscriptionResetSummary(detail)?.badge?.let { " · $it" }.orEmpty()
+    } else ""
+    return (if (providerType.isNotEmpty()) "$providerType · $state" else state) + resetSuffix
 }
 
 /**
@@ -314,6 +401,9 @@ fun OrbProvidersSettingsPage(
     var statusBanner by remember { mutableStateOf<String?>(null) }
     var errorBanner by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var resetPrompt by remember { mutableStateOf<Triple<OrbRow, OrbSubscriptionResetSummary, String>?>(null) }
+    var resetBusy by remember { mutableStateOf(false) }
+    var resetDialogError by remember { mutableStateOf<String?>(null) }
 
     var showConnectSubscriptionMenu by remember { mutableStateOf(false) }
     var oauthProviderType by remember { mutableStateOf<String?>(null) }
@@ -609,6 +699,26 @@ fun OrbProvidersSettingsPage(
         }
     }
 
+    fun setAutoReset(provider: OrbRow, autoReset: Boolean) {
+        if (busy) return
+        busy = true
+        scope.launch {
+            try {
+                core.request(
+                    path = "/api/ai/providers/${core.encodeComponent(provider.id)}",
+                    method = "PUT",
+                    body = mapOf("auto_reset_on_limit" to autoReset)
+                )
+                loadProvidersAndUsage()
+                core.refreshAll()
+            } catch (e: Throwable) {
+                errorBanner = e.message
+            } finally {
+                busy = false
+            }
+        }
+    }
+
     fun saveApiKey(provider: OrbRow?) {
         val pid = provider?.id
         savingKey = true
@@ -893,6 +1003,71 @@ fun OrbProvidersSettingsPage(
                                             }
                                             OrbJSON.str(detail, "usage_note")?.takeIf { it.isNotEmpty() }?.let { noteText ->
                                                 Text(text = noteText, color = OrbStyle.textMuted, fontSize = 12.sp)
+                                            }
+
+                                            val resetSummary = subscriptionResetSummary(detail)
+                                            val canResetSub = supportsSubscriptionReset(provider)
+                                            if (resetSummary != null || canResetSub) {
+                                                HorizontalDivider(color = OrbStyle.border)
+                                                if (resetSummary != null) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                                    ) {
+                                                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                                            Text(text = resetSummary.badge, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                                            if (resetSummary.detail.isNotEmpty()) {
+                                                                Text(text = resetSummary.detail, color = OrbStyle.textSecondary, fontSize = 11.sp)
+                                                            }
+                                                        }
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .clip(CircleShape)
+                                                                .background(OrbStyle.card)
+                                                                .border(1.dp, OrbStyle.border, CircleShape)
+                                                                .let { mod ->
+                                                                    if (resetSummary.usableNow && !busy && !resetBusy) {
+                                                                        mod.orbPressClickable {
+                                                                            resetDialogError = null
+                                                                            resetPrompt = Triple(provider, resetSummary, java.util.UUID.randomUUID().toString())
+                                                                        }
+                                                                    } else mod
+                                                                }
+                                                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                                        ) {
+                                                            Text(
+                                                                text = "Use reset…",
+                                                                color = if (resetSummary.usableNow) Color.White else OrbStyle.textMuted,
+                                                                fontSize = 12.sp,
+                                                                fontWeight = FontWeight.Medium,
+                                                                maxLines = 1,
+                                                                softWrap = false
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                if (canResetSub) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                                    ) {
+                                                        Column(modifier = Modifier.weight(1f)) {
+                                                            Text(text = "Auto-use reset on limit", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                                            Text(
+                                                                text = "Automatically redeem a banked reset when every enabled account reaches a limit.",
+                                                                color = OrbStyle.textSecondary,
+                                                                fontSize = 11.sp
+                                                            )
+                                                        }
+                                                        Switch(
+                                                            checked = provider.bool("auto_reset_on_limit") == true,
+                                                            enabled = !busy && !resetBusy,
+                                                            onCheckedChange = { next -> setAutoReset(provider, next) }
+                                                        )
+                                                    }
+                                                }
                                             }
 
                                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1397,6 +1572,76 @@ fun OrbProvidersSettingsPage(
                 }
             }
         }
+    }
+
+    resetPrompt?.let { (targetProvider, summary, idemKey) ->
+        val split = splitProviderDisplayName(targetProvider)
+        val label = split.account.ifEmpty { split.title }
+        val detailSentence = if (summary.detail.isNotEmpty()) "${summary.detail}. " else ""
+        AlertDialog(
+            onDismissRequest = {
+                if (!resetBusy) {
+                    resetDialogError = null
+                    resetPrompt = null
+                }
+            },
+            containerColor = OrbStyle.elevated,
+            titleContentColor = Color.White,
+            textContentColor = OrbStyle.textSecondary,
+            title = { Text("Use subscription reset?", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Redeem 1 banked subscription reset on $label? ${detailSentence}This immediately consumes a reset on your subscription and cannot be undone.")
+                    resetDialogError?.takeIf { it.isNotEmpty() }?.let { errMsg ->
+                        Text(errMsg, color = OrbStyle.error, fontSize = 12.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !resetBusy,
+                    onClick = {
+                        resetBusy = true
+                        resetDialogError = null
+                        scope.launch {
+                            try {
+                                val body = mutableMapOf<String, Any?>("idempotency_key" to idemKey)
+                                summary.primaryGrantId?.let { body["grant_id"] = it }
+                                val resp = core.request(
+                                    path = "/api/ai/providers/${core.encodeComponent(targetProvider.id)}/reset-usage",
+                                    method = "POST",
+                                    body = body
+                                )
+                                OrbJSON.dict(resp)?.let { usageEntries = usageEntries + (targetProvider.id to it) }
+                                resetDialogError = null
+                                resetPrompt = null
+                                statusBanner = "Redeemed subscription reset"
+                                loadProvidersAndUsage()
+                                core.refreshAll()
+                            } catch (e: Throwable) {
+                                resetDialogError = e.message ?: "Reset failed; try again."
+                                errorBanner = e.message
+                            } finally {
+                                resetBusy = false
+                            }
+                        }
+                    }
+                ) {
+                    Text(if (resetBusy) "Resetting…" else "Use reset", color = OrbStyle.error, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !resetBusy,
+                    onClick = {
+                        resetDialogError = null
+                        resetPrompt = null
+                    }
+                ) {
+                    Text("Cancel", color = OrbStyle.textSecondary)
+                }
+            }
+        )
     }
 }
 
