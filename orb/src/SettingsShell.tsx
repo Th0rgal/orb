@@ -1,10 +1,5 @@
-import { For, Show, createSignal, type JSX } from "solid-js";
-import { isConnected } from "./api";
+import { For, Show, type JSX } from "solid-js";
 import { settingsPageId, settingsSectionFor } from "./settingsNav";
-import { ErrorToast } from "./toast";
-import { ApprovalDevicesPanel } from "./ApprovalDevicesPanel";
-import { PrivilegeAccessPanel } from "./PrivilegeAccessPanel";
-import { MissionAccessPanel } from "./MissionAccessPanel";
 export { SettingsCard, SettingsRow } from "./SettingsCard";
 
 /** Page chrome for a settings section: title, one-line subtitle and tabs.
@@ -40,23 +35,6 @@ export function SettingsShell(p: { page: string; onOpen: (id: string) => void; c
         <div class="settings-page-content" role={section().tabs.length > 1 ? "tabpanel" : undefined} aria-labelledby={section().tabs.length > 1 ? `settings-tab-${current()}` : undefined}>
           {p.children}
         </div>
-      </div>
-    </div>
-  );
-}
-
-/** Security → Access: approval devices, Fleet Bunker Mode and privileged access. */
-export function SecuritySettings() {
-  const [error, setError] = createSignal("");
-  return (
-    <div class="s-body settings-body">
-      <div class="s-inner">
-        <ErrorToast error={error()} title="Security" onDismiss={() => setError("")} />
-        <Show when={isConnected()} fallback={<p class="s-lead">Connect to Core on the Account page to manage approvals and access.</p>}>
-          <ApprovalDevicesPanel onError={setError} />
-          <PrivilegeAccessPanel onError={setError} />
-          <MissionAccessPanel onError={setError} />
-        </Show>
       </div>
     </div>
   );

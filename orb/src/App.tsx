@@ -60,7 +60,7 @@ import * as Ic from "./icons";
 const SearchDialog = lazy(() => import("./SearchDialog"));
 const Settings=lazy(()=>import("./Settings").then(module=>({default:module.Settings})));
 const LocalAgentsSettings=lazy(()=>import("./Settings").then(module=>({default:module.LocalAgentsSettings})));
-const SecuritySettings=lazy(()=>import("./SettingsShell").then(module=>({default:module.SecuritySettings})));
+const SecuritySettings=lazy(()=>import("./SecuritySettings").then(module=>({default:module.SecuritySettings})));
 import { SettingsShell } from "./SettingsShell";
 import { SETTINGS_PAGE_IDS, SETTINGS_SECTIONS, settingsAttention, settingsPageId, settingsSectionFor, skillPageName } from "./settingsNav";
 const SkillPage = lazy(() => import("./SkillPage").then(module => ({ default: module.SkillPage })));
