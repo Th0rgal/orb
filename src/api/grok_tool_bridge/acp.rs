@@ -82,12 +82,14 @@ struct InboundToolCall {
     responder: oneshot::Sender<String>,
 }
 
+const TOOL_CALL_CHANNEL_CAPACITY: usize = 128;
+
 /// Shared state for the ephemeral MCP server.
 struct McpState {
     /// Caller tool descriptors (`name`/`description`/`inputSchema`).
     tools: Vec<serde_json::Value>,
-    /// Channel to hand suspended calls to the bridge coordination loop.
-    tool_tx: mpsc::UnboundedSender<InboundToolCall>,
+    /// Bounded channel to hand suspended calls to the bridge coordination loop.
+    tool_tx: mpsc::Sender<InboundToolCall>,
     /// Per-session bearer value required by every request to this endpoint.
     bearer_value: String,
 }
@@ -214,6 +216,7 @@ async fn mcp_handler(
                     arguments,
                     responder,
                 })
+                .await
                 .is_err()
             {
                 // Bridge coordination loop is gone — session tearing down.
@@ -489,7 +492,7 @@ pub struct AcpConversation {
     driver_handle: Option<JoinHandle<()>>,
     mcp_handle: Option<JoinHandle<()>>,
     stderr_handle: Option<JoinHandle<()>>,
-    tool_rx: mpsc::UnboundedReceiver<InboundToolCall>,
+    tool_rx: mpsc::Receiver<InboundToolCall>,
     done_rx: oneshot::Receiver<DriverResult>,
     /// provider_call_id → the suspended MCP handler awaiting its result.
     pending: HashMap<String, oneshot::Sender<String>>,
@@ -649,7 +652,7 @@ impl BridgeBackend for AcpMcpBackend {
 
         // 1. Start the ephemeral MCP server before the ACP handshake — the CLI
         //    connects to it (initialize / tools/list) during `session/new`.
-        let (tool_tx, tool_rx) = mpsc::unbounded_channel::<InboundToolCall>();
+        let (tool_tx, tool_rx) = mpsc::channel::<InboundToolCall>(TOOL_CALL_CHANNEL_CAPACITY);
         let mcp_bearer_value = format!("Bearer {}", uuid::Uuid::new_v4().simple());
         let mcp_state = Arc::new(McpState {
             tools: input.tools_mcp.clone(),
@@ -848,7 +851,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_endpoint_rejects_missing_or_wrong_session_authorization() {
-        let (tool_tx, _tool_rx) = mpsc::unbounded_channel();
+        let (tool_tx, _tool_rx) = mpsc::channel(TOOL_CALL_CHANNEL_CAPACITY);
         let state = Arc::new(McpState {
             tools: Vec::new(),
             tool_tx,

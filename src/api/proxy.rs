@@ -1224,132 +1224,147 @@ async fn list_capabilities(
         crate::api::ai_providers::read_standard_accounts(&state.config.working_dir);
     let mut by_model: HashMap<String, Vec<ProviderProtocolCapabilities>> = HashMap::new();
     let capability_tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
-    for chain in state.chain_store.list().await {
-        let configured_account_ids = state
-            .chain_store
-            .configured_account_ids(&chain.entries, &state.ai_providers, &standard_accounts)
-            .await;
-        let stateful_affinity = chain.entries.len() == 1 && configured_account_ids.len() == 1;
-        let available = state
-            .chain_store
-            .resolve_entries(
-                &chain.entries,
-                &state.ai_providers,
-                &standard_accounts,
-                &state.health_tracker,
-            )
-            .await;
-        let available_ids: HashSet<_> = available.iter().map(|entry| entry.account_id).collect();
-        let configured = state
-            .chain_store
-            .resolve_entries(
-                &chain.entries,
-                &state.ai_providers,
-                &standard_accounts,
-                &capability_tracker,
-            )
-            .await;
-        let mut provider_map: HashMap<(String, String), ProviderProtocolCapabilities> =
-            HashMap::new();
-        for entry in configured {
-            let provider_type =
-                ProviderType::from_id(&entry.provider_id).unwrap_or(ProviderType::Custom);
-            let mut capabilities =
-                protocol_capabilities(provider_type, entry.api_key.is_some(), entry.has_oauth);
-            if !stateful_affinity {
-                capabilities.previous_response_id = false;
-                capabilities.thinking_blocks_replay = false;
+    let chains = state.chain_store.list().await;
+    let chain_results = futures::future::join_all(chains.into_iter().map(|chain| {
+        let state = &state;
+        let standard_accounts = &standard_accounts;
+        let capability_tracker = &capability_tracker;
+        async move {
+            let (configured_account_ids, available, configured) = tokio::join!(
+                state.chain_store.configured_account_ids(
+                    &chain.entries,
+                    &state.ai_providers,
+                    standard_accounts,
+                ),
+                state.chain_store.resolve_entries(
+                    &chain.entries,
+                    &state.ai_providers,
+                    standard_accounts,
+                    &state.health_tracker,
+                ),
+                state.chain_store.resolve_entries(
+                    &chain.entries,
+                    &state.ai_providers,
+                    standard_accounts,
+                    capability_tracker,
+                ),
+            );
+            let stateful_affinity = chain.entries.len() == 1 && configured_account_ids.len() == 1;
+            let available_ids: HashSet<_> =
+                available.iter().map(|entry| entry.account_id).collect();
+            let mut provider_map: HashMap<(String, String), ProviderProtocolCapabilities> =
+                HashMap::new();
+            for entry in configured {
+                let provider_type =
+                    ProviderType::from_id(&entry.provider_id).unwrap_or(ProviderType::Custom);
+                let mut capabilities =
+                    protocol_capabilities(provider_type, entry.api_key.is_some(), entry.has_oauth);
+                if !stateful_affinity {
+                    capabilities.previous_response_id = false;
+                    capabilities.thinking_blocks_replay = false;
+                }
+                let key = (entry.provider_id.clone(), entry.model_id.clone());
+                let currently_available = available_ids.contains(&entry.account_id);
+                provider_map
+                    .entry(key)
+                    .and_modify(|provider| {
+                        provider.currently_available |= currently_available;
+                        provider.capabilities.chat_completions |= capabilities.chat_completions;
+                        provider.capabilities.responses |= capabilities.responses;
+                        provider.capabilities.anthropic_messages |= capabilities.anthropic_messages;
+                        provider.capabilities.native_function_tools |=
+                            capabilities.native_function_tools;
+                    })
+                    .or_insert(ProviderProtocolCapabilities {
+                        provider: entry.provider_id,
+                        model: entry.model_id,
+                        currently_available,
+                        capabilities,
+                    });
             }
-            let key = (entry.provider_id.clone(), entry.model_id.clone());
-            let currently_available = available_ids.contains(&entry.account_id);
-            provider_map
-                .entry(key)
-                .and_modify(|provider| {
-                    provider.currently_available |= currently_available;
-                    provider.capabilities.chat_completions |= capabilities.chat_completions;
-                    provider.capabilities.responses |= capabilities.responses;
-                    provider.capabilities.anthropic_messages |= capabilities.anthropic_messages;
-                    provider.capabilities.native_function_tools |=
-                        capabilities.native_function_tools;
-                })
-                .or_insert(ProviderProtocolCapabilities {
-                    provider: entry.provider_id,
-                    model: entry.model_id,
-                    currently_available,
-                    capabilities,
-                });
+            let mut providers: Vec<_> = provider_map.into_values().collect();
+            providers.sort_by(|left, right| {
+                (&left.provider, &left.model).cmp(&(&right.provider, &right.model))
+            });
+            (chain.id, providers)
         }
-        let mut providers: Vec<_> = provider_map.into_values().collect();
-        providers.sort_by(|left, right| {
-            (&left.provider, &left.model).cmp(&(&right.provider, &right.model))
-        });
-        by_model.insert(chain.id, providers);
+    }))
+    .await;
+    for (chain_id, providers) in chain_results {
+        by_model.insert(chain_id, providers);
     }
     let direct_models =
         crate::api::providers::catalog_model_options_for_state(&state, true, true).await;
-    for model in routable_direct_catalog_models(&state, direct_models).await {
-        let provider_type =
-            ProviderType::from_id(&model.provider_id).unwrap_or(ProviderType::Custom);
-        let synthetic = crate::provider_health::ChainEntry {
-            provider_id: model.provider_id.clone(),
-            model_id: model.id.clone(),
-        };
-        let configured_account_ids = state
-            .chain_store
-            .configured_account_ids(
-                std::slice::from_ref(&synthetic),
-                &state.ai_providers,
-                &standard_accounts,
-            )
-            .await;
-        let stateful_affinity = configured_account_ids.len() == 1;
-        let available = state
-            .chain_store
-            .resolve_entries(
-                std::slice::from_ref(&synthetic),
-                &state.ai_providers,
-                &standard_accounts,
-                &state.health_tracker,
-            )
-            .await;
-        let available_ids: HashSet<_> = available.iter().map(|entry| entry.account_id).collect();
-        let configured = state
-            .chain_store
-            .resolve_entries(
-                std::slice::from_ref(&synthetic),
-                &state.ai_providers,
-                &standard_accounts,
-                &capability_tracker,
-            )
-            .await;
-        let mut aggregate: Option<ProtocolCapabilities> = None;
-        for entry in configured {
-            let mut capabilities =
-                protocol_capabilities(provider_type, entry.api_key.is_some(), entry.has_oauth);
-            if !stateful_affinity {
-                capabilities.previous_response_id = false;
-                capabilities.thinking_blocks_replay = false;
+    let routable_models = routable_direct_catalog_models(&state, direct_models).await;
+    let direct_results = futures::future::join_all(routable_models.into_iter().map(|model| {
+        let state = &state;
+        let standard_accounts = &standard_accounts;
+        let capability_tracker = &capability_tracker;
+        async move {
+            let provider_type =
+                ProviderType::from_id(&model.provider_id).unwrap_or(ProviderType::Custom);
+            let synthetic = crate::provider_health::ChainEntry {
+                provider_id: model.provider_id.clone(),
+                model_id: model.id.clone(),
+            };
+            let (configured_account_ids, available, configured) = tokio::join!(
+                state.chain_store.configured_account_ids(
+                    std::slice::from_ref(&synthetic),
+                    &state.ai_providers,
+                    standard_accounts,
+                ),
+                state.chain_store.resolve_entries(
+                    std::slice::from_ref(&synthetic),
+                    &state.ai_providers,
+                    standard_accounts,
+                    &state.health_tracker,
+                ),
+                state.chain_store.resolve_entries(
+                    std::slice::from_ref(&synthetic),
+                    &state.ai_providers,
+                    standard_accounts,
+                    capability_tracker,
+                ),
+            );
+            let stateful_affinity = configured_account_ids.len() == 1;
+            let available_ids: HashSet<_> =
+                available.iter().map(|entry| entry.account_id).collect();
+            let mut aggregate: Option<ProtocolCapabilities> = None;
+            for entry in configured {
+                let mut capabilities =
+                    protocol_capabilities(provider_type, entry.api_key.is_some(), entry.has_oauth);
+                if !stateful_affinity {
+                    capabilities.previous_response_id = false;
+                    capabilities.thinking_blocks_replay = false;
+                }
+                if let Some(existing) = aggregate.as_mut() {
+                    existing.chat_completions |= capabilities.chat_completions;
+                    existing.responses |= capabilities.responses;
+                    existing.anthropic_messages |= capabilities.anthropic_messages;
+                    existing.reasoning_content_replay |= capabilities.reasoning_content_replay;
+                    existing.native_function_tools |= capabilities.native_function_tools;
+                } else {
+                    aggregate = Some(capabilities);
+                }
             }
-            if let Some(existing) = aggregate.as_mut() {
-                existing.chat_completions |= capabilities.chat_completions;
-                existing.responses |= capabilities.responses;
-                existing.anthropic_messages |= capabilities.anthropic_messages;
-                existing.reasoning_content_replay |= capabilities.reasoning_content_replay;
-                existing.native_function_tools |= capabilities.native_function_tools;
-            } else {
-                aggregate = Some(capabilities);
-            }
+            aggregate.map(|capabilities| {
+                (
+                    model.value,
+                    ProviderProtocolCapabilities {
+                        provider: model.provider_id,
+                        model: model.id,
+                        currently_available: !available_ids.is_empty(),
+                        capabilities,
+                    },
+                )
+            })
         }
-        if let Some(capabilities) = aggregate {
-            by_model.entry(model.value).or_insert_with(|| {
-                vec![ProviderProtocolCapabilities {
-                    provider: model.provider_id,
-                    model: model.id,
-                    currently_available: !available_ids.is_empty(),
-                    capabilities,
-                }]
-            });
-        }
+    }))
+    .await;
+    for (model_value, provider_cap) in direct_results.into_iter().flatten() {
+        by_model
+            .entry(model_value)
+            .or_insert_with(|| vec![provider_cap]);
     }
     let mut data: Vec<_> = by_model
         .into_iter()
@@ -2565,21 +2580,16 @@ async fn native_protocol_proxy(
     }
     let resolved_chain_id = resolve_stored_chain_id(&state.chain_store, &requested_model).await;
     let (chain_id, chain_entries, entries) = if let Some(id) = resolved_chain_id {
-        let configured = state
-            .chain_store
-            .get(&id)
-            .await
-            .map(|chain| chain.entries)
-            .unwrap_or_default();
-        let resolved = state
-            .chain_store
-            .resolve_chain(
+        let (chain_opt, resolved) = tokio::join!(
+            state.chain_store.get(&id),
+            state.chain_store.resolve_chain(
                 &id,
                 &state.ai_providers,
                 &standard_accounts,
                 &state.health_tracker,
-            )
-            .await;
+            ),
+        );
+        let configured = chain_opt.map(|chain| chain.entries).unwrap_or_default();
         (id, configured, resolved)
     } else if let Some(direct) = parse_native_model_entry(&requested_model, protocol)
         .or_else(|| parse_kimi_bare_model_entry(&requested_model))
@@ -3010,12 +3020,19 @@ async fn native_protocol_proxy(
             let response_headers = upstream.headers().clone();
             let retry_after = parse_rate_limit_headers(&response_headers, provider_type);
             let response_body = upstream.bytes().await.unwrap_or_default();
-            let reason = if status.as_u16() == 529 {
-                CooldownReason::Overloaded
-            } else if status == StatusCode::TOO_MANY_REQUESTS {
-                CooldownReason::RateLimit
-            } else {
-                CooldownReason::ServerError
+            let classified = crate::orb_spec::http_rate_limit_classify_step(
+                u32::from(status.as_u16()),
+                false,
+                false,
+                retry_after.map_or(0, |d| d.as_secs()),
+                3600,
+            );
+            let reason = match classified.reason {
+                crate::orb_spec::HttpRateLimitReason::Overloaded if status.as_u16() == 529 => {
+                    CooldownReason::Overloaded
+                }
+                crate::orb_spec::HttpRateLimitReason::RateLimit => CooldownReason::RateLimit,
+                _ => CooldownReason::ServerError,
             };
             // An exhausted usage allowance parks the account until the reset
             // it announces; the next entry (another account) takes over.
@@ -3318,32 +3335,63 @@ fn sse_chunk_commits_output(bytes: &[u8]) -> bool {
     {
         return false;
     }
-    text.lines()
-        .filter_map(|l| l.strip_prefix("data:"))
-        .filter_map(|d| serde_json::from_str::<serde_json::Value>(d.trim()).ok())
-        .any(|v| {
-            v.get("choices")
-                .and_then(|c| c.as_array())
-                .into_iter()
-                .flatten()
-                .any(|choice| {
-                    let delta = choice.get("delta").or_else(|| choice.get("message"));
-                    let content = delta
-                        .and_then(|d| d.get("content"))
-                        .and_then(|c| c.as_str())
-                        .is_some_and(|c| !c.is_empty());
-                    let tools = delta
-                        .and_then(|d| d.get("tool_calls"))
-                        .and_then(|t| t.as_array())
-                        .is_some_and(|t| !t.is_empty());
-                    let legacy = ["function_call", "audio"].iter().any(|key| {
-                        delta
-                            .and_then(|d| d.get(*key))
-                            .is_some_and(|v| !v.is_null())
-                    });
-                    content || tools || legacy
-                })
-        })
+    let mut in_think_tag = false;
+    for l in text.lines() {
+        let trimmed = l.trim();
+        if trimmed.is_empty() {
+            let step =
+                crate::orb_spec::proxy_sse_scan_step(0, false, in_think_tag, false, false, false);
+            in_think_tag = step.next_in_think_tag;
+            continue;
+        }
+        let Some(d) = l.strip_prefix("data:") else {
+            let step =
+                crate::orb_spec::proxy_sse_scan_step(1, false, in_think_tag, false, false, false);
+            in_think_tag = step.next_in_think_tag;
+            continue;
+        };
+        let payload = d.trim();
+        let has_done = payload == "[DONE]";
+        let visible = !has_done
+            && serde_json::from_str::<serde_json::Value>(payload)
+                .ok()
+                .is_some_and(|v| {
+                    v.get("choices")
+                        .and_then(|c| c.as_array())
+                        .into_iter()
+                        .flatten()
+                        .any(|choice| {
+                            let delta = choice.get("delta").or_else(|| choice.get("message"));
+                            let content = delta
+                                .and_then(|d| d.get("content"))
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|c| !c.is_empty());
+                            let tools = delta
+                                .and_then(|d| d.get("tool_calls"))
+                                .and_then(|t| t.as_array())
+                                .is_some_and(|t| !t.is_empty());
+                            let legacy = ["function_call", "audio"].iter().any(|key| {
+                                delta
+                                    .and_then(|d| d.get(*key))
+                                    .is_some_and(|v| !v.is_null())
+                            });
+                            content || tools || legacy
+                        })
+                });
+        let step = crate::orb_spec::proxy_sse_scan_step(
+            2,
+            has_done,
+            in_think_tag,
+            payload.contains("<think>"),
+            payload.contains("</think>"),
+            visible,
+        );
+        in_think_tag = step.next_in_think_tag;
+        if step.emit_delta {
+            return true;
+        }
+    }
+    false
 }
 
 /// Client side of a routed response:
@@ -3395,19 +3443,34 @@ fn client_stream_response(
             };
             let item = match next {
                 None => {
+                    let ka_ms = keepalive.as_millis() as u64;
+                    let at_boundary = at_sse_event_boundary(&tail);
                     let dl = crate::orb_spec::stream_deadlines(
                         crate::orb_spec::StreamDeadlinesInput {
-                            client_elapsed_ms: keepalive.as_millis() as u64,
-                            keepalive_ms: keepalive.as_millis() as u64,
+                            client_elapsed_ms: ka_ms,
+                            keepalive_ms: ka_ms,
                             upstream_elapsed_ms: 0,
                             base_idle_ms: 1,
                             provider_floor_ms: 1,
-                            at_event_boundary: at_sse_event_boundary(&tail),
+                            at_event_boundary: at_boundary,
                             has_mission_header: false,
                             auth_verified: false,
                         },
                     );
-                    if dl.emit_keepalive {
+                    let relay_verdict = crate::orb_spec::lean_sys_cabi::verify_stream_relay(
+                        false,
+                        false,
+                        committed,
+                        at_boundary,
+                        ka_ms,
+                        u64::MAX / 2,
+                        ka_ms,
+                        u64::MAX / 2,
+                        ka_ms.max(1),
+                        0,
+                        64 * 1024 * 1024,
+                    );
+                    if dl.emit_keepalive && relay_verdict == 1 {
                         cell.client_gap(last_item.elapsed(), true);
                         last_item = tokio::time::Instant::now();
                         yield Ok(bytes::Bytes::from_static(b": keepalive\n\n"));
@@ -3756,23 +3819,21 @@ async fn chat_completions_routed(
 
     let resolved_chain_id = resolve_stored_chain_id(&state.chain_store, &requested_model).await;
 
-    let (chain_id, chain_entries, mut entries) = if let Some(id) = resolved_chain_id {
-        let chain_entries = state
-            .chain_store
-            .get(&id)
-            .await
-            .map(|chain| chain.entries)
-            .unwrap_or_default();
-        let entries = state
-            .chain_store
-            .resolve_chain(
+    let (chain_id, chain_entries, mut entries, strip_thinking) = if let Some(id) = resolved_chain_id
+    {
+        let (chain_opt, entries) = tokio::join!(
+            state.chain_store.get(&id),
+            state.chain_store.resolve_chain(
                 &id,
                 &state.ai_providers,
                 &standard_accounts,
                 &state.health_tracker,
-            )
-            .await;
-        (id, chain_entries, entries)
+            ),
+        );
+        let (chain_entries, strip_thinking) = chain_opt
+            .map(|chain| (chain.entries, chain.strip_thinking))
+            .unwrap_or_else(|| (Vec::new(), false));
+        (id, chain_entries, entries, strip_thinking)
     } else if let Some(direct) = parse_direct_model_entry(&requested_model)
         .or_else(|| parse_kimi_bare_model_entry(&requested_model))
         .or_else(|| parse_google_bare_model_entry(&requested_model))
@@ -3792,7 +3853,7 @@ async fn chat_completions_routed(
                 &state.health_tracker,
             )
             .await;
-        (requested_model.clone(), chain_entries, entries)
+        (requested_model.clone(), chain_entries, entries, false)
     } else {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -3807,12 +3868,6 @@ async fn chat_completions_routed(
     // Per-chain post-processing: strip `<think>` markup from responses for
     // chains routed to models that leak reasoning into `content`. Direct
     // provider/model passthrough ids aren't chains, so this resolves to false.
-    let strip_thinking = state
-        .chain_store
-        .get(&chain_id)
-        .await
-        .map(|c| c.strip_thinking)
-        .unwrap_or(false);
     if let Some(cell) = super::proxy_timing::current() {
         cell.set_chain(&chain_id);
     }
@@ -3836,25 +3891,28 @@ async fn chat_completions_routed(
         if let Some(limit) = chain_usage_limit(&state, &chain_entries, &standard_accounts).await {
             return usage_limit_response(NativeProtocol::Responses, &chain_id, &limit);
         }
-        let candidate_account_ids = state
-            .chain_store
-            .configured_account_ids(&chain_entries, &state.ai_providers, &standard_accounts)
-            .await;
-        let candidate_subscription_keys = state
-            .chain_store
-            .configured_subscription_keys(&chain_entries, &state.ai_providers)
-            .await;
+        let (candidate_account_ids, candidate_subscription_keys) = tokio::join!(
+            state.chain_store.configured_account_ids(
+                &chain_entries,
+                &state.ai_providers,
+                &standard_accounts,
+            ),
+            state
+                .chain_store
+                .configured_subscription_keys(&chain_entries, &state.ai_providers),
+        );
         // Account-level OR subscription-level: a sibling held back only by a
         // shared subscription lane (possibly inherited from a since-deleted
         // account) still means "retry later", not "misconfigured".
-        let provider_in_cooldown = state
-            .health_tracker
-            .any_account_has_active_cooldown(&candidate_account_ids)
-            .await
-            || state
+        let (account_cooldown, sub_cooldown) = tokio::join!(
+            state
                 .health_tracker
-                .any_subscription_cooldown_active(&candidate_subscription_keys)
-                .await;
+                .any_account_has_active_cooldown(&candidate_account_ids),
+            state
+                .health_tracker
+                .any_subscription_cooldown_active(&candidate_subscription_keys),
+        );
+        let provider_in_cooldown = account_cooldown || sub_cooldown;
         if provider_in_cooldown {
             // Retry-After = when the first candidate account becomes usable.
             if let Some(remaining) = state
@@ -7573,6 +7631,33 @@ fn normalize_sse_stream(
     )
 }
 
+#[inline]
+fn sse_line_may_have_empty_role(json_bytes: &[u8]) -> bool {
+    const NEEDLE: &[u8] = b"\"role\"";
+    let mut i = 0;
+    while i + NEEDLE.len() <= json_bytes.len() {
+        if &json_bytes[i..i + NEEDLE.len()] == NEEDLE {
+            let mut j = i + NEEDLE.len();
+            while j < json_bytes.len() && json_bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < json_bytes.len() && json_bytes[j] == b':' {
+                j += 1;
+                while j < json_bytes.len() && json_bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j + 1 < json_bytes.len() && json_bytes[j] == b'"' && json_bytes[j + 1] == b'"' {
+                    return true;
+                }
+            }
+            i += NEEDLE.len();
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 /// Normalize a single SSE line.  If it's a `data: {...}` line, parse and
 /// fix known provider quirks; otherwise pass through unchanged.
 fn normalize_sse_line(
@@ -7615,6 +7700,13 @@ fn normalize_sse_line(
                 }
             }
         }
+        return line.to_vec();
+    }
+
+    // Fast path: when `<think>` stripping is off and the frame contains no
+    // `"role"` field at all (or only a non-empty role), skip full JSON Value
+    // parse + allocation on every SSE token.
+    if !strip_thinking && !sse_line_may_have_empty_role(json_bytes) {
         return line.to_vec();
     }
 

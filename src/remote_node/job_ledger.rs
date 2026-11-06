@@ -8,9 +8,13 @@
 //! in-memory task and the mission stayed Active forever.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 
+use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use super::ArtifactEntry;
@@ -78,10 +82,7 @@ pub struct RemoteJobIdentity {
 pub const IDENTITY_VERSION: u32 = 1;
 
 impl RemoteJobIdentity {
-    /// Canonical, byte-stable hash of the identity. `base_tree_sha` replaces
-    /// the commit when present; artifacts are sorted and de-duplicated; the
-    /// version is part of the hash so a schema change can never alias.
-    pub fn identity_hash(&self) -> String {
+    fn identity_digest_bytes(&self) -> [u8; 32] {
         use sha2::Digest;
         let mut artifacts = self.artifacts.clone();
         artifacts.sort();
@@ -107,7 +108,24 @@ impl RemoteJobIdentity {
         let mut hasher = sha2::Sha256::new();
         hasher.update(b"sandboxed-remote-job-identity\0");
         hasher.update(canonical.to_string().as_bytes());
-        hex::encode(hasher.finalize())
+        hasher.finalize().into()
+    }
+
+    fn identity_words(&self) -> [u64; 4] {
+        let raw = self.identity_digest_bytes();
+        [
+            u64::from_le_bytes(raw[0..8].try_into().unwrap()),
+            u64::from_le_bytes(raw[8..16].try_into().unwrap()),
+            u64::from_le_bytes(raw[16..24].try_into().unwrap()),
+            u64::from_le_bytes(raw[24..32].try_into().unwrap()),
+        ]
+    }
+
+    /// Canonical, byte-stable hash of the identity. `base_tree_sha` replaces
+    /// the commit when present; artifacts are sorted and de-duplicated; the
+    /// version is part of the hash so a schema change can never alias.
+    pub fn identity_hash(&self) -> String {
+        hex::encode(self.identity_digest_bytes())
     }
 
     /// Same build for exclusion purposes. Two identities of the same version
@@ -116,7 +134,12 @@ impl RemoteJobIdentity {
     /// blocks a duplicate — conservatively, never the other way round.
     pub fn excludes(&self, other: &RemoteJobIdentity) -> bool {
         if self.version == other.version {
-            return self.identity_hash() == other.identity_hash();
+            return crate::orb_spec::job_identity_eq256_step(
+                self.identity_words(),
+                other.identity_words(),
+                true,
+                false,
+            ) == crate::orb_spec::JobIdentityVerdict::JoinActiveExecution;
         }
         self.repository == other.repository
             && self.commit.eq_ignore_ascii_case(&other.commit)
@@ -132,7 +155,12 @@ impl RemoteJobIdentity {
     pub fn reusable_for(&self, other: &RemoteJobIdentity) -> bool {
         self.version >= 1
             && self.version == other.version
-            && self.identity_hash() == other.identity_hash()
+            && crate::orb_spec::job_identity_eq256_step(
+                self.identity_words(),
+                other.identity_words(),
+                false,
+                true,
+            ) == crate::orb_spec::JobIdentityVerdict::ReplayTerminalReceipt
     }
 }
 
@@ -255,6 +283,675 @@ pub(crate) fn validation_order(
     (sequence, started_at.timestamp_micros())
 }
 
+/// Immutable point-in-time snapshot of live job handles and terminal receipts
+/// for a working directory, served wait-free via [`ArcSwap`].
+#[derive(Debug, Clone, Default)]
+pub struct JobLedgerSnapshot {
+    pub handles: Vec<JobHandle>,
+    pub receipts: Vec<RemoteJobReceipt>,
+}
+
+enum LedgerCmd {
+    Record {
+        handle: Box<JobHandle>,
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    Attach {
+        job_id: Uuid,
+        mission_id: Uuid,
+        expects_continuation: bool,
+        reply: oneshot::Sender<anyhow::Result<Option<JobHandle>>>,
+    },
+    Remove {
+        job_id: Uuid,
+        reply: oneshot::Sender<()>,
+    },
+    Heartbeat {
+        job_id: Uuid,
+        reply: oneshot::Sender<anyhow::Result<bool>>,
+    },
+    RequireTerminalWake {
+        job_id: Uuid,
+        mission_id: Uuid,
+        reply: oneshot::Sender<anyhow::Result<bool>>,
+    },
+    RequireTerminalReceiptWake {
+        job_id: Uuid,
+        mission_id: Uuid,
+        reply: oneshot::Sender<anyhow::Result<bool>>,
+    },
+    MarkTerminalWakeSuppressed {
+        job_id: Uuid,
+        mission_id: Uuid,
+        superseding_job_id: Uuid,
+        reply: oneshot::Sender<anyhow::Result<bool>>,
+    },
+    MarkTerminalWakeDelivered {
+        job_id: Uuid,
+        mission_id: Uuid,
+        reply: oneshot::Sender<anyhow::Result<bool>>,
+    },
+    Finalize {
+        job_id: Uuid,
+        state: String,
+        exit_status: Option<i32>,
+        artifacts: Vec<ArtifactEntry>,
+        reply: oneshot::Sender<anyhow::Result<bool>>,
+    },
+}
+
+struct DirLedger {
+    working_dir: PathBuf,
+    snapshot: ArcSwap<JobLedgerSnapshot>,
+    initialized: AtomicBool,
+    init_lock: tokio::sync::Mutex<()>,
+    actor_tx: std::sync::Mutex<Option<mpsc::Sender<LedgerCmd>>>,
+}
+
+static LEDGERS: LazyLock<DashMap<PathBuf, Arc<DirLedger>>> = LazyLock::new(DashMap::new);
+
+fn dir_ledger(working_dir: &Path) -> Arc<DirLedger> {
+    if let Some(existing) = LEDGERS.get(working_dir) {
+        return Arc::clone(existing.value());
+    }
+    Arc::clone(
+        LEDGERS
+            .entry(working_dir.to_path_buf())
+            .or_insert_with(|| {
+                Arc::new(DirLedger {
+                    working_dir: working_dir.to_path_buf(),
+                    snapshot: ArcSwap::from_pointee(JobLedgerSnapshot::default()),
+                    initialized: AtomicBool::new(false),
+                    init_lock: tokio::sync::Mutex::new(()),
+                    actor_tx: std::sync::Mutex::new(None),
+                })
+            })
+            .value(),
+    )
+}
+
+impl DirLedger {
+    async fn load_snapshot(&self) -> anyhow::Result<Arc<JobLedgerSnapshot>> {
+        if self.initialized.load(Ordering::Acquire) {
+            return Ok(self.snapshot.load_full());
+        }
+        let _guard = self.init_lock.lock().await;
+        if self.initialized.load(Ordering::Acquire) {
+            return Ok(self.snapshot.load_full());
+        }
+        let handles = read_handles_from_disk(&self.working_dir).await?;
+        let receipts = read_receipts_from_disk(&self.working_dir).await?;
+        let snap = Arc::new(JobLedgerSnapshot { handles, receipts });
+        self.snapshot.store(Arc::clone(&snap));
+        self.initialized.store(true, Ordering::Release);
+        Ok(snap)
+    }
+
+    fn actor_sender(self: &Arc<Self>) -> mpsc::Sender<LedgerCmd> {
+        let mut guard = self.actor_tx.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tx) = guard.as_ref() {
+            if !tx.is_closed() {
+                return tx.clone();
+            }
+        }
+        let (tx, rx) = mpsc::channel(256);
+        tokio::spawn(run_ledger_actor(Arc::clone(self), rx));
+        *guard = Some(tx.clone());
+        tx
+    }
+
+    async fn send_cmd<R>(
+        self: &Arc<Self>,
+        make_cmd: impl FnOnce(oneshot::Sender<R>) -> LedgerCmd,
+    ) -> anyhow::Result<R> {
+        let tx = self.actor_sender();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(make_cmd(reply_tx))
+            .await
+            .map_err(|_| anyhow::anyhow!("remote job ledger actor stopped"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("remote job ledger actor dropped reply"))
+    }
+}
+
+async fn run_blocking_mirror<F>(f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    let _ = tokio::task::spawn_blocking(f).await;
+}
+
+async fn run_ledger_actor(ledger: Arc<DirLedger>, mut rx: mpsc::Receiver<LedgerCmd>) {
+    const MAX_RECEIPTS: usize = 2_000;
+    let mut pending_next: Option<LedgerCmd> = None;
+
+    loop {
+        let cmd = match pending_next.take() {
+            Some(next) => next,
+            None => match rx.recv().await {
+                Some(cmd) => cmd,
+                None => break,
+            },
+        };
+
+        let current = match ledger.load_snapshot().await {
+            Ok(snap) => snap,
+            Err(err) => {
+                match cmd {
+                    LedgerCmd::Record { reply, .. } => {
+                        let _ = reply.send(Err(err));
+                    }
+                    LedgerCmd::Attach { reply, .. } => {
+                        let _ = reply.send(Err(err));
+                    }
+                    LedgerCmd::Remove { reply, .. } => {
+                        tracing::warn!(?err, "remote job ledger removal deferred");
+                        let _ = reply.send(());
+                    }
+                    LedgerCmd::Heartbeat { reply, .. }
+                    | LedgerCmd::RequireTerminalWake { reply, .. }
+                    | LedgerCmd::RequireTerminalReceiptWake { reply, .. }
+                    | LedgerCmd::MarkTerminalWakeSuppressed { reply, .. }
+                    | LedgerCmd::MarkTerminalWakeDelivered { reply, .. }
+                    | LedgerCmd::Finalize { reply, .. } => {
+                        let _ = reply.send(Err(err));
+                    }
+                }
+                continue;
+            }
+        };
+
+        match cmd {
+            LedgerCmd::Record { handle, reply } => {
+                let mut handle = *handle;
+                let mut handles = current.handles.clone();
+                let receipts = &current.receipts;
+                let previous_sequence = handles
+                    .iter()
+                    .find(|existing| existing.job_id == handle.job_id)
+                    .map(|existing| existing.submission_sequence)
+                    .unwrap_or(0);
+                if handle.submission_sequence == 0 {
+                    handle.submission_sequence = if previous_sequence > 0 {
+                        previous_sequence
+                    } else {
+                        let receipt_max = receipts
+                            .iter()
+                            .map(|receipt| receipt.submission_sequence)
+                            .max()
+                            .unwrap_or(0);
+                        handles
+                            .iter()
+                            .map(|existing| existing.submission_sequence)
+                            .max()
+                            .unwrap_or(0)
+                            .max(receipt_max)
+                            .saturating_add(1)
+                    };
+                }
+                // A job may carry one handle per subscribed mission (see [`attach`]);
+                // the submitter's handle and every attached handle share the job id and
+                // are told apart by mission id.
+                handles.retain(|existing| {
+                    existing.job_id != handle.job_id || existing.mission_id != handle.mission_id
+                });
+                let mirrored = handle.clone();
+                handles.push(handle);
+                let res = match store(&ledger.working_dir, &handles).await {
+                    Ok(()) => {
+                        ledger.snapshot.store(Arc::new(JobLedgerSnapshot {
+                            handles,
+                            receipts: current.receipts.clone(),
+                        }));
+                        let wd = ledger.working_dir.clone();
+                        run_blocking_mirror(move || sql::mirror_handle(&wd, &mirrored)).await;
+                        Ok(())
+                    }
+                    Err(err) => Err(err),
+                };
+                let _ = reply.send(res);
+            }
+            LedgerCmd::Attach {
+                job_id,
+                mission_id,
+                expects_continuation,
+                reply,
+            } => {
+                if let Some(existing) = current
+                    .handles
+                    .iter()
+                    .find(|handle| handle.job_id == job_id && handle.mission_id == mission_id)
+                {
+                    let _ = reply.send(Ok(Some(existing.clone())));
+                    continue;
+                }
+                let Some(canonical) = current
+                    .handles
+                    .iter()
+                    .filter(|handle| {
+                        handle.job_id == job_id
+                            && matches!(
+                                handle.kind,
+                                JobHandleKind::RemoteBuild | JobHandleKind::Tentative
+                            )
+                    })
+                    .min_by_key(|handle| {
+                        validation_order(handle.submission_sequence, handle.started_at)
+                    })
+                    .cloned()
+                else {
+                    let _ = reply.send(Ok(None));
+                    continue;
+                };
+                let attached = JobHandle {
+                    mission_id,
+                    wait_for_completion: Some(expects_continuation),
+                    wake_on_terminal: false,
+                    ..canonical
+                };
+                let mut handles = current.handles.clone();
+                handles.push(attached.clone());
+                let res = match store(&ledger.working_dir, &handles).await {
+                    Ok(()) => {
+                        ledger.snapshot.store(Arc::new(JobLedgerSnapshot {
+                            handles,
+                            receipts: current.receipts.clone(),
+                        }));
+                        let wd = ledger.working_dir.clone();
+                        run_blocking_mirror(move || {
+                            sql::mirror_subscriber(&wd, job_id, mission_id, expects_continuation);
+                        })
+                        .await;
+                        Ok(Some(attached))
+                    }
+                    Err(err) => Err(err),
+                };
+                let _ = reply.send(res);
+            }
+            LedgerCmd::Remove { job_id, reply } => {
+                let mut handles = current.handles.clone();
+                let before = handles.len();
+                handles.retain(|h| h.job_id != job_id);
+                if handles.len() != before {
+                    match store(&ledger.working_dir, &handles).await {
+                        Ok(()) => {
+                            ledger.snapshot.store(Arc::new(JobLedgerSnapshot {
+                                handles,
+                                receipts: current.receipts.clone(),
+                            }));
+                            let wd = ledger.working_dir.clone();
+                            run_blocking_mirror(move || sql::mirror_remove(&wd, job_id)).await;
+                            if let Some(m) = crate::managed::global() {
+                                m.notify_activity_change();
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(?err, "remote job ledger removal failed");
+                        }
+                    }
+                }
+                let _ = reply.send(());
+            }
+            LedgerCmd::Heartbeat { job_id, reply } => {
+                // Coalesce any contiguous queued Heartbeat commands into one batch write!
+                let mut batch = vec![(job_id, reply)];
+                while let Ok(next) = rx.try_recv() {
+                    match next {
+                        LedgerCmd::Heartbeat {
+                            job_id: next_id,
+                            reply: next_reply,
+                        } => batch.push((next_id, next_reply)),
+                        other => {
+                            pending_next = Some(other);
+                            break;
+                        }
+                    }
+                }
+                let mut handles = current.handles.clone();
+                let now = chrono::Utc::now();
+                let mut any_touched = false;
+                let mut touched_ids = Vec::new();
+                let mut found_flags = Vec::with_capacity(batch.len());
+
+                for (id, _) in &batch {
+                    let mut found = false;
+                    let mut touched_this = false;
+                    for handle in handles.iter_mut().filter(|h| h.job_id == *id) {
+                        found = true;
+                        if handle
+                            .heartbeat_at
+                            .is_some_and(|previous| now - previous < chrono::Duration::seconds(15))
+                        {
+                            continue;
+                        }
+                        handle.heartbeat_at = Some(now);
+                        any_touched = true;
+                        touched_this = true;
+                    }
+                    if touched_this && !touched_ids.contains(id) {
+                        touched_ids.push(*id);
+                    }
+                    found_flags.push(found);
+                }
+
+                if any_touched {
+                    match store(&ledger.working_dir, &handles).await {
+                        Ok(()) => {
+                            let mirrored: Vec<JobHandle> = touched_ids
+                                .iter()
+                                .filter_map(|id| handles.iter().find(|h| h.job_id == *id).cloned())
+                                .collect();
+                            ledger.snapshot.store(Arc::new(JobLedgerSnapshot {
+                                handles,
+                                receipts: current.receipts.clone(),
+                            }));
+                            let wd = ledger.working_dir.clone();
+                            run_blocking_mirror(move || {
+                                for h in &mirrored {
+                                    sql::mirror_handle(&wd, h);
+                                }
+                            })
+                            .await;
+                            for ((_, reply), found) in batch.into_iter().zip(found_flags) {
+                                let _ = reply.send(Ok(found));
+                            }
+                        }
+                        Err(err) => {
+                            let msg = err.to_string();
+                            let mut iter = batch.into_iter();
+                            if let Some((_, first_reply)) = iter.next() {
+                                let _ = first_reply.send(Err(err));
+                            }
+                            for (_, r) in iter {
+                                let _ = r.send(Err(anyhow::anyhow!("{msg}")));
+                            }
+                        }
+                    }
+                } else {
+                    for ((_, reply), found) in batch.into_iter().zip(found_flags) {
+                        let _ = reply.send(Ok(found));
+                    }
+                }
+            }
+            LedgerCmd::RequireTerminalWake {
+                job_id,
+                mission_id,
+                reply,
+            } => {
+                let mut handles = current.handles.clone();
+                let Some(handle) = handles
+                    .iter_mut()
+                    .find(|handle| handle.job_id == job_id && handle.mission_id == mission_id)
+                else {
+                    let _ = reply.send(Ok(false));
+                    continue;
+                };
+                if !handle.wake_on_terminal {
+                    handle.wake_on_terminal = true;
+                    match store(&ledger.working_dir, &handles).await {
+                        Ok(()) => {
+                            ledger.snapshot.store(Arc::new(JobLedgerSnapshot {
+                                handles,
+                                receipts: current.receipts.clone(),
+                            }));
+                            let _ = reply.send(Ok(true));
+                        }
+                        Err(err) => {
+                            let _ = reply.send(Err(err));
+                        }
+                    }
+                } else {
+                    let _ = reply.send(Ok(true));
+                }
+            }
+            LedgerCmd::RequireTerminalReceiptWake {
+                job_id,
+                mission_id,
+                reply,
+            } => {
+                let mut receipts = current.receipts.clone();
+                let Some(receipt) = receipts
+                    .iter_mut()
+                    .find(|receipt| receipt.job_id == job_id && receipt.mission_id == mission_id)
+                else {
+                    let _ = reply.send(Ok(false));
+                    continue;
+                };
+                if receipt.wake_delivered_at.is_some()
+                    || (!receipt.wake_required && !receipt.continuation_expected)
+                {
+                    let _ = reply.send(Ok(false));
+                    continue;
+                }
+                if !receipt.wake_required {
+                    receipt.wake_required = true;
+                    match store_receipts(&ledger.working_dir, &receipts).await {
+                        Ok(()) => {
+                            ledger.snapshot.store(Arc::new(JobLedgerSnapshot {
+                                handles: current.handles.clone(),
+                                receipts,
+                            }));
+                            let _ = reply.send(Ok(true));
+                        }
+                        Err(err) => {
+                            let _ = reply.send(Err(err));
+                        }
+                    }
+                } else {
+                    let _ = reply.send(Ok(true));
+                }
+            }
+            LedgerCmd::MarkTerminalWakeSuppressed {
+                job_id,
+                mission_id,
+                superseding_job_id,
+                reply,
+            } => {
+                let mut receipts = current.receipts.clone();
+                let Some(receipt) = receipts
+                    .iter_mut()
+                    .find(|receipt| receipt.job_id == job_id && receipt.mission_id == mission_id)
+                else {
+                    let _ = reply.send(Ok(false));
+                    continue;
+                };
+                if receipt.wake_delivered_at.is_none() {
+                    receipt.wake_delivered_at = Some(chrono::Utc::now());
+                    receipt.wake_suppressed_by = Some(superseding_job_id);
+                    match store_receipts(&ledger.working_dir, &receipts).await {
+                        Ok(()) => {
+                            ledger.snapshot.store(Arc::new(JobLedgerSnapshot {
+                                handles: current.handles.clone(),
+                                receipts,
+                            }));
+                            let wd = ledger.working_dir.clone();
+                            run_blocking_mirror(move || {
+                                sql::mirror_wake(
+                                    &wd,
+                                    job_id,
+                                    mission_id,
+                                    "suppressed",
+                                    Some(superseding_job_id),
+                                );
+                            })
+                            .await;
+                            let _ = reply.send(Ok(true));
+                        }
+                        Err(err) => {
+                            let _ = reply.send(Err(err));
+                        }
+                    }
+                } else {
+                    let _ = reply.send(Ok(true));
+                }
+            }
+            LedgerCmd::MarkTerminalWakeDelivered {
+                job_id,
+                mission_id,
+                reply,
+            } => {
+                let mut receipts = current.receipts.clone();
+                let Some(receipt) = receipts
+                    .iter_mut()
+                    .find(|receipt| receipt.job_id == job_id && receipt.mission_id == mission_id)
+                else {
+                    let _ = reply.send(Ok(false));
+                    continue;
+                };
+                if receipt.wake_delivered_at.is_none() {
+                    receipt.wake_delivered_at = Some(chrono::Utc::now());
+                    match store_receipts(&ledger.working_dir, &receipts).await {
+                        Ok(()) => {
+                            ledger.snapshot.store(Arc::new(JobLedgerSnapshot {
+                                handles: current.handles.clone(),
+                                receipts,
+                            }));
+                            let wd = ledger.working_dir.clone();
+                            run_blocking_mirror(move || {
+                                sql::mirror_wake(&wd, job_id, mission_id, "delivered", None);
+                            })
+                            .await;
+                            let _ = reply.send(Ok(true));
+                        }
+                        Err(err) => {
+                            let _ = reply.send(Err(err));
+                        }
+                    }
+                } else {
+                    let _ = reply.send(Ok(true));
+                }
+            }
+            LedgerCmd::Finalize {
+                job_id,
+                state,
+                exit_status,
+                artifacts,
+                reply,
+            } => {
+                if !current.handles.iter().any(|handle| handle.job_id == job_id) {
+                    let _ = reply.send(Ok(false));
+                    continue;
+                }
+                // Verify receipts path is not obstructed (e.g. replaced by a directory)
+                // before mutating handles, preserving atomic failure semantics.
+                let rpath = receipts_path(&ledger.working_dir);
+                if let Ok(meta) = tokio::fs::metadata(&rpath).await {
+                    if meta.is_dir() {
+                        let _ = reply.send(Err(anyhow::anyhow!(
+                            "read {}: Is a directory",
+                            rpath.display()
+                        )));
+                        continue;
+                    }
+                }
+                let mut handles = current.handles.clone();
+                let closing: Vec<JobHandle> = handles
+                    .iter()
+                    .filter(|handle| handle.job_id == job_id)
+                    .cloned()
+                    .collect();
+                handles.retain(|handle| handle.job_id != job_id);
+                let mut receipts = current.receipts.clone();
+                let finished_at = chrono::Utc::now();
+                let mut mirrored_receipts = Vec::new();
+                let mut wrote_receipt = false;
+                for handle in closing {
+                    if handle.kind != JobHandleKind::RemoteBuild {
+                        continue;
+                    }
+                    let continuation_expected = handle.expects_mission_continuation();
+                    let Some(identity) = handle.identity.clone() else {
+                        continue;
+                    };
+                    let previous_wake_delivered_at = receipts
+                        .iter()
+                        .find(|receipt| {
+                            receipt.job_id == job_id && receipt.mission_id == handle.mission_id
+                        })
+                        .and_then(|receipt| receipt.wake_delivered_at);
+                    receipts.retain(|receipt| {
+                        receipt.job_id != job_id || receipt.mission_id != handle.mission_id
+                    });
+                    let receipt = RemoteJobReceipt {
+                        mission_id: handle.mission_id,
+                        node_id: handle.node_id,
+                        job_id,
+                        started_at: handle.started_at,
+                        submission_sequence: handle.submission_sequence,
+                        finished_at,
+                        state: state.clone(),
+                        exit_status,
+                        identity,
+                        artifacts: artifacts.clone(),
+                        continuation_expected,
+                        wake_required: handle.wake_on_terminal,
+                        wake_delivered_at: previous_wake_delivered_at,
+                        wake_suppressed_by: None,
+                    };
+                    mirrored_receipts.push(receipt.clone());
+                    receipts.push(receipt);
+                    wrote_receipt = true;
+                }
+                if !wrote_receipt {
+                    match store(&ledger.working_dir, &handles).await {
+                        Ok(()) => {
+                            ledger
+                                .snapshot
+                                .store(Arc::new(JobLedgerSnapshot { handles, receipts }));
+                            let wd = ledger.working_dir.clone();
+                            run_blocking_mirror(move || {
+                                sql::mirror_terminal_without_receipt(&wd, job_id, &state);
+                            })
+                            .await;
+                            let _ = reply.send(Ok(true));
+                        }
+                        Err(err) => {
+                            let _ = reply.send(Err(err));
+                        }
+                    }
+                    continue;
+                }
+
+                if receipts.len() > MAX_RECEIPTS {
+                    receipts.sort_by_key(|receipt| receipt.finished_at);
+                    let mut excess = receipts.len() - MAX_RECEIPTS;
+                    receipts.retain(|receipt| {
+                        let pending_wake =
+                            receipt.wake_required && receipt.wake_delivered_at.is_none();
+                        if excess > 0 && !pending_wake {
+                            excess -= 1;
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                }
+
+                if let Err(err) = store_receipts(&ledger.working_dir, &receipts).await {
+                    let _ = reply.send(Err(err));
+                    continue;
+                }
+                if let Err(err) = store(&ledger.working_dir, &handles).await {
+                    let _ = reply.send(Err(err));
+                    continue;
+                }
+                ledger
+                    .snapshot
+                    .store(Arc::new(JobLedgerSnapshot { handles, receipts }));
+                let wd = ledger.working_dir.clone();
+                run_blocking_mirror(move || {
+                    for receipt in &mirrored_receipts {
+                        sql::mirror_receipt(&wd, receipt);
+                    }
+                })
+                .await;
+                let _ = reply.send(Ok(true));
+            }
+        }
+    }
+}
+
 /// The one unresolved remote build, if any, that is still allowed to own a
 /// mission's `waiting_remote_job` lease. A terminal receipt from a later
 /// validation supersedes an older in-flight handle: the old node job must
@@ -264,9 +961,9 @@ pub async fn current_remote_build_wait_handle(
     working_dir: &Path,
     mission_id: Uuid,
 ) -> anyhow::Result<Option<JobHandle>> {
-    let _guard = lock().lock().await;
-    let handles = load_result(working_dir).await?;
-    let receipts = load_receipts_result(working_dir).await?;
+    let snap = dir_ledger(working_dir).load_snapshot().await?;
+    let handles = &snap.handles;
+    let receipts = &snap.receipts;
 
     let current_handle = handles
         .iter()
@@ -338,14 +1035,7 @@ fn receipts_path(working_dir: &Path) -> PathBuf {
         .join("remote-job-receipts.json")
 }
 
-/// Serializes read-modify-write cycles within this process. Cross-process
-/// concurrency is not a concern: one API instance owns its working dir.
-fn lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
-async fn load_result(working_dir: &Path) -> anyhow::Result<Vec<JobHandle>> {
+async fn read_handles_from_disk(working_dir: &Path) -> anyhow::Result<Vec<JobHandle>> {
     let path = ledger_path(working_dir);
     match tokio::fs::read(&path).await {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -353,6 +1043,24 @@ async fn load_result(working_dir: &Path) -> anyhow::Result<Vec<JobHandle>> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(err) => Err(anyhow::anyhow!("read {}: {err}", path.display())),
     }
+}
+
+async fn read_receipts_from_disk(working_dir: &Path) -> anyhow::Result<Vec<RemoteJobReceipt>> {
+    let path = receipts_path(working_dir);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|err| anyhow::anyhow!("parse {}: {err}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(err) => Err(anyhow::anyhow!("read {}: {err}", path.display())),
+    }
+}
+
+async fn load_result(working_dir: &Path) -> anyhow::Result<Vec<JobHandle>> {
+    Ok(dir_ledger(working_dir)
+        .load_snapshot()
+        .await?
+        .handles
+        .clone())
 }
 
 pub async fn load(working_dir: &Path) -> anyhow::Result<Vec<JobHandle>> {
@@ -362,34 +1070,23 @@ pub async fn load(working_dir: &Path) -> anyhow::Result<Vec<JobHandle>> {
 async fn store(working_dir: &Path, handles: &[JobHandle]) -> anyhow::Result<()> {
     let path = ledger_path(working_dir);
     let bytes = serde_json::to_vec_pretty(handles)?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    tokio::fs::write(&tmp, &bytes).await?;
-    tokio::fs::rename(&tmp, &path).await?;
+    crate::concurrency::write_atomic_async(&path, &bytes, None).await?;
     Ok(())
 }
 
+#[cfg(test)]
 async fn load_receipts_result(working_dir: &Path) -> anyhow::Result<Vec<RemoteJobReceipt>> {
-    let path = receipts_path(working_dir);
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map_err(|err| anyhow::anyhow!("parse {}: {err}", path.display())),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(err) => Err(anyhow::anyhow!("read {}: {err}", path.display())),
-    }
+    Ok(dir_ledger(working_dir)
+        .load_snapshot()
+        .await?
+        .receipts
+        .clone())
 }
 
 async fn store_receipts(working_dir: &Path, receipts: &[RemoteJobReceipt]) -> anyhow::Result<()> {
     let path = receipts_path(working_dir);
     let bytes = serde_json::to_vec_pretty(receipts)?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    tokio::fs::write(&tmp, &bytes).await?;
-    tokio::fs::rename(&tmp, &path).await?;
+    crate::concurrency::write_atomic_async(&path, &bytes, None).await?;
     Ok(())
 }
 
@@ -397,10 +1094,12 @@ pub async fn terminal_receipt(
     working_dir: &Path,
     job_id: Uuid,
 ) -> anyhow::Result<Option<RemoteJobReceipt>> {
-    Ok(load_receipts_result(working_dir)
-        .await?
-        .into_iter()
-        .find(|receipt| receipt.job_id == job_id))
+    let snap = dir_ledger(working_dir).load_snapshot().await?;
+    Ok(snap
+        .receipts
+        .iter()
+        .find(|receipt| receipt.job_id == job_id)
+        .cloned())
 }
 
 /// The terminal receipt a specific (possibly attached) mission holds for a job.
@@ -409,10 +1108,12 @@ pub async fn terminal_receipt_for_mission(
     job_id: Uuid,
     mission_id: Uuid,
 ) -> anyhow::Result<Option<RemoteJobReceipt>> {
-    Ok(load_receipts_result(working_dir)
-        .await?
-        .into_iter()
-        .find(|receipt| receipt.job_id == job_id && receipt.mission_id == mission_id))
+    let snap = dir_ledger(working_dir).load_snapshot().await?;
+    Ok(snap
+        .receipts
+        .iter()
+        .find(|receipt| receipt.job_id == job_id && receipt.mission_id == mission_id)
+        .cloned())
 }
 
 /// Whether `mission_id` holds (or held) a handle or receipt for `job_id`:
@@ -422,16 +1123,16 @@ pub async fn mission_subscribed(
     job_id: Uuid,
     mission_id: Uuid,
 ) -> anyhow::Result<bool> {
-    let _guard = lock().lock().await;
-    if load_result(working_dir)
-        .await?
+    let snap = dir_ledger(working_dir).load_snapshot().await?;
+    if snap
+        .handles
         .iter()
         .any(|handle| handle.job_id == job_id && handle.mission_id == mission_id)
     {
         return Ok(true);
     }
-    Ok(load_receipts_result(working_dir)
-        .await?
+    Ok(snap
+        .receipts
         .iter()
         .any(|receipt| receipt.job_id == job_id && receipt.mission_id == mission_id))
 }
@@ -440,10 +1141,12 @@ pub async fn terminal_receipts_for_mission(
     working_dir: &Path,
     mission_id: Uuid,
 ) -> anyhow::Result<Vec<RemoteJobReceipt>> {
-    Ok(load_receipts_result(working_dir)
-        .await?
-        .into_iter()
+    let snap = dir_ledger(working_dir).load_snapshot().await?;
+    Ok(snap
+        .receipts
+        .iter()
         .filter(|receipt| receipt.mission_id == mission_id)
+        .cloned()
         .collect())
 }
 
@@ -451,15 +1154,13 @@ pub async fn terminal_receipts_for_mission(
 /// completed terminal receipt on `node_id`.
 pub async fn mission_ids_for_node(working_dir: &Path, node_id: &str) -> Vec<Uuid> {
     let mut ids = Vec::new();
-    if let Ok(handles) = load_result(working_dir).await {
-        for h in handles {
+    if let Ok(snap) = dir_ledger(working_dir).load_snapshot().await {
+        for h in &snap.handles {
             if h.node_id == node_id && !ids.contains(&h.mission_id) {
                 ids.push(h.mission_id);
             }
         }
-    }
-    if let Ok(receipts) = load_receipts_result(working_dir).await {
-        for r in receipts {
+        for r in &snap.receipts {
             if r.node_id == node_id && !ids.contains(&r.mission_id) {
                 ids.push(r.mission_id);
             }
@@ -470,18 +1171,18 @@ pub async fn mission_ids_for_node(working_dir: &Path, node_id: &str) -> Vec<Uuid
 
 /// Resolve an immutable validation identity across mission boundaries.
 ///
-/// The ledger and receipt files are inspected under one lock so finalization
-/// cannot move a matching job between them during the lookup. Successful
-/// receipts take precedence over a redundant in-flight job left by an older
-/// client: once exact evidence exists, no third build should be dispatched.
+/// The ledger and receipt snapshots are swapped atomically via [`ArcSwap`] so
+/// finalization cannot move a matching job between them during the lookup.
+/// Successful receipts take precedence over a redundant in-flight job left by
+/// an older client: once exact evidence exists, no third build should be dispatched.
 pub async fn equivalent_remote_validation(
     working_dir: &Path,
     identity: &RemoteJobIdentity,
 ) -> anyhow::Result<Option<EquivalentRemoteValidation>> {
-    let _guard = lock().lock().await;
-    let receipts = load_receipts_result(working_dir).await?;
-    if let Some(receipt) = receipts
-        .into_iter()
+    let snap = dir_ledger(working_dir).load_snapshot().await?;
+    if let Some(receipt) = snap
+        .receipts
+        .iter()
         .filter(|receipt| {
             receipt.identity.reusable_for(identity)
                 && (identity.artifacts.is_empty() || !receipt.artifacts.is_empty())
@@ -490,11 +1191,11 @@ pub async fn equivalent_remote_validation(
         })
         .max_by_key(|receipt| receipt.finished_at)
     {
-        return Ok(Some(EquivalentRemoteValidation::Succeeded(receipt)));
+        return Ok(Some(EquivalentRemoteValidation::Succeeded(receipt.clone())));
     }
-    Ok(load_result(working_dir)
-        .await?
-        .into_iter()
+    Ok(snap
+        .handles
+        .iter()
         .filter(|handle| {
             handle
                 .identity
@@ -506,6 +1207,7 @@ pub async fn equivalent_remote_validation(
                 )
         })
         .min_by_key(|handle| handle.started_at)
+        .cloned()
         .map(EquivalentRemoteValidation::Active))
 }
 
@@ -518,10 +1220,10 @@ pub async fn active_equivalent_remote_validation(
     working_dir: &Path,
     identity: &RemoteJobIdentity,
 ) -> anyhow::Result<Option<JobHandle>> {
-    let _guard = lock().lock().await;
-    Ok(load_result(working_dir)
-        .await?
-        .into_iter()
+    let snap = dir_ledger(working_dir).load_snapshot().await?;
+    Ok(snap
+        .handles
+        .iter()
         .filter(|handle| {
             handle
                 .identity
@@ -532,7 +1234,8 @@ pub async fn active_equivalent_remote_validation(
                     JobHandleKind::RemoteBuild | JobHandleKind::Tentative
                 )
         })
-        .min_by_key(|handle| handle.started_at))
+        .min_by_key(|handle| handle.started_at)
+        .cloned())
 }
 
 /// Terminal remote-build receipts whose mission continuation has not yet
@@ -540,10 +1243,12 @@ pub async fn active_equivalent_remote_validation(
 /// process crash, making receipt finalization and mission wake-up effectively
 /// an outbox operation rather than a best-effort callback.
 pub async fn pending_terminal_wakes(working_dir: &Path) -> anyhow::Result<Vec<RemoteJobReceipt>> {
-    Ok(load_receipts_result(working_dir)
-        .await?
-        .into_iter()
+    let snap = dir_ledger(working_dir).load_snapshot().await?;
+    Ok(snap
+        .receipts
+        .iter()
         .filter(|receipt| receipt.wake_required && receipt.wake_delivered_at.is_none())
+        .cloned()
         .collect())
 }
 
@@ -555,14 +1260,16 @@ pub async fn recoverable_terminal_continuations(
     working_dir: &Path,
     mission_id: Uuid,
 ) -> anyhow::Result<Vec<RemoteJobReceipt>> {
-    Ok(load_receipts_result(working_dir)
-        .await?
-        .into_iter()
+    let snap = dir_ledger(working_dir).load_snapshot().await?;
+    Ok(snap
+        .receipts
+        .iter()
         .filter(|receipt| {
             receipt.mission_id == mission_id
                 && receipt.wake_delivered_at.is_none()
                 && (receipt.wake_required || receipt.continuation_expected)
         })
+        .cloned()
         .collect())
 }
 
@@ -573,24 +1280,13 @@ pub async fn require_terminal_receipt_wake(
     job_id: Uuid,
     mission_id: Uuid,
 ) -> anyhow::Result<bool> {
-    let _guard = lock().lock().await;
-    let mut receipts = load_receipts_result(working_dir).await?;
-    let Some(receipt) = receipts
-        .iter_mut()
-        .find(|receipt| receipt.job_id == job_id && receipt.mission_id == mission_id)
-    else {
-        return Ok(false);
-    };
-    if receipt.wake_delivered_at.is_some()
-        || (!receipt.wake_required && !receipt.continuation_expected)
-    {
-        return Ok(false);
-    }
-    if !receipt.wake_required {
-        receipt.wake_required = true;
-        store_receipts(working_dir, &receipts).await?;
-    }
-    Ok(true)
+    dir_ledger(working_dir)
+        .send_cmd(|reply| LedgerCmd::RequireTerminalReceiptWake {
+            job_id,
+            mission_id,
+            reply,
+        })
+        .await?
 }
 
 /// Decide whether a durable terminal callback still owns the mission wake.
@@ -605,9 +1301,9 @@ pub async fn terminal_wake_disposition(
     working_dir: &Path,
     receipt: &RemoteJobReceipt,
 ) -> anyhow::Result<TerminalWakeDisposition> {
-    let _guard = lock().lock().await;
-    let handles = load_result(working_dir).await?;
-    let receipts = load_receipts_result(working_dir).await?;
+    let snap = dir_ledger(working_dir).load_snapshot().await?;
+    let handles = &snap.handles;
+    let receipts = &snap.receipts;
     let receipt_order = validation_order(receipt.submission_sequence, receipt.started_at);
 
     let newer_handle_id = handles
@@ -671,27 +1367,14 @@ pub async fn mark_terminal_wake_suppressed(
     mission_id: Uuid,
     superseding_job_id: Uuid,
 ) -> anyhow::Result<bool> {
-    let _guard = lock().lock().await;
-    let mut receipts = load_receipts_result(working_dir).await?;
-    let Some(receipt) = receipts
-        .iter_mut()
-        .find(|receipt| receipt.job_id == job_id && receipt.mission_id == mission_id)
-    else {
-        return Ok(false);
-    };
-    if receipt.wake_delivered_at.is_none() {
-        receipt.wake_delivered_at = Some(chrono::Utc::now());
-        receipt.wake_suppressed_by = Some(superseding_job_id);
-        sql::mirror_wake(
-            working_dir,
+    dir_ledger(working_dir)
+        .send_cmd(|reply| LedgerCmd::MarkTerminalWakeSuppressed {
             job_id,
             mission_id,
-            "suppressed",
-            Some(superseding_job_id),
-        );
-        store_receipts(working_dir, &receipts).await?;
-    }
-    Ok(true)
+            superseding_job_id,
+            reply,
+        })
+        .await?
 }
 
 pub async fn mark_terminal_wake_delivered(
@@ -699,20 +1382,13 @@ pub async fn mark_terminal_wake_delivered(
     job_id: Uuid,
     mission_id: Uuid,
 ) -> anyhow::Result<bool> {
-    let _guard = lock().lock().await;
-    let mut receipts = load_receipts_result(working_dir).await?;
-    let Some(receipt) = receipts
-        .iter_mut()
-        .find(|receipt| receipt.job_id == job_id && receipt.mission_id == mission_id)
-    else {
-        return Ok(false);
-    };
-    if receipt.wake_delivered_at.is_none() {
-        receipt.wake_delivered_at = Some(chrono::Utc::now());
-        sql::mirror_wake(working_dir, job_id, mission_id, "delivered", None);
-        store_receipts(working_dir, &receipts).await?;
-    }
-    Ok(true)
+    dir_ledger(working_dir)
+        .send_cmd(|reply| LedgerCmd::MarkTerminalWakeDelivered {
+            job_id,
+            mission_id,
+            reply,
+        })
+        .await?
 }
 
 /// Close an active handle and retain immutable validation evidence. Raw
@@ -734,126 +1410,30 @@ pub async fn finalize_with_artifacts(
     exit_status: Option<i32>,
     artifacts: Vec<ArtifactEntry>,
 ) -> anyhow::Result<bool> {
-    const MAX_RECEIPTS: usize = 2_000;
-
     anyhow::ensure!(
         super::job_state_confirms_termination(state),
         "remote job {job_id} has no confirmed terminal execution: {state}"
     );
-    let _guard = lock().lock().await;
-    let mut handles = load_result(working_dir).await?;
-    if !handles.iter().any(|handle| handle.job_id == job_id) {
-        return Ok(false);
-    }
-    // Every subscribed mission gets its own terminal receipt (and therefore
-    // its own wake); the execution itself happened once.
-    let closing: Vec<JobHandle> = handles
-        .iter()
-        .filter(|handle| handle.job_id == job_id)
-        .cloned()
-        .collect();
-    handles.retain(|handle| handle.job_id != job_id);
-    let mut receipts = load_receipts_result(working_dir).await?;
-    let finished_at = chrono::Utc::now();
-    let mut wrote_receipt = false;
-    for handle in closing {
-        if handle.kind != JobHandleKind::RemoteBuild {
-            continue;
-        }
-        let continuation_expected = handle.expects_mission_continuation();
-        let Some(identity) = handle.identity.clone() else {
-            continue;
-        };
-        let previous_wake_delivered_at = receipts
-            .iter()
-            .find(|receipt| receipt.job_id == job_id && receipt.mission_id == handle.mission_id)
-            .and_then(|receipt| receipt.wake_delivered_at);
-        receipts
-            .retain(|receipt| receipt.job_id != job_id || receipt.mission_id != handle.mission_id);
-        receipts.push(RemoteJobReceipt {
-            mission_id: handle.mission_id,
-            node_id: handle.node_id,
+    let state = state.to_string();
+    dir_ledger(working_dir)
+        .send_cmd(|reply| LedgerCmd::Finalize {
             job_id,
-            started_at: handle.started_at,
-            submission_sequence: handle.submission_sequence,
-            finished_at,
-            state: state.to_string(),
+            state,
             exit_status,
-            identity,
-            artifacts: artifacts.clone(),
-            continuation_expected,
-            wake_required: handle.wake_on_terminal,
-            wake_delivered_at: previous_wake_delivered_at,
-            wake_suppressed_by: None,
-        });
-        if let Some(receipt) = receipts.last() {
-            sql::mirror_receipt(working_dir, receipt);
-        }
-        wrote_receipt = true;
-    }
-    if !wrote_receipt {
-        sql::mirror_terminal_without_receipt(working_dir, job_id, state);
-        store(working_dir, &handles).await?;
-        return Ok(true);
-    }
-    {
-        if receipts.len() > MAX_RECEIPTS {
-            receipts.sort_by_key(|receipt| receipt.finished_at);
-            let mut excess = receipts.len() - MAX_RECEIPTS;
-            receipts.retain(|receipt| {
-                let pending_wake = receipt.wake_required && receipt.wake_delivered_at.is_none();
-                if excess > 0 && !pending_wake {
-                    excess -= 1;
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-        store_receipts(working_dir, &receipts).await?;
-    }
-    store(working_dir, &handles).await?;
-    Ok(true)
+            artifacts,
+            reply,
+        })
+        .await?
 }
 
 /// Record a job handle (idempotent on (job_id, mission_id)).
 pub async fn record(working_dir: &Path, handle: JobHandle) -> anyhow::Result<()> {
-    let _guard = lock().lock().await;
-    let mut handles = load_result(working_dir).await?;
-    let mut handle = handle;
-    let previous_sequence = handles
-        .iter()
-        .find(|existing| existing.job_id == handle.job_id)
-        .map(|existing| existing.submission_sequence)
-        .unwrap_or(0);
-    if handle.submission_sequence == 0 {
-        handle.submission_sequence = if previous_sequence > 0 {
-            previous_sequence
-        } else {
-            let receipt_max = load_receipts_result(working_dir)
-                .await?
-                .into_iter()
-                .map(|receipt| receipt.submission_sequence)
-                .max()
-                .unwrap_or(0);
-            handles
-                .iter()
-                .map(|existing| existing.submission_sequence)
-                .max()
-                .unwrap_or(0)
-                .max(receipt_max)
-                .saturating_add(1)
-        };
-    }
-    // A job may carry one handle per subscribed mission (see [`attach`]);
-    // the submitter's handle and every attached handle share the job id and
-    // are told apart by mission id.
-    handles.retain(|existing| {
-        existing.job_id != handle.job_id || existing.mission_id != handle.mission_id
-    });
-    sql::mirror_handle(working_dir, &handle);
-    handles.push(handle);
-    store(working_dir, &handles).await
+    dir_ledger(working_dir)
+        .send_cmd(|reply| LedgerCmd::Record {
+            handle: Box::new(handle),
+            reply,
+        })
+        .await?
 }
 
 /// Subscribe `mission_id` to an already-live job: a second submission of the
@@ -867,91 +1447,46 @@ pub async fn attach(
     mission_id: Uuid,
     expects_continuation: bool,
 ) -> anyhow::Result<Option<JobHandle>> {
-    let _guard = lock().lock().await;
-    let mut handles = load_result(working_dir).await?;
-    if let Some(existing) = handles
-        .iter()
-        .find(|handle| handle.job_id == job_id && handle.mission_id == mission_id)
-    {
-        return Ok(Some(existing.clone()));
-    }
-    let Some(canonical) = handles
-        .iter()
-        .filter(|handle| {
-            handle.job_id == job_id
-                && matches!(
-                    handle.kind,
-                    JobHandleKind::RemoteBuild | JobHandleKind::Tentative
-                )
+    dir_ledger(working_dir)
+        .send_cmd(|reply| LedgerCmd::Attach {
+            job_id,
+            mission_id,
+            expects_continuation,
+            reply,
         })
-        .min_by_key(|handle| validation_order(handle.submission_sequence, handle.started_at))
-        .cloned()
-    else {
-        return Ok(None);
-    };
-    let attached = JobHandle {
-        mission_id,
-        wait_for_completion: Some(expects_continuation),
-        wake_on_terminal: false,
-        ..canonical
-    };
-    sql::mirror_subscriber(working_dir, job_id, mission_id, expects_continuation);
-    handles.push(attached.clone());
-    store(working_dir, &handles).await?;
-    Ok(Some(attached))
+        .await?
 }
 
 /// Remove a job handle once its mission is finalized.
 pub async fn remove(working_dir: &Path, job_id: Uuid) {
-    let _guard = lock().lock().await;
-    let mut handles = match load_result(working_dir).await {
-        Ok(handles) => handles,
-        Err(err) => {
-            tracing::warn!(?err, "remote job ledger removal deferred");
-            return;
-        }
-    };
-    let before = handles.len();
-    handles.retain(|h| h.job_id != job_id);
-    if handles.len() != before {
-        sql::mirror_remove(working_dir, job_id);
-        if let Err(err) = store(working_dir, &handles).await {
-            tracing::warn!(?err, "remote job ledger removal failed");
-        }
-        if let Some(m) = crate::managed::global() {
-            m.notify_activity_change();
-        }
-    }
+    let _ = dir_ledger(working_dir)
+        .send_cmd(|reply| LedgerCmd::Remove { job_id, reply })
+        .await;
 }
 
 /// Advance the durable heartbeat after a successful node status observation.
 pub async fn heartbeat(working_dir: &Path, job_id: Uuid) -> anyhow::Result<bool> {
-    let _guard = lock().lock().await;
-    let mut handles = load_result(working_dir).await?;
+    let ledger = dir_ledger(working_dir);
+    let snap = ledger.load_snapshot().await?;
     let now = chrono::Utc::now();
-    let mut touched = false;
     let mut found = false;
-    for handle in handles.iter_mut().filter(|handle| handle.job_id == job_id) {
+    let mut needs_update = false;
+    for handle in snap.handles.iter().filter(|h| h.job_id == job_id) {
         found = true;
-        if handle
+        if !handle
             .heartbeat_at
             .is_some_and(|previous| now - previous < chrono::Duration::seconds(15))
         {
-            continue;
+            needs_update = true;
+            break;
         }
-        handle.heartbeat_at = Some(now);
-        touched = true;
     }
-    if !found {
-        return Ok(false);
+    if found && !needs_update {
+        return Ok(true);
     }
-    if touched {
-        if let Some(handle) = handles.iter().find(|handle| handle.job_id == job_id) {
-            sql::mirror_handle(working_dir, handle);
-        }
-        store(working_dir, &handles).await?;
-    }
-    Ok(true)
+    ledger
+        .send_cmd(|reply| LedgerCmd::Heartbeat { job_id, reply })
+        .await?
 }
 
 pub async fn require_terminal_wake(
@@ -959,19 +1494,13 @@ pub async fn require_terminal_wake(
     job_id: Uuid,
     mission_id: Uuid,
 ) -> anyhow::Result<bool> {
-    let _guard = lock().lock().await;
-    let mut handles = load_result(working_dir).await?;
-    let Some(handle) = handles
-        .iter_mut()
-        .find(|handle| handle.job_id == job_id && handle.mission_id == mission_id)
-    else {
-        return Ok(false);
-    };
-    if !handle.wake_on_terminal {
-        handle.wake_on_terminal = true;
-        store(working_dir, &handles).await?;
-    }
-    Ok(true)
+    dir_ledger(working_dir)
+        .send_cmd(|reply| LedgerCmd::RequireTerminalWake {
+            job_id,
+            mission_id,
+            reply,
+        })
+        .await?
 }
 
 /// SQL mirror of the JSON ledger (`projects.db`: `remote_jobs`,
@@ -1438,10 +1967,11 @@ pub mod sql {
 /// Boot-time parity pass: mirror anything the JSON ledger has that SQL lacks
 /// and report drift. Never deletes.
 pub async fn sql_parity_backfill(working_dir: &Path) -> anyhow::Result<sql::ParityReport> {
-    let _guard = lock().lock().await;
-    let handles = load_result(working_dir).await?;
-    let receipts = load_receipts_result(working_dir).await?;
-    Ok(sql::parity_backfill(working_dir, &handles, &receipts))
+    let snap = dir_ledger(working_dir).load_snapshot().await?;
+    let wd = working_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || sql::parity_backfill(&wd, &snap.handles, &snap.receipts))
+        .await
+        .map_err(|err| anyhow::anyhow!("sql_parity_backfill task failed: {err}"))
 }
 
 #[cfg(test)]

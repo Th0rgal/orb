@@ -742,7 +742,7 @@ pub(crate) fn sustained_recovery_progress(
 /// First auto-resume delay after a proxy mid-stream stall.
 const STREAM_STALL_RESUME_SECS: i64 = 10;
 
-fn is_transient_wait(limit: &str) -> bool {
+pub(crate) fn is_transient_wait(limit: &str) -> bool {
     limit == "Inference connection interrupted"
         || limit == STARTUP_STALL_WAIT
         || limit == STORAGE_EXHAUSTED_WAIT

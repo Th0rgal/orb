@@ -714,18 +714,34 @@ pub fn select_node_auto_with_estimated_disk_and_source(
         });
     }
     eligible.sort_by(|a, b| {
-        a.queued
-            .cmp(&b.queued)
-            .then(a.specialized.cmp(&b.specialized))
-            // Compare load/capacity without floating point.
-            .then(
-                (u64::from(a.load) * u64::from(b.capacity))
-                    .cmp(&(u64::from(b.load) * u64::from(a.capacity))),
-            )
-            .then(a.soft_disk_pressure.cmp(&b.soft_disk_pressure))
-            .then(b.mem_available_bytes.cmp(&a.mem_available_bytes))
-            .then(b.disk_headroom_gib.cmp(&a.disk_headroom_gib))
-            .then(a.id.cmp(&b.id))
+        let ca = crate::orb_spec::FleetPlaceCandidate {
+            queued: a.queued,
+            specialized: a.specialized,
+            soft_disk_pressure: a.soft_disk_pressure,
+            load: a.load,
+            cap: a.capacity,
+            disk_headroom_gib: a.disk_headroom_gib,
+            mem_available_bytes: a.mem_available_bytes,
+        };
+        let cb = crate::orb_spec::FleetPlaceCandidate {
+            queued: b.queued,
+            specialized: b.specialized,
+            soft_disk_pressure: b.soft_disk_pressure,
+            load: b.load,
+            cap: b.capacity,
+            disk_headroom_gib: b.disk_headroom_gib,
+            mem_available_bytes: b.mem_available_bytes,
+        };
+        if crate::orb_spec::fleet_place_argmin_step(ca, cb, a.id < b.id) {
+            std::cmp::Ordering::Less
+        } else if crate::orb_spec::fleet_place_argmin_step(cb, ca, b.id < a.id) {
+            std::cmp::Ordering::Greater
+        } else {
+            a.disk_headroom_gib
+                .cmp(&b.disk_headroom_gib)
+                .reverse()
+                .then_with(|| a.id.cmp(&b.id))
+        }
     });
     eligible
         .into_iter()

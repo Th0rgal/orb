@@ -4785,6 +4785,181 @@
         "method": "orbPlacementMergeStep",
         "ret": "jlong"
       }
+    },
+    {
+      "name": "orb_proxy_sse_scan_step",
+      "ret": "uint32_t",
+      "params": [
+        { "name": "lineKind", "type": "uint8_t" },
+        { "name": "hasDoneToken", "type": "uint8_t" },
+        { "name": "inThinkTag", "type": "uint8_t" },
+        { "name": "nextStartsThink", "type": "uint8_t" },
+        { "name": "nextEndsThink", "type": "uint8_t" },
+        { "name": "hasNonEmptyContent", "type": "uint8_t" }
+      ],
+      "jni": {
+        "method": "orbProxySseScanStep",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_stream_repetition_step",
+      "ret": "uint64_t",
+      "params": [
+        { "name": "cancelledOrExpired", "type": "uint8_t" },
+        { "name": "collisionDetected", "type": "uint8_t" },
+        { "name": "startPos", "type": "uint32_t" },
+        { "name": "prevEnd", "type": "uint32_t" },
+        { "name": "candidateLen", "type": "uint32_t" },
+        { "name": "prevCount", "type": "uint32_t" },
+        { "name": "requiredRepeats", "type": "uint32_t" },
+        { "name": "comparisons", "type": "uint64_t" },
+        { "name": "comparisonBudget", "type": "uint64_t" }
+      ],
+      "jni": {
+        "method": "orbStreamRepetitionStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_http_rate_limit_classify_step",
+      "ret": "uint64_t",
+      "params": [
+        { "name": "httpStatus", "type": "uint32_t" },
+        { "name": "hasQuotaBodyHint", "type": "uint8_t" },
+        { "name": "hasAuthFailureHint", "type": "uint8_t" },
+        { "name": "retryAfterSecs", "type": "uint64_t" },
+        { "name": "maxCooldownSecs", "type": "uint64_t" }
+      ],
+      "jni": {
+        "method": "orbHttpRateLimitClassifyStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_fleet_place_argmin_step",
+      "ret": "uint8_t",
+      "params": [
+        { "name": "aQueued", "type": "uint8_t" },
+        { "name": "aSpec", "type": "uint8_t" },
+        { "name": "aSoftDisk", "type": "uint8_t" },
+        { "name": "bQueued", "type": "uint8_t" },
+        { "name": "bSpec", "type": "uint8_t" },
+        { "name": "bSoftDisk", "type": "uint8_t" },
+        { "name": "idLexLt", "type": "uint8_t" },
+        { "name": "aLoad", "type": "uint32_t" },
+        { "name": "aCap", "type": "uint32_t" },
+        { "name": "aDiskGib", "type": "uint32_t" },
+        { "name": "bLoad", "type": "uint32_t" },
+        { "name": "bCap", "type": "uint32_t" },
+        { "name": "bDiskGib", "type": "uint32_t" },
+        { "name": "aMemAvail", "type": "uint64_t" },
+        { "name": "bMemAvail", "type": "uint64_t" }
+      ],
+      "jni": {
+        "method": "orbFleetPlaceArgminStep",
+        "ret": "jbyte"
+      }
+    },
+    {
+      "name": "orb_pool_pacer_step",
+      "ret": "uint64_t",
+      "params": [
+        { "name": "mode", "type": "uint8_t" },
+        { "name": "prevDebtTokenMs", "type": "uint64_t" },
+        { "name": "elapsedMs", "type": "uint64_t" },
+        { "name": "rateTokensPerMin", "type": "uint64_t" },
+        { "name": "addedTokens", "type": "uint64_t" },
+        { "name": "maxDelayMs", "type": "uint64_t" }
+      ],
+      "jni": {
+        "method": "orbPoolPacerStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_confinement_scan_step",
+      "ret": "uint32_t",
+      "params": [
+        { "name": "hasNullByte", "type": "uint8_t" },
+        { "name": "hasDotDotSegment", "type": "uint8_t" },
+        { "name": "escapesRoot", "type": "uint8_t" },
+        { "name": "hasUnsafeEnvKey", "type": "uint8_t" },
+        { "name": "touchesSensitivePath", "type": "uint8_t" },
+        { "name": "isSymlinkEscape", "type": "uint8_t" },
+        { "name": "pathLen", "type": "uint32_t" },
+        { "name": "maxPathLen", "type": "uint32_t" }
+      ],
+      "jni": {
+        "method": "orbConfinementScanStep",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_job_identity_eq256_step",
+      "ret": "uint32_t",
+      "params": [
+        { "name": "a0", "type": "uint64_t" },
+        { "name": "a1", "type": "uint64_t" },
+        { "name": "a2", "type": "uint64_t" },
+        { "name": "a3", "type": "uint64_t" },
+        { "name": "b0", "type": "uint64_t" },
+        { "name": "b1", "type": "uint64_t" },
+        { "name": "b2", "type": "uint64_t" },
+        { "name": "b3", "type": "uint64_t" },
+        { "name": "hasActiveMatch", "type": "uint8_t" },
+        { "name": "hasTerminalReceipt", "type": "uint8_t" }
+      ],
+      "jni": {
+        "method": "orbJobIdentityEq256Step",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_validation_dag_step",
+      "ret": "uint32_t",
+      "params": [
+        { "name": "totalDeps", "type": "uint32_t" },
+        { "name": "passedDeps", "type": "uint32_t" },
+        { "name": "failedDeps", "type": "uint32_t" },
+        { "name": "alreadyClaimed", "type": "uint8_t" },
+        { "name": "alreadyPassed", "type": "uint8_t" },
+        { "name": "candidateExactMatch", "type": "uint8_t" }
+      ],
+      "jni": {
+        "method": "orbValidationDagStep",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_fts5_lexer_step",
+      "ret": "uint64_t",
+      "params": [
+        { "name": "state", "type": "uint32_t" },
+        { "name": "charClass", "type": "uint32_t" },
+        { "name": "tokenLen", "type": "uint32_t" },
+        { "name": "maxTokens", "type": "uint32_t" },
+        { "name": "emittedTokens", "type": "uint32_t" }
+      ],
+      "jni": {
+        "method": "orbFts5LexerStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_utf8_utf16_window_step",
+      "ret": "uint64_t",
+      "params": [
+        { "name": "byteIdx", "type": "uint32_t" },
+        { "name": "byteLen", "type": "uint32_t" },
+        { "name": "leadByte", "type": "uint32_t" },
+        { "name": "utf16Units", "type": "uint32_t" },
+        { "name": "maxUtf16Units", "type": "uint32_t" }
+      ],
+      "jni": {
+        "method": "orbUtf8Utf16WindowStep",
+        "ret": "jlong"
+      }
     }
   ]
 }

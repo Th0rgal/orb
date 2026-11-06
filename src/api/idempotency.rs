@@ -243,16 +243,29 @@ struct LeaderGuard {
 }
 
 impl LeaderGuard {
-    fn complete(mut self, stored: Option<StoredResponse>) {
+    async fn complete(mut self, stored: Option<StoredResponse>) {
         self.completed = true;
-        self.store.finish_leader(&self.scope_key, stored);
+        let store = self.store.clone();
+        let scope_key = self.scope_key.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            store.finish_leader(&scope_key, stored);
+        })
+        .await;
     }
 }
 
 impl Drop for LeaderGuard {
     fn drop(&mut self) {
         if !self.completed {
-            self.store.finish_leader(&self.scope_key, None);
+            let store = self.store.clone();
+            let scope_key = self.scope_key.clone();
+            if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::task::spawn_blocking(move || {
+                    store.finish_leader(&scope_key, None);
+                });
+            } else {
+                store.finish_leader(&scope_key, None);
+            }
         }
     }
 }
@@ -365,7 +378,24 @@ pub async fn handle_idempotency_key(
     let store = store_for_state(&state);
 
     let guard = loop {
-        match store.try_claim(&scope_key, &request_sha256) {
+        let store_claim = store.clone();
+        let scope_claim = scope_key.clone();
+        let sha_claim = request_sha256.clone();
+        let outcome = match tokio::task::spawn_blocking(move || {
+            store_claim.try_claim(&scope_claim, &sha_claim)
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Idempotency claim task failed",
+                )
+                    .into_response();
+            }
+        };
+        match outcome {
             ClaimOutcome::Leader => {
                 break LeaderGuard {
                     store: store.clone(),
@@ -401,7 +431,7 @@ pub async fn handle_idempotency_key(
         .is_some_and(|ct| ct.to_ascii_lowercase().contains("text/event-stream"));
 
     if !status.is_success() || status == StatusCode::SWITCHING_PROTOCOLS || is_event_stream {
-        guard.complete(None);
+        guard.complete(None).await;
         return resp;
     }
 
@@ -414,12 +444,12 @@ pub async fn handle_idempotency_key(
                 content_type,
                 body: resp_bytes.to_vec(),
             };
-            guard.complete(Some(stored));
+            guard.complete(Some(stored)).await;
             Response::from_parts(resp_parts, Body::from(resp_bytes))
         }
         Err(_) => {
             // Response larger than 512 KiB — release claim without caching.
-            guard.complete(None);
+            guard.complete(None).await;
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Idempotent response exceeded 512 KiB buffer cap",

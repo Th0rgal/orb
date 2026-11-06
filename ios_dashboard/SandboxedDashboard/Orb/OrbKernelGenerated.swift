@@ -389,6 +389,36 @@ internal func orb_wire_transcript_slice_step(_ inPtr: UInt64, _ inLen: UInt64, _
 @_silgen_name("orb_placement_merge_step")
 internal func orb_placement_merge_step(_ curRev: UInt64, _ incRev: UInt64, _ pendingOpId: UInt32, _ ackOpId: UInt32, _ sourceKind: UInt8, _ hasPlacement: UInt8) -> UInt64
 
+@_silgen_name("orb_proxy_sse_scan_step")
+internal func orb_proxy_sse_scan_step(_ lineKind: UInt8, _ hasDoneToken: UInt8, _ inThinkTag: UInt8, _ nextStartsThink: UInt8, _ nextEndsThink: UInt8, _ hasNonEmptyContent: UInt8) -> UInt32
+
+@_silgen_name("orb_stream_repetition_step")
+internal func orb_stream_repetition_step(_ cancelledOrExpired: UInt8, _ collisionDetected: UInt8, _ startPos: UInt32, _ prevEnd: UInt32, _ candidateLen: UInt32, _ prevCount: UInt32, _ requiredRepeats: UInt32, _ comparisons: UInt64, _ comparisonBudget: UInt64) -> UInt64
+
+@_silgen_name("orb_http_rate_limit_classify_step")
+internal func orb_http_rate_limit_classify_step(_ httpStatus: UInt32, _ hasQuotaBodyHint: UInt8, _ hasAuthFailureHint: UInt8, _ retryAfterSecs: UInt64, _ maxCooldownSecs: UInt64) -> UInt64
+
+@_silgen_name("orb_fleet_place_argmin_step")
+internal func orb_fleet_place_argmin_step(_ aQueued: UInt8, _ aSpec: UInt8, _ aSoftDisk: UInt8, _ bQueued: UInt8, _ bSpec: UInt8, _ bSoftDisk: UInt8, _ idLexLt: UInt8, _ aLoad: UInt32, _ aCap: UInt32, _ aDiskGib: UInt32, _ bLoad: UInt32, _ bCap: UInt32, _ bDiskGib: UInt32, _ aMemAvail: UInt64, _ bMemAvail: UInt64) -> UInt8
+
+@_silgen_name("orb_pool_pacer_step")
+internal func orb_pool_pacer_step(_ mode: UInt8, _ prevDebtTokenMs: UInt64, _ elapsedMs: UInt64, _ rateTokensPerMin: UInt64, _ addedTokens: UInt64, _ maxDelayMs: UInt64) -> UInt64
+
+@_silgen_name("orb_confinement_scan_step")
+internal func orb_confinement_scan_step(_ hasNullByte: UInt8, _ hasDotDotSegment: UInt8, _ escapesRoot: UInt8, _ hasUnsafeEnvKey: UInt8, _ touchesSensitivePath: UInt8, _ isSymlinkEscape: UInt8, _ pathLen: UInt32, _ maxPathLen: UInt32) -> UInt32
+
+@_silgen_name("orb_job_identity_eq256_step")
+internal func orb_job_identity_eq256_step(_ a0: UInt64, _ a1: UInt64, _ a2: UInt64, _ a3: UInt64, _ b0: UInt64, _ b1: UInt64, _ b2: UInt64, _ b3: UInt64, _ hasActiveMatch: UInt8, _ hasTerminalReceipt: UInt8) -> UInt32
+
+@_silgen_name("orb_validation_dag_step")
+internal func orb_validation_dag_step(_ totalDeps: UInt32, _ passedDeps: UInt32, _ failedDeps: UInt32, _ alreadyClaimed: UInt8, _ alreadyPassed: UInt8, _ candidateExactMatch: UInt8) -> UInt32
+
+@_silgen_name("orb_fts5_lexer_step")
+internal func orb_fts5_lexer_step(_ state: UInt32, _ charClass: UInt32, _ tokenLen: UInt32, _ maxTokens: UInt32, _ emittedTokens: UInt32) -> UInt64
+
+@_silgen_name("orb_utf8_utf16_window_step")
+internal func orb_utf8_utf16_window_step(_ byteIdx: UInt32, _ byteLen: UInt32, _ leadByte: UInt32, _ utf16Units: UInt32, _ maxUtf16Units: UInt32) -> UInt64
+
 enum OrbKernel {
     struct WorkfoldVerdict: Equatable, Sendable {
         let foldItem: Bool

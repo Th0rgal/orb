@@ -6,11 +6,12 @@
 //! Used by the OpenAI-compatible proxy to route requests through fallback
 //! chains, and by credential rotation in backend runners.
 
+use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -693,7 +694,7 @@ const MAX_FALLBACK_EVENTS: usize = 200;
 /// and for non-store accounts identified by synthetic UUIDs.
 #[derive(Debug, Clone)]
 pub struct ProviderHealthTracker {
-    accounts: Arc<RwLock<HashMap<Uuid, AccountHealth>>>,
+    accounts: Arc<DashMap<Uuid, AccountHealth>>,
     backoff_config: BackoffConfig,
     /// Recent fallback events (ring buffer, newest last).
     fallback_events: Arc<RwLock<Vec<FallbackEvent>>>,
@@ -701,7 +702,7 @@ pub struct ProviderHealthTracker {
     /// subscription reached through multiple credential records). When one
     /// account backing the subscription hits 429, every other chain entry
     /// sharing the same subscription is skipped until the cooldown expires.
-    subscription_cooldowns: Arc<RwLock<HashMap<SubscriptionKey, SubscriptionCooldown>>>,
+    subscription_cooldowns: Arc<DashMap<SubscriptionKey, SubscriptionCooldown>>,
     /// Usage-limit cooldowns, which outlive the process and are shared with
     /// the harness rotation paths. An account parked there is unhealthy here
     /// even when this tracker never saw it fail.
@@ -779,10 +780,10 @@ impl ProviderHealthTracker {
 
     pub fn with_backoff(backoff_config: BackoffConfig) -> Self {
         Self {
-            accounts: Arc::new(RwLock::new(HashMap::new())),
+            accounts: Arc::new(DashMap::new()),
             backoff_config,
             fallback_events: Arc::new(RwLock::new(Vec::new())),
-            subscription_cooldowns: Arc::new(RwLock::new(HashMap::new())),
+            subscription_cooldowns: Arc::new(DashMap::new()),
             // Tests get a registry of their own: the shared one would leak
             // cooldowns between trackers that reuse a subscription key.
             limits: if cfg!(test) {
@@ -836,8 +837,7 @@ impl ProviderHealthTracker {
         if self.account_limit_is_active(account_id) {
             return false;
         }
-        let accounts = self.accounts.read().await;
-        accounts
+        self.accounts
             .get(&account_id)
             .map(|h| !h.is_in_cooldown())
             .unwrap_or(true) // Unknown accounts are healthy by default
@@ -849,19 +849,17 @@ impl ProviderHealthTracker {
         &self,
         account_ids: &[Uuid],
     ) -> Option<std::time::Duration> {
-        let accounts = self.accounts.read().await;
         account_ids
             .iter()
-            .filter_map(|id| accounts.get(id).and_then(|h| h.remaining_cooldown()))
+            .filter_map(|id| self.accounts.get(id).and_then(|h| h.remaining_cooldown()))
             .min()
     }
 
     /// Return true when at least one currently configured candidate account is
     /// in an active cooldown.
     pub async fn any_account_has_active_cooldown(&self, account_ids: &[Uuid]) -> bool {
-        let accounts = self.accounts.read().await;
         account_ids.iter().any(|id| {
-            accounts.get(id).is_some_and(AccountHealth::is_in_cooldown)
+            self.accounts.get(id).is_some_and(|h| h.is_in_cooldown())
                 || self.account_limit_is_active(*id)
         })
     }
@@ -908,10 +906,9 @@ impl ProviderHealthTracker {
     /// may since have been deleted) must still classify the empty chain as
     /// retryable rather than as a configuration error.
     pub async fn any_subscription_cooldown_active(&self, keys: &[SubscriptionKey]) -> bool {
-        let cooldowns = self.subscription_cooldowns.read().await;
         let now = std::time::Instant::now();
         keys.iter().any(|key| {
-            cooldowns
+            self.subscription_cooldowns
                 .get(key)
                 .and_then(|entry| entry.cooldown_until)
                 .is_some_and(|until| now < until)
@@ -929,8 +926,7 @@ impl ProviderHealthTracker {
         if self.subscription_limit_is_active(key) {
             return false;
         }
-        let cooldowns = self.subscription_cooldowns.read().await;
-        match cooldowns.get(key) {
+        match self.subscription_cooldowns.get(key) {
             Some(entry) => entry
                 .cooldown_until
                 .map(|until| std::time::Instant::now() >= until)
@@ -941,8 +937,14 @@ impl ProviderHealthTracker {
 
     /// Set the provider identifier for an account (no-op if already set).
     pub async fn set_provider_id(&self, account_id: Uuid, provider_id: &str) {
-        let mut accounts = self.accounts.write().await;
-        let health = accounts.entry(account_id).or_default();
+        if self
+            .accounts
+            .get(&account_id)
+            .is_some_and(|h| h.provider_id.is_some())
+        {
+            return;
+        }
+        let mut health = self.accounts.entry(account_id).or_default();
         if health.provider_id.is_none() {
             health.provider_id = Some(provider_id.to_string());
         }
@@ -950,9 +952,13 @@ impl ProviderHealthTracker {
 
     /// Remove all account-scoped health state after its provider account is deleted.
     pub async fn remove_account(&self, account_id: Uuid) {
-        self.accounts.write().await.remove(&account_id);
-        self.limits
-            .clear(&crate::account_limits::account_key(account_id));
+        self.accounts.remove(&account_id);
+        if self
+            .limits
+            .clear(&crate::account_limits::account_key(account_id))
+        {
+            self.limits.flush().await;
+        }
         self.quota
             .forget(&crate::account_limits::account_key(account_id));
     }
@@ -977,41 +983,40 @@ impl ProviderHealthTracker {
         account_id: Uuid,
         subscription: Option<&SubscriptionKey>,
     ) {
-        let mut accounts = self.accounts.write().await;
-        let health = accounts.entry(account_id).or_default();
-        let was_recovering = health.consecutive_failures > 0 || health.cooldown_until.is_some();
-        if was_recovering {
-            // Reset the visible window so a single 429 burst from hours ago
-            // stops being surfaced as "1 req, 0% success" long after the
-            // account recovered.
-            health.total_requests = 0;
-            health.total_successes = 0;
-            health.total_rate_limits = 0;
-            health.total_errors = 0;
-            health.last_failure_reason = None;
-            health.last_failure_at = None;
+        {
+            let mut health = self.accounts.entry(account_id).or_default();
+            let was_recovering = health.consecutive_failures > 0 || health.cooldown_until.is_some();
+            if was_recovering {
+                // Reset the visible window so a single 429 burst from hours ago
+                // stops being surfaced as "1 req, 0% success" long after the
+                // account recovered.
+                health.total_requests = 0;
+                health.total_successes = 0;
+                health.total_rate_limits = 0;
+                health.total_errors = 0;
+                health.last_failure_reason = None;
+                health.last_failure_at = None;
+            }
+            health.total_requests += 1;
+            health.total_successes += 1;
+            health.consecutive_failures = 0;
+            health.transient_failures.clear();
+            health.cooldown_until = None;
         }
-        health.total_requests += 1;
-        health.total_successes += 1;
-        health.consecutive_failures = 0;
-        health.transient_failures.clear();
-        health.cooldown_until = None;
-        drop(accounts);
         // A served request proves the allowance is back, whatever reset time
         // was announced.
         self.limits
             .clear(&crate::account_limits::account_key(account_id));
 
         if let Some(key) = subscription {
-            let mut subs = self.subscription_cooldowns.write().await;
-            if let Some(entry) = subs.get_mut(key) {
+            if let Some(mut entry) = self.subscription_cooldowns.get_mut(key) {
                 entry.cooldown_until = None;
                 entry.consecutive_failures = 0;
             }
-            drop(subs);
             self.limits
                 .clear(&crate::account_limits::subscription_key(&key.0));
         }
+        self.limits.flush().await;
     }
 
     /// Record a failure and place the account into cooldown.
@@ -1042,75 +1047,164 @@ impl ProviderHealthTracker {
         reason: CooldownReason,
         retry_after: Option<std::time::Duration>,
     ) -> std::time::Duration {
-        let mut accounts = self.accounts.write().await;
-        let health = accounts.entry(account_id).or_default();
+        let mut transient_early: Option<Option<(std::time::Duration, String)>> = None;
+        let mut computed = None;
 
-        health.total_requests += 1;
-        match &reason {
-            CooldownReason::RateLimit
-            | CooldownReason::QuotaExhausted
-            | CooldownReason::Overloaded => health.total_rate_limits += 1,
-            _ => health.total_errors += 1,
+        {
+            let mut health = self.accounts.entry(account_id).or_default();
+
+            health.total_requests += 1;
+            match &reason {
+                CooldownReason::RateLimit
+                | CooldownReason::QuotaExhausted
+                | CooldownReason::Overloaded => health.total_rate_limits += 1,
+                _ => health.total_errors += 1,
+            }
+
+            health.consecutive_failures = health.consecutive_failures.saturating_add(1);
+            health.last_failure_reason = Some(reason);
+            health.last_failure_at = Some(chrono::Utc::now());
+
+            // Transient failures only cool the account down after several in a
+            // short window, for at most a minute, and never spill over to the
+            // shared subscription: a single 5xx or dropped stream used to park
+            // the only account of a single-entry chain and answer every
+            // following request with "all providers in cooldown".
+            if reason.is_transient() && retry_after.is_none() {
+                let now = std::time::Instant::now();
+                health.transient_failures.push_back(now);
+                // Bounded: only the streak length within the window matters.
+                while health.transient_failures.len() > MAX_TRANSIENT_SAMPLES {
+                    health.transient_failures.pop_front();
+                }
+                while health
+                    .transient_failures
+                    .front()
+                    .is_some_and(|at| now.duration_since(*at) > TRANSIENT_WINDOW)
+                {
+                    health.transient_failures.pop_front();
+                }
+                let streak = health.transient_failures.len();
+                let threshold = transient_failure_threshold();
+                let verdict = crate::orb_spec::breaker_step(
+                    crate::orb_spec::BreakerReason::Transient502Timeout,
+                    streak as u32,
+                    threshold as u32,
+                );
+                if !verdict.apply_cooldown {
+                    tracing::info!(
+                        account_id = %account_id,
+                        reason = %reason,
+                        streak,
+                        threshold,
+                        "Transient upstream failure recorded; no cooldown yet"
+                    );
+                    transient_early = Some(None);
+                } else {
+                    let mut cooldown = transient_cooldown(
+                        self.backoff_config.base_delay,
+                        self.backoff_config.multiplier,
+                        streak - threshold,
+                    );
+                    if matches!(reason, CooldownReason::Timeout) {
+                        cooldown = cooldown.min(timeout_cooldown_max());
+                    }
+                    health.cooldown_until = Some(now + cooldown);
+                    let provider_id = health.provider_id.clone().unwrap_or_default();
+                    tracing::warn!(
+                        account_id = %account_id,
+                        reason = %reason,
+                        streak,
+                        cooldown_secs = cooldown.as_secs_f64(),
+                        "Repeated transient upstream failures; short account cooldown"
+                    );
+                    transient_early = Some(Some((cooldown, provider_id)));
+                }
+            } else {
+                let breaker_verdict = crate::orb_spec::breaker_step(
+                    match reason {
+                        CooldownReason::QuotaExhausted => {
+                            crate::orb_spec::BreakerReason::QuotaExhausted
+                        }
+                        CooldownReason::PaymentRequired => {
+                            crate::orb_spec::BreakerReason::PaymentRequired402
+                        }
+                        CooldownReason::AuthError => crate::orb_spec::BreakerReason::Auth401Or403,
+                        _ => crate::orb_spec::BreakerReason::RateLimit429,
+                    },
+                    0,
+                    1,
+                );
+                let account_streak = if reason.is_account_error() {
+                    health.consecutive_failures
+                } else {
+                    0
+                };
+                health.last_failure_reason = Some(reason);
+                health.last_failure_at = Some(chrono::Utc::now());
+
+                // Use retry_after from headers if available, else exponential backoff.
+                // Auth errors (401/403) are almost always permanent (bad API key,
+                // revoked credentials), so use a long fixed cooldown instead of
+                // short exponential backoff that implies eventual recovery.
+                // QuotaExhausted (a subscription's hard usage limit) won't recover for
+                // hours/days, so park it for a long fixed window so the chain stops
+                // re-trying an exhausted subscription as a primary entry; honor a
+                // longer upstream retry_after when one is supplied.
+                let cooldown = match reason {
+                    CooldownReason::QuotaExhausted => {
+                        let base = std::time::Duration::from_secs(quota_cooldown_secs());
+                        retry_after.map(|r| r.max(base)).unwrap_or(base)
+                    }
+                    // Account errors (402 / out of credit / 401 / 403): exponential
+                    // circuit breaker, 10 min doubling to 6 h. Expiry is the probe.
+                    CooldownReason::AuthError | CooldownReason::PaymentRequired => {
+                        let breaker = account_error_cooldown(account_streak.max(1));
+                        retry_after.map(|r| r.max(breaker)).unwrap_or(breaker)
+                    }
+                    _ => retry_after.unwrap_or_else(|| {
+                        self.backoff_config
+                            .cooldown_for(health.consecutive_failures.saturating_sub(1))
+                    }),
+                };
+
+                health.cooldown_until = Some(std::time::Instant::now() + cooldown);
+                let provider_id = health.provider_id.clone().unwrap_or_default();
+
+                let is_degraded =
+                    health.consecutive_failures >= self.backoff_config.circuit_breaker_threshold;
+                if reason.is_account_error() {
+                    tracing::warn!(
+                        account_id = %account_id,
+                        provider = %provider_id,
+                        reason = %reason,
+                        consecutive_failures = health.consecutive_failures,
+                        cooldown_secs = cooldown.as_secs_f64(),
+                        "Account circuit breaker open — skipping account until the probe window"
+                    );
+                } else if is_degraded {
+                    tracing::warn!(
+                        account_id = %account_id,
+                        consecutive_failures = health.consecutive_failures,
+                        cooldown_secs = cooldown.as_secs_f64(),
+                        "Circuit breaker tripped — account degraded with extended cooldown"
+                    );
+                } else {
+                    tracing::info!(
+                        account_id = %account_id,
+                        consecutive_failures = health.consecutive_failures,
+                        cooldown_secs = cooldown.as_secs_f64(),
+                        "Account placed in cooldown"
+                    );
+                }
+                computed = Some((cooldown, provider_id, breaker_verdict));
+            }
         }
 
-        health.consecutive_failures = health.consecutive_failures.saturating_add(1);
-        health.last_failure_reason = Some(reason);
-        health.last_failure_at = Some(chrono::Utc::now());
-
-        // Transient failures only cool the account down after several in a
-        // short window, for at most a minute, and never spill over to the
-        // shared subscription: a single 5xx or dropped stream used to park
-        // the only account of a single-entry chain and answer every
-        // following request with "all providers in cooldown".
-        if reason.is_transient() && retry_after.is_none() {
-            let now = std::time::Instant::now();
-            health.transient_failures.push_back(now);
-            // Bounded: only the streak length within the window matters.
-            while health.transient_failures.len() > MAX_TRANSIENT_SAMPLES {
-                health.transient_failures.pop_front();
-            }
-            while health
-                .transient_failures
-                .front()
-                .is_some_and(|at| now.duration_since(*at) > TRANSIENT_WINDOW)
-            {
-                health.transient_failures.pop_front();
-            }
-            let streak = health.transient_failures.len();
-            let threshold = transient_failure_threshold();
-            let verdict = crate::orb_spec::breaker_step(
-                crate::orb_spec::BreakerReason::Transient502Timeout,
-                streak as u32,
-                threshold as u32,
-            );
-            if !verdict.apply_cooldown {
-                tracing::info!(
-                    account_id = %account_id,
-                    reason = %reason,
-                    streak,
-                    threshold,
-                    "Transient upstream failure recorded; no cooldown yet"
-                );
+        if let Some(early) = transient_early {
+            let Some((cooldown, provider_id)) = early else {
                 return std::time::Duration::ZERO;
-            }
-            let mut cooldown = transient_cooldown(
-                self.backoff_config.base_delay,
-                self.backoff_config.multiplier,
-                streak - threshold,
-            );
-            if matches!(reason, CooldownReason::Timeout) {
-                cooldown = cooldown.min(timeout_cooldown_max());
-            }
-            health.cooldown_until = Some(now + cooldown);
-            let provider_id = health.provider_id.clone().unwrap_or_default();
-            tracing::warn!(
-                account_id = %account_id,
-                reason = %reason,
-                streak,
-                cooldown_secs = cooldown.as_secs_f64(),
-                "Repeated transient upstream failures; short account cooldown"
-            );
-            drop(accounts);
+            };
             let now_utc = chrono::Utc::now();
             if let Ok(delta) = chrono::Duration::from_std(cooldown) {
                 self.limits.set_transient(
@@ -1126,81 +1220,9 @@ impl ProviderHealthTracker {
             return cooldown;
         }
 
-        let breaker_verdict = crate::orb_spec::breaker_step(
-            match reason {
-                CooldownReason::QuotaExhausted => crate::orb_spec::BreakerReason::QuotaExhausted,
-                CooldownReason::PaymentRequired => {
-                    crate::orb_spec::BreakerReason::PaymentRequired402
-                }
-                CooldownReason::AuthError => crate::orb_spec::BreakerReason::Auth401Or403,
-                _ => crate::orb_spec::BreakerReason::RateLimit429,
-            },
-            0,
-            1,
-        );
-        let account_streak = if reason.is_account_error() {
-            health.consecutive_failures
-        } else {
-            0
-        };
-        health.last_failure_reason = Some(reason);
-        health.last_failure_at = Some(chrono::Utc::now());
+        let (cooldown, provider_id, breaker_verdict) =
+            computed.expect("non-transient failure must compute cooldown");
 
-        // Use retry_after from headers if available, else exponential backoff.
-        // Auth errors (401/403) are almost always permanent (bad API key,
-        // revoked credentials), so use a long fixed cooldown instead of
-        // short exponential backoff that implies eventual recovery.
-        // QuotaExhausted (a subscription's hard usage limit) won't recover for
-        // hours/days, so park it for a long fixed window so the chain stops
-        // re-trying an exhausted subscription as a primary entry; honor a
-        // longer upstream retry_after when one is supplied.
-        let cooldown = match reason {
-            CooldownReason::QuotaExhausted => {
-                let base = std::time::Duration::from_secs(quota_cooldown_secs());
-                retry_after.map(|r| r.max(base)).unwrap_or(base)
-            }
-            // Account errors (402 / out of credit / 401 / 403): exponential
-            // circuit breaker, 10 min doubling to 6 h. Expiry is the probe.
-            CooldownReason::AuthError | CooldownReason::PaymentRequired => {
-                let breaker = account_error_cooldown(account_streak.max(1));
-                retry_after.map(|r| r.max(breaker)).unwrap_or(breaker)
-            }
-            _ => retry_after.unwrap_or_else(|| {
-                self.backoff_config
-                    .cooldown_for(health.consecutive_failures.saturating_sub(1))
-            }),
-        };
-
-        health.cooldown_until = Some(std::time::Instant::now() + cooldown);
-        let provider_id = health.provider_id.clone().unwrap_or_default();
-
-        let is_degraded =
-            health.consecutive_failures >= self.backoff_config.circuit_breaker_threshold;
-        if reason.is_account_error() {
-            tracing::warn!(
-                account_id = %account_id,
-                provider = %provider_id,
-                reason = %reason,
-                consecutive_failures = health.consecutive_failures,
-                cooldown_secs = cooldown.as_secs_f64(),
-                "Account circuit breaker open — skipping account until the probe window"
-            );
-        } else if is_degraded {
-            tracing::warn!(
-                account_id = %account_id,
-                consecutive_failures = health.consecutive_failures,
-                cooldown_secs = cooldown.as_secs_f64(),
-                "Circuit breaker tripped — account degraded with extended cooldown"
-            );
-        } else {
-            tracing::info!(
-                account_id = %account_id,
-                consecutive_failures = health.consecutive_failures,
-                cooldown_secs = cooldown.as_secs_f64(),
-                "Account placed in cooldown"
-            );
-        }
-        drop(accounts);
         let now_utc = chrono::Utc::now();
         if let Ok(delta) = chrono::Duration::from_std(cooldown) {
             self.limits.set_transient(
@@ -1220,8 +1242,7 @@ impl ProviderHealthTracker {
         let propagate_to_sub = breaker_verdict.poison_subscription
             || matches!(reason, CooldownReason::PaymentRequired);
         if let (Some(key), true) = (subscription, propagate_to_sub) {
-            let mut subs = self.subscription_cooldowns.write().await;
-            let entry = subs.entry(key.clone()).or_default();
+            let mut entry = self.subscription_cooldowns.entry(key.clone()).or_default();
             entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
             let now = std::time::Instant::now();
             let until = now + cooldown;
@@ -1259,6 +1280,7 @@ impl ProviderHealthTracker {
                 subscription,
                 crate::account_limits::LimitCooldown::new(&provider_id, label, reset),
             );
+            self.limits.flush().await;
         }
 
         cooldown
@@ -1294,8 +1316,7 @@ impl ProviderHealthTracker {
             .unwrap_or_default();
         let until = std::time::Instant::now() + remaining;
         {
-            let mut accounts = self.accounts.write().await;
-            let health = accounts.entry(account_id).or_default();
+            let mut health = self.accounts.entry(account_id).or_default();
             health.total_requests += 1;
             health.total_rate_limits += 1;
             health.consecutive_failures = health.consecutive_failures.saturating_add(1);
@@ -1304,8 +1325,7 @@ impl ProviderHealthTracker {
             health.cooldown_until = Some(until);
         }
         if let Some(key) = subscription {
-            let mut subs = self.subscription_cooldowns.write().await;
-            let entry = subs.entry(key.clone()).or_default();
+            let mut entry = self.subscription_cooldowns.entry(key.clone()).or_default();
             entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
             entry.cooldown_until = Some(until);
         }
@@ -1318,6 +1338,7 @@ impl ProviderHealthTracker {
             "Account parked until its usage limit resets"
         );
         self.park_until_limit_reset(account_id, subscription, cooldown);
+        self.limits.flush().await;
         remaining
     }
 
@@ -1329,7 +1350,9 @@ impl ProviderHealthTracker {
         cooldown: crate::account_limits::LimitCooldown,
     ) -> std::time::Duration {
         if let Some(key) = pool_limit_key(&entry.provider_id, entry.account_id, &entry.model_id) {
-            return self.park_pool(&key, cooldown);
+            let remaining = self.park_pool(&key, cooldown);
+            self.limits.flush().await;
+            return remaining;
         }
         self.record_usage_limit(entry.account_id, entry.subscription_key.as_ref(), cooldown)
             .await
@@ -1393,10 +1416,12 @@ impl ProviderHealthTracker {
                         .unwrap_or_else(|_| chrono::Duration::hours(1)),
                 announced: retry_after.is_some(),
             };
-            return self.park_pool(
+            let remaining = self.park_pool(
                 &key,
                 crate::account_limits::LimitCooldown::new(&entry.provider_id, "usage limit", reset),
             );
+            self.limits.flush().await;
+            return remaining;
         }
         self.record_failure_with_subscription(
             entry.account_id,
@@ -1417,8 +1442,7 @@ impl ProviderHealthTracker {
 
     /// Record a latency sample for an account (in milliseconds).
     pub async fn record_latency(&self, account_id: Uuid, latency_ms: u64) {
-        let mut accounts = self.accounts.write().await;
-        let health = accounts.entry(account_id).or_default();
+        let mut health = self.accounts.entry(account_id).or_default();
         health.total_latency_ms += latency_ms;
         health.latency_samples += 1;
     }
@@ -1430,8 +1454,7 @@ impl ProviderHealthTracker {
         input_tokens: u64,
         output_tokens: u64,
     ) {
-        let mut accounts = self.accounts.write().await;
-        let health = accounts.entry(account_id).or_default();
+        let mut health = self.accounts.entry(account_id).or_default();
         health.total_input_tokens += input_tokens;
         health.total_output_tokens += output_tokens;
     }
@@ -1440,8 +1463,7 @@ impl ProviderHealthTracker {
     ///
     /// Called on every successful response to track remaining quota.
     pub async fn record_rate_limits(&self, account_id: Uuid, snapshot: RateLimitSnapshot) {
-        let mut accounts = self.accounts.write().await;
-        let health = accounts.entry(account_id).or_default();
+        let mut health = self.accounts.entry(account_id).or_default();
         health.rate_limit_snapshot = Some(snapshot);
     }
 
@@ -1517,10 +1539,9 @@ impl ProviderHealthTracker {
         let limit_remaining = limit
             .as_ref()
             .and_then(|cooldown| (cooldown.until - chrono::Utc::now()).to_std().ok());
-        let accounts = self.accounts.read().await;
-        match accounts.get(&account_id) {
+        match self.accounts.get(&account_id) {
             Some(health) => {
-                Self::snapshot(account_id, health, &self.backoff_config, limit_remaining)
+                Self::snapshot(account_id, &health, &self.backoff_config, limit_remaining)
             }
             // Parked by a cooldown loaded from disk or recorded by a harness
             // rotation path: this tracker has no counters for it.
@@ -1562,7 +1583,7 @@ impl ProviderHealthTracker {
 
     /// Get health snapshots for all tracked accounts.
     pub async fn get_all_health(&self) -> Vec<AccountHealthSnapshot> {
-        let tracked: Vec<Uuid> = self.accounts.read().await.keys().copied().collect();
+        let tracked: Vec<Uuid> = self.accounts.iter().map(|entry| *entry.key()).collect();
         // Accounts only known through a usage-limit cooldown are listed too.
         let parked = self
             .limits
@@ -1583,23 +1604,23 @@ impl ProviderHealthTracker {
     pub async fn clear_subscription_cooldown(&self, key: &SubscriptionKey) {
         self.limits
             .clear(&crate::account_limits::subscription_key(&key.0));
-        let mut subs = self.subscription_cooldowns.write().await;
-        if let Some(entry) = subs.get_mut(key) {
+        if let Some(mut entry) = self.subscription_cooldowns.get_mut(key) {
             entry.cooldown_until = None;
             entry.consecutive_failures = 0;
         }
+        self.limits.flush().await;
     }
 
     /// Clear cooldown for an account (e.g., after manual recovery).
     pub async fn clear_cooldown(&self, account_id: Uuid) {
         self.limits
             .clear(&crate::account_limits::account_key(account_id));
-        let mut accounts = self.accounts.write().await;
-        if let Some(health) = accounts.get_mut(&account_id) {
+        if let Some(mut health) = self.accounts.get_mut(&account_id) {
             health.cooldown_until = None;
             health.consecutive_failures = 0;
             health.transient_failures.clear();
         }
+        self.limits.flush().await;
     }
 
     /// Clear all active in-memory and usage-limit cooldowns across tracked accounts.
@@ -1609,19 +1630,16 @@ impl ProviderHealthTracker {
             self.limits.clear(&key);
         }
         self.limits.clear_all_transient();
-        {
-            let mut accounts = self.accounts.write().await;
-            for health in accounts.values_mut() {
-                health.cooldown_until = None;
-                health.consecutive_failures = 0;
-                health.transient_failures.clear();
-            }
+        for mut health in self.accounts.iter_mut() {
+            health.cooldown_until = None;
+            health.consecutive_failures = 0;
+            health.transient_failures.clear();
         }
-        let mut subs = self.subscription_cooldowns.write().await;
-        for entry in subs.values_mut() {
+        for mut entry in self.subscription_cooldowns.iter_mut() {
             entry.cooldown_until = None;
             entry.consecutive_failures = 0;
         }
+        self.limits.flush().await;
     }
 }
 
@@ -1885,9 +1903,8 @@ const OAUTH_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(2
 /// After a failed refresh the account is not retried on every resolution.
 const OAUTH_REFRESH_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
-static OAUTH_REFRESH_FAILURES: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<Uuid, std::time::Instant>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+static OAUTH_REFRESH_FAILURES: std::sync::LazyLock<DashMap<Uuid, std::time::Instant>> =
+    std::sync::LazyLock::new(DashMap::new);
 
 /// Production refresher: the single locked writer for store-account OAuth
 /// rotation (`refresh_store_account_oauth_locked`), which also refuses
@@ -1904,8 +1921,6 @@ impl StoreOAuthRefresher for LockedStoreOAuthRefresher {
         refresh_token: &str,
     ) -> bool {
         let recently_failed = OAUTH_REFRESH_FAILURES
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
             .get(&account_id)
             .is_some_and(|at| at.elapsed() < OAUTH_REFRESH_RETRY_AFTER);
         if recently_failed {
@@ -1931,12 +1946,9 @@ impl StoreOAuthRefresher for LockedStoreOAuthRefresher {
             Ok(Err(error)) => Err(format!("refresh task failed: {error}")),
             Err(_) => Err("refresh still running".to_string()),
         };
-        let mut failures = OAUTH_REFRESH_FAILURES
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         match outcome {
             Ok(()) => {
-                failures.remove(&account_id);
+                OAUTH_REFRESH_FAILURES.remove(&account_id);
                 tracing::info!(
                     account_id = %account_id,
                     provider = provider_type.id(),
@@ -1945,7 +1957,7 @@ impl StoreOAuthRefresher for LockedStoreOAuthRefresher {
                 true
             }
             Err(error) => {
-                failures.insert(account_id, std::time::Instant::now());
+                OAUTH_REFRESH_FAILURES.insert(account_id, std::time::Instant::now());
                 tracing::warn!(
                     account_id = %account_id,
                     provider = provider_type.id(),
@@ -2011,21 +2023,22 @@ fn store_oauth_is_refreshable(
 /// In-memory store for model chains, persisted to disk as JSON.
 #[derive(Debug, Clone)]
 pub struct ModelChainStore {
-    chains: Arc<RwLock<Vec<ModelChain>>>,
+    chains: Arc<ArcSwap<Vec<ModelChain>>>,
+    writer: Arc<Mutex<()>>,
     storage_path: PathBuf,
 }
 
 impl ModelChainStore {
     pub async fn new(storage_path: PathBuf) -> Self {
         let store = Self {
-            chains: Arc::new(RwLock::new(Vec::new())),
+            chains: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            writer: Arc::new(Mutex::new(())),
             storage_path,
         };
 
-        match store.load_from_disk() {
+        match store.load_from_disk().await {
             Ok(loaded) => {
-                let mut chains = store.chains.write().await;
-                *chains = loaded;
+                store.chains.store(Arc::new(loaded));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // No file yet — will be created on first write.
@@ -2040,7 +2053,7 @@ impl ModelChainStore {
             }
         }
 
-        // Ensure default chain exists (check + insert under write lock)
+        // Ensure default chain exists (check + insert under serialized writer)
         store.ensure_default_chain().await;
 
         store
@@ -2049,12 +2062,13 @@ impl ModelChainStore {
     /// Ensure the builtin default chains exist.
     ///
     /// Idempotent: skips any chain whose ID is already present.
-    /// Checks and inserts under a single write lock to avoid TOCTOU races.
+    /// Checks and inserts under a single writer mutex to avoid TOCTOU races.
     async fn ensure_default_chain(&self) {
         // Refresh these stock chains against the upstream model catalogs:
         // Z.AI: https://docs.z.ai/guides/llm/glm
         // MiniMax: https://platform.minimaxi.com/document/ChatCompletion%20v2
-        let mut chains = self.chains.write().await;
+        let _guard = self.writer.lock().await;
+        let mut chains = (**self.chains.load()).clone();
 
         let now = chrono::Utc::now();
         let mut changed = false;
@@ -2368,53 +2382,42 @@ impl ModelChainStore {
         }
 
         if changed {
-            if let Err(e) = self.save_chains_to_disk(&chains) {
+            self.chains.store(Arc::new(chains.clone()));
+            if let Err(e) = self.save_chains_to_disk(&chains).await {
                 tracing::error!("Failed to save default model chains: {}", e);
             }
         }
     }
 
-    fn load_from_disk(&self) -> Result<Vec<ModelChain>, std::io::Error> {
-        let contents = std::fs::read_to_string(&self.storage_path)?;
+    async fn load_from_disk(&self) -> Result<Vec<ModelChain>, std::io::Error> {
+        let contents = tokio::fs::read_to_string(&self.storage_path).await?;
         serde_json::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
     /// Serialize `chains` to JSON and write to disk atomically (write to
     /// temp file, then rename). Caller should pass the chains data directly
-    /// so this can be called while the caller still holds the write lock,
-    /// avoiding TOCTOU races between concurrent upsert/delete operations.
-    fn save_chains_to_disk(&self, chains: &[ModelChain]) -> Result<(), std::io::Error> {
-        if let Some(parent) = self.storage_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let contents = serde_json::to_string_pretty(chains)
+    /// while holding `self.writer`, avoiding TOCTOU races between concurrent
+    /// upsert/delete operations while keeping reads 100% wait-free via `ArcSwap`.
+    async fn save_chains_to_disk(&self, chains: &[ModelChain]) -> Result<(), std::io::Error> {
+        let contents = serde_json::to_vec_pretty(chains)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        // Write to a temp file then rename for atomic replacement.
-        let tmp_path = self.storage_path.with_extension("tmp");
-        std::fs::write(&tmp_path, contents)?;
-        std::fs::rename(&tmp_path, &self.storage_path)?;
-        Ok(())
+        crate::concurrency::write_atomic_async(&self.storage_path, &contents, None).await
     }
 
     /// List all chains.
     pub async fn list(&self) -> Vec<ModelChain> {
-        self.chains.read().await.clone()
+        (**self.chains.load()).clone()
     }
 
     /// Get a chain by ID.
     pub async fn get(&self, id: &str) -> Option<ModelChain> {
-        self.chains
-            .read()
-            .await
-            .iter()
-            .find(|c| c.id == id)
-            .cloned()
+        self.chains.load().iter().find(|c| c.id == id).cloned()
     }
 
     /// Get the default chain.
     pub async fn get_default(&self) -> Option<ModelChain> {
-        let chains = self.chains.read().await;
+        let chains = self.chains.load();
         chains
             .iter()
             .find(|c| c.is_default)
@@ -2425,7 +2428,8 @@ impl ModelChainStore {
     /// Add or update a chain.
     pub async fn upsert(&self, mut chain: ModelChain) {
         chain.updated_at = chrono::Utc::now();
-        let mut chains = self.chains.write().await;
+        let _guard = self.writer.lock().await;
+        let mut chains = (**self.chains.load()).clone();
 
         // If setting as default, clear others
         if chain.is_default {
@@ -2440,8 +2444,11 @@ impl ModelChainStore {
             chains.push(chain);
         }
 
-        // Serialize while still holding the write lock to avoid TOCTOU races.
-        if let Err(e) = self.save_chains_to_disk(&chains) {
+        let next = Arc::new(chains);
+        self.chains.store(Arc::clone(&next));
+
+        // Serialize while still holding the writer mutex to avoid TOCTOU races.
+        if let Err(e) = self.save_chains_to_disk(&next).await {
             tracing::error!("Failed to save model chains: {}", e);
         }
     }
@@ -2453,7 +2460,8 @@ impl ModelChainStore {
     /// - `Ok(false)` if chain not found
     /// - `Err(msg)` if deletion is not allowed (e.g., last chain)
     pub async fn delete(&self, id: &str) -> Result<bool, &'static str> {
-        let mut chains = self.chains.write().await;
+        let _guard = self.writer.lock().await;
+        let mut chains = (**self.chains.load()).clone();
 
         if !chains.iter().any(|c| c.id == id) {
             return Ok(false);
@@ -2473,8 +2481,11 @@ impl ModelChainStore {
             }
         }
 
-        // Serialize while still holding the write lock to avoid TOCTOU races.
-        if let Err(e) = self.save_chains_to_disk(&chains) {
+        let next = Arc::new(chains);
+        self.chains.store(Arc::clone(&next));
+
+        // Serialize while still holding the writer mutex to avoid TOCTOU races.
+        if let Err(e) = self.save_chains_to_disk(&next).await {
             tracing::error!("Failed to save model chains after delete: {}", e);
         }
         Ok(true)
@@ -3572,7 +3583,10 @@ mod tests {
                 .await;
         }
         assert!(last <= std::time::Duration::from_secs(60));
-        let len = tracker.accounts.read().await[&account]
+        let len = tracker
+            .accounts
+            .get(&account)
+            .unwrap()
             .transient_failures
             .len();
         assert!(len <= MAX_TRANSIENT_SAMPLES);

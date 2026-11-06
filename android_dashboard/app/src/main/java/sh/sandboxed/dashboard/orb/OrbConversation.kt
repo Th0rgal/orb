@@ -1028,8 +1028,11 @@ fun OrbConversationPage(
 
     LaunchedEffect(missionId, lifecycleOwner) {
         val id = missionId ?: return@LaunchedEffect
-        val cachedMessages = OrbReadCache.loadRowsAsync(messagesCacheKey)
-        val cachedEvents = OrbReadCache.loadRowsAsync(eventsCacheKey)
+        val (cachedMessages, cachedEvents) = coroutineScope {
+            val msgsTask = async { OrbReadCache.loadRowsAsync(messagesCacheKey) }
+            val evsTask = async { OrbReadCache.loadRowsAsync(eventsCacheKey) }
+            msgsTask.await() to evsTask.await()
+        }
         if (id != missionId) return@LaunchedEffect
         // An SSE response or optimistic send may have populated these during the read.
         if (messages.isEmpty() && cachedMessages.isNotEmpty()) messages = cachedMessages

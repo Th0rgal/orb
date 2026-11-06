@@ -37,25 +37,27 @@ function extractFrontmatter(content: string): Record<string, string> {
  */
 async function listDocs(dir: string = CONTENT_DIR, prefix: string = ""): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
-  const docs: string[] = [];
+  const nested = await Promise.all(
+    entries.map(async (entry): Promise<string[]> => {
+      // Skip meta files and hidden files
+      if (entry.name.startsWith("_") || entry.name.startsWith(".")) return [];
 
-  for (const entry of entries) {
-    // Skip meta files and hidden files
-    if (entry.name.startsWith("_") || entry.name.startsWith(".")) continue;
+      const fullPath = join(dir, entry.name);
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
 
-    const fullPath = join(dir, entry.name);
-    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        return listDocs(fullPath, relativePath);
+      }
+      if (entry.name.endsWith(".mdx") || entry.name.endsWith(".md")) {
+        // Convert filename to URL path (remove extension)
+        const urlPath = relativePath.replace(/\.(mdx?|md)$/, "");
+        return [urlPath];
+      }
+      return [];
+    })
+  );
 
-    if (entry.isDirectory()) {
-      docs.push(...(await listDocs(fullPath, relativePath)));
-    } else if (entry.name.endsWith(".mdx") || entry.name.endsWith(".md")) {
-      // Convert filename to URL path (remove extension)
-      const urlPath = relativePath.replace(/\.(mdx?|md)$/, "");
-      docs.push(urlPath);
-    }
-  }
-
-  return docs;
+  return nested.flat();
 }
 
 /**
@@ -108,36 +110,34 @@ export async function GET(
         "",
       ];
 
-      for (const docPath of docs) {
-        const filePath = join(CONTENT_DIR, `${docPath}.mdx`);
-        try {
-          const content = await readFile(filePath, "utf-8");
-          const frontmatter = extractFrontmatter(content);
-          const markdown = stripFrontmatter(content);
-
-          contents.push(`# ${frontmatter.title || docPath}`);
-          contents.push("");
-          if (frontmatter.description) {
-            contents.push(`> ${frontmatter.description}`);
-            contents.push("");
-          }
-          contents.push(markdown);
-          contents.push("");
-          contents.push("---");
-          contents.push("");
-        } catch {
-          // Try .md extension as fallback
+      const sections = await Promise.all(
+        docs.map(async (docPath): Promise<string[]> => {
+          const filePath = join(CONTENT_DIR, `${docPath}.mdx`);
           try {
-            const mdPath = join(CONTENT_DIR, `${docPath}.md`);
-            const content = await readFile(mdPath, "utf-8");
-            contents.push(stripFrontmatter(content));
-            contents.push("");
-            contents.push("---");
-            contents.push("");
+            const content = await readFile(filePath, "utf-8");
+            const frontmatter = extractFrontmatter(content);
+            const markdown = stripFrontmatter(content);
+            const lines: string[] = [`# ${frontmatter.title || docPath}`, ""];
+            if (frontmatter.description) {
+              lines.push(`> ${frontmatter.description}`, "");
+            }
+            lines.push(markdown, "", "---", "");
+            return lines;
           } catch {
-            // Skip if file not found
+            // Try .md extension as fallback
+            try {
+              const mdPath = join(CONTENT_DIR, `${docPath}.md`);
+              const content = await readFile(mdPath, "utf-8");
+              return [stripFrontmatter(content), "", "---", ""];
+            } catch {
+              // Skip if file not found
+              return [];
+            }
           }
-        }
+        })
+      );
+      for (const section of sections) {
+        contents.push(...section);
       }
 
       return new NextResponse(contents.join("\n"), {
@@ -163,21 +163,22 @@ export async function GET(
     join(CONTENT_DIR, normalizedPath, "index.md"),
   ];
 
-  let content: string | null = null;
-  let foundPath: string | null = null;
-
-  for (const filePath of possiblePaths) {
-    try {
-      const stats = await stat(filePath);
-      if (stats.isFile()) {
-        content = await readFile(filePath, "utf-8");
-        foundPath = filePath;
-        break;
+  const candidates = await Promise.all(
+    possiblePaths.map(async (filePath) => {
+      try {
+        const stats = await stat(filePath);
+        if (stats.isFile()) {
+          return { filePath, content: await readFile(filePath, "utf-8") };
+        }
+      } catch {
+        // File doesn't exist, try next
       }
-    } catch {
-      // File doesn't exist, try next
-    }
-  }
+      return null;
+    })
+  );
+  const match = candidates.find((c) => c !== null) ?? null;
+  const content = match?.content ?? null;
+  const foundPath = match?.filePath ?? null;
 
   if (!content || !foundPath) {
     return NextResponse.json(

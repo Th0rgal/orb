@@ -433,8 +433,7 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
     await import("./localWakeups").then(m=>m.replayLocalWakeupStops());
     if(runVersions.get(req.id)!==version)throw new Error("Local launch rejected: stopped before launch");
     if(req.harness === "codex") {
-      await requireLocalCyber(invoke);
-      const selection = await getCyber(req.id);
+      const [, selection] = await Promise.all([requireLocalCyber(invoke), getCyber(req.id)]);
       req = {...req,cyber_access:selection.mode,cyber_revision:selection.revision};
       if(runVersions.get(req.id)!==version)throw new Error("Local launch rejected: stopped before launch");
     }
@@ -590,7 +589,7 @@ export async function localSessionGit(cwd: string): Promise<{ repository: string
 /** Initial runs have a native-generated identity and a durable synchronization journal. */
 export async function startLocalOrigin(request: Omit<StartLocal,"id">, draft: {key:string;title:string;project:string;folder?:string;prompt:string;tags:string[]}): Promise<import("./api").Mission> {
  const invoke=tauriInvoke();if(!invoke)throw new Error("Open Orb desktop to start on this computer.");
- if(request.harness==='codex'){await requireCyberSupport();await requireLocalCyber(invoke);}
+ if(request.harness==='codex'){await Promise.all([requireCyberSupport(),requireLocalCyber(invoke)]);}
  await import("./localWakeups").then(m=>m.replayLocalWakeupStops());
  let mission:import("./api").Mission;
  try{mission=await invoke("local_origin_launch",{request:{...request,id:"",session_id:null,image_paths:request.imagePaths??[]},draft,connection:{api_url:getApiUrl(),token:getJwt()}}) as import("./api").Mission;}

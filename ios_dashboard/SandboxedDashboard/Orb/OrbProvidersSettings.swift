@@ -216,14 +216,16 @@ struct OrbProvidersSettings: View {
     }
     private func load() async {
         guard !loading, client.current else { return }; loading = true; defer { loading = false }
+        async let providersReq = client.call("/api/ai/providers")
+        async let usageReq = client.call("/api/ai/providers/usage")
         do {
-            let response = try await client.call("/api/ai/providers")
+            let response = try await providersReq
             providers = response["providers"] == .null ? response.items : response["providers"].items
             ready = true; error = ""
         } catch is CancellationError { return }
         catch { ready = false; self.error = error.localizedDescription; return }
         do {
-            usage = try await client.call("/api/ai/providers/usage")["entries"]; usageError = ""
+            usage = try await usageReq["entries"]; usageError = ""
             // The bulk endpoint may only have a cache; request current subscription windows in parallel.
             let targets = providers.filter { ["kimi", "minimax", "zai"].contains($0["provider_type"].text) || $0["uses_oauth"].flag }
             guard !targets.isEmpty else { return }
@@ -602,10 +604,12 @@ struct OrbCloudAccountsSettings: View {
         .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await load() } } }
     }
     private func load() async {
-        do { accounts = try await client.call("/api/cloud/accounts").items; loaded = true; error = "" }
+        async let accountsReq = client.call("/api/cloud/accounts")
+        async let usageReq = client.call("/api/cloud/usage")
+        do { accounts = try await accountsReq.items; loaded = true; error = "" }
         catch is CancellationError { return }
         catch { self.error = "Cloud accounts unavailable."; loaded = true }
-        do { usage = try await client.call("/api/cloud/usage")["accounts"] }
+        do { usage = try await usageReq["accounts"] }
         catch { usage = .null }
     }
 }

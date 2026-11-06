@@ -39,9 +39,14 @@ export type PendingMove = {
 
 export const MOVE_CONFIRM_MS = 30_000;
 const [pending, setPending] = createSignal<ReadonlyMap<string, PendingMove>>(new Map());
+const pendingListeners = new Set<() => void>();
 
 export const missionMoveKey = (id: string) => `mission:${id}`;
 export const fileMoveKey = (slug: string, path: string) => `file:${slug}:${path}`;
+
+function notifyPendingListeners() {
+  for (const listener of [...pendingListeners]) listener();
+}
 
 function update(key: string, next: PendingMove | undefined) {
   setPending(map => {
@@ -49,6 +54,7 @@ function update(key: string, next: PendingMove | undefined) {
     if (next) copy.set(key, next); else copy.delete(key);
     return copy;
   });
+  notifyPendingListeners();
 }
 function clearIf(key: string, entry: PendingMove) {
   if (pending().get(key) === entry) update(key, undefined);
@@ -145,6 +151,13 @@ export function isFilePathPending(slug: string, path: string): boolean {
     if (!move.delete && move.toProject === slug && move.path && pathsOverlap(path, move.path)) return true;
   }
   return false;
+}
+
+export function waitForFilePathSettled(slug: string, path: string): Promise<void> {
+  return !isFilePathPending(slug, path) ? Promise.resolve() : new Promise(resolve => {
+    const check = () => { if (!isFilePathPending(slug, path)) { pendingListeners.delete(check); resolve(); } };
+    pendingListeners.add(check);
+  });
 }
 
 /**
@@ -245,4 +258,7 @@ export function settleMove(key: string): void {
 }
 
 /** Test hook. */
-export function resetMoves(): void { setPending(new Map()); }
+export function resetMoves(): void {
+  setPending(new Map());
+  notifyPendingListeners();
+}

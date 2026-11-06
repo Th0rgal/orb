@@ -270,29 +270,31 @@ export function ControllerView(p: { slug: string; id?: string }) {
 
   const load = async () => {
     if (!isConnected()) return;
-    try {
-      const next = await cacheLoad(viewKey(), () => (p.id ? getProjectCron(p.slug, p.id) : getProjectController(p.slug)));
-      setView(next);
-      setError(null);
-      if (p.id && !next.job) {
-        window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: p.slug, id: p.id, deleted: true } }));
-      }
-    } catch (e) {
-      if (p.id && e instanceof Error && /\b404\b/.test(e.message)) {
-        const cleared: View = { slug: p.slug, job: null, runs: [] };
-        cachePut(viewKey(), cleared);
-        setView(cleared);
-        setError(null);
-        window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: p.slug, id: p.id, deleted: true } }));
-      } else {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-    }
-    try {
-      setSteers(await getProjectSteers(p.slug));
-    } catch {
-      /* steers are optional on older backends */
-    }
+    await Promise.all([
+      (async () => {
+        try {
+          const next = await cacheLoad(viewKey(), () => (p.id ? getProjectCron(p.slug, p.id) : getProjectController(p.slug)));
+          setView(next);
+          setError(null);
+          if (p.id && !next.job) {
+            window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: p.slug, id: p.id, deleted: true } }));
+          }
+        } catch (e) {
+          if (p.id && e instanceof Error && /\b404\b/.test(e.message)) {
+            const cleared: View = { slug: p.slug, job: null, runs: [] };
+            cachePut(viewKey(), cleared);
+            setView(cleared);
+            setError(null);
+            window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: p.slug, id: p.id, deleted: true } }));
+          } else {
+            setError(e instanceof Error ? e.message : String(e));
+          }
+        }
+      })(),
+      getProjectSteers(p.slug).then(setSteers).catch(() => {
+        /* steers are optional on older backends */
+      }),
+    ]);
   };
   void load();
   onCleanup(pollWhileVisible(load, 15000));

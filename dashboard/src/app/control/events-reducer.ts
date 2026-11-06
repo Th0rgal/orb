@@ -391,31 +391,50 @@ export function eventsToItemsImpl(
           ops = [];
         }
         if (Array.isArray(ops)) {
+          let chars: string[] | undefined;
+          const scalarLen = () => {
+            chars ??= Array.from(content);
+            return chars.length;
+          };
+          const spliceScalars = (start: number, end: number, replacement: string) => {
+            chars ??= Array.from(content);
+            const s = Math.max(0, Math.min(start, chars.length));
+            const e = Math.max(s, Math.min(end, chars.length));
+            chars.splice(s, e - s, replacement);
+            content = chars.join("");
+            chars = undefined;
+          };
           for (const op of ops) {
             if (!isRecord(op)) continue;
-            if (op.type === "insert") {
-              const pos =
-                typeof op.pos === "number"
-                  ? Math.max(0, Math.min(op.pos, content.length))
-                  : content.length;
-              content =
-                content.slice(0, pos) +
-                String(op.text ?? "") +
-                content.slice(pos);
+            if (op.type === "snapshot") {
+              content = String(op.text ?? "");
+              chars = undefined;
+            } else if (op.type === "insert") {
+              const piece = String(op.text ?? "");
+              if (bubbleId === "text_delta_latest" && op.pos === 0) {
+                content = piece;
+                chars = undefined;
+              } else if (
+                typeof op.pos !== "number" ||
+                op.pos >= content.length ||
+                op.pos >= scalarLen()
+              ) {
+                content += piece;
+                chars = undefined;
+              } else {
+                spliceScalars(op.pos, op.pos, piece);
+              }
             } else if (op.type === "replace") {
+              const piece = String(op.text ?? "");
               const range = Array.isArray(op.range) ? op.range : [];
-              const start =
-                typeof range[0] === "number"
-                  ? Math.max(0, Math.min(range[0], content.length))
-                  : 0;
-              const end =
-                typeof range[1] === "number"
-                  ? Math.max(start, Math.min(range[1], content.length))
-                  : content.length;
-              content =
-                content.slice(0, start) +
-                String(op.text ?? "") +
-                content.slice(end);
+              const start = typeof range[0] === "number" ? range[0] : 0;
+              const end = typeof range[1] === "number" ? range[1] : scalarLen();
+              if (bubbleId === "text_delta_latest" && start === 0) {
+                content = piece;
+                chars = undefined;
+              } else {
+                spliceScalars(start, end, piece);
+              }
             } else if (op.type === "finalize") {
               finalized = true;
             }

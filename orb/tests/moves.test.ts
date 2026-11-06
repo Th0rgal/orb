@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createMemo, createRoot } from "solid-js";
 import { ApprovalTransferConfirmationRequiredError } from "../src/api";
 import { commitAuthoritativePlacements, resetMissionHierarchy, withHierarchy } from "../src/missionHierarchy";
-import { MOVE_CONFIRM_MS, deleteFileOptimistically, fileMoveKey, filesMovedAway, filesMovedInto, isFilePathPending, missionMoveKey, missionsMovedInto, moveOptimistically, movedMission, movingOutOf, previewMove, resetMoves, settleMove, withMovedMissions } from "../src/moves";
+import { MOVE_CONFIRM_MS, deleteFileOptimistically, fileMoveKey, filesMovedAway, filesMovedInto, isFilePathPending, missionMoveKey, missionsMovedInto, moveOptimistically, movedMission, movingOutOf, previewMove, resetMoves, settleMove, waitForFilePathSettled, withMovedMissions } from "../src/moves";
 
 beforeEach(() => { resetMoves(); resetMissionHierarchy(); });
 afterEach(() => { vi.useRealTimers(); resetMoves(); resetMissionHierarchy(); });
@@ -124,4 +124,23 @@ it("marks pending folder sources, destinations, ancestors, and descendants until
   expect(isFilePathPending("beta", "new/sub")).toBe(false);
   settleMove(fileMoveKey("alpha", "old/sub"));
   expect(isFilePathPending("alpha", "new/sub")).toBe(false);
+});
+
+it("resolves waitForFilePathSettled when an optimistic file rename settles", async () => {
+  const request = deferred();
+  const rename = moveOptimistically(
+    fileMoveKey("alpha", "context.md"),
+    { kind: "file", fromProject: "alpha", toProject: "alpha", path: "renamed.md", fromPath: "context.md" },
+    () => request.promise,
+  );
+  let settled = false;
+  const waiter = waitForFilePathSettled("alpha", "renamed.md").then(() => { settled = true; });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  request.resolve();
+  await rename;
+  expect(settled).toBe(false);
+  settleMove(fileMoveKey("alpha", "context.md"));
+  await waiter;
+  expect(settled).toBe(true);
 });

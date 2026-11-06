@@ -24,14 +24,14 @@ with zero mismatches (`QUALIFIED_WITH_HONEST_DEVICE_BLOCKERS`):
 [P3 report](P3_TARGET_QUALIFICATION_REPORT.md). Later `#1488` added
 `orb_slot_bypass_step`, live node capacity / coordinator priority lane added
 `orb_node_resize_step` and `orb_node_lane_step`, Phase R2b added
-`orb_wire_verify_slice_io`, `orb_wire_encode_slice_step`, and `orb_wire_decode_slice_step`, the `dgx-spark` / `lean-sys` bump (`c8449e02ad65f7afa7c6b3a83e7174b35c8c109c`) added 8 `leansys_*` gates (including `leansys_verify_stream_relay`) plus `orb_fleet_endpoint_gate` and `orb_prefill_deadline_ms`, Phase R4 added `orb_scroll_policy_gap`, `orb_scroll_policy_correct`, `orb_scroll_policy_step`, `orb_wire_scroll_slice_step`, `orb_wire_stream_slice_step`, and `orb_wire_transcript_slice_step`, and mission placement monotonicity added `orb_placement_merge_step`, expanding the current manifest to **152 entries / 151
-public exports** (110 `orb_*` + 41 `leansys_*` + 1 compiler helper), and `#1490`
-added the repo-owned 304-case (`152 * 2` on current manifest) Ed25519-signed local P3 consistency
-receipt and `ORB_KERNEL_BACKEND=stock-c` default rollback without retroactively
+`orb_wire_verify_slice_io`, `orb_wire_encode_slice_step`, and `orb_wire_decode_slice_step`, the `dgx-spark` / `lean-sys` bump (`c8449e02ad65f7afa7c6b3a83e7174b35c8c109c`) added 8 `leansys_*` gates (including `leansys_verify_stream_relay`) plus `orb_fleet_endpoint_gate` and `orb_prefill_deadline_ms`, Phase R4 added `orb_scroll_policy_gap`, `orb_scroll_policy_correct`, `orb_scroll_policy_step`, `orb_wire_scroll_slice_step`, `orb_wire_stream_slice_step`, and `orb_wire_transcript_slice_step`, mission placement monotonicity added `orb_placement_merge_step`, and Wave 4 added the 10 hot-path scanner, rate-limit, fleet-argmin, pool-pacer, confinement, 256-bit job-identity, validation-DAG, FTS5-lexer, and UTF-8/UTF-16 window steppers (`orb_proxy_sse_scan_step`, `orb_stream_repetition_step`, `orb_http_rate_limit_classify_step`, `orb_fleet_place_argmin_step`, `orb_pool_pacer_step`, `orb_confinement_scan_step`, `orb_job_identity_eq256_step`, `orb_validation_dag_step`, `orb_fts5_lexer_step`, `orb_utf8_utf16_window_step`), expanding the current manifest to **162 entries / 161
+public exports** (120 `orb_*` + 41 `leansys_*` + 1 compiler helper), and `#1490`
+added the repo-owned 324-case (`162 * 2` on current manifest) Ed25519-signed local P3 consistency
+receipt and `ORB_KERNEL_BACKEND=stock-c` rollback alongside committed `LeanNative` textual LLVM IR (`orb_kernel_leannative_{x86_64,aarch64}.ll`) without retroactively
 relabeling the `3c70e5ada` multi-target run.
 
-That local evidence is not phase acceptance: **85 partial / 67 unconnected**
-coverage entries remain across the current 152-entry manifest (`acceptance:
+That local evidence is not phase acceptance: **103 partial / 59 unconnected**
+coverage entries remain across the current 162-entry manifest (`acceptance:
 INCOMPLETE`; 23 partial / 106 unconnected at `3c70e5ada`); physical iPhone 13
 mini and Pixel 8 stay `BLOCKED_PHYSICAL_DEVICE`, the MacBook Air host is
 `BLOCKED_HOST_UNREACHABLE`, iOS/macOS/Android-ARM64 remain
@@ -58,14 +58,14 @@ those checks.
 
 The coverage registry remains incomplete: 106 entries were unconnected and 23
 had explicit partial evidence in `shared/orb-spec/coverage_evidence.json` at the
-2026-10-28 handoff (on current `master`, after `#1488`, live node capacity / coordinator lane exports, Phase R1 host-gate evidence, Phase R2b `OrbWire` slice I/O evidence, Phase R3 authoritative Cluster 1–4 evidence, the `dgx-spark` / `lean-sys` `c8449e0` fleet & stream-relay gates, Phase R4 Scroll / Stream / Transcript zero-copy slice ABI evidence, and `orb_placement_merge_step`, 67 entries are unconnected and 85 partial across 152
-manifest entries: 110 `orb_*` + 41 `leansys_*` + 1 compiler helper).
+2026-10-28 handoff (on current `master`, after `#1488`, live node capacity / coordinator lane exports, Phase R1 host-gate evidence, Phase R2b `OrbWire` slice I/O evidence, Phase R3 authoritative Cluster 1–4 evidence, the `dgx-spark` / `lean-sys` `c8449e0` fleet & stream-relay gates, Phase R4 Scroll / Stream / Transcript zero-copy slice ABI evidence, `orb_placement_merge_step`, and Wave 3.2 / Wave 4 scanner, pacer, confinement, DAG, FTS5, UTF-16, and `LeanSys` host-gate evidence, 59 entries are unconnected and 103 partial across 162
+manifest entries: 120 `orb_*` + 41 `leansys_*` + 1 compiler helper).
 Source hashes bind local host-test receipts to the linked theorem declarations
 and observers; these links do not establish authoritative callers or adapter parity.
 At that handoff its 129 manifest entries were 95 `orb_*` exports (`Orb.Kernel.*`), 33 `leansys_*`
 exports (`LeanSys.Spec.*`, verified against pinned `lean-sys` by `gen_orb_kernel_unboxed.py`),
 and the compiler helper `lp_orb_x2dspec_Orb_Kernel_accessStep___redArg` (`model: null`).
-Those 128 public exports covered all public Orb/LeanSys exports at that head (151 on
+Those 128 public exports covered all public Orb/LeanSys exports at that head (161 on
 current `master`); the helper
 remains inventoried separately rather than being counted as an extra public gate.
 Shadow observations now count missing host HOME poststates as unobserved,

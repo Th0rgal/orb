@@ -72,6 +72,16 @@ pub(crate) fn is_node_location_unsupported(raw: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+/// True when OpenCode 1.18+ HTTP server middleware (`wl.Unknown`, status 500)
+/// redacted an unhandled server/SQLite defect into `{message, ref: "err_…"}`
+/// without including `statusCode: 500` in the serialized JSON payload.
+fn is_opencode_redacted_server_error(data: &Value) -> bool {
+    data["ref"].as_str().is_some_and(|r| r.starts_with("err_"))
+        && data["message"]
+            .as_str()
+            .is_some_and(|m| m.to_ascii_lowercase().contains("unexpected server error"))
+}
+
 pub(crate) fn classify(raw: &str) -> Failure {
     let lower = raw.to_ascii_lowercase();
     let location_unsupported = is_node_location_unsupported(raw);
@@ -160,7 +170,8 @@ pub(crate) fn classify(raw: &str) -> Failure {
             if matches!(code, Some(401 | 403)) {
                 failure.kind = FailureKind::Authentication;
             } else if data["isRetryable"] != false
-                && matches!(code, Some(408 | 429 | 500 | 502 | 503 | 504 | 524 | 529))
+                && (matches!(code, Some(408 | 429 | 500 | 502 | 503 | 504 | 524 | 529))
+                    || is_opencode_redacted_server_error(data))
             {
                 failure.kind = FailureKind::Transport;
                 failure.retry_after_seconds = data["responseHeaders"]
@@ -188,6 +199,9 @@ pub(crate) fn classify(raw: &str) -> Failure {
                 "http 524",
                 "code 503",
                 "code 529",
+                // OpenCode 1.18+ HTTP server middleware (`wl.Unknown`, status 500)
+                // redacts unhandled server/SQLite defects to this message + `err_<hex>`.
+                "unexpected server error. check server logs",
                 // The /v1 proxy's mid-stream stall / stream error events.
                 PROXY_STREAM_STALL_CODE,
                 "upstream_stream_error",
@@ -327,5 +341,27 @@ mod tests {
         assert_eq!(failure.kind, FailureKind::Configuration);
         assert!(is_node_location_unsupported(raw));
         assert!(failure.summary.contains("egress IP or region"));
+    }
+
+    #[test]
+    fn opencode_redacted_server_500_is_recoverable_and_storage_log_upgrades_it() {
+        // Exact payload emitted by mission 9409f9a9 on ashur when OpenCode 1.19.5's
+        // HTTP middleware redacted an unhandled defect into `wl.Unknown` (status 500).
+        let bare = r#"{"data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_a0964479"},"name":"UnknownError"}"#;
+        assert_eq!(classify(bare).kind, FailureKind::Transport);
+
+        let wrapped = format!("command exited with Some(1).\nCLI error: {bare}");
+        assert_eq!(classify(&wrapped).kind, FailureKind::Transport);
+
+        // When sandboxed-node surfaces the underlying SQLite write error from
+        // `.local/share/opencode/log/opencode.log`, StorageExhausted wins.
+        let with_node_log = format!(
+            "{bare}\ncommand exited with Some(1); opencode server log: Failed to execute statement"
+        );
+        assert_eq!(classify(&with_node_log).kind, FailureKind::StorageExhausted);
+
+        // Explicit non-retryable marker still suppresses automatic transport retry.
+        let non_retryable = r#"{"data":{"isRetryable":false,"message":"Unexpected server error. Check server logs for details.","ref":"err_deadbeef"},"name":"UnknownError"}"#;
+        assert_eq!(classify(non_retryable).kind, FailureKind::Unknown);
     }
 }

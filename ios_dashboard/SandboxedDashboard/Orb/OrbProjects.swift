@@ -1280,11 +1280,15 @@ struct OrbHome: View {
     private func load() async {
         let scope = api.endpoint + (api.authToken ?? "")
         defer { loading = false }
-        if projects.isEmpty, let cached = await OrbDisk.readAsync("projects", as: OrbJSON.self) {
+        let needCachedProjects = projects.isEmpty
+        async let cachedProjectsTask: OrbJSON? = needCachedProjects ? OrbDisk.readAsync("projects", as: OrbJSON.self) : nil
+        async let cachedMissionsTask = OrbDisk.readAsync("inbox:missions", as: OrbJSON.self)
+        let (cachedProjects, cachedMissions) = await (cachedProjectsTask, cachedMissionsTask)
+        if projects.isEmpty, let cached = cachedProjects {
             let nextProjects = cached["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
             if projects != nextProjects { projects = nextProjects }
         }
-        if let cachedMissions = await OrbDisk.readAsync("inbox:missions", as: OrbJSON.self) {
+        if let cachedMissions {
             OrbReadCache.seedFromGlobalMissions(cachedMissions.items)
             let rows = cachedMissions.items.map { OrbRow($0) }.filter(\.mobile)
             let nextWorking = Self.countWorkingByProject(rows)
@@ -1293,34 +1297,39 @@ struct OrbHome: View {
             if inboxCount != nextInbox { inboxCount = nextInbox }
         }
         do {
-            let requested = Date(), endpoint = api.endpoint
-            let value = try await api.call("/api/projects")
+            let requested = Date(), endpoint = api.endpoint, core = api
+            async let projectsReq = core.call("/api/projects")
+            async let missionsReq = Log.attempt(.network, "home missions", { try await core.call("/api/control/missions?limit=100") })
+            let value = try await projectsReq
             guard scope == api.endpoint + (api.authToken ?? ""), !Task.isCancelled else { return }
             // Colors ride on the roster; a color chosen before the server stored any goes up here, once.
             Task { await appearance.apply(roster: value["projects"].items, fetchedAt: requested, endpoint: endpoint) }
             let nextProjects = value["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
             if projects != nextProjects { projects = nextProjects }
-            OrbDisk.saveAsync(value, key: "projects"); error = ""; connectionIssue = nil
+            OrbDisk.saveAsync(value, key: "projects"); loading = false; error = ""; connectionIssue = nil
             let roster = nextProjects
-            Task {
-                if let rawMissions = await Log.attempt(.network, "home missions", { try await api.call("/api/control/missions?limit=100") }), scope == api.endpoint + (api.authToken ?? "") {
-                    OrbDisk.saveAsync(rawMissions, key: "inbox:missions")
-                    OrbReadCache.seedFromGlobalMissions(rawMissions.items)
-                    let rows = rawMissions.items.map { OrbRow($0) }.filter(\.mobile)
-                    let nextWorking = Self.countWorkingByProject(rows)
-                    if workingByProject != nextWorking { workingByProject = nextWorking }
-                    let nextInbox = OrbInboxModel.unreadCount(missions: rows, projects: roster)
-                    if inboxCount != nextInbox { inboxCount = nextInbox }
-                    await OrbReadCache.prefetch(rows)
-                }
+            let rawMissions = await missionsReq
+            if let rawMissions, scope == api.endpoint + (api.authToken ?? ""), !Task.isCancelled {
+                OrbDisk.saveAsync(rawMissions, key: "inbox:missions")
+                OrbReadCache.seedFromGlobalMissions(rawMissions.items)
+                let rows = rawMissions.items.map { OrbRow($0) }.filter(\.mobile)
+                let nextWorking = Self.countWorkingByProject(rows)
+                if workingByProject != nextWorking { workingByProject = nextWorking }
+                let nextInbox = OrbInboxModel.unreadCount(missions: rows, projects: roster)
+                if inboxCount != nextInbox { inboxCount = nextInbox }
+                Task { await OrbReadCache.prefetch(rows) }
             }
             // Warm the top projects and the agent picker catalog so opening a project or composer feels instant.
             let topProjects = Array(nextProjects.prefix(3))
             Task {
-                _ = await Log.attempt(.cache, "agent catalog prefetch") { try await OrbReadCache.agentCatalog() }
-                for proj in topProjects {
-                    _ = await Log.attempt(.cache, "project prefetch", path: proj.id) { try await OrbReadCache.project(proj.id) }
+                async let catalogWarm = Log.attempt(.cache, "agent catalog prefetch", { try await OrbReadCache.agentCatalog() })
+                let projectTasks = topProjects.map { proj in
+                    Task { @MainActor in
+                        _ = await Log.attempt(.cache, "project prefetch", path: proj.id) { try await OrbReadCache.project(proj.id) }
+                    }
                 }
+                _ = await catalogWarm
+                for t in projectTasks { await t.value }
             }
         } catch {
             self.error = error.localizedDescription

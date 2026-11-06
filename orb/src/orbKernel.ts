@@ -925,3 +925,160 @@ export function orbKernelScratchSliceStep(inBytes = 0): {
   };
 }
 
+// Cross-client projection & Wave 4 scanner steppers backed by orb_kernel.wasm.
+
+export function orbMissionStateClassify(stateId: number): number {
+  return kernel.orb_mission_state_classify(enum8(stateId));
+}
+
+export function orbMissionSortRank(stateId: number): number {
+  return kernel.orb_mission_sort_rank(enum8(stateId));
+}
+
+export function orbMissionFlags(stateId: number): {
+  isActive: boolean;
+  needsAttention: boolean;
+  isTerminal: boolean;
+  raw: number;
+} {
+  const raw = kernel.orb_mission_flags(enum8(stateId));
+  return {
+    isActive: (raw & 1) !== 0,
+    needsAttention: (raw & 2) !== 0,
+    isTerminal: (raw & 4) !== 0,
+    raw,
+  };
+}
+
+export function orbMissionInboxSection(stateId: number): number {
+  return kernel.orb_mission_inbox_section(enum8(stateId));
+}
+
+export function orbConnectionIssueClassify(input: {
+  isUnreachable: boolean;
+  isUsingDefault: boolean;
+  isPrivateAddr: boolean;
+  defaultReachable: boolean;
+  hasExternalProxy: boolean;
+}): number {
+  return kernel.orb_connection_issue_classify(
+    b8(input.isUnreachable),
+    b8(input.isUsingDefault),
+    b8(input.isPrivateAddr),
+    b8(input.defaultReachable),
+    b8(input.hasExternalProxy),
+  );
+}
+
+export function orbWorkedDurationBucket(elapsedSecs: number): {
+  unit: number;
+  primary: number;
+  secondary: number;
+} {
+  const raw = kernel.orb_worked_duration_bucket(seconds(elapsedSecs));
+  return {
+    unit: byte(raw, 0n),
+    primary: Number((raw >> 8n) & 0xff_ffffn),
+    secondary: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export function orbTurnOutcomeStep(input: {
+  prevOutcome: number;
+  prevFailed: boolean;
+  eventKind: number;
+  isNarration: boolean;
+  isSuccessFalse: boolean;
+  isTextNonEmpty: boolean;
+}): { outcome: number; failed: boolean } {
+  const raw = kernel.orb_turn_outcome_step(
+    enum8(input.prevOutcome),
+    b8(input.prevFailed),
+    enum8(input.eventKind),
+    b8(input.isNarration),
+    b8(input.isSuccessFalse),
+    b8(input.isTextNonEmpty),
+  );
+  return {
+    outcome: raw & 0x7f,
+    failed: (raw & 0x80) !== 0,
+  };
+}
+
+export function orbNumericCellScan(input: {
+  nonEmpty: boolean;
+  hasLeadingDigitOrSign: boolean;
+  hasDigit: boolean;
+  allAllowedChars: boolean;
+}): boolean {
+  return kernel.orb_numeric_cell_scan(
+    b8(input.nonEmpty),
+    b8(input.hasLeadingDigitOrSign),
+    b8(input.hasDigit),
+    b8(input.allAllowedChars),
+  ) !== 0;
+}
+
+export function orbFileRefLineSpan(startLine: number, endLine: number, totalLines: number): {
+  valid: boolean;
+  count: number;
+} {
+  const raw = kernel.orb_file_ref_line_span(sat32(startLine), sat32(endLine), sat32(totalLines));
+  return {
+    valid: (raw & 1n) !== 0n,
+    count: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export function orbMachineActionAdmitted(stateKind: number, isBusy: boolean, isMuted: boolean): number {
+  return kernel.orb_machine_action_admitted(enum8(stateKind), b8(isBusy), b8(isMuted));
+}
+
+export function orbSendFlowStep(input: {
+  isBusy: boolean;
+  hasNonEmptyText: boolean;
+  canQueue: boolean;
+  awaitingAck: boolean;
+  isDraining: boolean;
+  pendingCount: number;
+  httpStatus: number;
+}): { tapAction: number; canDrain: boolean; editOutcome: number } {
+  const raw = kernel.orb_send_flow_step(
+    b8(input.isBusy),
+    b8(input.hasNonEmptyText),
+    b8(input.canQueue),
+    b8(input.awaitingAck),
+    b8(input.isDraining),
+    sat8(input.pendingCount),
+    sat32(input.httpStatus),
+  );
+  return {
+    tapAction: raw & 0xff,
+    canDrain: (raw & 256) !== 0,
+    editOutcome: (raw >>> 16) & 0xff,
+  };
+}
+
+export function orbUtf8Utf16WindowStep(
+  byteIdx: number,
+  byteLen: number,
+  leadByte: number,
+  utf16Units: number,
+  maxUtf16Units: number,
+): { admitted: boolean; seqBytes: number; utf16Cost: number; nextUtf16Units: number } {
+  const raw = kernel.orb_utf8_utf16_window_step(
+    sat32(byteIdx),
+    sat32(byteLen),
+    sat8(leadByte),
+    sat32(utf16Units),
+    sat32(maxUtf16Units),
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    admitted: (lo32 & 256) !== 0,
+    seqBytes: lo32 & 0xff,
+    utf16Cost: lo32 >>> 16,
+    nextUtf16Units: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+

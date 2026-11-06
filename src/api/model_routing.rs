@@ -432,10 +432,12 @@ async fn test_chain(
             )
             .await;
 
-        let mut entries = Vec::with_capacity(resolved.len());
-        for entry in &resolved {
-            entries.push(probe_entry(&state, &entry.provider_id, &entry.model_id).await);
-        }
+        let entries = futures::future::join_all(
+            resolved
+                .iter()
+                .map(|entry| probe_entry(&state, &entry.provider_id, &entry.model_id)),
+        )
+        .await;
         let live = entries.iter().filter(|e| e.ok).count();
         return Ok(Json(serde_json::json!({
             // `ok` keeps its meaning — the chain can serve a request — so a

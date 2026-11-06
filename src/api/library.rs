@@ -61,18 +61,24 @@ fn is_default_host_workspace(workspace: &workspace::Workspace) -> bool {
 }
 
 async fn sync_all_workspaces(state: &super::routes::AppState, library: &LibraryStore) {
+    use futures::stream::{self, StreamExt};
+
     let workspaces = state.workspaces.list().await;
-    for workspace in workspaces {
-        if is_default_host_workspace(&workspace) || !workspace.skills.is_empty() {
-            if let Err(e) = workspace::sync_workspace_skills(&workspace, library).await {
-                tracing::warn!(
-                    workspace = %workspace.name,
-                    error = %e,
-                    "Failed to sync skills after library update"
-                );
-            }
+    stream::iter(
+        workspaces.into_iter().filter(|workspace| {
+            is_default_host_workspace(workspace) || !workspace.skills.is_empty()
+        }),
+    )
+    .for_each_concurrent(8, |workspace| async move {
+        if let Err(e) = workspace::sync_workspace_skills(&workspace, library).await {
+            tracing::warn!(
+                workspace = %workspace.name,
+                error = %e,
+                "Failed to sync skills after library update"
+            );
         }
-    }
+    })
+    .await;
 }
 
 async fn sync_skill_to_workspaces(
@@ -80,20 +86,23 @@ async fn sync_skill_to_workspaces(
     library: &LibraryStore,
     skill_name: &str,
 ) {
+    use futures::stream::{self, StreamExt};
+
     let workspaces = state.workspaces.list().await;
-    for workspace in workspaces {
-        if is_default_host_workspace(&workspace) || workspace.skills.iter().any(|s| s == skill_name)
-        {
-            if let Err(e) = workspace::sync_workspace_skills(&workspace, library).await {
-                tracing::warn!(
-                    workspace = %workspace.name,
-                    skill = %skill_name,
-                    error = %e,
-                    "Failed to sync skill to workspace"
-                );
-            }
+    stream::iter(workspaces.into_iter().filter(|workspace| {
+        is_default_host_workspace(workspace) || workspace.skills.iter().any(|s| s == skill_name)
+    }))
+    .for_each_concurrent(8, |workspace| async move {
+        if let Err(e) = workspace::sync_workspace_skills(&workspace, library).await {
+            tracing::warn!(
+                workspace = %workspace.name,
+                skill = %skill_name,
+                error = %e,
+                "Failed to sync skill to workspace"
+            );
         }
-    }
+    })
+    .await;
 }
 
 fn same_remote(a: &str, b: &str) -> bool {

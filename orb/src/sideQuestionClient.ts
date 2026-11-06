@@ -35,9 +35,12 @@ export function doesTurnAnswerPending(
  return true;
 }
 export async function sideAttachments(images:DraftImage[], files:UploadedFile[]):Promise<SideAttachment[]> {
- const result:SideAttachment[]=images.map(image=>({name:image.name,data_base64:image.dataUrl.split(',')[1],media_type:image.type}));
- for(const file of files)result.push({name:file.source.name,data_base64:file.dataBase64??await encoded(file.source),media_type:file.source.file?.type||'application/octet-stream'});
- if(result.length>8)throw new Error('Attach up to 8 files or images to a side question.');
+ if(images.length+files.length>8)throw new Error('Attach up to 8 files or images to a side question.');
+ const encodedFiles=await Promise.all(files.map(async file=>({name:file.source.name,data_base64:file.dataBase64??await encoded(file.source),media_type:file.source.file?.type||'application/octet-stream'})));
+ const result:SideAttachment[]=[
+  ...images.map(image=>({name:image.name,data_base64:image.dataUrl.split(',')[1],media_type:image.type})),
+  ...encodedFiles,
+ ];
  if(result.reduce((n,f)=>n+f.data_base64.length,0)>24*1024*1024)throw new Error('Side question attachments must total at most 18 MiB.');
  return result;
 }

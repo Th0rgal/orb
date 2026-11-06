@@ -451,7 +451,8 @@ pub async fn run(state: &Arc<AppState>) -> ReconcileReport {
     let mut live_short_ids: HashSet<String> = HashSet::new();
 
     if !units.is_empty() {
-        let index_full = build_mission_index(state).await;
+        let (index_full, workspaces) =
+            tokio::join!(build_mission_index(state), state.workspaces.list());
         let index = &index_full.by_short;
 
         // Ownership: systemd units are host-global. Only act on scopes whose
@@ -459,78 +460,115 @@ pub async fn run(state: &Arc<AppState>) -> ReconcileReport {
         // dev instances share hosts.
         let mut workspace_ids_by_token: std::collections::HashMap<String, Uuid> =
             std::collections::HashMap::new();
-        for ws in state.workspaces.list().await {
+        for ws in workspaces {
             if let Some(token) = machine_name_for_path(&ws.path) {
                 workspace_ids_by_token.insert(token, ws.id);
             }
         }
 
-        for unit in &units {
-            let Some(parsed) = parse_scope_unit(unit) else {
-                continue;
-            };
-            report.scopes_scanned += 1;
-            let verdict = match &parsed {
-                ParsedScope::Exec {
-                    machine,
-                    mission_short,
-                } => {
-                    let owned_ws = machine
-                        .as_ref()
-                        .and_then(|m| workspace_ids_by_token.get(m))
-                        .copied();
-                    let Some(ws_id) = owned_ws else {
-                        // Not ours (other instance) or unparseable: keep.
-                        report.scopes_kept += 1;
-                        continue;
-                    };
-                    match mission_short {
-                        Some(short) => {
-                            let entry = index
-                                .get(short)
-                                .and_then(|entries| entry_for_workspace(entries, ws_id));
-                            let verdict =
-                                classify_exec_scope(entry.map(|e| &e.status), index_full.complete);
-                            if verdict == ScopeVerdict::Keep {
-                                live_short_ids.insert(short.clone());
+        enum ScopeAction {
+            Unparseable,
+            Keep(Option<String>),
+            Stopped,
+            StopFailed,
+        }
+        use futures::stream::{self, StreamExt};
+        let index_ref = &index;
+        let workspace_ids_ref = &workspace_ids_by_token;
+        let index_complete = index_full.complete;
+        let action_futs: Vec<_> = units
+            .iter()
+            .map(|unit| async move {
+                let Some(parsed) = parse_scope_unit(unit) else {
+                    return ScopeAction::Unparseable;
+                };
+                let (verdict, kept_short) = match &parsed {
+                    ParsedScope::Exec {
+                        machine,
+                        mission_short,
+                    } => {
+                        let owned_ws = machine
+                            .as_ref()
+                            .and_then(|m| workspace_ids_ref.get(m))
+                            .copied();
+                        let Some(ws_id) = owned_ws else {
+                            // Not ours (other instance) or unparseable: keep.
+                            return ScopeAction::Keep(None);
+                        };
+                        match mission_short {
+                            Some(short) => {
+                                let entry = index_ref
+                                    .get(short)
+                                    .and_then(|entries| entry_for_workspace(entries, ws_id));
+                                let verdict =
+                                    classify_exec_scope(entry.map(|e| &e.status), index_complete);
+                                let kept = if verdict == ScopeVerdict::Keep {
+                                    Some(short.clone())
+                                } else {
+                                    None
+                                };
+                                (verdict, kept)
                             }
-                            verdict
+                            // Legacy / task-tagged units: the periodic reaper owns
+                            // those (age-based policy); do not stop them here.
+                            None => (ScopeVerdict::Keep, None),
                         }
-                        // Legacy / task-tagged units: the periodic reaper owns
-                        // those (age-based policy); do not stop them here.
-                        None => ScopeVerdict::Keep,
                     }
-                }
-                ParsedScope::Durable { machine, job_id } => {
-                    if machine
-                        .as_ref()
-                        .map(|m| !workspace_ids_by_token.contains_key(m))
-                        .unwrap_or(true)
-                    {
-                        report.scopes_kept += 1;
-                        continue;
-                    }
-                    match job_id {
-                        Some(job_id) => {
-                            let status =
-                                super::durable_jobs::job_status_for_reconcile(state, *job_id).await;
-                            classify_durable_scope(status.as_ref())
+                    ParsedScope::Durable { machine, job_id } => {
+                        if machine
+                            .as_ref()
+                            .map(|m| !workspace_ids_ref.contains_key(m))
+                            .unwrap_or(true)
+                        {
+                            return ScopeAction::Keep(None);
                         }
-                        None => ScopeVerdict::Keep,
+                        let verdict = match job_id {
+                            Some(job_id) => {
+                                let status =
+                                    super::durable_jobs::job_status_for_reconcile(state, *job_id)
+                                        .await;
+                                classify_durable_scope(status.as_ref())
+                            }
+                            None => ScopeVerdict::Keep,
+                        };
+                        (verdict, None)
+                    }
+                };
+                match verdict {
+                    ScopeVerdict::Stop => {
+                        if stop_unit(unit, "reconcile: owner terminal or unknown").await {
+                            ScopeAction::Stopped
+                        } else {
+                            ScopeAction::StopFailed
+                        }
+                    }
+                    ScopeVerdict::Keep => ScopeAction::Keep(kept_short),
+                }
+            })
+            .collect();
+        let actions: Vec<ScopeAction> = stream::iter(action_futs).buffered(8).collect().await;
+
+        for action in actions {
+            match action {
+                ScopeAction::Unparseable => {}
+                ScopeAction::Keep(kept_short) => {
+                    report.scopes_kept += 1;
+                    if let Some(short) = kept_short {
+                        live_short_ids.insert(short);
                     }
                 }
-            };
-            match verdict {
-                ScopeVerdict::Stop => {
-                    if stop_unit(unit, "reconcile: owner terminal or unknown").await {
-                        report.scopes_stopped += 1;
-                    } else {
-                        report.errors += 1;
-                    }
+                ScopeAction::Stopped => {
+                    report.scopes_scanned += 1;
+                    report.scopes_stopped += 1;
                 }
-                ScopeVerdict::Keep => report.scopes_kept += 1,
+                ScopeAction::StopFailed => {
+                    report.scopes_scanned += 1;
+                    report.errors += 1;
+                }
             }
         }
+        // Account for Keep actions in scopes_scanned to match original semantics.
+        report.scopes_scanned += report.scopes_kept;
     }
 
     // ---- Phase 2: missions ----
@@ -689,12 +727,12 @@ pub async fn run(state: &Arc<AppState>) -> ReconcileReport {
             {
                 continue;
             }
-            let active_run = matches!(store.get_active_mission_run(mission.id).await, Ok(Some(_)));
-            let latest = store
-                .get_latest_mission_run(mission.id)
-                .await
-                .ok()
-                .flatten();
+            let (active_run_res, latest_res) = tokio::join!(
+                store.get_active_mission_run(mission.id),
+                store.get_latest_mission_run(mission.id),
+            );
+            let active_run = matches!(active_run_res, Ok(Some(_)));
+            let latest = latest_res.ok().flatten();
             let ended_long_ago = latest
                 .as_ref()
                 .and_then(|run| run.ended_at.as_deref())
@@ -749,17 +787,12 @@ pub async fn run(state: &Arc<AppState>) -> ReconcileReport {
             .filter(|m| m.status == MissionStatus::AwaitingUser && !m.backend.starts_with("cloud_"))
         {
             report.missions_scanned += 1;
-            let has_events = store
-                .max_event_sequence(mission.id)
-                .await
-                .map(|seq| seq > 0)
-                .unwrap_or(true); // unreadable event log: fail closed, keep
-            let has_durable_run = store
-                .get_active_mission_run(mission.id)
-                .await
-                .ok()
-                .flatten()
-                .is_some();
+            let (max_seq_res, active_run_res) = tokio::join!(
+                store.max_event_sequence(mission.id),
+                store.get_active_mission_run(mission.id),
+            );
+            let has_events = max_seq_res.map(|seq| seq > 0).unwrap_or(true); // unreadable event log: fail closed, keep
+            let has_durable_run = active_run_res.ok().flatten().is_some();
             let facts = MissionFacts {
                 is_client_placed: super::control::client_placement::is_tagged(
                     &mission.project.tags,

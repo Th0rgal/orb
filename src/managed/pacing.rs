@@ -32,22 +32,22 @@ struct TokenSample {
 
 #[derive(Debug)]
 struct PoolPacerEntry {
-    /// Outstanding token debt above the instantaneous allowance. Drains
-    /// continuously at `tokens_per_min / 60_000` tokens/ms.
-    debt_tokens: f64,
+    /// Outstanding token*ms debt (`tokens * 60_000`) above instantaneous
+    /// allowance, maintained via `orb_pool_pacer_step` without `f64` drift.
+    debt_token_ms: u64,
     last_updated: Instant,
     /// Rolling recent token samples (`<= RATE_WINDOW`) for live UI telemetry.
     samples: VecDeque<TokenSample>,
     /// Concurrent requests currently awaiting a pacing delay in this pool.
     active_waiters: usize,
-    /// Last computed delay (ms) when `debt_tokens > 0`, decayed as debt drains.
+    /// Last computed delay (ms) when `debt_token_ms > 0`, decayed as debt drains.
     last_delay_ms: u64,
 }
 
 impl PoolPacerEntry {
     fn new(now: Instant) -> Self {
         Self {
-            debt_tokens: 0.0,
+            debt_token_ms: 0,
             last_updated: now,
             samples: VecDeque::new(),
             active_waiters: 0,
@@ -55,23 +55,7 @@ impl PoolPacerEntry {
         }
     }
 
-    fn advance(&mut self, now: Instant, rate_tokens_per_min: Option<u64>) {
-        let elapsed_secs = now
-            .saturating_duration_since(self.last_updated)
-            .as_secs_f64();
-        self.last_updated = now;
-        if let Some(tpm) = rate_tokens_per_min.filter(|&r| r > 0) {
-            let drained = elapsed_secs * (tpm as f64 / 60.0);
-            self.debt_tokens = (self.debt_tokens - drained).max(0.0);
-            // Cap accumulated debt to 2 minutes of budget so an isolated huge
-            // context turn never stalls subsequent turns indefinitely.
-            let max_debt = (tpm as f64) * 2.0;
-            if self.debt_tokens > max_debt {
-                self.debt_tokens = max_debt;
-            }
-        } else {
-            self.debt_tokens = 0.0;
-        }
+    fn prune_samples(&mut self, now: Instant) {
         while let Some(front) = self.samples.front() {
             if now.saturating_duration_since(front.at) > RATE_WINDOW {
                 self.samples.pop_front();
@@ -81,16 +65,43 @@ impl PoolPacerEntry {
         }
     }
 
+    fn advance_and_add(
+        &mut self,
+        now: Instant,
+        rate_tokens_per_min: Option<u64>,
+        added_tokens: u64,
+    ) {
+        let elapsed_ms = now
+            .saturating_duration_since(self.last_updated)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        self.last_updated = now;
+        let tpm = rate_tokens_per_min.unwrap_or(0);
+        self.debt_token_ms = crate::orb_spec::pool_pacer_next_debt_token_ms(
+            self.debt_token_ms,
+            elapsed_ms,
+            tpm,
+            added_tokens,
+            MAX_INFERENCE_PACE_DELAY_MS,
+        );
+        self.prune_samples(now);
+    }
+
+    fn advance(&mut self, now: Instant, rate_tokens_per_min: Option<u64>) {
+        self.advance_and_add(now, rate_tokens_per_min, 0);
+    }
+
     fn delay_ms(&self, rate_tokens_per_min: u64) -> u64 {
-        if rate_tokens_per_min == 0 || self.debt_tokens <= 0.0 {
+        if rate_tokens_per_min == 0 || self.debt_token_ms == 0 {
             return 0;
         }
-        let tokens_per_ms = (rate_tokens_per_min as f64) / 60_000.0;
-        if tokens_per_ms <= 0.0 {
-            return 0;
-        }
-        let raw_ms = (self.debt_tokens / tokens_per_ms).ceil() as u64;
-        raw_ms.min(MAX_INFERENCE_PACE_DELAY_MS)
+        crate::orb_spec::pool_pacer_delay_ms(
+            self.debt_token_ms,
+            0,
+            rate_tokens_per_min,
+            0,
+            MAX_INFERENCE_PACE_DELAY_MS,
+        )
     }
 
     fn observed_tokens_per_min(&self, now: Instant) -> u64 {
@@ -156,7 +167,7 @@ pub async fn wait_or_notified(duration: Duration) {
 pub fn clear_pool_debt(pool_id: &str) {
     if let Ok(mut map) = hub().pools.lock() {
         if let Some(entry) = map.get_mut(pool_id) {
-            entry.debt_tokens = 0.0;
+            entry.debt_token_ms = 0;
             entry.last_delay_ms = 0;
         }
     }
@@ -240,21 +251,16 @@ fn record_pool_tokens_at(pool_rates: &[(String, Option<u64>)], tokens: u64, now:
         let entry = map
             .entry(pool_id.clone())
             .or_insert_with(|| PoolPacerEntry::new(now));
-        entry.advance(now, *rate_opt);
+        entry.advance_and_add(now, *rate_opt, tokens);
         entry.samples.push_back(TokenSample { at: now, tokens });
         if let Some(tpm) = rate_opt.filter(|&r| r > 0) {
-            entry.debt_tokens += tokens as f64;
-            let max_debt = (tpm as f64) * 2.0;
-            if entry.debt_tokens > max_debt {
-                entry.debt_tokens = max_debt;
-            }
             entry.last_delay_ms = entry.delay_ms(tpm);
         }
     }
     if map.len() > 256 {
         map.retain(|_, e| {
             e.active_waiters > 0
-                || e.debt_tokens > 0.0
+                || e.debt_token_ms > 0
                 || now.saturating_duration_since(e.last_updated) < Duration::from_secs(600)
         });
     }

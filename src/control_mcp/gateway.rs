@@ -2790,15 +2790,14 @@ pub async fn revoke_external_session(
             "External MCP session not found".into(),
         ));
     }
-    let reaped_privileges = crate::api::privilege_broker::store(&state)
-        .reap_session_grants(id, "external_session_revoked")
-        .await;
-    let revoked_secrets = crate::api::secret_broker::broker(&state)
-        .revoke_session_grants(id)
-        .await;
-    let revoked_mission_access = crate::api::mission_access::store(&state)
-        .revoke_session_grants(&user.id, id)
-        .await;
+    let privilege_store = crate::api::privilege_broker::store(&state);
+    let secret_broker = crate::api::secret_broker::broker(&state);
+    let mission_access_store = crate::api::mission_access::store(&state);
+    let (reaped_privileges, revoked_secrets, revoked_mission_access) = tokio::join!(
+        privilege_store.reap_session_grants(id, "external_session_revoked"),
+        secret_broker.revoke_session_grants(id),
+        mission_access_store.revoke_session_grants(&user.id, id),
+    );
     Ok(Json(json!({
         "revoked": true,
         "session_id": id,

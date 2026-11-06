@@ -1397,12 +1397,30 @@ pub(crate) async fn check_mission_oom_kills(
             .push(mission.id);
     }
 
-    for (workspace_id, mission_ids) in &missions_by_workspace {
-        let Some(workspace) = workspaces.get(*workspace_id).await else {
+    use futures::stream::{self, StreamExt};
+    let workspace_entries: Vec<(Uuid, Vec<Uuid>)> = missions_by_workspace.into_iter().collect();
+    type WorkspaceProbeResult = (
+        Vec<Uuid>,
+        Option<(workspace::Workspace, Result<Vec<String>, String>)>,
+    );
+    let workspace_probes: Vec<WorkspaceProbeResult> = stream::iter(workspace_entries)
+        .map(|(workspace_id, mission_ids)| async move {
+            let Some(workspace) = workspaces.get(workspace_id).await else {
+                return (mission_ids, None);
+            };
+            let units_res = crate::api::workspaces::list_workspace_scope_units(&workspace).await;
+            (mission_ids, Some((workspace, units_res)))
+        })
+        .buffered(8)
+        .collect()
+        .await;
+
+    for (mission_ids, probe) in workspace_probes {
+        let Some((workspace, units_res)) = probe else {
             enumeration_complete = false;
             continue;
         };
-        let units = match crate::api::workspaces::list_workspace_scope_units(&workspace).await {
+        let units = match units_res {
             Ok(units) => units,
             Err(e) => {
                 tracing::warn!(
@@ -1414,12 +1432,20 @@ pub(crate) async fn check_mission_oom_kills(
                 continue;
             }
         };
-        for unit in units {
+        let unit_counts: Vec<(String, Option<u64>)> = stream::iter(units)
+            .map(|unit| async move {
+                let count = read_scope_oom_kills(&unit).await;
+                (unit, count)
+            })
+            .buffered(8)
+            .collect()
+            .await;
+        for (unit, count_opt) in unit_counts {
             // The unit was listed, so it's alive: record it now so a transient
             // `memory.events` read failure below doesn't drop its baseline and
             // cause the cumulative oom_kill total to be re-reported as new.
             live_units.insert(unit.clone());
-            let Some(count) = read_scope_oom_kills(&unit).await else {
+            let Some(count) = count_opt else {
                 continue;
             };
             // Treat a never-seen scope as a baseline of 0 so the first kernel
@@ -1436,7 +1462,7 @@ pub(crate) async fn check_mission_oom_kills(
                     workspace.name,
                     mission_ids.len()
                 );
-                for mission_id in mission_ids {
+                for mission_id in &mission_ids {
                     let _ = events_tx.send(AgentEvent::MissionActivity {
                         label: format!(
                             "⚠ Memory limit hit: kernel OOM-killed {killed} process(es) in this \

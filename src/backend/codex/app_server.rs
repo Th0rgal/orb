@@ -35,6 +35,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -254,7 +255,7 @@ pub struct RpcError {
 /// A live connection to a `codex app-server` process.
 pub struct AppServerSession {
     closed: tokio_util::sync::CancellationToken,
-    next_id: Arc<Mutex<i64>>,
+    next_id: AtomicI64,
     pending: PendingMap,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     /// Receives every inbound notification or server-request.
@@ -484,7 +485,7 @@ impl AppServerSession {
 
         Ok(Self {
             closed,
-            next_id: Arc::new(Mutex::new(1)),
+            next_id: AtomicI64::new(1),
             pending,
             stdin: Arc::new(Mutex::new(Some(stdin))),
             inbound_rx: Mutex::new(Some(inbound_rx)),
@@ -508,12 +509,7 @@ impl AppServerSession {
         method: &str,
         params: P,
     ) -> Result<R> {
-        let id = {
-            let mut id_lock = self.next_id.lock().await;
-            let id = *id_lock;
-            *id_lock += 1;
-            id
-        };
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         let envelope = json!({
             "jsonrpc": "2.0",

@@ -1,35 +1,23 @@
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-mission-moves)
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:433:5
-    |
-432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
-    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
-433 | /     {
-434 | |         let conn = state
-435 | |             .projects
-436 | |             .connection
-...   |
-439 | |         require_no_accepted_actions(&conn)?;
-440 | |     }
-    | |_____^ unreachable statement
-    |
-    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+   Compiling sandboxed_sh v1.3.0 (/var/lib/sandboxed-node/work/9c44a457-5ffd-4ea6-bde4-12b97183bd0f/orb)
+warning: function `populate_activity` is never used
+    --> src/api/control/mission_list.rs:1177:21
+     |
+1177 | pub(super) async fn populate_activity(control: &ControlState, missions...
+     |                     ^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
-warning: unreachable statement
-   --> src/api/control/workspace_purge.rs:627:5
-    |
-626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
-    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
-627 |     receipt.phase = Phase::Purged;
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+warning: function `merge_text_stream_fragment` is never used
+  --> src/api/control/streaming.rs:87:15
+   |
+87 | pub(super) fn merge_text_stream_fragment(buffer: &mut String, fragment: ...
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-warning: unused variable: `source`
-   --> src/api/control/workspace_purge.rs:405:5
+warning: function `apply_text_ops` is never used
+   --> src/api/mission_store/sqlite/events.rs:125:15
     |
-405 |     source: &FsPath,
-    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+125 | pub(super) fn apply_text_ops(buffer: &mut String, ops: &[TextOp]) {
+    |               ^^^^^^^^^^^^^^
 
 warning: field `billable_tokens` is never read
   --> src/api/mission_store/sqlite_resources.rs:47:9
@@ -41,7 +29,6 @@ warning: field `billable_tokens` is never read
    |         ^^^^^^^^^^^^^^^
    |
    = note: `UsageRollupRow` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: field `node_id` is never read
   --> src/api/mission_store/sqlite_resources.rs:56:9
@@ -163,15 +150,18 @@ warning: field `run_intervals` is never read
     |
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
-warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:2245:10
-     |
-2245 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
-     |          ^^^^^^^^^^^^^^^^
+warning: method `note_activity` is never used
+  --> src/api/proxy_liveness.rs:60:12
+   |
+50 | impl MissionProxyLiveness {
+   | ------------------------- method in this implementation
+...
+60 |     pub fn note_activity(&self) {
+   |            ^^^^^^^^^^^^^
 
-warning: `sandboxed_sh` (lib test) generated 13 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 37.32s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-837e61f0670757b6)
+warning: `sandboxed_sh` (lib test) generated 13 warnings
+    Finished `test` profile [unoptimized] target(s) in 39.15s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-a214cb14eeb438e4)
 
 running 14 tests
 test api::control::fork::tests::an_edited_message_replaces_the_rest_of_the_conversation ... ok
@@ -189,5 +179,5 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3715 filtered out; finished in 0.12s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3769 filtered out; finished in 0.41s
 

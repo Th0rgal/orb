@@ -62,7 +62,7 @@ const SearchDialog = lazy(() => import("./SearchDialog"));
 const Settings=lazy(()=>import("./Settings").then(module=>({default:module.Settings})));
 const LocalAgentsSettings=lazy(()=>import("./Settings").then(module=>({default:module.LocalAgentsSettings})));
 const SecuritySettings=lazy(()=>import("./SettingsShell").then(module=>({default:module.SecuritySettings})));
-import { SettingsShell } from "./SettingsShell";
+const SettingsShell=lazy(()=>import("./SettingsShell").then(module=>({default:module.SettingsShell})));
 import { SETTINGS_PAGE_IDS, SETTINGS_SECTIONS, settingsAttention, settingsPageId, settingsSectionFor, skillPageName } from "./settingsNav";
 const SkillPage = lazy(() => import("./SkillPage").then(module => ({ default: module.SkillPage })));
 import { quotaStatus, usageWindows } from "./providerUsage";
@@ -673,14 +673,18 @@ export default function App() {
   const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[], launchNavigation: number, remote?: { key: string; cwd?: string | null }) => {
     const selectedCyber = remote ? "standard" : draftCyber();
     if (!projectSlug) throw new Error("Choose a project before starting on this computer. Your draft is kept.");
-    if (pick.backend === "codex") await requireSpeedSupport(pick.model,pick.service_tier??"standard",undefined,true);
-    const row = await localAgentForLaunch(pick.backend);
+    const [, row, plan] = await Promise.all([
+      pick.backend === "codex" ? requireSpeedSupport(pick.model,pick.service_tier??"standard",undefined,true) : Promise.resolve(),
+      localAgentForLaunch(pick.backend),
+      materializeMentions(projectSlug, prompt, remote ? [] : attachChips()),
+    ]);
     if (!row?.path) throw new Error("That CLI is not installed on this computer. Set its path in Settings → Agents → Local agents. Your draft is kept.");
-    const plan = await materializeMentions(projectSlug, prompt, remote ? [] : attachChips());
     const chosenDirectory = remote ? (remote.cwd ?? "") : workingDirectory();
     const root = chosenDirectory.trim() ? await localDirectory(chosenDirectory) : await localWorkspace(projectSlug);
-    if (plan.files.length) await writeLocalFiles(root, plan.files);
-    const imagePaths = await stageLocalImages(root, images);
+    const [, imagePaths] = await Promise.all([
+      plan.files.length ? writeLocalFiles(root, plan.files) : Promise.resolve(),
+      stageLocalImages(root, images),
+    ]);
     const sent = imagePrompt(bindWorkspace(plan.prompt, root), imagePaths, images);
     const effort = normalizeEffort(pick.effort, pick.backend);
     const folder = newFolderPath(projectSlug);
@@ -777,7 +781,7 @@ export default function App() {
         }
         // `effectivePick` already dropped an effort this harness can't take, so
         // an omitted field means "backend default" rather than a stale level.
-        if(pick.backend === "codex") { await requireCyberSupport({model:pick.model,mode:selectedCyber,remote:machine !== "core"}); await requireSpeedSupport(pick.model,pick.service_tier??"standard"); }
+        if(pick.backend === "codex") { await Promise.all([requireCyberSupport({model:pick.model,mode:selectedCyber,remote:machine !== "core"}), requireSpeedSupport(pick.model,pick.service_tier??"standard")]); }
         const effort = normalizeEffort(pick.effort, pick.backend);
         const attachments = attachChips().map(chipToAttachment);
         const sentPrompt = imagePrompt(prompt, await stageRemoteImages(images, undefined, machine), images);
@@ -1570,24 +1574,26 @@ export default function App() {
             {(sk) => <Show when={sk().name} keyed>{(name) => <SkillPage name={name} initialView={sk().history ? "history" : "edit"} onBack={() => open("skills-settings")} onOpenPage={open} />}</Show>}
           </Match>
           <Match when={settingsSectionFor(selected())}>
-            <SettingsShell page={selected()!} onOpen={open}>
-              <Switch>
-                <Match when={selected() === "settings"}><Settings onOpenPage={open} /></Match>
-                <Match when={selected() === "usage-telemetry"}><UsageTelemetrySettings /></Match>
-                <Match when={selected() === "routing" || selected() === "routing-providers" || selected() === "routing-keys"}>
-                  <RoutingSettings onOpenClient={() => open("settings")} tab={selected() === "routing-providers" ? "health" : selected() === "routing-keys" ? "keys" : "chains"} />
-                </Match>
-                <Match when={selected() === "usage-settings"}><UsageSettings /></Match>
-                <Match when={selected() === "skills-settings"}><SkillsSettings onOpenPage={open} /></Match>
-                <Match when={selected() === "hermes-settings"}><HermesSettings /></Match>
-                <Match when={selected() === "btw-settings"}><BtwSettings/></Match>
-                <Match when={selected() === "inbox-summaries"}><InboxSummariesSettings /></Match>
-                <Match when={selected() === "local-agents"}><LocalAgentsSettings /></Match>
-                <Match when={selected() === "security-settings"}><SecuritySettings /></Match>
-                <Match when={selected() === "bitwarden-settings"}><BitwardenSettings /></Match>
-                <Match when={selected() === "inbox-settings"}><InboxSettings onOpenPage={open} /></Match>
-              </Switch>
-            </SettingsShell>
+            <Suspense>
+              <SettingsShell page={selected()!} onOpen={open}>
+                <Switch>
+                  <Match when={selected() === "settings"}><Settings onOpenPage={open} /></Match>
+                  <Match when={selected() === "usage-telemetry"}><UsageTelemetrySettings /></Match>
+                  <Match when={selected() === "routing" || selected() === "routing-providers" || selected() === "routing-keys"}>
+                    <RoutingSettings onOpenClient={() => open("settings")} tab={selected() === "routing-providers" ? "health" : selected() === "routing-keys" ? "keys" : "chains"} />
+                  </Match>
+                  <Match when={selected() === "usage-settings"}><UsageSettings /></Match>
+                  <Match when={selected() === "skills-settings"}><SkillsSettings onOpenPage={open} /></Match>
+                  <Match when={selected() === "hermes-settings"}><HermesSettings /></Match>
+                  <Match when={selected() === "btw-settings"}><BtwSettings/></Match>
+                  <Match when={selected() === "inbox-summaries"}><InboxSummariesSettings /></Match>
+                  <Match when={selected() === "local-agents"}><LocalAgentsSettings /></Match>
+                  <Match when={selected() === "security-settings"}><SecuritySettings /></Match>
+                  <Match when={selected() === "bitwarden-settings"}><BitwardenSettings /></Match>
+                  <Match when={selected() === "inbox-settings"}><InboxSettings onOpenPage={open} /></Match>
+                </Switch>
+              </SettingsShell>
+            </Suspense>
           </Match>
           <Match when={selected() === "machines"}>
             <Machines />

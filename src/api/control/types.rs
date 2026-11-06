@@ -288,10 +288,10 @@ pub(super) async fn validate_rich_tags(
     // Only allow files that resolve within the mission working directory. This keeps the
     // "shared files" surface area consistent with what the agent produced in its workspace,
     // and avoids emitting links that would be rejected by the download endpoint anyway.
-    let canonical_working_dir = working_dir.canonicalize().ok();
+    let canonical_working_dir = tokio::fs::canonicalize(working_dir).await.ok();
+    let canon_root_ref = canonical_working_dir.as_deref();
 
-    let mut files = Vec::new();
-    for tag in tags {
+    let resolved_files = futures::future::join_all(tags.iter().map(|tag| async move {
         // Resolve the path relative to working_dir
         let p = std::path::Path::new(&tag.path);
         let resolved = if p.is_absolute() {
@@ -300,20 +300,17 @@ pub(super) async fn validate_rich_tags(
             working_dir.join(&tag.path)
         };
 
-        // Check existence and metadata
-        let meta = match tokio::fs::metadata(&resolved).await {
-            Ok(m) => m,
-            Err(_) => continue, // skip non-existent files
-        };
+        // Check existence, metadata, and canonical path concurrently
+        let (meta_res, canon_res) = tokio::join!(
+            tokio::fs::metadata(&resolved),
+            tokio::fs::canonicalize(&resolved),
+        );
+        let meta = meta_res.ok()?; // skip non-existent files
+        let canon_resolved = canon_res.ok()?;
 
-        let canon_resolved = match resolved.canonicalize() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-
-        if let Some(work_root) = canonical_working_dir.as_ref() {
+        if let Some(work_root) = canon_root_ref {
             if !canon_resolved.starts_with(work_root) {
-                continue;
+                return None;
             }
         }
 
@@ -346,9 +343,11 @@ pub(super) async fn validate_rich_tags(
             url.push_str(&format!("&mission_id={}", mid));
         }
 
-        files.push(SharedFile::new(display_name, url, content_type, size));
-    }
-    files
+        Some(SharedFile::new(display_name, url, content_type, size))
+    }))
+    .await;
+
+    resolved_files.into_iter().flatten().collect()
 }
 
 /// Request to set mission status.

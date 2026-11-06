@@ -662,12 +662,10 @@ async fn bounded_side_history_events(
     id: Uuid,
 ) -> Result<Vec<crate::api::mission_store::StoredEvent>, String> {
     let types = ["user_message", "assistant_message"];
-    let head = store
-        .get_events_since(id, 0, Some(&types), Some(BTW_LEGACY_HEAD_MESSAGES))
-        .await?;
-    let tail = store
-        .get_events_before(id, i64::MAX, Some(&types), Some(BTW_LEGACY_TAIL_MESSAGES))
-        .await?;
+    let (head, tail) = tokio::try_join!(
+        store.get_events_since(id, 0, Some(&types), Some(BTW_LEGACY_HEAD_MESSAGES)),
+        store.get_events_before(id, i64::MAX, Some(&types), Some(BTW_LEGACY_TAIL_MESSAGES)),
+    )?;
     if !head.is_empty() || !tail.is_empty() {
         let mut merged = std::collections::BTreeMap::new();
         for ev in head.into_iter().chain(tail) {

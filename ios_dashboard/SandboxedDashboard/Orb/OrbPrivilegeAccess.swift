@@ -93,13 +93,16 @@ final class OrbPrivilegeAccessMonitor {
     func refresh() async -> Bool {
         let current = OrbCore.shared.endpoint
         if current != endpoint { requests = []; commands = []; incidents = []; meshStatus = nil; announced = []; announcedBunkerLevel = 0; endpoint = current }
-        guard let snap = await Log.attempt(.network, "privilege access", { try await OrbCore.shared.call("/api/privilege-access") }) else { return false }
+        async let snapTask = Log.attempt(.network, "privilege access", { try await OrbCore.shared.call("/api/privilege-access") })
+        async let meshTask = Log.attempt(.network, "mesh status", { try await OrbCore.shared.call("/api/mesh/status") })
+        let (snap, mesh) = await (snapTask, meshTask)
+        guard let snap else { return false }
         guard current == OrbCore.shared.endpoint else { return true }
         requests = snap["requests"].items
         commands = snap["command_audit"].items
         incidents = snap["bunker_incidents"].items
         let snapBunker = Int(snap["bunker_state"].doubleValue ?? 0)
-        meshStatus = await Log.attempt(.network, "mesh status", { try await OrbCore.shared.call("/api/mesh/status") })
+        meshStatus = mesh
         let meshBunker = Int(meshStatus?["bunker_state"].doubleValue ?? 0)
         bunkerState = max(snapBunker, meshBunker)
         if bunkerState <= 0 { bunkerDismissedForLevel = 0 }

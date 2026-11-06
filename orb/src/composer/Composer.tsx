@@ -148,9 +148,11 @@ export function Composer(p: {
     try {
       const largeQueue: Array<{ source: UploadSource; size: number; destination: string }> = [];
       const ready: UploadSource[] = [];
-      for (const source of sources) {
-        if (disposed || scope !== p.scope || destination !== attachmentTarget()) return;
-        const stat = await statUploadSource(source);
+      if (disposed || scope !== p.scope || destination !== attachmentTarget()) return;
+      const stats = await Promise.all(sources.map(statUploadSource));
+      if (disposed || scope !== p.scope || destination !== attachmentTarget()) return;
+      for (let i = 0; i < sources.length; i++) {
+        const source = sources[i], stat = stats[i];
         if (stat.size > HARD_MAX_BYTES) {
           throw new Error(`${source.name} (${formatFileSize(stat.size)}) exceeds the 2 GiB maximum.`);
         }
@@ -194,8 +196,9 @@ export function Composer(p: {
       if (path) { insertFolder(root, path, sources.length, 0, sources.map(source => source.relativePath ?? source.name), destination); return; }
     }
     try {
-      const files: Array<{ source: UploadSource; size: number }> = [];
-      for (const source of sources) files.push({ source, size: source.size ?? (await statUploadSource(source)).size });
+      const files: Array<{ source: UploadSource; size: number }> = await Promise.all(
+        sources.map(async source => ({ source, size: source.size ?? (await statUploadSource(source)).size })),
+      );
       const bytes = files.reduce((sum, file) => sum + file.size, 0);
       if (bytes > BATCH_MAX_BYTES) { setUploadError(`${root} is ${formatFileSize(bytes)}; folders can be up to ${formatFileSize(BATCH_MAX_BYTES)}.`); return; }
       const request = { root, files, skipped, destination };

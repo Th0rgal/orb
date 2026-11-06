@@ -673,6 +673,121 @@ object OrbKernel {
         hasPlacement: Int
     ): Long
 
+    @JvmStatic
+    external fun orbProxySseScanStep(
+        lineKind: Int,
+        hasDoneToken: Int,
+        inThinkTag: Int,
+        nextStartsThink: Int,
+        nextEndsThink: Int,
+        hasNonEmptyContent: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbStreamRepetitionStep(
+        cancelledOrExpired: Int,
+        collisionDetected: Int,
+        startPos: Int,
+        prevEnd: Int,
+        candidateLen: Int,
+        prevCount: Int,
+        requiredRepeats: Int,
+        comparisons: Long,
+        comparisonBudget: Long
+    ): Long
+
+    @JvmStatic
+    external fun orbHttpRateLimitClassifyStep(
+        httpStatus: Int,
+        hasQuotaBodyHint: Int,
+        hasAuthFailureHint: Int,
+        retryAfterSecs: Long,
+        maxCooldownSecs: Long
+    ): Long
+
+    @JvmStatic
+    external fun orbFleetPlaceArgminStep(
+        aQueued: Int,
+        aSpec: Int,
+        aSoftDisk: Int,
+        bQueued: Int,
+        bSpec: Int,
+        bSoftDisk: Int,
+        idLexLt: Int,
+        aLoad: Int,
+        aCap: Int,
+        aDiskGib: Int,
+        bLoad: Int,
+        bCap: Int,
+        bDiskGib: Int,
+        aMemAvail: Long,
+        bMemAvail: Long
+    ): Byte
+
+    @JvmStatic
+    external fun orbPoolPacerStep(
+        mode: Int,
+        prevDebtTokenMs: Long,
+        elapsedMs: Long,
+        rateTokensPerMin: Long,
+        addedTokens: Long,
+        maxDelayMs: Long
+    ): Long
+
+    @JvmStatic
+    external fun orbConfinementScanStep(
+        hasNullByte: Int,
+        hasDotDotSegment: Int,
+        escapesRoot: Int,
+        hasUnsafeEnvKey: Int,
+        touchesSensitivePath: Int,
+        isSymlinkEscape: Int,
+        pathLen: Int,
+        maxPathLen: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbJobIdentityEq256Step(
+        a0: Long,
+        a1: Long,
+        a2: Long,
+        a3: Long,
+        b0: Long,
+        b1: Long,
+        b2: Long,
+        b3: Long,
+        hasActiveMatch: Int,
+        hasTerminalReceipt: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbValidationDagStep(
+        totalDeps: Int,
+        passedDeps: Int,
+        failedDeps: Int,
+        alreadyClaimed: Int,
+        alreadyPassed: Int,
+        candidateExactMatch: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbFts5LexerStep(
+        state: Int,
+        charClass: Int,
+        tokenLen: Int,
+        maxTokens: Int,
+        emittedTokens: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbUtf8Utf16WindowStep(
+        byteIdx: Int,
+        byteLen: Int,
+        leadByte: Int,
+        utf16Units: Int,
+        maxUtf16Units: Int
+    ): Long
+
     data class WorkfoldVerdict(val foldItem: Boolean, val foldHasToolNext: Boolean)
 
     private fun bInt(v: Boolean): Int = if (v) 1 else 0

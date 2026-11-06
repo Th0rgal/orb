@@ -8379,4 +8379,517 @@ theorem placement_merge_fences_stale_polls_and_advances_monotonically
       Bool.true_and, Bool.false_or]
     decide
 
+-- Wave 12: LeanNative Option B+ Hot-Path Scanners, Pacer & Confinement Specs
+
+theorem mask_lo32_sub (w m : UInt64) (hm : m &&& 0xFFFFFFFF = m) :
+    (w &&& m) = ((w &&& 0xFFFFFFFF) &&& m) := by
+  apply UInt64.toBitVec_inj.mp
+  have hmbv : m.toBitVec &&& (0xFFFFFFFF : UInt64).toBitVec = m.toBitVec := by
+    simpa [UInt64.toBitVec_and] using congrArg UInt64.toBitVec hm
+  apply BitVec.eq_of_getLsbD_eq
+  intro i _
+  have hmi :
+      (m.toBitVec.getLsbD i && (0xFFFFFFFF : UInt64).toBitVec.getLsbD i) =
+        m.toBitVec.getLsbD i := by
+    have hc := congrArg (fun b => b.getLsbD i) hmbv
+    rw [BitVec.getLsbD_and] at hc
+    exact hc
+  simp only [UInt64.toBitVec_and, BitVec.getLsbD_and]
+  rw [Bool.and_assoc, Bool.and_comm ((0xFFFFFFFF : UInt64).toBitVec.getLsbD i), hmi]
+
+theorem uint64_xor_self (x : UInt64) : (x ^^^ x) = 0 := by
+  apply UInt64.toBitVec_inj.mp
+  apply BitVec.eq_of_getLsbD_eq
+  intro i _
+  have hz : (UInt64.toBitVec 0).getLsbD i = false := by simp
+  rw [hz]
+  simp only [UInt64.toBitVec_xor, BitVec.getLsbD_xor]
+  cases x.toBitVec.getLsbD i <;> rfl
+
+theorem shift32_and_256_zero (u : UInt32) :
+    ((u.toUInt64 <<< 32) &&& 256) = 0 := by
+  have h0 :
+      (u.toUInt64 <<< 32) = ((0 : UInt32).toUInt64 ||| (u.toUInt64 <<< 32)) := by
+    apply UInt64.toBitVec_inj.mp
+    apply BitVec.eq_of_getLsbD_eq
+    intro i _
+    simp [UInt64.toBitVec_or]
+  rw [h0, mask_lo32_sub _ 256 (by decide), pack32_lo 0 u]
+  decide
+
+structure ProxySseScanCheck where
+  lineKind           : UInt8
+  hasDoneToken       : UInt8
+  inThinkTag         : UInt8
+  nextStartsThink    : UInt8
+  nextEndsThink      : UInt8
+  hasNonEmptyContent : UInt8
+  deriving Repr, DecidableEq
+
+def ProxySseScanCheck.EmitsDelta (s : ProxySseScanCheck) : Bool :=
+  s.lineKind == 2 && !(s.hasDoneToken == 1) && s.hasNonEmptyContent == 1
+
+theorem proxySseScanStep_emit_eq (s : ProxySseScanCheck) :
+    ((proxySseScanStep s.lineKind s.hasDoneToken s.inThinkTag
+        s.nextStartsThink s.nextEndsThink s.hasNonEmptyContent &&& 256) != 0) =
+      s.EmitsDelta := by
+  unfold proxySseScanStep ProxySseScanCheck.EmitsDelta
+  by_cases h0 : s.lineKind == 0
+  · have h2 : (s.lineKind == 2) = false := by
+      have hk : s.lineKind = 0 := eq_of_beq h0
+      rw [hk]
+      decide
+    simp only [h0, h2, ite_true, Bool.false_and]
+    cases s.inThinkTag == 1 <;> decide
+  · simp only [h0, Bool.false_eq_true, ite_false]
+    by_cases h2 : s.lineKind == 2
+    · simp only [h2, Bool.not_true, Bool.false_eq_true, ite_false, Bool.true_and]
+      by_cases hd : s.hasDoneToken == 1
+      · simp only [hd, Bool.not_true, Bool.false_and, ite_true]
+        cases s.inThinkTag == 1 <;> decide
+      · simp only [hd, Bool.not_false, Bool.true_and, Bool.false_eq_true, ite_false]
+        cases hc : s.hasNonEmptyContent == 1
+        · simp only [Bool.false_eq_true, ite_false]
+          cases (if s.nextEndsThink == 1 then false
+                 else if s.nextStartsThink == 1 then true
+                 else s.inThinkTag == 1) <;> decide
+        · simp only [ite_true]
+          cases (if s.nextEndsThink == 1 then false
+                 else if s.nextStartsThink == 1 then true
+                 else s.inThinkTag == 1) <;> decide
+    · simp only [h2, Bool.not_false, ite_true, Bool.false_and]
+      cases s.inThinkTag == 1 <;> decide
+
+def proxySseScanMetaGate : MetaGateSpec ProxySseScanCheck
+    (fun s => s.EmitsDelta = true) where
+  gate s :=
+    (proxySseScanStep s.lineKind s.hasDoneToken s.inThinkTag
+      s.nextStartsThink s.nextEndsThink s.hasNonEmptyContent &&& 256) != 0
+  sound s h := by
+    rw [← proxySseScanStep_emit_eq s]
+    exact h
+  complete s h := by
+    rw [proxySseScanStep_emit_eq s]
+    exact h
+  posWitness := ⟨2, 0, 0, 0, 0, 1⟩
+  negWitness := ⟨2, 1, 0, 0, 0, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- `[DONE]` frames on `data:` lines (`lineKind = 2, hasDoneToken = 1`) return
+    terminal action `3` and never set `emitDeltaBit` (`256`). -/
+theorem proxySseScan_done_terminates_without_delta
+    (inThink sThink eThink nonEmpty : UInt8) :
+    (proxySseScanStep 2 1 inThink sThink eThink nonEmpty &&& 0xFF) = 3 ∧
+    (proxySseScanStep 2 1 inThink sThink eThink nonEmpty &&& 256) = 0 := by
+  unfold proxySseScanStep
+  have h0 : ((2 : UInt8) == 0) = false := by decide
+  have h2 : ((2 : UInt8) == 2) = true := by decide
+  have hd : ((1 : UInt8) == 1) = true := by decide
+  simp only [h0, h2, hd, Bool.not_true, Bool.false_eq_true, ite_false, ite_true]
+  cases inThink == 1 <;> decide
+
+/-- Cancellation or hash collision in `streamRepetitionStep` fails open to
+    `Inconclusive` (`lo32 = 2`) and preserves `prevCount`. -/
+theorem streamRepetition_cancel_or_collision_inconclusive
+    (startPos prevEnd candLen prevCount reqRep : UInt32)
+    (comps budget : UInt64) :
+    (streamRepetitionStep 1 0 startPos prevEnd candLen prevCount reqRep comps budget
+      &&& 0xFFFFFFFF) = 2 ∧
+    (streamRepetitionStep 0 1 startPos prevEnd candLen prevCount reqRep comps budget
+      &&& 0xFFFFFFFF) = 2 ∧
+    (streamRepetitionStep 1 0 startPos prevEnd candLen prevCount reqRep comps budget
+      >>> 32).toUInt32 = prevCount := by
+  have h1 : ((1 : UInt8) == 1) = true := by decide
+  have h0 : ((0 : UInt8) == 1) = false := by decide
+  have hp2 : (2 : UInt64) = (2 : UInt32).toUInt64 := rfl
+  refine ⟨?_, ?_, ?_⟩
+  · unfold streamRepetitionStep
+    simp only [h1, Bool.true_or, ite_true]
+    rw [hp2, pack32_lo 2 prevCount]
+  · unfold streamRepetitionStep
+    simp only [h0, h1, Bool.false_or, Bool.true_or, ite_true]
+    rw [hp2, pack32_lo 2 prevCount]
+  · unfold streamRepetitionStep
+    simp only [h1, Bool.true_or, ite_true]
+    rw [hp2, pack32_hi 2 prevCount, toUInt32_toUInt64]
+
+/-- HTTP status classification distinguishes transient `429` rate limits from
+    `429` quota exhaustion and never triggers cooldown on `200 OK`. -/
+theorem httpRateLimitClassify_429_quota_and_200_ok
+    (authHint : UInt8) (retryAfter maxCool : UInt64) :
+    (httpRateLimitClassifyStep 429 0 authHint retryAfter maxCool &&& 0xFF) = 1 ∧
+    (httpRateLimitClassifyStep 429 0 authHint retryAfter maxCool &&& 512) = 512 ∧
+    (httpRateLimitClassifyStep 429 1 authHint retryAfter maxCool &&& 0xFF) = 2 ∧
+    (httpRateLimitClassifyStep 429 1 authHint retryAfter maxCool &&& 512) = 0 ∧
+    httpRateLimitClassifyStep 200 1 authHint retryAfter maxCool = 0 := by
+  have h429 : ((429 : UInt32) == 429) = true := by decide
+  have hq0 : ((0 : UInt8) == 1) = false := by decide
+  have hq1 : ((1 : UInt8) == 1) = true := by decide
+  have hr10 : ((1 : UInt32) == 0) = false := by decide
+  have hr1r :
+      ((1 : UInt32) == 1 || (1 : UInt32) == 4 || (1 : UInt32) == 5) = true := by
+    decide
+  have hr20 : ((2 : UInt32) == 0) = false := by decide
+  have hr2r :
+      ((2 : UInt32) == 1 || (2 : UInt32) == 4 || (2 : UInt32) == 5) = false := by
+    decide
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · unfold httpRateLimitClassifyStep
+    simp only [h429, hq0, hr10, hr1r, Bool.false_eq_true, ite_true, ite_false]
+    rw [mask_lo32_sub _ 0xFF (by decide), pack32_lo]
+    decide
+  · unfold httpRateLimitClassifyStep
+    simp only [h429, hq0, hr10, hr1r, Bool.false_eq_true, ite_true, ite_false]
+    rw [mask_lo32_sub _ 512 (by decide), pack32_lo]
+    decide
+  · unfold httpRateLimitClassifyStep
+    simp only [h429, hq1, hr20, hr2r, Bool.false_eq_true, ite_true, ite_false]
+    rw [mask_lo32_sub _ 0xFF (by decide), pack32_lo]
+    decide
+  · unfold httpRateLimitClassifyStep
+    simp only [h429, hq1, hr20, hr2r, Bool.false_eq_true, ite_true, ite_false]
+    rw [mask_lo32_sub _ 512 (by decide), pack32_lo]
+    decide
+  · unfold httpRateLimitClassifyStep
+    have hc1 : ((200 : UInt32) == 429) = false := by decide
+    have hc2 : ((200 : UInt32) == 402) = false := by decide
+    have hc3 : ((200 : UInt32) == 401) = false := by decide
+    have hc4 : ((200 : UInt32) == 403) = false := by decide
+    have hc5 : ((200 : UInt32) == 529 || (200 : UInt32) == 503) = false := by
+      decide
+    have hc6 : ¬ ((500 : UInt32) ≤ 200) := by decide
+    have hr00 : ((0 : UInt32) == 0) = true := by decide
+    simp only [hc1, hc2, hc3, hc4, hc5, hc6, hr00,
+      decide_false, Bool.false_and, Bool.or_false,
+      Bool.false_eq_true, ite_false, ite_true]
+
+/-- `fleetPlaceArgminStep` is irreflexive when `idLexLt = 0` and always prefers
+    an unqueued node (`aQueued = 0`) over a queued node (`bQueued = 1`). -/
+theorem fleetPlaceArgmin_irreflexive_and_unqueued_priority
+    (q sp sd bSp bSd lex : UInt8)
+    (ld cap dg bLd bCap bDg : UInt32)
+    (mem bMem : UInt64) :
+    fleetPlaceArgminStep q sp sd q sp sd 0 ld cap dg ld cap dg mem mem = 0 ∧
+    fleetPlaceArgminStep 0 sp sd 1 bSp bSd lex ld cap dg bLd bCap bDg mem bMem = 1 := by
+  refine ⟨?_, ?_⟩
+  · unfold fleetPlaceArgminStep
+    dsimp only []
+    have hq : ¬ ((if q == 0 then (0 : UInt8) else 1) <
+        (if q == 0 then 0 else 1)) := UInt8.lt_irrefl _
+    have hs : ¬ ((if sp == 0 then (0 : UInt8) else 1) <
+        (if sp == 0 then 0 else 1)) := UInt8.lt_irrefl _
+    have hl : ¬ (ld.toUInt64 * (if cap == 0 then 1 else cap.toUInt64) <
+        ld.toUInt64 * (if cap == 0 then 1 else cap.toUInt64)) :=
+      UInt64.lt_irrefl _
+    have hd : ¬ ((if sd == 0 then (0 : UInt8) else 1) <
+        (if sd == 0 then 0 else 1)) := UInt8.lt_irrefl _
+    have hm : ¬ (mem < mem) := UInt64.lt_irrefl _
+    have hdg : ¬ (dg < dg) := UInt32.lt_irrefl _
+    have hlex : ((0 : UInt8) == 1) = false := by decide
+    simp only [hq, hs, hl, hd, hm, hdg, hlex, Bool.false_eq_true, ite_false]
+  · unfold fleetPlaceArgminStep
+    dsimp only []
+    have hq0 : ((0 : UInt8) == 0) = true := by decide
+    have hq1 : ((1 : UInt8) == 0) = false := by decide
+    have hlt : (0 : UInt8) < 1 := by decide
+    simp only [hq0, hq1, Bool.false_eq_true, ite_true, ite_false, hlt]
+
+/-- `poolPacerStep` returns `0` when `rateTokensPerMin = 0` and clamps `mode = 1`
+    delays to `≤ maxDelayMs` without overflow. -/
+theorem poolPacerStep_zero_rate_and_clamped_delay
+    (prev dt rate added maxDelay : UInt64) :
+    poolPacerStep 0 prev dt 0 added maxDelay = 0 ∧
+    poolPacerStep 1 prev dt rate added maxDelay ≤ maxDelay := by
+  have hclamp : ∀ x y : UInt64, (if x ≤ y then x else y) ≤ y := by
+    intro x y
+    by_cases h : x ≤ y
+    · simp only [h, ite_true]
+    · simp only [h, ite_false]
+      exact UInt64.le_refl y
+  refine ⟨?_, ?_⟩
+  · unfold poolPacerStep
+    have hz : ((0 : UInt64) == 0) = true := by decide
+    simp only [hz, ite_true]
+  · unfold poolPacerStep
+    dsimp only []
+    by_cases hr : rate == 0
+    · simp only [hr, ite_true]
+      exact @UInt64.zero_le maxDelay
+    · have hm : ((1 : UInt8) == 0) = false := by decide
+      simp only [hr, hm, Bool.false_eq_true, ite_false]
+      by_cases hn :
+          (if (if added ≤ 200000000000 then added else 200000000000) * 60000 ≤
+              (if rate ≤ 100000000000 then rate else 100000000000) * 120000 -
+                (if (if dt ≤ 120000 then dt else 120000) *
+                      (if rate ≤ 100000000000 then rate else 100000000000) ≤
+                    (if prev ≤
+                        (if rate ≤ 100000000000 then rate else 100000000000) * 120000
+                     then prev
+                     else (if rate ≤ 100000000000 then rate else 100000000000) * 120000)
+                 then
+                   (if prev ≤
+                       (if rate ≤ 100000000000 then rate else 100000000000) * 120000
+                    then prev
+                    else (if rate ≤ 100000000000 then rate else 100000000000) * 120000) -
+                     (if dt ≤ 120000 then dt else 120000) *
+                       (if rate ≤ 100000000000 then rate else 100000000000)
+                 else 0)
+           then
+             (if (if dt ≤ 120000 then dt else 120000) *
+                   (if rate ≤ 100000000000 then rate else 100000000000) ≤
+                 (if prev ≤
+                     (if rate ≤ 100000000000 then rate else 100000000000) * 120000
+                  then prev
+                  else (if rate ≤ 100000000000 then rate else 100000000000) * 120000)
+              then
+                (if prev ≤
+                    (if rate ≤ 100000000000 then rate else 100000000000) * 120000
+                 then prev
+                 else (if rate ≤ 100000000000 then rate else 100000000000) * 120000) -
+                  (if dt ≤ 120000 then dt else 120000) *
+                    (if rate ≤ 100000000000 then rate else 100000000000)
+              else 0) +
+               (if added ≤ 200000000000 then added else 200000000000) * 60000
+           else (if rate ≤ 100000000000 then rate else 100000000000) * 120000) == 0
+      · simp only [hn, ite_true]
+        exact @UInt64.zero_le maxDelay
+      · simp only [hn, Bool.false_eq_true, ite_false]
+        exact hclamp _ maxDelay
+
+structure ConfinementScanCheck where
+  hasNullByte          : UInt8
+  hasDotDotSegment     : UInt8
+  escapesRoot          : UInt8
+  hasUnsafeEnvKey      : UInt8
+  touchesSensitivePath : UInt8
+  isSymlinkEscape      : UInt8
+  pathLen              : UInt32
+  maxPathLen           : UInt32
+  deriving Repr, DecidableEq
+
+def ConfinementScanCheck.Admissible (c : ConfinementScanCheck) : Bool :=
+  !(c.maxPathLen == 0) && !(c.pathLen == 0) && c.pathLen ≤ c.maxPathLen &&
+  c.hasNullByte == 0 && c.hasDotDotSegment == 0 && c.escapesRoot == 0 &&
+  c.isSymlinkEscape == 0 && c.hasUnsafeEnvKey == 0 && c.touchesSensitivePath == 0
+
+theorem confinementScanStep_admit_eq (c : ConfinementScanCheck) :
+    ((confinementScanStep c.hasNullByte c.hasDotDotSegment c.escapesRoot
+        c.hasUnsafeEnvKey c.touchesSensitivePath c.isSymlinkEscape
+        c.pathLen c.maxPathLen &&& 256) != 0) = c.Admissible := by
+  unfold confinementScanStep ConfinementScanCheck.Admissible
+  have hle_eq :
+      decide (c.maxPathLen < c.pathLen) = !decide (c.pathLen ≤ c.maxPathLen) := by
+    by_cases h : c.pathLen ≤ c.maxPathLen
+    · have hnot : ¬ (c.maxPathLen < c.pathLen) := UInt32.not_lt.mpr h
+      simp [h, hnot]
+    · have hlt : c.maxPathLen < c.pathLen :=
+        Nat.lt_of_not_ge (fun hge => h (UInt32.le_iff_toNat_le.mpr hge))
+      simp [h, hlt]
+  cases hm0 : c.maxPathLen == 0
+  · cases hp0 : c.pathLen == 0
+    · simp only [hm0, hp0, Bool.false_or, Bool.not_false, Bool.true_and]
+      rw [hle_eq]
+      cases hle : decide (c.pathLen ≤ c.maxPathLen)
+      · simp only [Bool.not_false, ite_true, Bool.false_and]
+        decide
+      · simp only [Bool.not_true, Bool.false_eq_true, ite_false, Bool.true_and]
+        cases c.hasNullByte == 0
+        · simp only [Bool.not_false, ite_true, Bool.false_and]
+          decide
+        · simp only [Bool.not_true, Bool.false_eq_true, ite_false, Bool.true_and]
+          cases c.hasDotDotSegment == 0
+          · simp only [Bool.not_false, ite_true, Bool.false_and]
+            decide
+          · simp only [Bool.not_true, Bool.false_eq_true, ite_false, Bool.true_and]
+            cases c.escapesRoot == 0
+            · simp only [Bool.not_false, ite_true, Bool.false_and]
+              decide
+            · simp only [Bool.not_true, Bool.false_eq_true, ite_false, Bool.true_and]
+              cases c.isSymlinkEscape == 0
+              · simp only [Bool.not_false, ite_true, Bool.false_and]
+                decide
+              · simp only [Bool.not_true, Bool.false_eq_true, ite_false, Bool.true_and]
+                cases c.hasUnsafeEnvKey == 0
+                · simp only [Bool.not_false, ite_true, Bool.false_and]
+                  decide
+                · simp only [Bool.not_true, Bool.false_eq_true, ite_false, Bool.true_and]
+                  cases c.touchesSensitivePath == 0
+                  · simp only [Bool.not_false, ite_true]
+                    decide
+                  · simp only [Bool.not_true, Bool.false_eq_true, ite_false]
+                    decide
+    · have hb1 : (((1 : UInt32) &&& 256) != 0) = false := by decide
+      simp only [hm0, hp0, Bool.false_or, Bool.true_or, ite_true,
+        Bool.not_false, Bool.not_true, Bool.true_and, Bool.false_and, hb1]
+  · have hb1 : (((1 : UInt32) &&& 256) != 0) = false := by decide
+    simp only [hm0, Bool.true_or, ite_true, Bool.not_true, Bool.false_and, hb1]
+
+def confinementScanMetaGate : MetaGateSpec ConfinementScanCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    (confinementScanStep c.hasNullByte c.hasDotDotSegment c.escapesRoot
+      c.hasUnsafeEnvKey c.touchesSensitivePath c.isSymlinkEscape
+      c.pathLen c.maxPathLen &&& 256) != 0
+  sound c h := by
+    rw [← confinementScanStep_admit_eq c]
+    exact h
+  complete c h := by
+    rw [confinementScanStep_admit_eq c]
+    exact h
+  posWitness := ⟨0, 0, 0, 0, 0, 0, 24, 4096⟩
+  negWitness := ⟨0, 1, 0, 0, 0, 0, 24, 4096⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- `jobIdentityEq256Step` rejects all-zero digests (`3`) and deduplicates
+    matching digests with a terminal receipt (`2`) or active execution (`1`). -/
+theorem jobIdentityEq256_zero_and_dedup_sound
+    (a0 a1 a2 a3 b0 b1 b2 b3 : UInt64)
+    (act rec_ : UInt8)
+    (hnz : (a0 ||| a1 ||| a2 ||| a3) ≠ 0) :
+    jobIdentityEq256Step 0 0 0 0 b0 b1 b2 b3 act rec_ = 3 ∧
+    jobIdentityEq256Step a0 a1 a2 a3 a0 a1 a2 a3 act 1 = 2 ∧
+    jobIdentityEq256Step a0 a1 a2 a3 a0 a1 a2 a3 1 0 = 1 := by
+  have hnz_b : ((a0 ||| a1 ||| a2 ||| a3) == 0) = false :=
+    beq_eq_false_iff_ne.mpr hnz
+  have hdiff0 :
+      ((a0 ^^^ a0) ||| (a1 ^^^ a1) ||| (a2 ^^^ a2) ||| (a3 ^^^ a3)) = 0 := by
+    rw [uint64_xor_self, uint64_xor_self, uint64_xor_self, uint64_xor_self]
+    decide
+  have h1 : ((1 : UInt8) == 1) = true := by decide
+  have h0 : ((0 : UInt8) == 1) = false := by decide
+  have hd0 : ((0 : UInt64) == 0) = true := by decide
+  refine ⟨?_, ?_, ?_⟩
+  · unfold jobIdentityEq256Step
+    dsimp only []
+    have hz : (((0 : UInt64) ||| 0 ||| 0 ||| 0) == 0) = true := by decide
+    simp only [hz, Bool.not_true, Bool.not_false, ite_true]
+  · unfold jobIdentityEq256Step
+    dsimp only []
+    simp only [hnz_b, Bool.not_false, Bool.not_true, Bool.false_eq_true, ite_false,
+      hdiff0, hd0, h1, Bool.and_true, ite_true]
+  · unfold jobIdentityEq256Step
+    dsimp only []
+    simp only [hnz_b, Bool.not_false, Bool.not_true, Bool.false_eq_true, ite_false,
+      hdiff0, hd0, h0, h1, Bool.and_false, Bool.and_true, ite_true]
+
+structure ValidationDagCheck where
+  totalDeps           : UInt32
+  passedDeps          : UInt32
+  failedDeps          : UInt32
+  alreadyClaimed      : UInt8
+  alreadyPassed       : UInt8
+  candidateExactMatch : UInt8
+  deriving Repr, DecidableEq
+
+def ValidationDagCheck.ReadyToClaim (v : ValidationDagCheck) : Bool :=
+  (v.passedDeps.toUInt64 + v.failedDeps.toUInt64 ≤ v.totalDeps.toUInt64) &&
+  v.candidateExactMatch == 1 && v.alreadyPassed == 0 &&
+  v.failedDeps == 0 && v.alreadyClaimed == 0 && !(v.passedDeps < v.totalDeps)
+
+/-- A failed upstream dependency (`0 < failedDeps`) on an exact, unpassed gate
+    always blocks claim (`orb_validation_dag_step = 2`). -/
+theorem validationDag_failed_dep_blocks_claim
+    (totalDeps passedDeps failedDeps : UInt32)
+    (claimed : UInt8)
+    (hvalid : passedDeps.toUInt64 + failedDeps.toUInt64 ≤ totalDeps.toUInt64)
+    (hfail : 0 < failedDeps) :
+    validationDagStep totalDeps passedDeps failedDeps claimed 0 1 = 2 := by
+  unfold validationDagStep
+  have hnotlt : ¬ (totalDeps.toUInt64 < passedDeps.toUInt64 + failedDeps.toUInt64) :=
+    UInt64.not_lt.mpr hvalid
+  have hc1 : ((1 : UInt8) == 1) = true := by decide
+  have hc0 : ((0 : UInt8) == 0) = true := by decide
+  simp only [hnotlt, hc1, hc0, hfail, Bool.not_true, Bool.false_eq_true,
+    ite_false, ite_true]
+
+/-- `fts5LexerStep` never emits beyond `maxTokens`: once `maxTokens ≤ emittedTokens`,
+    `lo32 = 0` (`admittedBit = 0`) and `nextEmitted = emittedTokens`. -/
+theorem fts5LexerStep_respects_token_cap
+    (st cc tlen maxTok emitTok : UInt32)
+    (hcap : maxTok ≤ emitTok) :
+    (fts5LexerStep st cc tlen maxTok emitTok &&& 0xFFFFFFFF) = 0 ∧
+    (fts5LexerStep st cc tlen maxTok emitTok >>> 32).toUInt32 = emitTok := by
+  have hle : decide (maxTok ≤ emitTok) = true := decide_eq_true hcap
+  have h0 :
+      (emitTok.toUInt64 <<< 32) = ((0 : UInt32).toUInt64 ||| (emitTok.toUInt64 <<< 32)) := by
+    apply UInt64.toBitVec_inj.mp
+    apply BitVec.eq_of_getLsbD_eq
+    intro i _
+    simp [UInt64.toBitVec_or]
+  refine ⟨?_, ?_⟩
+  · unfold fts5LexerStep
+    simp only [hle, Bool.or_true, Bool.true_or, ite_true]
+    rw [h0, pack32_lo 0 emitTok]
+    rfl
+  · unfold fts5LexerStep
+    simp only [hle, Bool.or_true, Bool.true_or, ite_true]
+    rw [h0, pack32_hi 0 emitTok, toUInt32_toUInt64]
+
+/-- `utf8Utf16WindowStep` rejects UTF-8 continuation bytes (`0x80`) and refuses
+    to split a 4-byte astral scalar (`0xF0`, 2 UTF-16 units) when 1 unit remains. -/
+theorem utf8Utf16Window_continuation_and_surrogate_atomic
+    (byteIdx byteLen u16Units : UInt32)
+    (hu16 : u16Units < 0xFFFFFFFF) :
+    (utf8Utf16WindowStep byteIdx byteLen 0x80 u16Units (u16Units + 1) &&& 256) = 0 ∧
+    (utf8Utf16WindowStep byteIdx byteLen 0xF0 u16Units (u16Units + 1) &&& 256) = 0 ∧
+    (utf8Utf16WindowStep byteIdx byteLen 0xF0 u16Units (u16Units + 1) >>> 32).toUInt32 =
+      u16Units := by
+  have hc80_1 : ¬ ((0x80 : UInt32) ≤ 0x7F) := by decide
+  have hc80_2 : ¬ ((0xC2 : UInt32) ≤ 0x80) := by decide
+  have hc80_3 : ¬ ((0xE0 : UInt32) ≤ 0x80) := by decide
+  have hc80_4 : ¬ ((0xF0 : UInt32) ≤ 0x80) := by decide
+  have hcf0_1 : ¬ ((0xF0 : UInt32) ≤ 0x7F) := by decide
+  have hcf0_2a : (0xC2 : UInt32) ≤ 0xF0 := by decide
+  have hcf0_2b : ¬ ((0xF0 : UInt32) ≤ 0xDF) := by decide
+  have hcf0_3a : (0xE0 : UInt32) ≤ 0xF0 := by decide
+  have hcf0_3b : ¬ ((0xF0 : UInt32) ≤ 0xEF) := by decide
+  have hcf0_4a : (0xF0 : UInt32) ≤ 0xF0 := by decide
+  have hcf0_4b : (0xF0 : UInt32) ≤ 0xF4 := by decide
+  have hbudget :
+      decide ((u16Units + 1).toUInt64 < u16Units.toUInt64 + (2 : UInt32).toUInt64) = true := by
+    apply decide_eq_true
+    apply UInt64.lt_iff_toNat_lt.mpr
+    have hu_lt : u16Units.toNat < 4294967295 := UInt32.lt_iff_toNat_lt.mp hu16
+    have hadd1 : (u16Units + 1).toUInt64.toNat = u16Units.toNat + 1 := by
+      change (u16Units + 1).toNat = u16Units.toNat + 1
+      rw [UInt32.toNat_add]
+      change (u16Units.toNat + 1) % 4294967296 = u16Units.toNat + 1
+      omega
+    have h2 : (2 : UInt32).toUInt64.toNat = 2 := rfl
+    have hadd2 : (u16Units.toUInt64 + (2 : UInt32).toUInt64).toNat = u16Units.toNat + 2 := by
+      rw [UInt64.toNat_add, h2]
+      change (u16Units.toNat + 2) % 18446744073709551616 = u16Units.toNat + 2
+      omega
+    omega
+  have h0 :
+      (u16Units.toUInt64 <<< 32) =
+        ((0 : UInt32).toUInt64 ||| (u16Units.toUInt64 <<< 32)) := by
+    apply UInt64.toBitVec_inj.mp
+    apply BitVec.eq_of_getLsbD_eq
+    intro i _
+    simp [UInt64.toBitVec_or]
+  have hs0 : ((0 : UInt32) == 0) = true := by decide
+  have hs40 : ((4 : UInt32) == 0) = false := by decide
+  have hs44 : ((4 : UInt32) == 4) = true := by decide
+  refine ⟨?_, ?_, ?_⟩
+  · unfold utf8Utf16WindowStep
+    dsimp only []
+    simp only [hc80_1, hc80_2, hc80_3, hc80_4, decide_false, Bool.false_and,
+      Bool.false_eq_true, ite_false, hs0, Bool.true_or, ite_true]
+    exact shift32_and_256_zero u16Units
+  · unfold utf8Utf16WindowStep
+    dsimp only []
+    simp only [hcf0_1, hcf0_2a, hcf0_2b, hcf0_3a, hcf0_3b, hcf0_4a, hcf0_4b,
+      decide_true, decide_false, Bool.true_and, Bool.false_eq_true,
+      ite_false, ite_true, hs40, hs44, Bool.false_or, hbudget, Bool.or_true]
+    exact shift32_and_256_zero u16Units
+  · unfold utf8Utf16WindowStep
+    dsimp only []
+    simp only [hcf0_1, hcf0_2a, hcf0_2b, hcf0_3a, hcf0_3b, hcf0_4a, hcf0_4b,
+      decide_true, decide_false, Bool.true_and, Bool.false_eq_true,
+      ite_false, ite_true, hs40, hs44, Bool.false_or, hbudget, Bool.or_true]
+    rw [h0, pack32_hi 0 u16Units, toUInt32_toUInt64]
+
 end Orb.Spec

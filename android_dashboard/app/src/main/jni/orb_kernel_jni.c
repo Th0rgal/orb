@@ -375,3 +375,53 @@ JNIEXPORT jlong JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_orbPlacementMergeStep(JNIEnv *env, jclass clazz, jlong curRev, jlong incRev, jint pendingOpId, jint ackOpId, jint sourceKind, jint hasPlacement) {
     return (jlong)orb_placement_merge_step((uint64_t)curRev, (uint64_t)incRev, (uint32_t)pendingOpId, (uint32_t)ackOpId, (uint8_t)sourceKind, (uint8_t)hasPlacement);
 }
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbProxySseScanStep(JNIEnv *env, jclass clazz, jint lineKind, jint hasDoneToken, jint inThinkTag, jint nextStartsThink, jint nextEndsThink, jint hasNonEmptyContent) {
+    return (jint)orb_proxy_sse_scan_step((uint8_t)lineKind, (uint8_t)hasDoneToken, (uint8_t)inThinkTag, (uint8_t)nextStartsThink, (uint8_t)nextEndsThink, (uint8_t)hasNonEmptyContent);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbStreamRepetitionStep(JNIEnv *env, jclass clazz, jint cancelledOrExpired, jint collisionDetected, jint startPos, jint prevEnd, jint candidateLen, jint prevCount, jint requiredRepeats, jlong comparisons, jlong comparisonBudget) {
+    return (jlong)orb_stream_repetition_step((uint8_t)cancelledOrExpired, (uint8_t)collisionDetected, (uint32_t)startPos, (uint32_t)prevEnd, (uint32_t)candidateLen, (uint32_t)prevCount, (uint32_t)requiredRepeats, (uint64_t)comparisons, (uint64_t)comparisonBudget);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbHttpRateLimitClassifyStep(JNIEnv *env, jclass clazz, jint httpStatus, jint hasQuotaBodyHint, jint hasAuthFailureHint, jlong retryAfterSecs, jlong maxCooldownSecs) {
+    return (jlong)orb_http_rate_limit_classify_step((uint32_t)httpStatus, (uint8_t)hasQuotaBodyHint, (uint8_t)hasAuthFailureHint, (uint64_t)retryAfterSecs, (uint64_t)maxCooldownSecs);
+}
+
+JNIEXPORT jbyte JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbFleetPlaceArgminStep(JNIEnv *env, jclass clazz, jint aQueued, jint aSpec, jint aSoftDisk, jint bQueued, jint bSpec, jint bSoftDisk, jint idLexLt, jint aLoad, jint aCap, jint aDiskGib, jint bLoad, jint bCap, jint bDiskGib, jlong aMemAvail, jlong bMemAvail) {
+    return (jbyte)orb_fleet_place_argmin_step((uint8_t)aQueued, (uint8_t)aSpec, (uint8_t)aSoftDisk, (uint8_t)bQueued, (uint8_t)bSpec, (uint8_t)bSoftDisk, (uint8_t)idLexLt, (uint32_t)aLoad, (uint32_t)aCap, (uint32_t)aDiskGib, (uint32_t)bLoad, (uint32_t)bCap, (uint32_t)bDiskGib, (uint64_t)aMemAvail, (uint64_t)bMemAvail);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbPoolPacerStep(JNIEnv *env, jclass clazz, jint mode, jlong prevDebtTokenMs, jlong elapsedMs, jlong rateTokensPerMin, jlong addedTokens, jlong maxDelayMs) {
+    return (jlong)orb_pool_pacer_step((uint8_t)mode, (uint64_t)prevDebtTokenMs, (uint64_t)elapsedMs, (uint64_t)rateTokensPerMin, (uint64_t)addedTokens, (uint64_t)maxDelayMs);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbConfinementScanStep(JNIEnv *env, jclass clazz, jint hasNullByte, jint hasDotDotSegment, jint escapesRoot, jint hasUnsafeEnvKey, jint touchesSensitivePath, jint isSymlinkEscape, jint pathLen, jint maxPathLen) {
+    return (jint)orb_confinement_scan_step((uint8_t)hasNullByte, (uint8_t)hasDotDotSegment, (uint8_t)escapesRoot, (uint8_t)hasUnsafeEnvKey, (uint8_t)touchesSensitivePath, (uint8_t)isSymlinkEscape, (uint32_t)pathLen, (uint32_t)maxPathLen);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbJobIdentityEq256Step(JNIEnv *env, jclass clazz, jlong a0, jlong a1, jlong a2, jlong a3, jlong b0, jlong b1, jlong b2, jlong b3, jint hasActiveMatch, jint hasTerminalReceipt) {
+    return (jint)orb_job_identity_eq256_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)b0, (uint64_t)b1, (uint64_t)b2, (uint64_t)b3, (uint8_t)hasActiveMatch, (uint8_t)hasTerminalReceipt);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbValidationDagStep(JNIEnv *env, jclass clazz, jint totalDeps, jint passedDeps, jint failedDeps, jint alreadyClaimed, jint alreadyPassed, jint candidateExactMatch) {
+    return (jint)orb_validation_dag_step((uint32_t)totalDeps, (uint32_t)passedDeps, (uint32_t)failedDeps, (uint8_t)alreadyClaimed, (uint8_t)alreadyPassed, (uint8_t)candidateExactMatch);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbFts5LexerStep(JNIEnv *env, jclass clazz, jint state, jint charClass, jint tokenLen, jint maxTokens, jint emittedTokens) {
+    return (jlong)orb_fts5_lexer_step((uint32_t)state, (uint32_t)charClass, (uint32_t)tokenLen, (uint32_t)maxTokens, (uint32_t)emittedTokens);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbUtf8Utf16WindowStep(JNIEnv *env, jclass clazz, jint byteIdx, jint byteLen, jint leadByte, jint utf16Units, jint maxUtf16Units) {
+    return (jlong)orb_utf8_utf16_window_step((uint32_t)byteIdx, (uint32_t)byteLen, (uint32_t)leadByte, (uint32_t)utf16Units, (uint32_t)maxUtf16Units);
+}

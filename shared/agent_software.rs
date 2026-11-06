@@ -650,70 +650,102 @@ pub async fn releases(inventory: &mut Inventory, force: bool) {
     else {
         return;
     };
-    for row in &mut inventory.components {
-        if (!row.installed && !row.update_supported) || (!force && row.latest.is_some()) {
-            continue;
-        }
-        if row.id == "vibe" {
-            row.latest = Some(DEFAULT_VIBE_RELEASE.into());
-            continue;
-        }
-        let cache_key = row.id.clone();
-        let cached = CACHE
-            .get_or_init(Default::default)
-            .lock()
-            .ok()
-            .and_then(|m| m.get(&cache_key).cloned())
-            .filter(|(t, _)| !force && now().saturating_sub(*t) < 21600);
-        if let Some((_, v)) = cached {
-            row.latest = Some(v);
-            continue;
-        }
-        if row.id == "grok" {
-            match client.get("https://x.ai/cli/stable").send().await {
-                Ok(r) if r.status().is_success() => {
-                    if let Ok(text) = r.text().await {
-                        let trimmed = text.trim();
-                        if numeric_version(trimmed).as_deref() == Some(trimmed) {
-                            row.latest = Some(trimmed.into());
-                            if let Ok(mut cache) = CACHE.get_or_init(Default::default).lock() {
-                                cache.insert(cache_key, (now(), trimmed.into()));
+    let mut tasks: Vec<
+        Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>>,
+    > = inventory
+        .components
+        .iter_mut()
+        .map(|row| {
+            let client = &client;
+            Some(Box::pin(async move {
+                if (!row.installed && !row.update_supported) || (!force && row.latest.is_some()) {
+                    return;
+                }
+                if row.id == "vibe" {
+                    row.latest = Some(DEFAULT_VIBE_RELEASE.into());
+                    return;
+                }
+                let cache_key = row.id.clone();
+                let cached = CACHE
+                    .get_or_init(Default::default)
+                    .lock()
+                    .ok()
+                    .and_then(|m| m.get(&cache_key).cloned())
+                    .filter(|(t, _)| !force && now().saturating_sub(*t) < 21600);
+                if let Some((_, v)) = cached {
+                    row.latest = Some(v);
+                    return;
+                }
+                if row.id == "grok" {
+                    match client.get("https://x.ai/cli/stable").send().await {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(text) = r.text().await {
+                                let trimmed = text.trim();
+                                if numeric_version(trimmed).as_deref() == Some(trimmed) {
+                                    row.latest = Some(trimmed.into());
+                                    if let Ok(mut cache) =
+                                        CACHE.get_or_init(Default::default).lock()
+                                    {
+                                        cache.insert(cache_key, (now(), trimmed.into()));
+                                    }
+                                    return;
+                                }
                             }
-                            continue;
+                            row.release_error = Some("Release metadata unavailable".into());
                         }
+                        _ => row.release_error = Some("Could not check releases".into()),
                     }
-                    row.release_error = Some("Release metadata unavailable".into());
+                    return;
                 }
-                _ => row.release_error = Some("Could not check releases".into()),
-            }
-            continue;
-        }
-        let Some(package) = TOOLS.iter().find(|t| t.0 == row.id).and_then(|t| t.3) else {
-            continue;
-        };
-        let url = format!(
-            "https://registry.npmjs.org/{}/latest",
-            package.replace('/', "%2f")
-        );
-        match client.get(url).send().await {
-            Ok(r) if r.status().is_success() => {
-                if let Ok(v) = r.json::<serde_json::Value>().await {
-                    if let Some(v) = v["version"]
-                        .as_str()
-                        .filter(|v| numeric_version(v).as_deref() == Some(*v))
-                    {
-                        row.latest = Some(v.into());
-                        if let Ok(mut cache) = CACHE.get_or_init(Default::default).lock() {
-                            cache.insert(cache_key, (now(), v.into()));
+                let Some(package) = TOOLS.iter().find(|t| t.0 == row.id).and_then(|t| t.3) else {
+                    return;
+                };
+                let url = format!(
+                    "https://registry.npmjs.org/{}/latest",
+                    package.replace('/', "%2f")
+                );
+                match client.get(url).send().await {
+                    Ok(r) if r.status().is_success() => {
+                        if let Ok(v) = r.json::<serde_json::Value>().await {
+                            if let Some(v) = v["version"]
+                                .as_str()
+                                .filter(|v| numeric_version(v).as_deref() == Some(*v))
+                            {
+                                row.latest = Some(v.into());
+                                if let Ok(mut cache) = CACHE.get_or_init(Default::default).lock() {
+                                    cache.insert(cache_key, (now(), v.into()));
+                                }
+                                return;
+                            }
                         }
-                        continue;
+                        row.release_error = Some("Release metadata unavailable".into());
                     }
+                    _ => row.release_error = Some("Could not check releases".into()),
                 }
-                row.release_error = Some("Release metadata unavailable".into());
+            })
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = ()> + Send + '_>,
+                >)
+        })
+        .collect();
+    std::future::poll_fn(|cx| {
+        let mut pending = false;
+        for slot in &mut tasks {
+            if let Some(fut) = slot.as_mut() {
+                if fut.as_mut().poll(cx).is_ready() {
+                    *slot = None;
+                } else {
+                    pending = true;
+                }
             }
-            _ => row.release_error = Some("Could not check releases".into()),
         }
-    }
+        if pending {
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(())
+        }
+    })
+    .await;
 }
 
 pub fn queue(component: &str, target: &str, path: &str) -> Result<UpdateJob, String> {

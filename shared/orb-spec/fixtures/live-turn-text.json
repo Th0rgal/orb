@@ -105,6 +105,45 @@
         }
       ],
       "expected": "Step 1 complete.\n\nStep 2 streaming…"
+    },
+    {
+      "name": "incremental_suffix_insert_multibyte_and_reconnect_snapshot",
+      "events": [
+        {
+          "type": "text_op",
+          "bubble_id": "text_delta_latest",
+          "ops": [
+            {
+              "type": "insert",
+              "pos": 0,
+              "text": "Prix : 3 € 😀"
+            }
+          ]
+        },
+        {
+          "type": "text_op",
+          "bubble_id": "text_delta_latest",
+          "ops": [
+            {
+              "type": "insert",
+              "pos": 12,
+              "text": "\n\nÉtape 2 🧪"
+            }
+          ]
+        },
+        {
+          "type": "text_op",
+          "bubble_id": "text_delta_latest",
+          "ops": [
+            {
+              "type": "insert",
+              "pos": 23,
+              "text": " — ok"
+            }
+          ]
+        }
+      ],
+      "expected": "Prix : 3 € 😀\n\nÉtape 2 🧪 — ok"
     }
   ],
   "storedCases": [

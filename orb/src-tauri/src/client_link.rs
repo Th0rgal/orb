@@ -14,7 +14,7 @@
 use crate::local_stream::{Activity, Event};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -26,6 +26,8 @@ use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 const COALESCE: Duration = Duration::from_millis(250);
 /// Unacknowledged events in flight per mission.
 const WINDOW: u64 = 256;
+/// Maximum queued outbound control frames while uplink is disconnected.
+const MAX_OUTBOUND_FRAMES: usize = 256;
 const UNSUPPORTED: &str = "Client link requires";
 
 fn home() -> Option<PathBuf> {
@@ -406,8 +408,8 @@ struct Account {
     converting: Mutex<HashSet<String>>,
     /// Harnesses reported in `hello` / `capabilities`.
     harnesses: Mutex<Value>,
-    /// Control frames (capabilities, start results) waiting for the socket.
-    outbound: Mutex<Vec<Value>>,
+    /// Bounded control frames (capabilities, start results) waiting for the socket.
+    outbound: Mutex<VecDeque<Value>>,
 }
 
 fn accounts() -> &'static Mutex<HashMap<String, Arc<Account>>> {
@@ -462,7 +464,10 @@ fn account(api_url: &str, token: &str, client_id: &str) -> Option<Arc<Account>> 
 impl Account {
     fn queue(&self, frame: Value) {
         if let Ok(mut outbound) = self.outbound.lock() {
-            outbound.push(frame);
+            if outbound.len() >= MAX_OUTBOUND_FRAMES {
+                outbound.pop_front();
+            }
+            outbound.push_back(frame);
         }
         self.wake.notify_one();
     }
@@ -740,7 +745,7 @@ async fn session(api: &str, acc: &Arc<Account>) -> Result<Stop, String> {
         let mut frames: Vec<Value> = acc
             .outbound
             .lock()
-            .map(|mut o| std::mem::take(&mut *o))
+            .map(|mut o| o.drain(..).collect())
             .unwrap_or_default();
         if let Ok(journals) = acc.journals.lock() {
             for (mission, journal) in journals.iter() {

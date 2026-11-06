@@ -7,25 +7,105 @@
 //! - Average broadcast events per active mission and broadcast lag
 //!
 //! Everything lives behind a single `Arc<ControlMetrics>` so the handler at
-//! `GET /api/control/metrics` can return a JSON snapshot. Counters are
-//! `AtomicU64`; samples are kept in a fixed-size ring under a `Mutex` to
-//! cap memory. Cost per `record_*` call is one atomic add + (for samples)
-//! one `lock + write_index`.
+//! `GET /api/control/metrics` can return a JSON snapshot. Counters, rate
+//! buckets, and sample rings are lock-free atomics; `snapshot()` copies sample
+//! values out and sorts `unstable` completely outside any lock.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use serde::Serialize;
+
+use crate::concurrency::AtomicRingSamples;
 
 /// Number of samples we keep for percentile estimation. ~64 KB at 8 bytes
 /// each — generous enough for stable percentiles, small enough not to
 /// matter.
 const SAMPLE_BUFFER_SIZE: usize = 8192;
 
-/// Sliding window for per-endpoint rate calculations.
-const RATE_WINDOW: Duration = Duration::from_secs(60);
+/// Sliding window in seconds for per-endpoint rate calculations.
+const RATE_WINDOW_SECS: u64 = 60;
+
+/// Number of atomic epoch-second buckets (>= `RATE_WINDOW_SECS` power of two).
+const RATE_BUCKET_SLOTS: usize = 64;
+
+/// Lock-free 60-second sliding rate counter backed by `[AtomicU64; 64]`.
+///
+/// Each slot packs `((epoch_sec + 1) << 32) | count` so recording a hit is a
+/// single CAS/fetch loop on the current second's bucket with zero allocations
+/// and zero mutex contention.
+struct AtomicEpochRateBuckets {
+    origin: Instant,
+    buckets: [AtomicU64; RATE_BUCKET_SLOTS],
+}
+
+impl AtomicEpochRateBuckets {
+    fn new(origin: Instant) -> Self {
+        Self {
+            origin,
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+
+    #[inline]
+    fn current_sec(&self) -> u64 {
+        self.origin.elapsed().as_secs() + 1
+    }
+
+    #[inline]
+    fn record_hit(&self) {
+        let sec = self.current_sec();
+        let slot = &self.buckets[(sec as usize) & (RATE_BUCKET_SLOTS - 1)];
+        let mut cur = slot.load(Ordering::Relaxed);
+        loop {
+            let cur_sec = cur >> 32;
+            let next = if cur_sec == sec {
+                let count = (cur & 0xffff_ffff)
+                    .saturating_add(1)
+                    .min(u64::from(u32::MAX));
+                (sec << 32) | count
+            } else {
+                (sec << 32) | 1
+            };
+            match slot.compare_exchange_weak(cur, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
+    fn count_last_window(&self) -> u64 {
+        let now_sec = self.current_sec();
+        let min_sec = now_sec.saturating_sub(RATE_WINDOW_SECS - 1);
+        let mut total = 0u64;
+        for slot in &self.buckets {
+            let packed = slot.load(Ordering::Relaxed);
+            let sec = packed >> 32;
+            if sec >= min_sec && sec <= now_sec {
+                total += packed & 0xffff_ffff;
+            }
+        }
+        total
+    }
+}
+
+fn percentiles_from_ring(
+    ring: &AtomicRingSamples<SAMPLE_BUFFER_SIZE>,
+) -> (Option<u64>, Option<u64>, usize) {
+    let mut copy = ring.values();
+    if copy.is_empty() {
+        return (None, None, 0);
+    }
+    // Sorted completely outside any lock.
+    copy.sort_unstable();
+    let n = copy.len();
+    let p50 = copy[n / 2];
+    let p99_idx = ((n as f64 * 0.99) as usize).min(n - 1);
+    let p99 = copy[p99_idx];
+    (Some(p50), Some(p99), n)
+}
 
 pub struct ControlMetrics {
     /// Wall-clock when the process started — exposed so dashboards can
@@ -34,19 +114,19 @@ pub struct ControlMetrics {
 
     sse_chunks_total: AtomicU64,
     sse_bytes_total: AtomicU64,
-    sse_chunk_sizes: Mutex<RingSamples>,
+    sse_chunk_sizes: AtomicRingSamples<SAMPLE_BUFFER_SIZE>,
 
-    events_endpoint_hits: Mutex<Vec<Instant>>,
-    events_latency_ms: Mutex<RingSamples>,
+    events_endpoint_hits: AtomicEpochRateBuckets,
+    events_latency_ms: AtomicRingSamples<SAMPLE_BUFFER_SIZE>,
     events_payload_bytes_total: AtomicU64,
     events_original_total: AtomicU64,
     events_summarized_total: AtomicU64,
-    running_endpoint_hits: Mutex<Vec<Instant>>,
+    running_endpoint_hits: AtomicEpochRateBuckets,
 
     broadcast_events_total: AtomicU64,
     broadcast_lagged_total: AtomicU64,
     broadcast_dropped_total: AtomicU64,
-    broadcast_events_by_mission: Mutex<HashMap<uuid::Uuid, u64>>,
+    broadcast_events_by_mission: DashMap<uuid::Uuid, AtomicU64>,
 
     /// P5-#25 health budget reports — bounded ring of recent client
     /// telemetry pings. A client posts when its 5-second longtask total
@@ -66,49 +146,6 @@ pub struct HealthReport {
     pub at: u64,
 }
 
-struct RingSamples {
-    buf: Vec<u64>,
-    next: usize,
-    filled: bool,
-}
-
-impl RingSamples {
-    fn new() -> Self {
-        Self {
-            buf: Vec::with_capacity(SAMPLE_BUFFER_SIZE),
-            next: 0,
-            filled: false,
-        }
-    }
-
-    fn push(&mut self, sample: u64) {
-        if !self.filled {
-            self.buf.push(sample);
-            if self.buf.len() >= SAMPLE_BUFFER_SIZE {
-                self.filled = true;
-                self.next = 0;
-            }
-            return;
-        }
-        self.buf[self.next] = sample;
-        self.next = (self.next + 1) % SAMPLE_BUFFER_SIZE;
-    }
-
-    /// Returns p50, p99 estimates and the total sample count.
-    fn percentiles(&self) -> (Option<u64>, Option<u64>, usize) {
-        if self.buf.is_empty() {
-            return (None, None, 0);
-        }
-        let mut copy = self.buf.clone();
-        copy.sort_unstable();
-        let n = copy.len();
-        let p50 = copy[n / 2];
-        let p99_idx = ((n as f64 * 0.99) as usize).min(n - 1);
-        let p99 = copy[p99_idx];
-        (Some(p50), Some(p99), n)
-    }
-}
-
 impl Default for ControlMetrics {
     fn default() -> Self {
         Self::new()
@@ -117,21 +154,22 @@ impl Default for ControlMetrics {
 
 impl ControlMetrics {
     pub fn new() -> Self {
+        let start = Instant::now();
         Self {
-            start: Instant::now(),
+            start,
             sse_chunks_total: AtomicU64::new(0),
             sse_bytes_total: AtomicU64::new(0),
-            sse_chunk_sizes: Mutex::new(RingSamples::new()),
-            events_endpoint_hits: Mutex::new(Vec::with_capacity(128)),
-            events_latency_ms: Mutex::new(RingSamples::new()),
+            sse_chunk_sizes: AtomicRingSamples::new(),
+            events_endpoint_hits: AtomicEpochRateBuckets::new(start),
+            events_latency_ms: AtomicRingSamples::new(),
             events_payload_bytes_total: AtomicU64::new(0),
             events_original_total: AtomicU64::new(0),
             events_summarized_total: AtomicU64::new(0),
-            running_endpoint_hits: Mutex::new(Vec::with_capacity(128)),
+            running_endpoint_hits: AtomicEpochRateBuckets::new(start),
             broadcast_events_total: AtomicU64::new(0),
             broadcast_lagged_total: AtomicU64::new(0),
             broadcast_dropped_total: AtomicU64::new(0),
-            broadcast_events_by_mission: Mutex::new(HashMap::new()),
+            broadcast_events_by_mission: DashMap::new(),
             health_reports: Mutex::new(Vec::with_capacity(256)),
         }
     }
@@ -152,17 +190,12 @@ impl ControlMetrics {
         self.sse_chunks_total.fetch_add(1, Ordering::Relaxed);
         self.sse_bytes_total
             .fetch_add(bytes as u64, Ordering::Relaxed);
-        if let Ok(mut samples) = self.sse_chunk_sizes.lock() {
-            samples.push(bytes as u64);
-        }
+        self.sse_chunk_sizes.record(bytes as u64);
     }
 
     /// Record a single `/api/control/missions/:id/events` request hit.
     pub fn record_events_request(&self) {
-        if let Ok(mut hits) = self.events_endpoint_hits.lock() {
-            self.trim_window(&mut hits);
-            hits.push(Instant::now());
-        }
+        self.events_endpoint_hits.record_hit();
     }
 
     /// Record `/events` response characteristics after the handler has
@@ -174,9 +207,8 @@ impl ControlMetrics {
         original_count: usize,
         summarized_count: usize,
     ) {
-        if let Ok(mut samples) = self.events_latency_ms.lock() {
-            samples.push(latency.as_millis().min(u128::from(u64::MAX)) as u64);
-        }
+        self.events_latency_ms
+            .record(latency.as_millis().min(u128::from(u64::MAX - 1)) as u64);
         self.events_payload_bytes_total
             .fetch_add(payload_bytes as u64, Ordering::Relaxed);
         self.events_original_total
@@ -187,10 +219,7 @@ impl ControlMetrics {
 
     /// Record a single `/api/control/running` request hit.
     pub fn record_running_request(&self) {
-        if let Ok(mut hits) = self.running_endpoint_hits.lock() {
-            self.trim_window(&mut hits);
-            hits.push(Instant::now());
-        }
+        self.running_endpoint_hits.record_hit();
     }
 
     /// Record an `AgentEvent` broadcast to subscribers. `mission_id` is
@@ -198,9 +227,14 @@ impl ControlMetrics {
     pub fn record_broadcast(&self, mission_id: Option<uuid::Uuid>) {
         self.broadcast_events_total.fetch_add(1, Ordering::Relaxed);
         if let Some(mid) = mission_id {
-            if let Ok(mut map) = self.broadcast_events_by_mission.lock() {
-                *map.entry(mid).or_insert(0) += 1;
+            if let Some(counter) = self.broadcast_events_by_mission.get(&mid) {
+                counter.fetch_add(1, Ordering::Relaxed);
+                return;
             }
+            self.broadcast_events_by_mission
+                .entry(mid)
+                .or_insert_with(|| AtomicU64::new(0))
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -211,65 +245,33 @@ impl ControlMetrics {
             .fetch_add(dropped, Ordering::Relaxed);
     }
 
-    fn trim_window(&self, hits: &mut Vec<Instant>) {
-        let cutoff = Instant::now()
-            .checked_sub(RATE_WINDOW)
-            .unwrap_or_else(Instant::now);
-        hits.retain(|t| *t >= cutoff);
-    }
-
     pub fn snapshot(&self) -> MetricsSnapshot {
-        let (sse_p50, sse_p99, sample_count) = self
-            .sse_chunk_sizes
-            .lock()
-            .map(|s| s.percentiles())
-            .unwrap_or((None, None, 0));
-        let (events_latency_p50, events_latency_p99, events_latency_sample_count) = self
-            .events_latency_ms
-            .lock()
-            .map(|s| s.percentiles())
-            .unwrap_or((None, None, 0));
+        let (sse_p50, sse_p99, sample_count) = percentiles_from_ring(&self.sse_chunk_sizes);
+        let (events_latency_p50, events_latency_p99, events_latency_sample_count) =
+            percentiles_from_ring(&self.events_latency_ms);
 
         let now = Instant::now();
-        let events_hits = self
-            .events_endpoint_hits
-            .lock()
-            .map(|mut hits| {
-                self.trim_window(&mut hits);
-                hits.len()
-            })
-            .unwrap_or(0);
-        let running_hits = self
-            .running_endpoint_hits
-            .lock()
-            .map(|mut hits| {
-                self.trim_window(&mut hits);
-                hits.len()
-            })
-            .unwrap_or(0);
+        let events_hits = self.events_endpoint_hits.count_last_window();
+        let running_hits = self.running_endpoint_hits.count_last_window();
 
-        let (mission_count, events_avg_per_mission, top_missions) = self
+        let mut entries: Vec<(uuid::Uuid, u64)> = self
             .broadcast_events_by_mission
-            .lock()
-            .map(|map| {
-                let mission_count = map.len();
-                let total: u64 = map.values().sum();
-                let avg = if mission_count > 0 {
-                    total as f64 / mission_count as f64
-                } else {
-                    0.0
-                };
-                let mut entries: Vec<(uuid::Uuid, u64)> =
-                    map.iter().map(|(k, v)| (*k, *v)).collect();
-                entries.sort_by_key(|entry| std::cmp::Reverse(entry.1));
-                let top: Vec<TopMission> = entries
-                    .into_iter()
-                    .take(5)
-                    .map(|(mission_id, count)| TopMission { mission_id, count })
-                    .collect();
-                (mission_count, avg, top)
-            })
-            .unwrap_or((0, 0.0, Vec::new()));
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().load(Ordering::Relaxed)))
+            .collect();
+        let mission_count = entries.len();
+        let total: u64 = entries.iter().map(|(_, v)| *v).sum();
+        let events_avg_per_mission = if mission_count > 0 {
+            total as f64 / mission_count as f64
+        } else {
+            0.0
+        };
+        entries.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.1));
+        let top_missions: Vec<TopMission> = entries
+            .into_iter()
+            .take(5)
+            .map(|(mission_id, count)| TopMission { mission_id, count })
+            .collect();
 
         let uptime_secs = now.saturating_duration_since(self.start).as_secs();
 
@@ -290,14 +292,14 @@ impl ControlMetrics {
                 sample_count,
             },
             endpoints: EndpointStats {
-                events_req_per_minute: events_hits as u64,
+                events_req_per_minute: events_hits,
                 events_latency_p50_ms: events_latency_p50,
                 events_latency_p99_ms: events_latency_p99,
                 events_latency_sample_count,
                 events_payload_bytes_total: self.events_payload_bytes_total.load(Ordering::Relaxed),
                 events_original_total: self.events_original_total.load(Ordering::Relaxed),
                 events_summarized_total: self.events_summarized_total.load(Ordering::Relaxed),
-                running_req_per_minute: running_hits as u64,
+                running_req_per_minute: running_hits,
             },
             broadcast: BroadcastStats {
                 events_total: self.broadcast_events_total.load(Ordering::Relaxed),

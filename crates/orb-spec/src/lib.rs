@@ -774,6 +774,49 @@ pub mod lean_sys_cabi {
     }
 
     #[inline]
+    pub fn verify_unix_path_bounds(path_len: u64, no_interior_null: bool) -> bool {
+        unsafe { leansys_verify_unix_path_bounds(path_len, u8::from(no_interior_null)) == 1 }
+    }
+
+    #[inline]
+    pub fn verify_cas_digest256(
+        expected: [u64; 4],
+        computed: [u64; 4],
+        has_path_sep: bool,
+    ) -> bool {
+        unsafe {
+            leansys_verify_cas_digest256(
+                expected[0],
+                expected[1],
+                expected[2],
+                expected[3],
+                computed[0],
+                computed[1],
+                computed[2],
+                computed[3],
+                u8::from(has_path_sep),
+            ) == 1
+        }
+    }
+
+    #[inline]
+    pub fn verify_cgroup_v2_budget(
+        mem_current_bytes: u64,
+        mem_max_bytes: u64,
+        oom_kill_count: u64,
+        cgroup_attached: bool,
+    ) -> bool {
+        unsafe {
+            leansys_verify_cgroup_v2_budget(
+                mem_current_bytes,
+                mem_max_bytes,
+                oom_kill_count,
+                u8::from(cgroup_attached),
+            ) == 1
+        }
+    }
+
+    #[inline]
     pub fn verify_stream_relay(
         client_gone: bool,
         upstream_dead: bool,
@@ -1562,6 +1605,101 @@ unsafe extern "C" {
         ack_op_id: u32,
         source_kind: u8,
         has_placement: u8,
+    ) -> u64;
+    fn orb_proxy_sse_scan_step(
+        line_kind: u8,
+        has_done_token: u8,
+        in_think_tag: u8,
+        next_starts_think: u8,
+        next_ends_think: u8,
+        has_non_empty_content: u8,
+    ) -> u32;
+    fn orb_stream_repetition_step(
+        cancel_flag: u8,
+        hash_collision: u8,
+        start_pos: u32,
+        prev_end_pos: u32,
+        cand_len: u32,
+        prev_count: u32,
+        required_repeats: u32,
+        comparisons_done: u64,
+        comparison_budget: u64,
+    ) -> u64;
+    fn orb_http_rate_limit_classify_step(
+        http_status: u32,
+        quota_hint: u8,
+        auth_hint: u8,
+        retry_after_secs: u64,
+        max_cooldown_secs: u64,
+    ) -> u64;
+    fn orb_fleet_place_argmin_step(
+        a_queued: u8,
+        a_sticky_pkg: u8,
+        a_sticky_data: u8,
+        b_queued: u8,
+        b_sticky_pkg: u8,
+        b_sticky_data: u8,
+        id_lex_lt: u8,
+        a_load: u32,
+        a_cap: u32,
+        a_degrade: u32,
+        b_load: u32,
+        b_cap: u32,
+        b_degrade: u32,
+        a_mem_pct: u64,
+        b_mem_pct: u64,
+    ) -> u8;
+    fn orb_pool_pacer_step(
+        mode: u8,
+        prev_debt_token_ms: u64,
+        elapsed_ms: u64,
+        rate_tokens_per_min: u64,
+        added_tokens: u64,
+        max_delay_ms: u64,
+    ) -> u64;
+    fn orb_confinement_scan_step(
+        has_dot_dot: u8,
+        has_nul_or_ctl: u8,
+        escapes_root: u8,
+        symlink_escape: u8,
+        has_unsafe_flag: u8,
+        has_shell_meta: u8,
+        arg_count: u32,
+        max_args: u32,
+    ) -> u32;
+    fn orb_job_identity_eq256_step(
+        a0: u64,
+        a1: u64,
+        a2: u64,
+        a3: u64,
+        b0: u64,
+        b1: u64,
+        b2: u64,
+        b3: u64,
+        backend_eq: u8,
+        workspace_eq: u8,
+    ) -> u32;
+    fn orb_validation_dag_step(
+        total_steps: u32,
+        completed_steps: u32,
+        ready_steps: u32,
+        any_failed: u8,
+        fail_fast: u8,
+        cancelled: u8,
+    ) -> u32;
+    fn orb_fts5_lexer_step(
+        char_class: u32,
+        token_len: u32,
+        max_token_len: u32,
+        emitted_tokens: u32,
+        max_tokens: u32,
+    ) -> u64;
+    fn orb_utf8_utf16_window_step(
+        byte_idx: u32,
+        byte_len: u32,
+        lead_byte: u32,
+        utf16_units: u32,
+        max_utf16_units: u32,
     ) -> u64;
 }
 
@@ -5288,7 +5426,9 @@ pub mod stream_simd {
 
     #[inline]
     pub fn select_verified_stream_isa() -> u8 {
-        select_verified_stream_isa_with_caps(detect_hw_caps(), VARIANT_AVX2)
+        static CACHED_ISA: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        *CACHED_ISA
+            .get_or_init(|| select_verified_stream_isa_with_caps(detect_hw_caps(), VARIANT_AVX2))
     }
 
     pub fn scan_stream_bytes_scalar(buf: &[u8]) -> StreamByteScanSummary {
@@ -5344,17 +5484,8 @@ pub mod stream_simd {
         0
     }
 
-    /// # Safety
-    /// Caller must ensure the current CPU supports `sse2` (for example via
-    /// `select_verified_stream_isa()` or `is_x86_feature_detected!("sse2")`).
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    #[target_feature(enable = "sse2")]
-    pub unsafe fn scan_stream_bytes_sse2(buf: &[u8]) -> StreamByteScanSummary {
-        #[cfg(target_arch = "x86")]
-        use core::arch::x86::*;
-        #[cfg(target_arch = "x86_64")]
-        use core::arch::x86_64::*;
-
+    #[inline]
+    fn scan_stream_bytes_chunked<const LANES: usize>(buf: &[u8]) -> StreamByteScanSummary {
         let len = buf.len();
         if len == 0 {
             return StreamByteScanSummary {
@@ -5370,16 +5501,21 @@ pub mod stream_simd {
         let mut pipe_bytes = 0usize;
         let mut last_newline = usize::MAX;
 
-        let nl_vec = _mm_set1_epi8(b'\n' as i8);
-        let pipe_vec = _mm_set1_epi8(b'|' as i8);
-        let ptr = buf.as_ptr();
         let mut i = 0usize;
-
-        while i + 16 <= len {
-            let chunk = unsafe { _mm_loadu_si128(ptr.add(i) as *const __m128i) };
-            let nl_mask = (_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, nl_vec)) as u32) & 0xFFFF;
-            let pipe_mask = (_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, pipe_vec)) as u32) & 0xFFFF;
-            pipe_bytes += pipe_mask.count_ones() as usize;
+        let chunks = buf.chunks_exact(LANES);
+        let rem = chunks.remainder();
+        for chunk in chunks {
+            let mut nl_mask = 0u32;
+            let mut pipe_count = 0usize;
+            for (lane, &b) in chunk.iter().enumerate() {
+                if b == b'\n' {
+                    nl_mask |= 1u32 << lane;
+                }
+                if b == b'|' {
+                    pipe_count += 1;
+                }
+            }
+            pipe_bytes += pipe_count;
             if nl_mask != 0 {
                 newlines += nl_mask.count_ones() as usize;
                 let highest_bit = 31 - nl_mask.leading_zeros() as usize;
@@ -5391,19 +5527,18 @@ pub mod stream_simd {
                     m &= m - 1;
                 }
             }
-            i += 16;
+            i += LANES;
         }
 
-        while i < len {
-            let b = buf[i];
+        for (offset, &b) in rem.iter().enumerate() {
+            let idx = i + offset;
             if b == b'\n' {
                 newlines += 1;
-                last_newline = i;
-                fence_candidates += check_fence_at_line_start(buf, i + 1);
+                last_newline = idx;
+                fence_candidates += check_fence_at_line_start(buf, idx + 1);
             } else if b == b'|' {
                 pipe_bytes += 1;
             }
-            i += 1;
         }
 
         StreamByteScanSummary {
@@ -5414,161 +5549,22 @@ pub mod stream_simd {
         }
     }
 
-    /// # Safety
-    /// Caller must ensure the current CPU supports `avx2` (for example via
-    /// `select_verified_stream_isa()` or `is_x86_feature_detected!("avx2")`).
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    #[target_feature(enable = "avx2")]
-    pub unsafe fn scan_stream_bytes_avx2(buf: &[u8]) -> StreamByteScanSummary {
-        #[cfg(target_arch = "x86")]
-        use core::arch::x86::*;
-        #[cfg(target_arch = "x86_64")]
-        use core::arch::x86_64::*;
-
-        let len = buf.len();
-        if len == 0 {
-            return StreamByteScanSummary {
-                newlines: 0,
-                fence_candidates: 0,
-                pipe_bytes: 0,
-                last_newline: usize::MAX,
-            };
-        }
-
-        let mut fence_candidates = check_fence_at_line_start(buf, 0);
-        let mut newlines = 0usize;
-        let mut pipe_bytes = 0usize;
-        let mut last_newline = usize::MAX;
-
-        let nl_vec = _mm256_set1_epi8(b'\n' as i8);
-        let pipe_vec = _mm256_set1_epi8(b'|' as i8);
-        let ptr = buf.as_ptr();
-        let mut i = 0usize;
-
-        while i + 32 <= len {
-            let chunk = unsafe { _mm256_loadu_si256(ptr.add(i) as *const __m256i) };
-            let nl_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, nl_vec)) as u32;
-            let pipe_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, pipe_vec)) as u32;
-            pipe_bytes += pipe_mask.count_ones() as usize;
-            if nl_mask != 0 {
-                newlines += nl_mask.count_ones() as usize;
-                let highest_bit = 31 - nl_mask.leading_zeros() as usize;
-                last_newline = i + highest_bit;
-                let mut m = nl_mask;
-                while m != 0 {
-                    let bit = m.trailing_zeros() as usize;
-                    fence_candidates += check_fence_at_line_start(buf, i + bit + 1);
-                    m &= m - 1;
-                }
-            }
-            i += 32;
-        }
-
-        while i < len {
-            let b = buf[i];
-            if b == b'\n' {
-                newlines += 1;
-                last_newline = i;
-                fence_candidates += check_fence_at_line_start(buf, i + 1);
-            } else if b == b'|' {
-                pipe_bytes += 1;
-            }
-            i += 1;
-        }
-
-        StreamByteScanSummary {
-            newlines,
-            fence_candidates,
-            pipe_bytes,
-            last_newline,
-        }
+    /// Safe, zero-`unsafe` 16-lane chunked scanner (auto-vectorized by LLVM under `SIMD128`).
+    #[inline]
+    pub fn scan_stream_bytes_simd128(buf: &[u8]) -> StreamByteScanSummary {
+        scan_stream_bytes_chunked::<16>(buf)
     }
 
-    /// # Safety
-    /// Caller must ensure the current CPU supports `neon` (mandatory on `aarch64` Linux/macOS/iOS/Android
-    /// and checked via `select_verified_stream_isa()` / `is_aarch64_feature_detected!("neon")`).
-    #[cfg(target_arch = "aarch64")]
-    #[target_feature(enable = "neon")]
-    pub unsafe fn scan_stream_bytes_neon(buf: &[u8]) -> StreamByteScanSummary {
-        use core::arch::aarch64::*;
-
-        let len = buf.len();
-        if len == 0 {
-            return StreamByteScanSummary {
-                newlines: 0,
-                fence_candidates: 0,
-                pipe_bytes: 0,
-                last_newline: usize::MAX,
-            };
-        }
-
-        #[inline]
-        unsafe fn neon_movemask_u8(cmp: uint8x16_t) -> u32 {
-            const WEIGHTS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
-            let weights = unsafe { vld1q_u8(WEIGHTS.as_ptr()) };
-            let masked = vandq_u8(cmp, weights);
-            let lo = u32::from(vaddv_u8(vget_low_u8(masked)));
-            let hi = u32::from(vaddv_u8(vget_high_u8(masked)));
-            lo | (hi << 8)
-        }
-
-        let mut fence_candidates = check_fence_at_line_start(buf, 0);
-        let mut newlines = 0usize;
-        let mut pipe_bytes = 0usize;
-        let mut last_newline = usize::MAX;
-
-        let nl_vec = vdupq_n_u8(b'\n');
-        let pipe_vec = vdupq_n_u8(b'|');
-        let ptr = buf.as_ptr();
-        let mut i = 0usize;
-
-        while i + 16 <= len {
-            let chunk = unsafe { vld1q_u8(ptr.add(i)) };
-            let nl_mask = unsafe { neon_movemask_u8(vceqq_u8(chunk, nl_vec)) };
-            let pipe_mask = unsafe { neon_movemask_u8(vceqq_u8(chunk, pipe_vec)) };
-            pipe_bytes += pipe_mask.count_ones() as usize;
-            if nl_mask != 0 {
-                newlines += nl_mask.count_ones() as usize;
-                let highest_bit = 31 - nl_mask.leading_zeros() as usize;
-                last_newline = i + highest_bit;
-                let mut m = nl_mask;
-                while m != 0 {
-                    let bit = m.trailing_zeros() as usize;
-                    fence_candidates += check_fence_at_line_start(buf, i + bit + 1);
-                    m &= m - 1;
-                }
-            }
-            i += 16;
-        }
-
-        while i < len {
-            let b = buf[i];
-            if b == b'\n' {
-                newlines += 1;
-                last_newline = i;
-                fence_candidates += check_fence_at_line_start(buf, i + 1);
-            } else if b == b'|' {
-                pipe_bytes += 1;
-            }
-            i += 1;
-        }
-
-        StreamByteScanSummary {
-            newlines,
-            fence_candidates,
-            pipe_bytes,
-            last_newline,
-        }
+    /// Safe, zero-`unsafe` 32-lane chunked scanner (auto-vectorized by LLVM under `AVX2`).
+    #[inline]
+    pub fn scan_stream_bytes_avx2_safe(buf: &[u8]) -> StreamByteScanSummary {
+        scan_stream_bytes_chunked::<32>(buf)
     }
 
     pub fn scan_stream_bytes(buf: &[u8]) -> StreamByteScanSummary {
         match select_verified_stream_isa() {
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            VARIANT_AVX2 => unsafe { scan_stream_bytes_avx2(buf) },
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            VARIANT_SIMD128 => unsafe { scan_stream_bytes_sse2(buf) },
-            #[cfg(target_arch = "aarch64")]
-            VARIANT_SIMD128 => unsafe { scan_stream_bytes_neon(buf) },
+            VARIANT_AVX2 => scan_stream_bytes_avx2_safe(buf),
+            VARIANT_SIMD128 => scan_stream_bytes_simd128(buf),
             _ => scan_stream_bytes_scalar(buf),
         }
     }
@@ -5942,6 +5938,442 @@ pub fn send_flow_step(
         can_drain: (raw & 256) != 0,
         edit_outcome: ((raw >> 16) & 0xFF) as u8,
         raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxySseAction {
+    FlushFrame,
+    SkipCommentOrField,
+    EmitContent,
+    DoneTerminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProxySseScanVerdict {
+    pub action: ProxySseAction,
+    pub emit_delta: bool,
+    pub next_in_think_tag: bool,
+    pub raw: u32,
+}
+
+#[inline]
+pub fn proxy_sse_scan_step(
+    line_kind: u8,
+    has_done_token: bool,
+    in_think_tag: bool,
+    next_starts_think: bool,
+    next_ends_think: bool,
+    has_non_empty_content: bool,
+) -> ProxySseScanVerdict {
+    let raw = unsafe {
+        orb_proxy_sse_scan_step(
+            line_kind,
+            u8::from(has_done_token),
+            u8::from(in_think_tag),
+            u8::from(next_starts_think),
+            u8::from(next_ends_think),
+            u8::from(has_non_empty_content),
+        )
+    };
+    let action = match raw & 0xFF {
+        0 => ProxySseAction::FlushFrame,
+        2 => ProxySseAction::EmitContent,
+        3 => ProxySseAction::DoneTerminal,
+        _ => ProxySseAction::SkipCommentOrField,
+    };
+    ProxySseScanVerdict {
+        action,
+        emit_delta: (raw & 256) != 0,
+        next_in_think_tag: (raw & 512) != 0,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamRepetitionVerdict {
+    Continue(u32),
+    AbortRepetition(u32),
+    Inconclusive(u32),
+}
+
+#[inline]
+pub fn stream_repetition_step(
+    cancel_flag: bool,
+    hash_collision: bool,
+    start_pos: u32,
+    prev_end_pos: u32,
+    cand_len: u32,
+    prev_count: u32,
+    required_repeats: u32,
+    comparisons_done: u64,
+    comparison_budget: u64,
+) -> StreamRepetitionVerdict {
+    let raw = unsafe {
+        orb_stream_repetition_step(
+            u8::from(cancel_flag),
+            u8::from(hash_collision),
+            start_pos,
+            prev_end_pos,
+            cand_len,
+            prev_count,
+            required_repeats,
+            comparisons_done,
+            comparison_budget,
+        )
+    };
+    let code = (raw & 0xFFFF_FFFF) as u32;
+    let next_count = (raw >> 32) as u32;
+    match code & 0xFF {
+        3 => StreamRepetitionVerdict::AbortRepetition(next_count),
+        2 => StreamRepetitionVerdict::Inconclusive(next_count),
+        _ => StreamRepetitionVerdict::Continue(next_count),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpRateLimitReason {
+    Ok,
+    RateLimit,
+    QuotaExhausted,
+    AuthFailed,
+    Overloaded,
+    ServerError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpRateLimitVerdict {
+    pub reason: HttpRateLimitReason,
+    pub apply_cooldown: bool,
+    pub retryable: bool,
+    pub cooldown_secs: u32,
+}
+
+#[inline]
+pub fn http_rate_limit_classify_step(
+    http_status: u32,
+    quota_hint: bool,
+    auth_hint: bool,
+    retry_after_secs: u64,
+    max_cooldown_secs: u64,
+) -> HttpRateLimitVerdict {
+    let raw = unsafe {
+        orb_http_rate_limit_classify_step(
+            http_status,
+            u8::from(quota_hint),
+            u8::from(auth_hint),
+            retry_after_secs,
+            max_cooldown_secs,
+        )
+    };
+    let lo = (raw & 0xFFFF_FFFF) as u32;
+    let reason = match lo & 0xFF {
+        1 => HttpRateLimitReason::RateLimit,
+        2 => HttpRateLimitReason::QuotaExhausted,
+        3 => HttpRateLimitReason::AuthFailed,
+        4 => HttpRateLimitReason::Overloaded,
+        5 => HttpRateLimitReason::ServerError,
+        _ => HttpRateLimitReason::Ok,
+    };
+    HttpRateLimitVerdict {
+        reason,
+        apply_cooldown: (lo & 256) != 0,
+        retryable: (lo & 512) != 0,
+        cooldown_secs: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FleetPlaceCandidate {
+    pub queued: bool,
+    pub specialized: bool,
+    pub soft_disk_pressure: bool,
+    pub load: u32,
+    pub cap: u32,
+    pub disk_headroom_gib: u32,
+    pub mem_available_bytes: u64,
+}
+
+#[inline]
+pub fn fleet_place_argmin_step(
+    a: FleetPlaceCandidate,
+    b: FleetPlaceCandidate,
+    id_lex_lt: bool,
+) -> bool {
+    unsafe {
+        orb_fleet_place_argmin_step(
+            u8::from(a.queued),
+            u8::from(a.specialized),
+            u8::from(a.soft_disk_pressure),
+            u8::from(b.queued),
+            u8::from(b.specialized),
+            u8::from(b.soft_disk_pressure),
+            u8::from(id_lex_lt),
+            a.load,
+            a.cap,
+            a.disk_headroom_gib,
+            b.load,
+            b.cap,
+            b.disk_headroom_gib,
+            a.mem_available_bytes,
+            b.mem_available_bytes,
+        ) == 1
+    }
+}
+
+#[inline]
+pub fn pool_pacer_next_debt_token_ms(
+    prev_debt_token_ms: u64,
+    elapsed_ms: u64,
+    rate_tokens_per_min: u64,
+    added_tokens: u64,
+    max_delay_ms: u64,
+) -> u64 {
+    unsafe {
+        orb_pool_pacer_step(
+            0,
+            prev_debt_token_ms,
+            elapsed_ms,
+            rate_tokens_per_min,
+            added_tokens,
+            max_delay_ms,
+        )
+    }
+}
+
+#[inline]
+pub fn pool_pacer_delay_ms(
+    prev_debt_token_ms: u64,
+    elapsed_ms: u64,
+    rate_tokens_per_min: u64,
+    added_tokens: u64,
+    max_delay_ms: u64,
+) -> u64 {
+    unsafe {
+        orb_pool_pacer_step(
+            1,
+            prev_debt_token_ms,
+            elapsed_ms,
+            rate_tokens_per_min,
+            added_tokens,
+            max_delay_ms,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfinementScanVerdict {
+    Admit,
+    RejectPathLength,
+    RejectNullByte,
+    RejectDotDot,
+    RejectEscapesRoot,
+    RejectSymlinkEscape,
+    RejectUnsafeEnvKey,
+    RejectSensitivePath,
+}
+
+#[inline]
+pub fn confinement_scan_step(
+    has_null_byte: bool,
+    has_dot_dot_segment: bool,
+    escapes_root: bool,
+    has_unsafe_env_key: bool,
+    touches_sensitive_path: bool,
+    is_symlink_escape: bool,
+    path_len: u32,
+    max_path_len: u32,
+) -> ConfinementScanVerdict {
+    let raw = unsafe {
+        orb_confinement_scan_step(
+            u8::from(has_null_byte),
+            u8::from(has_dot_dot_segment),
+            u8::from(escapes_root),
+            u8::from(has_unsafe_env_key),
+            u8::from(touches_sensitive_path),
+            u8::from(is_symlink_escape),
+            path_len,
+            max_path_len,
+        )
+    };
+    if (raw & 256) != 0 {
+        return ConfinementScanVerdict::Admit;
+    }
+    match raw & 0xFF {
+        1 => ConfinementScanVerdict::RejectPathLength,
+        2 => ConfinementScanVerdict::RejectNullByte,
+        3 => ConfinementScanVerdict::RejectDotDot,
+        4 => ConfinementScanVerdict::RejectEscapesRoot,
+        5 => ConfinementScanVerdict::RejectSymlinkEscape,
+        6 => ConfinementScanVerdict::RejectUnsafeEnvKey,
+        _ => ConfinementScanVerdict::RejectSensitivePath,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobIdentityVerdict {
+    AdmitFreshDispatch,
+    JoinActiveExecution,
+    ReplayTerminalReceipt,
+    RejectZeroDigest,
+}
+
+#[inline]
+pub fn job_identity_eq256_step(
+    a: [u64; 4],
+    b: [u64; 4],
+    has_active_match: bool,
+    has_terminal_receipt: bool,
+) -> JobIdentityVerdict {
+    let raw = unsafe {
+        orb_job_identity_eq256_step(
+            a[0],
+            a[1],
+            a[2],
+            a[3],
+            b[0],
+            b[1],
+            b[2],
+            b[3],
+            u8::from(has_active_match),
+            u8::from(has_terminal_receipt),
+        )
+    };
+    if (raw & 256) != 0 {
+        return JobIdentityVerdict::AdmitFreshDispatch;
+    }
+    match raw & 0xFF {
+        1 => JobIdentityVerdict::JoinActiveExecution,
+        2 => JobIdentityVerdict::ReplayTerminalReceipt,
+        _ => JobIdentityVerdict::RejectZeroDigest,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationDagVerdict {
+    ReadyToClaim,
+    WaitingDepsOrClaimed,
+    BlockedByFailedDep,
+    AlreadyPassed,
+    StaleCandidate,
+    InvalidDepCounts,
+}
+
+#[inline]
+pub fn validation_dag_step(
+    total_deps: u32,
+    passed_deps: u32,
+    failed_deps: u32,
+    already_claimed: bool,
+    already_passed: bool,
+    candidate_exact_match: bool,
+) -> ValidationDagVerdict {
+    let raw = unsafe {
+        orb_validation_dag_step(
+            total_deps,
+            passed_deps,
+            failed_deps,
+            u8::from(already_claimed),
+            u8::from(already_passed),
+            u8::from(candidate_exact_match),
+        )
+    };
+    if (raw & 256) != 0 {
+        return ValidationDagVerdict::ReadyToClaim;
+    }
+    match raw & 0xFF {
+        1 => ValidationDagVerdict::WaitingDepsOrClaimed,
+        2 => ValidationDagVerdict::BlockedByFailedDep,
+        3 => ValidationDagVerdict::AlreadyPassed,
+        4 => ValidationDagVerdict::StaleCandidate,
+        _ => ValidationDagVerdict::InvalidDepCounts,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fts5LexAction {
+    Skip,
+    AppendWordChar,
+    CloseBareToken,
+    ClosePrefixToken,
+    OpenPhrase,
+    ClosePhrase,
+    CloseBareAndOpenPhrase,
+    TokenBudgetFull,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fts5LexVerdict {
+    pub admitted: bool,
+    pub action: Fts5LexAction,
+    pub next_state: u32,
+    pub next_emitted_tokens: u32,
+}
+
+#[inline]
+pub fn fts5_lexer_step(
+    state: u32,
+    char_class: u32,
+    token_len: u32,
+    max_tokens: u32,
+    emitted_tokens: u32,
+) -> Fts5LexVerdict {
+    let raw =
+        unsafe { orb_fts5_lexer_step(state, char_class, token_len, max_tokens, emitted_tokens) };
+    let lo = (raw & 0xFFFF_FFFF) as u32;
+    let admitted = (lo & 256) != 0;
+    let action = if !admitted {
+        Fts5LexAction::TokenBudgetFull
+    } else {
+        match lo & 0xFF {
+            1 => Fts5LexAction::AppendWordChar,
+            2 => Fts5LexAction::CloseBareToken,
+            3 => Fts5LexAction::ClosePrefixToken,
+            4 => Fts5LexAction::OpenPhrase,
+            5 => Fts5LexAction::ClosePhrase,
+            6 => Fts5LexAction::CloseBareAndOpenPhrase,
+            _ => Fts5LexAction::Skip,
+        }
+    };
+    Fts5LexVerdict {
+        admitted,
+        action,
+        next_state: lo >> 16,
+        next_emitted_tokens: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Utf8Utf16WindowVerdict {
+    pub admitted: bool,
+    pub seq_bytes: u32,
+    pub utf16_cost: u32,
+    pub next_utf16_units: u32,
+}
+
+#[inline]
+pub fn utf8_utf16_window_step(
+    byte_idx: u32,
+    byte_len: u32,
+    lead_byte: u8,
+    utf16_units: u32,
+    max_utf16_units: u32,
+) -> Utf8Utf16WindowVerdict {
+    let raw = unsafe {
+        orb_utf8_utf16_window_step(
+            byte_idx,
+            byte_len,
+            u32::from(lead_byte),
+            utf16_units,
+            max_utf16_units,
+        )
+    };
+    let lo = (raw & 0xFFFF_FFFF) as u32;
+    Utf8Utf16WindowVerdict {
+        admitted: (lo & 256) != 0,
+        seq_bytes: lo & 0xFF,
+        utf16_cost: lo >> 16,
+        next_utf16_units: (raw >> 32) as u32,
     }
 }
 
@@ -7030,6 +7462,96 @@ pub mod raw_cabi {
     #[inline]
     pub fn orb_placement_merge_step(a0: u64, a1: u64, a2: u32, a3: u32, a4: u8, a5: u8) -> u64 {
         unsafe { super::orb_placement_merge_step(a0, a1, a2, a3, a4, a5) }
+    }
+    #[inline]
+    pub fn orb_proxy_sse_scan_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8) -> u32 {
+        unsafe { super::orb_proxy_sse_scan_step(a0, a1, a2, a3, a4, a5) }
+    }
+    #[inline]
+    pub fn orb_stream_repetition_step(
+        a0: u8,
+        a1: u8,
+        a2: u32,
+        a3: u32,
+        a4: u32,
+        a5: u32,
+        a6: u32,
+        a7: u64,
+        a8: u64,
+    ) -> u64 {
+        unsafe { super::orb_stream_repetition_step(a0, a1, a2, a3, a4, a5, a6, a7, a8) }
+    }
+    #[inline]
+    pub fn orb_http_rate_limit_classify_step(a0: u32, a1: u8, a2: u8, a3: u64, a4: u64) -> u64 {
+        unsafe { super::orb_http_rate_limit_classify_step(a0, a1, a2, a3, a4) }
+    }
+    #[inline]
+    pub fn orb_fleet_place_argmin_step(
+        a0: u8,
+        a1: u8,
+        a2: u8,
+        a3: u8,
+        a4: u8,
+        a5: u8,
+        a6: u8,
+        a7: u32,
+        a8: u32,
+        a9: u32,
+        a10: u32,
+        a11: u32,
+        a12: u32,
+        a13: u64,
+        a14: u64,
+    ) -> u8 {
+        unsafe {
+            super::orb_fleet_place_argmin_step(
+                a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14,
+            )
+        }
+    }
+    #[inline]
+    pub fn orb_pool_pacer_step(a0: u8, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+        unsafe { super::orb_pool_pacer_step(a0, a1, a2, a3, a4, a5) }
+    }
+    #[inline]
+    pub fn orb_confinement_scan_step(
+        a0: u8,
+        a1: u8,
+        a2: u8,
+        a3: u8,
+        a4: u8,
+        a5: u8,
+        a6: u32,
+        a7: u32,
+    ) -> u32 {
+        unsafe { super::orb_confinement_scan_step(a0, a1, a2, a3, a4, a5, a6, a7) }
+    }
+    #[inline]
+    pub fn orb_job_identity_eq256_step(
+        a0: u64,
+        a1: u64,
+        a2: u64,
+        a3: u64,
+        a4: u64,
+        a5: u64,
+        a6: u64,
+        a7: u64,
+        a8: u8,
+        a9: u8,
+    ) -> u32 {
+        unsafe { super::orb_job_identity_eq256_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) }
+    }
+    #[inline]
+    pub fn orb_validation_dag_step(a0: u32, a1: u32, a2: u32, a3: u8, a4: u8, a5: u8) -> u32 {
+        unsafe { super::orb_validation_dag_step(a0, a1, a2, a3, a4, a5) }
+    }
+    #[inline]
+    pub fn orb_fts5_lexer_step(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32) -> u64 {
+        unsafe { super::orb_fts5_lexer_step(a0, a1, a2, a3, a4) }
+    }
+    #[inline]
+    pub fn orb_utf8_utf16_window_step(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32) -> u64 {
+        unsafe { super::orb_utf8_utf16_window_step(a0, a1, a2, a3, a4) }
     }
     pub fn call_u64(symbol: &str, args: &[u64]) -> Option<u64> {
         Some(match symbol {
@@ -8129,6 +8651,98 @@ pub mod raw_cabi {
                 args[3] as u32,
                 args[4] as u8,
                 args[5] as u8,
+            ),
+            "orb_proxy_sse_scan_step" if args.len() == 6 => orb_proxy_sse_scan_step(
+                args[0] as u8,
+                args[1] as u8,
+                args[2] as u8,
+                args[3] as u8,
+                args[4] as u8,
+                args[5] as u8,
+            ) as u64,
+            "orb_stream_repetition_step" if args.len() == 9 => orb_stream_repetition_step(
+                args[0] as u8,
+                args[1] as u8,
+                args[2] as u32,
+                args[3] as u32,
+                args[4] as u32,
+                args[5] as u32,
+                args[6] as u32,
+                args[7],
+                args[8],
+            ),
+            "orb_http_rate_limit_classify_step" if args.len() == 5 => {
+                orb_http_rate_limit_classify_step(
+                    args[0] as u32,
+                    args[1] as u8,
+                    args[2] as u8,
+                    args[3],
+                    args[4],
+                )
+            }
+            "orb_fleet_place_argmin_step" if args.len() == 15 => orb_fleet_place_argmin_step(
+                args[0] as u8,
+                args[1] as u8,
+                args[2] as u8,
+                args[3] as u8,
+                args[4] as u8,
+                args[5] as u8,
+                args[6] as u8,
+                args[7] as u32,
+                args[8] as u32,
+                args[9] as u32,
+                args[10] as u32,
+                args[11] as u32,
+                args[12] as u32,
+                args[13],
+                args[14],
+            ) as u64,
+            "orb_pool_pacer_step" if args.len() == 6 => {
+                orb_pool_pacer_step(args[0] as u8, args[1], args[2], args[3], args[4], args[5])
+            }
+            "orb_confinement_scan_step" if args.len() == 8 => orb_confinement_scan_step(
+                args[0] as u8,
+                args[1] as u8,
+                args[2] as u8,
+                args[3] as u8,
+                args[4] as u8,
+                args[5] as u8,
+                args[6] as u32,
+                args[7] as u32,
+            ) as u64,
+            "orb_job_identity_eq256_step" if args.len() == 10 => orb_job_identity_eq256_step(
+                args[0],
+                args[1],
+                args[2],
+                args[3],
+                args[4],
+                args[5],
+                args[6],
+                args[7],
+                args[8] as u8,
+                args[9] as u8,
+            ) as u64,
+            "orb_validation_dag_step" if args.len() == 6 => orb_validation_dag_step(
+                args[0] as u32,
+                args[1] as u32,
+                args[2] as u32,
+                args[3] as u8,
+                args[4] as u8,
+                args[5] as u8,
+            ) as u64,
+            "orb_fts5_lexer_step" if args.len() == 5 => orb_fts5_lexer_step(
+                args[0] as u32,
+                args[1] as u32,
+                args[2] as u32,
+                args[3] as u32,
+                args[4] as u32,
+            ),
+            "orb_utf8_utf16_window_step" if args.len() == 5 => orb_utf8_utf16_window_step(
+                args[0] as u32,
+                args[1] as u32,
+                args[2] as u32,
+                args[3] as u32,
+                args[4] as u32,
             ),
             _ => return None,
         })
@@ -9462,7 +10076,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 151);
+        assert_eq!(count, 161);
     }
 }
 
@@ -10553,18 +11167,16 @@ mod stateful_tests {
                 actual, expected,
                 "dispatch mismatch at case {case_idx} (len={target_len}, align={align_off})"
             );
-
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                if std::arch::is_x86_feature_detected!("sse2") {
-                    let sse2 = unsafe { stream_simd::scan_stream_bytes_sse2(slice) };
-                    assert_eq!(sse2, expected, "SSE2 mismatch at case {case_idx}");
-                }
-                if std::arch::is_x86_feature_detected!("avx2") {
-                    let avx2 = unsafe { stream_simd::scan_stream_bytes_avx2(slice) };
-                    assert_eq!(avx2, expected, "AVX2 mismatch at case {case_idx}");
-                }
-            }
+            assert_eq!(
+                stream_simd::scan_stream_bytes_simd128(slice),
+                expected,
+                "SIMD128 chunked mismatch at case {case_idx}"
+            );
+            assert_eq!(
+                stream_simd::scan_stream_bytes_avx2_safe(slice),
+                expected,
+                "AVX2 chunked mismatch at case {case_idx}"
+            );
         }
     }
 
@@ -11246,5 +11858,168 @@ mod stateful_tests {
         assert!(rollback.clear_pending);
         assert!(rollback.evict_other_projects);
         assert_eq!(rollback.next_rev32, 5);
+    }
+
+    #[test]
+    fn wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts() {
+        // 1. Proxy SSE scan step
+        let done = proxy_sse_scan_step(2, true, true, false, false, true);
+        assert_eq!(done.action, ProxySseAction::DoneTerminal);
+        assert!(!done.emit_delta);
+        assert!(done.next_in_think_tag);
+
+        let delta = proxy_sse_scan_step(2, false, false, true, false, true);
+        assert_eq!(delta.action, ProxySseAction::EmitContent);
+        assert!(delta.emit_delta);
+        assert!(delta.next_in_think_tag);
+
+        // 2. Stream repetition step
+        assert_eq!(
+            stream_repetition_step(true, false, 10, 10, 5, 2, 3, 1, 100),
+            StreamRepetitionVerdict::Inconclusive(2)
+        );
+        assert_eq!(
+            stream_repetition_step(false, false, 10, 10, 5, 2, 3, 10, 100),
+            StreamRepetitionVerdict::AbortRepetition(3)
+        );
+        assert_eq!(
+            stream_repetition_step(false, false, 20, 8, 5, 2, 3, 10, 100),
+            StreamRepetitionVerdict::Continue(1)
+        );
+
+        // 3. HTTP rate-limit classify step
+        let rl = http_rate_limit_classify_step(429, false, false, 45, 120);
+        assert_eq!(rl.reason, HttpRateLimitReason::RateLimit);
+        assert!(rl.apply_cooldown);
+        assert!(rl.retryable);
+        assert_eq!(rl.cooldown_secs, 45);
+
+        let quota = http_rate_limit_classify_step(429, true, false, 0, 120);
+        assert_eq!(quota.reason, HttpRateLimitReason::QuotaExhausted);
+        assert!(quota.apply_cooldown);
+        assert!(!quota.retryable);
+
+        let ok = http_rate_limit_classify_step(200, true, true, 99, 120);
+        assert_eq!(ok.reason, HttpRateLimitReason::Ok);
+        assert!(!ok.apply_cooldown);
+
+        // 4. Fleet place argmin step
+        let unqueued = FleetPlaceCandidate {
+            queued: false,
+            specialized: true,
+            soft_disk_pressure: true,
+            load: 3,
+            cap: 4,
+            disk_headroom_gib: 10,
+            mem_available_bytes: 8_000,
+        };
+        let queued = FleetPlaceCandidate {
+            queued: true,
+            specialized: false,
+            soft_disk_pressure: false,
+            load: 0,
+            cap: 8,
+            disk_headroom_gib: 100,
+            mem_available_bytes: 64_000,
+        };
+        assert!(fleet_place_argmin_step(unqueued, queued, false));
+        assert!(!fleet_place_argmin_step(unqueued, unqueued, false));
+
+        // 5. Pool pacer step (fixed-point token*ms leaky bucket)
+        assert_eq!(pool_pacer_next_debt_token_ms(0, 0, 0, 1_000, 10_000), 0);
+        let debt1 = pool_pacer_next_debt_token_ms(0, 0, 60_000, 2_000, 10_000);
+        assert_eq!(debt1, 2_000 * 60_000);
+        let delay = pool_pacer_delay_ms(debt1, 500, 60_000, 0, 10_000);
+        assert_eq!(delay, 1_500);
+
+        // 6. Confinement scan step
+        assert_eq!(
+            confinement_scan_step(false, false, false, false, false, false, 4, 4096),
+            ConfinementScanVerdict::Admit
+        );
+        assert_eq!(
+            confinement_scan_step(false, true, false, false, false, false, 4, 4096),
+            ConfinementScanVerdict::RejectDotDot
+        );
+        assert_eq!(
+            confinement_scan_step(false, false, false, false, false, true, 4, 4096),
+            ConfinementScanVerdict::RejectSymlinkEscape
+        );
+
+        // 7. 256-bit job identity equality
+        let d = [11u64, 22, 33, 44];
+        assert_eq!(
+            job_identity_eq256_step(d, d, true, false),
+            JobIdentityVerdict::JoinActiveExecution
+        );
+        assert_eq!(
+            job_identity_eq256_step(d, d, false, true),
+            JobIdentityVerdict::ReplayTerminalReceipt
+        );
+        assert_eq!(
+            job_identity_eq256_step(d, [11, 22, 33, 45], true, true),
+            JobIdentityVerdict::AdmitFreshDispatch
+        );
+        assert_eq!(
+            job_identity_eq256_step([0, 0, 0, 0], [0, 0, 0, 0], true, true),
+            JobIdentityVerdict::RejectZeroDigest
+        );
+
+        // 8. Validation DAG gate step
+        assert_eq!(
+            validation_dag_step(2, 2, 0, false, false, true),
+            ValidationDagVerdict::ReadyToClaim
+        );
+        assert_eq!(
+            validation_dag_step(2, 1, 0, false, false, true),
+            ValidationDagVerdict::WaitingDepsOrClaimed
+        );
+        assert_eq!(
+            validation_dag_step(2, 1, 1, false, false, true),
+            ValidationDagVerdict::BlockedByFailedDep
+        );
+        assert_eq!(
+            validation_dag_step(1, 2, 0, false, false, true),
+            ValidationDagVerdict::InvalidDepCounts
+        );
+
+        // 9. FTS5 lexer step
+        assert_eq!(
+            fts5_lexer_step(0, 1, 0, 16, 0),
+            Fts5LexVerdict {
+                admitted: true,
+                action: Fts5LexAction::AppendWordChar,
+                next_state: 1,
+                next_emitted_tokens: 0,
+            }
+        );
+        assert_eq!(
+            fts5_lexer_step(1, 0, 4, 16, 2),
+            Fts5LexVerdict {
+                admitted: true,
+                action: Fts5LexAction::CloseBareToken,
+                next_state: 0,
+                next_emitted_tokens: 3,
+            }
+        );
+
+        // 10. UTF-8 / UTF-16 window step + new LeanSys bounds
+        let cont = utf8_utf16_window_step(0, 10, 0x80, 5, 6);
+        assert!(!cont.admitted);
+        let astral_blocked = utf8_utf16_window_step(0, 10, 0xF0, 5, 6);
+        assert!(!astral_blocked.admitted);
+        assert_eq!(astral_blocked.next_utf16_units, 5);
+        let astral_ok = utf8_utf16_window_step(0, 10, 0xF0, 5, 7);
+        assert!(astral_ok.admitted);
+        assert_eq!(astral_ok.seq_bytes, 4);
+        assert_eq!(astral_ok.utf16_cost, 2);
+        assert_eq!(astral_ok.next_utf16_units, 7);
+
+        assert!(lean_sys_cabi::verify_unix_path_bounds(64, true));
+        assert!(!lean_sys_cabi::verify_unix_path_bounds(0, true));
+        assert!(lean_sys_cabi::verify_cas_digest256(d, d, false));
+        assert!(!lean_sys_cabi::verify_cas_digest256(d, d, true));
+        assert!(lean_sys_cabi::verify_cgroup_v2_budget(512, 1024, 0, true));
+        assert!(!lean_sys_cabi::verify_cgroup_v2_budget(512, 1024, 1, true));
     }
 }

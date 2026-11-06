@@ -71,6 +71,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -218,20 +220,28 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
 
     suspend fun load() {
         try {
-            chains = OrbJSON.dictList(core.request("/api/model-routing/chains")).map { OrbRow(it) }
-            health = runCatching { OrbJSON.dictList(core.request("/api/model-routing/health")).map { OrbRow(it, (it["account_id"] as? String).orEmpty()) } }.getOrDefault(emptyList())
-            events = runCatching { OrbJSON.dictList(core.request("/api/model-routing/events")).mapIndexed { i, d -> OrbRow(d, "ev-$i") } }.getOrDefault(emptyList())
-            runCatching { OrbJSON.dict(core.request("/api/settings")) }.getOrNull()?.let { s ->
-                val cap = (s["google_max_concurrency"] as? Number)?.toInt()
-                if (cap != null && cap >= 1) {
-                    savedGoogleCap = cap
-                    googleCapText = cap.toString()
+            coroutineScope {
+                val cTask = async { runCatching { OrbJSON.dictList(core.request("/api/model-routing/chains")).map { OrbRow(it) } } }
+                val hTask = async { runCatching { OrbJSON.dictList(core.request("/api/model-routing/health")).map { OrbRow(it, (it["account_id"] as? String).orEmpty()) } } }
+                val eTask = async { runCatching { OrbJSON.dictList(core.request("/api/model-routing/events")).mapIndexed { i, d -> OrbRow(d, "ev-$i") } } }
+                val sTask = async { runCatching { OrbJSON.dict(core.request("/api/settings")) } }
+                val pTask = async { runCatching { core.fetchRows("/api/ai/providers", "providers") } }
+
+                chains = cTask.await().getOrThrow()
+                health = hTask.await().onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
+                events = eTask.await().onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
+                sTask.await().onFailure { if (it is CancellationException) throw it }.getOrNull()?.let { s ->
+                    val cap = (s["google_max_concurrency"] as? Number)?.toInt()
+                    if (cap != null && cap >= 1) {
+                        savedGoogleCap = cap
+                        googleCapText = cap.toString()
+                    }
                 }
-            }
-            runCatching { core.fetchRows("/api/ai/providers", "providers") }.getOrNull()?.let { provs ->
-                providerLabels = provs.associate { p ->
-                    val s = splitProviderDisplayName(p)
-                    p.id to s.account.ifEmpty { s.title }
+                pTask.await().onFailure { if (it is CancellationException) throw it }.getOrNull()?.let { provs ->
+                    providerLabels = provs.associate { p ->
+                        val s = splitProviderDisplayName(p)
+                        p.id to s.account.ifEmpty { s.title }
+                    }
                 }
             }
             error = null
@@ -1049,10 +1059,18 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
 
     suspend fun load() {
         try {
-            skills = OrbJSON.dictList(core.request("/api/library/skill"))
-                .map { OrbRow(it, (it["name"] as? String).orEmpty()) }
-                .sortedBy { it.id }
-            repoStatus = runCatching { core.fetchDict("/api/library/status") }.getOrNull()
+            coroutineScope {
+                val skillsTask = async {
+                    runCatching {
+                        OrbJSON.dictList(core.request("/api/library/skill"))
+                            .map { OrbRow(it, (it["name"] as? String).orEmpty()) }
+                            .sortedBy { it.id }
+                    }
+                }
+                val statusTask = async { runCatching { core.fetchDict("/api/library/status") } }
+                skills = skillsTask.await().getOrThrow()
+                repoStatus = statusTask.await().onFailure { if (it is CancellationException) throw it }.getOrNull()
+            }
             error = null
         } catch (e: CancellationException) {
             throw e

@@ -578,7 +578,31 @@ impl MissionResourceCaps {
         if let Some(quota) = &self.cpu_quota {
             args.push(format!("--property=CPUQuota={quota}"));
         }
+        if let (Some(high), Some(max)) = (
+            self.high.as_deref().and_then(|v| v.parse::<u64>().ok()),
+            self.max.as_deref().and_then(|v| v.parse::<u64>().ok()),
+        ) {
+            if !Self::verify_cgroup_v2_live_budget(high.min(max), max, 0, true) {
+                return None;
+            }
+        }
         Some(args)
+    }
+
+    /// Formally verified Linux `cgroup v2` live memory & OOM-kill check (`leansys_verify_cgroup_v2_budget`).
+    #[inline]
+    pub fn verify_cgroup_v2_live_budget(
+        mem_current_bytes: u64,
+        mem_max_bytes: u64,
+        oom_kill_count: u64,
+        cgroup_attached: bool,
+    ) -> bool {
+        crate::orb_spec::lean_sys_cabi::verify_cgroup_v2_budget(
+            mem_current_bytes,
+            mem_max_bytes,
+            oom_kill_count,
+            cgroup_attached,
+        )
     }
 }
 
@@ -1990,12 +2014,22 @@ impl WorkspaceExec {
         }
 
         let x11_socket_path = Path::new("/tmp/.X11-unix");
-        if x11_socket_path.exists() {
+        let x11_bytes = x11_socket_path.as_os_str().as_encoded_bytes();
+        if crate::orb_spec::lean_sys_cabi::verify_unix_path_bounds(
+            x11_bytes.len() as u64,
+            !x11_bytes.contains(&0),
+        ) && x11_socket_path.exists()
+        {
             cmd.arg("--bind=/tmp/.X11-unix");
         }
 
         let fido_agent_path = Path::new("/run/sandboxed-sh/fido-agent.sock");
-        if fido_agent_path.exists() {
+        let fido_bytes = fido_agent_path.as_os_str().as_encoded_bytes();
+        if crate::orb_spec::lean_sys_cabi::verify_unix_path_bounds(
+            fido_bytes.len() as u64,
+            !fido_bytes.contains(&0),
+        ) && fido_agent_path.exists()
+        {
             cmd.arg("--bind=/run/sandboxed-sh/fido-agent.sock");
         }
 

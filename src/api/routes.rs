@@ -209,35 +209,55 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         });
     }
 
+    // Initialize independent persisted stores concurrently at startup.
+    let working_dir = config.working_dir.clone();
+    let opencode_connections_path = config
+        .working_dir
+        .join(".sandboxed-sh/opencode_connections.json");
+    let ai_providers_path = config.working_dir.join(AI_PROVIDERS_PATH);
+    let github_connection_path = config.working_dir.join(GITHUB_CONNECTION_PATH);
+    let model_chains_path = config.working_dir.join(".sandboxed-sh/model_chains.json");
+    let proxy_api_keys_path = config.working_dir.join(".sandboxed-sh/proxy_api_keys.json");
+    let deferred_requests_path = config
+        .working_dir
+        .join(".sandboxed-sh/deferred_requests.json");
+    let (
+        workspaces_raw,
+        opencode_connections_raw,
+        ai_providers_raw,
+        github_connection_raw,
+        chain_store_raw,
+        proxy_api_keys_raw,
+        deferred_requests_raw,
+        secrets_res,
+        settings_raw,
+    ) = tokio::join!(
+        workspace::WorkspaceStore::new(working_dir),
+        crate::opencode_config::OpenCodeStore::new(opencode_connections_path),
+        crate::ai_providers::AIProviderStore::new(ai_providers_path),
+        crate::github_connection::GithubConnectionStore::new(github_connection_path),
+        crate::provider_health::ModelChainStore::new(model_chains_path),
+        super::proxy_keys::ProxyApiKeyStore::new(proxy_api_keys_path),
+        deferred_proxy_api::DeferredRequestStore::new(deferred_requests_path),
+        crate::secrets::SecretsStore::new(&config.working_dir),
+        crate::settings::SettingsStore::new(&config.working_dir),
+    );
+
     // Initialize workspace store (loads from disk and recovers orphaned containers)
-    let workspaces = Arc::new(workspace::WorkspaceStore::new(config.working_dir.clone()).await);
+    let workspaces = Arc::new(workspaces_raw);
 
     // Enable per-container metrics collection in the monitoring background task
     monitoring::init_monitoring_workspaces(Arc::clone(&workspaces)).await;
 
     // Initialize OpenCode connection store
-    let opencode_connections = Arc::new(
-        crate::opencode_config::OpenCodeStore::new(
-            config
-                .working_dir
-                .join(".sandboxed-sh/opencode_connections.json"),
-        )
-        .await,
-    );
+    let opencode_connections = Arc::new(opencode_connections_raw);
 
     // Initialize AI provider store
-    let ai_providers = Arc::new(
-        crate::ai_providers::AIProviderStore::new(config.working_dir.join(AI_PROVIDERS_PATH)).await,
-    );
+    let ai_providers = Arc::new(ai_providers_raw);
     super::ai_providers::register_shared_provider_store(Arc::clone(&ai_providers));
     let pending_oauth = Arc::new(RwLock::new(HashMap::new()));
     let pending_github_oauth = Arc::new(RwLock::new(HashMap::new()));
-    let github_connection = Arc::new(
-        crate::github_connection::GithubConnectionStore::new(
-            config.working_dir.join(GITHUB_CONNECTION_PATH),
-        )
-        .await,
-    );
+    let github_connection = Arc::new(github_connection_raw);
     let pending_github_integration = Arc::new(RwLock::new(HashMap::new()));
 
     // Usage-limit cooldowns outlive the process: load them before anything
@@ -251,31 +271,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 
     // Initialize provider health tracker and model chain store
     let health_tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
-    let chain_store = Arc::new(
-        crate::provider_health::ModelChainStore::new(
-            config.working_dir.join(".sandboxed-sh/model_chains.json"),
-        )
-        .await,
-    );
+    let chain_store = Arc::new(chain_store_raw);
 
     // Initialize proxy API key store
-    let proxy_api_keys = Arc::new(
-        super::proxy_keys::ProxyApiKeyStore::new(
-            config.working_dir.join(".sandboxed-sh/proxy_api_keys.json"),
-        )
-        .await,
-    );
-    let deferred_requests = Arc::new(
-        deferred_proxy_api::DeferredRequestStore::new(
-            config
-                .working_dir
-                .join(".sandboxed-sh/deferred_requests.json"),
-        )
-        .await,
-    );
+    let proxy_api_keys = Arc::new(proxy_api_keys_raw);
+    let deferred_requests = Arc::new(deferred_requests_raw);
 
     // Initialize secrets store
-    let secrets = match crate::secrets::SecretsStore::new(&config.working_dir).await {
+    let secrets = match secrets_res {
         Ok(store) => {
             tracing::info!("Secrets store initialized");
             Some(Arc::new(store))
@@ -291,7 +294,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     Arc::clone(&console_pool).start_cleanup_task();
 
     // Initialize global settings store
-    let settings = Arc::new(crate::settings::SettingsStore::new(&config.working_dir).await);
+    let settings = Arc::new(settings_raw);
     settings.init_cached_values();
     // Per-model `/v1` latency summary in the journal every 5 minutes.
     super::proxy_timing::spawn_periodic_summary(std::time::Duration::from_secs(300));
@@ -487,22 +490,26 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                     *library_clone.write().await = Some(Arc::new(store));
 
                     let workspaces = workspaces_clone.list().await;
-                    if let Some(library) = library_clone.read().await.as_ref() {
-                        for workspace in workspaces {
+                    let library_opt = library_clone.read().await.clone();
+                    if let Some(library) = library_opt.as_deref() {
+                        use futures::stream::{self, StreamExt};
+                        stream::iter(workspaces.into_iter().filter(|workspace| {
                             let is_default_host = workspace.id == workspace::DEFAULT_WORKSPACE_ID
                                 && workspace.workspace_type == workspace::WorkspaceType::Host;
-                            if is_default_host || !workspace.skills.is_empty() {
-                                if let Err(e) =
-                                    workspace::sync_workspace_skills(&workspace, library).await
-                                {
-                                    tracing::warn!(
-                                        workspace = %workspace.name,
-                                        error = %e,
-                                        "Failed to sync skills after library init"
-                                    );
-                                }
+                            is_default_host || !workspace.skills.is_empty()
+                        }))
+                        .for_each_concurrent(8, |workspace| async move {
+                            if let Err(e) =
+                                workspace::sync_workspace_skills(&workspace, library).await
+                            {
+                                tracing::warn!(
+                                    workspace = %workspace.name,
+                                    error = %e,
+                                    "Failed to sync skills after library init"
+                                );
                             }
-                        }
+                        })
+                        .await;
                     }
                 }
                 Err(e) => {

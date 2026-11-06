@@ -8850,9 +8850,12 @@ pub(crate) async fn ensure_codex_cli_available(
         ));
     }
 
-    let has_bun = command_available(workspace_exec, cwd, "bun").await
-        || command_available(workspace_exec, cwd, "/root/.bun/bin/bun").await;
-    let has_npm = command_available(workspace_exec, cwd, "npm").await;
+    let (has_bun_path, has_root_bun, has_npm) = tokio::join!(
+        command_available(workspace_exec, cwd, "bun"),
+        command_available(workspace_exec, cwd, "/root/.bun/bin/bun"),
+        command_available(workspace_exec, cwd, "npm"),
+    );
+    let has_bun = has_bun_path || has_root_bun;
 
     if !has_bun && !has_npm {
         return Err(format!(
@@ -9707,18 +9710,16 @@ pub async fn check_backend_prerequisites(
             check_codex_prerequisites(&workspace_exec, cwd, cli).await
         }
         "vibe" => {
-            let cli_available = command_available(&workspace_exec, cwd, cli_path.unwrap_or("vibe-acp")).await;
-            let python = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                workspace_exec.output(
-                    cwd,
-                    "python3",
-                    &["-c".into(), crate::vibe::PYTHON_VERSION_CHECK.into()],
-                    HashMap::new(),
+            let vibe_python_args = ["-c".into(), crate::vibe::PYTHON_VERSION_CHECK.into()];
+            let (cli_available, python_out) = tokio::join!(
+                command_available(&workspace_exec, cwd, cli_path.unwrap_or("vibe-acp")),
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    workspace_exec.output(cwd, "python3", &vibe_python_args, HashMap::new()),
                 ),
-            )
-            .await
-            .is_ok_and(|result| result.is_ok_and(|output| output.status.success()));
+            );
+            let python = python_out
+                .is_ok_and(|result| result.is_ok_and(|output| output.status.success()));
             BackendPreflightResult { backend_id: "vibe".into(), available: cli_available && python, cli_available, auto_install_possible: false, missing_dependencies: if cli_available && python { vec![] } else { vec!["Mistral Vibe (vibe-acp) and Python 3.9+".into()] }, message: Some("Install mistral-vibe with uv tool install mistral-vibe; Core uses the connected Mistral provider".into()) }
         }
         "antigravity" => {
@@ -9783,11 +9784,14 @@ async fn check_claudecode_prerequisites(
     let mut missing = Vec::new();
     let program = cli_path.split_whitespace().next().unwrap_or(cli_path);
 
-    let cli_available = command_available(workspace_exec, cwd, program).await
-        || command_available(workspace_exec, cwd, "/usr/local/bin/claude").await
-        || command_available(workspace_exec, cwd, "/usr/bin/claude").await
-        || command_available(workspace_exec, cwd, "/root/.cache/.bun/bin/claude").await
-        || command_available(workspace_exec, cwd, "/root/.bun/bin/claude").await;
+    let (c0, c1, c2, c3, c4) = tokio::join!(
+        command_available(workspace_exec, cwd, program),
+        command_available(workspace_exec, cwd, "/usr/local/bin/claude"),
+        command_available(workspace_exec, cwd, "/usr/bin/claude"),
+        command_available(workspace_exec, cwd, "/root/.cache/.bun/bin/claude"),
+        command_available(workspace_exec, cwd, "/root/.bun/bin/claude"),
+    );
+    let cli_available = c0 || c1 || c2 || c3 || c4;
 
     if cli_available {
         return BackendPreflightResult {
@@ -9800,8 +9804,11 @@ async fn check_claudecode_prerequisites(
         };
     }
 
-    let has_npm = command_available(workspace_exec, cwd, "npm").await;
-    let has_bun = available_bun_command(workspace_exec, cwd).await.is_some()
+    let (has_npm, bun_cmd) = tokio::join!(
+        command_available(workspace_exec, cwd, "npm"),
+        available_bun_command(workspace_exec, cwd),
+    );
+    let has_bun = bun_cmd.is_some()
         || (workspace_exec.workspace.workspace_type == WorkspaceType::Container
             && resolve_host_executable("bun").is_some());
 
@@ -9844,8 +9851,10 @@ async fn check_opencode_prerequisites(
         };
     }
 
-    let has_curl = command_available(workspace_exec, cwd, "curl").await;
-    let has_wget = command_available(workspace_exec, cwd, "wget").await;
+    let (has_curl, has_wget) = tokio::join!(
+        command_available(workspace_exec, cwd, "curl"),
+        command_available(workspace_exec, cwd, "wget"),
+    );
 
     if !has_curl && !has_wget {
         missing.push("curl or wget".to_string());
@@ -9875,9 +9884,12 @@ async fn check_codex_prerequisites(
     let mut missing = Vec::new();
     let program = cli_path.split_whitespace().next().unwrap_or(cli_path);
 
-    let cli_available = command_available(workspace_exec, cwd, program).await
-        || command_available(workspace_exec, cwd, "/root/.cache/.bun/bin/codex").await
-        || command_available(workspace_exec, cwd, "/root/.bun/bin/codex").await;
+    let (c0, c1, c2) = tokio::join!(
+        command_available(workspace_exec, cwd, program),
+        command_available(workspace_exec, cwd, "/root/.cache/.bun/bin/codex"),
+        command_available(workspace_exec, cwd, "/root/.bun/bin/codex"),
+    );
+    let cli_available = c0 || c1 || c2;
 
     if cli_available {
         return BackendPreflightResult {
@@ -9890,9 +9902,12 @@ async fn check_codex_prerequisites(
         };
     }
 
-    let has_npm = command_available(workspace_exec, cwd, "npm").await;
-    let has_bun = command_available(workspace_exec, cwd, "bun").await
-        || command_available(workspace_exec, cwd, "/root/.bun/bin/bun").await;
+    let (has_npm, has_bun_path, has_root_bun) = tokio::join!(
+        command_available(workspace_exec, cwd, "npm"),
+        command_available(workspace_exec, cwd, "bun"),
+        command_available(workspace_exec, cwd, "/root/.bun/bin/bun"),
+    );
+    let has_bun = has_bun_path || has_root_bun;
 
     if !has_npm && !has_bun {
         missing.push("npm or bun".to_string());

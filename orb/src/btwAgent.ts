@@ -181,9 +181,7 @@ export function btwLastLaunchError(parent:string):{error:string;notSent:boolean}
 export async function stopBtw(parent:string){const s=btwSession(parent);if(!s)return;if(s.queuedCursor||s.queuedCursors){delete s.queuedCursor;delete s.queuedCursors;save(parent,s);}if(s.local){await stopLocal(s.id);await flushClientLink(s.id);await setClientMissionStatus(s.id,'interrupted');}else{await currentSide(parent,s);await cancelMission(s.id);}}
 export function btwActivities(parent:string){const s=btwSession(parent);return s?.local?localActivities(s.id):s?remoteActivities()[s.id]??[]:[];}
 async function upload(attachments:SideAttachment[],destination:string){
- const paths:string[]=[];
- for(const a of attachments){const bytes=Uint8Array.from(atob(a.data_base64),c=>c.charCodeAt(0));const file=new File([bytes],a.name,{type:a.media_type});const item=await transferFile({name:a.name,file},destination);paths.push(item.path);}
- return paths;
+ return Promise.all(attachments.map(async a=>{const bytes=Uint8Array.from(atob(a.data_base64),c=>c.charCodeAt(0));const file=new File([bytes],a.name,{type:a.media_type});const item=await transferFile({name:a.name,file},destination);return item.path;}));
 }
 const NOT_LOCAL='This conversation no longer runs on this computer';
 const finishing=new Map<string,Promise<unknown>>();
@@ -200,9 +198,12 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
  if(s.local){
   receive({type:'status',text:''});
   await restoreLocalBindings();
-  await reconcileLocalRun(s.id);
   if(signal.aborted||connectionVersion()!==version)return;
-  await getMission(s.id).then(m=>{if(connectionVersion()===version&&ACTIVE.includes(m.status))follow(s.id);}).catch(swallow("btw.watchStatus", { mission: s.id }));
+  await Promise.all([
+   reconcileLocalRun(s.id),
+   getMission(s.id).then(m=>{if(connectionVersion()===version&&ACTIVE.includes(m.status))follow(s.id);}).catch(swallow("btw.watchStatus", { mission: s.id })),
+  ]);
+  if(signal.aborted||connectionVersion()!==version)return;
   // The native receipt owns completion; Core synchronization must not keep the UI busy.
   const state=await followLocal(s.id,text=>{if(!signal.aborted&&connectionVersion()===version)receive({type:'snapshot',text});});
   if(signal.aborted||connectionVersion()!==version)return;
@@ -438,22 +439,28 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   const node=machine?.kind==='node'?machine.id:machine?.kind==='core'?undefined:missionAssignedNode(source);
   const destination=local?'local':node??'core';
   const placement=JSON.stringify([local,node,source.working_directory,source.workspace_id]);
-  const paths=await upload(attachments,destination);
-  if(local)await restoreLocalBindings();
   const resumable=!!current&&RESUMABLE.includes(current.status)&&!s?.brokenSession&&!s?.freshSession&&(local||!current.track||current.track===`mission-${current.id}`||current.track===`mission-${current.id.slice(0,8)}`||!!current.tags?.includes(`btw-parent:${parent}`));
   let reuse=resumable&&s?.contextVersion===2&&!!s.conversationCursor&&s.harness===config.harness&&s.model===config.model&&s.placement===placement&&!shouldRotateBtwSession(s?.turnCount??0,s?.lastSequence??0);
+  const [paths, , tail] = await Promise.all([
+   upload(attachments,destination),
+   local ? restoreLocalBindings() : Promise.resolve(),
+   reuse ? getMissionEvents(s!.id,{limit:1,enough:()=>true}) : Promise.resolve([] as StoredEvent[]),
+  ]);
   let headSeq=0;
   if(reuse){
-   const tail=await getMissionEvents(s!.id,{limit:1,enough:()=>true});
    headSeq=tail.reduce((n,e)=>Math.max(n,e.sequence),0);
    if(shouldRotateBtwSession(s?.turnCount??0,headSeq))reuse=false;
   }
-  let snapshot=await prepareBtwContext(source,context,destination,reuse?s?.conversationCursor:undefined,reuse?[]:history,local?localBinding(parent)?.cwd:undefined);
+  const [snapshotResult, launchAgent] = await Promise.all([
+   prepareBtwContext(source,context,destination,reuse?s?.conversationCursor:undefined,reuse?[]:history,local?localBinding(parent)?.cwd:undefined),
+   local ? localAgentForLaunch(config.harness) : Promise.resolve(undefined),
+  ]);
+  let snapshot=snapshotResult;
   const makePrompt=(context:string)=>makeBtwPrompt(context,question,paths);
   let prompt=makePrompt(snapshot.context);
-  let binding=local?localBinding(parent):undefined;
-  let bin='';
-  if(local){await restoreLocalBindings();binding=localBinding(parent);if(!bin)bin=(await localAgentForLaunch(config.harness))?.path??'';if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');if(!bin)throw new Error(`${config.harness} is not installed. Configure it in Settings → Agents → Local agents.`);}
+  const binding=local?localBinding(parent):undefined;
+  const bin=local?(launchAgent?.path??''):'';
+  if(local){if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');if(!bin)throw new Error(`${config.harness} is not installed. Configure it in Settings → Agents → Local agents.`);}
   if(launchSignal.aborted||connectionVersion()!==version)throw new Error('Side question launch cancelled or connection changed.');
   const createSide=async()=>{
    const attemptKey=key+':attempt:'+config.harness+':'+config.model+':'+placement;
@@ -573,13 +580,19 @@ export async function queueBtwFollowUp(
   s=reconciled.activeSession??btwSession(parent);
  }
  if(!s)throw new Error('No active side session to queue onto.');
- const current=await currentSide(parent,s,undefined,version);
- const source=await getMission(parent,{coreOnly:true}),config=btwConfig();
+ const [current, source] = await Promise.all([
+  currentSide(parent,s,undefined,version),
+  getMission(parent,{coreOnly:true}),
+ ]);
+ const config=btwConfig();
  const machine=source.machine_transfer?.destination;
  const local=s.local||(machine?machine.kind==='client':source.tags?.includes('placement:client')??false);
  const node=machine?.kind==='node'?machine.id:machine?.kind==='core'?undefined:missionAssignedNode(source);
  const destination=local?'local':node??'core';
- const uploadedPaths=await upload(attachments,destination);
+ const [uploadedPaths] = await Promise.all([
+  upload(attachments,destination),
+  local ? restoreLocalBindings() : Promise.resolve(),
+ ]);
  const existingLocal=local&&replace?queuedLocalMessages(s.id).find(row=>row.id===clientMessageId):undefined;
  const preservedPaths=existingLocal?extractBtwAttachmentPaths(existingLocal.request.prompt):[];
  const paths=[...new Set([...preservedPaths,...uploadedPaths])];
@@ -588,7 +601,10 @@ export async function queueBtwFollowUp(
  // undelivered predecessor in the queue) so deleting or promoting any queued row via
  // Send now leaves every remaining prompt self-contained with its required parent delta.
  const baseCursor=s.pendingCursor??s.conversationCursor;
- const snapshot=await prepareBtwContext(source,context,destination,baseCursor,baseCursor?[]:history,local?localBinding(parent)?.cwd:undefined);
+ const [snapshot, launchAgent] = await Promise.all([
+  prepareBtwContext(source,context,destination,baseCursor,baseCursor?[]:history,local?localBinding(parent)?.cwd:undefined),
+  local ? localAgentForLaunch(s.harness||config.harness) : Promise.resolve(undefined),
+ ]);
  const prompt=makeBtwPrompt(snapshot.context,question,paths);
  const recordQueuedCursor=(session:BtwSession,id:string):BtwSession=>{
   const prior=(session.queuedCursors??[]).filter(entry=>entry.id!==id);
@@ -599,10 +615,9 @@ export async function queueBtwFollowUp(
   return next;
  };
  if(local){
-  await restoreLocalBindings();
   const binding=localBinding(parent);
   const sideBinding=localBinding(s.id);
-  const bin=(await localAgentForLaunch(s.harness||config.harness))?.path??'';
+  const bin=launchAgent?.path??'';
   if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');
   if(!bin)throw new Error(`${s.harness||config.harness} is not installed. Configure it in Settings → Agents → Local agents.`);
   const newImagePaths=uploadedPaths.filter((_,i)=>attachments[i]?.media_type.startsWith('image/'));
@@ -728,8 +743,10 @@ function parseBtwThread(m:Mission,events:StoredEvent[]):Omit<ParsedBtwThread,'st
 
 export async function reconnectBtwSession(parent:string,sideId:string):Promise<BtwSession>{
  const existing=btwSession(parent);
- const mission=await getMission(sideId,{coreOnly:true});
- const events=await getMissionEvents(mission.id,{view:'history'}).catch(()=>[] as StoredEvent[]);
+ const [mission, events]=await Promise.all([
+  getMission(sideId,{coreOnly:true}),
+  getMissionEvents(sideId,{view:'history'}).catch(()=>[] as StoredEvent[]),
+ ]);
  const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
  let question=existing?.id===mission.id?existing.question:'';
  let startedAt=existing?.id===mission.id?existing.startedAt:undefined;

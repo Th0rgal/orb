@@ -33,16 +33,17 @@ pub(super) async fn current_callback_snapshot(
     if before.status != status {
         return None;
     }
-    let run = store.get_latest_mission_run(mission_id).await.ok()?;
-    let events = store
-        .get_events_before(
+    let (run_res, events_res) = tokio::join!(
+        store.get_latest_mission_run(mission_id),
+        store.get_events_before(
             mission_id,
             i64::MAX,
             Some(&["mission_status_changed"]),
             Some(16),
-        )
-        .await
-        .ok()?;
+        ),
+    );
+    let run = run_res.ok()?;
+    let events = events_res.ok()?;
     let event = events.into_iter().rev().find(|event| {
         event
             .metadata
@@ -105,8 +106,12 @@ pub(super) async fn current_callback_snapshot(
             },
         ),
     };
-    let after = store.get_mission(mission_id).await.ok().flatten()?;
-    let checked_run = store.get_latest_mission_run(mission_id).await.ok()?;
+    let (after_res, checked_run_res) = tokio::join!(
+        store.get_mission(mission_id),
+        store.get_latest_mission_run(mission_id),
+    );
+    let after = after_res.ok().flatten()?;
+    let checked_run = checked_run_res.ok()?;
     if before.updated_at != after.updated_at
         || after.status != status
         || run.as_ref().map(|r| (r.run_id, r.generation))

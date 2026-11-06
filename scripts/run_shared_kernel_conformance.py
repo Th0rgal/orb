@@ -385,7 +385,7 @@ def public_export_functions(manifest):
     # `internal` also marks public-prefix steppers not exposed to mobile.
     # The roadmap includes those steppers; exclude only the compiler helper.
     functions = [f for f in manifest["functions"] if f["name"].startswith(("orb_", "leansys_"))]
-    if len(functions) != 151 or len(manifest["functions"]) != 152:
+    if len(functions) != 161 or len(manifest["functions"]) != 162:
         raise ValueError("public export inventory changed; qualify the new surface explicitly")
     return functions
 
