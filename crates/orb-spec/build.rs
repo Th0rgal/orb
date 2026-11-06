@@ -343,15 +343,19 @@ fn archive_object(obj_path: &Path, lib_path: &Path) {
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=artifact_symbols.rs");
-    println!("cargo:rerun-if-changed=../../shared/orb-spec/cabi/orb_kernel_exports.rs");
-    println!("cargo:rerun-if-changed=src/lib.rs");
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let root = manifest_dir
         .parent()
         .and_then(|p| p.parent())
         .expect("crates/orb-spec sits two levels below workspace root");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=artifact_symbols.rs");
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("shared/orb-spec/cabi/orb_kernel_exports.rs")
+            .display()
+    );
+    println!("cargo:rerun-if-changed=src/lib.rs");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     build_orb_spec_cabi(root, &out_dir);
 }

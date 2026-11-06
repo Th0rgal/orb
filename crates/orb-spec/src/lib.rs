@@ -1232,6 +1232,21 @@ unsafe extern "C" {
         per_k_tokens_ms: u64,
         max_prefill_ms: u64,
     ) -> u64;
+    fn orb_model_account_admit(
+        cand_id: u32,
+        ineligible: u8,
+        entitlement: u8,
+        require_entitled: u8,
+    ) -> u8;
+    fn orb_model_account_score(
+        cand_id: u32,
+        ineligible: u8,
+        entitlement: u8,
+        require_entitled: u8,
+        has_pool_quota: u8,
+        priority_rank: u32,
+        usable_in_secs: u32,
+    ) -> u64;
     fn orb_scroll_policy_gap(height: u64, client: u64, top: u64) -> u64;
     fn orb_scroll_policy_correct(
         height: u64,
@@ -3576,6 +3591,104 @@ pub fn prefill_deadline_ms(
     max_prefill_ms: u64,
 ) -> u64 {
     unsafe { orb_prefill_deadline_ms(prompt_tokens, base_ms, per_k_tokens_ms, max_prefill_ms) }
+}
+
+/// 3-valued per-account capability entitlement for a requested model (`orb_model_account_admit`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ModelAccountEntitlement {
+    /// Complete catalog or probe confirms the account does NOT offer the model.
+    LacksModel = 0,
+    /// No complete catalog or probe verdict yet.
+    Unknown = 1,
+    /// Catalog or live probe positively confirms the account offers the model.
+    Entitled = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelAccountCandidate {
+    pub cand_id: u32,
+    pub ineligible: bool,
+    pub entitlement: ModelAccountEntitlement,
+    pub has_pool_quota: bool,
+    pub priority_rank: u32,
+    pub usable_in_secs: u32,
+}
+
+#[inline]
+pub fn model_account_admitted(
+    cand_id: u32,
+    ineligible: bool,
+    entitlement: ModelAccountEntitlement,
+    require_entitled: bool,
+) -> bool {
+    unsafe {
+        orb_model_account_admit(
+            cand_id,
+            u8::from(ineligible),
+            entitlement as u8,
+            u8::from(require_entitled),
+        ) == 1
+    }
+}
+
+#[inline]
+pub fn model_account_score(cand: ModelAccountCandidate, require_entitled: bool) -> u64 {
+    unsafe {
+        orb_model_account_score(
+            cand.cand_id,
+            u8::from(cand.ineligible),
+            cand.entitlement as u8,
+            u8::from(require_entitled),
+            u8::from(cand.has_pool_quota),
+            cand.priority_rank,
+            cand.usable_in_secs,
+        )
+    }
+}
+
+/// Formally verified model-compatible account selector (`orb_model_account_admit` +
+/// `orb_model_account_score` + `orb_route_argmin_step`):
+/// - Automatically raises `require_entitled` whenever `model_is_eap_gated` is true OR any
+///   eligible candidate in `candidates` has `ModelAccountEntitlement::Entitled`, so an
+///   unreconciled/unknown higher-priority account can never preempt a positively entitled account.
+/// - Strictly excludes `LacksModel` and `ineligible` candidates on every path (including when all
+///   compatible accounts have exhausted quota).
+pub fn select_best_model_account(
+    model_is_eap_gated: bool,
+    candidates: &[ModelAccountCandidate],
+) -> Option<u32> {
+    let any_entitled = candidates.iter().any(|c| {
+        c.cand_id != 0 && !c.ineligible && c.entitlement == ModelAccountEntitlement::Entitled
+    });
+    let require_entitled = model_is_eap_gated || any_entitled;
+    let mut has_best = false;
+    let mut best_id = 0u32;
+    let mut best_score = u64::MAX;
+
+    for &cand in candidates {
+        let admissible = model_account_admitted(
+            cand.cand_id,
+            cand.ineligible,
+            cand.entitlement,
+            require_entitled,
+        );
+        let score = model_account_score(cand, require_entitled);
+        let step = route_argmin_step(
+            has_best,
+            best_id,
+            best_score,
+            cand.cand_id,
+            score,
+            admissible,
+        );
+        if step.took_candidate {
+            has_best = true;
+            best_id = step.best_id;
+            best_score = score;
+        }
+    }
+    has_best.then_some(best_id)
 }
 
 /// Canonical 64-bit `OrbWire` record word (`tag: u8`, `flags: u8`, `len16: u16`, `payload32: u32`).
@@ -7541,6 +7654,22 @@ pub mod raw_cabi {
     pub fn orb_utf8_utf16_window_step(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32) -> u64 {
         unsafe { super::orb_utf8_utf16_window_step(a0, a1, a2, a3, a4) }
     }
+    #[inline]
+    pub fn orb_model_account_admit(a0: u32, a1: u8, a2: u8, a3: u8) -> u8 {
+        unsafe { super::orb_model_account_admit(a0, a1, a2, a3) }
+    }
+    #[inline]
+    pub fn orb_model_account_score(
+        a0: u32,
+        a1: u8,
+        a2: u8,
+        a3: u8,
+        a4: u8,
+        a5: u32,
+        a6: u32,
+    ) -> u64 {
+        unsafe { super::orb_model_account_score(a0, a1, a2, a3, a4, a5, a6) }
+    }
     pub fn call_u64(symbol: &str, args: &[u64]) -> Option<u64> {
         Some(match symbol {
             "orb_verify_writer_reuse" if args.len() == 6 => orb_verify_writer_reuse(
@@ -8723,6 +8852,19 @@ pub mod raw_cabi {
                 args[2] as u32,
                 args[3] as u32,
                 args[4] as u32,
+            ),
+            "orb_model_account_admit" if args.len() == 4 => {
+                orb_model_account_admit(args[0] as u32, args[1] as u8, args[2] as u8, args[3] as u8)
+                    as u64
+            }
+            "orb_model_account_score" if args.len() == 7 => orb_model_account_score(
+                args[0] as u32,
+                args[1] as u8,
+                args[2] as u8,
+                args[3] as u8,
+                args[4] as u8,
+                args[5] as u32,
+                args[6] as u32,
             ),
             _ => return None,
         })
@@ -10056,7 +10198,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 160);
+        assert_eq!(count, 162);
     }
 }
 
@@ -11806,5 +11948,93 @@ mod stateful_tests {
         assert!(!lean_sys_cabi::verify_cas_digest256(d, d, true));
         assert!(lean_sys_cabi::verify_cgroup_v2_budget(512, 1024, 0, true));
         assert!(!lean_sys_cabi::verify_cgroup_v2_budget(512, 1024, 1, true));
+    }
+
+    #[test]
+    fn model_account_gate_and_score_preserve_eap_entitlement_over_priority() {
+        let general_high_prio = ModelAccountCandidate {
+            cand_id: 1,
+            ineligible: false,
+            entitlement: ModelAccountEntitlement::LacksModel,
+            has_pool_quota: true,
+            priority_rank: 0,
+            usable_in_secs: 0,
+        };
+        let general_unknown = ModelAccountCandidate {
+            entitlement: ModelAccountEntitlement::Unknown,
+            ..general_high_prio
+        };
+        let carbon_low_prio = ModelAccountCandidate {
+            cand_id: 2,
+            ineligible: false,
+            entitlement: ModelAccountEntitlement::Entitled,
+            has_pool_quota: true,
+            priority_rank: 5,
+            usable_in_secs: 30,
+        };
+
+        assert!(!model_account_admitted(
+            1,
+            false,
+            ModelAccountEntitlement::LacksModel,
+            true
+        ));
+        assert!(!model_account_admitted(
+            1,
+            false,
+            ModelAccountEntitlement::Unknown,
+            true
+        ));
+        assert!(model_account_admitted(
+            2,
+            false,
+            ModelAccountEntitlement::Entitled,
+            true
+        ));
+        assert_eq!(model_account_score(general_high_prio, true), u64::MAX);
+        assert_eq!(model_account_score(general_unknown, true), u64::MAX);
+        assert!(model_account_score(carbon_low_prio, true) < u64::MAX);
+
+        assert_eq!(
+            select_best_model_account(true, &[general_high_prio, general_unknown, carbon_low_prio]),
+            Some(2)
+        );
+        assert_eq!(
+            select_best_model_account(true, &[general_high_prio, general_unknown]),
+            None
+        );
+
+        let general_non_eap_unknown = ModelAccountCandidate {
+            cand_id: 10,
+            ineligible: false,
+            entitlement: ModelAccountEntitlement::Unknown,
+            has_pool_quota: true,
+            priority_rank: 0,
+            usable_in_secs: 0,
+        };
+        let general_non_eap_entitled = ModelAccountCandidate {
+            cand_id: 11,
+            ineligible: false,
+            entitlement: ModelAccountEntitlement::Entitled,
+            has_pool_quota: true,
+            priority_rank: 9,
+            usable_in_secs: 0,
+        };
+        assert!(model_account_admitted(
+            10,
+            false,
+            ModelAccountEntitlement::Unknown,
+            false
+        ));
+        assert!(model_account_admitted(
+            11,
+            false,
+            ModelAccountEntitlement::Entitled,
+            false
+        ));
+        assert_eq!(
+            select_best_model_account(false, &[general_non_eap_unknown, general_non_eap_entitled]),
+            Some(11)
+        );
     }
 }

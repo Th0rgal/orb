@@ -468,6 +468,19 @@ async fn core_antigravity_ready(state: &AppState, model: Option<&str>) -> bool {
     let Some(workspace) = state.workspaces.get(Uuid::nil()).await else {
         return false;
     };
+    if let Some(home) = crate::api::runners::antigravity::projectable_home(&workspace) {
+        if crate::api::antigravity_native::ensure_in_home_for_model(
+            &state.http_client,
+            &home,
+            Some(&state.config.working_dir),
+            model,
+        )
+        .await
+        .is_err()
+        {
+            return false;
+        }
+    }
     let cli = super::super::mission_runner::get_backend_string_setting("antigravity", "cli_path")
         .unwrap_or_else(|| "agy".into());
     let (wanted_base, _) = crate::antigravity::normalize_model_and_effort(model, None);
@@ -1054,11 +1067,26 @@ async fn validate_destination(
             if !state.config.remote_nodes.enabled {
                 return Err(conflict("Remote nodes are disabled"));
             }
+            let mut synced_slot: Option<String> = None;
             if backend == "antigravity" {
-                if let Err(error) =
-                    crate::api::antigravity_native::sync_node_for_model(state, id, model).await
-                {
-                    tracing::warn!(node = %id, "Antigravity sign-in not pushed: {error}");
+                match crate::api::antigravity_native::sync_node_for_model(state, id, model).await {
+                    Ok(crate::api::antigravity_native::NodeSync::Ready { slot, profile }) => {
+                        if profile.starts_with("antigravity:") {
+                            synced_slot = Some(slot);
+                        }
+                    }
+                    Ok(
+                        crate::api::antigravity_native::NodeSync::NoLogin
+                        | crate::api::antigravity_native::NodeSync::Unsupported,
+                    ) => {}
+                    Err(error) => {
+                        if model.is_some_and(crate::api::antigravity_accounts::is_eap_gated_model)
+                            || error.starts_with("No connected Google Antigravity account")
+                        {
+                            return Err(conflict(error));
+                        }
+                        tracing::warn!(node = %id, "Antigravity sign-in not pushed: {error}");
+                    }
                 }
             }
             let c = node_transfer_capabilities(state, id).await?;
@@ -1072,7 +1100,11 @@ async fn validate_destination(
                 if let (Some(base_model), _) =
                     crate::antigravity::normalize_model_and_effort(model, None)
                 {
-                    let models = node_request(state, id, "/antigravity/models", None).await?;
+                    let models_path = match synced_slot.as_deref() {
+                        Some(slot) => format!("/antigravity/models?slot={slot}"),
+                        None => "/antigravity/models".to_string(),
+                    };
+                    let models = node_request(state, id, &models_path, None).await?;
                     if !models.as_array().is_some_and(|rows| {
                         rows.iter().any(|row| {
                             crate::antigravity::normalize_model_and_effort(row[0].as_str(), None).0
@@ -1188,8 +1220,15 @@ pub async fn operate(
         }
         let backend = backend.unwrap_or(m.backend.clone());
         let model = model.or(m.model_override.clone());
+        let effective_effort = effort.or_else(|| m.model_effort.clone());
+        let destination_model = if backend == "antigravity" {
+            crate::antigravity::effective_cli_model(model.as_deref(), effective_effort.as_deref())
+                .map(str::to_owned)
+        } else {
+            model.clone()
+        };
         validate_cyber_model(&state, id, &backend, model.as_deref(), &destination).await?;
-        validate_destination(&state, &destination, &backend, model.as_deref()).await?;
+        validate_destination(&state, &destination, &backend, destination_model.as_deref()).await?;
         let (source, mut source_root) = if light {
             let mut inspected = inspect_source(&state, &control, &m, &existing_transfers).await?;
             if let Machine::Client { ref id } = inspected {
@@ -1268,7 +1307,7 @@ pub async fn operate(
             generation: generation + 1,
             backend,
             model,
-            effort: effort.or(m.model_effort),
+            effort: effective_effort,
             source_root,
             destination_root: None,
             manifest: None,
@@ -1321,7 +1360,19 @@ pub async fn operate(
             if a.phase != "verified" {
                 return Err(conflict("Destination verification is incomplete"));
             }
-            validate_destination(&state, &a.destination, &a.backend, a.model.as_deref()).await?;
+            let destination_model = if a.backend == "antigravity" {
+                crate::antigravity::effective_cli_model(a.model.as_deref(), a.effort.as_deref())
+                    .map(str::to_owned)
+            } else {
+                a.model.clone()
+            };
+            validate_destination(
+                &state,
+                &a.destination,
+                &a.backend,
+                destination_model.as_deref(),
+            )
+            .await?;
             if !a.light {
                 if let Machine::Client { id } = &a.source {
                     if client_source_verified.as_ref() != Some(id) {

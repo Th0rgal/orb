@@ -114,12 +114,43 @@ impl ManagedAuth {
         &self,
         credential: &crate::antigravity_auth::Credential,
     ) -> Result<bool, String> {
-        match &self.antigravity_home {
-            Some(home) if self.accepts_core_antigravity() => {
-                crate::antigravity_auth::install(home, credential)
-            }
-            _ => Err("This node keeps its own Antigravity sign-in".into()),
+        self.install_antigravity_slot(credential, None, true)
+    }
+
+    /// Store an Antigravity login in an isolated per-account slot
+    /// (`<antigravity_home>/accounts/<slot>`) and optionally also update the
+    /// node's default `"antigravity"` sign-in. Each slot shares the node's
+    /// `conversations/` and `brain/` directories so resuming a conversation
+    /// across account switches preserves full native history while keeping
+    /// OAuth tokens isolated across concurrent jobs.
+    pub fn install_antigravity_slot(
+        &self,
+        credential: &crate::antigravity_auth::Credential,
+        slot: Option<&str>,
+        update_default: bool,
+    ) -> Result<bool, String> {
+        let Some(home) = &self.antigravity_home else {
+            return Err("This node keeps its own Antigravity sign-in".into());
+        };
+        if !self.accepts_core_antigravity() {
+            return Err("This node keeps its own Antigravity sign-in".into());
         }
+        let slot = slot.map(str::trim).filter(|s| !s.is_empty());
+        if let Some(slot_id) = slot {
+            if !crate::antigravity_auth::valid_slot_id(slot_id) {
+                return Err("Invalid Antigravity slot identifier".into());
+            }
+        }
+        let mut changed = false;
+        let default_missing =
+            !private_file_readable(&home.join(crate::antigravity_auth::TOKEN_FILE));
+        if slot.is_none() || update_default || default_missing {
+            changed |= crate::antigravity_auth::install(home, credential)?;
+        }
+        if let Some(slot_id) = slot {
+            changed |= install_slot_profile(home, slot_id, credential)?;
+        }
+        Ok(changed)
     }
 
     /// Profiles that are configured *and* usable right now (the credential
@@ -134,12 +165,33 @@ impl ManagedAuth {
                 ready.push(PROFILE_GROK.to_string());
             }
         }
-        if self
-            .antigravity_home
-            .as_ref()
-            .is_some_and(|p| private_file_readable(&p.join("antigravity-oauth-token")))
-        {
-            ready.push("antigravity".into());
+        if let Some(home) = &self.antigravity_home {
+            if private_file_readable(&home.join(crate::antigravity_auth::TOKEN_FILE)) {
+                ready.push("antigravity".into());
+            }
+            let accounts_dir = home.join("accounts");
+            if !accounts_dir.is_symlink() {
+                if let Ok(entries) = std::fs::read_dir(&accounts_dir) {
+                    let mut slots: Vec<String> = entries
+                        .flatten()
+                        .filter_map(|entry| {
+                            if entry.file_type().ok()?.is_symlink() {
+                                return None;
+                            }
+                            let slot = entry.file_name().into_string().ok()?;
+                            if !crate::antigravity_auth::valid_slot_id(&slot) {
+                                return None;
+                            }
+                            private_file_readable(
+                                &entry.path().join(crate::antigravity_auth::TOKEN_FILE),
+                            )
+                            .then(|| format!("antigravity:{slot}"))
+                        })
+                        .collect();
+                    slots.sort();
+                    ready.extend(slots);
+                }
+            }
         }
         ready
     }
@@ -148,6 +200,7 @@ impl ManagedAuth {
     /// at submission so the core gets a clear HTTP rejection instead of a job
     /// that fails (or hangs on an interactive login) minutes later.
     pub fn validate_request(&self, profiles: &[String]) -> Result<(), String> {
+        let mut antigravity_count = 0usize;
         for profile in profiles {
             match profile.as_str() {
                 PROFILE_GROK => {
@@ -165,20 +218,47 @@ impl ManagedAuth {
                     }
                 }
                 "antigravity" => {
-                    if !self
-                        .antigravity_home
-                        .as_ref()
-                        .is_some_and(|p| private_file_readable(&p.join("antigravity-oauth-token")))
-                    {
+                    antigravity_count += 1;
+                    if !self.antigravity_home.as_ref().is_some_and(|p| {
+                        private_file_readable(&p.join(crate::antigravity_auth::TOKEN_FILE))
+                    }) {
                         return Err("Antigravity requires SANDBOXED_NODE_ANTIGRAVITY_HOME pointing to the execution user's native CLI profile with a private OAuth login; connect Google Antigravity in Core or sign in with agy".into());
+                    }
+                }
+                other if other.starts_with("antigravity:") => {
+                    antigravity_count += 1;
+                    let slot = &other["antigravity:".len()..];
+                    if !crate::antigravity_auth::valid_slot_id(slot) {
+                        return Err(format!(
+                            "managed auth profile '{other}' has an invalid Antigravity slot identifier"
+                        ));
+                    }
+                    let ready = self.antigravity_home.as_ref().is_some_and(|home| {
+                        let accounts = home.join("accounts");
+                        let slot_dir = accounts.join(slot);
+                        !accounts.is_symlink()
+                            && !slot_dir.is_symlink()
+                            && private_file_readable(
+                                &slot_dir.join(crate::antigravity_auth::TOKEN_FILE),
+                            )
+                    });
+                    if !ready {
+                        return Err(format!(
+                            "managed auth profile '{other}' is not provisioned on this node; sync the compatible Google Antigravity account from Core before launching"
+                        ));
                     }
                 }
                 other => {
                     return Err(format!(
-                        "managed auth profile '{other}' is unknown to this node (supported: {PROFILE_GROK}, antigravity)"
+                        "managed auth profile '{other}' is unknown to this node (supported: {PROFILE_GROK}, antigravity, antigravity:<slot>)"
                     ));
                 }
             }
+        }
+        if antigravity_count > 1 {
+            return Err(
+                "Only one Antigravity managed auth profile may be requested per job".into(),
+            );
         }
         Ok(())
     }
@@ -186,13 +266,20 @@ impl ManagedAuth {
     /// Bind only the native agy profile; retain the job's isolated HOME.
     pub fn prepare_workspace(&self, profiles: &[String], directory: &Path) -> Result<(), String> {
         self.validate_request(profiles)?;
-        if !profiles.iter().any(|p| p == "antigravity") {
+        let Some(requested_profile) = profiles
+            .iter()
+            .find(|p| p.as_str() == "antigravity" || p.starts_with("antigravity:"))
+        else {
             return Ok(());
-        }
-        let profile = self
+        };
+        let home = self
             .antigravity_home
             .as_ref()
             .ok_or("Missing Antigravity profile")?;
+        let target_profile = match requested_profile.strip_prefix("antigravity:") {
+            Some(slot) => home.join("accounts").join(slot),
+            None => home.clone(),
+        };
         let gemini = directory.join(".gemini");
         if gemini.is_symlink() {
             return Err("Job .gemini must not be a symlink".into());
@@ -200,16 +287,33 @@ impl ManagedAuth {
         std::fs::create_dir_all(&gemini).map_err(|_| "Cannot prepare native Antigravity home")?;
         let link = gemini.join("antigravity-cli");
         if let Ok(metadata) = std::fs::symlink_metadata(&link) {
-            if !metadata.file_type().is_symlink()
-                || std::fs::read_link(&link).ok().as_ref() != Some(profile)
-            {
+            if !metadata.file_type().is_symlink() {
                 return Err("Job Antigravity home conflicts with the node-managed profile".into());
             }
-            return Ok(());
+            let current_target = std::fs::read_link(&link)
+                .map_err(|_| "Job Antigravity home conflicts with the node-managed profile")?;
+            if !is_node_managed_antigravity_target(home, &current_target) {
+                return Err("Job Antigravity home conflicts with the node-managed profile".into());
+            }
+            if current_target == target_profile {
+                return Ok(());
+            }
+            #[cfg(unix)]
+            {
+                let tmp = gemini.join(format!(".antigravity-cli.{}", uuid::Uuid::new_v4()));
+                let _ = std::fs::remove_file(&tmp);
+                std::os::unix::fs::symlink(&target_profile, &tmp)
+                    .map_err(|_| "Cannot update native Antigravity profile binding")?;
+                if std::fs::rename(&tmp, &link).is_err() {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err("Cannot update native Antigravity profile binding".into());
+                }
+                return Ok(());
+            }
         }
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(profile, &link)
+            std::os::unix::fs::symlink(&target_profile, &link)
                 .map_err(|_| "Cannot bind native Antigravity profile")?;
             Ok(())
         }
@@ -236,6 +340,66 @@ impl ManagedAuth {
         }
         Ok(env)
     }
+}
+
+fn is_node_managed_antigravity_target(home: &Path, target: &Path) -> bool {
+    if target == home {
+        return true;
+    }
+    target.parent() == Some(home.join("accounts").as_path())
+        && target
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(crate::antigravity_auth::valid_slot_id)
+}
+
+fn install_slot_profile(
+    home: &Path,
+    slot_id: &str,
+    credential: &crate::antigravity_auth::Credential,
+) -> Result<bool, String> {
+    if home.is_symlink() {
+        return Err("Antigravity profile must not be a symlink".into());
+    }
+    let accounts_dir = home.join("accounts");
+    if accounts_dir.is_symlink() {
+        return Err("Antigravity accounts directory must not be a symlink".into());
+    }
+    std::fs::create_dir_all(&accounts_dir)
+        .map_err(|_| "Cannot prepare Antigravity account slots")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&accounts_dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let slot_dir = accounts_dir.join(slot_id);
+    let changed = crate::antigravity_auth::install(&slot_dir, credential)?;
+    #[cfg(unix)]
+    for shared_subdir in ["conversations", "brain"] {
+        let shared_target = home.join(shared_subdir);
+        if shared_target.is_symlink() {
+            return Err("Antigravity shared conversation state must not be a symlink".into());
+        }
+        std::fs::create_dir_all(&shared_target)
+            .map_err(|_| "Cannot prepare Antigravity conversation state")?;
+        let link = slot_dir.join(shared_subdir);
+        match std::fs::symlink_metadata(&link) {
+            Ok(meta) => {
+                if !meta.file_type().is_symlink()
+                    || std::fs::read_link(&link).ok().as_deref() != Some(shared_target.as_path())
+                {
+                    return Err(
+                        "Antigravity slot conversation state conflicts with node profile".into(),
+                    );
+                }
+            }
+            Err(_) => {
+                std::os::unix::fs::symlink(&shared_target, &link)
+                    .map_err(|_| "Cannot link Antigravity slot conversation state")?;
+            }
+        }
+    }
+    Ok(changed)
 }
 
 fn grok_auth_readable(home: &Path) -> bool {
@@ -415,5 +579,98 @@ mod tests {
             .env_for(&["grok".to_string(), "openai".to_string()])
             .unwrap_err();
         assert!(err.contains("'openai' is unknown"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn per_account_antigravity_slots_isolate_concurrent_missions_and_keep_conversations() {
+        let root = tempfile::tempdir().unwrap();
+        let auth = ManagedAuth {
+            antigravity_home: Some(root.path().join("managed-auth/antigravity")),
+            antigravity_core_sync: true,
+            ..Default::default()
+        };
+        let general = crate::antigravity_auth::Credential {
+            access_token: "access-general".into(),
+            refresh_token: "refresh-her3sy".into(),
+            expires_at: 1_800_000_000_000,
+        };
+        let carbon = crate::antigravity_auth::Credential {
+            access_token: "access-carbon".into(),
+            refresh_token: "refresh-marchand".into(),
+            expires_at: 1_800_000_000_000,
+        };
+        let general_slot = general.slot_id();
+        let carbon_slot = carbon.slot_id();
+        assert_ne!(general_slot, carbon_slot);
+
+        // Install default/general account first, then Carbon account without clobbering default.
+        assert!(auth
+            .install_antigravity_slot(&general, Some(&general_slot), true)
+            .unwrap());
+        assert!(auth
+            .install_antigravity_slot(&carbon, Some(&carbon_slot), false)
+            .unwrap());
+
+        let advertised = auth.advertised();
+        assert!(advertised.contains(&"antigravity".to_string()));
+        assert!(advertised.contains(&format!("antigravity:{general_slot}")));
+        assert!(advertised.contains(&format!("antigravity:{carbon_slot}")));
+
+        // Re-syncing general account as default (e.g. model picker or refresh loop)
+        // NEVER overwrites the Carbon slot!
+        let general_refreshed = crate::antigravity_auth::Credential {
+            access_token: "access-general-2".into(),
+            refresh_token: "refresh-her3sy".into(),
+            expires_at: 1_800_000_050_000,
+        };
+        auth.install_antigravity_slot(&general_refreshed, Some(&general_slot), true)
+            .unwrap();
+
+        let carbon_mission = tempfile::tempdir().unwrap();
+        let opus_mission = tempfile::tempdir().unwrap();
+
+        // Simulate resuming a pre-upgrade mission that originally linked `"antigravity"`
+        // and created a conversation DB, then switched to Gemini 4 Carbon (`antigravity:<carbon_slot>`).
+        auth.prepare_workspace(&["antigravity".into()], carbon_mission.path())
+            .unwrap();
+        let conv_db = carbon_mission
+            .path()
+            .join(".gemini/antigravity-cli/conversations/conv-1.db");
+        std::fs::create_dir_all(conv_db.parent().unwrap()).unwrap();
+        std::fs::write(&conv_db, b"sqlite-fixture").unwrap();
+
+        auth.prepare_workspace(
+            &[format!("antigravity:{carbon_slot}")],
+            carbon_mission.path(),
+        )
+        .unwrap();
+        auth.prepare_workspace(
+            &[format!("antigravity:{general_slot}")],
+            opus_mission.path(),
+        )
+        .unwrap();
+
+        let carbon_token: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                carbon_mission
+                    .path()
+                    .join(".gemini/antigravity-cli/antigravity-oauth-token"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let opus_token: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                opus_mission
+                    .path()
+                    .join(".gemini/antigravity-cli/antigravity-oauth-token"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(carbon_token["token"]["refresh_token"], "refresh-marchand");
+        assert_eq!(opus_token["token"]["refresh_token"], "refresh-her3sy");
+        assert_eq!(std::fs::read(&conv_db).unwrap(), b"sqlite-fixture");
     }
 }
