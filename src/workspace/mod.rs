@@ -692,6 +692,18 @@ fn is_build_lock_held(workspace_path: &Path) -> bool {
     }
 }
 
+fn sync_build_lock_generation(lock: &mut std::fs::File, generation: u64) -> std::io::Result<()> {
+    use std::io::{Seek, Write};
+
+    lock.rewind()?;
+    lock.set_len(0)?;
+    if generation > 0 {
+        write!(lock, "{generation}")?;
+    }
+    lock.sync_data()?;
+    Ok(())
+}
+
 fn try_cleanup_build_lock_file(workspace_path: &Path) {
     use std::os::unix::fs::MetadataExt;
 
@@ -881,7 +893,7 @@ impl WorkspaceStore {
         distro: Option<String>,
     ) -> Result<BuildClaimGuard, BuildConflict> {
         use axum::http::StatusCode;
-        use std::io::{Read, Seek, Write};
+        use std::io::Read;
 
         fn conflict(status: axum::http::StatusCode, message: String) -> BuildConflict {
             BuildConflict { status, message }
@@ -979,10 +991,9 @@ impl WorkspaceStore {
                     "Workspace path changed concurrently".into(),
                 ));
             }
-            let generation = match lock_generation
-                .max(workspace.config["build_generation"].as_u64().unwrap_or(0))
-                .checked_add(1)
-            {
+            let persisted_generation = workspace.config["build_generation"].as_u64().unwrap_or(0);
+            let previous_generation = lock_generation.max(persisted_generation);
+            let generation = match previous_generation.checked_add(1) {
                 Some(gen) => gen,
                 None => {
                     drop(lock);
@@ -992,13 +1003,17 @@ impl WorkspaceStore {
                     ));
                 }
             };
-            if let Err(error) = (|| -> std::io::Result<()> {
-                lock.rewind()?;
-                lock.set_len(0)?;
-                write!(lock, "{generation}")?;
-                lock.sync_data()?;
-                Ok(())
-            })() {
+            let pre_claim = workspace.clone();
+            if let Err(error) = sync_build_lock_generation(&mut lock, generation) {
+                if let Err(rollback_error) =
+                    sync_build_lock_generation(&mut lock, previous_generation)
+                {
+                    tracing::warn!(
+                        workspace = %id,
+                        %rollback_error,
+                        "Failed to roll back workspace build lock generation after lock write failure"
+                    );
+                }
                 drop(lock);
                 return Err(io_error(error));
             }
@@ -1013,6 +1028,16 @@ impl WorkspaceStore {
             let claimed = workspace.clone();
             workspace.error_message = None;
             if let Err(error) = write_workspace_snapshot(&storage_path, &next) {
+                *workspace = pre_claim;
+                if let Err(rollback_error) =
+                    sync_build_lock_generation(&mut lock, previous_generation)
+                {
+                    tracing::warn!(
+                        workspace = %id,
+                        %rollback_error,
+                        "Failed to roll back workspace build lock generation after snapshot persist failure"
+                    );
+                }
                 drop(lock);
                 return Err(io_error(error));
             }
@@ -8252,5 +8277,117 @@ mod managed_library_skill_tests {
         );
         assert!(!is_container_fallback(&cleared));
         assert!(!container_fallback_from_env(&cleared.env_vars));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claim_workspace_build_snapshot_write_failure_rolls_back_lock_and_does_not_burn_generation(
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(WorkspaceStore::new(directory.path().to_path_buf()).await);
+        let ws_path = directory
+            .path()
+            .join(".sandboxed-sh/containers/rollback-gen-ws");
+        let id = store
+            .add(Workspace::new_container(
+                "rollback-gen-ws".into(),
+                ws_path.clone(),
+            ))
+            .await
+            .unwrap();
+
+        let sandboxed_dir = directory.path().join(".sandboxed-sh");
+        let storage_path = sandboxed_dir.join("workspaces.json");
+        let lock_path = workspace_build_lock_path(&ws_path);
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+
+        std::fs::set_permissions(&sandboxed_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let initial_failed = store
+            .try_claim_workspace_build(id, Some("ubuntu-noble".into()))
+            .await;
+        std::fs::set_permissions(&sandboxed_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let Err(conflict) = initial_failed else {
+            panic!("expected snapshot write failure on initial claim");
+        };
+        assert_eq!(
+            conflict.status,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(!is_build_lock_held(&ws_path));
+        assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), "");
+        let after_initial_fail = store.get(id).await.unwrap();
+        assert_eq!(after_initial_fail.status, WorkspaceStatus::Pending);
+        assert!(after_initial_fail.distro.is_none());
+        assert!(after_initial_fail.config.get("build_generation").is_none());
+        let persisted_initial = read_workspace_snapshot(&storage_path).unwrap();
+        assert_eq!(persisted_initial[&id].status, WorkspaceStatus::Pending);
+        assert!(persisted_initial[&id]
+            .config
+            .get("build_generation")
+            .is_none());
+
+        let first_claim = store
+            .try_claim_workspace_build(id, Some("ubuntu-noble".into()))
+            .await
+            .unwrap();
+        assert_eq!(first_claim.generation(), 1);
+        assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), "1");
+        let mut first_ready = first_claim.workspace.clone();
+        first_ready.status = WorkspaceStatus::Ready;
+        first_claim.settle(first_ready).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), "1");
+
+        std::fs::set_permissions(&sandboxed_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let rebuild_failed = store
+            .try_claim_workspace_build(id, Some("debian-bookworm".into()))
+            .await;
+        std::fs::set_permissions(&sandboxed_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let Err(rebuild_conflict) = rebuild_failed else {
+            panic!("expected snapshot write failure on rebuild claim");
+        };
+        assert_eq!(
+            rebuild_conflict.status,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(!is_build_lock_held(&ws_path));
+        assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), "1");
+        let after_rebuild_fail = store.get(id).await.unwrap();
+        assert_eq!(after_rebuild_fail.status, WorkspaceStatus::Ready);
+        assert_eq!(after_rebuild_fail.distro.as_deref(), Some("ubuntu-noble"));
+        assert_eq!(
+            after_rebuild_fail.config["build_generation"].as_u64(),
+            Some(1)
+        );
+        let persisted_rebuild = read_workspace_snapshot(&storage_path).unwrap();
+        assert_eq!(persisted_rebuild[&id].status, WorkspaceStatus::Ready);
+        assert_eq!(
+            persisted_rebuild[&id].distro.as_deref(),
+            Some("ubuntu-noble")
+        );
+        assert_eq!(
+            persisted_rebuild[&id].config["build_generation"].as_u64(),
+            Some(1)
+        );
+
+        let second_claim = store
+            .try_claim_workspace_build(id, Some("debian-bookworm".into()))
+            .await
+            .unwrap();
+        assert_eq!(second_claim.generation(), 2);
+        assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), "2");
+        let mut second_ready = second_claim.workspace.clone();
+        second_ready.status = WorkspaceStatus::Ready;
+        second_claim.settle(second_ready).await.unwrap();
+
+        let reloaded = WorkspaceStore::new(directory.path().to_path_buf()).await;
+        let final_ws = reloaded.get(id).await.unwrap();
+        assert_eq!(final_ws.status, WorkspaceStatus::Ready);
+        assert_eq!(final_ws.distro.as_deref(), Some("debian-bookworm"));
+        assert_eq!(final_ws.config["build_generation"].as_u64(), Some(2));
+        assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), "2");
     }
 }
