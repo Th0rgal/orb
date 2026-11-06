@@ -125,6 +125,7 @@ mod tests {
                     client_id: Uuid::new_v4(),
                     title: "Local task".into(),
                     project: "test".into(),
+                    folder: String::new(),
                     backend: "claudecode".into(),
                     model: None,
                     effort: None,

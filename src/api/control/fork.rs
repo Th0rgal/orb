@@ -492,6 +492,7 @@ pub async fn fork_mission(
         "service_tier": if req.backend == "codex" { req.service_tier } else { None },
         "parent_mission_id": None::<Uuid>,
         "project": source.project.project,
+        "folder": if req.side_question.is_some() { String::new() } else { source.project.folder.clone() },
         "tags": tags,
         "idempotency_key": if req.side_question.is_some() { side_request_key(id, &req.idempotency_key) } else { req.idempotency_key },
         "remote_node_id": placement.map(|p| p.node_id),

@@ -87,7 +87,8 @@ pub(super) const MISSION_LIST_COLUMNS: &str = "id, status, title, short_descript
      COALESCE(goal_mode, 0) as goal_mode, goal_objective, first_viewed_at, \
      COALESCE(priority, 0) as priority, not_before, deadline, paused_at, \
      project, track, intent, github_pr, tags, desired_state, next_check_at, awaiting_kind, last_status_change_at, \
-     COALESCE(fast_mode, 0) as fast_mode, origin, origin_session_id, COALESCE(requires_local_disk, 1) as requires_local_disk, service_tier";
+     COALESCE(fast_mode, 0) as fast_mode, origin, origin_session_id, COALESCE(requires_local_disk, 1) as requires_local_disk, service_tier, \
+     COALESCE(folder, '') as folder, COALESCE(placement_revision, 0) as placement_revision";
 
 pub(super) fn read_service_tier(
     row: &rusqlite::Row<'_>,
@@ -208,12 +209,23 @@ pub(super) fn read_project_columns(
     row: &rusqlite::Row,
     base: usize,
 ) -> rusqlite::Result<(MissionProject, Option<AwaitingKind>, Option<String>)> {
+    let mut tags = tags_from_json(row.get(base + 4)?);
+    let legacy_folder = crate::api::mission_store::strip_legacy_orb_folder_tags(&mut tags);
+    let raw_folder = row.get::<_, String>("folder")?;
+    let folder = if raw_folder.is_empty() {
+        legacy_folder.unwrap_or_default()
+    } else {
+        crate::api::mission_store::normalize_mission_folder(&raw_folder)
+    };
+    let placement_revision = row.get::<_, i64>("placement_revision")?.max(0) as u64;
     let project = MissionProject {
         project: row.get(base)?,
+        folder,
+        placement_revision,
         track: row.get(base + 1)?,
         intent: row.get(base + 2)?,
         github_pr: row.get(base + 3)?,
-        tags: tags_from_json(row.get(base + 4)?),
+        tags,
         desired_state: row.get(base + 5)?,
         next_check_at: row.get(base + 6)?,
     };
@@ -309,6 +321,27 @@ impl SqliteMissionStore {
                 clauses.push(format!(
                     "(project = ?{exact} OR (project >= ?{lower} AND project < ?{upper}))"
                 ));
+            }
+            if let Some(v) = filter.folder.as_deref() {
+                let norm = crate::api::mission_store::normalize_mission_folder(v);
+                bind("folder = ?n", &norm, &mut clauses, &mut binds);
+            }
+            if let Some(v) = filter.folder_prefix.as_deref() {
+                let norm = crate::api::mission_store::normalize_mission_folder(v);
+                if !norm.is_empty() {
+                    // `'/'` is 0x2F and `'0'` is 0x30, so [`norm/`, `norm0`)
+                    // is the exact set of `norm/*` descendants under BINARY
+                    // collation and uses `idx_missions_project_folder`.
+                    binds.push(norm.clone());
+                    let exact = binds.len();
+                    binds.push(format!("{norm}/"));
+                    let lower = binds.len();
+                    binds.push(format!("{norm}0"));
+                    let upper = binds.len();
+                    clauses.push(format!(
+                        "(folder = ?{exact} OR (folder >= ?{lower} AND folder < ?{upper}))"
+                    ));
+                }
             }
             if let Some(v) = filter.track.as_deref() {
                 bind("track = ?n", v, &mut clauses, &mut binds);
@@ -611,7 +644,8 @@ impl SqliteMissionStore {
                             COALESCE(mission_mode, 'task') as mission_mode, COALESCE(goal_mode, 0) as goal_mode, goal_objective, first_viewed_at,
                             COALESCE(priority, 0) as priority, not_before, deadline, paused_at,
                             project, track, intent, github_pr, tags, desired_state, next_check_at, awaiting_kind, last_status_change_at,
-                            COALESCE(fast_mode, 0) as fast_mode, origin, origin_session_id, COALESCE(requires_local_disk, 1) as requires_local_disk, service_tier FROM missions WHERE id = ?1",
+                            COALESCE(fast_mode, 0) as fast_mode, origin, origin_session_id, COALESCE(requires_local_disk, 1) as requires_local_disk, service_tier,
+                            COALESCE(folder, '') as folder, COALESCE(placement_revision, 0) as placement_revision FROM missions WHERE id = ?1",
                 )
                 .map_err(|e| e.to_string())?;
 
@@ -1614,6 +1648,12 @@ impl SqliteMissionStore {
         let title_set = patch.title.is_some();
         let title = patch.title.flatten();
         let project_set = patch.project.is_some();
+        let folder_set = patch.folder.is_some();
+        let folder = patch
+            .folder
+            .as_deref()
+            .map(crate::api::mission_store::normalize_mission_folder)
+            .unwrap_or_default();
         let track_set = patch.track.is_some();
         let intent_set = patch.intent.is_some();
         let github_pr_set = patch.github_pr.is_some();
@@ -1624,9 +1664,22 @@ impl SqliteMissionStore {
         let track = patch.track.flatten();
         let intent = patch.intent.flatten();
         let github_pr = patch.github_pr.flatten();
-        let mut tags_json = patch.tags.as_deref().and_then(tags_to_json);
+        let mut cleaned_tags = patch.tags;
+        let mut extracted_legacy_folder = None;
+        if let Some(ref mut list) = cleaned_tags {
+            extracted_legacy_folder = crate::api::mission_store::strip_legacy_orb_folder_tags(list);
+        }
+        let (folder_set, folder) = if folder_set {
+            (true, folder)
+        } else if let Some(legacy) = extracted_legacy_folder {
+            (true, legacy)
+        } else {
+            (false, String::new())
+        };
+        let mut tags_json = cleaned_tags.as_deref().and_then(tags_to_json);
         let desired_state = patch.desired_state.flatten();
         let next_check_at = patch.next_check_at.flatten();
+        let bump_revision = patch.bump_placement_revision;
 
         tokio::task::spawn_blocking(move || {
             let mut conn = conn.blocking_lock();
@@ -1646,17 +1699,25 @@ impl SqliteMissionStore {
                     None => Vec::new(),
                 };
                 delta.apply(&mut tags);
+                let _ = crate::api::mission_store::strip_legacy_orb_folder_tags(&mut tags);
                 tags_json = tags_to_json(&tags);
             }
             tx.execute(
                 "UPDATE missions
-                 SET project = CASE WHEN ?1 THEN ?2 ELSE project END,
+                 SET placement_revision = CASE
+                         WHEN ?22 OR (?1 AND project IS NOT ?2) OR (?20 AND COALESCE(folder, '') <> ?21)
+                         THEN COALESCE(placement_revision, 0) + 1
+                         ELSE COALESCE(placement_revision, 0)
+                     END,
+                     project = CASE WHEN ?1 THEN ?2 ELSE project END,
+                     folder = CASE WHEN ?20 THEN ?21 ELSE COALESCE(folder, '') END,
                      track = CASE WHEN ?3 THEN ?4 ELSE track END,
                      intent = CASE WHEN ?5 THEN ?6 ELSE intent END,
                      github_pr = CASE WHEN ?7 THEN ?8 ELSE github_pr END,
                      tags = CASE WHEN ?9 THEN ?10 ELSE tags END,
                      desired_state = CASE WHEN ?11 THEN ?12 ELSE desired_state END,
                      next_check_at = CASE WHEN ?13 THEN ?14 ELSE next_check_at END,
+                     metadata_updated_at = ?15,
                      updated_at = CASE WHEN ?19 THEN updated_at ELSE ?15 END,
                      title = CASE WHEN ?17 THEN ?18 ELSE title END
                  WHERE id = ?16",
@@ -1680,10 +1741,255 @@ impl SqliteMissionStore {
                     title_set,
                     title,
                     patch.preserve_updated_at,
+                    folder_set,
+                    folder,
+                    bump_revision,
                 ],
             )
             .map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    pub(super) async fn batch_set_mission_placement(
+        &self,
+        updates: &[(Uuid, Option<Option<String>>, String)],
+    ) -> Result<Vec<crate::api::control::events::MissionPlacementItem>, String> {
+        let checked: Vec<crate::api::mission_store::CheckedPlacementUpdate> = updates
+            .iter()
+            .map(
+                |(id, proj, folder)| crate::api::mission_store::CheckedPlacementUpdate {
+                    id: *id,
+                    expected_project: None,
+                    next_project: proj.clone(),
+                    next_folder: folder.clone(),
+                },
+            )
+            .collect();
+        self.batch_set_mission_placement_checked(&checked)
+            .await?
+            .ok_or_else(|| "unexpected project precondition failure".to_string())
+    }
+
+    pub(super) async fn batch_set_mission_placement_checked(
+        &self,
+        updates: &[crate::api::mission_store::CheckedPlacementUpdate],
+    ) -> Result<Option<Vec<crate::api::control::events::MissionPlacementItem>>, String> {
+        if updates.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let conn = self.conn.clone();
+        let now = now_string();
+        let updates: Vec<crate::api::mission_store::CheckedPlacementUpdate> = updates
+            .iter()
+            .map(|item| crate::api::mission_store::CheckedPlacementUpdate {
+                id: item.id,
+                expected_project: item.expected_project.clone(),
+                next_project: item.next_project.clone(),
+                next_folder: crate::api::mission_store::normalize_mission_folder(&item.next_folder),
+            })
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock();
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+            let mut moved = Vec::with_capacity(updates.len());
+            {
+                let mut select_stmt = tx
+                    .prepare_cached(
+                        "SELECT project, COALESCE(folder, ''), COALESCE(placement_revision, 0), tags
+                         FROM missions WHERE id = ?1",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let mut loaded = Vec::with_capacity(updates.len());
+                for item in updates {
+                    let id_str = item.id.to_string();
+                    let cur: Option<(Option<String>, String, i64, Option<String>)> = select_stmt
+                        .query_row(params![&id_str], |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                        })
+                        .optional()
+                        .map_err(|e| e.to_string())?;
+                    let Some((cur_proj, cur_folder, cur_rev, raw_tags)) = cur else {
+                        continue;
+                    };
+                    if let Some(ref exp) = item.expected_project {
+                        if &cur_proj != exp {
+                            return Ok(None);
+                        }
+                    }
+                    loaded.push((
+                        item.id,
+                        id_str,
+                        cur_proj,
+                        cur_folder,
+                        cur_rev,
+                        raw_tags,
+                        item.next_project,
+                        item.next_folder,
+                    ));
+                }
+
+                let mut update_stmt = tx
+                    .prepare_cached(
+                        "UPDATE missions
+                         SET project = ?1,
+                             folder = ?2,
+                             placement_revision = ?3,
+                             tags = ?4,
+                             metadata_updated_at = ?5
+                         WHERE id = ?6",
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                for (
+                    id,
+                    id_str,
+                    cur_proj,
+                    cur_folder,
+                    cur_rev,
+                    raw_tags,
+                    next_project,
+                    next_folder,
+                ) in loaded
+                {
+                    let mut cleaned_tags = raw_tags.clone();
+                    let mut stripped_legacy = false;
+                    if let Some(ref raw) = raw_tags {
+                        if raw.contains(crate::api::mission_store::LEGACY_ORB_FOLDER_TAG_PREFIX) {
+                            if let Ok(mut parsed) = serde_json::from_str::<Vec<String>>(raw) {
+                                let _ = crate::api::mission_store::strip_legacy_orb_folder_tags(
+                                    &mut parsed,
+                                );
+                                cleaned_tags = tags_to_json(&parsed);
+                                stripped_legacy = true;
+                            }
+                        }
+                    }
+                    let cur_folder_norm =
+                        crate::api::mission_store::normalize_mission_folder(&cur_folder);
+                    let target_proj = next_project.unwrap_or_else(|| cur_proj.clone());
+                    let cur_rev_u64 = cur_rev.max(0) as u64;
+                    if cur_proj == target_proj && cur_folder_norm == next_folder && !stripped_legacy
+                    {
+                        moved.push(crate::api::control::events::MissionPlacementItem {
+                            mission_id: id,
+                            project: cur_proj,
+                            folder: cur_folder_norm,
+                            placement_revision: cur_rev_u64,
+                        });
+                        continue;
+                    }
+                    let next_rev = if cur_proj == target_proj && cur_folder_norm == next_folder {
+                        cur_rev_u64
+                    } else {
+                        cur_rev_u64.saturating_add(1)
+                    };
+                    update_stmt
+                        .execute(params![
+                            &target_proj,
+                            &next_folder,
+                            next_rev as i64,
+                            &cleaned_tags,
+                            &now,
+                            &id_str
+                        ])
+                        .map_err(|e| e.to_string())?;
+                    moved.push(crate::api::control::events::MissionPlacementItem {
+                        mission_id: id,
+                        project: target_proj,
+                        folder: next_folder,
+                        placement_revision: next_rev,
+                    });
+                }
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(Some(moved))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    pub(super) async fn cascade_rename_folder(
+        &self,
+        project: &str,
+        old_prefix: &str,
+        new_prefix: &str,
+    ) -> Result<Vec<crate::api::control::events::MissionPlacementItem>, String> {
+        let old_norm = crate::api::mission_store::normalize_mission_folder(old_prefix);
+        let new_norm = crate::api::mission_store::normalize_mission_folder(new_prefix);
+        if old_norm.is_empty() || old_norm == new_norm {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.clone();
+        let now = now_string();
+        let project = project.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock();
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+            let lower = format!("{old_norm}/");
+            let upper = format!("{old_norm}0");
+            let mut moved = Vec::new();
+            {
+                let mut select_stmt = tx
+                    .prepare(
+                        "SELECT id, COALESCE(folder, ''), COALESCE(placement_revision, 0)
+                         FROM missions
+                         WHERE project = ?1
+                           AND (folder = ?2 OR (folder >= ?3 AND folder < ?4))",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows: Vec<(String, String, i64)> = select_stmt
+                    .query_map(params![&project, &old_norm, &lower, &upper], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?;
+                let mut update_stmt = tx
+                    .prepare_cached(
+                        "UPDATE missions
+                         SET folder = ?1,
+                             placement_revision = ?2,
+                             metadata_updated_at = ?3
+                         WHERE id = ?4",
+                    )
+                    .map_err(|e| e.to_string())?;
+                for (id_str, cur_folder, cur_rev) in rows {
+                    let Some(id) = Uuid::parse_str(&id_str).ok() else {
+                        continue;
+                    };
+                    let cur = crate::api::mission_store::normalize_mission_folder(&cur_folder);
+                    let rewritten = if cur == old_norm {
+                        new_norm.clone()
+                    } else if let Some(rest) = cur.strip_prefix(&lower) {
+                        if new_norm.is_empty() {
+                            rest.to_string()
+                        } else {
+                            format!("{new_norm}/{rest}")
+                        }
+                    } else {
+                        continue;
+                    };
+                    let next_rev = (cur_rev.max(0) as u64).saturating_add(1);
+                    update_stmt
+                        .execute(params![&rewritten, next_rev as i64, &now, &id_str])
+                        .map_err(|e| e.to_string())?;
+                    moved.push(crate::api::control::events::MissionPlacementItem {
+                        mission_id: id,
+                        project: Some(project.clone()),
+                        folder: rewritten,
+                        placement_revision: next_rev,
+                    });
+                }
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(moved)
         })
         .await
         .map_err(|e| e.to_string())?

@@ -27,7 +27,7 @@ test('one collapsed archive spans projects, while completion stays in place; res
  const missions=[
   {id:'completed',title:'Completed but not archived',status:'completed',project:'one',tags:[]},
   {id:'failed',title:'Failed but not archived',status:'failed',project:'one',tags:[]},
-  {id:'archived',title:'Archived nested conversation',status:'acknowledged',project:'two',tags:['orb-folder:notes/deep']},
+  {id:'archived',title:'Archived nested conversation',status:'acknowledged',project:'two',folder:'notes/deep',tags:[]},
  ];
  const writes:any[]=[];
  await page.route('**/api/**',async route=>{
@@ -75,7 +75,7 @@ test('one collapsed archive spans projects, while completion stays in place; res
  await expect(page.getByRole('button',{name:'notes',exact:true})).toHaveAttribute('aria-expanded','true');
  await expect(page.getByRole('button',{name:'deep',exact:true})).toHaveAttribute('aria-expanded','true');
  expect(writes).toEqual([{path:'/api/control/missions/archived/status',body:{status:'paused'}}]);
- expect(missions[2].tags).toEqual(['orb-folder:notes/deep']);
+ expect(missions[2].folder).toBe('notes/deep');
  await page.screenshot({path:'/tmp/orb-shared-archives.png'});
  await restoredRow.click({button:'right'});await page.getByRole('menuitem',{name:'Delete agent…',exact:true}).click();
  await page.getByRole('dialog').getByRole('button',{name:'Delete',exact:true}).click();
@@ -256,10 +256,10 @@ test('deletion stays busy until completion and retains failed targets for retry'
 test('archiving or deleting a parent agent cascades to its spawned subagents and keeps them nested in archives',async({page})=>{
  await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
  let missions:any[]=[
-  {id:'parent-archive',title:'Parent to archive',status:'awaiting_user',project:'verity',tags:['orb-folder:Context']},
+  {id:'parent-archive',title:'Parent to archive',status:'awaiting_user',project:'verity',folder:'Context',tags:[]},
   {id:'sub-archive-1',title:'Spawned worker 1',status:'failed',project:'verity',parent_mission_id:'parent-archive',tags:[]},
   {id:'sub-archive-2',title:'Spawned worker 2',status:'completed',project:'verity',parent_mission_id:'parent-archive',tags:[]},
-  {id:'parent-delete',title:'Parent to delete',status:'awaiting_user',project:'verity',tags:['orb-folder:Context']},
+  {id:'parent-delete',title:'Parent to delete',status:'awaiting_user',project:'verity',folder:'Context',tags:[]},
   {id:'sub-delete-1',title:'Delete worker 1',status:'completed',project:'verity',parent_mission_id:'parent-delete',tags:[]},
  ];
  const statusWrites:string[]=[];

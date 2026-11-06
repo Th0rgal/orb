@@ -94,21 +94,33 @@ impl Replica {
         Ok(response)
     }
     pub async fn tick(&self) -> Result<ReplicaState> {
+        struct SyncLockGuard(std::fs::File);
+        impl Drop for SyncLockGuard {
+            fn drop(&mut self) {
+                // Explicit `LOCK_UN` releases the kernel open-file-description flock
+                // immediately even if a concurrent `fork()` + `pre_exec()` child still
+                // holds a duplicated `O_CLOEXEC` descriptor before `execve()`.
+                let _ = FileExt::unlock(&self.0);
+            }
+        }
         std::fs::create_dir_all(&self.store.metadata).map_err(|e| e.to_string())?;
-        let guard = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
             .open(self.store.metadata.join("sync.lock"))
             .map_err(|e| e.to_string())?;
-        if guard.try_lock_exclusive().is_err() {
+        if file.try_lock_exclusive().is_err() {
             return self.status();
         }
+        let guard = SyncLockGuard(file);
         let mut state = self.status()?;
         let result = self.synchronize(&mut state).await;
         state.error = result.err();
-        self.save(&state)?;
+        let saved = self.save(&state);
+        drop(guard);
+        saved?;
         Ok(state)
     }
     async fn synchronize(&self, state: &mut ReplicaState) -> Result<()> {

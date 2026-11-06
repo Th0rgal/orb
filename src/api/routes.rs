@@ -1214,6 +1214,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             "/api/control/missions/:id/settings",
             patch(control::update_mission_settings),
         )
+        .route("/api/control/missions/move", post(control::move_missions))
         .route(
             "/api/control/missions/:id/project",
             post(control::update_mission_project),

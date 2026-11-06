@@ -60,6 +60,7 @@ fn identity_patch(
         preserve_updated_at,
         title: Some(mission.title.clone()),
         project: Some(mission.project.project.clone()),
+        folder: Some(mission.project.folder.clone()),
         track: Some(mission.project.track.clone()),
         github_pr: Some(mission.project.github_pr.clone()),
         tag_patch: Some(crate::api::mission_store::MissionTagPatch::capabilities(
@@ -232,6 +233,7 @@ pub(super) async fn recover_dispatch_single(
             fields
                 .iter()
                 .all(|(before, after, current, expected)| before == after || current == expected)
+                && (before.folder == after.folder || current.project.folder == expected.folder)
                 && before.tags.iter().chain(&after.tags).all(|tag| {
                     before.tags.contains(tag) == after.tags.contains(tag)
                         || current.project.tags.contains(tag) == expected.tags.contains(tag)
@@ -287,7 +289,7 @@ pub(super) async fn recover_dispatch_single(
             let title: Option<String> = serde_json::from_value(journal["before"]["title"].clone()).map_err(|e| e.to_string())?;
             if journal["identity_changed"] != false {
             store.update_mission_project(id, crate::api::mission_store::MissionProjectPatch {
-                preserve_updated_at: true, title: Some(title), project: Some(project.project), track: Some(project.track), github_pr: Some(project.github_pr), tag_patch: Some(crate::api::mission_store::MissionTagPatch::capabilities(&project.tags)), ..Default::default()
+                preserve_updated_at: true, title: Some(title), project: Some(project.project), folder: Some(project.folder), track: Some(project.track), github_pr: Some(project.github_pr), tag_patch: Some(crate::api::mission_store::MissionTagPatch::capabilities(&project.tags)), ..Default::default()
             }).await?;
             }
             if journal["phase"] != "preparing" && journal["actor_may_have_started"] != false {

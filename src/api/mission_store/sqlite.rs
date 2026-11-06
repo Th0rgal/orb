@@ -869,15 +869,16 @@ impl MissionStore for SqliteMissionStore {
     async fn cloud_executions(&self) -> Result<Vec<crate::api::cloud_agents::Execution>, String> {
         cloud::list(self).await
     }
-    async fn save_cloud_execution(
+    async fn save_cloud_execution_in_folder(
         &self,
         execution: crate::api::cloud_agents::Execution,
         expected: Option<u64>,
         title: Option<String>,
         project: Option<String>,
+        folder: Option<String>,
         tags: Vec<String>,
     ) -> Result<crate::api::cloud_agents::Execution, String> {
-        cloud::save(self, execution, expected, title, project, tags).await
+        cloud::save(self, execution, expected, title, project, folder, tags).await
     }
 
     async fn machine_transfers(&self, id: Uuid) -> Result<Vec<super::transfer::Transfer>, String> {
@@ -1155,6 +1156,26 @@ impl MissionStore for SqliteMissionStore {
         patch: MissionProjectPatch,
     ) -> Result<(), String> {
         SqliteMissionStore::update_mission_project(self, id, patch).await
+    }
+    async fn batch_set_mission_placement(
+        &self,
+        updates: &[(Uuid, Option<Option<String>>, String)],
+    ) -> Result<Vec<crate::api::control::events::MissionPlacementItem>, String> {
+        SqliteMissionStore::batch_set_mission_placement(self, updates).await
+    }
+    async fn batch_set_mission_placement_checked(
+        &self,
+        updates: &[crate::api::mission_store::CheckedPlacementUpdate],
+    ) -> Result<Option<Vec<crate::api::control::events::MissionPlacementItem>>, String> {
+        SqliteMissionStore::batch_set_mission_placement_checked(self, updates).await
+    }
+    async fn cascade_rename_folder(
+        &self,
+        project: &str,
+        old_prefix: &str,
+        new_prefix: &str,
+    ) -> Result<Vec<crate::api::control::events::MissionPlacementItem>, String> {
+        SqliteMissionStore::cascade_rename_folder(self, project, old_prefix, new_prefix).await
     }
     async fn set_mission_origin(
         &self,

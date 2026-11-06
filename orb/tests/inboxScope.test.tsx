@@ -5,10 +5,9 @@ import { buildInboxSections, classifyInboxMission, countUnreadInboxMissions, lis
 import {
   applySharedInboxPreferences,
   inboxConfig,
-  InboxSettings,
-  InboxSummariesSettings,
   saveInboxConfig,
 } from "../src/inboxSettings";
+import { InboxSettings, InboxSummariesSettings } from "../src/InboxSettingsPanels";
 import { sideQuestionKey } from "../src/sideQuestionStorage";
 import type { StreamItem } from "../src/transcriptModel";
 

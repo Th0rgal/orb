@@ -386,6 +386,9 @@ internal func orb_wire_stream_slice_step(_ inPtr: UInt64, _ inLen: UInt64, _ out
 @_silgen_name("orb_wire_transcript_slice_step")
 internal func orb_wire_transcript_slice_step(_ inPtr: UInt64, _ inLen: UInt64, _ outPtr: UInt64, _ outCap: UInt64, _ is32Bit: UInt8, _ lastAppliedSeq: UInt64, _ incomingSeq: UInt64, _ entryCount: UInt32, _ thinkingOpen: UInt8, _ normalizedAction: UInt8, _ isReplayFromLog: UInt8) -> UInt64
 
+@_silgen_name("orb_placement_merge_step")
+internal func orb_placement_merge_step(_ curRev: UInt64, _ incRev: UInt64, _ pendingOpId: UInt32, _ ackOpId: UInt32, _ sourceKind: UInt8, _ hasPlacement: UInt8) -> UInt64
+
 @_silgen_name("orb_proxy_sse_scan_step")
 internal func orb_proxy_sse_scan_step(_ lineKind: UInt8, _ hasDoneToken: UInt8, _ inThinkTag: UInt8, _ nextStartsThink: UInt8, _ nextEndsThink: UInt8, _ hasNonEmptyContent: UInt8) -> UInt32
 
@@ -1074,6 +1077,41 @@ enum OrbKernel {
             b8(thinkingOpen),
             normalizedAction,
             b8(isReplayFromLog)
+        )
+    }
+
+    struct PlacementMergeVerdict: Equatable, Sendable {
+        let status: UInt8
+        let admitted: Bool
+        let clearPending: Bool
+        let evictOtherProjects: Bool
+        let nextRev32: UInt32
+    }
+
+    static func placementMergeStep(
+        curRev: UInt64,
+        incRev: UInt64,
+        pendingOpId: UInt32,
+        ackOpId: UInt32,
+        sourceKind: UInt8,
+        hasPlacement: Bool
+    ) -> PlacementMergeVerdict {
+        let raw = orb_placement_merge_step(
+            curRev,
+            incRev,
+            pendingOpId,
+            ackOpId,
+            sourceKind,
+            b8(hasPlacement)
+        )
+        let lo32 = UInt32(truncatingIfNeeded: raw)
+        let hi32 = UInt32(truncatingIfNeeded: raw >> 32)
+        return PlacementMergeVerdict(
+            status: UInt8(lo32 & 0xFF),
+            admitted: ((lo32 >> 8) & 1) != 0,
+            clearPending: ((lo32 >> 9) & 1) != 0,
+            evictOtherProjects: ((lo32 >> 10) & 1) != 0,
+            nextRev32: hi32
         )
     }
 }

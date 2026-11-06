@@ -44,7 +44,8 @@ describe('cloud creation', () => {
   fireEvent.click(screen.getByRole('button',{name:'Create cloud agent'}));
   await waitFor(() => expect(fakes.launch).toHaveBeenCalledTimes(2));
   expect(fakes.launch.mock.calls[0][0].idempotency_key).toBe(fakes.launch.mock.calls[1][0].idempotency_key);
-  expect(fakes.launch.mock.calls[0][0].tags).toEqual(['orb-folder:notes']);
+  expect(fakes.launch.mock.calls[0][0].folder).toBe('notes');
+  expect(fakes.launch.mock.calls[0][0]).not.toHaveProperty('tags');
   expect(fakes.launch.mock.calls[0][0]).not.toHaveProperty('working_directory');
  });
  it('shows the provider mark once, in the account chip, not inside the composer', async () => {

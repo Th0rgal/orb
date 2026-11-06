@@ -472,6 +472,14 @@ struct OrbHome: View {
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OrbPresentationChanged"))) { _ in
             Task { await load() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OrbMissionPlacementChanged"))) { _ in
+            Task {
+                await load()
+                if archivesLoaded {
+                    await loadArchives()
+                }
+            }
+        }
         .task(id: scenePhase) { if scenePhase == .active { await approvals.poll() } }
         .task(id: scenePhase) { if scenePhase == .active { await secretRequests.poll() } }
         .task(id: scenePhase) { if scenePhase == .active { await accessRequests.poll() } }
@@ -542,12 +550,43 @@ struct OrbHome: View {
             } message: {
                 Text("This permanently deletes the selected conversations, their child agents and associated workspace files. Agents still running will be kept.")
             }
+            .confirmationDialog("Secret approvals affected", isPresented: homeApprovalDialogBinding, titleVisibility: .visible) {
+                homeApprovalDialogActions
+            } message: {
+                if let prompt = OrbMoveClipboard.shared.pendingApprovalPrompt {
+                    Text(prompt.confirmation.summaryText)
+                }
+            }
             .navigationDestination(item: $linkedMission) { OrbConversation(missionID: $0, project: linkedProject, folder: linkedFolder) }
             .navigationDestination(item: $linkedProjectObj) { OrbProjectPage(project: $0) }
             // Links arrive through the buffer (ContentView registers it), so one
             // opened during launch is handled once this view and its data are ready.
             .onChange(of: deepLinks.pending) { _, _ in if homeReady { consumeDeepLink() } }
         }.tint(.primary).toggleStyle(OrbSwitchStyle()).preferredColorScheme(.dark)
+    }
+
+    private var homeApprovalDialogBinding: Binding<Bool> {
+        Binding(
+            get: { OrbMoveClipboard.shared.pendingApprovalPrompt != nil },
+            set: { if !$0 { OrbMoveClipboard.shared.cancelPendingApproval() } }
+        )
+    }
+
+    @ViewBuilder
+    private var homeApprovalDialogActions: some View {
+        Button("Move & revoke approvals", role: .destructive) {
+            Task {
+                do { try await OrbMoveClipboard.shared.confirmPendingApproval(policy: "revoke"); await load() }
+                catch { self.error = error.localizedDescription }
+            }
+        }
+        Button("Move & keep approvals") {
+            Task {
+                do { try await OrbMoveClipboard.shared.confirmPendingApproval(policy: "keep"); await load() }
+                catch { self.error = error.localizedDescription }
+            }
+        }
+        Button("Cancel", role: .cancel) { OrbMoveClipboard.shared.cancelPendingApproval() }
     }
 
     private func consumeDeepLink() {
@@ -1019,8 +1058,11 @@ struct OrbHome: View {
                         if OrbMoveClipboard.shared.canDrop(project: project.id, folder: "") {
                             Button {
                                 Task {
-                                    do { try await OrbMoveClipboard.shared.drop(project: project.id, folder: ""); await load() }
-                                    catch { self.error = error.localizedDescription }
+                                    do {
+                                        if try await OrbMoveClipboard.shared.drop(project: project.id, folder: "") {
+                                            await load()
+                                        }
+                                    } catch { self.error = error.localizedDescription }
                                 }
                             } label: { Label("Move here", systemImage: "arrow.down.to.line") }
                             Divider()
@@ -1467,6 +1509,28 @@ struct OrbProjectPage: View {
         .accessibilityLabel("Project actions")
     }
     var body: some View {
+        projectScaffold
+            .task { await load() }
+            .refreshable { await load(force: true) }
+            .onChange(of: filter) { _, newValue in
+                if newValue == "Archived" && !loadedArchived {
+                    Task { await load(force: true) }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OrbMissionPlacementChanged"))) { note in
+                handlePlacementChanged(note)
+            }
+            .confirmationDialog("Secret approvals affected", isPresented: projectApprovalDialogBinding, titleVisibility: .visible) {
+                projectApprovalDialogActions
+            } message: {
+                if let prompt = moveClipboard.pendingApprovalPrompt {
+                    Text(prompt.confirmation.summaryText)
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var projectScaffold: some View {
         scrollContent
             .background(OrbStyle.background)
             .navigationTitle(project.name)
@@ -1528,12 +1592,50 @@ struct OrbProjectPage: View {
                     Text("Delete \"\(folder)\" and all context files inside? This cannot be undone.")
                 }
             }
-            .task { await load() }.refreshable { await load(force: true) }
-            .onChange(of: filter) { _, newValue in
-                if newValue == "Archived" && !loadedArchived {
-                    Task { await load(force: true) }
-                }
+    }
+
+    private var projectApprovalDialogBinding: Binding<Bool> {
+        Binding(
+            get: { moveClipboard.pendingApprovalPrompt != nil },
+            set: { if !$0 { moveClipboard.cancelPendingApproval() } }
+        )
+    }
+
+    @ViewBuilder
+    private var projectApprovalDialogActions: some View {
+        Button("Move & revoke approvals", role: .destructive) {
+            Task {
+                do { try await moveClipboard.confirmPendingApproval(policy: "revoke"); await load(force: true) }
+                catch { self.error = error.localizedDescription }
             }
+        }
+        Button("Move & keep approvals") {
+            Task {
+                do { try await moveClipboard.confirmPendingApproval(policy: "keep"); await load(force: true) }
+                catch { self.error = error.localizedDescription }
+            }
+        }
+        Button("Cancel", role: .cancel) { moveClipboard.cancelPendingApproval() }
+    }
+
+    private func handlePlacementChanged(_ note: Notification) {
+        let committed = (note.userInfo?["moves"] as? [OrbPlacementCommitItem]) ?? []
+        guard !committed.isEmpty else { return }
+        let passedRows = (note.userInfo?["rows"] as? [OrbRow]) ?? []
+        var fallbackByID: [String: OrbRow] = [:]
+        for r in passedRows where !r.id.isEmpty && fallbackByID[r.id] == nil { fallbackByID[r.id] = r }
+        let result = OrbMissionTree.applyPlacementItems(
+            to: missions,
+            projectSlug: project.id,
+            moves: committed,
+            fallbackRows: fallbackByID
+        )
+        if result.changed {
+            missions = result.rows
+        }
+        if !result.missingIDs.isEmpty {
+            Task { await load(force: true) }
+        }
     }
     private var conversationSkeletons: some View {
         VStack(spacing: 0) {
@@ -1791,7 +1893,7 @@ struct OrbProjectPage: View {
     /// Rename and Move work at any time; a running agent is stopped before it is archived.
     @ViewBuilder private func missionMenu(_ row: OrbRow) -> some View {
         Button { missionTitleDraft = OrbStyle.displayTitle(row.name); renamingMission = row } label: { Label("Rename", systemImage: "pencil") }
-        Button { moveClipboard.pick(row, from: project.id) } label: { Label("Move…", systemImage: "folder") }
+        Button { moveClipboard.pick(row, from: project.id, within: missions) } label: { Label("Move…", systemImage: "folder") }
         Button { settingsMission = row } label: { Label("Mission settings…", systemImage: "slider.horizontal.3") }
         Divider()
         if row.missionState?.canReopen == true {
@@ -1847,11 +1949,17 @@ struct OrbProjectPage: View {
         } catch is CancellationError {} catch { self.error = error.localizedDescription }
     }
     private func drop(into folder: String) async {
-        do { try await moveClipboard.drop(project: project.id, folder: folder); await load(force: true) }
-        catch { self.error = error.localizedDescription }
+        do {
+            if try await moveClipboard.drop(project: project.id, folder: folder) {
+                await load(force: true)
+            }
+        } catch { self.error = error.localizedDescription }
     }
     private func apply(_ value: OrbJSON) {
-        let nextMissions = value["missions"].items.map { OrbRow($0) }.filter(\.mobile)
+        let rawRows = value["missions"].items.map { OrbRow($0) }
+        let ownIDs = Set(rawRows.map(\.id))
+        let scoped = OrbMissionTree.filterToProjectScope(rawRows, projectSlug: project.id, ownIDs: ownIDs).filter(\.mobile)
+        let nextMissions = OrbMissionTree.mergePendingStagedRows(scoped, projectSlug: project.id)
         if missions != nextMissions { missions = nextMissions }
         if case .object(let entries) = value["manifest"]["entries"] {
             let nextFolders = entries
@@ -1893,23 +2001,15 @@ struct OrbProjectPage: View {
             await load(force: true)
         } catch { self.error = error.localizedDescription }
     }
-    private func migrateFolderMissions(from oldPath: String, to destination: String) async {
-        let affected = missions.filter { $0.folder == oldPath || $0.folder.hasPrefix(oldPath + "/") }
-        for m in affected {
-            let suffix = String(m.folder.dropFirst(oldPath.count))
-            let targetFolder = destination + suffix
-            var tags = m.raw["tags"].items.map(\.text).filter { !$0.isEmpty && !$0.hasPrefix("orb-folder:") }
-            if !targetFolder.isEmpty {
-                tags.append("orb-folder:\(targetFolder)")
+    private func migrateVirtualFolderMissions(from folder: String, to destination: String) async {
+        let batches = OrbMissionTree.planVirtualFolderMigration(missions: missions, from: folder, to: destination)
+        var alreadyMoved: Set<String> = []
+        for batch in batches {
+            let remaining = batch.ids.filter { !alreadyMoved.contains($0) }
+            guard !remaining.isEmpty else { continue }
+            if let moved = try? await api.moveMissions(ids: remaining, project: project.id, folder: batch.folder) {
+                alreadyMoved.formUnion(moved.map(\.missionID))
             }
-            _ = try? await api.call(
-                "/api/control/missions/\(OrbCore.escape(m.id))/project",
-                method: "POST",
-                body: .object([
-                    "project": .string(project.id),
-                    "tags": .array(tags.map(OrbJSON.string))
-                ])
-            )
         }
     }
     private func renameFolder(_ folder: String, to rawNewName: String) async {
@@ -1923,19 +2023,20 @@ struct OrbProjectPage: View {
         guard destination != folder else { return }
         do {
             if folders.contains(where: { $0 == folder || $0.hasPrefix(folder + "/") }) {
-                _ = try await api.call(
+                let res = try await api.call(
                     "/api/projects/\(OrbCore.escape(project.id))/file/transfer",
                     method: "POST",
                     body: .object(["path": .string(folder), "destination": .string(destination), "copy": .bool(false)])
                 )
+                OrbCore.applyTransferMovedMissions(res, fallbackProject: project.id)
             } else {
                 _ = try await api.call(
                     "/api/projects/\(OrbCore.escape(project.id))/file/mkdir",
                     method: "POST",
                     body: .object(["path": .string(destination)])
                 )
+                await migrateVirtualFolderMissions(from: folder, to: destination)
             }
-            await migrateFolderMissions(from: folder, to: destination)
             OrbReadCache.invalidate("project:\(project.id)")
             OrbReadCache.invalidate("project:\(project.id):all")
             await load(force: true)
@@ -1952,19 +2053,20 @@ struct OrbProjectPage: View {
         }
         do {
             if folders.contains(where: { $0 == folder || $0.hasPrefix(folder + "/") }) {
-                _ = try await api.call(
+                let res = try await api.call(
                     "/api/projects/\(OrbCore.escape(project.id))/file/transfer",
                     method: "POST",
                     body: .object(["path": .string(folder), "destination": .string(destination), "copy": .bool(false)])
                 )
+                OrbCore.applyTransferMovedMissions(res, fallbackProject: project.id)
             } else {
                 _ = try await api.call(
                     "/api/projects/\(OrbCore.escape(project.id))/file/mkdir",
                     method: "POST",
                     body: .object(["path": .string(destination)])
                 )
+                await migrateVirtualFolderMissions(from: folder, to: destination)
             }
-            await migrateFolderMissions(from: folder, to: destination)
             OrbReadCache.invalidate("project:\(project.id)")
             OrbReadCache.invalidate("project:\(project.id):all")
             await load(force: true)
@@ -1995,27 +2097,175 @@ struct OrbProjectPage: View {
 /// long-pressing a folder, the project menu, or another project.
 @MainActor @Observable
 final class OrbMoveClipboard {
+    struct PendingApprovalPrompt: Equatable {
+        let mission: OrbRow
+        let sourceProject: String
+        let destinationProject: String
+        let destinationFolder: String
+        let rootIDs: [String]
+        let descendantIDs: [String]
+        let familyRows: [OrbRow]
+        let confirmation: OrbApprovalTransferConfirmationError
+    }
+
     static let shared = OrbMoveClipboard()
     private(set) var mission: OrbRow?
     private(set) var sourceProject = ""
-    func pick(_ mission: OrbRow, from project: String) { self.mission = mission; sourceProject = project; OrbHaptics.selection() }
-    func clear() { mission = nil; sourceProject = "" }
+    private(set) var rootIDs: [String] = []
+    private(set) var descendantIDs: [String] = []
+    private(set) var familyRows: [OrbRow] = []
+    private(set) var pendingApprovalPrompt: PendingApprovalPrompt?
+
+    func pick(_ mission: OrbRow, from project: String, within rows: [OrbRow] = []) {
+        self.mission = mission
+        self.sourceProject = project
+        let sub = OrbMissionTree.subtree(rows, rootIDs: [mission.id])
+        let activeRows = sub.isEmpty ? [mission] : sub
+        self.familyRows = activeRows
+        OrbHierarchy.retainStagedRows(activeRows)
+        let roots = sub.filter { $0.parentMissionID == nil }.map(\.id)
+        self.rootIDs = roots.isEmpty ? [mission.id] : roots
+        let rootSet = Set(self.rootIDs)
+        self.descendantIDs = sub.map(\.id).filter { !rootSet.contains($0) }
+        OrbHaptics.selection()
+    }
+
+    func clear() {
+        mission = nil
+        sourceProject = ""
+        rootIDs = []
+        descendantIDs = []
+        familyRows = []
+        pendingApprovalPrompt = nil
+    }
+
+    func cancelPendingApproval() {
+        pendingApprovalPrompt = nil
+    }
+
     func canDrop(project: String, folder: String) -> Bool {
         guard let mission else { return false }
-        return project != sourceProject || folder != mission.folder
+        return project != sourceProject || OrbRow.normalizeFolder(folder) != mission.folder
     }
-    /// Keeps every tag except the folder, which becomes the destination.
-    func drop(project: String, folder: String) async throws {
-        guard let mission else { return }
-        var tags = mission.raw["tags"].items.filter { !$0.text.isEmpty && !$0.text.hasPrefix("orb-folder:") }
-        if !folder.isEmpty { tags.append(.string("orb-folder:" + folder)) }
-        _ = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(mission.id))/project", method: "POST", body: .object(["project": .string(project), "tags": .array(tags)]))
-        for slug in Set([sourceProject, project]) {
-            OrbReadCache.invalidate("project:\(slug)")
-            OrbReadCache.invalidate("project:\(slug):all")
+
+    /// Moves the picked mission (and its subtree/family) via `POST /api/control/missions/move`.
+    /// Returns `true` when committed immediately, or `false` when paused for user confirmation on cross-project secret approvals.
+    @discardableResult
+    func drop(project: String, folder: String, approvalPolicy: String = "check") async throws -> Bool {
+        guard let mission else { return false }
+        let normalizedFolder = OrbRow.normalizeFolder(folder)
+        let opID = OrbHierarchy.allocateOpID()
+        let activeRootIDs = rootIDs.isEmpty ? [mission.id] : rootIDs
+        let activeFamilyRows = familyRows.isEmpty ? [mission] : familyRows
+        OrbHierarchy.retainStagedRows(activeFamilyRows)
+        var familyByID: [String: OrbRow] = [:]
+        for r in activeFamilyRows where !r.id.isEmpty && familyByID[r.id] == nil { familyByID[r.id] = r }
+        let rootSet = Set(activeRootIDs)
+        let allIDs = activeRootIDs + descendantIDs
+        let optimistic = OrbHierarchy.stageOptimisticPlacement(
+            rootIDs: activeRootIDs,
+            descendantIDs: descendantIDs,
+            project: project,
+            folder: normalizedFolder,
+            opID: opID
+        )
+        if !optimistic.isEmpty {
+            let previewItems = allIDs.filter { optimistic.contains($0) }.map { mid in
+                let isChild = !rootSet.contains(mid) || OrbHierarchy.parent(of: mid) != nil
+                let rev = OrbHierarchy.placement(of: mid)?.revision ?? mission.placementRevision
+                return OrbPlacementCommitItem(
+                    missionID: mid,
+                    project: project,
+                    folder: isChild ? "" : normalizedFolder,
+                    placementRevision: rev,
+                    isPreview: true
+                )
+            }
+            OrbReadCache.applyPlacementCommit(previewItems, fallbackRows: familyByID, persistToDisk: false)
+            NotificationCenter.default.post(
+                name: Notification.Name("OrbMissionPlacementChanged"),
+                object: nil,
+                userInfo: ["moves": previewItems, "rows": activeFamilyRows]
+            )
         }
-        OrbReadCache.invalidate("mission:\(mission.id)")
-        clear()
+        do {
+            _ = try await OrbCore.shared.moveMissions(
+                ids: [mission.id],
+                project: project,
+                folder: normalizedFolder,
+                approvalPolicy: approvalPolicy,
+                clientOpID: opID,
+                fallbackRows: activeFamilyRows
+            )
+            OrbReadCache.invalidate("mission:\(mission.id)")
+            OrbUsageTelemetry.shared.trackAction(.sidebarMove, surface: "project")
+            OrbHaptics.success()
+            clear()
+            return true
+        } catch let confirmation as OrbApprovalTransferConfirmationError {
+            let rolledBack = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: allIDs, opID: opID)
+            let rollbackItems = rolledBack.compactMap { mid -> OrbPlacementCommitItem? in
+                guard let snap = OrbHierarchy.placement(of: mid) else { return nil }
+                return OrbPlacementCommitItem(
+                    missionID: mid,
+                    project: snap.project,
+                    folder: snap.folder,
+                    placementRevision: snap.revision
+                )
+            }
+            if !rollbackItems.isEmpty {
+                OrbReadCache.applyPlacementCommit(rollbackItems, fallbackRows: familyByID, persistToDisk: false)
+                NotificationCenter.default.post(
+                    name: Notification.Name("OrbMissionPlacementChanged"),
+                    object: nil,
+                    userInfo: ["moves": rollbackItems, "rows": activeFamilyRows]
+                )
+            }
+            pendingApprovalPrompt = PendingApprovalPrompt(
+                mission: mission,
+                sourceProject: sourceProject,
+                destinationProject: project,
+                destinationFolder: normalizedFolder,
+                rootIDs: activeRootIDs,
+                descendantIDs: descendantIDs,
+                familyRows: activeFamilyRows,
+                confirmation: confirmation
+            )
+            return false
+        } catch {
+            let rolledBack = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: allIDs, opID: opID)
+            let rollbackItems = rolledBack.compactMap { mid -> OrbPlacementCommitItem? in
+                guard let snap = OrbHierarchy.placement(of: mid) else { return nil }
+                return OrbPlacementCommitItem(
+                    missionID: mid,
+                    project: snap.project,
+                    folder: snap.folder,
+                    placementRevision: snap.revision
+                )
+            }
+            if !rollbackItems.isEmpty {
+                OrbReadCache.applyPlacementCommit(rollbackItems, fallbackRows: familyByID, persistToDisk: false)
+                NotificationCenter.default.post(
+                    name: Notification.Name("OrbMissionPlacementChanged"),
+                    object: nil,
+                    userInfo: ["moves": rollbackItems, "rows": activeFamilyRows]
+                )
+            }
+            throw error
+        }
+    }
+
+    func confirmPendingApproval(policy: String) async throws {
+        guard let prompt = pendingApprovalPrompt else { return }
+        pendingApprovalPrompt = nil
+        if self.mission == nil {
+            self.mission = prompt.mission
+            self.sourceProject = prompt.sourceProject
+            self.rootIDs = prompt.rootIDs
+            self.descendantIDs = prompt.descendantIDs
+            self.familyRows = prompt.familyRows
+        }
+        _ = try await drop(project: prompt.destinationProject, folder: prompt.destinationFolder, approvalPolicy: policy)
     }
 }
 

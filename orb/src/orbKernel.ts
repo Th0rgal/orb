@@ -868,6 +868,46 @@ export function orbWireTranscriptSliceStep(input: {
   };
 }
 
+export type PlacementSourceKind = 0 | 1 | 2 | 3;
+export type PlacementStatusCode = 1 | 2 | 3 | 4 | 5 | 6;
+
+export type PlacementMergeInput = {
+  curRev: bigint | number;
+  incRev: bigint | number;
+  pendingOpId: number;
+  ackOpId: number;
+  sourceKind: PlacementSourceKind;
+  hasPlacement: boolean;
+};
+
+export type PlacementMergeVerdict = {
+  status: PlacementStatusCode;
+  admitted: boolean;
+  clearPending: boolean;
+  evictOtherProjects: boolean;
+  nextRev32: number;
+};
+
+export function orbPlacementMergeStep(input: PlacementMergeInput): PlacementMergeVerdict {
+  const raw = kernel.orb_placement_merge_step(
+    u64(input.curRev),
+    u64(input.incRev),
+    sat32(input.pendingOpId),
+    sat32(input.ackOpId),
+    enum8(input.sourceKind),
+    b8(input.hasPlacement),
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  const status = (lo32 & 0xff) as PlacementStatusCode;
+  return {
+    status,
+    admitted: ((lo32 >> 8) & 1) !== 0,
+    clearPending: ((lo32 >> 9) & 1) !== 0,
+    evictOtherProjects: ((lo32 >> 10) & 1) !== 0,
+    nextRev32: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
 export function orbKernelScratchSliceStep(inBytes = 0): {
   inView: Uint8Array;
   outView: Uint8Array;

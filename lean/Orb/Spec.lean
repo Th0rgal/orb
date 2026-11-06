@@ -8102,6 +8102,283 @@ theorem wireScrollSliceStep_refines_OrbScroll
   exact scrollPolicyStep_refines_OrbScroll
     ⟨w.opKind, w.pinned, w.intent, w.resized, w.curTop, w.height, w.client, w.arg⟩ hinner
 
+-- ===========================================================================
+-- Mission Placement & Optimistic-Move Reconciliation (`orb_placement_merge_step`)
+-- ===========================================================================
+
+structure PlacementMergeCheck where
+  curRev       : UInt64
+  incRev       : UInt64
+  pendingOpId  : UInt32
+  ackOpId      : UInt32
+  sourceKind   : UInt8
+  hasPlacement : UInt8
+  deriving Repr, DecidableEq
+
+def PlacementMergeCheck.Admissible (p : PlacementMergeCheck) : Bool :=
+  if !(decide (p.sourceKind ≤ 3)) then false
+  else if p.sourceKind == 2 then
+    p.hasPlacement == 1 && p.ackOpId != 0
+  else if p.sourceKind == 3 then
+    p.pendingOpId != 0 && p.ackOpId == p.pendingOpId
+  else if !(p.hasPlacement == 1) then false
+  else if p.pendingOpId != 0 then
+    decide (p.curRev < p.incRev) ||
+    (p.sourceKind == 1 && p.ackOpId == p.pendingOpId && decide (p.curRev ≤ p.incRev))
+  else
+    decide (p.curRev ≤ p.incRev)
+
+theorem placementMerge_admit_eq (p : PlacementMergeCheck) :
+    (((placementMergeStep p.curRev p.incRev p.pendingOpId p.ackOpId
+        p.sourceKind p.hasPlacement
+      &&& 0xFFFFFFFF) &&& 256) != 0) = p.Admissible := by
+  unfold PlacementMergeCheck.Admissible placementMergeStep placementMergeLo32
+  rw [pack32_lo]
+  dsimp only [GT.gt, GE.ge]
+  by_cases hsk3 : p.sourceKind ≤ 3
+  · simp only [decide_eq_true hsk3, Bool.not_true, Bool.false_eq_true, ite_false]
+    cases hsk2 : (p.sourceKind == 2)
+    · simp only [hsk2, Bool.false_eq_true, ite_false]
+      cases hsk_rb : (p.sourceKind == 3)
+      · simp only [hsk_rb, Bool.false_eq_true, ite_false]
+        cases hhp : (p.hasPlacement == 1)
+        · simp only [hhp, Bool.not_false, ite_true]
+          decide
+        · simp only [hhp, Bool.not_true, Bool.false_eq_true, ite_false]
+          cases hpend : (p.pendingOpId != 0)
+          · simp only [hpend, Bool.false_eq_true, ite_false]
+            cases hsk1 : (p.sourceKind == 1) <;>
+              by_cases hge : p.curRev ≤ p.incRev <;>
+              by_cases hgt : p.curRev < p.incRev <;>
+              (simp only [hsk1, hge, hgt, decide_true, decide_false, Bool.false_eq_true,
+                ite_true, ite_false];
+               decide)
+          · simp only [hpend, ite_true]
+            by_cases hgt : p.curRev < p.incRev
+            · simp only [hgt, decide_true, ite_true, Bool.true_or]
+              cases hsk0 : (p.sourceKind == 0) <;>
+                cases hsk1 : (p.sourceKind == 1) <;>
+                by_cases hlt_op : p.ackOpId < p.pendingOpId <;>
+                (simp only [hsk0, hsk1, hlt_op, decide_true, decide_false,
+                  Bool.true_and, Bool.false_and, Bool.true_or, Bool.false_or,
+                  Bool.false_eq_true, ite_true, ite_false];
+                 decide)
+            · simp only [hgt, decide_false, Bool.false_eq_true, ite_false, Bool.false_or]
+              cases hsk1 : (p.sourceKind == 1) <;>
+                cases hack : (p.ackOpId == p.pendingOpId) <;>
+                by_cases hge : p.curRev ≤ p.incRev <;>
+                (simp only [hsk1, hack, hge, decide_true, decide_false,
+                  Bool.true_and, Bool.false_and,
+                  Bool.false_eq_true, ite_true, ite_false];
+                 decide)
+      · simp only [hsk_rb, ite_true]
+        cases hpend : (p.pendingOpId != 0) <;>
+          cases hack : (p.ackOpId == p.pendingOpId) <;>
+          (simp only [hpend, hack, Bool.true_and, Bool.false_and, Bool.false_eq_true,
+            ite_true, ite_false];
+           decide)
+    · simp only [hsk2, ite_true]
+      cases hhp : (p.hasPlacement == 1) <;>
+        cases hack0 : (p.ackOpId != 0) <;>
+        (simp only [hhp, hack0, Bool.true_and, Bool.false_and, Bool.false_eq_true,
+          ite_true, ite_false];
+         decide)
+  · simp only [decide_eq_false hsk3, Bool.not_false, ite_true]
+    decide
+
+def placementMergeMetaGate : MetaGateSpec PlacementMergeCheck
+    (fun p => p.Admissible = true) where
+  gate p :=
+    ((placementMergeStep p.curRev p.incRev p.pendingOpId p.ackOpId
+        p.sourceKind p.hasPlacement
+      &&& 0xFFFFFFFF) &&& 256) != 0
+  sound p hg := by rw [← placementMerge_admit_eq p]; exact hg
+  complete p hadm := by rw [placementMerge_admit_eq p]; exact hadm
+  posWitness := ⟨4, 5, 11, 11, 1, 1⟩
+  negWitness := ⟨4, 4, 11, 0, 0, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+structure PlacementNodeState where
+  rev         : UInt64
+  pendingOpId : UInt32
+  projectOrd  : UInt32
+  folderOrd   : UInt32
+  deriving Repr, DecidableEq
+
+structure PlacementMergeEvent where
+  incRev        : UInt64
+  ackOpId       : UInt32
+  sourceKind    : UInt8
+  hasPlacement  : UInt8
+  incProjectOrd : UInt32
+  incFolderOrd  : UInt32
+  deriving Repr, DecidableEq
+
+def effectivePlacementCheck (s : PlacementNodeState) (e : PlacementMergeEvent) :
+    PlacementMergeCheck :=
+  ⟨s.rev, e.incRev, s.pendingOpId, e.ackOpId, e.sourceKind, e.hasPlacement⟩
+
+def placementMachineStep (s : PlacementNodeState) (e : PlacementMergeEvent) :
+    PlacementNodeState × List UInt64 :=
+  let chk := effectivePlacementCheck s e
+  let w := placementMergeStep chk.curRev chk.incRev chk.pendingOpId chk.ackOpId
+    chk.sourceKind chk.hasPlacement
+  let admit := ((w &&& 0xFFFFFFFF) &&& 256) != 0
+  let clearPending := ((w &&& 0xFFFFFFFF) &&& 512) != 0
+  if !admit then
+    (s, [])
+  else
+    let nextRev : UInt64 :=
+      if e.sourceKind == 2 || e.sourceKind == 3 then s.rev
+      else if e.incRev > s.rev then e.incRev else s.rev
+    let nextPending : UInt32 :=
+      if e.sourceKind == 2 then e.ackOpId
+      else if clearPending then 0
+      else s.pendingOpId
+    (⟨nextRev, nextPending, e.incProjectOrd, e.incFolderOrd⟩, [nextRev])
+
+def placementMergeMetaStepSpec :
+    MetaStepSpec PlacementNodeState PlacementMergeEvent UInt64 where
+  safety := {
+    step := placementMachineStep
+    authorized := fun s e _ => (effectivePlacementCheck s e).Admissible
+    sound := fun s e eff h_in => by
+      dsimp [placementMachineStep] at h_in
+      split at h_in
+      · contradiction
+      · next h_not_nadm =>
+        have h_adm_bool : (((placementMergeStep (effectivePlacementCheck s e).curRev
+            (effectivePlacementCheck s e).incRev (effectivePlacementCheck s e).pendingOpId
+            (effectivePlacementCheck s e).ackOpId (effectivePlacementCheck s e).sourceKind
+            (effectivePlacementCheck s e).hasPlacement &&& 0xFFFFFFFF) &&& 256) != 0) = true := by
+          cases hg : (((placementMergeStep (effectivePlacementCheck s e).curRev
+            (effectivePlacementCheck s e).incRev (effectivePlacementCheck s e).pendingOpId
+            (effectivePlacementCheck s e).ackOpId (effectivePlacementCheck s e).sourceKind
+            (effectivePlacementCheck s e).hasPlacement &&& 0xFFFFFFFF) &&& 256) != 0)
+          · simp [hg] at h_not_nadm
+          · rfl
+        exact placementMergeMetaGate.sound (effectivePlacementCheck s e) h_adm_bool
+  }
+  liveness := {
+    init := ⟨0, 0, 1, 0⟩
+    step := placementMachineStep
+    progressRequired := fun s e => (effectivePlacementCheck s e).Admissible
+    expectedEffect := fun _ _ => true
+    live := fun s e h_req => by
+      have h_gate := placementMergeMetaGate.complete (effectivePlacementCheck s e) h_req
+      dsimp [placementMergeMetaGate] at h_gate
+      dsimp [placementMachineStep]
+      simp [h_gate]
+    traceEvents := [
+      ⟨0, 7, 2, 1, 1, 2⟩,
+      ⟨1, 7, 1, 1, 1, 2⟩
+    ]
+    posEvent := ⟨2, 0, 0, 1, 2, 0⟩
+    negEvent := ⟨1, 0, 0, 0, 1, 0⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := placementMachineStep
+    cpuFuel := fun s e => 8 + ((placementMachineStep s e).2).length
+    inputBytes := fun _ => 32
+    outputBytes := fun s e => 16 + 8 * ((placementMachineStep s e).2).length
+    c0 := 9
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 24
+    fuel_bound := fun s e => by
+      dsimp [placementMachineStep]
+      split <;> simp
+    eff_bound := fun s e => by
+      dsimp [placementMachineStep]
+      split <;> simp
+    out_bound := fun s e => by
+      dsimp [placementMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- Key anti-reversion invariants for `orb_placement_merge_step`:
+    1. **Pending-op fence (`status = 5`)**: While an optimistic move `pendingOpId != 0` is in flight,
+       ANY list poll (`sourceKind = 0`) at `incRev ≤ curRev` is fenced (`lo32 = 5`, `admittedBit = 0`,
+       `clearPendingBit = 0`), preventing snap-back and keeping return-to-origin (`A → B → A`) pending.
+    2. **Monotone settled revision (`status = 4`)**: Once settled (`pendingOpId = 0`), any poll or
+       SSE frame with `incRev < curRev` is rejected (`lo32 = 4`, `admittedBit = 0`).
+    3. **Authoritative ack clears fence & evicts stale buckets (`lo32 = 1793`)**: A matching local ack
+       (`ackOpId == pendingOpId`) with `incRev > curRev` while `pendingOpId != 0` admits (`256`), clears
+       the pending op (`512`), and signals cross-project eviction (`1024`).
+    4. **Intermediate poll, older ack, & uncorrelated foreign event preserve pending op (`lo32 = 1281`)**:
+       A poll (`sourceKind = 0`), an older local acknowledgement (`sourceKind = 1`, `ackOpId < pendingOpId`),
+       or an uncorrelated foreign placement event (`sourceKind = 1`, `ackOpId = 0 < pendingOpId`) observing
+       an intermediate revision (`incRev > curRev`) while `pendingOpId != 0` admits (`256`) and updates the
+       confirmed rollback baseline without clearing `pendingOpId` (`clearPendingBit = 0`), including
+       repeated-destination sequences (`A → B → C → B`). -/
+theorem placement_merge_fences_stale_polls_and_advances_monotonically
+    (curRev incRev : UInt64) (pendingOpId ackOpId : UInt32)
+    (h_pend : pendingOpId != 0)
+    (h_le : incRev ≤ curRev) :
+    (placementMergeStep curRev incRev pendingOpId 0 0 1 &&& 0xFFFFFFFF) = 5 ∧
+    (incRev < curRev →
+      (placementMergeStep curRev incRev 0 0 0 1 &&& 0xFFFFFFFF) = 4) ∧
+    (curRev < curRev + 1 →
+      (placementMergeStep curRev (curRev + 1) pendingOpId pendingOpId 1 1 &&& 0xFFFFFFFF) = 1793) ∧
+    (curRev < curRev + 1 →
+      (placementMergeStep curRev (curRev + 1) pendingOpId 0 0 1 &&& 0xFFFFFFFF) = 1281) ∧
+    (curRev < curRev + 1 → ackOpId < pendingOpId →
+      (placementMergeStep curRev (curRev + 1) pendingOpId ackOpId 1 1 &&& 0xFFFFFFFF) = 1281) := by
+  have h_not_gt : ¬ (curRev < incRev) := UInt64.not_lt.mpr h_le
+  have hsk0_3 : ((0 : UInt8) ≤ 3) := by decide
+  have hsk1_3 : ((1 : UInt8) ≤ 3) := by decide
+  have h0_eq0 : ((0 : UInt8) == 0) = true := by decide
+  have h0_eq2 : ((0 : UInt8) == 2) = false := by decide
+  have h0_eq3 : ((0 : UInt8) == 3) = false := by decide
+  have h0_eq1 : ((0 : UInt8) == 1) = false := by decide
+  have h1_eq0 : ((1 : UInt8) == 0) = false := by decide
+  have h1_eq2 : ((1 : UInt8) == 2) = false := by decide
+  have h1_eq3 : ((1 : UInt8) == 3) = false := by decide
+  have h1_eq1 : ((1 : UInt8) == 1) = true := by decide
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · unfold placementMergeStep placementMergeLo32
+    rw [pack32_lo]
+    dsimp only [GT.gt, GE.ge]
+    simp only [hsk0_3, h_not_gt, decide_true, decide_false, Bool.not_true, Bool.false_eq_true,
+      ite_false, h0_eq2, h0_eq3, h1_eq1, h0_eq1, h_pend, ite_true, Bool.false_and]
+    decide
+  · intro h_lt
+    have h_not_ge : ¬ (curRev ≤ incRev) := UInt64.not_le.mpr h_lt
+    have hp0 : ((0 : UInt32) != 0) = false := by decide
+    unfold placementMergeStep placementMergeLo32
+    rw [pack32_lo]
+    dsimp only [GT.gt, GE.ge]
+    simp only [hsk0_3, h_not_ge, decide_true, decide_false, Bool.not_true, Bool.false_eq_true,
+      ite_false, h0_eq2, h0_eq3, h1_eq1, h0_eq1, hp0]
+    decide
+  · intro h_ovf
+    have h_not_lt_op : ¬ (pendingOpId < pendingOpId) := UInt32.lt_irrefl pendingOpId
+    unfold placementMergeStep placementMergeLo32
+    rw [pack32_lo]
+    dsimp only [GT.gt, GE.ge]
+    simp only [hsk1_3, h_ovf, h_not_lt_op, decide_true, decide_false, Bool.not_true,
+      Bool.false_eq_true, ite_false, h1_eq0, h1_eq2, h1_eq3, h1_eq1, h_pend, ite_true,
+      Bool.false_or, Bool.and_false]
+    decide
+  · intro h_ovf
+    unfold placementMergeStep placementMergeLo32
+    rw [pack32_lo]
+    dsimp only [GT.gt, GE.ge]
+    simp only [hsk0_3, h_ovf, decide_true, Bool.not_true, Bool.false_eq_true,
+      ite_false, h0_eq0, h0_eq2, h0_eq3, h1_eq1, h0_eq1, h_pend, ite_true, Bool.true_or]
+    decide
+  · intro h_ovf hack_lt
+    unfold placementMergeStep placementMergeLo32
+    rw [pack32_lo]
+    dsimp only [GT.gt, GE.ge]
+    simp only [hsk1_3, h_ovf, hack_lt, decide_true, Bool.not_true, Bool.false_eq_true,
+      ite_false, h1_eq0, h1_eq2, h1_eq3, h1_eq1, h_pend, ite_true,
+      Bool.true_and, Bool.false_or]
+    decide
+
 -- Wave 12: LeanNative Option B+ Hot-Path Scanners, Pacer & Confinement Specs
 
 theorem mask_lo32_sub (w m : UInt64) (hm : m &&& 0xFFFFFFFF = m) :

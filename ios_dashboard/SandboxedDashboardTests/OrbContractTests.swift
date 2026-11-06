@@ -233,9 +233,184 @@ final class OrbContractTests: XCTestCase {
         XCTAssertNil(OrbContinuation.identity(for: .object([:])))
     }
 
-    func testFolderTagKeepsNestedPath() {
-        let row = OrbRow(.object(["id": .string("a"), "tags": .array([.string("orb-folder:Design/Images")])]))
+    func testFolderColumnKeepsNestedPathAndIgnoresLegacyTags() {
+        OrbHierarchy.reset()
+        let row = OrbRow(.object([
+            "id": .string("a"),
+            "project": .string("orb-test"),
+            "folder": .string(" /Design/Images/ "),
+            "placement_revision": .number(1),
+            "tags": .array([.string("orb-folder:Stale/Legacy")]),
+        ]))
         XCTAssertEqual(row.folder, "Design/Images")
+
+        // Nested launched child subagents always carry `folder == ""` regardless of incoming payload.
+        let child = OrbRow(.object([
+            "id": .string("child-a"),
+            "project": .string("orb-test"),
+            "folder": .string("Design/Images"),
+            "placement_revision": .number(1),
+            "parent_mission_id": .string("a"),
+        ]))
+        XCTAssertEqual(child.folder, "")
+        OrbHierarchy.reset()
+    }
+
+    @MainActor func testPlacementMergeMonotoneReconcilerAndRollback() {
+        OrbHierarchy.reset()
+        // Seed initial state: mission `9f559751` + subagent `06203bdc` in `assistant` at rev 2.
+        let rootInit = OrbRow(.object([
+            "id": .string("9f559751"),
+            "project": .string("assistant"),
+            "folder": .string(""),
+            "placement_revision": .number(2),
+        ]))
+        OrbHierarchy.storeAncestor(rootInit)
+        let childInit = OrbRow(.object([
+            "id": .string("06203bdc"),
+            "project": .string("assistant"),
+            "folder": .string(""),
+            "placement_revision": .number(2),
+            "parent_mission_id": .string("9f559751"),
+        ]))
+        XCTAssertEqual(rootInit.project, "assistant")
+        XCTAssertEqual(childInit.project, "assistant")
+
+        // Stage optimistic move to `default/ops` with opID 42.
+        let staged = OrbHierarchy.stageOptimisticPlacement(
+            rootIDs: ["9f559751"],
+            descendantIDs: ["06203bdc"],
+            project: "default",
+            folder: "ops",
+            opID: 42
+        )
+        XCTAssertEqual(Set(staged), Set(["9f559751", "06203bdc"]))
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.project, "default")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.folder, "ops")
+        XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.project, "default")
+        XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.folder, "")
+
+        // Optimistic UI row preview (`withPatchedPlacement`) does NOT re-observe or clear `pendingOpID`.
+        let previewRoot = rootInit.withPatchedPlacement(project: "default", folder: "ops", revision: rootInit.placementRevision)
+        XCTAssertEqual(previewRoot.project, "default")
+        XCTAssertEqual(previewRoot.folder, "ops")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.pendingOpID, 42)
+
+        // A stale in-flight poll carrying `rev == 2` from `assistant` is fenced and preserves optimistic placement.
+        let staleRoot = OrbRow(.object([
+            "id": .string("9f559751"),
+            "project": .string("assistant"),
+            "folder": .string(""),
+            "placement_revision": .number(2),
+        ]))
+        XCTAssertEqual(staleRoot.project, "default")
+        XCTAssertEqual(staleRoot.folder, "ops")
+
+        // Rollback on 409 approval prompt restores `assistant` cleanly; mismatched opID does nothing.
+        XCTAssertTrue(OrbHierarchy.rollbackOptimisticPlacement(missionIDs: ["9f559751", "06203bdc"], opID: 99).isEmpty)
+        let rolledBack = OrbHierarchy.rollbackOptimisticPlacement(missionIDs: ["9f559751", "06203bdc"], opID: 42)
+        XCTAssertEqual(Set(rolledBack), Set(["9f559751", "06203bdc"]))
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.project, "assistant")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.folder, "")
+
+        // Commit authoritative move at `rev == 3` to `default/ops`.
+        let committed = OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "9f559751", project: "default", folder: "ops", placementRevision: 3),
+            OrbPlacementCommitItem(missionID: "06203bdc", project: "default", folder: "ignored", placementRevision: 3),
+        ], ackOpID: 43)
+        XCTAssertEqual(committed.count, 2)
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.project, "default")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.folder, "ops")
+        XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.folder, "")
+
+        // Post-commit stale poll (`rev == 2`, `assistant`) is strictly rejected — prevents incident `9f559751`.
+        let postMoveStaleChild = OrbRow(.object([
+            "id": .string("06203bdc"),
+            "project": .string("assistant"),
+            "folder": .string(""),
+            "placement_revision": .number(2),
+            "parent_mission_id": .string("9f559751"),
+        ]))
+        XCTAssertEqual(postMoveStaleChild.project, "default")
+        XCTAssertEqual(postMoveStaleChild.placementRevision, 3)
+
+        // Authoritative snapshot unassigning `project: null` and `folder: ""` at `rev == 4` clears cached project and folder.
+        let unassignedSnapshot = OrbRow(.object([
+            "id": .string("9f559751"),
+            "project": .null,
+            "folder": .string(""),
+            "placement_revision": .number(4),
+        ]))
+        XCTAssertEqual(unassignedSnapshot.project, "")
+        XCTAssertEqual(unassignedSnapshot.folder, "")
+        XCTAssertEqual(unassignedSnapshot.placementRevision, 4)
+
+        // Incoming SSE/WS `mission_placement_changed` commits authoritative moves and clears project on explicit null.
+        var notifiedMoves: [OrbPlacementCommitItem] = []
+        let observer = NotificationCenter.default.addObserver(
+            forName: Notification.Name("OrbMissionPlacementChanged"),
+            object: nil,
+            queue: nil
+        ) { note in
+            if let moves = note.userInfo?["moves"] as? [OrbPlacementCommitItem] {
+                notifiedMoves = moves
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        let remoteMove = OrbCore.applyIncomingPlacementEvent([
+            "type": "mission_placement_changed",
+            "moves": [
+                [
+                    "mission_id": "9f559751",
+                    "project": "ethereum",
+                    "folder": " /Specs/Consensus/ ",
+                    "placement_revision": NSNumber(value: 5),
+                ],
+                [
+                    "mission_id": "06203bdc",
+                    "project": "ethereum",
+                    "folder": "Specs/Consensus",
+                    "placement_revision": NSNumber(value: 5),
+                ],
+            ],
+        ])
+        XCTAssertEqual(remoteMove.count, 2)
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.project, "ethereum")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.folder, "Specs/Consensus")
+        XCTAssertEqual(OrbHierarchy.cachedAncestor("9f559751")?.project, "ethereum")
+        XCTAssertEqual(OrbHierarchy.cachedAncestor("9f559751")?.folder, "Specs/Consensus")
+        XCTAssertEqual(OrbHierarchy.cachedAncestor("9f559751")?.placementRevision, 5)
+        XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.project, "ethereum")
+        XCTAssertEqual(OrbHierarchy.placement(of: "06203bdc")?.folder, "")
+        XCTAssertEqual(notifiedMoves.count, 2)
+
+        let remoteUnassign = OrbCore.applyIncomingPlacementEvent([
+            "type": "mission_placement_changed",
+            "moves": [
+                [
+                    "mission_id": "9f559751",
+                    "project": NSNull(),
+                    "folder": "",
+                    "placement_revision": NSNumber(value: 6),
+                ],
+            ],
+        ])
+        XCTAssertEqual(remoteUnassign.count, 1)
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.project, "")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.folder, "")
+        XCTAssertEqual(OrbHierarchy.placement(of: "9f559751")?.revision, 6)
+
+        // Parse 409 approval transfer confirmation error.
+        let errJSON = """
+        {"code":"approval_transfer_confirmation_required","error":"Moving across projects affects active secret approvals","target_project":"ethereum","active_grants":[{"id":"g1","secret_name":"PROD_DB","source_project":"assistant"}],"pending_requests":[{"id":"r1","secret_name":"STRIPE_KEY","operation":"get"}]}
+        """
+        let parsed = OrbApprovalTransferConfirmationError.parse(from: OrbHTTPError(status: 409, detail: errJSON))
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.targetProject, "ethereum")
+        XCTAssertEqual(parsed?.activeGrants.map(\.secretName), ["PROD_DB"])
+        XCTAssertEqual(parsed?.pendingRequests.map(\.secretName), ["STRIPE_KEY"])
+        OrbHierarchy.reset()
     }
     func testWireRoundTripPreservesProviderParameters() throws {
         let value = OrbJSON.object(["params": .array([.object(["id": .string("effort"), "value": .string("high")])]), "available": .bool(true)])
@@ -681,6 +856,369 @@ final class OrbContractTests: XCTestCase {
         XCTAssertTrue(OrbMissionTree.isSupersededInTree(supParent, byID: supMap))
         XCTAssertTrue(OrbMissionTree.isSupersededInTree(supChild, byID: supMap))
         XCTAssertFalse(OrbMissionTree.isSupersededInTree(liveSup, byID: supMap))
+        OrbHierarchy.reset()
+    }
+
+    func testOverlappingOptimisticMovesPreserveNewerPendingOpAcrossEarlierAck() {
+        OrbHierarchy.reset()
+        let row0 = OrbRow(.object([
+            "id": .string("rapid-ios"),
+            "project": .string("assistant"),
+            "folder": .string(""),
+            "placement_revision": .number(0),
+            "status": .string("active")
+        ]))
+        XCTAssertEqual(row0.folder, "")
+
+        let op1 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderA", opID: op1)
+        let op2 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderB", opID: op2)
+        XCTAssertGreaterThan(op2, op1)
+
+        // Earlier ack (`op1` at rev 1) advances rollback baseline without clobbering `op2`'s FolderB preview.
+        let accepted1 = OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "rapid-ios", project: "assistant", folder: "FolderA", placementRevision: 1)
+        ], ackOpID: op1)
+        XCTAssertTrue(accepted1.isEmpty)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderB")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 1)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op2)
+
+        // Poll at rev 1 (`FolderA`) remains fenced while `op2` is pending:
+        let poll1 = OrbRow(.object([
+            "id": .string("rapid-ios"),
+            "project": .string("assistant"),
+            "folder": .string("FolderA"),
+            "placement_revision": .number(1),
+            "status": .string("active")
+        ]))
+        XCTAssertEqual(poll1.folder, "FolderB")
+
+        // Rolling back `op2` restores Move 1's committed `FolderA` at rev 1:
+        XCTAssertTrue(OrbHierarchy.rollbackOptimisticPlacement(id: "rapid-ios", ackOpID: op2))
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderA")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 1)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, 0)
+
+        // Stale list row reconciled during an optimistic move (`OrbRow` -> `openBeyondPage` -> `filterMobile`)
+        // MUST preserve `pendingOpID` and rollback state across repeated `OrbHierarchy.observe` passes:
+        let op3 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "default", toFolder: "TargetFolder", opID: op3)
+        let staleListed = OrbRow(.object([
+            "id": .string("rapid-ios"),
+            "project": .string("assistant"),
+            "folder": .string("FolderA"),
+            "placement_revision": .number(1),
+            "status": .string("active")
+        ]))
+        XCTAssertEqual(staleListed.project, "default")
+        XCTAssertEqual(staleListed.folder, "TargetFolder")
+        XCTAssertTrue(staleListed.raw["orb_projected_move"].flag)
+        _ = OrbMissionTree.openBeyondPage([staleListed], extra: [staleListed])
+        let filtered = OrbMissionTree.filterMobile([staleListed])
+        XCTAssertEqual(filtered.first?.project, "default")
+        XCTAssertEqual(filtered.first?.folder, "TargetFolder")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op3)
+        let redecoded = OrbRow(staleListed.raw)
+        XCTAssertEqual(redecoded.project, "default")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op3)
+        XCTAssertTrue(OrbHierarchy.rollbackOptimisticPlacement(id: "rapid-ios", ackOpID: op3))
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.project, "assistant")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderA")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 1)
+
+        // Poll-before-ack on overlapping moves (`op4 -> FolderX`, `op5 -> FolderY`, then rev-2 poll for `FolderX`
+        // arrives before `op4`'s HTTP/SSE ack): preserves `FolderY` (`op5`) while recording `FolderX` at rev 2 as rollback base.
+        let op4 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderX", opID: op4)
+        let op5 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "default", toFolder: "FolderY", opID: op5)
+        let pollBeforeAck = OrbRow(.object([
+            "id": .string("rapid-ios"),
+            "project": .string("assistant"),
+            "folder": .string("FolderX"),
+            "placement_revision": .number(2),
+            "status": .string("active")
+        ]))
+        XCTAssertEqual(pollBeforeAck.project, "default")
+        XCTAssertEqual(pollBeforeAck.folder, "FolderY")
+        XCTAssertTrue(pollBeforeAck.raw["orb_projected_move"].flag)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op5)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 2)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.rollbackProject, "assistant")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.rollbackFolder, "FolderX")
+        XCTAssertTrue(OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "rapid-ios", project: "assistant", folder: "FolderX", placementRevision: 2)
+        ], ackOpID: op4).isEmpty)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op5)
+        XCTAssertTrue(OrbHierarchy.rollbackOptimisticPlacement(id: "rapid-ios", ackOpID: op5))
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.project, "assistant")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderX")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 2)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, 0)
+
+        // Return-to-origin (`FolderX -> FolderY -> FolderX`): a delayed pre-move poll at rev 2 (`FolderX`)
+        // MUST NOT clear `op7`, keeping Move 1 (`op6 -> FolderY`) fenced when its rev-3 ack arrives.
+        let op6 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderY", opID: op6)
+        let op7 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderX", opID: op7)
+        let preMoveOriginPoll = OrbRow(.object([
+            "id": .string("rapid-ios"),
+            "project": .string("assistant"),
+            "folder": .string("FolderX"),
+            "placement_revision": .number(2),
+            "status": .string("active")
+        ]))
+        XCTAssertEqual(preMoveOriginPoll.folder, "FolderX")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op7)
+        XCTAssertTrue(OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "rapid-ios", project: "assistant", folder: "FolderY", placementRevision: 3)
+        ], ackOpID: op6).isEmpty)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderX")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op7)
+        let settledReturn = OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "rapid-ios", project: "assistant", folder: "FolderX", placementRevision: 4)
+        ], ackOpID: op7)
+        XCTAssertEqual(settledReturn.count, 1)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderX")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 4)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, 0)
+
+        // Repeated-destination (`FolderX -> FolderY -> FolderZ -> FolderY`): neither Move 1's older ack (`FolderY`, rev 5)
+        // nor an intermediate poll clears Move 3 (`op10`), so Move 2's ack (`FolderZ`, rev 6) cannot overwrite `FolderY`.
+        let op8 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderY", opID: op8)
+        let op9 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderZ", opID: op9)
+        let op10 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "rapid-ios", toProject: "assistant", toFolder: "FolderY", opID: op10)
+        XCTAssertTrue(OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "rapid-ios", project: "assistant", folder: "FolderY", placementRevision: 5)
+        ], ackOpID: op8).isEmpty)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op10)
+        XCTAssertTrue(OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "rapid-ios", project: "assistant", folder: "FolderZ", placementRevision: 6)
+        ], ackOpID: op9).isEmpty)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderY")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, op10)
+        let settledRepeat = OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "rapid-ios", project: "assistant", folder: "FolderY", placementRevision: 7)
+        ], ackOpID: op10)
+        XCTAssertEqual(settledRepeat.count, 1)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.folder, "FolderY")
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.revision, 7)
+        XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, 0)
+        OrbHierarchy.reset()
+    }
+
+    func testProjectScopeFilteringAndVirtualFolderMigrationPlan() {
+        OrbHierarchy.reset()
+        // 1. In-flight project-A list response finishing after an optimistic or authoritative move to B (or unassigned)
+        // must be excluded from project-A's scoped rows even though its ID was in `ownIDs`.
+        let opMove = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(
+            id: "moved-opt",
+            toProject: "beta",
+            toFolder: "docs",
+            opID: opMove,
+            fallbackProject: "alpha",
+            fallbackFolder: "",
+            fallbackRevision: 1
+        )
+        _ = OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "moved-auth", project: "beta", folder: "", placementRevision: 3),
+            OrbPlacementCommitItem(missionID: "moved-unassigned", project: nil, folder: "", placementRevision: 2)
+        ])
+
+        let staleOptRow = OrbRow(.object([
+            "id": .string("moved-opt"),
+            "project": .string("alpha"),
+            "placement_revision": .number(1),
+            "status": .string("active")
+        ]))
+        let staleAuthRow = OrbRow(.object([
+            "id": .string("moved-auth"),
+            "project": .string("alpha"),
+            "placement_revision": .number(1),
+            "status": .string("completed")
+        ]))
+        let staleUnassignedRow = OrbRow(.object([
+            "id": .string("moved-unassigned"),
+            "project": .string("alpha"),
+            "placement_revision": .number(1),
+            "status": .string("completed")
+        ]))
+        let keptRow = OrbRow(.object([
+            "id": .string("still-alpha"),
+            "project": .string("alpha"),
+            "placement_revision": .number(1),
+            "status": .string("active")
+        ]))
+        let legacyPartialRow = OrbRow(.object([
+            "id": .string("legacy-partial"),
+            "folder": .string("sub"),
+            "status": .string("completed")
+        ]))
+        let crossAncestor = OrbRow(.object([
+            "id": .string("anc-beta"),
+            "project": .string("beta"),
+            "placement_revision": .number(1),
+            "status": .string("completed")
+        ]))
+
+        let ownIDs: Set<String> = ["moved-opt", "moved-auth", "moved-unassigned", "still-alpha", "legacy-partial"]
+        let scoped = OrbMissionTree.filterToProjectScope(
+            [staleOptRow, staleAuthRow, staleUnassignedRow, keptRow, legacyPartialRow, crossAncestor],
+            projectSlug: "alpha",
+            ownIDs: ownIDs
+        )
+        XCTAssertEqual(scoped.map(\.id), ["still-alpha", "legacy-partial"])
+
+        // 2. Virtual folder rename/move snapshots original folders upfront and batches fork siblings per destination.
+        let forkLeader = OrbRow(.object([
+            "id": .string("fork-leader"),
+            "project": .string("alpha"),
+            "folder": .string("old"),
+            "tags": .array([.string("fork-of:fork-v1")]),
+            "status": .string("active")
+        ]))
+        let forkOrigin = OrbRow(.object([
+            "id": .string("fork-v1"),
+            "project": .string("alpha"),
+            "folder": .string("old"),
+            "status": .string("completed")
+        ]))
+        let nestedFolderMission = OrbRow(.object([
+            "id": .string("sub-root"),
+            "project": .string("alpha"),
+            "folder": .string("old/deep"),
+            "status": .string("completed")
+        ]))
+        let childWorker = OrbRow(.object([
+            "id": .string("worker-child"),
+            "project": .string("alpha"),
+            "folder": .string("old"),
+            "parent_mission_id": .string("fork-leader"),
+            "status": .string("active")
+        ]))
+        let batches = OrbMissionTree.planVirtualFolderMigration(
+            missions: [forkLeader, forkOrigin, nestedFolderMission, childWorker],
+            from: "old",
+            to: "renamed"
+        )
+        XCTAssertEqual(batches.count, 2)
+        XCTAssertEqual(batches[0].folder, "renamed")
+        XCTAssertEqual(batches[0].ids, ["fork-leader", "fork-v1"])
+        XCTAssertEqual(batches[1].folder, "renamed/deep")
+        XCTAssertEqual(batches[1].ids, ["sub-root"])
+        OrbHierarchy.reset()
+    }
+
+    func testClientScopedPlacementAckAndLocalStagedRowInsertion() {
+        OrbHierarchy.reset()
+        let rootRow = OrbRow(.object([
+            "id": .string("stage-root"),
+            "title": .string("Cross-project root"),
+            "project": .string("alpha"),
+            "folder": .string("old"),
+            "placement_revision": .number(2),
+            "status": .string("active"),
+            "updated_at": .string("2026-11-06T01:20:00Z")
+        ]))
+        let existingNewer = OrbRow(.object([
+            "id": .string("beta-newer"),
+            "project": .string("beta"),
+            "folder": .string(""),
+            "placement_revision": .number(1),
+            "status": .string("active"),
+            "updated_at": .string("2026-11-06T01:30:00Z")
+        ]))
+        let existingOlder = OrbRow(.object([
+            "id": .string("beta-older"),
+            "project": .string("beta"),
+            "folder": .string(""),
+            "placement_revision": .number(1),
+            "status": .string("completed"),
+            "updated_at": .string("2026-11-06T01:10:00Z")
+        ]))
+
+        OrbHierarchy.retainStagedRows([rootRow])
+        let op = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(
+            id: "stage-root",
+            toProject: "beta",
+            toFolder: "docs",
+            opID: op,
+            fallbackProject: "alpha",
+            fallbackFolder: "old",
+            fallbackRevision: 2
+        )
+
+        // 1. Optimistic preview inserts staged row locally into destination project in recency order without needing a server reload.
+        let previewApplied = OrbMissionTree.applyPlacementItems(
+            to: [existingNewer, existingOlder],
+            projectSlug: "beta",
+            moves: [OrbPlacementCommitItem(missionID: "stage-root", project: "beta", folder: "docs", placementRevision: 2, isPreview: true)]
+        )
+        XCTAssertTrue(previewApplied.changed)
+        XCTAssertTrue(previewApplied.missingIDs.isEmpty)
+        XCTAssertEqual(previewApplied.rows.map(\.id), ["beta-newer", "stage-root", "beta-older"])
+        XCTAssertEqual(previewApplied.rows[1].folder, "docs")
+
+        // 2. An in-flight destination load finishing before server commit preserves the pending preview row.
+        let mergedAfterInFlightLoad = OrbMissionTree.mergePendingStagedRows([existingNewer, existingOlder], projectSlug: "beta")
+        XCTAssertEqual(mergedAfterInFlightLoad.map(\.id), ["beta-newer", "stage-root", "beta-older"])
+
+        // 3. Foreign placement event at `incRev > curRev` (`3 > 2`) with colliding `client_op_id` advances the confirmed
+        //    rollback baseline without clearing `pendingOpID` or replacing the in-flight `beta/docs` preview!
+        let foreignCommitted = OrbCore.applyIncomingPlacementEvent([
+            "client_op_id": Int(op),
+            "client_id": "foreign-client-uuid",
+            "moves": [[
+                "mission_id": "stage-root",
+                "project": "gamma",
+                "folder": "foreign",
+                "placement_revision": 3
+            ]]
+        ])
+        XCTAssertTrue(foreignCommitted.isEmpty)
+        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.pendingOpID, op)
+        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.project, "beta")
+        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.revision, 3)
+
+        // 4. Failed local move rolls back cleanly to the updated confirmed baseline (`gamma/foreign`, rev 3) and restores locally.
+        XCTAssertTrue(OrbHierarchy.rollbackOptimisticPlacement(id: "stage-root", ackOpID: op))
+        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.project, "gamma")
+        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.folder, "foreign")
+        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.revision, 3)
+        let restoredGamma = OrbMissionTree.applyPlacementItems(
+            to: [],
+            projectSlug: "gamma",
+            moves: [OrbPlacementCommitItem(missionID: "stage-root", project: "gamma", folder: "foreign", placementRevision: 3)]
+        )
+        XCTAssertTrue(restoredGamma.changed)
+        XCTAssertTrue(restoredGamma.missingIDs.isEmpty)
+        XCTAssertEqual(restoredGamma.rows.map(\.id), ["stage-root"])
+        XCTAssertEqual(restoredGamma.rows.first?.folder, "foreign")
+
+        // 5. Same `client_id == OrbHierarchy.localClientID` at `incRev == curRev` (`3`) acknowledges and clears `pendingOpID`.
+        let op2 = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(id: "stage-root", toProject: "beta", toFolder: "docs", opID: op2)
+        let localCommitted = OrbCore.applyIncomingPlacementEvent([
+            "client_op_id": Int(op2),
+            "client_id": OrbHierarchy.localClientID,
+            "moves": [[
+                "mission_id": "stage-root",
+                "project": "beta",
+                "folder": "docs",
+                "placement_revision": 3
+            ]]
+        ])
+        XCTAssertEqual(localCommitted.count, 1)
+        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.pendingOpID, 0)
+        XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.revision, 3)
         OrbHierarchy.reset()
     }
 }

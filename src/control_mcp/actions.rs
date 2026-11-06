@@ -24,13 +24,14 @@ pub fn init(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS mcp_actions_pending ON mcp_actions_v1(state,created_at);
         CREATE TABLE IF NOT EXISTS mcp_sessions_v1 (
         id TEXT PRIMARY KEY, owner TEXT NOT NULL, mission_id TEXT, expires_at INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0,
-        subject_kind TEXT NOT NULL DEFAULT 'mission', client_label TEXT, host_hint TEXT, project_scope TEXT, hard_expires_at INTEGER);")
+        subject_kind TEXT NOT NULL DEFAULT 'mission', client_label TEXT, host_hint TEXT, project_scope TEXT, project_scoped INTEGER NOT NULL DEFAULT 0, hard_expires_at INTEGER);")
         .map_err(|e|e.to_string())?;
     for col in [
         "subject_kind TEXT NOT NULL DEFAULT 'mission'",
         "client_label TEXT",
         "host_hint TEXT",
         "project_scope TEXT",
+        "project_scoped INTEGER NOT NULL DEFAULT 0",
         "hard_expires_at INTEGER",
     ] {
         if let Err(e) = conn.execute(&format!("ALTER TABLE mcp_sessions_v1 ADD COLUMN {col}"), []) {
@@ -40,6 +41,11 @@ pub fn init(conn: &Connection) -> Result<(), String> {
             }
         }
     }
+    conn.execute(
+        "UPDATE mcp_sessions_v1 SET project_scoped = 1 WHERE project_scope IS NOT NULL AND project_scoped = 0",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 fn scope(p: &Principal) -> String {

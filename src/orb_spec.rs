@@ -144,6 +144,10 @@ pub fn step_host_wire_transcript_slice(
     wire_transcript_slice_step(in_event, out_buf, input)
 }
 
+pub fn step_host_placement_merge(input: PlacementMergeInput) -> PlacementMergeVerdict {
+    placement_merge_step(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,6 +465,17 @@ mod tests {
             WireTranscriptSliceError::FoldRejected(v)
                 if !v.admitted && v.action_code == 3 && v.gap_buffered
         ));
+
+        let pm = step_host_placement_merge(PlacementMergeInput {
+            cur_rev: 2,
+            inc_rev: 3,
+            pending_op_id: 9,
+            ack_op_id: 9,
+            source_kind: 1,
+            has_placement: true,
+        });
+        assert!(pm.admitted && pm.clear_pending && pm.evict_other_projects);
+        assert_eq!(pm.next_rev32, 3);
     }
 
     #[test]

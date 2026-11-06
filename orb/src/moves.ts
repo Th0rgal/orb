@@ -2,12 +2,23 @@
  * Optimistic moves shared by every view, like `renames.ts`. A mission, file
  * or folder moved to another project (or folder) shows at its destination at
  * once wherever lists are read through `withMovedMissions` / `movedMission` /
- * `filesMovedAway` / `filesMovedInto`. List refreshes that still carry the
- * old place cannot snap it back. An entry clears when the server reports the
- * new place is committed by its owner, `MOVE_CONFIRM_MS` after success, or when
- * it failed (the item returns and an error toast explains why).
+ * `filesMovedAway` / `filesMovedInto`.
+ *
+ * Mission moves are monotonically revisioned via `orb_placement_merge_step`
+ * (`missionHierarchy.ts`): once `save()` commits the server's authoritative
+ * `placement_revision`, the pending overlay clears immediately without any
+ * timer heuristic, and stale pre-move list refreshes are rejected by revision.
+ * File moves retain `MOVE_CONFIRM_MS` / `settleMove` until directory listings
+ * refresh.
  */
 import { createSignal } from "solid-js";
+import { ApprovalTransferConfirmationRequiredError } from "./api";
+import {
+  allocatePlacementOpId,
+  normalizeMissionFolder,
+  rollbackOptimisticPlacement,
+  stageOptimisticPlacement,
+} from "./missionHierarchy";
 import { notify } from "./toast";
 import { errorText, log } from "./log";
 
@@ -22,12 +33,13 @@ export type PendingMove = {
   directory?: boolean;
   delete?: boolean;
   acceptedAt?: number;
+  /** Monotonic client op id for mission moves (`orb_placement_merge_step`). */
+  opId?: number;
 };
 
 export const MOVE_CONFIRM_MS = 30_000;
 const [pending, setPending] = createSignal<ReadonlyMap<string, PendingMove>>(new Map());
 const pendingListeners = new Set<() => void>();
-const FOLDER = "orb-folder:";
 
 export const missionMoveKey = (id: string) => `mission:${id}`;
 export const fileMoveKey = (slug: string, path: string) => `file:${slug}:${path}`;
@@ -51,21 +63,74 @@ function clearIf(key: string, entry: PendingMove) {
 export const pendingMove = (key: string) => pending().get(key);
 export const pendingMoves = () => pending();
 
-type Placed = { id: string; project?: string | null; tags?: string[] | null };
-const folderOf = (tags?: string[] | null) => tags?.find(t => t.startsWith(FOLDER))?.slice(FOLDER.length) ?? "";
-const withFolder = (tags: string[] | null | undefined, folder: string) => [...(tags ?? []).filter(t => !t.startsWith(FOLDER)), ...(folder ? [`${FOLDER}${folder}`] : [])];
+const PROJECTED_MOVE = Symbol.for("orb.projectedMove");
+
+type Placed = {
+  id: string;
+  project?: string | null;
+  folder?: string | null;
+  placement_revision?: number;
+  parent_mission_id?: string | null;
+  callback_parent_mission_id?: string | null;
+  updated_at?: string | null;
+  created_at?: string | null;
+  tags?: string[] | null;
+  [PROJECTED_MOVE]?: true;
+};
+
+const missionSortMs = (row: Pick<Placed, "updated_at" | "created_at">) =>
+  (row.updated_at ? Date.parse(row.updated_at) || 0 : 0)
+  || (row.created_at ? Date.parse(row.created_at) || 0 : 0);
+
+/**
+ * Patch `updated` in place if its `id` is already in `rows`, or insert a newly
+ * arriving row at its descending `updated_at` (fallback `created_at`) position
+ * so moves never cause older conversations to jump above newer ones.
+ */
+export function upsertMissionPreservingOrder<T extends Placed>(rows: readonly T[], updated: T): T[] {
+  const existingIdx = rows.findIndex(r => r.id === updated.id);
+  if (existingIdx >= 0) {
+    if (rows[existingIdx] === updated) return rows as T[];
+    const next = rows.slice();
+    next[existingIdx] = updated;
+    return next;
+  }
+  const ts = missionSortMs(updated);
+  if (ts > 0) {
+    const insertIdx = rows.findIndex(r => missionSortMs(r) < ts);
+    if (insertIdx < 0) return [...rows, updated];
+    return [...rows.slice(0, insertIdx), updated, ...rows.slice(insertIdx)];
+  }
+  return [updated, ...rows];
+}
+
+/** Merge newly `arriving` cross-project rows into `own` in recency order. */
+export function mergeArrivingMissions<T extends Placed>(own: readonly T[], arriving: readonly T[]): T[] {
+  if (!arriving.length) return own as T[];
+  let out = own as T[];
+  for (const row of arriving) {
+    if (out.some(r => r.id === row.id)) continue;
+    out = upsertMissionPreservingOrder(out, row);
+  }
+  return out;
+}
 
 /** `mission` at its pending destination, if it is being moved. */
 export function movedMission<T extends Placed>(mission: T): T {
   const key = missionMoveKey(mission.id);
   const move = pending().get(key);
   if (!move) return mission;
-  if ((mission.project ?? null) === move.toProject && folderOf(mission.tags) === move.path) {
-    // A projected row may be read again. Rendering is not acknowledgement;
-    // only the owner may settle the move after committing canonical placement.
+  const targetFolder = normalizeMissionFolder(move.path);
+  if (
+    (mission.project ?? null) === move.toProject
+    && normalizeMissionFolder(mission.folder) === targetFolder
+    && mission[PROJECTED_MOVE]
+  ) {
     return mission;
   }
-  return { ...mission, project: move.toProject, tags: withFolder(mission.tags, move.path) };
+  const out = { ...mission, project: move.toProject, folder: targetFolder };
+  Object.defineProperty(out, PROJECTED_MOVE, { value: true, enumerable: false });
+  return out;
 }
 
 /** `rows` with pending moves applied; unchanged rows (and the array) keep their identity. */
@@ -110,6 +175,10 @@ export function filesMovedInto(toProject: string, dir: string): { name: string; 
   return out;
 }
 
+function missionIdOfKey(key: string): string | null {
+  return key.startsWith("mission:") ? key.slice("mission:".length) : null;
+}
+
 const pathsOverlap = (a: string, b: string) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 
 /** Whether `slug:path` (or an ancestor/descendant folder) has an unsettled file move or delete. */
@@ -133,48 +202,75 @@ export function waitForFilePathSettled(slug: string, path: string): Promise<void
 /**
  * Show one or more related moves (e.g. a mission and its launched subtree)
  * now and persist them via a single `save` call. On failure every entry
- * returns to its old place together, one error toast is shown and the error
- * is rethrown.
+ * returns to its old place together, one error toast is shown (unless a
+ * cross-project secret approval confirmation dialog is requested) and the
+ * error is rethrown.
  */
 export async function moveBatchOptimistically(
   items: readonly { key: string; move: PendingMove }[],
-  save: () => Promise<unknown>,
+  save: (opId: number) => Promise<unknown>,
   label = "the conversation",
 ): Promise<void> {
   if (!items.length) {
-    await save();
+    await save(0);
     return;
   }
-  const staged = items.map(({ key, move }) => ({ key, entry: { ...move, acceptedAt: undefined } as PendingMove }));
+  const hasMission = items.some(i => i.move.kind === "mission");
+  const opId = hasMission ? allocatePlacementOpId() : 0;
+  const staged = items.map(({ key, move }) => {
+    const normPath = move.kind === "mission" ? normalizeMissionFolder(move.path) : move.path;
+    const entry: PendingMove = {
+      ...move,
+      path: normPath,
+      acceptedAt: undefined,
+      ...(move.kind === "mission" ? { opId } : {}),
+    };
+    const mid = move.kind === "mission" ? missionIdOfKey(key) : null;
+    if (mid) stageOptimisticPlacement(mid, move.toProject, normPath, opId, { project: move.fromProject });
+    return { key, entry, mid };
+  });
   for (const { key, entry } of staged) update(key, entry);
   try {
-    await save();
+    await save(opId);
   } catch (error) {
-    for (const { key, entry } of staged) clearIf(key, entry);
-    const primary = items[0]!;
-    const verb = primary.move.delete ? "delete" : "move";
-    log.warn(`${verb}.${primary.move.kind}`, errorText(error), { key: primary.key, to: primary.move.toProject });
-    notify({ kind: "error", key: `${verb}:${primary.key}`, title: `Couldn’t ${verb} ${label}`, message: errorText(error) });
+    for (const { key, entry, mid } of staged) {
+      if (mid && entry.opId) rollbackOptimisticPlacement(mid, entry.opId);
+      clearIf(key, entry);
+    }
+    if (!(error instanceof ApprovalTransferConfirmationRequiredError)) {
+      const primary = items[0]!;
+      const verb = primary.move.delete ? "delete" : "move";
+      log.warn(`${verb}.${primary.move.kind}`, errorText(error), { key: primary.key, to: primary.move.toProject });
+      notify({ kind: "error", key: `${verb}:${primary.key}`, title: `Couldn’t ${verb} ${label}`, message: errorText(error) });
+    }
     throw error;
   }
   const now = Date.now();
-  const accepted: { key: string; entry: PendingMove }[] = [];
+  const fileAccepted: { key: string; entry: PendingMove }[] = [];
   for (const { key, entry } of staged) {
+    if (entry.kind === "mission") {
+      // Authoritative `placement_revision` is now committed in `missionHierarchy.ts`;
+      // clear the transient overlay immediately without a 30s confirmation window.
+      clearIf(key, entry);
+      continue;
+    }
     if (pending().get(key) !== entry) continue;
     const next = { ...entry, acceptedAt: now };
     update(key, next);
-    accepted.push({ key, entry: next });
+    fileAccepted.push({ key, entry: next });
   }
-  setTimeout(() => {
-    for (const { key, entry } of accepted) clearIf(key, entry);
-  }, MOVE_CONFIRM_MS);
+  if (fileAccepted.length) {
+    setTimeout(() => {
+      for (const { key, entry } of fileAccepted) clearIf(key, entry);
+    }, MOVE_CONFIRM_MS);
+  }
 }
 
 /**
  * Show the move now and send it with `save`. On failure the item returns to
  * its old place, an error toast is shown and the error is rethrown.
  */
-export async function moveOptimistically(key: string, move: PendingMove, save: () => Promise<unknown>, label = "the conversation"): Promise<void> {
+export async function moveOptimistically(key: string, move: PendingMove, save: (opId: number) => Promise<unknown>, label = "the conversation"): Promise<void> {
   await moveBatchOptimistically([{ key, move }], save, label);
 }
 
@@ -187,10 +283,18 @@ export async function deleteFileOptimistically(slug: string, path: string, direc
 }
 
 /** Show a move that will be sent shortly (a batch shows all its items at once). */
-export function previewMove(key: string, move: PendingMove): void { update(key, { ...move, acceptedAt: undefined }); }
+export function previewMove(key: string, move: PendingMove): void {
+  const normPath = move.kind === "mission" ? normalizeMissionFolder(move.path) : move.path;
+  update(key, { ...move, path: normPath, acceptedAt: undefined });
+}
 
-/** Forget a file move once its listings were reloaded from the server. */
-export function settleMove(key: string): void { update(key, undefined); }
+/** Forget a move once its listings were reloaded or cancelled. */
+export function settleMove(key: string): void {
+  const existing = pending().get(key);
+  const mid = existing?.kind === "mission" ? missionIdOfKey(key) : null;
+  if (mid && existing?.opId) rollbackOptimisticPlacement(mid, existing.opId);
+  update(key, undefined);
+}
 
 /** Test hook. */
 export function resetMoves(): void {

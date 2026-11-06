@@ -16,6 +16,8 @@ pub struct Draft {
     pub key: String,
     pub title: String,
     pub project: String,
+    #[serde(default)]
+    pub folder: String,
     pub prompt: String,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -102,7 +104,25 @@ fn view(r: &Record) -> Value {
         .map(str::trim)
         .filter(|rest| !rest.is_empty());
     let (status, title) = confirmed::shown(r.confirmed.as_ref(), pending(r), &s.status, &o.title);
-    json!({"id":o.id,"title":title,"status":status,"project":o.project,"tags":o.tags.iter().cloned().chain(std::iter::once("placement:client".into())).collect::<Vec<_>>(),"backend":o.backend,"agent":o.initial_agent(),"model_override":o.model,"model_effort":o.effort,"service_tier":o.service_tier,"working_directory":o.cwd,"created_at":o.created_at,"updated_at":o.created_at,"history":[{"role":"user","content":o.prompt},{"role":"assistant","content":s.text}],"goal_mode":objective.is_some(),"goal_objective":objective,"status_message":s.error,"local_sync_pending":r.acked<s.sequence,"local_run_active":s.status=="active","local_sync_error":r.error})
+    let clean_tags: Vec<String> = o
+        .tags
+        .iter()
+        .filter(|t| !t.starts_with("orb-folder:"))
+        .cloned()
+        .chain(std::iter::once("placement:client".into()))
+        .collect();
+    let folder = if !o.folder.is_empty() {
+        o.folder.clone()
+    } else {
+        o.tags
+            .iter()
+            .filter_map(|t| t.strip_prefix("orb-folder:"))
+            .next_back()
+            .unwrap_or("")
+            .trim_matches('/')
+            .to_string()
+    };
+    json!({"id":o.id,"title":title,"status":status,"project":o.project,"folder":folder,"tags":clean_tags,"backend":o.backend,"agent":o.initial_agent(),"model_override":o.model,"model_effort":o.effort,"service_tier":o.service_tier,"working_directory":o.cwd,"created_at":o.created_at,"updated_at":o.created_at,"history":[{"role":"user","content":o.prompt},{"role":"assistant","content":s.text}],"goal_mode":objective.is_some(),"goal_objective":objective,"status_message":s.error,"local_sync_pending":r.acked<s.sequence,"local_run_active":s.status=="active","local_sync_error":r.error})
 }
 fn initial_binding(request: &local_agents::StartRequest, origin: &Origin) -> Value {
     json!({"harness":request.harness,"bin":request.bin,"cwd":request.cwd,"model":request.model,"effort":request.effort,"planMode":origin.initial_agent() == Some("plan")})
@@ -467,6 +487,7 @@ pub async fn local_origin_launch(
         let record = read(&path)?;
         if record.snapshot.origin.prompt != draft.prompt
             || record.snapshot.origin.project != draft.project
+            || record.snapshot.origin.folder != draft.folder.trim().trim_matches('/')
             || record.snapshot.origin.backend != request.harness
             || record.snapshot.origin.model != request.model
             || record.snapshot.origin.effort != request.effort
@@ -511,6 +532,7 @@ pub async fn local_origin_launch(
                 .map_err(|_| "Invalid computer identity")?,
             title: draft.title,
             project: draft.project,
+            folder: draft.folder.trim().trim_matches('/').to_string(),
             backend: request.harness.clone(),
             model: request.model.clone(),
             effort: request.effort.clone(),

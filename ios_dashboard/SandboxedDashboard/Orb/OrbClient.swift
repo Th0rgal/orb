@@ -805,6 +805,13 @@ final class OrbCore {
                             }
                             continue
                         }
+                        if eventType == "mission_placement_changed" {
+                            OrbCore.applyIncomingPlacementEvent(obj)
+                            for sub in subscribers.values where sub.kinds == ["presentation"] || sub.missionId != nil || sub.kinds == nil {
+                                sub.onEvent(eventType, obj)
+                            }
+                            continue
+                        }
                         if eventType == "fido_sign_request" {
                             for sub in subscribers.values where sub.kinds == ["fido"] || sub.missionId != nil {
                                 sub.onEvent(eventType, obj)
@@ -921,6 +928,9 @@ final class OrbCore {
         do {
             let parsed = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
             if let obj = parsed as? [String: Any] {
+                if eventType == "mission_placement_changed" {
+                    OrbCore.applyIncomingPlacementEvent(obj)
+                }
                 onEvent(eventType, obj)
             } else {
                 onEvent("parseError", ["raw": payload, "reason": "non-object payload"])
@@ -1093,8 +1103,127 @@ final class OrbCore {
         let withParents = await OrbMissionTree.withAncestors(merged) { [weak self] id in
             await self?.fetchAncestor(id)
         }
-        let scoped = withParents.filter { ownIDs.contains($0.id) || $0.raw["project"].text == project }
-        return OrbMissionTree.filterMobile(scoped)
+        let scoped = OrbMissionTree.filterToProjectScope(withParents, projectSlug: project, ownIDs: ownIDs)
+        return OrbMissionTree.mergePendingStagedRows(OrbMissionTree.filterMobile(scoped), projectSlug: project)
+    }
+
+    @discardableResult
+    func moveMissions(
+        ids: [String],
+        project: String?,
+        folder: String,
+        approvalPolicy: String = "check",
+        clientOpID: UInt32 = 0,
+        fallbackRows: [OrbRow] = []
+    ) async throws -> [OrbPlacementCommitItem] {
+        var payload: [String: OrbJSON] = [
+            "mission_ids": .array(ids.map(OrbJSON.string)),
+            "project": project.flatMap { $0.isEmpty ? nil : OrbJSON.string($0) } ?? .null,
+            "folder": .string(OrbRow.normalizeFolder(folder)),
+            "approval_policy": .string(approvalPolicy),
+        ]
+        if clientOpID != 0 {
+            payload["client_op_id"] = .number(Double(clientOpID))
+            payload["client_id"] = .string(OrbHierarchy.localClientID)
+        }
+        let response: OrbJSON
+        do {
+            response = try await call("/api/control/missions/move", method: "POST", body: .object(payload))
+        } catch {
+            if let confirmation = OrbApprovalTransferConfirmationError.parse(from: error) {
+                throw confirmation
+            }
+            throw error
+        }
+        let rawAck = UInt32(max(0, Int(response["client_op_id"].doubleValue ?? Double(clientOpID))))
+        let respClientID = response["client_id"].text.isEmpty ? OrbHierarchy.localClientID : response["client_id"].text
+        let ackOp = OrbHierarchy.resolveLocalAckOpID(clientOpID: rawAck, clientID: respClientID)
+        let items: [OrbPlacementCommitItem] = response["moved"].items.compactMap { m in
+            let mid = m["mission_id"].text
+            guard !mid.isEmpty else { return nil }
+            let proj = m["project"].text.isEmpty ? nil : m["project"].text
+            let targetFolder = m["folder"].text
+            let rev = UInt64(max(0, Int64(m["placement_revision"].doubleValue ?? 0)))
+            return OrbPlacementCommitItem(missionID: mid, project: proj, folder: targetFolder, placementRevision: rev)
+        }
+        let accepted = OrbHierarchy.commitAuthoritativePlacements(items, ackOpID: ackOp)
+        if !accepted.isEmpty {
+            var byID: [String: OrbRow] = [:]
+            for r in fallbackRows where !r.id.isEmpty && byID[r.id] == nil { byID[r.id] = r }
+            OrbReadCache.applyPlacementCommit(accepted, fallbackRows: byID)
+            var info: [String: Any] = ["moves": accepted]
+            if !fallbackRows.isEmpty { info["rows"] = fallbackRows }
+            NotificationCenter.default.post(
+                name: Notification.Name("OrbMissionPlacementChanged"),
+                object: nil,
+                userInfo: info
+            )
+        }
+        return accepted
+    }
+
+    static func applyTransferMovedMissions(_ response: OrbJSON, fallbackProject: String) {
+        let items: [OrbPlacementCommitItem] = response["moved_missions"].items.compactMap { m in
+            let mid = m["mission_id"].text
+            guard !mid.isEmpty else { return nil }
+            let projText = m["project"].text
+            let proj = projText.isEmpty ? (fallbackProject.isEmpty ? nil : fallbackProject) : projText
+            let targetFolder = m["folder"].text
+            let rev = UInt64(max(0, Int64(m["placement_revision"].doubleValue ?? 0)))
+            return OrbPlacementCommitItem(missionID: mid, project: proj, folder: targetFolder, placementRevision: rev)
+        }
+        guard !items.isEmpty else { return }
+        let accepted = OrbHierarchy.commitAuthoritativePlacements(items, ackOpID: 0)
+        if !accepted.isEmpty {
+            OrbReadCache.applyPlacementCommit(accepted)
+            NotificationCenter.default.post(
+                name: Notification.Name("OrbMissionPlacementChanged"),
+                object: nil,
+                userInfo: ["moves": accepted]
+            )
+        }
+    }
+
+    @discardableResult
+    nonisolated static func applyIncomingPlacementEvent(_ obj: [String: Any]) -> [OrbPlacementCommitItem] {
+        let rawMoves = (obj["moves"] as? [[String: Any]]) ?? (obj["moved"] as? [[String: Any]]) ?? []
+        guard !rawMoves.isEmpty else { return [] }
+        let rawOp = UInt32(max(0, (obj["client_op_id"] as? NSNumber)?.intValue ?? 0))
+        let ackOp = OrbHierarchy.resolveLocalAckOpID(clientOpID: rawOp, clientID: obj["client_id"] as? String)
+        let items: [OrbPlacementCommitItem] = rawMoves.compactMap { m in
+            let mid = ((m["mission_id"] as? String) ?? (m["id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !mid.isEmpty else { return nil }
+            let proj: String?
+            if let s = m["project"] as? String {
+                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                proj = trimmed.isEmpty ? nil : trimmed
+            } else {
+                proj = nil
+            }
+            let targetFolder = (m["folder"] as? String) ?? ""
+            let rev = UInt64(max(0, (m["placement_revision"] as? NSNumber)?.int64Value ?? 0))
+            return OrbPlacementCommitItem(missionID: mid, project: proj, folder: targetFolder, placementRevision: rev)
+        }
+        guard !items.isEmpty else { return [] }
+        let accepted = OrbHierarchy.commitAuthoritativePlacements(items, ackOpID: ackOp)
+        if !accepted.isEmpty {
+            let applyMain = { @MainActor in
+                OrbReadCache.applyPlacementCommit(accepted)
+                NotificationCenter.default.post(
+                    name: Notification.Name("OrbMissionPlacementChanged"),
+                    object: nil,
+                    userInfo: ["moves": accepted]
+                )
+            }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated(applyMain)
+            } else {
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated(applyMain)
+                }
+            }
+        }
+        return accepted
     }
 
     private func advanceMissionDeltaCursor(with items: [OrbJSON]) {
@@ -1104,6 +1233,12 @@ final class OrbCore {
             if let parsed = OrbDateCache.parse(stamp) {
                 if maxDate == nil || parsed > maxDate! {
                     maxDate = parsed
+                }
+            }
+            let metaStamp = item["metadata_updated_at"].text
+            if !metaStamp.isEmpty, let parsedMeta = OrbDateCache.parse(metaStamp) {
+                if maxDate == nil || parsedMeta > maxDate! {
+                    maxDate = parsedMeta
                 }
             }
         }
@@ -1148,7 +1283,10 @@ final class OrbCore {
             }
             for updated in delta.items {
                 let id = updated["id"].text
-                if !id.isEmpty { byId[id] = updated }
+                if !id.isEmpty {
+                    _ = OrbRow(updated)
+                    byId[id] = updated
+                }
             }
             let merged = byId.values.sorted { a, b in
                 let ta = a["updated_at"].text.isEmpty ? a["created_at"].text : a["updated_at"].text

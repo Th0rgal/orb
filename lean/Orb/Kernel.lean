@@ -2841,6 +2841,84 @@ def wireTranscriptSliceStep
     transcriptFoldStep lastAppliedSeq incomingSeq entryCount
       thinkingOpen normalizedAction isReplayFromLog
 
+/--
+  Unboxed C-ABI Monotone Mission Placement & Optimistic-Move Reconciliation Stepper
+  (`orb_placement_merge_step`):
+  Reconciles client `(project, folder, placement_revision)` state across optimistic local moves,
+  in-flight list polls, move acknowledgements, rollbacks, and live SSE `mission_placement_changed`
+  frames without timers or stale snap-backs (`docs/ui/mission-moves.md`).
+
+  - `sourceKind`:
+    `0 = snapshot_or_poll` (list poll / single GET / journal snapshot),
+    `1 = sse_or_ack` (authoritative move HTTP response or SSE `mission_placement_changed`),
+    `2 = optimistic_preview` (local user cut/paste or drag-drop preview),
+    `0 = poll_or_snapshot` (list/read snapshot — cannot clear `pendingOpId`),
+    `1 = live_event` (HTTP response or SSE `mission_placement_changed` — clears `pendingOpId` iff `ackOpId >= pendingOpId` and `incRev >= curRev`),
+    `2 = optimistic_stage` (local optimistic move staging `ackOpId` as `pendingOpId`),
+    `3 = rollback` (failed local move rolling back iff `ackOpId == pendingOpId` and `pendingOpId != 0`).
+  - `hasPlacement == 1` iff the incoming payload carries explicit placement fields (`project`/`folder`).
+  - Returns a 64-bit word:
+    `lo32 = status | admittedBit(256) | clearPendingBit(512) | evictOtherProjectsBit(1024)`,
+    `hi32 = nextRev32` (`UInt32` saturating projection of `nextRev`).
+    Status codes (`lo32 & 0xFF`):
+    `1 = applied`, `2 = bad_source_kind`, `3 = missing_placement`, `4 = stale_revision`,
+    `5 = fenced_by_pending_op`, `6 = stale_rollback_op`.
+-/
+@[inline] def placementMergeSatU32 (rev : UInt64) : UInt32 :=
+  if rev ≤ 0xFFFFFFFF then rev.toUInt32 else 0xFFFFFFFF
+
+@[inline] def placementMergeLo32
+    (curRev incRev : UInt64)
+    (pendingOpId ackOpId : UInt32)
+    (sourceKind hasPlacement : UInt8) : UInt32 :=
+  if !(sourceKind ≤ 3) then 2
+  else if sourceKind == 2 then
+    if hasPlacement == 1 && ackOpId != 0 then 1281 else 3
+  else if sourceKind == 3 then
+    if pendingOpId != 0 && ackOpId == pendingOpId then 1793 else 6
+  else if !(hasPlacement == 1) then 3
+  else if pendingOpId != 0 then
+    if incRev > curRev then
+      if sourceKind == 0 || (sourceKind == 1 && ackOpId < pendingOpId) then
+        1281
+      else 1793
+    else if sourceKind == 1 && ackOpId == pendingOpId && incRev ≥ curRev then 1793
+    else 5
+  else if sourceKind == 1 then
+    if incRev ≥ curRev then 1281 else 4
+  else
+    if incRev ≥ curRev then
+      let evictBit : UInt32 := if incRev > curRev then 1024 else 0
+      (257 : UInt32) ||| evictBit
+    else 4
+
+@[inline] def placementMergeHi32
+    (curRev incRev : UInt64)
+    (pendingOpId ackOpId : UInt32)
+    (sourceKind hasPlacement : UInt8) : UInt32 :=
+  let curRev32 : UInt32 := placementMergeSatU32 curRev
+  let incRev32 : UInt32 := placementMergeSatU32 incRev
+  if !(sourceKind ≤ 3) || sourceKind == 2 || sourceKind == 3 || !(hasPlacement == 1) then
+    curRev32
+  else if pendingOpId != 0 then
+    if incRev > curRev || (sourceKind == 1 && ackOpId == pendingOpId && incRev ≥ curRev) then
+      incRev32
+    else
+      curRev32
+  else
+    if incRev ≥ curRev then incRev32 else curRev32
+
+@[inline, export orb_placement_merge_step]
+def placementMergeStep
+    (curRev incRev : UInt64)
+    (pendingOpId ackOpId : UInt32)
+    (sourceKind hasPlacement : UInt8) : UInt64 :=
+  let lo32 : UInt32 :=
+    placementMergeLo32 curRev incRev pendingOpId ackOpId sourceKind hasPlacement
+  let hi32 : UInt32 :=
+    placementMergeHi32 curRev incRev pendingOpId ackOpId sourceKind hasPlacement
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Wave 12: LeanNative Option B+ Hot-Path Scanners, Pacer, Placement & Confinement
 -- ═══════════════════════════════════════════════════════════════════════════

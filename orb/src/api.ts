@@ -10,8 +10,40 @@ import { createSignal } from "solid-js";
 import { getProjectCronFromJob, hermesPatch, normalizeControllerView, type HermesControllerView, type HermesJob } from "./cronSchema";
 import { applyProjectRoster } from "./projectAppearance";
 import { note, requestDone } from "./diagnostics";
-import { btwParentId, configureParentResolver, excludeBtwMissions, isBtwMission, openBeyondPage, partialList, resetMissionHierarchy, stickHierarchy } from "./missionHierarchy";
-export { btwParentId, excludeBtwMissions, isBtwMission };
+import {
+  LOCAL_PLACEMENT_CLIENT_ID,
+  allocatePlacementOpId,
+  authoritativePlacement,
+  btwParentId,
+  commitAuthoritativePlacements,
+  configureParentResolver,
+  excludeBtwMissions,
+  isBtwMission,
+  normalizeMissionFolder,
+  openBeyondPage,
+  partialList,
+  resetMissionHierarchy,
+  resolveLocalAckOpId,
+  rollbackOptimisticPlacement,
+  stageOptimisticPlacement,
+  stickHierarchy,
+  withHierarchy,
+  type PlacementCommitItem,
+} from "./missionHierarchy";
+export {
+  LOCAL_PLACEMENT_CLIENT_ID,
+  allocatePlacementOpId,
+  authoritativePlacement,
+  btwParentId,
+  commitAuthoritativePlacements,
+  excludeBtwMissions,
+  isBtwMission,
+  normalizeMissionFolder,
+  resolveLocalAckOpId,
+  rollbackOptimisticPlacement,
+  stageOptimisticPlacement,
+  type PlacementCommitItem,
+};
 
 const URL_KEY = "orb.apiUrl";
 const JWT_KEY = "orb.jwt";
@@ -630,11 +662,14 @@ export interface Mission {
   config_profile?: string | null;
   session_id?: string | null;
   project?: string | null;
+  folder?: string;
+  placement_revision?: number;
   track?: string | null;
   github_pr?: string | null;
   tags?: string[];
   first_viewed_at?: string | null;
   last_output_at?: string | null;
+  metadata_updated_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -657,6 +692,8 @@ export interface CreateMissionBody {
   remote_node_id?: string;
   /** Stable project identifier — groups the mission under the project. */
   project?: string;
+  /** Normalized folder path inside the project ("" for project root). */
+  folder?: string;
   /**
    * Harness id (claudecode, codex, opencode, grok, antigravity). Goal mode has no
    * dedicated create field: a prompt of the form `/goal <objective>` is what
@@ -1281,11 +1318,26 @@ const ancestorCache = new Map<string, {row: Mission; at: number}>();
  * recently active: reuse a fetched copy for a while instead of re-reading
  * every missing parent on each sidebar poll (12 parents meant ~2 req/s). */
 export const ANCESTOR_TTL_MS = 60_000;
+/** Keep `ancestorCache` synchronized with authoritative placement changes so
+ * `fetchAncestor` never serves a stale pre-move parent copy within its TTL. */
+export function applyAncestorCachePlacements(moves: readonly PlacementCommitItem[]): void {
+  for (const item of moves) {
+    const cached = ancestorCache.get(item.mission_id);
+    if (!cached) continue;
+    cached.row = {
+      ...cached.row,
+      project: item.project,
+      folder: normalizeMissionFolder(item.folder),
+      placement_revision: item.placement_revision,
+    };
+  }
+}
+
 async function fetchAncestor(id: string): Promise<Mission | null> {
   const cached = ancestorCache.get(id);
-  if (cached && Date.now() - cached.at < ANCESTOR_TTL_MS) return stickHierarchy(cached.row);
+  if (cached && Date.now() - cached.at < ANCESTOR_TTL_MS) return withHierarchy(cached.row);
   try { const row = await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}?include_history=false`); ancestorCache.set(id, {row, at: Date.now()}); return row; }
-  catch (error) { if (error instanceof ApiError && error.status === 404) { ancestorCache.delete(id); return null; } return cached ? stickHierarchy(cached.row) : null; }
+  catch (error) { if (error instanceof ApiError && error.status === 404) { ancestorCache.delete(id); return null; } return cached ? withHierarchy(cached.row) : null; }
 }
 // The sidebar's parent resolver: null only when Core says the parent is gone.
 configureParentResolver(async id => {
@@ -1485,6 +1537,8 @@ export function recordMissionSyncCursor(rows: readonly Mission[], fullSync: bool
   for (const row of rows) {
     const ms = Date.parse(row.updated_at || row.created_at || "");
     if (Number.isFinite(ms) && ms > maxMs) maxMs = ms;
+    const metaMs = row.metadata_updated_at ? Date.parse(row.metadata_updated_at) : NaN;
+    if (Number.isFinite(metaMs) && metaMs > maxMs) maxMs = metaMs;
   }
   if (maxMs <= 0) return;
   const cursorIso = new Date(Math.max(0, maxMs - DELTA_CURSOR_OVERLAP_MS)).toISOString();
@@ -1622,6 +1676,7 @@ function remoteReplacementBody(mission: Mission, text: string, attachments: Miss
     idempotency_key: `orb-followup:${mission.id}:${clientMessageId}`,
     remote_node_id: node,
     project: mission.project ?? undefined,
+    folder: normalizeMissionFolder(mission.folder) || undefined,
     track: mission.track ?? undefined,
     github_pr: mission.github_pr ?? undefined,
     writer: mission.tags?.includes("pr-writer") ?? false,
@@ -1873,6 +1928,94 @@ export async function renameMission(id: string, title: string): Promise<void> {
 /** Core accepted the change just now: any list requested earlier is older than this. */
 async function confirmCoreChange(change: { id: string; status?: string; title?: string }): Promise<void> {
   await import("./localOrigins").then(m => m.confirmLocalOrigins([{ ...change, observed_at: m.observe() }]));
+}
+
+export type ApprovalTransferPolicy = "check" | "revoke" | "keep";
+
+export interface MissionPlacementItem {
+  mission_id: string;
+  project: string | null;
+  folder: string;
+  placement_revision: number;
+}
+
+export interface MoveApprovalGrantSummary {
+  id: string;
+  mission_id?: string | null;
+  secret_name: string;
+  source_project?: string | null;
+  expires_at: string;
+  expires_at_ms?: number;
+}
+
+export interface MoveApprovalPendingSummary {
+  id?: string;
+  mission_id?: string | null;
+  secret_name: string;
+  operation?: string;
+  source_project?: string | null;
+}
+
+export class ApprovalTransferConfirmationRequiredError extends Error {
+  override name = "ApprovalTransferConfirmationRequiredError";
+  constructor(
+    message: string,
+    public readonly targetProject: string,
+    public readonly grants: MoveApprovalGrantSummary[],
+    public readonly pendingRequests: MoveApprovalPendingSummary[],
+  ) {
+    super(message);
+  }
+}
+
+export interface MoveMissionsRequest {
+  mission_ids: string[];
+  project?: string | null;
+  folder?: string;
+  approval_policy?: ApprovalTransferPolicy;
+  client_op_id?: number;
+  client_id?: string;
+  descendant_ids?: string[];
+}
+
+export interface MoveMissionsResponse {
+  moved: MissionPlacementItem[];
+  client_op_id?: number;
+  client_id?: string;
+}
+
+/** Atomically move one or more mission families between folders or projects. */
+export async function moveMissionsBatch(body: MoveMissionsRequest): Promise<MoveMissionsResponse> {
+  try {
+    return await api<MoveMissionsResponse>("/api/control/missions/move", withIdempotencyKey({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      try {
+        const parsed = JSON.parse(error.detail) as {
+          code?: string;
+          error?: string;
+          target_project?: string;
+          grants?: MoveApprovalGrantSummary[];
+          pending_requests?: MoveApprovalPendingSummary[];
+        };
+        if (parsed?.code === "approval_transfer_confirmation_required") {
+          throw new ApprovalTransferConfirmationRequiredError(
+            parsed.error || "Moving across projects affects active secret approvals.",
+            parsed.target_project || body.project || "default",
+            Array.isArray(parsed.grants) ? parsed.grants : [],
+            Array.isArray(parsed.pending_requests) ? parsed.pending_requests : [],
+          );
+        }
+      } catch (inner) {
+        if (inner instanceof ApprovalTransferConfirmationRequiredError) throw inner;
+      }
+    }
+    throw error;
+  }
 }
 
 export async function cancelMission(id: string): Promise<void> {

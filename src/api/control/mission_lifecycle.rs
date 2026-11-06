@@ -589,8 +589,13 @@ pub async fn clone_mission(
         not_before: None,
         deadline: None,
         // Inherit project tagging from the source mission so clones stay
-        // grouped under the same project/track/intent.
+        // grouped under the same project/folder/track/intent.
         project: source.project.project.clone(),
+        folder: if parent_mission_id.is_some() || source.project.folder.is_empty() {
+            None
+        } else {
+            Some(source.project.folder.clone())
+        },
         // A generated track belongs to the source mission alone; the clone gets its own at
         // create. Inheriting it made the clone fail the remote queue's writer check
         // (REMOTE_JOB_STILL_RUNNING instead of queueing, mission 27b29974).

@@ -48,6 +48,58 @@ pub struct MissionScheduling {
 /// Default listings hide these without requiring a separate acknowledge.
 pub const SUPERSEDED_TAG: &str = "superseded";
 
+/// Legacy tag prefix used before `missions.folder` became a first-class column.
+/// Retained solely for idempotent migration and backward-compatible ingress stripping.
+pub const LEGACY_ORB_FOLDER_TAG_PREFIX: &str = "orb-folder:";
+
+/// Normalize a mission folder path (`""` for project root, `"a/b"` for nested
+/// folders without leading or trailing slashes). Rejects `..` and `.` segments
+/// by dropping them cleanly.
+pub fn normalize_mission_folder(raw: &str) -> String {
+    let cleaned = raw.trim().replace('\\', "/");
+    let mut parts = Vec::new();
+    for seg in cleaned.split('/') {
+        let seg = seg.trim();
+        if seg.is_empty() || seg == "." || seg == ".." {
+            continue;
+        }
+        parts.push(seg);
+    }
+    parts.join("/")
+}
+
+/// Remove every legacy `orb-folder:*` tag from `tags`, returning the last
+/// non-empty normalized folder path extracted (if any).
+pub fn strip_legacy_orb_folder_tags(tags: &mut Vec<String>) -> Option<String> {
+    let mut extracted = None;
+    tags.retain(|tag| {
+        if let Some(rest) = tag.strip_prefix(LEGACY_ORB_FOLDER_TAG_PREFIX) {
+            let norm = normalize_mission_folder(rest);
+            if !norm.is_empty() {
+                extracted = Some(norm);
+            }
+            false
+        } else {
+            true
+        }
+    });
+    extracted
+}
+
+/// True when `folder` equals `prefix` or sits inside a subfolder of `prefix`.
+/// An empty `prefix` matches every folder.
+pub fn folder_matches_prefix(folder: &str, prefix: &str) -> bool {
+    let prefix = normalize_mission_folder(prefix);
+    if prefix.is_empty() {
+        return true;
+    }
+    let folder = normalize_mission_folder(folder);
+    folder == prefix
+        || (folder.len() > prefix.len()
+            && folder.starts_with(prefix.as_str())
+            && folder.as_bytes()[prefix.len()] == b'/')
+}
+
 /// Which missions a listing wants. One value, one predicate — so the SQL
 /// pushdown and the in-memory scan can never disagree about what a filter
 /// means.
@@ -67,6 +119,10 @@ pub struct MissionFilter {
     pub project: Option<String>,
     /// Family match: `project == X` OR `project` starts with `X-`.
     pub project_prefix: Option<String>,
+    /// Exact normalized folder match (`""` matches root-level missions).
+    pub folder: Option<String>,
+    /// Folder subtree match (`folder == P` OR `folder` starts with `P/`).
+    pub folder_prefix: Option<String>,
     pub track: Option<String>,
     pub tag: Option<String>,
     /// The conversation a mission was launched from (Hermes session id).
@@ -391,6 +447,13 @@ impl MissionFilter {
                     .as_deref()
                     .is_some_and(|p| Self::in_family(p, family))
             })
+            && self.folder.as_deref().is_none_or(|f| {
+                normalize_mission_folder(&mission.project.folder) == normalize_mission_folder(f)
+            })
+            && self
+                .folder_prefix
+                .as_deref()
+                .is_none_or(|fp| folder_matches_prefix(&mission.project.folder, fp))
             && self
                 .track
                 .as_deref()
@@ -420,9 +483,20 @@ impl MissionFilter {
 /// `[beal-research] BR-07 ...`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MissionProject {
-    /// Stable project identifier (e.g. "verity-core").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Stable project identifier (e.g. "verity-core"), or `null` when unassigned.
+    /// Always serialized so snapshots unassigning a mission at a higher
+    /// `placement_revision` unambiguously clear cached client projects.
+    #[serde(default)]
     pub project: Option<String>,
+    /// Normalized folder path inside `project` (`""` for project root).
+    /// Always serialized so snapshots moving a mission back to root (`""`) at a
+    /// higher `placement_revision` unambiguously clear cached client folders.
+    #[serde(default)]
+    pub folder: String,
+    /// Monotone placement version incremented on every authoritative project or
+    /// folder move (`orb_placement_merge_step`).
+    #[serde(default)]
+    pub placement_revision: u64,
     /// Track / workstream within the project (e.g. "C3-bridge-collapse").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track: Option<String>,
@@ -452,6 +526,7 @@ impl MissionProject {
     /// True when no project metadata is set.
     pub fn is_empty(&self) -> bool {
         self.project.is_none()
+            && self.folder.is_empty()
             && self.track.is_none()
             && self.intent.is_none()
             && self.github_pr.is_none()
@@ -553,9 +628,13 @@ pub struct MissionProjectPatch {
     /// Compensation is not new activity. Keep the current timestamp rather
     /// than restoring a stale snapshot or hiding startup recovery candidates.
     pub preserve_updated_at: bool,
+    /// Increment `placement_revision` atomically with this patch.
+    pub bump_placement_revision: bool,
     /// Updated atomically with assignment fields during dispatch admission.
     pub title: Option<Option<String>>,
     pub project: Option<Option<String>>,
+    /// Normalized folder path (`Some("")` clears to root, `Some("a/b")` sets).
+    pub folder: Option<String>,
     pub track: Option<Option<String>>,
     pub intent: Option<Option<String>>,
     pub github_pr: Option<Option<String>>,
@@ -570,6 +649,8 @@ impl MissionProjectPatch {
     pub fn is_empty(&self) -> bool {
         self.title.is_none()
             && self.project.is_none()
+            && self.folder.is_none()
+            && !self.bump_placement_revision
             && self.track.is_none()
             && self.intent.is_none()
             && self.github_pr.is_none()
@@ -2655,6 +2736,18 @@ pub enum ClientIngest {
     Refused,
 }
 
+/// Atomic placement batch item with an optional expected-project precondition.
+#[derive(Debug, Clone)]
+pub struct CheckedPlacementUpdate {
+    pub id: Uuid,
+    /// When `Some(expected)`, the entire batch aborts (`Ok(None)`) if the row's
+    /// current `project` differs from `expected`.
+    pub expected_project: Option<Option<String>>,
+    /// `None` preserves the current project; `Some(project)` overwrites it.
+    pub next_project: Option<Option<String>>,
+    pub next_folder: String,
+}
+
 /// Mission store trait - implemented by all storage backends.
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
@@ -2761,10 +2854,22 @@ pub trait MissionStore: Send + Sync {
     }
     async fn save_cloud_execution(
         &self,
+        execution: crate::api::cloud_agents::Execution,
+        expected: Option<u64>,
+        title: Option<String>,
+        project: Option<String>,
+        tags: Vec<String>,
+    ) -> Result<crate::api::cloud_agents::Execution, String> {
+        self.save_cloud_execution_in_folder(execution, expected, title, project, None, tags)
+            .await
+    }
+    async fn save_cloud_execution_in_folder(
+        &self,
         _execution: crate::api::cloud_agents::Execution,
         _expected: Option<u64>,
         _title: Option<String>,
         _project: Option<String>,
+        _folder: Option<String>,
         _tags: Vec<String>,
     ) -> Result<crate::api::cloud_agents::Execution, String> {
         Err("Cloud agents require durable SQLite storage".into())
@@ -3150,6 +3255,136 @@ pub trait MissionStore: Send + Sync {
     ) -> Result<(), String> {
         let _ = (id, patch);
         Ok(())
+    }
+
+    /// Atomically update `(project, folder)` for a batch of missions, bumping
+    /// `placement_revision` on every mission whose placement changed (without
+    /// touching `updated_at`) and returning the authoritative receipt rows.
+    ///
+    /// Each tuple is `(mission_id, next_project, next_folder)` where
+    /// `next_project` is `None` to preserve the current project or
+    /// `Some(project_opt)` to overwrite it.
+    async fn batch_set_mission_placement(
+        &self,
+        updates: &[(Uuid, Option<Option<String>>, String)],
+    ) -> Result<Vec<crate::api::control::events::MissionPlacementItem>, String> {
+        let checked: Vec<CheckedPlacementUpdate> = updates
+            .iter()
+            .map(|(id, next_project, next_folder)| CheckedPlacementUpdate {
+                id: *id,
+                expected_project: None,
+                next_project: next_project.clone(),
+                next_folder: next_folder.clone(),
+            })
+            .collect();
+        self.batch_set_mission_placement_checked(&checked)
+            .await?
+            .ok_or_else(|| "unexpected project precondition failure".to_string())
+    }
+
+    /// Atomically update `(project, folder)` for a batch of missions after
+    /// verifying that every row with `expected_project = Some(exp)` still has
+    /// `project == exp`. Returns `Ok(None)` without mutating any row if any
+    /// expected project changed concurrently.
+    async fn batch_set_mission_placement_checked(
+        &self,
+        updates: &[CheckedPlacementUpdate],
+    ) -> Result<Option<Vec<crate::api::control::events::MissionPlacementItem>>, String> {
+        let mut current = Vec::with_capacity(updates.len());
+        for item in updates {
+            let Some(cur) = self.get_mission_metadata(item.id).await? else {
+                continue;
+            };
+            if let Some(ref exp) = item.expected_project {
+                if &cur.project.project != exp {
+                    return Ok(None);
+                }
+            }
+            current.push((
+                item.id,
+                cur,
+                item.next_project.clone(),
+                item.next_folder.clone(),
+            ));
+        }
+        let mut moved = Vec::with_capacity(current.len());
+        for (id, cur, next_project, next_folder) in current {
+            let norm_folder = normalize_mission_folder(&next_folder);
+            let target_project = next_project.unwrap_or_else(|| cur.project.project.clone());
+            if cur.project.project == target_project && cur.project.folder == norm_folder {
+                moved.push(crate::api::control::events::MissionPlacementItem {
+                    mission_id: id,
+                    project: cur.project.project,
+                    folder: cur.project.folder,
+                    placement_revision: cur.project.placement_revision,
+                });
+                continue;
+            }
+            self.update_mission_project(
+                id,
+                MissionProjectPatch {
+                    preserve_updated_at: true,
+                    bump_placement_revision: true,
+                    project: Some(target_project),
+                    folder: Some(norm_folder),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            if let Some(after) = self.get_mission_metadata(id).await? {
+                moved.push(crate::api::control::events::MissionPlacementItem {
+                    mission_id: id,
+                    project: after.project.project,
+                    folder: after.project.folder,
+                    placement_revision: after.project.placement_revision,
+                });
+            }
+        }
+        Ok(Some(moved))
+    }
+
+    /// Atomically rewrite `folder` for all missions in `project` whose folder
+    /// equals `old_prefix` or starts with `"{old_prefix}/"`, bumping
+    /// `placement_revision` without touching `updated_at`.
+    async fn cascade_rename_folder(
+        &self,
+        project: &str,
+        old_prefix: &str,
+        new_prefix: &str,
+    ) -> Result<Vec<crate::api::control::events::MissionPlacementItem>, String> {
+        let old_norm = normalize_mission_folder(old_prefix);
+        let new_norm = normalize_mission_folder(new_prefix);
+        if old_norm.is_empty() || old_norm == new_norm {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .list_missions_filtered(
+                &MissionFilter {
+                    project: Some(project.to_string()),
+                    folder_prefix: Some(old_norm.clone()),
+                    ..Default::default()
+                },
+                usize::MAX,
+                0,
+            )
+            .await?;
+        let mut updates = Vec::with_capacity(rows.len());
+        for m in rows {
+            let cur = normalize_mission_folder(&m.project.folder);
+            let rewritten = if cur == old_norm {
+                new_norm.clone()
+            } else if let Some(rest) = cur.strip_prefix(&format!("{old_norm}/")) {
+                if new_norm.is_empty() {
+                    rest.to_string()
+                } else {
+                    format!("{new_norm}/{rest}")
+                }
+            } else {
+                continue;
+            };
+            updates.push((m.id, None, rewritten));
+        }
+        self.batch_set_mission_placement(&updates).await
     }
 
     /// Computed activity timestamps for the given missions, keyed by id:

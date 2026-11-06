@@ -257,4 +257,414 @@ class OrbMissionTreeTest {
         assertFalse(OrbMissionTree.isSupersededInTree(liveSup, supMap))
         OrbMissionTree.resetHierarchy()
     }
+
+    @Test
+    fun folderColumnNormalizesNestedPathsAndIgnoresLegacyTags() {
+        OrbMissionTree.resetHierarchy()
+        val root = m(
+            "root-folder",
+            "project" to "assistant",
+            "folder" to " /Design // Images/ ",
+            "placement_revision" to 1L,
+            "tags" to listOf("orb-folder:Stale/Legacy")
+        )
+        assertEquals("Design/Images", OrbMissionTree.folderPath(root))
+
+        val legacyOnly = m(
+            "legacy-only",
+            "project" to "assistant",
+            "folder" to "",
+            "tags" to listOf("orb-folder:Stale/Legacy")
+        )
+        assertEquals(null, OrbMissionTree.folderPath(legacyOnly))
+
+        val child = m(
+            "child-folder",
+            "project" to "assistant",
+            "parent_mission_id" to "root-folder",
+            "folder" to "ShouldBeCleared",
+            "placement_revision" to 2L
+        )
+        assertEquals(null, OrbMissionTree.folderPath(child))
+        OrbMissionTree.resetHierarchy()
+    }
+
+    @Test
+    fun placementMergeMonotoneReconcilerAndOptimisticRollback() {
+        OrbMissionTree.resetHierarchy()
+        // Replay `9f559751` ("turbo-lean improvements"): moved to `default` at rev 4 with worker `06203bdc`.
+        val rootBefore = m("9f559751", "project" to "assistant", "folder" to "Research", "placement_revision" to 1L)
+        val workerBefore = m("06203bdc", "project" to "assistant", "parent_mission_id" to "9f559751", "folder" to "", "placement_revision" to 1L)
+        assertEquals("Research", OrbMissionTree.folderPath(rootBefore))
+        assertEquals("assistant", OrbMissionTree.projectSlug(rootBefore))
+        assertEquals("assistant", OrbMissionTree.projectSlug(workerBefore))
+
+        // Stage optimistic cross-project move to `default` / `""`
+        val opId = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("9f559751", "06203bdc"), opId, "default", "")
+        assertEquals("default", OrbMissionTree.projectSlug(rootBefore))
+        assertEquals("default", OrbMissionTree.projectSlug(workerBefore))
+        assertEquals(null, OrbMissionTree.folderPath(rootBefore))
+
+        // Stale poll from `assistant` at rev 1 arrives while optimistic op is in flight -> rejected!
+        OrbMissionTree.observe(rootBefore)
+        OrbMissionTree.observe(workerBefore)
+        assertEquals("default", OrbMissionTree.projectSlug(rootBefore))
+        assertEquals("default", OrbMissionTree.projectSlug(workerBefore))
+
+        // Commit authoritative move at rev 4
+        val accepted = OrbMissionTree.commitAuthoritativePlacements(
+            listOf(
+                OrbPlacementCommitItem("9f559751", "default", "Benchmarks", 4L),
+                OrbPlacementCommitItem("06203bdc", "default", "Benchmarks", 4L)
+            ),
+            ackOpId = opId
+        )
+        assertEquals(2, accepted.size)
+        assertEquals("default", OrbMissionTree.projectSlug(rootBefore))
+        assertEquals("Benchmarks", OrbMissionTree.folderPath(rootBefore))
+        assertEquals(null, OrbMissionTree.folderPath(workerBefore))
+
+        // Late stale poll at rev 3 from `assistant` MUST be rejected (zero reversion!)
+        val stalePoll = m("9f559751", "project" to "assistant", "folder" to "Research", "placement_revision" to 3L)
+        assertEquals("Benchmarks", OrbMissionTree.folderPath(stalePoll))
+        assertEquals("default", OrbMissionTree.projectSlug(stalePoll))
+
+        // Test 409 approval confirmation rollback — including rendering preview-patched rows (`isPreview = true`)
+        val op2 = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("9f559751", "06203bdc"), op2, "ethereum", "Audits")
+        val previewPatched = OrbReadCache.patchRowPlacement(
+            stalePoll,
+            OrbPlacementCommitItem("9f559751", "ethereum", "Audits", 4L, explicitProject = true, isPreview = true)
+        )
+        assertEquals("ethereum", OrbMissionTree.projectSlug(previewPatched))
+        assertEquals("Audits", OrbMissionTree.folderPath(previewPatched))
+        assertEquals(op2, OrbMissionTree.placementOf("9f559751")?.pendingOpId)
+
+        val reverted = OrbMissionTree.rollbackOptimisticPlacement(op2)
+        assertEquals(2, reverted.size)
+        assertEquals("default", OrbMissionTree.projectSlug(stalePoll))
+        assertEquals("Benchmarks", OrbMissionTree.folderPath(stalePoll))
+
+        // Snapshot with explicit `project: null` and `folder: ""` at higher revision clears cached project and folder
+        val unassignedPoll = m("9f559751", "project" to null, "folder" to "", "placement_revision" to 5L)
+        assertEquals(null, OrbMissionTree.projectSlug(unassignedPoll))
+        assertEquals(null, OrbMissionTree.folderPath(unassignedPoll))
+
+        // Incoming WS/SSE `mission_placement_changed` commits authoritative moves and handles explicit `project: null`
+        val remoteMoveEvent = OrbJSON.parse(
+            """{"type":"mission_placement_changed","moves":[{"mission_id":"9f559751","project":"ethereum","folder":" /Specs/Consensus/ ","placement_revision":6},{"mission_id":"06203bdc","project":"ethereum","folder":"Specs/Consensus","placement_revision":6}]}"""
+        )
+        val committedFromStream = OrbMissionTree.commitIncomingPlacementEvent(remoteMoveEvent)
+        assertEquals(2, committedFromStream.size)
+        assertEquals("ethereum", OrbMissionTree.projectSlug(stalePoll))
+        assertEquals("Specs/Consensus", OrbMissionTree.folderPath(stalePoll))
+        assertEquals("ethereum", OrbMissionTree.projectSlug(workerBefore))
+        assertEquals(null, OrbMissionTree.folderPath(workerBefore))
+
+        OrbMissionTree.storeAncestor(m("9f559751", "project" to "ethereum", "folder" to "Specs/Consensus", "placement_revision" to 6L))
+
+        val remoteUnassignEvent = OrbJSON.parse(
+            """{"type":"mission_placement_changed","moves":[{"mission_id":"9f559751","project":null,"folder":"","placement_revision":7}]}"""
+        )
+        val committedUnassign = OrbMissionTree.commitIncomingPlacementEvent(remoteUnassignEvent)
+        assertEquals(1, committedUnassign.size)
+        assertEquals(null, OrbMissionTree.projectSlug(unassignedPoll))
+        assertEquals(null, OrbMissionTree.folderPath(unassignedPoll))
+        // Stale row or cached ancestor carrying former `project: "ethereum"` MUST resolve to unassigned, never falling back!
+        assertEquals(null, OrbMissionTree.projectSlug(stalePoll))
+        assertEquals("", OrbMissionTree.effectiveProject(stalePoll, fallback = "ethereum"))
+        assertTrue(OrbMissionTree.hasAuthoritativePlacement(stalePoll))
+        assertEquals(null, OrbMissionTree.cachedAncestor("9f559751")?.str("project"))
+        assertEquals(7L, (OrbMissionTree.cachedAncestor("9f559751")?.raw?.get("placement_revision") as? Number)?.toLong())
+
+        val err = OrbError(
+            message = "Secret approvals affected",
+            status = 409,
+            body = """{"code":"approval_transfer_confirmation_required","error":"Secret approvals affected","target_project":"ethereum","active_grants":[{"id":"g1","secret_name":"GITHUB_TOKEN","source_project":"default"}],"pending_requests":[{"id":"r1","secret_name":"NPM_TOKEN","operation":"get"}]}"""
+        )
+        val parsed = OrbApprovalTransferConfirmationException.parse(err)
+        assertEquals("ethereum", parsed?.targetProject)
+        assertEquals(1, parsed?.activeGrants?.size)
+        assertEquals("GITHUB_TOKEN", parsed?.activeGrants?.first()?.secretName)
+        assertEquals(1, parsed?.pendingRequests?.size)
+        assertEquals("NPM_TOKEN", parsed?.pendingRequests?.first()?.secretName)
+
+        // Leader-only fork expansion in `subtree`: selecting the leader moves the co-located fork group + workers,
+        // whereas selecting an earlier version moves ONLY that version and its own workers (never the leader).
+        OrbMissionTree.resetHierarchy()
+        val olderVer = m("v1", "project" to "assistant", "status" to "completed", "updated_at" to "2026-10-28T00:00:00Z")
+        val olderWorker = m("v1-worker", "project" to "assistant", "parent_mission_id" to "v1", "status" to "completed", "updated_at" to "2026-10-28T01:00:00Z")
+        val leaderVer = m("v2", "project" to "assistant", "tags" to listOf("fork-of:v1"), "status" to "active", "updated_at" to "2026-10-30T00:00:00Z")
+        val otherProjectFork = m("v3-other", "project" to "elsewhere", "tags" to listOf("fork-of:v1"), "status" to "completed", "updated_at" to "2026-10-29T00:00:00Z")
+        val roster = listOf(olderVer, olderWorker, leaderVer, otherProjectFork)
+
+        assertEquals(setOf("v2", "v1", "v1-worker"), OrbMissionTree.subtree(roster, listOf("v2")).map { it.id }.toSet())
+        assertEquals(setOf("v1", "v1-worker"), OrbMissionTree.subtree(roster, listOf("v1")).map { it.id }.toSet())
+
+        // Overlapping optimistic moves: an earlier ack (`opA < opB`) advances revision & rollback base
+        // without clobbering `opB`'s optimistic preview or allowing a rev-1 poll to revert `FolderB`.
+        OrbMissionTree.resetHierarchy()
+        val rapid0 = m("rapid-kt", "project" to "assistant", "folder" to "", "placement_revision" to 0L)
+        OrbMissionTree.observe(rapid0)
+        val opA = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opA, "assistant", "FolderA")
+        val opB = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opB, "assistant", "FolderB")
+
+        val acceptedA = OrbMissionTree.commitAuthoritativePlacements(
+            listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderA", 1L, explicitProject = true)),
+            ackOpId = opA
+        )
+        assertEquals(0, acceptedA.size)
+        assertEquals(opB, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+        assertEquals("FolderB", OrbMissionTree.folderPath(rapid0))
+
+        val pollAt1 = m("rapid-kt", "project" to "assistant", "folder" to "FolderA", "placement_revision" to 1L)
+        assertEquals("FolderB", OrbMissionTree.folderPath(pollAt1))
+
+        val revertedB = OrbMissionTree.rollbackOptimisticPlacement(opB)
+        assertEquals(1, revertedB.size)
+        assertEquals("FolderA", revertedB.first().folder)
+        assertEquals(1L, revertedB.first().placementRevision)
+        assertEquals("FolderA", OrbMissionTree.folderPath(pollAt1))
+
+        // Poll-before-ack on overlapping moves (`opC -> FolderX`, `opD -> default/FolderY`, then rev-2 poll
+        // for `FolderX` arrives before `opC`'s HTTP/SSE ack): preserves `default/FolderY` (`opD`) and records
+        // `assistant/FolderX` at rev 2 as the confirmed rollback base.
+        val opC = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opC, "assistant", "FolderX")
+        val opD = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opD, "default", "FolderY")
+
+        val pollBeforeAck = m("rapid-kt", "project" to "assistant", "folder" to "FolderX", "placement_revision" to 2L)
+        assertEquals("default", OrbMissionTree.projectSlug(pollBeforeAck))
+        assertEquals("FolderY", OrbMissionTree.folderPath(pollBeforeAck))
+        assertEquals(opD, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+        assertEquals(2L, OrbMissionTree.placementOf("rapid-kt")?.revision)
+        assertEquals("assistant", OrbMissionTree.placementOf("rapid-kt")?.project)
+        assertEquals("FolderX", OrbMissionTree.placementOf("rapid-kt")?.folder)
+        assertEquals("default", OrbMissionTree.seen("rapid-kt")?.project)
+
+        val lateAckC = OrbMissionTree.commitAuthoritativePlacements(
+            listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderX", 2L, explicitProject = true)),
+            ackOpId = opC
+        )
+        assertEquals(0, lateAckC.size)
+        assertEquals(opD, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+
+        val revertedD = OrbMissionTree.rollbackOptimisticPlacement(opD)
+        assertEquals(1, revertedD.size)
+        assertEquals("assistant", revertedD.first().project)
+        assertEquals("FolderX", revertedD.first().folder)
+        assertEquals(2L, revertedD.first().placementRevision)
+        assertEquals("assistant", OrbMissionTree.projectSlug(pollBeforeAck))
+        assertEquals("FolderX", OrbMissionTree.folderPath(pollBeforeAck))
+
+        // Return-to-origin (`FolderX -> FolderY -> FolderX`): a delayed pre-move poll at rev 2 (`FolderX`)
+        // MUST NOT clear `opF`, keeping Move 1 (`opE -> FolderY`) fenced when its rev-3 ack arrives.
+        val opE = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opE, "assistant", "FolderY")
+        val opF = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opF, "assistant", "FolderX")
+        val originPoll = m("rapid-kt", "project" to "assistant", "folder" to "FolderX", "placement_revision" to 2L)
+        assertEquals("FolderX", OrbMissionTree.folderPath(originPoll))
+        assertEquals(opF, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+        assertEquals(
+            0,
+            OrbMissionTree.commitAuthoritativePlacements(
+                listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderY", 3L, explicitProject = true)),
+                ackOpId = opE
+            ).size
+        )
+        assertEquals("FolderX", OrbMissionTree.folderPath(originPoll))
+        assertEquals(opF, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+        val settledReturn = OrbMissionTree.commitAuthoritativePlacements(
+            listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderX", 4L, explicitProject = true)),
+            ackOpId = opF
+        )
+        assertEquals(1, settledReturn.size)
+        assertEquals("FolderX", OrbMissionTree.folderPath(originPoll))
+        assertEquals(0, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+
+        // Repeated-destination (`FolderX -> FolderY -> FolderZ -> FolderY`): neither Move 1's older ack (`FolderY`, rev 5)
+        // nor an intermediate poll clears Move 3 (`opI`), so Move 2's ack (`FolderZ`, rev 6) cannot overwrite `FolderY`.
+        val opG = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opG, "assistant", "FolderY")
+        val opH = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opH, "assistant", "FolderZ")
+        val opI = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("rapid-kt"), opI, "assistant", "FolderY")
+        assertEquals(
+            0,
+            OrbMissionTree.commitAuthoritativePlacements(
+                listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderY", 5L, explicitProject = true)),
+                ackOpId = opG
+            ).size
+        )
+        assertEquals(opI, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+        assertEquals(
+            0,
+            OrbMissionTree.commitAuthoritativePlacements(
+                listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderZ", 6L, explicitProject = true)),
+                ackOpId = opH
+            ).size
+        )
+        assertEquals("FolderY", OrbMissionTree.folderPath(originPoll))
+        assertEquals(opI, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+        val settledRepeat = OrbMissionTree.commitAuthoritativePlacements(
+            listOf(OrbPlacementCommitItem("rapid-kt", "assistant", "FolderY", 7L, explicitProject = true)),
+            ackOpId = opI
+        )
+        assertEquals(1, settledRepeat.size)
+        assertEquals("FolderY", OrbMissionTree.folderPath(originPoll))
+        assertEquals(0, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
+        OrbMissionTree.resetHierarchy()
+    }
+
+    @Test
+    fun readCacheApplyPlacementCommitInsertsArrivingRowsInRecencyOrder() {
+        OrbReadCache.clearMemory()
+        val newer = m("m-new", "project" to "beta", "folder" to "", "updated_at" to "2026-11-06T01:30:00Z")
+        val middle = m("m-mid", "project" to "beta", "folder" to "old", "updated_at" to "2026-11-06T01:20:00Z")
+        val older = m("m-old", "project" to "beta", "folder" to "", "updated_at" to "2026-11-06T01:10:00Z")
+        OrbReadCache.saveRowsMemoryOnly("project_missions_beta", listOf(newer, middle, older))
+
+        val arrivingBetween = m("m-arrive", "project" to "alpha", "folder" to "", "updated_at" to "2026-11-06T01:15:00Z")
+        val arrivingOldest = m("m-oldest", "project" to "alpha", "folder" to "", "updated_at" to "2026-11-06T01:00:00Z")
+        OrbReadCache.applyPlacementCommit(
+            accepted = listOf(
+                OrbPlacementCommitItem("m-mid", "beta", "renamed", 2L, explicitProject = true),
+                OrbPlacementCommitItem("m-oldest", "beta", "docs", 2L, explicitProject = true),
+                OrbPlacementCommitItem("m-arrive", "beta", "docs", 2L, explicitProject = true),
+            ),
+            fallbackRows = mapOf("m-arrive" to arrivingBetween, "m-oldest" to arrivingOldest),
+            persistToDisk = false,
+        )
+
+        val cached = OrbReadCache.readMemoryRows("project_missions_beta")
+        assertEquals(listOf("m-new", "m-mid", "m-arrive", "m-old", "m-oldest"), cached.map { it.id })
+        assertEquals("renamed", cached[1].raw["folder"])
+        assertEquals("docs", cached[2].raw["folder"])
+        OrbReadCache.clearMemory()
+    }
+
+    @Test
+    fun projectScopeFilteringAndVirtualFolderMigrationPlan() {
+        OrbMissionTree.resetHierarchy()
+        val opMove = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("moved-opt"), opMove, "beta", "docs")
+        OrbMissionTree.commitAuthoritativePlacements(
+            listOf(
+                OrbPlacementCommitItem("moved-auth", "beta", "", 3L, explicitProject = true),
+                OrbPlacementCommitItem("moved-unassigned", null, "", 2L, explicitProject = true),
+            )
+        )
+
+        val staleOptRow = m("moved-opt", "project" to "alpha", "placement_revision" to 1, "status" to "active")
+        val staleAuthRow = m("moved-auth", "project" to "alpha", "placement_revision" to 1, "status" to "completed")
+        val staleUnassignedRow = m("moved-unassigned", "project" to "alpha", "placement_revision" to 1, "status" to "completed")
+        val keptRow = m("still-alpha", "project" to "alpha", "placement_revision" to 1, "status" to "active")
+        val legacyPartialRow = m("legacy-partial", "folder" to "sub", "status" to "completed")
+        val crossAncestor = m("anc-beta", "project" to "beta", "placement_revision" to 1, "status" to "completed")
+
+        val ownIds = setOf("moved-opt", "moved-auth", "moved-unassigned", "still-alpha", "legacy-partial")
+        val scoped = OrbMissionTree.filterToProjectScope(
+            listOf(staleOptRow, staleAuthRow, staleUnassignedRow, keptRow, legacyPartialRow, crossAncestor),
+            projectSlug = "alpha",
+            ownIds = ownIds,
+        )
+        assertEquals(listOf("still-alpha", "legacy-partial"), scoped.map { it.id })
+
+        val forkLeader = m("fork-leader", "project" to "alpha", "folder" to "old", "tags" to listOf("fork-of:fork-v1"), "status" to "active")
+        val forkOrigin = m("fork-v1", "project" to "alpha", "folder" to "old", "status" to "completed")
+        val nestedFolderMission = m("sub-root", "project" to "alpha", "folder" to "old/deep", "status" to "completed")
+        val childWorker = m("worker-child", "project" to "alpha", "folder" to "old", "parent_mission_id" to "fork-leader", "status" to "active")
+        val batches = OrbMissionTree.planVirtualFolderMigration(
+            missions = listOf(forkLeader, forkOrigin, nestedFolderMission, childWorker),
+            oldFolder = "old",
+            destination = "renamed",
+        )
+        assertEquals(
+            listOf("renamed" to listOf("fork-leader", "fork-v1"), "renamed/deep" to listOf("sub-root")),
+            batches,
+        )
+        OrbMissionTree.resetHierarchy()
+    }
+
+    @Test
+    fun clientScopedPlacementAckAndMergePendingStagedRows() {
+        OrbMissionTree.resetHierarchy()
+        val rootRow = m(
+            "stage-root",
+            "title" to "Cross-project root",
+            "project" to "alpha",
+            "folder" to "old",
+            "placement_revision" to 2L,
+            "status" to "active",
+            "updated_at" to "2026-11-06T01:20:00Z",
+        )
+        val betaNewer = m("beta-newer", "project" to "beta", "folder" to "", "placement_revision" to 1L, "updated_at" to "2026-11-06T01:30:00Z")
+        val betaOlder = m("beta-older", "project" to "beta", "folder" to "", "placement_revision" to 1L, "updated_at" to "2026-11-06T01:10:00Z")
+        OrbMissionTree.observe(rootRow)
+        OrbMissionTree.retainStagedRows(listOf(rootRow))
+
+        val op = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("stage-root"), op, "beta", "docs")
+
+        // 1. In-flight destination `projectMissions` load preserves the pending staged row in recency order.
+        val merged = OrbMissionTree.mergePendingStagedRows(listOf(betaNewer, betaOlder), projectSlug = "beta")
+        assertEquals(listOf("beta-newer", "stage-root", "beta-older"), merged.map { it.id })
+        assertEquals("docs", merged[1].raw["folder"])
+
+        // 2. Foreign placement event at `incRev > curRev` (`3 > 2`) with colliding `client_op_id` advances the confirmed
+        //    rollback baseline without clearing `pendingOpId` or replacing the in-flight `beta/docs` preview!
+        val foreignAccepted = OrbMissionTree.commitIncomingPlacementEvent(
+            mapOf(
+                "client_op_id" to op,
+                "client_id" to "foreign-client-uuid",
+                "moves" to listOf(
+                    mapOf(
+                        "mission_id" to "stage-root",
+                        "project" to "gamma",
+                        "folder" to "foreign",
+                        "placement_revision" to 3L,
+                    )
+                ),
+            )
+        )
+        assertTrue(foreignAccepted.isEmpty())
+        assertEquals(op, OrbMissionTree.placementOf("stage-root")?.pendingOpId)
+        assertEquals(3L, OrbMissionTree.placementOf("stage-root")?.revision)
+        assertEquals("beta", OrbMissionTree.projectSlug(rootRow))
+
+        // 3. Failed local move rolls back cleanly to the updated confirmed baseline (`gamma/foreign` at rev 3).
+        val reverted = OrbMissionTree.rollbackOptimisticPlacement(op)
+        assertEquals(1, reverted.size)
+        assertEquals("gamma", reverted[0].project)
+        assertEquals("foreign", reverted[0].folder)
+        assertEquals(3L, reverted[0].placementRevision)
+
+        // 4. Event carrying `localClientId` at `incRev == curRev` (`3`) acknowledges and clears `pendingOpId`.
+        val op2 = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("stage-root"), op2, "beta", "docs")
+        val localAccepted = OrbMissionTree.commitIncomingPlacementEvent(
+            mapOf(
+                "client_op_id" to op2,
+                "client_id" to OrbMissionTree.localClientId,
+                "moves" to listOf(
+                    mapOf(
+                        "mission_id" to "stage-root",
+                        "project" to "beta",
+                        "folder" to "docs",
+                        "placement_revision" to 3L,
+                    )
+                ),
+            )
+        )
+        assertEquals(1, localAccepted.size)
+        assertEquals(0, OrbMissionTree.placementOf("stage-root")?.pendingOpId)
+        assertEquals(3L, OrbMissionTree.placementOf("stage-root")?.revision)
+        OrbMissionTree.resetHierarchy()
+    }
 }

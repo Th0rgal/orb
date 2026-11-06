@@ -117,9 +117,30 @@ impl SqliteMissionStore {
             )
             .map_err(|e| format!("Failed to insert mission: {e}"))?;
 
-            tx.execute("UPDATE missions SET service_tier = ?1 WHERE id = ?2", rusqlite::params![
-                mission.service_tier.map(|tier| tier.id().to_string()), new_mission_id.to_string()
-            ]).map_err(|e| e.to_string())?;
+            let mut imported_tags = mission.project.tags.clone();
+            let legacy_folder =
+                crate::api::mission_store::strip_legacy_orb_folder_tags(&mut imported_tags);
+            let imported_folder = if !mission.project.folder.is_empty() {
+                crate::api::mission_store::normalize_mission_folder(&mission.project.folder)
+            } else {
+                legacy_folder.unwrap_or_default()
+            };
+            tx.execute(
+                "UPDATE missions
+                 SET service_tier = ?1,
+                     project = ?2,
+                     folder = ?3,
+                     tags = ?4
+                 WHERE id = ?5",
+                rusqlite::params![
+                    mission.service_tier.map(|tier| tier.id().to_string()),
+                    mission.project.project,
+                    imported_folder,
+                    tags_to_json(&imported_tags),
+                    new_mission_id.to_string()
+                ],
+            )
+            .map_err(|e| e.to_string())?;
 
             // --- events ---
             // Re-spill large content to the target's content_dir so the

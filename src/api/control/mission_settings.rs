@@ -5,10 +5,12 @@ use super::*;
 /// Request body for `POST /api/control/missions/:id/project`. Tri-state per
 /// field: omit to leave unchanged, `null` to clear, a value to set. `tags`
 /// replaces the whole list when present.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct UpdateMissionProjectRequest {
     #[serde(default, deserialize_with = "deserialize_string_patch")]
     pub project: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_string_patch")]
+    pub folder: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_string_patch")]
     pub track: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_string_patch")]
@@ -26,8 +28,8 @@ pub struct UpdateMissionProjectRequest {
     #[serde(default, deserialize_with = "deserialize_string_patch")]
     pub next_check_at: Option<Option<String>>,
     /// When true and `project` assigns a destination slug, also move every
-    /// launched descendant not yet in that project (clearing child
-    /// `orb-folder:*` tags while preserving capability and hierarchy tags).
+    /// launched descendant not yet in that project (clearing child `folder`
+    /// while preserving capability and hierarchy tags).
     #[serde(default)]
     pub include_descendants: bool,
     /// Optional client-known callback children (`callback_parent_mission_id`)
@@ -35,6 +37,93 @@ pub struct UpdateMissionProjectRequest {
     /// Hermes callback roots in the atomic subtree transfer.
     #[serde(default)]
     pub descendant_ids: Vec<Uuid>,
+    /// Preserve `updated_at` on sidebar folder/project moves so recency order
+    /// does not jump.
+    #[serde(default)]
+    pub preserve_updated_at: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalTransferPolicy {
+    #[default]
+    Check,
+    Revoke,
+    Keep,
+}
+
+/// Request body for `POST /api/control/missions/move`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MoveMissionsRequest {
+    pub mission_ids: Vec<Uuid>,
+    #[serde(
+        default,
+        alias = "target_project",
+        deserialize_with = "deserialize_string_patch"
+    )]
+    pub project: Option<Option<String>>,
+    #[serde(default, alias = "target_folder")]
+    pub folder: String,
+    #[serde(default)]
+    pub approval_policy: ApprovalTransferPolicy,
+    #[serde(default)]
+    pub client_op_id: Option<u32>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub descendant_ids: Vec<Uuid>,
+}
+
+/// Response body for `POST /api/control/missions/move`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveMissionsResponse {
+    pub moved: Vec<MissionPlacementItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_op_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+}
+
+fn sanitize_placement_client_id(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 128)
+        .map(str::to_string)
+}
+
+pub(crate) fn fork_source_id(mission: &Mission) -> Option<Uuid> {
+    if let Some(id) = mission
+        .project
+        .tags
+        .iter()
+        .find_map(|tag| tag.strip_prefix("fork-of:")?.parse::<Uuid>().ok())
+    {
+        return Some(id);
+    }
+    if let Some(pid) = mission.parent_mission_id {
+        if mission
+            .title
+            .as_deref()
+            .is_some_and(|title| title.to_ascii_lowercase().ends_with(" · fork"))
+        {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+pub(crate) fn is_btw_side_mission(mission: &Mission) -> bool {
+    mission
+        .project
+        .tags
+        .iter()
+        .any(|tag| tag.starts_with("btw-parent:") || tag == "btw-subagent")
+}
+
+pub(crate) fn is_nested_child_mission(mission: &Mission) -> bool {
+    let non_fork_parent = mission
+        .parent_mission_id
+        .filter(|&pid| !is_fork_of_parent(mission, pid));
+    non_fork_parent.is_some() || is_btw_side_mission(mission)
 }
 
 pub(crate) fn is_fork_of_parent(mission: &Mission, parent_id: Uuid) -> bool {
@@ -53,17 +142,177 @@ pub(crate) fn is_fork_of_parent(mission: &Mission, parent_id: Uuid) -> bool {
         .is_some_and(|title| title.to_ascii_lowercase().ends_with(" · fork"))
 }
 
-async fn collect_launched_descendants(
+fn is_retired_fork_version(mission: &Mission) -> bool {
+    matches!(mission.status, MissionStatus::Acknowledged)
+        || mission
+            .project
+            .tags
+            .iter()
+            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG)
+}
+
+fn is_working_fork_version(mission: &Mission) -> bool {
+    matches!(
+        mission.status,
+        MissionStatus::Active | MissionStatus::Pending | MissionStatus::WaitingBackground
+    )
+}
+
+fn parse_rfc3339_millis(raw: Option<&str>) -> i64 {
+    raw.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or(0)
+}
+
+/// Discover co-located `fork-of:` conversation group members in `project_bucket`
+/// and return the group members ONLY when `selected_id` is the group's current
+/// leader (matching `forkLeaders` in `orb/src/missionTree.ts`). Selecting an
+/// earlier version moves only that version and its own launched subtree.
+async fn expand_colocated_fork_group_if_leader(
     mission_store: &Arc<dyn MissionStore>,
-    root_id: Uuid,
+    selected: &Mission,
+) -> Result<Vec<Mission>, (StatusCode, String)> {
+    const FORK_SETTLE_MS: i64 = 15_000;
+
+    // Climb `fork-of:` links inside the same project bucket to find the conversation root.
+    let target_project = &selected.project.project;
+    let mut group_by_id: HashMap<Uuid, Mission> = HashMap::from([(selected.id, selected.clone())]);
+    let mut root = selected.clone();
+    let mut climb_seen = HashSet::from([selected.id]);
+    while let Some(src_id) = fork_source_id(&root) {
+        if !climb_seen.insert(src_id) {
+            break;
+        }
+        let Some(src) = mission_store
+            .get_mission_metadata(src_id)
+            .await
+            .map_err(internal_error)?
+        else {
+            break;
+        };
+        if &src.project.project != target_project {
+            break;
+        }
+        group_by_id.insert(src.id, src.clone());
+        root = src;
+    }
+
+    // BFS downward from `root` over `fork-of:<cur>` tags AND legacy `parent_mission_id` forks
+    // within the same project bucket.
+    let mut queue = VecDeque::from([root.id]);
+    let mut bfs_seen = HashSet::from([root.id]);
+    while let Some(cur_id) = queue.pop_front() {
+        let tagged = mission_store
+            .list_missions_filtered(
+                &crate::api::mission_store::MissionFilter {
+                    project: target_project.clone(),
+                    tag: Some(format!("fork-of:{cur_id}")),
+                    ..Default::default()
+                },
+                usize::MAX,
+                0,
+            )
+            .await
+            .map_err(internal_error)?;
+        let direct_children = mission_store
+            .get_child_missions(cur_id)
+            .await
+            .map_err(internal_error)?;
+        for cand in tagged.into_iter().chain(
+            direct_children
+                .into_iter()
+                .filter(|c| is_fork_of_parent(c, cur_id)),
+        ) {
+            if &cand.project.project != target_project {
+                continue;
+            }
+            if bfs_seen.insert(cand.id) {
+                group_by_id.insert(cand.id, cand.clone());
+                queue.push_back(cand.id);
+            }
+        }
+    }
+
+    if group_by_id.len() < 2 {
+        return Ok(vec![selected.clone()]);
+    }
+
+    let mut group: Vec<Mission> = group_by_id.values().cloned().collect();
+    group.sort_by_key(|m| m.id);
+
+    // Compute lineage depth & ancestors within `group_by_id` to determine leader rank (F1).
+    let mut info: HashMap<Uuid, (usize, Vec<Uuid>)> = HashMap::with_capacity(group.len());
+    for m in &group {
+        let mut seen = HashSet::new();
+        let mut ancestors = Vec::new();
+        let mut cur = m;
+        while let Some(src_id) = fork_source_id(cur) {
+            if !group_by_id.contains_key(&src_id) || !seen.insert(src_id) {
+                break;
+            }
+            seen.insert(cur.id);
+            cur = group_by_id.get(&src_id).expect("checked");
+            ancestors.push(cur.id);
+        }
+        info.insert(m.id, (ancestors.len(), ancestors));
+    }
+
+    let mut effective_activity: HashMap<Uuid, i64> = group
+        .iter()
+        .map(|m| {
+            let act = parse_rfc3339_millis(Some(&m.updated_at))
+                .max(parse_rfc3339_millis(Some(&m.created_at)));
+            (m.id, act)
+        })
+        .collect();
+    for m in &group {
+        let created = parse_rfc3339_millis(Some(&m.created_at));
+        if created <= 0 {
+            continue;
+        }
+        if let Some((_, ancestors)) = info.get(&m.id) {
+            for anc_id in ancestors {
+                if let Some(anc_act) = effective_activity.get_mut(anc_id) {
+                    if *anc_act <= created + FORK_SETTLE_MS {
+                        *anc_act = (*anc_act).min(created);
+                    }
+                }
+            }
+        }
+    }
+
+    let rank = |m: &Mission| -> (u8, u8, i64, usize) {
+        (
+            if is_retired_fork_version(m) { 0 } else { 1 },
+            if is_working_fork_version(m) { 1 } else { 0 },
+            effective_activity.get(&m.id).copied().unwrap_or(0),
+            info.get(&m.id).map(|(d, _)| *d).unwrap_or(0),
+        )
+    };
+    let mut leader = &group[0];
+    for m in &group[1..] {
+        if rank(m) > rank(leader) {
+            leader = m;
+        }
+    }
+    if leader.id == selected.id {
+        Ok(group)
+    } else {
+        Ok(vec![selected.clone()])
+    }
+}
+
+async fn collect_launched_descendants_from_seeds(
+    mission_store: &Arc<dyn MissionStore>,
+    seed_ids: &[Uuid],
     extra_candidates: &[Uuid],
 ) -> Result<(Vec<Uuid>, HashMap<Uuid, Mission>), (StatusCode, String)> {
-    let mut visited = HashSet::from([root_id]);
-    let mut stack = vec![root_id];
+    let mut visited: HashSet<Uuid> = seed_ids.iter().copied().collect();
+    let mut stack: Vec<Uuid> = seed_ids.to_vec();
     let mut out = Vec::new();
     let mut by_id = HashMap::new();
 
-    let mut seen_candidates = HashSet::from([root_id]);
+    let mut seen_candidates: HashSet<Uuid> = seed_ids.iter().copied().collect();
     let mut candidate_missions = Vec::new();
     for &cid in extra_candidates {
         if !seen_candidates.insert(cid) {
@@ -119,6 +368,29 @@ async fn collect_launched_descendants(
                     stack.push(child_id);
                 }
             }
+
+            // Also include any `/btw` side sessions (`btw-parent:<cur>`) and
+            // their launched `btw-subagent` trees so side sessions never stay
+            // stranded in an old project when their parent conversation moves.
+            let btw_children = mission_store
+                .list_missions_filtered(
+                    &crate::api::mission_store::MissionFilter {
+                        tag: Some(format!("btw-parent:{cur}")),
+                        ..Default::default()
+                    },
+                    usize::MAX,
+                    0,
+                )
+                .await
+                .map_err(internal_error)?;
+            for btw in btw_children {
+                let btw_id = btw.id;
+                if visited.insert(btw_id) {
+                    by_id.insert(btw_id, btw);
+                    out.push(btw_id);
+                    stack.push(btw_id);
+                }
+            }
         }
 
         let mut added_callback = false;
@@ -148,6 +420,14 @@ async fn collect_launched_descendants(
     }
 
     Ok((out, by_id))
+}
+
+async fn collect_launched_descendants(
+    mission_store: &Arc<dyn MissionStore>,
+    root_id: Uuid,
+    extra_candidates: &[Uuid],
+) -> Result<(Vec<Uuid>, HashMap<Uuid, Mission>), (StatusCode, String)> {
+    collect_launched_descendants_from_seeds(mission_store, &[root_id], extra_candidates).await
 }
 
 fn folder_only_tag_diff(a: &[String], b: &[String]) -> bool {
@@ -300,6 +580,7 @@ fn normalize_project_patch(
 struct ResolvedEditTags {
     tags: Option<Vec<String>>,
     effective_tags: Vec<String>,
+    extracted_legacy_folder: Option<String>,
     could_change_writer_status: bool,
     becomes_writer: Option<bool>,
 }
@@ -375,7 +656,13 @@ async fn resolve_project_edit_tags(
             "disk-reservation-v1 tags are reserved internal admission state".to_string(),
         ));
     }
-    let mut effective_tags = tags.clone().unwrap_or_else(|| current.project.tags.clone());
+    let mut extracted_legacy_folder = None;
+    if let Some(ref mut tag_list) = tags {
+        extracted_legacy_folder = crate::api::mission_store::strip_legacy_orb_folder_tags(tag_list);
+    }
+    let mut current_clean_tags = current.project.tags.clone();
+    let _ = crate::api::mission_store::strip_legacy_orb_folder_tags(&mut current_clean_tags);
+    let mut effective_tags = tags.clone().unwrap_or_else(|| current_clean_tags.clone());
     // Compatibility: old releases persisted leases in project tags. A
     // project edit may not drop or replace one of those records while the
     // migration reader still reconstructs it.
@@ -394,16 +681,15 @@ async fn resolve_project_edit_tags(
             effective_tags.push(reservation.clone());
         }
     }
-    if tags.is_some() {
+    if tags.is_some() || effective_tags != current.project.tags {
         tags = Some(effective_tags.clone());
     }
-    // Pure sidebar folder edits (`orb-folder:*` only) do not alter writer
-    // capability, so they must not inject `"pr-writer"` or re-arbitrate foreign
-    // PR writer leases.
+    // Pure sidebar folder edits do not alter writer capability, so they must
+    // not inject `"pr-writer"` or re-arbitrate foreign PR writer leases.
     let could_change_writer_status = writer_status_inputs_changed(
         non_tag_writer_inputs_changed,
         &effective_tags,
-        &current.project.tags,
+        &current_clean_tags,
     );
     // Defer prompt/deferred-goal event scans unless writer status is actually
     // changing or a live lease needs a mode decision later in the edit.
@@ -435,6 +721,7 @@ async fn resolve_project_edit_tags(
     Ok(ResolvedEditTags {
         tags,
         effective_tags,
+        extracted_legacy_folder,
         could_change_writer_status,
         becomes_writer,
     })
@@ -445,6 +732,8 @@ fn non_tag_project_eq(
     b: &crate::api::mission_store::MissionProject,
 ) -> bool {
     a.project == b.project
+        && crate::api::mission_store::normalize_mission_folder(&a.folder)
+            == crate::api::mission_store::normalize_mission_folder(&b.folder)
         && a.track == b.track
         && a.intent == b.intent
         && a.github_pr == b.github_pr
@@ -662,8 +951,10 @@ async fn rollback_moved_missions(
                 if !non_tag_project_eq(&cur.project, &snap.before) || tag_rollback_needed {
                     let patch = crate::api::mission_store::MissionProjectPatch {
                         preserve_updated_at: true,
+                        bump_placement_revision: false,
                         title: None,
                         project: Some(snap.before.project.clone()),
+                        folder: Some(snap.before.folder.clone()),
                         track: Some(snap.before.track.clone()),
                         intent: Some(snap.before.intent.clone()),
                         github_pr: Some(snap.before.github_pr.clone()),
@@ -781,6 +1072,738 @@ pub async fn update_mission_project(
     dispatch_admission_tests::notify_wait(id, "project");
     let updated = result.await.map_err(recv_failed)??;
     Ok(Json(updated))
+}
+
+struct ExpandedMovePlan {
+    /// Ordered `(mission_id, current_mission, target_folder)` across the full
+    /// expanded family closure (`target_folder` on top-level roots/forks,
+    /// `""` on nested children & `/btw` sessions).
+    entries: Vec<(Uuid, Mission, String)>,
+    /// Root/version seeds in deterministic request order.
+    roots: Vec<Uuid>,
+    /// Target canonical project (`None` when `req.project` was omitted;
+    /// `Some(None)` when explicitly clearing to `Default` / `None`;
+    /// `Some(Some(slug))` when targeting a named project).
+    resolved_project: Option<Option<String>>,
+}
+
+async fn plan_expanded_move_family(
+    state: &Arc<AppState>,
+    mission_store: &Arc<dyn MissionStore>,
+    req: &MoveMissionsRequest,
+) -> Result<ExpandedMovePlan, (StatusCode, serde_json::Value)> {
+    let json_err = |code: StatusCode, msg: String| {
+        (
+            code,
+            serde_json::json!({
+                "error": msg,
+            }),
+        )
+    };
+    if req.mission_ids.is_empty() {
+        return Err(json_err(
+            StatusCode::BAD_REQUEST,
+            "mission_ids must not be empty".to_string(),
+        ));
+    }
+    let norm_folder = crate::api::mission_store::normalize_mission_folder(&req.folder);
+    let resolved_project = normalize_project_patch(&state.projects, req.project.clone());
+
+    let mut root_ids = Vec::new();
+    let mut seen_roots = HashSet::new();
+    let mut by_id: HashMap<Uuid, Mission> = HashMap::new();
+    for &mid in &req.mission_ids {
+        let m = mission_store
+            .get_mission_metadata(mid)
+            .await
+            .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .ok_or_else(|| json_err(StatusCode::NOT_FOUND, format!("Mission {mid} not found")))?;
+        let expanded = expand_colocated_fork_group_if_leader(mission_store, &m)
+            .await
+            .map_err(|(c, m)| json_err(c, m))?;
+        for member in expanded {
+            let member_id = member.id;
+            by_id.insert(member_id, member);
+            if seen_roots.insert(member_id) {
+                root_ids.push(member_id);
+            }
+        }
+    }
+
+    let (descendant_ids, descendant_map) =
+        collect_launched_descendants_from_seeds(mission_store, &root_ids, &req.descendant_ids)
+            .await
+            .map_err(|(c, m)| json_err(c, m))?;
+    let descendant_set: HashSet<Uuid> = descendant_ids.iter().copied().collect();
+    for (did, dm) in descendant_map {
+        by_id.entry(did).or_insert(dm);
+    }
+
+    // Filter out any selected IDs that turned out to be launched descendants of
+    // another selected root so they get `folder = ""` rather than `norm_folder`.
+    let top_roots: Vec<Uuid> = root_ids
+        .into_iter()
+        .filter(|id| {
+            !descendant_set.contains(id)
+                && by_id.get(id).is_some_and(|m| !is_nested_child_mission(m))
+        })
+        .collect();
+    let top_root_set: HashSet<Uuid> = top_roots.iter().copied().collect();
+
+    let mut entries = Vec::with_capacity(by_id.len());
+    let mut emitted = HashSet::new();
+    for &rid in &top_roots {
+        if emitted.insert(rid) {
+            if let Some(m) = by_id.get(&rid).cloned() {
+                entries.push((rid, m, norm_folder.clone()));
+            }
+        }
+    }
+    // Include any directly selected nested children that did not have a selected
+    // top-level root (forcing `folder = ""`).
+    for &mid in &req.mission_ids {
+        if !top_root_set.contains(&mid) && emitted.insert(mid) {
+            if let Some(m) = by_id.get(&mid).cloned() {
+                entries.push((mid, m, String::new()));
+            }
+        }
+    }
+    for did in descendant_ids {
+        if emitted.insert(did) {
+            if let Some(m) = by_id.get(&did).cloned() {
+                entries.push((did, m, String::new()));
+            }
+        }
+    }
+
+    let roots = if top_roots.is_empty() {
+        req.mission_ids.clone()
+    } else {
+        top_roots
+    };
+
+    Ok(ExpandedMovePlan {
+        entries,
+        roots,
+        resolved_project,
+    })
+}
+
+async fn check_approval_transfer_preflight(
+    state: &Arc<AppState>,
+    plan: &ExpandedMovePlan,
+    policy: ApprovalTransferPolicy,
+) -> Result<HashSet<Uuid>, (StatusCode, serde_json::Value)> {
+    let Some(ref target_proj) = plan.resolved_project else {
+        return Ok(HashSet::new());
+    };
+    let cross_ids: HashSet<Uuid> = plan
+        .entries
+        .iter()
+        .filter(|(_, m, _)| &m.project.project != target_proj)
+        .map(|(id, _, _)| *id)
+        .collect();
+    if cross_ids.is_empty() || policy != ApprovalTransferPolicy::Check {
+        return Ok(cross_ids);
+    }
+    let (grants, pending) = crate::api::secret_broker::broker(state)
+        .inspect_mission_transfer(&cross_ids)
+        .await;
+    if grants.is_empty() && pending.is_empty() {
+        return Ok(cross_ids);
+    }
+    let grant_items: Vec<serde_json::Value> = grants
+        .iter()
+        .map(|g| {
+            let secret_name = match &g.scope {
+                crate::api::secret_broker::GrantScope::Secret { key } => key.clone(),
+                crate::api::secret_broker::GrantScope::Project { project_id } => {
+                    format!("project:{project_id}")
+                }
+                crate::api::secret_broker::GrantScope::All => "*".to_string(),
+            };
+            serde_json::json!({
+                "id": g.id,
+                "mission_id": g.mission_id.or(g.root_mission_id),
+                "secret_name": secret_name,
+                "source_project": g.paloma_project,
+                "expires_at": g.expires_at.to_rfc3339(),
+                "expires_at_ms": g.expires_at.timestamp_millis(),
+            })
+        })
+        .collect();
+    let pending_items: Vec<serde_json::Value> = pending
+        .into_iter()
+        .map(|mut p| {
+            if let Some(obj) = p.as_object_mut() {
+                if let Some(key) = obj.get("key").cloned() {
+                    obj.entry("secret_name").or_insert(key);
+                }
+                if let Some(kind) = obj.get("kind").cloned() {
+                    obj.entry("operation").or_insert(kind);
+                }
+                if let Some(src) = obj.get("paloma_project").cloned() {
+                    obj.entry("source_project").or_insert(src);
+                }
+            }
+            p
+        })
+        .collect();
+    Err((
+        StatusCode::CONFLICT,
+        serde_json::json!({
+            "code": "approval_transfer_confirmation_required",
+            "error": "Moving across projects affects active secret approvals.",
+            "target_project": target_proj.as_deref().unwrap_or("default"),
+            "grants": grant_items,
+            "active_grants": grant_items,
+            "pending_requests": pending_items,
+        }),
+    ))
+}
+
+/// `POST /api/control/missions/move`: atomic batch folder & cross-project move
+/// endpoint with family closure, `orb_placement_merge_step` revisioning, and
+/// cross-project secret approval confirmation.
+pub async fn move_missions(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Json(req): Json<MoveMissionsRequest>,
+) -> Response {
+    let control = control_for_user(&state, &user).await;
+    let plan = match plan_expanded_move_family(&state, &control.mission_store, &req).await {
+        Ok(p) => p,
+        Err((code, body)) => return (code, Json(body)).into_response(),
+    };
+
+    let cross_ids =
+        match check_approval_transfer_preflight(&state, &plan, req.approval_policy).await {
+            Ok(ids) => ids,
+            Err((code, body)) => return (code, Json(body)).into_response(),
+        };
+
+    // Fast path: intra-project folder move (`cross_ids.is_empty()`).
+    // Executes in a single atomic SQLite `IMMEDIATE` transaction on `missions.db`
+    // without queuing behind the control actor, `durable_lock`, or `projects.db`.
+    // Revalidates every entry's observed `project` inside the transaction; if a
+    // concurrent request transferred any member to another project since planning,
+    // aborts without writing a hybrid `(other_project, folder)` row and falls
+    // through to the serialized `ControlCommand::MoveMissions` path.
+    if cross_ids.is_empty() {
+        let updates: Vec<crate::api::mission_store::CheckedPlacementUpdate> = plan
+            .entries
+            .iter()
+            .map(
+                |(id, m, folder)| crate::api::mission_store::CheckedPlacementUpdate {
+                    id: *id,
+                    expected_project: Some(m.project.project.clone()),
+                    next_project: None,
+                    next_folder: folder.clone(),
+                },
+            )
+            .collect();
+        match control
+            .mission_store
+            .batch_set_mission_placement_checked(&updates)
+            .await
+        {
+            Ok(Some(moved)) => {
+                let clean_client_id = sanitize_placement_client_id(req.client_id.as_deref());
+                if !moved.is_empty() {
+                    let _ = control.events_tx.send(AgentEvent::MissionPlacementChanged {
+                        moves: moved.clone(),
+                        client_op_id: req.client_op_id,
+                        client_id: clean_client_id.clone(),
+                    });
+                }
+                return (
+                    StatusCode::OK,
+                    Json(MoveMissionsResponse {
+                        moved,
+                        client_op_id: req.client_op_id,
+                        client_id: clean_client_id,
+                    }),
+                )
+                    .into_response();
+            }
+            Ok(None) => {
+                // Concurrent project change invalidated `plan`: fall through to
+                // `ControlCommand::MoveMissions` to replan under actor serialization.
+            }
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": err })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Cross-project path: serialize on the control actor + `durable_lock`.
+    let (respond, result) = oneshot::channel();
+    if let Err(err) = control
+        .cmd_tx
+        .send(ControlCommand::MoveMissions {
+            user,
+            request: req,
+            respond,
+        })
+        .await
+    {
+        let (code, msg) = session_unavailable(err);
+        return (code, Json(serde_json::json!({ "error": msg }))).into_response();
+    }
+    match result.await {
+        Ok(Ok(resp)) => (StatusCode::OK, Json(resp)).into_response(),
+        Ok(Err((code, body))) => (code, Json(body)).into_response(),
+        Err(err) => {
+            let (code, msg) = recv_failed(err);
+            (code, Json(serde_json::json!({ "error": msg }))).into_response()
+        }
+    }
+}
+
+pub(super) async fn execute_move_missions_locked<F>(
+    is_actor_busy: &F,
+    state: Arc<AppState>,
+    user: AuthUser,
+    req: MoveMissionsRequest,
+) -> Result<MoveMissionsResponse, (StatusCode, serde_json::Value)>
+where
+    F: Fn(Uuid) -> bool,
+{
+    let control = control_for_user(&state, &user).await;
+    recover_subtree_project_edits_in_store(&state, &control.mission_store)
+        .await
+        .map_err(|e| {
+            let (c, m) = map_dispatch_recovery_error(e);
+            (c, serde_json::json!({ "error": m }))
+        })?;
+
+    let plan = plan_expanded_move_family(&state, &control.mission_store, &req).await?;
+    let cross_ids = check_approval_transfer_preflight(&state, &plan, req.approval_policy).await?;
+
+    let Some(target_project) = plan.resolved_project.clone() else {
+        for attempt in 0..2 {
+            let active_plan = if attempt == 0 {
+                &plan
+            } else {
+                &plan_expanded_move_family(&state, &control.mission_store, &req).await?
+            };
+            let updates: Vec<crate::api::mission_store::CheckedPlacementUpdate> = active_plan
+                .entries
+                .iter()
+                .map(
+                    |(id, m, folder)| crate::api::mission_store::CheckedPlacementUpdate {
+                        id: *id,
+                        expected_project: Some(m.project.project.clone()),
+                        next_project: None,
+                        next_folder: folder.clone(),
+                    },
+                )
+                .collect();
+            let Some(moved) = control
+                .mission_store
+                .batch_set_mission_placement_checked(&updates)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        serde_json::json!({ "error": e }),
+                    )
+                })?
+            else {
+                continue;
+            };
+            let clean_client_id = sanitize_placement_client_id(req.client_id.as_deref());
+            if !moved.is_empty() {
+                let _ = control.events_tx.send(AgentEvent::MissionPlacementChanged {
+                    moves: moved.clone(),
+                    client_op_id: req.client_op_id,
+                    client_id: clean_client_id.clone(),
+                });
+            }
+            return Ok(MoveMissionsResponse {
+                moved,
+                client_op_id: req.client_op_id,
+                client_id: clean_client_id,
+            });
+        }
+        return Err((
+            StatusCode::CONFLICT,
+            serde_json::json!({ "error": "Mission project changed concurrently during move; retry." }),
+        ));
+    };
+
+    let map_str_err = |(code, msg): (StatusCode, String)| -> (StatusCode, serde_json::Value) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&msg) {
+            if parsed.is_object() {
+                return (code, parsed);
+            }
+        }
+        (code, serde_json::json!({ "error": msg }))
+    };
+
+    // Reconcile any interrupted individual `mission_dispatch_admissions` receipts
+    // on every moving entry BEFORE capturing rollback snapshots.
+    let initial_unresolved: HashSet<String> = state
+        .projects
+        .dispatch_admissions()
+        .map_err(|e| map_str_err(internal_error(e)))?
+        .into_iter()
+        .map(|(attempt, _)| attempt)
+        .collect();
+    let mut entries = plan.entries;
+    if !initial_unresolved.is_empty() {
+        for (mid, current_mission, _) in &mut entries {
+            if initial_unresolved.contains(&mid.to_string()) {
+                dispatch_admission::recover_dispatch_single(&state, &control.mission_store, *mid)
+                    .await
+                    .map_err(|e| map_str_err(map_dispatch_recovery_error(e)))?;
+                if let Some(reloaded) = control
+                    .mission_store
+                    .get_mission_metadata(*mid)
+                    .await
+                    .map_err(|e| map_str_err(internal_error(e)))?
+                {
+                    *current_mission = reloaded;
+                }
+            }
+        }
+    }
+
+    let live_leases = live_track_leases_by_attempt(&state).map_err(map_str_err)?;
+    let mut planned_snapshots = Vec::with_capacity(entries.len());
+    for (_, m, target_folder) in &entries {
+        if m.project.project == target_project
+            && crate::api::mission_store::normalize_mission_folder(&m.project.folder)
+                == *target_folder
+        {
+            continue;
+        }
+        let removed_folders: Vec<String> = m
+            .project
+            .tags
+            .iter()
+            .filter(|t| t.starts_with(crate::api::mission_store::LEGACY_ORB_FOLDER_TAG_PREFIX))
+            .cloned()
+            .collect();
+        planned_snapshots.push(MovedMissionSnapshot::from_leases(
+            &live_leases,
+            m,
+            Vec::new(),
+            removed_folders,
+        ));
+    }
+
+    let root_key = plan.roots[0].to_string();
+    if !planned_snapshots.is_empty() {
+        let receipt_json = serde_json::to_value(&planned_snapshots)
+            .map_err(|e| map_str_err(internal_error(e.to_string())))?;
+        state
+            .projects
+            .save_subtree_project_edit(&root_key, &receipt_json)
+            .map_err(|e| map_str_err(internal_error(e)))?;
+    }
+
+    let unresolved_after_reconcile: HashSet<String> = state
+        .projects
+        .dispatch_admissions()
+        .map_err(|e| map_str_err(internal_error(e)))?
+        .into_iter()
+        .map(|(attempt, _)| attempt)
+        .collect();
+    let mut subtree_ctx = SubtreeMoveContext {
+        live_leases: live_leases.clone(),
+        unresolved_admissions: unresolved_after_reconcile,
+        ..Default::default()
+    };
+    let mut planned_by_id: HashMap<Uuid, MovedMissionSnapshot> = planned_snapshots
+        .iter()
+        .map(|s| (s.id, s.clone()))
+        .collect();
+    let mut moved_snaps: Vec<MovedMissionSnapshot> = Vec::with_capacity(planned_snapshots.len());
+
+    // Partition cross-project moves into Wave 1 (active/busy/leased) and Wave 2
+    // (passive, batch-absorbing destination tracks), plus same-project folder
+    // updates for any family member already in `target_project`.
+    let mut wave1_active: Vec<(Uuid, Mission, String)> = Vec::new();
+    let mut wave2_passive: Vec<(Uuid, Mission, String)> = Vec::new();
+    let mut same_project_folder_updates: Vec<crate::api::mission_store::CheckedPlacementUpdate> =
+        Vec::new();
+
+    for (mid, m, target_folder) in entries {
+        if m.project.project == target_project {
+            same_project_folder_updates.push(crate::api::mission_store::CheckedPlacementUpdate {
+                id: mid,
+                expected_project: Some(target_project.clone()),
+                next_project: None,
+                next_folder: target_folder,
+            });
+            continue;
+        }
+        let holds_track = match subtree_ctx.holds_track(&state.control, mid).await {
+            Ok(v) => v,
+            Err(err) => {
+                if rollback_moved_missions(&state, &control.mission_store, &moved_snaps)
+                    .await
+                    .is_ok()
+                {
+                    let _ = state.projects.clear_subtree_project_edit(&root_key);
+                }
+                return Err(map_str_err(internal_error(err)));
+            }
+        };
+        let mid_str = mid.to_string();
+        if holds_track
+            || is_actor_busy(mid)
+            || live_leases.contains_key(&mid_str)
+            || subtree_ctx.unresolved_admissions.contains(&mid_str)
+        {
+            wave1_active.push((mid, m, target_folder));
+        } else {
+            wave2_passive.push((mid, m, target_folder));
+        }
+    }
+
+    let apply_cross_entry = async |mid: Uuid,
+                                   m: Mission,
+                                   target_folder: String,
+                                   planned_by_id: &mut HashMap<Uuid, MovedMissionSnapshot>,
+                                   moved_snaps: &mut Vec<MovedMissionSnapshot>,
+                                   subtree_ctx: &mut SubtreeMoveContext|
+           -> Result<(), (StatusCode, String)> {
+        let snap = match planned_by_id.remove(&mid) {
+            Some(s) => s,
+            None => MovedMissionSnapshot::from_leases(&live_leases, &m, Vec::new(), Vec::new()),
+        };
+        moved_snaps.push(snap);
+        let clean_tags: Vec<String> = m
+            .project
+            .tags
+            .iter()
+            .filter(|t| {
+                !t.starts_with(crate::api::mission_store::LEGACY_ORB_FOLDER_TAG_PREFIX)
+                    && !t.starts_with(DISK_RESERVATION_TAG_PREFIX)
+            })
+            .cloned()
+            .collect();
+        update_mission_project_inner(
+            is_actor_busy(mid),
+            state.clone(),
+            user.clone(),
+            mid,
+            UpdateMissionProjectRequest {
+                project: Some(target_project.clone()),
+                folder: Some(if target_folder.is_empty() {
+                    None
+                } else {
+                    Some(target_folder)
+                }),
+                track: None,
+                intent: None,
+                github_pr: None,
+                writer: None,
+                tags: Some(clean_tags),
+                desired_state: None,
+                next_check_at: None,
+                include_descendants: false,
+                descendant_ids: Vec::new(),
+                preserve_updated_at: true,
+            },
+            Some(m),
+            Some(subtree_ctx),
+            false,
+        )
+        .await
+        .map(|_| ())
+    };
+
+    for (mid, m, target_folder) in wave1_active {
+        if let Err(err) = apply_cross_entry(
+            mid,
+            m,
+            target_folder,
+            &mut planned_by_id,
+            &mut moved_snaps,
+            &mut subtree_ctx,
+        )
+        .await
+        {
+            if rollback_moved_missions(&state, &control.mission_store, &moved_snaps)
+                .await
+                .is_ok()
+            {
+                let _ = state.projects.clear_subtree_project_edit(&root_key);
+            }
+            return Err(map_str_err(err));
+        }
+    }
+
+    if let Some(slug) = target_project.as_deref() {
+        let batch_inputs: Vec<super::super::projects_store::AbsorbTrackBatchItem<'_>> =
+            wave2_passive
+                .iter()
+                .filter_map(|(cid, child, _)| {
+                    let key = child.project.track.as_deref()?;
+                    let pr =
+                        super::super::track_leases::pr_number(child.project.github_pr.as_deref());
+                    Some(super::super::projects_store::AbsorbTrackBatchItem {
+                        mission_id: *cid,
+                        key,
+                        title_hint: child.title.as_deref(),
+                        pr_number: pr,
+                    })
+                })
+                .collect();
+        if !batch_inputs.is_empty() {
+            match state
+                .projects
+                .absorb_tracks_batch_for_subtree(&root_key, slug, &batch_inputs)
+            {
+                Ok((outcomes, undo)) => {
+                    subtree_ctx.absorbed_tracks = outcomes;
+                    if let Some(first) = moved_snaps.first_mut() {
+                        first.absorbed_tracks_undo.extend_from(&undo);
+                    } else if let Some((_, first_m, _)) = wave2_passive.first() {
+                        let mut holder = MovedMissionSnapshot::from_leases(
+                            &live_leases,
+                            first_m,
+                            Vec::new(),
+                            Vec::new(),
+                        );
+                        holder.absorbed_tracks_undo.extend_from(&undo);
+                        planned_by_id.insert(first_m.id, holder);
+                    }
+                }
+                Err(err) => {
+                    if rollback_moved_missions(&state, &control.mission_store, &moved_snaps)
+                        .await
+                        .is_ok()
+                    {
+                        let _ = state.projects.clear_subtree_project_edit(&root_key);
+                    }
+                    return Err(map_str_err(internal_error(err)));
+                }
+            }
+        }
+    }
+
+    for (mid, m, target_folder) in wave2_passive {
+        if let Err(err) = apply_cross_entry(
+            mid,
+            m,
+            target_folder,
+            &mut planned_by_id,
+            &mut moved_snaps,
+            &mut subtree_ctx,
+        )
+        .await
+        {
+            if rollback_moved_missions(&state, &control.mission_store, &moved_snaps)
+                .await
+                .is_ok()
+            {
+                let _ = state.projects.clear_subtree_project_edit(&root_key);
+            }
+            return Err(map_str_err(err));
+        }
+    }
+
+    if !same_project_folder_updates.is_empty() {
+        match control
+            .mission_store
+            .batch_set_mission_placement_checked(&same_project_folder_updates)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if rollback_moved_missions(&state, &control.mission_store, &moved_snaps)
+                    .await
+                    .is_ok()
+                {
+                    let _ = state.projects.clear_subtree_project_edit(&root_key);
+                }
+                return Err((
+                    StatusCode::CONFLICT,
+                    serde_json::json!({ "error": "Mission project changed concurrently during move; retry." }),
+                ));
+            }
+            Err(err) => {
+                if rollback_moved_missions(&state, &control.mission_store, &moved_snaps)
+                    .await
+                    .is_ok()
+                {
+                    let _ = state.projects.clear_subtree_project_edit(&root_key);
+                }
+                return Err(map_str_err(internal_error(err)));
+            }
+        }
+    }
+
+    if !planned_snapshots.is_empty() {
+        state
+            .projects
+            .clear_subtree_project_edit(&root_key)
+            .map_err(|e| map_str_err(internal_error(e)))?;
+    }
+
+    // Rebind active `mcp_sessions_v1.project_scope` for moved missions and apply
+    // the confirmed `SecretBroker` transfer policy.
+    let cross_vec: Vec<Uuid> = cross_ids.iter().copied().collect();
+    if let Err(err) = crate::control_mcp::gateway::rebind_moved_mission_sessions(
+        &state,
+        &cross_vec,
+        target_project.as_deref(),
+    ) {
+        tracing::warn!(%err, "Failed to rebind mcp_sessions_v1 project_scope after mission move");
+    }
+    let revoke_secrets = matches!(req.approval_policy, ApprovalTransferPolicy::Revoke);
+    crate::api::secret_broker::broker(&state)
+        .apply_mission_transfer_policy(&cross_ids, target_project.as_deref(), revoke_secrets)
+        .await;
+
+    // Collect authoritative post-move placement items across the full family.
+    let mut moved_items = Vec::with_capacity(moved_snaps.len() + same_project_folder_updates.len());
+    let mut seen_out = HashSet::new();
+    for id in moved_snaps
+        .iter()
+        .map(|s| s.id)
+        .chain(same_project_folder_updates.iter().map(|u| u.id))
+    {
+        if !seen_out.insert(id) {
+            continue;
+        }
+        if let Some(meta) = control
+            .mission_store
+            .get_mission_metadata(id)
+            .await
+            .map_err(|e| map_str_err(internal_error(e)))?
+        {
+            moved_items.push(MissionPlacementItem {
+                mission_id: id,
+                project: meta.project.project,
+                folder: meta.project.folder,
+                placement_revision: meta.project.placement_revision,
+            });
+        }
+    }
+
+    let clean_client_id = sanitize_placement_client_id(req.client_id.as_deref());
+    if !moved_items.is_empty() {
+        let _ = control.events_tx.send(AgentEvent::MissionPlacementChanged {
+            moves: moved_items.clone(),
+            client_op_id: req.client_op_id,
+            client_id: clean_client_id.clone(),
+        });
+    }
+
+    Ok(MoveMissionsResponse {
+        moved: moved_items,
+        client_op_id: req.client_op_id,
+        client_id: clean_client_id,
+    })
 }
 
 pub(super) async fn update_mission_project_subtree_locked<F>(
@@ -972,7 +1995,7 @@ where
         //     `subtree_project_edits` and `moved[0]`) and then commit metadata.
         let mut wave1_active_or_leased: Vec<(Uuid, Mission)> = Vec::new();
         let mut wave2_passive: Vec<(Uuid, Mission)> = Vec::new();
-        for child_id in descendant_ids {
+        for &child_id in &descendant_ids {
             let child = match descendant_missions.remove(&child_id) {
                 Some(child) => child,
                 None => match control.mission_store.get_mission_metadata(child_id).await {
@@ -1108,6 +2131,32 @@ where
         .projects
         .clear_subtree_project_edit(&root_key)
         .map_err(internal_error)?;
+
+    let mut moved_ids = vec![id];
+    moved_ids.extend(descendant_ids.iter().copied());
+    let mut placement_moves = Vec::with_capacity(moved_ids.len());
+    for mid in &moved_ids {
+        if let Ok(Some(meta)) = control.mission_store.get_mission_metadata(*mid).await {
+            if meta.project.placement_revision > 0
+                || meta.project.project.is_some()
+                || !meta.project.folder.is_empty()
+            {
+                placement_moves.push(MissionPlacementItem {
+                    mission_id: *mid,
+                    project: meta.project.project,
+                    folder: meta.project.folder,
+                    placement_revision: meta.project.placement_revision,
+                });
+            }
+        }
+    }
+    if !placement_moves.is_empty() {
+        let _ = control.events_tx.send(AgentEvent::MissionPlacementChanged {
+            moves: placement_moves,
+            client_op_id: None,
+            client_id: None,
+        });
+    }
     Ok(Json(updated))
 }
 
@@ -1163,6 +2212,7 @@ where
         child_id,
         UpdateMissionProjectRequest {
             project: Some(target_project.clone()),
+            folder: Some(None),
             track: None,
             intent: None,
             github_pr: None,
@@ -1172,6 +2222,7 @@ where
             next_check_at: None,
             include_descendants: false,
             descendant_ids: Vec::new(),
+            preserve_updated_at: true,
         },
         Some(child),
         Some(subtree_ctx),
@@ -1188,9 +2239,33 @@ pub(super) async fn update_mission_project_locked(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateMissionProjectRequest>,
 ) -> Result<Json<Mission>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+    let before = control
+        .mission_store
+        .get_mission_metadata(id)
+        .await
+        .ok()
+        .flatten();
     let updated = update_mission_project_inner(actor_busy, state, user, id, req, None, None, true)
         .await?
         .ok_or_else(|| internal_error("Updated mission response missing"))?;
+    let placement_changed = before.as_ref().is_some_and(|prev| {
+        prev.project.project != updated.project.project
+            || prev.project.folder != updated.project.folder
+            || prev.project.placement_revision != updated.project.placement_revision
+    });
+    if placement_changed {
+        let _ = control.events_tx.send(AgentEvent::MissionPlacementChanged {
+            moves: vec![MissionPlacementItem {
+                mission_id: id,
+                project: updated.project.project.clone(),
+                folder: updated.project.folder.clone(),
+                placement_revision: updated.project.placement_revision,
+            }],
+            client_op_id: None,
+            client_id: None,
+        });
+    }
     Ok(Json(updated))
 }
 
@@ -1236,6 +2311,7 @@ async fn update_mission_project_inner(
     let ResolvedEditTags {
         tags,
         effective_tags,
+        extracted_legacy_folder,
         could_change_writer_status,
         becomes_writer,
     } = resolve_project_edit_tags(
@@ -1245,6 +2321,34 @@ async fn update_mission_project_inner(
         effective_intent.as_deref(),
     )
     .await?;
+
+    let explicit_folder: Option<String> =
+        match &req.folder {
+            Some(Some(raw)) => Some(crate::api::mission_store::normalize_mission_folder(raw)),
+            Some(None) => Some(String::new()),
+            None => {
+                if let Some(legacy) = extracted_legacy_folder {
+                    Some(legacy)
+                } else if req.tags.is_some()
+                    && current.project.tags.iter().any(|t| {
+                        t.starts_with(crate::api::mission_store::LEGACY_ORB_FOLDER_TAG_PREFIX)
+                    })
+                {
+                    // Legacy callers clearing `orb-folder:*` via `tags` without sending `folder`.
+                    Some(String::new())
+                } else {
+                    None
+                }
+            }
+        };
+    let folder = match explicit_folder {
+        Some(_) if is_nested_child_mission(&current) => Some(String::new()),
+        Some(f) => Some(f),
+        None if is_nested_child_mission(&current) && !current.project.folder.is_empty() => {
+            Some(String::new())
+        }
+        None => None,
+    };
 
     let writer_guard = if becomes_writer == Some(true) && could_change_writer_status {
         Some(
@@ -1353,6 +2457,8 @@ async fn update_mission_project_inner(
                 &current,
                 MoveTarget {
                     project: effective_project.clone().unwrap_or_default(),
+                    folder: folder.clone(),
+                    preserve_updated_at: req.preserve_updated_at,
                     track: effective_track.clone(),
                     mode: if is_writer {
                         "writer"
@@ -1480,9 +2586,11 @@ async fn update_mission_project_inner(
     };
 
     let patch = crate::api::mission_store::MissionProjectPatch {
-        preserve_updated_at: false,
+        preserve_updated_at: req.preserve_updated_at,
+        bump_placement_revision: false,
         title: None,
         project,
+        folder,
         track,
         intent,
         github_pr,
@@ -1496,6 +2604,9 @@ async fn update_mission_project_inner(
     let mut after = current.project.clone();
     if let Some(value) = &patch.project {
         after.project = value.clone();
+    }
+    if let Some(value) = &patch.folder {
+        after.folder = value.clone();
     }
     if let Some(value) = &patch.track {
         after.track = value.clone();
@@ -1581,6 +2692,8 @@ async fn update_mission_project_inner(
 
 pub(super) struct MoveTarget {
     pub(super) project: String,
+    pub(super) folder: Option<String>,
+    pub(super) preserve_updated_at: bool,
     pub(super) track: Option<String>,
     pub(super) mode: &'static str,
     pub(super) pr: Option<i64>,
@@ -1653,9 +2766,11 @@ pub(super) async fn move_running_mission_project(
         }
     }
     let patch = crate::api::mission_store::MissionProjectPatch {
-        preserve_updated_at: false,
+        preserve_updated_at: target.preserve_updated_at,
+        bump_placement_revision: false,
         title: None,
         project: Some(Some(target.project.clone())),
+        folder: target.folder,
         track: new_track
             .clone()
             .filter(|key| current.project.track.as_deref() != Some(key.as_str()))
@@ -2061,6 +3176,7 @@ mod subtree_move_tests {
         let path = dir.path();
         let mut config = Config::new(path.to_path_buf());
         config.automations_enabled = false;
+        config.auth.jwt_secret = Some("test-jwt-secret-for-mcp-rebind-32bytes".into());
         let root_agent: AgentRef = Arc::new(crate::agents::OpenCodeAgent::new(config.clone()));
         let mcp = Arc::new(McpRegistry::new(path).await);
         let workspaces = Arc::new(workspace::WorkspaceStore::new(path.to_path_buf()).await);
@@ -2100,6 +3216,13 @@ mod subtree_move_tests {
         );
         hub.sessions.write().await.insert(user.id.clone(), control);
         let projects = Arc::new(ProjectsStore::open(path.join("projects.db")).unwrap());
+        {
+            let conn = projects.connection.lock().unwrap();
+            crate::control_mcp::actions::init(&conn).unwrap();
+        }
+        projects
+            .upsert_project("default", Some("Default"), None, None, None)
+            .unwrap();
         projects
             .upsert_project("assistant", Some("Assistant"), None, None, None)
             .unwrap();
@@ -2287,15 +3410,9 @@ mod subtree_move_tests {
             Path(root.id),
             Json(UpdateMissionProjectRequest {
                 project: Some(Some("Ethereum".into())),
-                track: None,
-                intent: None,
-                github_pr: None,
-                writer: None,
                 tags: Some(vec!["pr-readonly".into(), "orb-folder:evm".into()]),
-                desired_state: None,
-                next_check_at: None,
                 include_descendants: true,
-                descendant_ids: Vec::new(),
+                ..Default::default()
             }),
         )
         .await;
@@ -2309,10 +3426,8 @@ mod subtree_move_tests {
             "210-child subtree move took too long: {elapsed:?}"
         );
         assert_eq!(updated.project.project.as_deref(), Some("verity-core"));
-        assert_eq!(
-            updated.project.tags,
-            vec!["pr-readonly".to_string(), "orb-folder:evm".to_string()]
-        );
+        assert_eq!(updated.project.folder, "evm");
+        assert_eq!(updated.project.tags, vec!["pr-readonly".to_string()]);
 
         for (idx, child_id) in child_ids.into_iter().enumerate() {
             let child = store
@@ -2321,6 +3436,7 @@ mod subtree_move_tests {
                 .unwrap()
                 .expect("child exists");
             assert_eq!(child.project.project.as_deref(), Some("verity-core"));
+            assert_eq!(child.project.folder, "");
             assert!(
                 !child
                     .project
@@ -2482,15 +3598,8 @@ mod subtree_move_tests {
             Path(root.id),
             Json(UpdateMissionProjectRequest {
                 project: Some(Some("Ethereum".into())),
-                track: None,
-                intent: None,
-                github_pr: None,
-                writer: None,
-                tags: None,
-                desired_state: None,
-                next_check_at: None,
                 include_descendants: true,
-                descendant_ids: Vec::new(),
+                ..Default::default()
             }),
         )
         .await
@@ -2700,5 +3809,965 @@ mod subtree_move_tests {
         assert!(object.contains_key("status"));
         assert!(object.contains_key("first_viewed_at"));
         assert!(!object.contains_key("history"));
+    }
+
+    #[tokio::test]
+    async fn move_missions_intra_project_batch_bumps_revision_preserves_recency_and_clears_child_folder(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, store, user) = build_subtree_test_env(&dir).await;
+        let control = control_for_user(&state, &user).await;
+        let mut events_rx = control.events_tx.subscribe();
+
+        let root = store
+            .create_mission(
+                Some("root-conv"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        let child = store
+            .create_mission_with_parent(
+                Some("worker"),
+                None,
+                None,
+                None,
+                None,
+                false,
+                Some("opencode"),
+                None,
+                Some(root.id),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                root.id,
+                MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    folder: Some("research".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                child.id,
+                MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let before_root = store.get_mission_metadata(root.id).await.unwrap().unwrap();
+        let resp = move_missions(
+            State(state.clone()),
+            Extension(user.clone()),
+            Json(MoveMissionsRequest {
+                mission_ids: vec![root.id],
+                project: Some(Some("assistant".into())),
+                folder: "/audits/2026/".into(),
+                approval_policy: ApprovalTransferPolicy::Check,
+                client_op_id: Some(77),
+                client_id: Some("  client-a  ".into()),
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: MoveMissionsResponse = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 64)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body.client_op_id, Some(77));
+        assert_eq!(body.client_id.as_deref(), Some("client-a"));
+        let root_item = body
+            .moved
+            .iter()
+            .find(|i| i.mission_id == root.id)
+            .expect("root placement item");
+        assert_eq!(root_item.project.as_deref(), Some("assistant"));
+        assert_eq!(root_item.folder, "audits/2026");
+        assert_eq!(
+            root_item.placement_revision,
+            before_root.project.placement_revision + 1
+        );
+
+        let after_root = store.get_mission_metadata(root.id).await.unwrap().unwrap();
+        assert_eq!(after_root.updated_at, before_root.updated_at);
+        assert_eq!(after_root.project.folder, "audits/2026");
+
+        let after_child = store.get_mission_metadata(child.id).await.unwrap().unwrap();
+        assert_eq!(after_child.project.folder, "");
+
+        let mut saw_placement_event = false;
+        while let Ok(ev) = events_rx.try_recv() {
+            if let AgentEvent::MissionPlacementChanged {
+                moves,
+                client_op_id,
+                client_id,
+            } = ev
+            {
+                saw_placement_event = true;
+                assert_eq!(client_op_id, Some(77));
+                assert_eq!(client_id.as_deref(), Some("client-a"));
+                assert!(moves
+                    .iter()
+                    .any(|m| m.mission_id == root.id && m.folder == "audits/2026"));
+            }
+        }
+        assert!(
+            saw_placement_event,
+            "MissionPlacementChanged must broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn move_missions_cross_project_transfers_full_family_closure_including_archived_root_forks_and_btw(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, store, user) = build_subtree_test_env(&dir).await;
+
+        // Reproduce the exact `9f559751` ("turbo-lean improvements") topology:
+        // archived root + active fork leader + worker + `/btw` side session + `btw-subagent`.
+        let root = store
+            .create_mission(
+                Some("turbo-lean improvements"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(root.id, MissionStatus::Acknowledged)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                root.id,
+                MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    folder: Some("old-folder".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let fork = store
+            .create_mission_with_parent(
+                Some("turbo-lean improvements"),
+                None,
+                None,
+                None,
+                None,
+                false,
+                Some("opencode"),
+                None,
+                Some(root.id),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                fork.id,
+                MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    folder: Some("old-folder".into()),
+                    tags: Some(vec![format!("fork-of:{}", root.id)]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let worker = store
+            .create_mission_with_parent(
+                Some("worker-on-archived-root"),
+                None,
+                None,
+                None,
+                None,
+                false,
+                Some("opencode"),
+                None,
+                Some(root.id),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(worker.id, MissionStatus::Completed)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                worker.id,
+                MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let btw = store
+            .create_mission(
+                Some("Side question"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(btw.id, MissionStatus::Completed)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                btw.id,
+                MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    tags: Some(vec![format!("btw-parent:{}", fork.id)]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let btw_worker = store
+            .create_mission_with_parent(
+                Some("btw-worker"),
+                None,
+                None,
+                None,
+                None,
+                false,
+                Some("opencode"),
+                None,
+                Some(btw.id),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(btw_worker.id, MissionStatus::Completed)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                btw_worker.id,
+                MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    tags: Some(vec!["btw-subagent".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Select the visible fork leader (`fork.id`) and move to `verity-core` / `lean`.
+        let resp = move_missions(
+            State(state.clone()),
+            Extension(user.clone()),
+            Json(MoveMissionsRequest {
+                mission_ids: vec![fork.id],
+                project: Some(Some("verity-core".into())),
+                folder: "lean".into(),
+                approval_policy: ApprovalTransferPolicy::Check,
+                client_op_id: Some(12),
+                client_id: Some("client-cross".into()),
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        for (id, expected_folder) in [
+            (root.id, "lean"),
+            (fork.id, "lean"),
+            (worker.id, ""),
+            (btw.id, ""),
+            (btw_worker.id, ""),
+        ] {
+            let m = store.get_mission_metadata(id).await.unwrap().unwrap();
+            assert_eq!(
+                m.project.project.as_deref(),
+                Some("verity-core"),
+                "mission {id} must move out of assistant"
+            );
+            assert_eq!(m.project.folder, expected_folder, "folder mismatch on {id}");
+        }
+
+        let remaining_in_assistant = store
+            .list_missions_filtered(
+                &crate::api::mission_store::MissionFilter {
+                    project: Some("assistant".into()),
+                    ..Default::default()
+                },
+                100,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            remaining_in_assistant.is_empty(),
+            "zero ghost missions may remain in assistant: {remaining_in_assistant:?}"
+        );
+
+        // Moving to `"default"` preserves literal `Some("default")` so
+        // `GET /api/control/missions?project=default` returns every moved row!
+        let resp_default = move_missions(
+            State(state.clone()),
+            Extension(user.clone()),
+            Json(MoveMissionsRequest {
+                mission_ids: vec![fork.id],
+                project: Some(Some("default".into())),
+                folder: "".into(),
+                approval_policy: ApprovalTransferPolicy::Check,
+                client_op_id: Some(13),
+                client_id: None,
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(resp_default.status(), StatusCode::OK);
+        let in_default = store
+            .list_missions_filtered(
+                &crate::api::mission_store::MissionFilter {
+                    project: Some("default".into()),
+                    ..Default::default()
+                },
+                100,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            in_default.len(),
+            5,
+            "all 5 family members must be listed in project=default"
+        );
+    }
+
+    #[tokio::test]
+    async fn move_missions_cross_project_preflights_secret_approvals_and_applies_revoke_or_keep() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, store, user) = build_subtree_test_env(&dir).await;
+
+        let m = store
+            .create_mission(
+                Some("secret-holder"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(m.id, MissionStatus::AwaitingUser)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                m.id,
+                MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Issue a project-scoped MCP session on `assistant` to verify `rebind_moved_mission_sessions`.
+        let Json(issued) = crate::control_mcp::gateway::session(
+            State(state.clone()),
+            Extension(user.clone()),
+            Json(crate::control_mcp::gateway::SessionRequest {
+                role: crate::control_mcp::Role::Executor,
+                mission_id: Some(m.id),
+                project: Some("assistant".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        let token = issued["token"].as_str().unwrap().to_string();
+
+        // Seed a live grant + pending write request for `m.id` on `SecretBroker`.
+        let broker = crate::api::secret_broker::broker(&state);
+        let grant = broker
+            .seed_grant_for_test(crate::api::secret_broker::Grant {
+                id: Uuid::new_v4(),
+                mission_id: Some(m.id),
+                root_mission_id: Some(m.id),
+                requester: Some(crate::api::approval_flow::RequesterSubject::mission(m.id)),
+                requester_label: None,
+                mission_title: Some("secret-holder".into()),
+                paloma_project: Some("assistant".into()),
+                scope: crate::api::secret_broker::GrantScope::Secret {
+                    key: "PROD_API_KEY".into(),
+                },
+                created_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
+            })
+            .await;
+        let pending_write = broker
+            .seed_pending_for_test(crate::api::secret_broker::SecretRequest {
+                id: Uuid::new_v4(),
+                kind: crate::api::secret_broker::RequestKind::Write,
+                status: crate::api::secret_broker::RequestStatus::Pending,
+                owner: Some(user.id.clone()),
+                mission_id: Some(m.id),
+                root_mission_id: Some(m.id),
+                requester: Some(crate::api::approval_flow::RequesterSubject::mission(m.id)),
+                requester_label: None,
+                mission_title: Some("secret-holder".into()),
+                paloma_project: Some("assistant".into()),
+                key: Some("PROD_WRITE_TOKEN".into()),
+                project_id: Some("bw-proj".into()),
+                all_projects: false,
+                reason: "rotate token".into(),
+                note: None,
+                value_sha256: Some("abc".into()),
+                encrypted_value: None,
+                target_project_id: None,
+                created_at: chrono::Utc::now(),
+                resolved_at: None,
+                error: None,
+            })
+            .await;
+
+        // 1. Default `check` policy returns 409 without mutating the mission.
+        let r_check = move_missions(
+            State(state.clone()),
+            Extension(user.clone()),
+            Json(MoveMissionsRequest {
+                mission_ids: vec![m.id],
+                project: Some(Some("verity-core".into())),
+                folder: "ops".into(),
+                approval_policy: ApprovalTransferPolicy::Check,
+                client_op_id: Some(1),
+                client_id: None,
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(r_check.status(), StatusCode::CONFLICT);
+        let err_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(r_check.into_body(), 1024 * 64)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(err_json["code"], "approval_transfer_confirmation_required");
+        assert!(!err_json["grants"].as_array().unwrap().is_empty());
+        assert!(!err_json["pending_requests"].as_array().unwrap().is_empty());
+        assert_eq!(
+            store
+                .get_mission_metadata(m.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .project
+                .project
+                .as_deref(),
+            Some("assistant")
+        );
+
+        // 2. Retry with `keep`: rebinds `paloma_project` AND `mcp_sessions_v1.project_scope`.
+        let r_keep = move_missions(
+            State(state.clone()),
+            Extension(user.clone()),
+            Json(MoveMissionsRequest {
+                mission_ids: vec![m.id],
+                project: Some(Some("verity-core".into())),
+                folder: "ops".into(),
+                approval_policy: ApprovalTransferPolicy::Keep,
+                client_op_id: Some(2),
+                client_id: None,
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(r_keep.status(), StatusCode::OK);
+        let verified_principal =
+            crate::control_mcp::gateway::verify(&state, &token).expect("session stays valid");
+        assert_eq!(verified_principal.project.as_deref(), Some("verity-core"));
+        let (grants_after_keep, pending_after_keep) = broker
+            .inspect_mission_transfer(&HashSet::from([m.id]))
+            .await;
+        assert_eq!(grants_after_keep.len(), 1);
+        assert_eq!(
+            grants_after_keep[0].paloma_project.as_deref(),
+            Some("verity-core")
+        );
+        assert_eq!(pending_after_keep.len(), 1);
+        assert_eq!(pending_after_keep[0]["paloma_project"], "verity-core");
+
+        // 3. Move back to `assistant` with `revoke`: revokes grant and denies pending write.
+        let r_revoke = move_missions(
+            State(state.clone()),
+            Extension(user.clone()),
+            Json(MoveMissionsRequest {
+                mission_ids: vec![m.id],
+                project: Some(Some("assistant".into())),
+                folder: "".into(),
+                approval_policy: ApprovalTransferPolicy::Revoke,
+                client_op_id: Some(3),
+                client_id: None,
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(r_revoke.status(), StatusCode::OK);
+        let (grants_after_revoke, pending_after_revoke) = broker
+            .inspect_mission_transfer(&HashSet::from([m.id]))
+            .await;
+        assert!(grants_after_revoke.is_empty());
+        assert!(pending_after_revoke.is_empty());
+
+        // 4. Move `assistant -> None -> verity-core`: project-scoped session fails closed
+        // while unassigned (never escalates to unscoped) and rebinds to `verity-core` afterwards.
+        let r_unassign = move_missions(
+            State(state.clone()),
+            Extension(user.clone()),
+            Json(MoveMissionsRequest {
+                mission_ids: vec![m.id],
+                project: Some(None),
+                folder: "".into(),
+                approval_policy: ApprovalTransferPolicy::Check,
+                client_op_id: Some(4),
+                client_id: None,
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(r_unassign.status(), StatusCode::OK);
+        assert!(
+            crate::control_mcp::gateway::verify(&state, &token).is_err(),
+            "project-scoped session must not become unscoped when mission moves to None"
+        );
+
+        let r_rebind = move_missions(
+            State(state.clone()),
+            Extension(user.clone()),
+            Json(MoveMissionsRequest {
+                mission_ids: vec![m.id],
+                project: Some(Some("verity-core".into())),
+                folder: "".into(),
+                approval_policy: ApprovalTransferPolicy::Check,
+                client_op_id: Some(5),
+                client_id: None,
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(r_rebind.status(), StatusCode::OK);
+        let rebound = crate::control_mcp::gateway::verify(&state, &token)
+            .expect("session rebinds after None -> verity-core");
+        assert_eq!(rebound.project.as_deref(), Some("verity-core"));
+        let _ = (grant, pending_write);
+    }
+
+    #[tokio::test]
+    async fn project_folder_rename_cascades_mission_and_cron_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, store, user) = build_subtree_test_env(&dir).await;
+        let control = control_for_user(&state, &user).await;
+        let mut events_rx = control.events_tx.subscribe();
+
+        let files_root = state
+            .config
+            .working_dir
+            .join(".sandboxed-sh/project-files/assistant");
+        let ctx_store = crate::project_context::Store::new(
+            files_root,
+            state
+                .config
+                .working_dir
+                .join(".sandboxed-sh/project-context-state/assistant"),
+        );
+        for p in ["audits", "audits/sub", "reviews"] {
+            let receipt = ctx_store
+                .apply(crate::project_context::Operation {
+                    id: Uuid::new_v4().to_string(),
+                    path: p.into(),
+                    base: None,
+                    hash: None,
+                    directory: true,
+                    delete: false,
+                    source: "test".into(),
+                    confirmed_large: false,
+                })
+                .unwrap();
+            assert!(!receipt.conflict);
+        }
+        let hash = ctx_store.put_blob(b"hi").unwrap();
+        let file_receipt = ctx_store
+            .apply(crate::project_context::Operation {
+                id: Uuid::new_v4().to_string(),
+                path: "audits/sub/readme.md".into(),
+                base: None,
+                hash: Some(hash),
+                directory: false,
+                delete: false,
+                source: "test".into(),
+                confirmed_large: false,
+            })
+            .unwrap();
+        assert!(!file_receipt.conflict);
+
+        let m_exact = store
+            .create_mission(
+                Some("m-exact"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        let m_nested = store
+            .create_mission(
+                Some("m-nested"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        let m_other = store
+            .create_mission(
+                Some("m-other"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        for (id, folder) in [
+            (m_exact.id, "audits"),
+            (m_nested.id, "audits/sub"),
+            (m_other.id, "audits2"),
+        ] {
+            store
+                .update_mission_project(
+                    id,
+                    MissionProjectPatch {
+                        project: Some(Some("assistant".into())),
+                        folder: Some(folder.into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        state
+            .projects
+            .bind_project_cron_in_folder("assistant", "cron-daily-audit", "audits/sub")
+            .unwrap();
+
+        let Json(resp) = crate::api::project_files::transfer_file(
+            State(state.clone()),
+            Some(axum::Extension(user.clone())),
+            axum::extract::Path("assistant".to_string()),
+            Json(crate::api::project_files::TransferFileRequest {
+                path: "audits".into(),
+                destination: "reviews/2026".into(),
+                copy: false,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["moved_crons"], serde_json::json!(1));
+        assert_eq!(resp["moved_missions"].as_array().unwrap().len(), 2);
+
+        assert_eq!(
+            store
+                .get_mission_metadata(m_exact.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .project
+                .folder,
+            "reviews/2026"
+        );
+        assert_eq!(
+            store
+                .get_mission_metadata(m_nested.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .project
+                .folder,
+            "reviews/2026/sub"
+        );
+        assert_eq!(
+            store
+                .get_mission_metadata(m_other.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .project
+                .folder,
+            "audits2"
+        );
+        assert_eq!(
+            state
+                .projects
+                .project_cron_folder("assistant", "cron-daily-audit")
+                .unwrap(),
+            "reviews/2026/sub"
+        );
+
+        let mut broadcast_ids = HashSet::new();
+        while let Ok(ev) = events_rx.try_recv() {
+            if let AgentEvent::MissionPlacementChanged { moves, .. } = ev {
+                for item in moves {
+                    broadcast_ids.insert(item.mission_id);
+                }
+            }
+        }
+        assert!(broadcast_ids.contains(&m_exact.id));
+        assert!(broadcast_ids.contains(&m_nested.id));
+        assert!(!broadcast_ids.contains(&m_other.id));
+
+        // Chained rename (`reviews/2026 -> archive/2026`) keeps filesystem + cron + mission folders aligned under the per-project lock.
+        for p in ["archive", "broken"] {
+            let receipt = ctx_store
+                .apply(crate::project_context::Operation {
+                    id: Uuid::new_v4().to_string(),
+                    path: p.into(),
+                    base: None,
+                    hash: None,
+                    directory: true,
+                    delete: false,
+                    source: "test".into(),
+                    confirmed_large: false,
+                })
+                .unwrap();
+            assert!(!receipt.conflict);
+        }
+        let Json(resp2) = crate::api::project_files::transfer_file(
+            State(state.clone()),
+            Some(axum::Extension(user.clone())),
+            axum::extract::Path("assistant".to_string()),
+            Json(crate::api::project_files::TransferFileRequest {
+                path: "reviews/2026".into(),
+                destination: "archive/2026".into(),
+                copy: false,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp2["moved_crons"], serde_json::json!(1));
+        assert_eq!(resp2["moved_missions"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            store
+                .get_mission_metadata(m_nested.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .project
+                .folder,
+            "archive/2026/sub"
+        );
+
+        // If `cascade_rename_folder` fails in SQLite, `transfer_file` rolls back BOTH `moved_crons`
+        // and the context folder rename — without touching pre-existing cron-only virtual folders
+        // at the destination — and propagates `500 Internal Server Error` instead of returning `200`.
+        state
+            .projects
+            .bind_project_cron_in_folder("assistant", "cron-broken-exact", "broken/2026")
+            .unwrap();
+        state
+            .projects
+            .bind_project_cron_in_folder(
+                "assistant",
+                "cron-broken-existing",
+                "broken/2026/existing",
+            )
+            .unwrap();
+        {
+            let mission_db =
+                rusqlite::Connection::open(dir.path().join("missions/missions-subtree-test.db"))
+                    .unwrap();
+            mission_db
+                .execute_batch(
+                    "CREATE TRIGGER abort_mission_cascade BEFORE UPDATE ON missions
+                     BEGIN SELECT RAISE(ABORT, 'simulated mission cascade failure'); END;",
+                )
+                .unwrap();
+        }
+        let (err_status, err_msg) = crate::api::project_files::transfer_file(
+            State(state.clone()),
+            Some(axum::Extension(user.clone())),
+            axum::extract::Path("assistant".to_string()),
+            Json(crate::api::project_files::TransferFileRequest {
+                path: "archive/2026".into(),
+                destination: "broken/2026".into(),
+                copy: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            err_msg.contains("rolled back"),
+            "unexpected error: {err_msg}"
+        );
+        let rolled_back_manifest = ctx_store.manifest().unwrap();
+        assert!(rolled_back_manifest
+            .entries
+            .contains_key("archive/2026/sub/readme.md"));
+        assert!(!rolled_back_manifest.entries.contains_key("broken/2026"));
+        assert_eq!(
+            state
+                .projects
+                .project_cron_folder("assistant", "cron-daily-audit")
+                .unwrap(),
+            "archive/2026/sub"
+        );
+        assert_eq!(
+            state
+                .projects
+                .project_cron_folder("assistant", "cron-broken-exact")
+                .unwrap(),
+            "broken/2026"
+        );
+        assert_eq!(
+            state
+                .projects
+                .project_cron_folder("assistant", "cron-broken-existing")
+                .unwrap(),
+            "broken/2026/existing"
+        );
+    }
+
+    #[tokio::test]
+    async fn move_missions_propagates_subtree_receipt_cleanup_failure_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, store, user) = build_subtree_test_env(&dir).await;
+        let m = store
+            .create_mission(
+                Some("receipt-cleanup-guard"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                m.id,
+                crate::api::mission_store::MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    folder: Some("orig".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let broker = crate::api::secret_broker::broker(&state);
+        broker
+            .seed_grant_for_test(crate::api::secret_broker::Grant {
+                id: Uuid::new_v4(),
+                mission_id: Some(m.id),
+                root_mission_id: Some(m.id),
+                requester: Some(crate::api::approval_flow::RequesterSubject::mission(m.id)),
+                requester_label: None,
+                mission_title: Some("receipt-cleanup-guard".into()),
+                paloma_project: Some("assistant".into()),
+                scope: crate::api::secret_broker::GrantScope::Secret {
+                    key: "OPENAI_API_KEY".into(),
+                },
+                created_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
+            })
+            .await;
+
+        {
+            let conn = state.projects.connection.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER abort_subtree_receipt_delete BEFORE DELETE ON subtree_project_edits
+                 BEGIN SELECT RAISE(ABORT, 'simulated receipt cleanup failure'); END;",
+            )
+            .unwrap();
+        }
+
+        let failed_move = move_missions(
+            State(state.clone()),
+            Extension(user.clone()),
+            Json(MoveMissionsRequest {
+                mission_ids: vec![m.id],
+                project: Some(Some("verity-core".into())),
+                folder: "dest".into(),
+                approval_policy: ApprovalTransferPolicy::Revoke,
+                client_op_id: Some(11),
+                client_id: None,
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(failed_move.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Secret grant was NOT revoked because cleanup failed before post-commit side effects.
+        let (grants_after_fail, _) = broker
+            .inspect_mission_transfer(&HashSet::from([m.id]))
+            .await;
+        assert_eq!(grants_after_fail.len(), 1);
+        assert_eq!(
+            grants_after_fail[0].paloma_project.as_deref(),
+            Some("assistant")
+        );
+
+        // Once the transient DB error clears, recovery rolls back the uncommitted transfer cleanly.
+        {
+            let conn = state.projects.connection.lock().unwrap();
+            conn.execute_batch("DROP TRIGGER abort_subtree_receipt_delete;")
+                .unwrap();
+        }
+        recover_subtree_project_edits_in_store(&state, &store)
+            .await
+            .unwrap();
+        let recovered = store.get_mission_metadata(m.id).await.unwrap().unwrap();
+        assert_eq!(recovered.project.project.as_deref(), Some("assistant"));
+        assert_eq!(recovered.project.folder, "orig");
+        assert!(state.projects.subtree_project_edits().unwrap().is_empty());
     }
 }

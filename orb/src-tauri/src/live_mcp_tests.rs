@@ -76,6 +76,7 @@ fn live_native_mcp_roundtrip() {
                 key: uuid::Uuid::new_v4().to_string(),
                 title: format!("Orb MCP live validation: {harness}"),
                 project: "unified-mcp-validation".into(),
+                folder: String::new(),
                 prompt,
                 tags: vec![],
             },

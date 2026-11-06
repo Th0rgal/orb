@@ -130,7 +130,8 @@ it("keeps an open mission only at its moved destination across delayed lists and
   const gate = new Promise<void>(r=>release=r);
   const done = moveOptimistically(missionMoveKey(mission.id), {kind:'mission',fromProject:'verity',toProject:'other',path:''}, async()=>{
     await gate;
-    window.dispatchEvent(new CustomEvent('orb:mission-moved',{detail:{id:mission.id,project:'other',tags:[]}}));
+    const { applyServerPlacementEvent } = await import('../src/missionMove');
+    applyServerPlacementEvent([{ mission_id: mission.id, project: 'other', folder: '', placement_revision: 2 }]);
   });
   await waitFor(()=>expect(view.getAllByRole('button',{name:'Open plan',exact:true})).toHaveLength(1));
   release(); await done;

@@ -2525,16 +2525,8 @@ async fn cleanup_stale_active_missions_once_skips_hermes_tagged_writer() {
         .update_mission_project(
             mission.id,
             mission_store::MissionProjectPatch {
-                preserve_updated_at: false,
-                tag_patch: None,
-                title: None,
-                project: None,
-                track: None,
-                intent: None,
-                github_pr: None,
                 tags: Some(vec!["origin:hermes-assistant".to_string()]),
-                desired_state: None,
-                next_check_at: None,
+                ..Default::default()
             },
         )
         .await
@@ -2581,16 +2573,8 @@ async fn cleanup_stale_active_missions_once_skips_client_placed_mission() {
         .update_mission_project(
             mission.id,
             mission_store::MissionProjectPatch {
-                preserve_updated_at: false,
-                tag_patch: None,
-                title: None,
-                project: None,
-                track: None,
-                intent: None,
-                github_pr: None,
                 tags: Some(vec!["placement:client".to_string()]),
-                desired_state: None,
-                next_check_at: None,
+                ..Default::default()
             },
         )
         .await
