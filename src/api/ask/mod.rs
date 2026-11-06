@@ -145,6 +145,74 @@ fn register_live_sandbox(sandbox: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+enum SandboxCleanupTarget {
+    Local {
+        exec: Box<WorkspaceExec>,
+        base_work_dir: PathBuf,
+    },
+    Remote(RemoteAskTarget),
+}
+
+pub struct SandboxCleanupGuard {
+    path: PathBuf,
+    target: Option<SandboxCleanupTarget>,
+}
+
+impl SandboxCleanupGuard {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub async fn cleanup(mut self) {
+        if let Some(task) = self.start_cleanup() {
+            let _ = task.await;
+        }
+    }
+
+    fn start_cleanup(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let target = self.target.take()?;
+        let path = self.path.clone();
+        let release = SandboxReleaseGuard(path.clone());
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => Some(runtime.spawn(async move {
+                let _release = release;
+                let cleanup = async {
+                    match target {
+                        SandboxCleanupTarget::Local {
+                            exec,
+                            base_work_dir,
+                        } => {
+                            cleanup_sandbox(&exec, &base_work_dir, &path).await;
+                        }
+                        SandboxCleanupTarget::Remote(target) => {
+                            cleanup_remote_sandbox(&target, &path.to_string_lossy()).await;
+                        }
+                    }
+                };
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(120), cleanup).await;
+            })),
+            Err(_) => {
+                drop(release);
+                None
+            }
+        }
+    }
+}
+
+impl Drop for SandboxCleanupGuard {
+    fn drop(&mut self) {
+        self.start_cleanup();
+    }
+}
+
+struct SandboxReleaseGuard(PathBuf);
+
+impl Drop for SandboxReleaseGuard {
+    fn drop(&mut self) {
+        release_live_sandbox(&self.0);
+    }
+}
+
 fn release_live_sandbox(sandbox: &Path) {
     let guard = live_sandboxes()
         .lock()
@@ -1653,8 +1721,34 @@ pub async fn exec_remote_ask_command(
 
 /// Prepare an isolated sandbox directory (`/tmp/ask-sandbox-<uuid>`) on a
 /// remote `orb-node` for `sandbox: true` Ask turns.
-pub async fn prepare_remote_sandbox(target: &RemoteAskTarget) -> Option<String> {
+pub async fn prepare_remote_sandbox(target: &RemoteAskTarget) -> Option<SandboxCleanupGuard> {
+    let target = target.clone();
+    tokio::spawn(async move { prepare_remote_sandbox_inner(&target).await })
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn prepare_remote_sandbox_inner(target: &RemoteAskTarget) -> Option<SandboxCleanupGuard> {
+    initialize_sandbox_gc().await;
     let sandbox_dir = format!("/tmp/ask-sandbox-{}", Uuid::new_v4());
+    let sandbox_for_lock = PathBuf::from(&sandbox_dir);
+    let lock_res = tokio::task::spawn_blocking(move || register_live_sandbox(&sandbox_for_lock))
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))
+        .and_then(|r| r);
+    if let Err(err) = lock_res {
+        tracing::warn!(
+            sandbox = %sandbox_dir,
+            %err,
+            "Failed to acquire cross-process lock for remote Ask sandbox"
+        );
+        return None;
+    }
+    let guard = SandboxCleanupGuard {
+        path: PathBuf::from(&sandbox_dir),
+        target: Some(SandboxCleanupTarget::Remote(target.clone())),
+    };
     let script = format!(
         "set -e; s={s}; rm -rf \"$s\"; \
          if git rev-parse --git-dir >/dev/null 2>&1; then \
@@ -1670,9 +1764,9 @@ pub async fn prepare_remote_sandbox(target: &RemoteAskTarget) -> Option<String> 
         s = single_quote(&sandbox_dir),
     );
     match exec_remote_ask_command(target, &script).await {
-        Ok((0, stdout, _)) if stdout.contains("SANDBOX_OK") => Some(sandbox_dir),
+        Ok((0, stdout, _)) if stdout.contains("SANDBOX_OK") => Some(guard),
         _ => {
-            cleanup_remote_sandbox(target, &sandbox_dir).await;
+            guard.cleanup().await;
             None
         }
     }
@@ -1686,6 +1780,8 @@ pub async fn cleanup_remote_sandbox(base_target: &RemoteAskTarget, sandbox_dir: 
         s = single_quote(sandbox_dir),
     );
     let _ = exec_remote_ask_command(base_target, &cmd).await;
+    let sandbox_owned = PathBuf::from(sandbox_dir);
+    let _ = tokio::task::spawn_blocking(move || release_live_sandbox(&sandbox_owned)).await;
 }
 
 async fn run_turn_command_raw(
@@ -1897,7 +1993,22 @@ pub async fn prepend_pending_operator_notes(
 /// deliberately do NOT `cp -a` a possibly-huge non-git tree). The caller treats
 /// `None` for an explicit sandbox request as an error rather than silently
 /// running against the live tree.
-pub async fn prepare_sandbox(exec: &WorkspaceExec, base_work_dir: &Path) -> Option<PathBuf> {
+pub async fn prepare_sandbox(
+    exec: &WorkspaceExec,
+    base_work_dir: &Path,
+) -> Option<SandboxCleanupGuard> {
+    let exec = exec.clone();
+    let base_work_dir = base_work_dir.to_path_buf();
+    tokio::spawn(async move { prepare_sandbox_inner(&exec, &base_work_dir).await })
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn prepare_sandbox_inner(
+    exec: &WorkspaceExec,
+    base_work_dir: &Path,
+) -> Option<SandboxCleanupGuard> {
     initialize_sandbox_gc().await;
     let sandbox_guest = PathBuf::from(format!("/tmp/ask-sandbox-{}", Uuid::new_v4()));
     let sandbox_host = sandbox_host_path(exec, &sandbox_guest);
@@ -1914,6 +2025,13 @@ pub async fn prepare_sandbox(exec: &WorkspaceExec, base_work_dir: &Path) -> Opti
         );
         return None;
     }
+    let guard = SandboxCleanupGuard {
+        path: sandbox_host.clone(),
+        target: Some(SandboxCleanupTarget::Local {
+            exec: Box::new(exec.clone()),
+            base_work_dir: base_work_dir.to_path_buf(),
+        }),
+    };
     // Shell snippets execute in the workspace context. For nspawn workspaces,
     // interpolating host paths here makes both `git -C` and `test -d` point at
     // paths that do not exist in the guest, so every sandbox request fails.
@@ -1950,7 +2068,7 @@ pub async fn prepare_sandbox(exec: &WorkspaceExec, base_work_dir: &Path) -> Opti
                 if out.status.success()
                     && String::from_utf8_lossy(&out.stdout).contains("SANDBOX_OK") =>
             {
-                Some(sandbox_host)
+                Some(guard)
             }
             Ok(out) => {
                 log_sandbox_command_failure("copy", &out);
@@ -1960,12 +2078,12 @@ pub async fn prepare_sandbox(exec: &WorkspaceExec, base_work_dir: &Path) -> Opti
                 // collect — the caller only tears down sandboxes it was
                 // handed. That turns one failed Ask into permanently lost
                 // scratch space, which makes the next Ask likelier to fail.
-                cleanup_sandbox(exec, base_work_dir, &sandbox_host).await;
+                guard.cleanup().await;
                 None
             }
             Err(error) => {
                 tracing::warn!(stage = "copy", %error, "Ask sandbox command failed to start");
-                cleanup_sandbox(exec, base_work_dir, &sandbox_host).await;
+                guard.cleanup().await;
                 None
             }
         };
@@ -1987,16 +2105,16 @@ pub async fn prepare_sandbox(exec: &WorkspaceExec, base_work_dir: &Path) -> Opti
             if out.status.success()
                 && String::from_utf8_lossy(&out.stdout).contains("SANDBOX_OK") =>
         {
-            Some(sandbox_host)
+            Some(guard)
         }
         Ok(out) => {
             log_sandbox_command_failure("git-worktree", &out);
-            cleanup_sandbox(exec, base_work_dir, &sandbox_host).await;
+            guard.cleanup().await;
             None
         }
         Err(error) => {
             tracing::warn!(stage = "git-worktree", %error, "Ask sandbox command failed to start");
-            cleanup_sandbox(exec, base_work_dir, &sandbox_host).await;
+            guard.cleanup().await;
             None
         }
     }
@@ -2232,6 +2350,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_remote_setup_keeps_lock_until_cleanup() {
+        use crate::remote_node::{ExecuteResponse, LeaseRequest, RemoteNodeConfig};
+        use axum::{routing::post, Json, Router};
+
+        let root = tempfile::tempdir().unwrap();
+        let (created_tx, mut created_rx) = tokio::sync::mpsc::channel(1);
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let handler_resume = Arc::clone(&resume);
+        let app = Router::new().route(
+            "/execute",
+            post(move |Json(req): Json<LeaseRequest>| {
+                let created_tx = created_tx.clone();
+                let resume = Arc::clone(&handler_resume);
+                async move {
+                    let out = tokio::process::Command::new("/bin/bash")
+                        .arg("-lc")
+                        .arg(&req.command)
+                        .output()
+                        .await
+                        .unwrap();
+                    if req.command.contains("SANDBOX_OK") {
+                        let path = req
+                            .command
+                            .split("s='")
+                            .nth(1)
+                            .unwrap()
+                            .split('\'')
+                            .next()
+                            .unwrap();
+                        created_tx.send(PathBuf::from(path)).await.unwrap();
+                        resume.notified().await;
+                    }
+                    Json(ExecuteResponse {
+                        accepted: true,
+                        exit_code: out.status.code(),
+                        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let target = RemoteAskTarget {
+            node: RemoteNodeConfig {
+                id: "ask-test".into(),
+                base_url: format!("http://{address}"),
+                token_env: "ASK_TEST_TOKEN".into(),
+                labels: None,
+            },
+            secret: "test-secret".into(),
+            workspace_mission_id: Uuid::new_v4(),
+            cwd_override: Some(root.path().to_string_lossy().into_owned()),
+            display_cwd: root.path().to_string_lossy().into_owned(),
+            live: false,
+        };
+        let request = tokio::spawn(async move { prepare_remote_sandbox(&target).await });
+        let path = tokio::time::timeout(std::time::Duration::from_secs(10), created_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        request.abort();
+        let _ = request.await;
+        assert!(path.exists());
+        assert!(acquire_sandbox_lock(&path).is_err());
+        gc_stale_sandboxes_with_observer(Path::new("/tmp"), &HashSet::new(), |_| {});
+        assert!(path.exists());
+        resume.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if !path.exists()
+                    && !sandbox_lock_path(&path).exists()
+                    && !live_sandboxes().lock().unwrap().contains_key(&path)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn dropped_sandbox_guard_cleans_directory_and_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let exec = WorkspaceExec::new(crate::workspace::Workspace::default_host(
+            root.path().into(),
+        ));
+        let guard = prepare_sandbox(&exec, root.path()).await.unwrap();
+        let path = guard.path().to_path_buf();
+        assert!(path.exists());
+        assert!(sandbox_lock_path(&path).exists());
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if !path.exists()
+                    && !sandbox_lock_path(&path).exists()
+                    && !live_sandboxes().lock().unwrap().contains_key(&path)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn startup_gc_removes_stale_ask_sandboxes_only() {
         let root = tempfile::tempdir().unwrap();
         let stale = root.path().join("ask-sandbox-stale");
@@ -2323,6 +2555,151 @@ mod tests {
         gc_stale_sandboxes(root.path()).await;
         assert!(!remote_live.exists());
         assert!(!external_lock_path.exists());
+    }
+
+    #[tokio::test]
+    async fn remote_sandbox_holds_host_lock_against_colocated_gc_and_cleans_up_on_drop() {
+        let work_root = tempfile::tempdir().unwrap();
+        let src_file = work_root.path().join("hello.txt");
+        tokio::fs::write(&src_file, "remote-sandbox-ok")
+            .await
+            .unwrap();
+        let work_dir = work_root.path().to_path_buf();
+
+        let execute_router = axum::Router::new().route(
+            "/execute",
+            axum::routing::post(
+                move |axum::Json(req): axum::Json<crate::remote_node::LeaseRequest>| {
+                    let work_dir = work_dir.clone();
+                    async move {
+                        let out = tokio::process::Command::new("/bin/bash")
+                            .arg("-lc")
+                            .arg(&req.command)
+                            .current_dir(&work_dir)
+                            .output()
+                            .await
+                            .unwrap();
+                        axum::Json(crate::remote_node::ExecuteResponse {
+                            accepted: true,
+                            exit_code: Some(out.status.code().unwrap_or(-1)),
+                            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                        })
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, execute_router).await;
+        });
+
+        let target = RemoteAskTarget {
+            node: crate::remote_node::RemoteNodeConfig {
+                id: "colocated-node".into(),
+                base_url: format!("http://{addr}"),
+                token_env: "TEST_TOKEN".into(),
+                labels: None,
+            },
+            secret: "test-secret".into(),
+            workspace_mission_id: Uuid::new_v4(),
+            cwd_override: None,
+            display_cwd: work_root.path().display().to_string(),
+            live: true,
+        };
+
+        let guard = prepare_remote_sandbox(&target)
+            .await
+            .expect("remote sandbox should be prepared");
+        let sandbox_path = guard.path().to_path_buf();
+        let lock_path = sandbox_lock_path(&sandbox_path);
+
+        assert!(sandbox_path.join("hello.txt").exists());
+        assert!(lock_path.exists());
+        assert!(live_sandboxes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&sandbox_path));
+
+        // Simulate a co-located second Core process scanning `/tmp` without
+        // sharing this process's in-memory `LIVE_SANDBOXES` map.
+        let empty_other_proc_live = HashSet::new();
+        gc_stale_sandboxes_with_observer(Path::new("/tmp"), &empty_other_proc_live, |_| {});
+        assert!(
+            sandbox_path.join("hello.txt").exists(),
+            "cross-process flock must protect live co-located remote sandbox from GC"
+        );
+        assert!(lock_path.exists());
+
+        // Simulate request drop / SSE disconnect without explicit `.cleanup().await`.
+        drop(guard);
+        for _ in 0..50 {
+            if !sandbox_path.exists()
+                && !lock_path.exists()
+                && !live_sandboxes()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(&sandbox_path)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        assert!(!sandbox_path.exists());
+        assert!(!lock_path.exists());
+        assert!(!live_sandboxes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&sandbox_path));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn local_sandbox_cleans_up_when_guard_is_dropped() {
+        let ws_root = tempfile::tempdir().unwrap();
+        tokio::fs::write(ws_root.path().join("marker.txt"), "local-ok")
+            .await
+            .unwrap();
+        let exec = WorkspaceExec::new(crate::workspace::Workspace::default_host(
+            ws_root.path().to_path_buf(),
+        ));
+
+        let guard = prepare_sandbox(&exec, ws_root.path())
+            .await
+            .expect("local sandbox should be prepared");
+        let sandbox_path = guard.path().to_path_buf();
+        let lock_path = sandbox_lock_path(&sandbox_path);
+
+        assert!(sandbox_path.join("marker.txt").exists());
+        assert!(lock_path.exists());
+        assert!(live_sandboxes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&sandbox_path));
+
+        drop(guard);
+        for _ in 0..50 {
+            if !sandbox_path.exists()
+                && !lock_path.exists()
+                && !live_sandboxes()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(&sandbox_path)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        assert!(!sandbox_path.exists());
+        assert!(!lock_path.exists());
+        assert!(!live_sandboxes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&sandbox_path));
     }
 
     #[test]

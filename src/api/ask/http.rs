@@ -315,18 +315,16 @@ pub async fn ask_send(
 
     // Optional sandbox-copy isolation: writes go to a throwaway worktree/copy.
     let setup_exec = crate::workspace_exec::WorkspaceExec::new(workspace.clone());
-    let mut remote_sandbox_dir: Option<String> = None;
-    let sandbox_dir = if req.sandbox {
+    let sandbox_guard = if req.sandbox {
         if let Some(rt) = &base_remote_target {
-            remote_sandbox_dir = super::prepare_remote_sandbox(rt).await;
-            remote_sandbox_dir.as_deref().map(std::path::PathBuf::from)
+            super::prepare_remote_sandbox(rt).await
         } else {
             super::prepare_sandbox(&setup_exec, &base_work_dir).await
         }
     } else {
         None
     };
-    if req.sandbox && sandbox_dir.is_none() {
+    if req.sandbox && sandbox_guard.is_none() {
         return Err((
             StatusCode::BAD_REQUEST,
             "sandbox_unavailable: could not create an isolated git worktree or temp-copy sandbox"
@@ -344,10 +342,8 @@ pub async fn ask_send(
                 .map_err(internal)?
                 .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
             if t.mission_id != mission_id {
-                if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
-                    super::cleanup_remote_sandbox(rt, sdir).await;
-                } else if let Some(dir) = &sandbox_dir {
-                    super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
+                if let Some(guard) = sandbox_guard {
+                    guard.cleanup().await;
                 }
                 return Err((
                     StatusCode::BAD_REQUEST,
@@ -356,29 +352,27 @@ pub async fn ask_send(
             }
             t
         }
-        None => {
-            match ask_store
-                .create_thread(mission_id, Some(cfg.model.clone()))
-                .await
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
-                        super::cleanup_remote_sandbox(rt, sdir).await;
-                    } else if let Some(dir) = &sandbox_dir {
-                        super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
-                    }
-                    return Err(internal(e));
+        None => match ask_store
+            .create_thread(mission_id, Some(cfg.model.clone()))
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                if let Some(guard) = sandbox_guard {
+                    guard.cleanup().await;
                 }
+                return Err(internal(e));
             }
-        }
+        },
     };
+    let sandbox_dir = sandbox_guard.as_ref().map(|g| g.path().to_path_buf());
     let used_sandbox = sandbox_dir.is_some();
     let work_dir = sandbox_dir.clone().unwrap_or_else(|| base_work_dir.clone());
     let turn_remote_target = base_remote_target.clone().map(|mut rt| {
-        if let Some(sdir) = &remote_sandbox_dir {
-            rt.cwd_override = Some(sdir.clone());
-            rt.display_cwd = sdir.clone();
+        if let Some(sdir) = &sandbox_dir {
+            let sdir_str = sdir.to_string_lossy().into_owned();
+            rt.cwd_override = Some(sdir_str.clone());
+            rt.display_cwd = sdir_str;
         }
         rt
     });
@@ -408,10 +402,8 @@ pub async fn ask_send(
     let answer_result = run_ask_turn(&turn, &req.content).await;
 
     // Tear down the sandbox regardless of how the turn ended.
-    if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
-        super::cleanup_remote_sandbox(rt, sdir).await;
-    } else if let Some(dir) = &sandbox_dir {
-        super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
+    if let Some(guard) = sandbox_guard {
+        guard.cleanup().await;
     }
     let answer = answer_result.map_err(internal)?;
 
@@ -492,18 +484,16 @@ pub async fn ask_send_stream(
     // Optional sandbox-copy isolation (same as the synchronous path): set up a
     // throwaway worktree, run the streamed turn in it, tear it down after.
     let setup_exec = crate::workspace_exec::WorkspaceExec::new(workspace.clone());
-    let mut remote_sandbox_dir: Option<String> = None;
-    let sandbox_dir = if req.sandbox {
+    let sandbox_guard = if req.sandbox {
         if let Some(rt) = &base_remote_target {
-            remote_sandbox_dir = super::prepare_remote_sandbox(rt).await;
-            remote_sandbox_dir.as_deref().map(std::path::PathBuf::from)
+            super::prepare_remote_sandbox(rt).await
         } else {
             super::prepare_sandbox(&setup_exec, &base_work_dir).await
         }
     } else {
         None
     };
-    if req.sandbox && sandbox_dir.is_none() {
+    if req.sandbox && sandbox_guard.is_none() {
         return Err((
             StatusCode::BAD_REQUEST,
             "sandbox_unavailable: could not create an isolated git worktree or temp-copy sandbox"
@@ -520,10 +510,8 @@ pub async fn ask_send_stream(
                 .map_err(internal)?
                 .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
             if t.mission_id != mission_id {
-                if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
-                    super::cleanup_remote_sandbox(rt, sdir).await;
-                } else if let Some(dir) = &sandbox_dir {
-                    super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
+                if let Some(guard) = sandbox_guard {
+                    guard.cleanup().await;
                 }
                 return Err((
                     StatusCode::BAD_REQUEST,
@@ -532,29 +520,27 @@ pub async fn ask_send_stream(
             }
             t
         }
-        None => {
-            match ask_store
-                .create_thread(mission_id, Some(cfg.model.clone()))
-                .await
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
-                        super::cleanup_remote_sandbox(rt, sdir).await;
-                    } else if let Some(dir) = &sandbox_dir {
-                        super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
-                    }
-                    return Err(internal(e));
+        None => match ask_store
+            .create_thread(mission_id, Some(cfg.model.clone()))
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                if let Some(guard) = sandbox_guard {
+                    guard.cleanup().await;
                 }
+                return Err(internal(e));
             }
-        }
+        },
     };
+    let sandbox_dir = sandbox_guard.as_ref().map(|g| g.path().to_path_buf());
     let used_sandbox = sandbox_dir.is_some();
     let work_dir = sandbox_dir.clone().unwrap_or_else(|| base_work_dir.clone());
     let turn_remote_target = base_remote_target.clone().map(|mut rt| {
-        if let Some(sdir) = &remote_sandbox_dir {
-            rt.cwd_override = Some(sdir.clone());
-            rt.display_cwd = sdir.clone();
+        if let Some(sdir) = &sandbox_dir {
+            let sdir_str = sdir.to_string_lossy().into_owned();
+            rt.cwd_override = Some(sdir_str.clone());
+            rt.display_cwd = sdir_str;
         }
         rt
     });
@@ -584,10 +570,10 @@ pub async fn ask_send_stream(
     let content = req.content.clone();
     let thread_id = thread.id;
     let title_store = Arc::clone(&ask_store);
-    let cleanup_base = base_work_dir.clone();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<super::AskStreamEvent>(128);
     tokio::spawn(async move {
+        let sandbox_guard = sandbox_guard;
         let ok = run_ask_turn_streaming(&turn, &content, tx).await;
         // Only title a new thread if the turn actually produced an answer
         // (matches the synchronous path, which titles after success).
@@ -596,10 +582,8 @@ pub async fn ask_send_stream(
                 .set_thread_title(thread_id, &derive_title(&content))
                 .await;
         }
-        if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
-            super::cleanup_remote_sandbox(rt, sdir).await;
-        } else if let Some(dir) = &sandbox_dir {
-            super::cleanup_sandbox(&setup_exec, &cleanup_base, dir).await;
+        if let Some(guard) = sandbox_guard {
+            guard.cleanup().await;
         }
     });
 

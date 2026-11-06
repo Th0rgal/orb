@@ -432,5 +432,45 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+        assert_eq!(store.delivery_locks_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn delivery_locks_evict_to_zero_after_concurrent_drain_and_take_across_missions() {
+        let store = temp_store().await;
+        let (events_tx, _events_rx) = broadcast::channel(64);
+        let mut handles = Vec::new();
+        for i in 0..16 {
+            let mission_id = Uuid::new_v4();
+            store
+                .enqueue_operator_note(mission_id, &format!("note-{i}-a"), None)
+                .await
+                .unwrap();
+            store
+                .enqueue_operator_note(mission_id, &format!("note-{i}-b"), None)
+                .await
+                .unwrap();
+
+            let s1 = Arc::clone(&store);
+            let tx1 = events_tx.clone();
+            handles.push(tokio::spawn(async move {
+                drain_and_inject_from_store(s1, mission_id, &tx1, |_| async move {
+                    tokio::task::yield_now().await;
+                    i % 2 == 0
+                })
+                .await;
+            }));
+
+            let s2 = Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                let _ = s2.take_pending_operator_notes(mission_id).await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(store.delivery_locks_len(), 0);
     }
 }

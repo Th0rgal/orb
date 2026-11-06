@@ -79,6 +79,21 @@ pub struct AskStore {
     delivery_locks: DashMap<Uuid, Arc<Mutex<()>>>,
 }
 
+pub struct OperatorNoteDeliveryGuard<'a> {
+    guard: Option<OwnedMutexGuard<()>>,
+    store: &'a AskStore,
+    mission_id: Uuid,
+}
+
+impl Drop for OperatorNoteDeliveryGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        self.store
+            .delivery_locks
+            .remove_if(&self.mission_id, |_, arc| Arc::strong_count(arc) == 1);
+    }
+}
+
 impl std::fmt::Debug for AskStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AskStore").finish()
@@ -240,13 +255,27 @@ impl AskStore {
         })
     }
 
-    pub async fn lock_operator_note_delivery(&self, mission_id: Uuid) -> OwnedMutexGuard<()> {
+    pub async fn lock_operator_note_delivery(
+        &self,
+        mission_id: Uuid,
+    ) -> OperatorNoteDeliveryGuard<'_> {
         let mutex = self
             .delivery_locks
             .entry(mission_id)
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
-        mutex.lock_owned().await
+        let mut guard = OperatorNoteDeliveryGuard {
+            guard: None,
+            store: self,
+            mission_id,
+        };
+        guard.guard = Some(mutex.lock_owned().await);
+        guard
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delivery_locks_len(&self) -> usize {
+        self.delivery_locks.len()
     }
 
     pub async fn inbox_digest(&self, key: &str, revision: &str) -> Result<Option<String>, String> {
@@ -776,6 +805,47 @@ mod tests {
         // Second take returns nothing — notes flush exactly once.
         let second = store.take_pending_operator_notes(mission).await.unwrap();
         assert!(second.is_empty());
+        assert_eq!(store.delivery_locks_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn delivery_locks_evict_idle_entries_after_contention() {
+        let store = Arc::new(temp_store().await);
+        for _ in 0..8 {
+            let mission = Uuid::new_v4();
+            let g1 = store.lock_operator_note_delivery(mission).await;
+            assert_eq!(store.delivery_locks_len(), 1);
+
+            let store2 = Arc::clone(&store);
+            let waiter = tokio::spawn(async move {
+                let _g2 = store2.lock_operator_note_delivery(mission).await;
+                assert_eq!(store2.delivery_locks_len(), 1);
+            });
+            tokio::task::yield_now().await;
+            drop(g1);
+            waiter.await.unwrap();
+            assert_eq!(store.delivery_locks_len(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_locks_evict_when_contending_waiter_is_cancelled() {
+        let store = Arc::new(temp_store().await);
+        let mission = Uuid::new_v4();
+        let g1 = store.lock_operator_note_delivery(mission).await;
+        assert_eq!(store.delivery_locks_len(), 1);
+
+        let store2 = Arc::clone(&store);
+        let waiter = tokio::spawn(async move {
+            let _g2 = store2.lock_operator_note_delivery(mission).await;
+        });
+        tokio::task::yield_now().await;
+        waiter.abort();
+        let _ = waiter.await;
+        assert_eq!(store.delivery_locks_len(), 1);
+
+        drop(g1);
+        assert_eq!(store.delivery_locks_len(), 0);
     }
 
     #[tokio::test]
