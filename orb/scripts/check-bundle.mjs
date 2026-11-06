@@ -1,8 +1,10 @@
 // Count the complete eager startup graph, including App after WASM initialization.
 import fs from "node:fs";
 import path from "node:path";
+import { verifyBundleBudget } from "../src/clientCore.ts";
 
 const BUDGET_KB = 1150;
+const BUDGET_BYTES = BUDGET_KB * 1024;
 const LAZY = ["katex", "mermaid", "pdfjs-dist", "cytoscape"];
 const dist = path.resolve(process.argv[2] ?? "dist");
 const manifest = JSON.parse(fs.readFileSync(path.join(dist, ".vite/manifest.json"), "utf8"));
@@ -48,7 +50,8 @@ for (const file of files) {
   if (/\bkatex-display\b/.test(code) && /renderToString/.test(code) && /KaTeX parse error/.test(code)) offenders.push(`${file}: katex`);
   if (/mermaid/i.test(name) || LAZY.some(lazy => name.startsWith(lazy))) offenders.push(file);
 }
-const kb = Math.round(bytes / 1024);
+const kb = Math.ceil(bytes / 1024);
 console.log(`startup JS: ${kb} kB in ${files.size} chunks (budget ${BUDGET_KB} kB)`);
+const admitted = verifyBundleBudget(bytes, BUDGET_BYTES, apps.length === 1, offenders.length > 0);
 if (offenders.length) { console.error(`lazy dependencies in the startup bundle: ${offenders.join(", ")}`); process.exit(1); }
-if (kb > BUDGET_KB) { console.error(`startup JS over budget by ${kb - BUDGET_KB} kB`); process.exit(1); }
+if (!admitted) { console.error(`startup JS over budget by ${bytes - BUDGET_BYTES} bytes (${Math.max(1, kb - BUDGET_KB)} kB)`); process.exit(1); }

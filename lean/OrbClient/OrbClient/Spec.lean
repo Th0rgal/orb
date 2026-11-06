@@ -186,16 +186,36 @@ def validTranscriptProjInput (inp : TranscriptProjInput) : Bool :=
   inp.counts.1 ≤ 65536 && inp.counts.2 ≤ 65536 && inp.metaFlags.1 ≤ 1 && inp.metaFlags.2 ≤ 1
 
 def stableTranscriptProj (inp : TranscriptProjInput) (out : TranscriptProjOut) : Bool :=
-  let flipped : TranscriptProjInput := { inp with metaFlags := (inp.metaFlags.1, 1 - inp.metaFlags.2) }
-  out == projectTranscript flipped && out.thinkingActive ≤ 1
+  if inp.metaFlags.2 ≤ 1 then
+    let flipped : TranscriptProjInput := { inp with metaFlags := (inp.metaFlags.1, 1 - inp.metaFlags.2) }
+    out == projectTranscript flipped &&
+      out.thinkingActive == inp.metaFlags.1 &&
+      out.thinkingActive ≤ 1 &&
+      out.visibleEntries.toNat == inp.counts.1.toNat + inp.counts.2.toNat
+  else
+    false
 
 def transcriptProjectionStability : ProjectionStability TranscriptProjInput TranscriptProjOut where
   project := projectTranscript
   validIn := validTranscriptProjInput
   stable := stableTranscriptProj
-  preserves x _h := by
+  preserves x h := by
+    rcases x with ⟨⟨c1, c2⟩, ⟨f1, f2⟩⟩
+    unfold validTranscriptProjInput at h
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at h
+    rcases h with ⟨⟨⟨hc1, hc2⟩, hf1⟩, hf2⟩
+    have hc1N : c1.toNat ≤ 65536 := UInt32.le_iff_toNat_le.mp hc1
+    have hc2N : c2.toNat ≤ 65536 := UInt32.le_iff_toNat_le.mp hc2
+    have hf1N : f1.toNat ≤ 1 := UInt8.le_iff_toNat_le.mp hf1
+    have hsum : (c1 + c2).toNat = c1.toNat + c2.toNat := by
+      rw [UInt32.toNat_add, Nat.mod_eq_of_lt]
+      omega
+    have hf1_cases : f1 = 0 ∨ f1 = 1 := by
+      rcases Nat.le_one_iff_eq_zero_or_eq_one.mp hf1N with hz | ho
+      · exact Or.inl (u8_eq_of_toNat f1 0 (by omega) hz)
+      · exact Or.inr (u8_eq_of_toNat f1 1 (by omega) ho)
     unfold stableTranscriptProj projectTranscript
-    cases h_t : x.metaFlags.1 == 1 <;> simp [h_t]
+    rcases hf1_cases with rfl | rfl <;> simp [hf2, hsum]
   posWitness := { counts := (12, 4), metaFlags := (1, 0) }
   negWitness := { counts := (90000, 4), metaFlags := (1, 0) }
   validPos := by decide
@@ -289,9 +309,15 @@ theorem bundle_budget_rejects_overbudget (eB bB : UInt64) (se hv : UInt8)
 
 /-! ### 4. Bounded `OrbWire` Client Patch Frame Parser (`TotalSliceParserSpec`, `<= 64 KiB`) -/
 
+/-- Decoded `OrbWire` client patch envelope carrying both verified `schema` (`1..255`) and `payload` (`1..65535` bytes). -/
+structure OrbClientPatchFrame where
+  schema  : UInt16
+  payload : ByteArray
+  deriving DecidableEq
+
 /-- Parse an 8-byte `OrbWire` client patch envelope:
     magic `"ORBP"` (`0x4F, 0x52, 0x42, 0x50`), 2-byte schema (`1..255`), 2-byte big-endian payload length (`1..65535`). -/
-def parseOrbClientPatch (raw : ByteArray) : Option ByteArray :=
+def parseOrbClientPatch (raw : ByteArray) : Option OrbClientPatchFrame :=
   if raw.size < 9 then none
   else if raw.get! 0 != 0x4F || raw.get! 1 != 0x52 || raw.get! 2 != 0x42 || raw.get! 3 != 0x50 then
     none
@@ -299,15 +325,14 @@ def parseOrbClientPatch (raw : ByteArray) : Option ByteArray :=
     let schema := ((raw.get! 4).toUInt16 <<< 8) ||| (raw.get! 5).toUInt16
     let payLen := (((raw.get! 6).toNat) <<< 8) ||| (raw.get! 7).toNat
     if 1 ≤ schema && schema ≤ 255 && 1 ≤ payLen && payLen ≤ 65535 && 8 + payLen == raw.size then
-      let sub := raw.extract 8 (8 + payLen)
-      if sub.size ≤ 65535 then some sub else none
+      some { schema := schema, payload := raw.extract 8 (8 + payLen) }
     else
       none
 
-def orbClientPatchParserSpec : TotalSliceParserSpec ByteArray where
+def orbClientPatchParserSpec : TotalSliceParserSpec OrbClientPatchFrame where
   maxCap := 65535
   parse := parseOrbClientPatch
-  byteLen := ByteArray.size
+  byteLen f := f.payload.size
   bounded raw out h := by
     unfold parseOrbClientPatch at h
     split at h
@@ -316,11 +341,13 @@ def orbClientPatchParserSpec : TotalSliceParserSpec ByteArray where
       · contradiction
       · dsimp at h
         split at h
-        · split at h
-          · injection h with h_eq
-            subst h_eq
-            assumption
-          · contradiction
+        · rename_i h_cond
+          simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at h_cond
+          rcases h_cond with ⟨⟨⟨⟨_, _⟩, _⟩, h_max⟩, h_len⟩
+          injection h with h_eq
+          subst h_eq
+          simp [ByteArray.size_extract, h_len]
+          omega
         · contradiction
   posRaw := ByteArray.mk #[0x4F, 0x52, 0x42, 0x50, 0x00, 0x01, 0x00, 0x02, 0x7B, 0x7D]
   negRaw := ByteArray.mk #[0x4F, 0x52, 0x42, 0x58, 0x00, 0x01, 0x00, 0x02, 0x7B, 0x7D]
@@ -328,9 +355,26 @@ def orbClientPatchParserSpec : TotalSliceParserSpec ByteArray where
   tight := by decide
 
 theorem orb_client_patch_bounded
-    (raw out : ByteArray)
+    (raw : ByteArray) (out : OrbClientPatchFrame)
     (h : parseOrbClientPatch raw = some out) :
-    out.size ≤ 65535 :=
-  orbClientPatchParserSpec.bounded raw out h
+    1 ≤ out.schema.toNat ∧ out.schema.toNat ≤ 255 ∧ 1 ≤ out.payload.size ∧ out.payload.size ≤ 65535 := by
+  unfold parseOrbClientPatch at h
+  split at h
+  · contradiction
+  · split at h
+    · contradiction
+    · dsimp at h
+      split at h
+      · rename_i h_cond
+        simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at h_cond
+        rcases h_cond with ⟨⟨⟨⟨hs1, hs2⟩, hp1⟩, hp2⟩, h_len⟩
+        have hs1N : 1 ≤ out.schema.toNat := by
+          injection h with h_eq; subst h_eq; exact UInt16.le_iff_toNat_le.mp hs1
+        have hs2N : out.schema.toNat ≤ 255 := by
+          injection h with h_eq; subst h_eq; exact UInt16.le_iff_toNat_le.mp hs2
+        injection h with h_eq
+        subst h_eq
+        refine ⟨hs1N, hs2N, ?_, ?_⟩ <;> (simp [ByteArray.size_extract, h_len]; omega)
+      · contradiction
 
 end OrbClient.Spec

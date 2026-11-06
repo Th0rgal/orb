@@ -12,6 +12,15 @@ import {
   orbKernelScratchSliceStep,
   orbWireStreamSliceStep,
 } from "./orbKernel";
+import {
+  ORB_PATCH_MAGIC_0,
+  ORB_PATCH_MAGIC_1,
+  ORB_PATCH_MAGIC_2,
+  ORB_PATCH_MAGIC_3,
+  parseOrbClientPatch,
+  stepSyncCursor,
+  type SyncCursorState,
+} from "./clientCore";
 
 export const STREAM_MAX_OPEN_TAIL_BYTES = 16_384;
 
@@ -485,14 +494,35 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
     };
 
     ws.onmessage = (msg) => {
-      if (socket !== ws || typeof msg.data !== "string") return;
+      if (socket !== ws) return;
       if (pongTimer) {
         clearTimeout(pongTimer);
         pongTimer = undefined;
       }
+      let rawText: string | null = null;
+      if (typeof msg.data === "string") {
+        rawText = msg.data;
+      } else if (msg.data instanceof ArrayBuffer || ArrayBuffer.isView(msg.data)) {
+        const bytes =
+          msg.data instanceof ArrayBuffer
+            ? new Uint8Array(msg.data)
+            : new Uint8Array(msg.data.buffer, msg.data.byteOffset, msg.data.byteLength);
+        if (
+          bytes.byteLength >= 9 &&
+          bytes[0] === ORB_PATCH_MAGIC_0 &&
+          bytes[1] === ORB_PATCH_MAGIC_1 &&
+          bytes[2] === ORB_PATCH_MAGIC_2 &&
+          bytes[3] === ORB_PATCH_MAGIC_3
+        ) {
+          const patch = parseOrbClientPatch(bytes);
+          if (!patch) return;
+          rawText = new TextDecoder().decode(patch.payload);
+        }
+      }
+      if (rawText === null) return;
       let parsed: Record<string, unknown>;
       try {
-        parsed = JSON.parse(msg.data) as Record<string, unknown>;
+        parsed = JSON.parse(rawText) as Record<string, unknown>;
       } catch {
         return;
       }
@@ -517,7 +547,7 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       if (!eventType || eventType === "sync_ready" || eventType === "heartbeat" || eventType === "subscribed" || eventType === "unsubscribed") {
         return;
       }
-      streamLoad("sync-ws", 1, msg.data.length);
+      streamLoad("sync-ws", 1, rawText.length);
       if (eventType === "stream_lagged") {
         reportSyncStreamLagged();
         const targetMid = typeof parsed.mission_id === "string" ? parsed.mission_id : null;
@@ -658,17 +688,29 @@ export function streamMission(
   onCaughtUp?: (cursor: number | null, replayed: number) => void,
 ): () => void {
   let stopped = false;
+  let syncCursor: SyncCursorState =
+    initialSinceSeq !== undefined && Number.isSafeInteger(initialSinceSeq) && initialSinceSeq >= 0
+      ? { epoch: 1n, seq: BigInt(initialSinceSeq) }
+      : { epoch: 0n, seq: 0n };
   let highestSeq: number | undefined = initialSinceSeq;
+  const advanceCursor = (candidateSeq: number) => {
+    if (!Number.isSafeInteger(candidateSeq) || candidateSeq < 0) return;
+    const stepped = stepSyncCursor(syncCursor, 1n, candidateSeq, true, true);
+    if (stepped.stepped) {
+      syncCursor = stepped.state;
+      highestSeq = Number(stepped.state.seq);
+    }
+  };
   let fragments:StreamEvent[]=[],paint:ReturnType<typeof setTimeout>|undefined;
   const flush=()=>{clearTimeout(paint);paint=undefined;const pending=fragments;fragments=[];if(pending.length)timed('stream text',()=>batch(()=>{if(onBatch)onBatch(pending);else for(const event of pending)onEvent(event);}));};
   // Thinking deltas carry the whole thought so far; applied one by one each
   // re-renders a growing block (up to 70 ms each on a long thought). They are
   // painted together with text, once per frame.
-  const deliver=(event:StreamEvent)=>{if(typeof event.sequence==="number"&&Number.isSafeInteger(event.sequence))highestSeq=highestSeq===undefined?event.sequence:Math.max(highestSeq,event.sequence);if(event.type==='text_delta'||event.type==='text_op'||(event.type==='thinking'&&event.data.done!==true)){fragments.push(event);paint??=setTimeout(flush,16);}else{flush();timed(`stream ${event.type}`,()=>onEvent(event));}};
+  const deliver=(event:StreamEvent)=>{if(typeof event.sequence==="number")advanceCursor(event.sequence);if(event.type==='text_delta'||event.type==='text_op'||(event.type==='thinking'&&event.data.done!==true)){fragments.push(event);paint??=setTimeout(flush,16);}else{flush();timed(`stream ${event.type}`,()=>onEvent(event));}};
   const handleCaughtUp = (cursor: number | null, replayed: number) => {
     flush();
-    if (typeof cursor === "number" && Number.isSafeInteger(cursor)) {
-      highestSeq = highestSeq === undefined ? cursor : Math.max(highestSeq, cursor);
+    if (typeof cursor === "number") {
+      advanceCursor(cursor);
     }
     onCaughtUp?.(cursor, replayed);
   };

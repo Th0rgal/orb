@@ -160,4 +160,118 @@ final class OrbModelPackageTests: XCTestCase {
             XCTAssertEqual(Set(uniqueKeys).count, uniqueKeys.count, "duplicate TurnKey at seed \(seed)")
         }
     }
+
+    func testClientCoreFixturesAndRoundtrip() throws {
+        let url = repoRoot.appendingPathComponent("shared/orb-spec/fixtures/client-core.json")
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let cases = try XCTUnwrap(root["cases"] as? [[String: Any]])
+        XCTAssertGreaterThanOrEqual(cases.count, 30)
+
+        func hexToData(_ hex: String) -> Data {
+            var data = Data()
+            var index = hex.startIndex
+            while index < hex.endIndex {
+                let next = hex.index(index, offsetBy: 2)
+                if let byte = UInt8(hex[index..<next], radix: 16) {
+                    data.append(byte)
+                }
+                index = next
+            }
+            return data
+        }
+
+        func dataToHex(_ data: Data) -> String {
+            data.map { String(format: "%02x", $0) }.joined()
+        }
+
+        for (idx, item) in cases.enumerated() {
+            let op = try XCTUnwrap(item["op"] as? String, "case \(idx)")
+            let label = item["name"] as? String ?? "case-\(idx)"
+            switch op {
+            case "syncCursor":
+                let le = try XCTUnwrap(UInt64(item["localEpoch"] as? String ?? ""), label)
+                let ie = try XCTUnwrap(UInt64(item["incomingEpoch"] as? String ?? ""), label)
+                let ls = try XCTUnwrap(UInt64(item["localSeq"] as? String ?? ""), label)
+                let isq = try XCTUnwrap(UInt64(item["incomingSeq"] as? String ?? ""), label)
+                let fv = item["frameValid"] as? Bool ?? false
+                let ao = item["authOk"] as? Bool ?? false
+                XCTAssertEqual(
+                    OrbClientCore.verifyClientSyncCursor(
+                        localEpoch: le,
+                        incomingEpoch: ie,
+                        localSeq: ls,
+                        incomingSeq: isq,
+                        frameValid: fv,
+                        authOk: ao
+                    ),
+                    item["expectedAdmitted"] as? Bool,
+                    label
+                )
+                let res = OrbClientCore.stepSyncCursor(
+                    OrbClientCore.SyncCursorState(epoch: le, seq: ls),
+                    incomingEpoch: ie,
+                    incomingSeq: isq,
+                    frameValid: fv,
+                    authOk: ao
+                )
+                XCTAssertEqual(res.stepped, item["expectedStepped"] as? Bool, label)
+                XCTAssertEqual(res.state.epoch, UInt64(item["expectedEpoch"] as? String ?? ""), label)
+                XCTAssertEqual(res.state.seq, UInt64(item["expectedSeq"] as? String ?? ""), label)
+
+            case "projectTranscript":
+                let u = UInt32((item["userTurns"] as? NSNumber)?.uint64Value ?? 0)
+                let t = UInt32((item["toolTurns"] as? NSNumber)?.uint64Value ?? 0)
+                let think = item["thinkingOpen"] as? Bool ?? false
+                let replay = item["isReplay"] as? Bool ?? false
+                XCTAssertEqual(
+                    OrbClientCore.validTranscriptProjInput(userTurns: u, toolTurns: t),
+                    item["expectedValidDomain"] as? Bool,
+                    label
+                )
+                let out = OrbClientCore.projectTranscriptCounts(
+                    userTurns: u,
+                    toolTurns: t,
+                    thinkingOpen: think,
+                    isReplayFromLog: replay
+                )
+                XCTAssertEqual(out.visibleEntries, UInt32((item["expectedVisibleEntries"] as? NSNumber)?.uint64Value ?? 0), label)
+                XCTAssertEqual(out.thinkingActive, item["expectedThinkingActive"] as? Bool, label)
+
+            case "bundleBudget":
+                let eb = try XCTUnwrap(UInt64(item["eagerBytes"] as? String ?? ""), label)
+                let bb = try XCTUnwrap(UInt64(item["budgetBytes"] as? String ?? ""), label)
+                let se = item["singleAppEntry"] as? Bool ?? false
+                let hv = item["hasEagerHeavyVendor"] as? Bool ?? false
+                XCTAssertEqual(
+                    OrbClientCore.verifyBundleBudget(
+                        eagerBytes: eb,
+                        budgetBytes: bb,
+                        singleAppEntry: se,
+                        hasEagerHeavyVendor: hv
+                    ),
+                    item["expectedAdmitted"] as? Bool,
+                    label
+                )
+
+            case "parsePatch":
+                let raw = hexToData(item["rawHex"] as? String ?? "")
+                let parsed = OrbClientCore.parseOrbClientPatch(raw)
+                if let expHex = item["expectedPayloadHex"] as? String {
+                    let unwrapped = try XCTUnwrap(parsed, label)
+                    XCTAssertEqual(Int(unwrapped.schema), item["expectedSchema"] as? Int, label)
+                    XCTAssertEqual(dataToHex(unwrapped.payload), expHex, label)
+                    let reencoded = try XCTUnwrap(
+                        OrbClientCore.encodeOrbClientPatch(schema: unwrapped.schema, payload: unwrapped.payload),
+                        label
+                    )
+                    XCTAssertEqual(OrbClientCore.parseOrbClientPatch(reencoded), unwrapped, label)
+                } else {
+                    XCTAssertNil(parsed, label)
+                }
+
+            default:
+                XCTFail("Unknown client-core op: \(op)")
+            }
+        }
+    }
 }

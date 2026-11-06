@@ -1,6 +1,8 @@
 /**
  * Verified client-core reducers and framing gates (`lean/OrbClient/{Spec,Reducers}.lean`),
- * checked mechanically in CI against Lean-generated `shared/orb-spec/fixtures/client-core.json`.
+ * checked mechanically in CI against Lean-generated `shared/orb-spec/fixtures/client-core.json`
+ * and mirrored on iOS (`OrbClientCore` in `OrbPipeTables.swift`) and Android (`OrbClientCore`
+ * in `OrbTranscriptGates.kt`).
  */
 
 export const ORB_PATCH_MAGIC_0 = 0x4f; // 'O'
@@ -9,10 +11,16 @@ export const ORB_PATCH_MAGIC_2 = 0x42; // 'B'
 export const ORB_PATCH_MAGIC_3 = 0x50; // 'P'
 export const ORB_PATCH_MAX_PAYLOAD_BYTES = 65_535;
 export const ORB_PATCH_HEADER_BYTES = 8;
+export const ORB_TRANSCRIPT_STABLE_MAX_TURNS = 65_536;
 
 export interface SyncCursorState {
   epoch: bigint;
   seq: bigint;
+}
+
+export interface OrbClientPatchFrame {
+  schema: number;
+  payload: Uint8Array;
 }
 
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
@@ -78,17 +86,36 @@ export function stepSyncCursor(
 }
 
 /**
+ * Mirrors `OrbClient.Spec.validTranscriptProjInput`: admissible non-wrapping transcript turn counts.
+ */
+export function validTranscriptProjInput(
+  userTurns: number,
+  toolTurns: number,
+): boolean {
+  const u = asExactU32(userTurns);
+  const t = asExactU32(toolTurns);
+  return (
+    u !== null &&
+    t !== null &&
+    u <= ORB_TRANSCRIPT_STABLE_MAX_TURNS &&
+    t <= ORB_TRANSCRIPT_STABLE_MAX_TURNS
+  );
+}
+
+/**
  * Mirrors `OrbClient.Spec.projectTranscript` (`orb_client_project_transcript_counts`):
- * `isReplayFromLog` is strictly projection-invariant (`transcript_projection_replay_invariant`).
+ * fails closed (`null`) if `userTurns` or `toolTurns` is outside `UInt32` (`0..=0xffff_ffff`),
+ * and `isReplayFromLog` is strictly projection-invariant (`transcript_projection_replay_invariant`).
  */
 export function projectTranscriptCounts(
   userTurns: number,
   toolTurns: number,
   thinkingOpen: boolean,
   _isReplayFromLog: boolean,
-): { visibleEntries: number; thinkingActive: boolean } {
-  const u = asExactU32(userTurns) ?? 0;
-  const t = asExactU32(toolTurns) ?? 0;
+): { visibleEntries: number; thinkingActive: boolean } | null {
+  const u = asExactU32(userTurns);
+  const t = asExactU32(toolTurns);
+  if (u === null || t === null) return null;
   return {
     visibleEntries: (u + t) >>> 0,
     thinkingActive: thinkingOpen,
@@ -142,9 +169,10 @@ export function encodeOrbClientPatch(
 }
 
 /**
- * Mirrors `OrbClient.Spec.parseOrbClientPatch` (`TotalSliceParserSpec`, `<= 65535` bytes).
+ * Mirrors `OrbClient.Spec.parseOrbClientPatch` (`TotalSliceParserSpec`, `<= 65535` bytes),
+ * preserving both verified `schema` (`1..=255`) and `payload`.
  */
-export function parseOrbClientPatch(raw: Uint8Array): Uint8Array | null {
+export function parseOrbClientPatch(raw: Uint8Array): OrbClientPatchFrame | null {
   if (raw.byteLength < 9) return null;
   if (
     raw[0] !== ORB_PATCH_MAGIC_0 ||
@@ -163,7 +191,10 @@ export function parseOrbClientPatch(raw: Uint8Array): Uint8Array | null {
     payLen <= ORB_PATCH_MAX_PAYLOAD_BYTES &&
     ORB_PATCH_HEADER_BYTES + payLen === raw.byteLength
   ) {
-    return raw.slice(ORB_PATCH_HEADER_BYTES, ORB_PATCH_HEADER_BYTES + payLen);
+    return {
+      schema,
+      payload: raw.slice(ORB_PATCH_HEADER_BYTES, ORB_PATCH_HEADER_BYTES + payLen),
+    };
   }
   return null;
 }

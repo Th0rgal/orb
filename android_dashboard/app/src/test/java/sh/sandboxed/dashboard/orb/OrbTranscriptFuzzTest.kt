@@ -199,4 +199,97 @@ class OrbTranscriptFuzzTest {
             }
         }
     }
+
+    @Test
+    fun matchesLeanClientCoreFixture() {
+        val cases = OrbJSON.dictList(OrbSpec.dict("fixtures/client-core.json")["cases"])
+        assertTrue(cases.size >= 30)
+
+        fun hexToBytes(hex: String): ByteArray {
+            val clean = hex.trim()
+            return ByteArray(clean.length / 2) { idx ->
+                clean.substring(idx * 2, idx * 2 + 2).toInt(16).toByte()
+            }
+        }
+
+        fun bytesToHex(bytes: ByteArray): String =
+            bytes.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+
+        for ((idx, item) in cases.withIndex()) {
+            val label = OrbJSON.str(item, "name") ?: "case-$idx"
+            when (val op = OrbJSON.str(item, "op")) {
+                "syncCursor" -> {
+                    val le = (OrbJSON.str(item, "localEpoch") ?: "0").toULong()
+                    val ie = (OrbJSON.str(item, "incomingEpoch") ?: "0").toULong()
+                    val ls = (OrbJSON.str(item, "localSeq") ?: "0").toULong()
+                    val isq = (OrbJSON.str(item, "incomingSeq") ?: "0").toULong()
+                    val fv = OrbJSON.bool(item, "frameValid") ?: false
+                    val ao = OrbJSON.bool(item, "authOk") ?: false
+                    assertEquals(
+                        label,
+                        OrbJSON.bool(item, "expectedAdmitted") ?: false,
+                        OrbClientCore.verifyClientSyncCursor(le, ie, ls, isq, fv, ao)
+                    )
+                    val res = OrbClientCore.stepSyncCursor(
+                        OrbClientCore.SyncCursorState(le, ls),
+                        ie,
+                        isq,
+                        fv,
+                        ao
+                    )
+                    assertEquals(label, OrbJSON.bool(item, "expectedStepped") ?: false, res.stepped)
+                    assertEquals(label, (OrbJSON.str(item, "expectedEpoch") ?: "0").toULong(), res.state.epoch)
+                    assertEquals(label, (OrbJSON.str(item, "expectedSeq") ?: "0").toULong(), res.state.seq)
+                }
+
+                "projectTranscript" -> {
+                    val u = ((item["userTurns"] as? Number)?.toLong() ?: 0L).toUInt()
+                    val t = ((item["toolTurns"] as? Number)?.toLong() ?: 0L).toUInt()
+                    val think = OrbJSON.bool(item, "thinkingOpen") ?: false
+                    val replay = OrbJSON.bool(item, "isReplay") ?: false
+                    assertEquals(
+                        label,
+                        OrbJSON.bool(item, "expectedValidDomain") ?: false,
+                        OrbClientCore.validTranscriptProjInput(u, t)
+                    )
+                    val out = OrbClientCore.projectTranscriptCounts(u, t, think, replay)
+                    assertEquals(
+                        label,
+                        ((item["expectedVisibleEntries"] as? Number)?.toLong() ?: 0L).toUInt(),
+                        out.visibleEntries
+                    )
+                    assertEquals(label, OrbJSON.bool(item, "expectedThinkingActive") ?: false, out.thinkingActive)
+                }
+
+                "bundleBudget" -> {
+                    val eb = (OrbJSON.str(item, "eagerBytes") ?: "0").toULong()
+                    val bb = (OrbJSON.str(item, "budgetBytes") ?: "0").toULong()
+                    val se = OrbJSON.bool(item, "singleAppEntry") ?: false
+                    val hv = OrbJSON.bool(item, "hasEagerHeavyVendor") ?: false
+                    assertEquals(
+                        label,
+                        OrbJSON.bool(item, "expectedAdmitted") ?: false,
+                        OrbClientCore.verifyBundleBudget(eb, bb, se, hv)
+                    )
+                }
+
+                "parsePatch" -> {
+                    val raw = hexToBytes(OrbJSON.str(item, "rawHex") ?: "")
+                    val parsed = OrbClientCore.parseOrbClientPatch(raw)
+                    val expHex = OrbJSON.str(item, "expectedPayloadHex")
+                    if (expHex == null) {
+                        assertEquals(label, null, parsed)
+                    } else {
+                        checkNotNull(parsed) { label }
+                        assertEquals(label, OrbJSON.int(item, "expectedSchema") ?: 0, parsed.schema)
+                        assertEquals(label, expHex, bytesToHex(parsed.payload))
+                        val reencoded = checkNotNull(OrbClientCore.encodeOrbClientPatch(parsed.schema, parsed.payload))
+                        assertEquals(label, parsed, OrbClientCore.parseOrbClientPatch(reencoded))
+                    }
+                }
+
+                else -> error("Unknown client-core op: $op")
+            }
+        }
+    }
 }

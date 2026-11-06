@@ -8,6 +8,7 @@ import {
   parseOrbClientPatch,
   projectTranscriptCounts,
   stepSyncCursor,
+  validTranscriptProjInput,
   verifyBundleBudget,
   verifyClientSyncCursor,
   type SyncCursorState,
@@ -17,16 +18,16 @@ type ClientCoreCase =
   | {
       op: "syncCursor";
       name: string;
-      localEpoch: number;
-      incomingEpoch: number;
-      localSeq: number;
-      incomingSeq: number;
+      localEpoch: string;
+      incomingEpoch: string;
+      localSeq: string;
+      incomingSeq: string;
       frameValid: boolean;
       authOk: boolean;
       expectedAdmitted: boolean;
       expectedStepped: boolean;
-      expectedEpoch: number;
-      expectedSeq: number;
+      expectedEpoch: string;
+      expectedSeq: string;
     }
   | {
       op: "projectTranscript";
@@ -35,14 +36,15 @@ type ClientCoreCase =
       toolTurns: number;
       thinkingOpen: boolean;
       isReplay: boolean;
+      expectedValidDomain: boolean;
       expectedVisibleEntries: number;
       expectedThinkingActive: boolean;
     }
   | {
       op: "bundleBudget";
       name: string;
-      eagerBytes: number;
-      budgetBytes: number;
+      eagerBytes: string;
+      budgetBytes: string;
       singleAppEntry: boolean;
       hasEagerHeavyVendor: boolean;
       expectedAdmitted: boolean;
@@ -51,6 +53,7 @@ type ClientCoreCase =
       op: "parsePatch";
       name: string;
       rawHex: string;
+      expectedSchema: number | null;
       expectedPayloadHex: string | null;
     };
 
@@ -80,24 +83,28 @@ const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as { cases: Client
 
 describe("shared/orb-spec/fixtures/client-core.json (lean/OrbClient)", () => {
   it("matches every Lean-generated OrbClient fixture case", () => {
-    expect(fixture.cases.length).toBeGreaterThanOrEqual(25);
+    expect(fixture.cases.length).toBeGreaterThanOrEqual(30);
     for (const c of fixture.cases) {
       if (c.op === "syncCursor") {
+        const le = BigInt(c.localEpoch);
+        const ie = BigInt(c.incomingEpoch);
+        const ls = BigInt(c.localSeq);
+        const isq = BigInt(c.incomingSeq);
         expect(
           verifyClientSyncCursor(
-            c.localEpoch,
-            c.incomingEpoch,
-            c.localSeq,
-            c.incomingSeq,
+            le,
+            ie,
+            ls,
+            isq,
             c.frameValid,
             c.authOk,
           ),
           c.name,
         ).toBe(c.expectedAdmitted);
         const res = stepSyncCursor(
-          { epoch: BigInt(c.localEpoch), seq: BigInt(c.localSeq) },
-          c.incomingEpoch,
-          c.incomingSeq,
+          { epoch: le, seq: ls },
+          ie,
+          isq,
           c.frameValid,
           c.authOk,
         );
@@ -105,6 +112,9 @@ describe("shared/orb-spec/fixtures/client-core.json (lean/OrbClient)", () => {
         expect(res.state.epoch, c.name).toBe(BigInt(c.expectedEpoch));
         expect(res.state.seq, c.name).toBe(BigInt(c.expectedSeq));
       } else if (c.op === "projectTranscript") {
+        expect(validTranscriptProjInput(c.userTurns, c.toolTurns), c.name).toBe(
+          c.expectedValidDomain,
+        );
         const out = projectTranscriptCounts(
           c.userTurns,
           c.toolTurns,
@@ -118,8 +128,8 @@ describe("shared/orb-spec/fixtures/client-core.json (lean/OrbClient)", () => {
       } else if (c.op === "bundleBudget") {
         expect(
           verifyBundleBudget(
-            c.eagerBytes,
-            c.budgetBytes,
+            BigInt(c.eagerBytes),
+            BigInt(c.budgetBytes),
             c.singleAppEntry,
             c.hasEagerHeavyVendor,
           ),
@@ -131,13 +141,27 @@ describe("shared/orb-spec/fixtures/client-core.json (lean/OrbClient)", () => {
           expect(parsed, c.name).toBeNull();
         } else {
           expect(parsed, c.name).not.toBeNull();
-          expect(bytesToHex(parsed!), c.name).toBe(c.expectedPayloadHex);
+          expect(parsed!.schema, c.name).toBe(c.expectedSchema);
+          expect(bytesToHex(parsed!.payload), c.name).toBe(c.expectedPayloadHex);
         }
       }
     }
   });
 
-  it("satisfies cursor irreflexivity, replay invariance, and ORBP roundtrip across 300 fuzz seeds", () => {
+  it("fails closed on out-of-domain JS numbers (negative, NaN, float, > UInt32/UInt64)", () => {
+    expect(projectTranscriptCounts(-1, 5, false, false)).toBeNull();
+    expect(projectTranscriptCounts(5, Number.NaN, false, false)).toBeNull();
+    expect(projectTranscriptCounts(1.5, 2, true, false)).toBeNull();
+    expect(projectTranscriptCounts(2 ** 32, 0, false, false)).toBeNull();
+    expect(validTranscriptProjInput(-1, 0)).toBe(false);
+    expect(validTranscriptProjInput(65_537, 0)).toBe(false);
+    expect(verifyClientSyncCursor(-1, 1, 0, 1, true, true)).toBe(false);
+    expect(verifyClientSyncCursor(0n, 1n << 64n, 0n, 1n, true, true)).toBe(false);
+    expect(verifyBundleBudget(-1, 1000, true, false)).toBe(false);
+    expect(verifyBundleBudget(1000n, 1n << 64n, true, false)).toBe(false);
+  });
+
+  it("satisfies cursor irreflexivity, replay invariance, and ORBP schema+payload roundtrip across 300 fuzz seeds", () => {
     let seedState = 0x517cc1b7;
     const nextU32 = () => {
       seedState ^= seedState << 13;
@@ -164,15 +188,17 @@ describe("shared/orb-spec/fixtures/client-core.json (lean/OrbClient)", () => {
         expect(stepped.state).toEqual(cur);
       }
 
-      // Replay projection invariance theorem
+      // Replay projection invariance & non-wrapping theorem on valid domain
       const u = nextU32() % 4096;
       const t = nextU32() % 4096;
       const think = (nextU32() & 1) === 1;
-      expect(projectTranscriptCounts(u, t, think, false)).toEqual(
-        projectTranscriptCounts(u, t, think, true),
-      );
+      expect(validTranscriptProjInput(u, t)).toBe(true);
+      const liveProj = projectTranscriptCounts(u, t, think, false);
+      const replayProj = projectTranscriptCounts(u, t, think, true);
+      expect(liveProj).toEqual(replayProj);
+      expect(liveProj!.visibleEntries).toBe(u + t);
 
-      // ORBP roundtrip & bounded slice cap
+      // ORBP roundtrip (both schema and payload) & bounded slice cap
       const payLen = 1 + (nextU32() % 512);
       const schema = 1 + (nextU32() % 255);
       const payload = new Uint8Array(payLen);
@@ -181,8 +207,9 @@ describe("shared/orb-spec/fixtures/client-core.json (lean/OrbClient)", () => {
       expect(encoded).not.toBeNull();
       const decoded = parseOrbClientPatch(encoded!);
       expect(decoded).not.toBeNull();
-      expect(decoded!.byteLength).toBeLessThanOrEqual(ORB_PATCH_MAX_PAYLOAD_BYTES);
-      expect(decoded).toEqual(payload);
+      expect(decoded!.schema).toBe(schema);
+      expect(decoded!.payload.byteLength).toBeLessThanOrEqual(ORB_PATCH_MAX_PAYLOAD_BYTES);
+      expect(decoded!.payload).toEqual(payload);
     }
   });
 });

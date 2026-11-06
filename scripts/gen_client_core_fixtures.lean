@@ -25,7 +25,10 @@ private def syncCursorCases : List (String × UInt64 × UInt64 × UInt64 × UInt
   ("zero_incoming_epoch_rejected", 0, 0, 0, 1, 1, 1),
   ("invalid_frame_rejected", 2, 2, 10, 11, 0, 1),
   ("unauthenticated_rejected", 2, 2, 10, 11, 1, 0),
-  ("initial_cursor_first_frame", 0, 1, 0, 0, 1, 1)
+  ("initial_cursor_first_frame", 0, 1, 0, 0, 1, 1),
+  ("u64_max_seq_admitted", 1, 1, 0xfffffffffffffffe, 0xffffffffffffffff, 1, 1),
+  ("u64_max_seq_duplicate_rejected", 1, 1, 0xffffffffffffffff, 0xffffffffffffffff, 1, 1),
+  ("u64_max_epoch_bump_admitted", 0xfffffffffffffffe, 0xffffffffffffffff, 0xffffffffffffffff, 0, 1, 1)
 ]
 
 private def transcriptProjCases : List (String × UInt32 × UInt32 × UInt8 × UInt8) := [
@@ -34,7 +37,11 @@ private def transcriptProjCases : List (String × UInt32 × UInt32 × UInt8 × U
   ("live_thinking", 20, 5, 1, 0),
   ("replay_thinking", 20, 5, 1, 1),
   ("live_settled_tools", 48, 12, 0, 0),
-  ("replay_settled_tools", 48, 12, 0, 1)
+  ("replay_settled_tools", 48, 12, 0, 1),
+  ("stable_domain_upper_bound_live", 65536, 65536, 1, 0),
+  ("stable_domain_upper_bound_replay", 65536, 65536, 1, 1),
+  ("outside_stable_domain_no_wrap", 90000, 4, 0, 0),
+  ("u32_wraparound_boundary", 0xffffffff, 1, 0, 0)
 ]
 
 private def bundleBudgetCases : List (String × UInt64 × UInt64 × UInt8 × UInt8) := [
@@ -43,11 +50,13 @@ private def bundleBudgetCases : List (String × UInt64 × UInt64 × UInt8 × UIn
   ("over_budget_by_1b_rejected", 1177601, 1177600, 1, 0),
   ("eager_heavy_vendor_rejected", 500000, 1177600, 1, 1),
   ("missing_single_app_entry_rejected", 500000, 1177600, 0, 0),
-  ("zero_budget_rejected", 0, 0, 1, 0)
+  ("zero_budget_rejected", 0, 0, 1, 0),
+  ("u64_max_budget_admitted", 0xfffffffffffffffe, 0xffffffffffffffff, 1, 0)
 ]
 
 private def patchDecodeCases : List (String × ByteArray) := [
   ("valid_json_patch_s1", ByteArray.mk #[0x4F, 0x52, 0x42, 0x50, 0x00, 0x01, 0x00, 0x02, 0x7B, 0x7D]),
+  ("valid_schema_2_distinct", ByteArray.mk #[0x4F, 0x52, 0x42, 0x50, 0x00, 0x02, 0x00, 0x02, 0x7B, 0x7D]),
   ("valid_max_schema_255", ByteArray.mk #[0x4F, 0x52, 0x42, 0x50, 0x00, 0xFF, 0x00, 0x03, 0x6F, 0x72, 0x62]),
   ("bad_magic_rejected", ByteArray.mk #[0x4F, 0x52, 0x42, 0x58, 0x00, 0x01, 0x00, 0x02, 0x7B, 0x7D]),
   ("schema_zero_rejected", ByteArray.mk #[0x4F, 0x52, 0x42, 0x50, 0x00, 0x00, 0x00, 0x01, 0x41]),
@@ -63,24 +72,26 @@ def main : IO Unit := do
     let ok := verifyClientSyncCursor le ie ls isq fv ao == 1
     let (stepped, nextSt) := stepSyncCursor { epoch := le, seq := ls } ie isq fv ao
     rows := rows.push
-      s!"    \{\"op\": \"syncCursor\", \"name\": \"{name}\", \"localEpoch\": {le}, \"incomingEpoch\": {ie}, \"localSeq\": {ls}, \"incomingSeq\": {isq}, \"frameValid\": {fv == 1}, \"authOk\": {ao == 1}, \"expectedAdmitted\": {ok}, \"expectedStepped\": {stepped}, \"expectedEpoch\": {nextSt.epoch}, \"expectedSeq\": {nextSt.seq}}"
+      s!"    \{\"op\": \"syncCursor\", \"name\": \"{name}\", \"localEpoch\": \"{le}\", \"incomingEpoch\": \"{ie}\", \"localSeq\": \"{ls}\", \"incomingSeq\": \"{isq}\", \"frameValid\": {fv == 1}, \"authOk\": {ao == 1}, \"expectedAdmitted\": {ok}, \"expectedStepped\": {stepped}, \"expectedEpoch\": \"{nextSt.epoch}\", \"expectedSeq\": \"{nextSt.seq}\"}"
   for (name, userTurns, toolTurns, thinkingFlag, replayFlag) in transcriptProjCases do
-    let out := projectTranscript { counts := (userTurns, toolTurns), metaFlags := (thinkingFlag, replayFlag) }
+    let inp : TranscriptProjInput := { counts := (userTurns, toolTurns), metaFlags := (thinkingFlag, replayFlag) }
+    let validDom := validTranscriptProjInput inp
+    let out := projectTranscript inp
     rows := rows.push
-      s!"    \{\"op\": \"projectTranscript\", \"name\": \"{name}\", \"userTurns\": {userTurns}, \"toolTurns\": {toolTurns}, \"thinkingOpen\": {thinkingFlag == 1}, \"isReplay\": {replayFlag == 1}, \"expectedVisibleEntries\": {out.visibleEntries}, \"expectedThinkingActive\": {out.thinkingActive == 1}}"
+      s!"    \{\"op\": \"projectTranscript\", \"name\": \"{name}\", \"userTurns\": {userTurns}, \"toolTurns\": {toolTurns}, \"thinkingOpen\": {thinkingFlag == 1}, \"isReplay\": {replayFlag == 1}, \"expectedValidDomain\": {validDom}, \"expectedVisibleEntries\": {out.visibleEntries}, \"expectedThinkingActive\": {out.thinkingActive == 1}}"
   for (name, eagerB, budgetB, singleEntry, heavyVendor) in bundleBudgetCases do
     let ok := verifyBundleBudget eagerB budgetB singleEntry heavyVendor == 1
     rows := rows.push
-      s!"    \{\"op\": \"bundleBudget\", \"name\": \"{name}\", \"eagerBytes\": {eagerB}, \"budgetBytes\": {budgetB}, \"singleAppEntry\": {singleEntry == 1}, \"hasEagerHeavyVendor\": {heavyVendor == 1}, \"expectedAdmitted\": {ok}}"
+      s!"    \{\"op\": \"bundleBudget\", \"name\": \"{name}\", \"eagerBytes\": \"{eagerB}\", \"budgetBytes\": \"{budgetB}\", \"singleAppEntry\": {singleEntry == 1}, \"hasEagerHeavyVendor\": {heavyVendor == 1}, \"expectedAdmitted\": {ok}}"
   for (name, raw) in patchDecodeCases do
     let hexIn := bytesToHex raw
     match parseOrbClientPatch raw with
-    | some pay =>
+    | some frame =>
       rows := rows.push
-        s!"    \{\"op\": \"parsePatch\", \"name\": \"{name}\", \"rawHex\": \"{hexIn}\", \"expectedPayloadHex\": \"{bytesToHex pay}\"}"
+        s!"    \{\"op\": \"parsePatch\", \"name\": \"{name}\", \"rawHex\": \"{hexIn}\", \"expectedSchema\": {frame.schema}, \"expectedPayloadHex\": \"{bytesToHex frame.payload}\"}"
     | none =>
       rows := rows.push
-        s!"    \{\"op\": \"parsePatch\", \"name\": \"{name}\", \"rawHex\": \"{hexIn}\", \"expectedPayloadHex\": null}"
+        s!"    \{\"op\": \"parsePatch\", \"name\": \"{name}\", \"rawHex\": \"{hexIn}\", \"expectedSchema\": null, \"expectedPayloadHex\": null}"
   IO.println "{"
   IO.println "  \"description\": \"Generated from lean/OrbClient by scripts/gen_client_core_fixtures.lean; do not edit. Verified client sync-cursor epoch/sequence gates, replay-invariant transcript projection, startup bundle budget conservation, and bounded ORBP binary patch framing.\","
   IO.println "  \"cases\": ["

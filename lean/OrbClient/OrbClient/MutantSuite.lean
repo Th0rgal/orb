@@ -58,4 +58,18 @@ theorem kill_m03_bundle_ignores_eager_vendor :
       verifyBundleBudget 900000 1177600 1 1 := by
   decide
 
+/-- Mutant 04: Drops the wire `schema` byte and hardcodes `schema := 1` on decode,
+    allowing schema-2 frames to masquerade as schema-1 frames. -/
+def m04_patchParserHardcodesSchema1 (raw : ByteArray) : Option OrbClientPatchFrame :=
+  match parseOrbClientPatch raw with
+  | some f => some { f with schema := 1 }
+  | none => none
+
+theorem kill_m04_patch_parser_hardcodes_schema1 :
+    m04_patchParserHardcodesSchema1
+        (ByteArray.mk #[0x4F, 0x52, 0x42, 0x50, 0x00, 0x02, 0x00, 0x02, 0x7B, 0x7D]) ≠
+      parseOrbClientPatch
+        (ByteArray.mk #[0x4F, 0x52, 0x42, 0x50, 0x00, 0x02, 0x00, 0x02, 0x7B, 0x7D]) := by
+  decide
+
 end OrbClient.MutantSuite

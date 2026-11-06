@@ -41,12 +41,13 @@ def runTests : IO UInt32 := do
   check "bundle budget rejects over-budget bundle" (verifyBundleBudget 1200000 1177600 1 0 == 0)
   check "bundle budget rejects missing single appEntry" (verifyBundleBudget 500000 1177600 0 0 == 0)
 
-  -- 4. Patch parser roundtrip
+  -- 4. Patch parser roundtrip (including verified schema preservation)
   let samplePayload := "{\"op\":\"patch\",\"seq\":42}".toUTF8
-  match encodeOrbClientPatch? 1 samplePayload with
+  match encodeOrbClientPatch? 7 samplePayload with
   | none => throw (IO.userError "encodeOrbClientPatch? returned none")
   | some frame =>
-    check "patch frame roundtrip" (parseOrbClientPatch frame == some samplePayload)
+    check "patch frame roundtrip preserves schema and payload"
+      (parseOrbClientPatch frame == some { schema := 7, payload := samplePayload })
   check "patch parser rejects bad magic"
     ((parseOrbClientPatch (ByteArray.mk #[0x4F, 0x52, 0x42, 0x00, 0x00, 0x01, 0x00, 0x01, 0x41])).isNone)
   check "patch parser rejects trailing bytes"
