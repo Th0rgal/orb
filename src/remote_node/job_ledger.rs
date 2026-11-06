@@ -1473,9 +1473,9 @@ pub async fn heartbeat(working_dir: &Path, job_id: Uuid) -> anyhow::Result<bool>
     let mut needs_update = false;
     for handle in snap.handles.iter().filter(|h| h.job_id == job_id) {
         found = true;
-        if !handle
+        if handle
             .heartbeat_at
-            .is_some_and(|previous| now - previous < chrono::Duration::seconds(15))
+            .is_none_or(|previous| now - previous >= chrono::Duration::seconds(15))
         {
             needs_update = true;
             break;
