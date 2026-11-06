@@ -94,6 +94,7 @@ data class OrbMissionBudget(
         val reserved: Double,
         val carved: Double,
         val available: Double,
+        val liveMachines: Int = 0,
         val lifetimeSpent: Double = spent,
         val resetPeriod: BudgetResetPeriod = BudgetResetPeriod.TOTAL,
         val periodStartedAt: String? = null,
@@ -424,10 +425,17 @@ data class OrbMissionBudget(
         }
         if (!budgetOn) capUsd = null
 
+        val effectiveMode = when (budgetEnabled) {
+            true -> "own"
+            false -> if (maxGrant != null) "pooled" else "none"
+            null -> mode
+        }
+
         val resetPeriod = when {
-            capUsd == null || maxGrant != null -> BudgetResetPeriod.TOTAL
-            budgetOn && draftResetPeriod != null -> draftResetPeriod
-            else -> pool?.resetPeriod ?: ownBudgetResetPeriod
+            capUsd == null -> BudgetResetPeriod.TOTAL
+            effectiveMode == "pooled" -> pool?.resetPeriod ?: BudgetResetPeriod.TOTAL
+            effectiveMode == "own" && maxGrant == null -> draftResetPeriod ?: pool?.resetPeriod ?: ownBudgetResetPeriod
+            else -> BudgetResetPeriod.TOTAL
         }
 
         val refNowMs = nowMs ?: System.currentTimeMillis()
@@ -486,6 +494,10 @@ data class OrbMissionBudget(
             resetsInSecs != null &&
             runwayUsd > 0.0 &&
             (etaSecs == null || etaSecs >= resetsInSecs)
+        val liveMachineCount = maxOf(1, pool?.liveMachines ?: 1)
+        val extensionStepUsd = (shapedCompute / liveMachineCount.toDouble()) * 0.5
+        val avgReservedHours = if (shapedCompute > 0.005) reservedUsd / shapedCompute else 0.0
+        val timeToExtendTriggerSecs = maxOf(0.0, (avgReservedHours - 10.0 / 60.0) * 3600.0)
         val leaseCliffSecs: Double? = if (
             capUsd != null &&
             runwayUsd > 0.0 &&
@@ -493,7 +505,11 @@ data class OrbMissionBudget(
             shapedCompute > 0.005 &&
             availableUsd < runwayUsd - 0.005
         ) {
-            if (availableUsd <= 0.0) 0.0 else (availableUsd / shapedCompute) * 3600.0
+            if (availableUsd + 1e-6 < extensionStepUsd) {
+                0.0
+            } else {
+                timeToExtendTriggerSecs + ((availableUsd - extensionStepUsd) / shapedCompute) * 3600.0
+            }
         } else {
             null
         }
@@ -555,7 +571,11 @@ data class OrbMissionBudget(
                 if (leaseCliffSecs != null && leaseCliffSecs < 3600.0) {
                     parts.add(
                         if (leaseCliffSecs <= 0.0) {
-                            "VM auto-extensions paused (0 unallocated)"
+                            if (availableUsd <= 0.005) {
+                                "VM auto-extensions paused (0 unallocated)"
+                            } else {
+                                "VM auto-extensions paused (${money(availableUsd)} < ${money(extensionStepUsd)} 30m step)"
+                            }
                         } else {
                             "VM extensions pause in ${formatDurationEta(leaseCliffSecs)}"
                         },
@@ -770,6 +790,7 @@ data class OrbMissionBudget(
                     reserved = OrbJSON.double(it, "reserved_usd") ?: 0.0,
                     carved = OrbJSON.double(it, "carved_usd") ?: 0.0,
                     available = OrbJSON.double(it, "available_usd") ?: 0.0,
+                    liveMachines = OrbJSON.int(it, "live_machines") ?: 0,
                     lifetimeSpent = OrbJSON.double(it, "lifetime_spent_usd") ?: spent,
                     resetPeriod = BudgetResetPeriod.fromWire(OrbJSON.str(it, "reset_period")),
                     periodStartedAt = OrbJSON.str(it, "period_started_at"),

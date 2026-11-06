@@ -54,6 +54,7 @@ struct OrbMissionBudget: Equatable {
         var reserved: Double
         var carved: Double
         var available: Double
+        var liveMachines: Int = 0
         var resetPeriod: BudgetResetPeriod = .total
         var periodStartedAt: String? = nil
         var periodResetsAt: String? = nil
@@ -311,6 +312,7 @@ struct OrbMissionBudget: Equatable {
             reserved: p["reserved_usd"].doubleValue ?? 0,
             carved: p["carved_usd"].doubleValue ?? 0,
             available: p["available_usd"].doubleValue ?? 0,
+            liveMachines: p["live_machines"].doubleValue.map(Int.init) ?? 0,
             resetPeriod: BudgetResetPeriod(wire: p["reset_period"].text),
             periodStartedAt: p["period_started_at"].text.isEmpty ? nil : p["period_started_at"].text,
             periodResetsAt: p["period_resets_at"].text.isEmpty ? nil : p["period_resets_at"].text
@@ -794,10 +796,23 @@ struct OrbMissionBudget: Equatable {
         }
         if !budgetOn { capUsd = nil }
 
+        let effectiveMode: String = {
+            if let budgetEnabled {
+                return budgetEnabled ? "own" : (maxGrant != nil ? "pooled" : "none")
+            }
+            return mode
+        }()
+
         let resetPeriod: BudgetResetPeriod = {
-            guard capUsd != nil, maxGrant == nil else { return .total }
-            if budgetOn, let draftResetPeriod { return draftResetPeriod }
-            return pool?.resetPeriod ?? ownBudgetResetPeriod
+            guard capUsd != nil else { return .total }
+            if effectiveMode == "pooled" {
+                return pool?.resetPeriod ?? .total
+            }
+            if effectiveMode == "own", maxGrant == nil {
+                if let draftResetPeriod { return draftResetPeriod }
+                return pool?.resetPeriod ?? ownBudgetResetPeriod
+            }
+            return .total
         }()
 
         let refNowMs = nowMs ?? (Date().timeIntervalSince1970 * 1000.0)
@@ -853,11 +868,16 @@ struct OrbMissionBudget: Equatable {
             guard let e = etaSecs else { return true }
             return e >= rSecs
         }()
+        let liveMachineCount = max(1, pool?.liveMachines ?? 1)
+        let extensionStepUsd = (shapedCompute / Double(liveMachineCount)) * 0.5
+        let avgReservedHours = shapedCompute > 0.005 ? (reservedUsd / shapedCompute) : 0
+        let timeToExtendTriggerSecs = max(0, (avgReservedHours - 10.0 / 60.0) * 3600.0)
         let leaseCliffSecs: Double? = {
             guard capUsd != nil, runwayUsd > 0, reservedUsd > 0.005, shapedCompute > 0.005, availableUsd < runwayUsd - 0.005 else {
                 return nil
             }
-            return availableUsd <= 0 ? 0 : (availableUsd / shapedCompute) * 3600.0
+            if availableUsd + 1e-6 < extensionStepUsd { return 0 }
+            return timeToExtendTriggerSecs + ((availableUsd - extensionStepUsd) / shapedCompute) * 3600.0
         }()
         let unshapedEtaSecs: Double? = (capUsd != nil && runwayUsd > 0 && obsCompute > 0.005)
             ? (runwayUsd / obsCompute) * 3600.0 : nil
@@ -902,7 +922,15 @@ struct OrbMissionBudget: Equatable {
                     }
                 }
                 if let cliff = leaseCliffSecs, cliff < 3600 {
-                    parts.append(cliff <= 0 ? "VM auto-extensions paused (0 unallocated)" : "VM extensions pause in \(Self.formatDurationEta(cliff))")
+                    if cliff <= 0 {
+                        parts.append(
+                            availableUsd <= 0.005
+                                ? "VM auto-extensions paused (0 unallocated)"
+                                : "VM auto-extensions paused (\(Self.money(availableUsd)) < \(Self.money(extensionStepUsd)) 30m step)"
+                        )
+                    } else {
+                        parts.append("VM extensions pause in \(Self.formatDurationEta(cliff))")
+                    }
                 }
                 if let gain = etaGainSecs {
                     let clean = Self.formatDurationEta(gain).replacingOccurrences(of: "~", with: "")

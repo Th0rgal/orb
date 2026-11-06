@@ -172,7 +172,7 @@
       "reserved_usd": 58.0,
       "carved_usd": 0.0,
       "available_usd": 2.0,
-      "live_machines": 10,
+      "live_machines": 2,
       "reset_period": "daily",
       "period_started_at": "2026-11-05T00:00:00Z",
       "period_resets_at": "2026-11-06T00:00:00Z"

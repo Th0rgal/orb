@@ -839,6 +839,19 @@ pub struct ManagedMachine {
     pub prior_pool_charges: Vec<(String, f64)>,
     #[serde(default)]
     pub pool_spent_offset: f64,
+    /// Closed active billing intervals (`[start, end]` + owning `pool_id` +
+    /// `cost_usd`) recorded at every pool change, stop, and resume so daily/weekly
+    /// budget resets attribute charges strictly by ownership interval and exclude
+    /// stopped idle gaps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub billed_segments: Vec<BilledRunSegment>,
+    /// Start timestamp of the currently open billing segment (set after pool
+    /// changes or resumes; falls back to `run_started_at` / `created_at`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_started_at: Option<DateTime<Utc>>,
+    /// Cumulative `machine_spent` already recorded into `billed_segments`.
+    #[serde(default)]
+    pub segment_spent_offset: f64,
     /// Project slug of the owning mission (set server-side at spawn/claim).
     #[serde(default)]
     pub project: Option<String>,
@@ -891,13 +904,58 @@ pub struct ManagedMachine {
     pub forkable: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BilledRunSegment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_id: Option<String>,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub cost_usd: f64,
+}
+
 impl ManagedMachine {
+    /// Close the currently open billing interval `[seg_start, seg_end]` under
+    /// `self.budget_pool_id` and advance `segment_started_at` to `next_start`.
+    pub fn close_billing_segment(
+        &mut self,
+        seg_end: DateTime<Utc>,
+        next_start: DateTime<Utc>,
+        now_for_spend: DateTime<Utc>,
+    ) {
+        let spent = budget::machine_spent(self, now_for_spend);
+        let delta = (spent - self.segment_spent_offset).max(0.0);
+        let seg_start = self
+            .segment_started_at
+            .or(self.run_started_at)
+            .unwrap_or(self.created_at);
+        if delta > 0.0 {
+            let bounded_end = seg_end.max(seg_start);
+            self.billed_segments.push(BilledRunSegment {
+                pool_id: self.budget_pool_id.clone(),
+                start: seg_start,
+                end: bounded_end,
+                cost_usd: delta,
+            });
+        }
+        self.segment_started_at = Some(next_start);
+        self.segment_spent_offset = spent;
+    }
+
     /// Move the VM to `pool`: what it cost so far stays with the old pool,
     /// only future cost is charged to the new one.
     pub fn change_pool(&mut self, pool: Option<String>, now: DateTime<Utc>) {
         if self.budget_pool_id == pool {
             return;
         }
+        let min_end = self.deletable_at.unwrap_or(self.created_at);
+        let active_end = self
+            .destroyed_at
+            .or(self.stopped_at)
+            .unwrap_or(now)
+            .min(self.expires_at)
+            .max(min_end.min(now))
+            .max(self.created_at);
+        self.close_billing_segment(active_end, now, now);
         let spent = budget::machine_spent(self, now);
         if let Some(old) = self.budget_pool_id.take() {
             let share = (spent - self.pool_spent_offset).max(0.0);
@@ -4272,6 +4330,9 @@ impl ManagedManager {
                     cost_before_resume: 0.0,
                     prior_pool_charges: Vec::new(),
                     pool_spent_offset: 0.0,
+                    billed_segments: Vec::new(),
+                    segment_started_at: None,
+                    segment_spent_offset: 0.0,
                     project: req.snapshot_project.clone(),
                     root_mission_id: req
                         .root_mission_id
@@ -6996,6 +7057,11 @@ impl ManagedManager {
                         for (pool, _) in m.prior_pool_charges.iter_mut() {
                             if pool == mission_id {
                                 *pool = parent.clone();
+                            }
+                        }
+                        for seg in m.billed_segments.iter_mut() {
+                            if seg.pool_id.as_deref() == Some(mission_id) {
+                                seg.pool_id = Some(parent.clone());
                             }
                         }
                     }

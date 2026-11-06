@@ -734,12 +734,25 @@ export function computeRunwayForecast(opts: {
   }
   if (!budgetOn) capUsd = null;
 
+  const effectiveMode: MissionBudget["mode"] =
+    opts.budgetEnabled === true
+      ? "own"
+      : opts.budgetEnabled === false
+        ? b?.max_grant_usd != null
+          ? "pooled"
+          : "none"
+        : (b?.mode ?? "none");
+
   let resetPeriod: BudgetResetPeriod = "total";
-  if (capUsd != null && b?.max_grant_usd == null) {
-    if (opts.budgetEnabled && opts.draftResetPeriod != null) {
-      resetPeriod = opts.draftResetPeriod;
-    } else {
-      resetPeriod = pool?.reset_period ?? b?.own_budget_reset_period ?? "total";
+  if (capUsd != null) {
+    if (effectiveMode === "pooled") {
+      resetPeriod = pool?.reset_period ?? "total";
+    } else if (effectiveMode === "own" && b?.max_grant_usd == null) {
+      if (opts.draftResetPeriod != null) {
+        resetPeriod = opts.draftResetPeriod;
+      } else {
+        resetPeriod = pool?.reset_period ?? b?.own_budget_reset_period ?? "total";
+      }
     }
   }
 
@@ -832,15 +845,24 @@ export function computeRunwayForecast(opts: {
       (etaSecs == null || etaSecs >= resetsInSecs),
   );
 
+  // `ManagedManager::auto_extend` runs when a live VM has `<= 10m` remaining on
+  // its lease and requests a `30m` extension (`0.5h * perVmUsdPerH`), which
+  // `extend()` checks against `available_usd` (`reservation_for(30, usd_per_hour)`).
+  const liveMachineCount = Math.max(1, pool?.live_machines ?? 1);
+  const perVmUsdPerH = shapedComputeBurnUsdPerH / liveMachineCount;
+  const extensionStepUsd = perVmUsdPerH * 0.5;
+  const avgReservedHours =
+    shapedComputeBurnUsdPerH > 0.005 ? reservedUsd / shapedComputeBurnUsdPerH : 0;
+  const timeToExtendTriggerSecs = Math.max(0, (avgReservedHours - 10 / 60) * 3600);
   const leaseCliffSecs =
     capUsd != null &&
     runwayUsd > 0 &&
     reservedUsd > 0.005 &&
     shapedComputeBurnUsdPerH > 0.005 &&
     availableUsd < runwayUsd - 0.005
-      ? availableUsd <= 0
+      ? availableUsd + 1e-6 < extensionStepUsd
         ? 0
-        : (availableUsd / shapedComputeBurnUsdPerH) * 3600
+        : timeToExtendTriggerSecs + ((availableUsd - extensionStepUsd) / shapedComputeBurnUsdPerH) * 3600
       : null;
 
   const unshapedEtaSecs =
@@ -903,7 +925,9 @@ export function computeRunwayForecast(opts: {
       if (leaseCliffSecs != null && leaseCliffSecs < 3600) {
         parts.push(
           leaseCliffSecs <= 0
-            ? "VM auto-extensions paused (0 unallocated)"
+            ? availableUsd <= 0.005
+              ? "VM auto-extensions paused (0 unallocated)"
+              : `VM auto-extensions paused (${money(availableUsd)} < ${money(extensionStepUsd)} 30m step)`
             : `VM extensions pause in ${formatDurationEta(leaseCliffSecs)}`,
         );
       }

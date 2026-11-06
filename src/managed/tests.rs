@@ -579,6 +579,9 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         auto_extensions: 0,
         prior_pool_charges: Vec::new(),
         pool_spent_offset: 0.0,
+        billed_segments: Vec::new(),
+        segment_started_at: None,
+        segment_spent_offset: 0.0,
         stopped_at: None,
         stopped_by_reaper: false,
         source_snapshot: None,
@@ -991,6 +994,9 @@ fn spend_machine(
         auto_extensions: 0,
         prior_pool_charges: Vec::new(),
         pool_spent_offset: 0.0,
+        billed_segments: Vec::new(),
+        segment_started_at: None,
+        segment_spent_offset: 0.0,
         stopped_at: None,
         stopped_by_reaper: false,
         source_snapshot: None,
@@ -3262,6 +3268,9 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
         cost_before_resume: 0.0,
         prior_pool_charges: Vec::new(),
         pool_spent_offset: 0.0,
+        billed_segments: Vec::new(),
+        segment_started_at: None,
+        segment_spent_offset: 0.0,
         project: Some("verity".into()),
         root_mission_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
         active_mission_ids: vec!["550e8400-e29b-41d4-a716-446655440000".into()],
@@ -6189,6 +6198,103 @@ fn daily_and_weekly_budget_pools_reset_window_spend_while_preserving_lifetime_sp
     assert!(
         (u.available_usd - 270.0).abs() < 0.02,
         "expected $270 remaining today, got {u:?}"
+    );
+}
+
+#[test]
+fn daily_pool_window_spend_respects_pool_change_intervals_and_excludes_stopped_gaps() {
+    let t_22 = chrono::DateTime::parse_from_rfc3339("2026-11-04T22:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t_23 = chrono::DateTime::parse_from_rfc3339("2026-11-04T23:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let midnight = chrono::DateTime::parse_from_rfc3339("2026-11-05T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t_01 = chrono::DateTime::parse_from_rfc3339("2026-11-05T01:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t_02 = chrono::DateTime::parse_from_rfc3339("2026-11-05T02:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    let mut pool_a = pool("pool_a", 100.0, None);
+    pool_a.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    let mut pool_b = pool("pool_b", 100.0, None);
+    pool_b.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    let mut pool_c = pool("pool_c", 100.0, None);
+    pool_c.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    let mut pools = HashMap::new();
+    pools.insert("pool_a".into(), pool_a);
+    pools.insert("pool_b".into(), pool_b);
+    pools.insert("pool_c".into(), pool_c);
+
+    // Case 1 (Finding 1): $10/h VM created at 22:00 on Pool A, transferred to
+    // Pool B at 00:00, and inspected at 02:00. Pool A incurred $0 today ($20
+    // lifetime) and Pool B incurred $20 today ($20 lifetime).
+    let mut vm_transfer = spend_machine(
+        "m-transfer",
+        "large",
+        Some("pool_a"),
+        "2026-11-04T22:00:00Z",
+        None,
+        0.0,
+    );
+    vm_transfer.usd_per_hour = 10.0;
+    vm_transfer.cost_is_metered = false;
+    vm_transfer.expires_at = t_02 + chrono::Duration::minutes(30);
+    vm_transfer.budget_pool_id = Some("pool_a".into());
+    vm_transfer.change_pool(Some("pool_b".into()), midnight);
+
+    // Case 2 (Finding 2): $10/h VM created yesterday at 22:00 on Pool C,
+    // stopped at 23:00 ($10 prior cost), resumed today at 01:00, inspected at
+    // 02:00 ($10 post-resume cost). Today's window spend must be $10 (none of
+    // yesterday's $10 spreads across the stopped [23:00, 01:00] interval).
+    let mut vm_resumed = spend_machine(
+        "m-resumed",
+        "large",
+        Some("pool_c"),
+        "2026-11-04T22:00:00Z",
+        None,
+        0.0,
+    );
+    vm_resumed.created_at = t_22;
+    vm_resumed.usd_per_hour = 10.0;
+    vm_resumed.cost_is_metered = false;
+    vm_resumed.expires_at = t_23 + chrono::Duration::minutes(30);
+    vm_resumed.budget_pool_id = Some("pool_c".into());
+    // Stop at 23:00:
+    vm_resumed.cost_usd = vm_resumed.estimated_cost(t_23);
+    vm_resumed.close_billing_segment(t_23, t_23, t_23);
+    vm_resumed.state = MachineState::Stopped;
+    vm_resumed.stopped_at = Some(t_23);
+    // Resume at 01:00:
+    let pre_end = vm_resumed.stopped_at.unwrap_or(t_01);
+    vm_resumed.close_billing_segment(pre_end, t_01, t_01);
+    vm_resumed.state = MachineState::Online;
+    vm_resumed.cost_before_resume = vm_resumed.cost_usd;
+    vm_resumed.run_started_at = Some(t_01);
+    vm_resumed.stopped_at = None;
+    vm_resumed.expires_at = t_02 + chrono::Duration::minutes(30);
+
+    let machines = vec![vm_transfer, vm_resumed];
+    let is_open = |_: &str| true;
+    let ua = budget::pool_usage("pool_a", &pools, &machines, t_02, &is_open).unwrap();
+    let ub = budget::pool_usage("pool_b", &pools, &machines, t_02, &is_open).unwrap();
+    let uc = budget::pool_usage("pool_c", &pools, &machines, t_02, &is_open).unwrap();
+
+    assert!(
+        ua.spent_usd.abs() < 0.001 && (ua.lifetime_spent_usd - 20.0).abs() < 0.01,
+        "Pool A should have $0 today and $20 lifetime, got {ua:?}"
+    );
+    assert!(
+        (ub.spent_usd - 20.0).abs() < 0.01 && (ub.lifetime_spent_usd - 20.0).abs() < 0.01,
+        "Pool B should have $20 today and $20 lifetime, got {ub:?}"
+    );
+    assert!(
+        (uc.spent_usd - 10.0).abs() < 0.01 && (uc.lifetime_spent_usd - 20.0).abs() < 0.01,
+        "Pool C should have $10 today (post-resume only) and $20 lifetime, got {uc:?}"
     );
 }
 

@@ -89,10 +89,42 @@ class OrbMissionBudgetTest {
         )
         assertTrue(fc.sustainsUntilReset)
         assertEquals(14_400.0, fc.resetsInSecs ?: 0.0, 1.0)
-        assertEquals(720.0, fc.leaseCliffSecs ?: 0.0, 1.0)
+        assertEquals(0.0, fc.leaseCliffSecs ?: -1.0, 1e-6)
         assertEquals("Sustains until daily reset", fc.headline)
-        assertTrue(fc.subline.contains("VM extensions pause in ~12m"))
+        assertTrue(fc.subline.contains("VM auto-extensions paused ($2.00 < $2.50 30m step)"))
         assertEquals(OrbMissionBudget.RunwayForecast.Tone.WARNING, fc.tone)
+
+        val pooledChild = dailySust.copy(
+            ownBudget = null,
+            ownBudgetResetPeriod = OrbMissionBudget.BudgetResetPeriod.TOTAL,
+            mode = "pooled",
+            maxGrant = 2.0,
+        )
+        val pooledFc = pooledChild.computeRunwayForecast(
+            bandwidthEnabled = true,
+            nowMs = 1_793_908_800_000L,
+        )
+        assertEquals(OrbMissionBudget.BudgetResetPeriod.DAILY, pooledFc.resetPeriod)
+        assertTrue(pooledFc.sustainsUntilReset)
+        assertEquals("Sustains until daily reset", pooledFc.headline)
+
+        val upcomingCliff = dailySust.copy(
+            pool = dailySust.pool!!.copy(
+                liveMachines = 10,
+                spent = 255.8333,
+                carved = 40.0,
+                reserved = 1.6667,
+                available = 2.5,
+            ),
+        )
+        val upcomingFc = upcomingCliff.computeRunwayForecast(
+            bandwidthEnabled = true,
+            budgetEnabled = true,
+            nowMs = 1_793_922_300_000L,
+        )
+        assertTrue(upcomingFc.sustainsUntilReset)
+        assertEquals(720.0, upcomingFc.leaseCliffSecs ?: 0.0, 1.0)
+        assertTrue(upcomingFc.subline.contains("VM extensions pause in ~12m"))
     }
 
     @Test fun validatesVmAndBandwidthInputsAndForecast() {

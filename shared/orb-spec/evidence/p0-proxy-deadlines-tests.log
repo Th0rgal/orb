@@ -1,4 +1,4 @@
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-sse-keepalive-header-timeout)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -206,15 +206,14 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 44.39s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-271328e52cbc5ae3)
+    Finished `test` profile [unoptimized] target(s) in 1m 59s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::proxy::latency_tests::keepalives_fill_long_pauses_between_events_only ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3765 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3783 filtered out; finished in 0.02s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-sse-keepalive-header-timeout)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -422,15 +421,14 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 42.75s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-271328e52cbc5ae3)
+    Finished `test` profile [unoptimized] target(s) in 1.43s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::proxy::tests::keepalive_only_stream_hits_semantic_deadline_without_resetting_clock ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3765 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3783 filtered out; finished in 0.01s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-sse-keepalive-header-timeout)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -638,15 +636,14 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 43.65s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-271328e52cbc5ae3)
+    Finished `test` profile [unoptimized] target(s) in 0.42s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::proxy::tests::fleet_keepalive_bridges_transport_idle_within_semantic_queue_budget ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3765 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3783 filtered out; finished in 0.01s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-sse-keepalive-header-timeout)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -854,15 +851,14 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 49.41s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-271328e52cbc5ae3)
+    Finished `test` profile [unoptimized] target(s) in 0.47s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::proxy::tests::exhausted_semantic_deadline_skips_same_entry_retries ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3765 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3783 filtered out; finished in 0.01s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-sse-keepalive-header-timeout)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -1070,15 +1066,14 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 44.48s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-271328e52cbc5ae3)
+    Finished `test` profile [unoptimized] target(s) in 0.53s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::proxy::latency_tests::stall_before_output_is_rerouted_transparently ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3765 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3783 filtered out; finished in 0.04s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-sse-keepalive-header-timeout)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -1286,11 +1281,11 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 44.48s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-271328e52cbc5ae3)
+    Finished `test` profile [unoptimized] target(s) in 0.83s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::proxy::latency_tests::stall_after_output_is_surfaced_not_retried ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3765 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3783 filtered out; finished in 0.01s
 

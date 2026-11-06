@@ -189,8 +189,9 @@ child it is claimed for). Per pool, derived from the registry
 
 - `spent` = metered (or estimated so far) cost of its VMs within the pool's
   active window (`total` = lifetime, `daily` = `[00:00 UTC, +24h)`, `weekly` =
-  `[ISO Monday 00:00 UTC, +7d)`, time-proportioned across VMs spanning a window
-  boundary; `lifetime_spent_usd` always reports cumulative all-time pool spend);
+  `[ISO Monday 00:00 UTC, +7d)`, attributed per ownership/run segment in
+  `billed_segments` so pool transfers and stopped idle gaps never leak across
+  reset boundaries; `lifetime_spent_usd` always reports cumulative all-time pool spend);
 - `reserved` = for each live VM, `min(remaining TTL, 60 min) × usd_per_hour`;
 - `carved` = each child pool's budget while its owner runs, and once the owner
   is terminal only what that child used inside the parent pool's active window
@@ -320,9 +321,12 @@ Hierarchical inheritance & pace/delay enforcement:
    renders Mission Settings as a full-page view (`ms:<id>`) with a top compact
    spend/runway forecast chart showing observed burn, `now`, reserved hold, cap
    line, estimated time until budget exhaustion (`max(0, cap_usd - spent_usd - carved_usd)`),
-   periodic reset sustainability when `eta_secs >= resets_in_secs`, and live VM
-   lease-extension cliff (`available_usd / burn_rate`) when active reservations
-   will block auto-extensions before unspent funds hit zero.
+   periodic reset sustainability when `eta_secs >= resets_in_secs` (inherited by
+   `pooled` child missions sharing a daily/weekly ancestor pool), and live VM
+   lease-extension cliff based on the `30m` auto-extend reservation threshold
+   (`extension_step_usd = 0.5h × per_vm_usd_per_h` at `<= 10m` remaining lease)
+   when active reservations or insufficient unallocated headroom will pause
+   auto-extensions before unspent funds hit zero.
 
 ## Provisioning
 

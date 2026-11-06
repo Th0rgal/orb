@@ -446,8 +446,49 @@ it("matches the shared cross-client mission-budget fixture", () => {
   expect(fc.resetPeriod).toBe("daily");
   expect(fc.sustainsUntilReset).toBe(true);
   expect(fc.resetsInSecs).toBe(14_400);
-  expect(fc.leaseCliffSecs).toBeCloseTo(720, 0);
+  expect(fc.leaseCliffSecs).toBe(0);
   expect(fc.headline).toBe("Sustains until daily reset");
-  expect(fc.subline).toContain("VM extensions pause in ~12m");
+  expect(fc.subline).toContain("VM auto-extensions paused ($2.00 < $2.50 30m step)");
   expect(fc.tone).toBe("warning");
+
+  // Pooled child sharing a daily ancestor pool (`max_grant_usd != null`) keeps the ancestor's daily reset cadence.
+  const pooledChild: MissionBudget = {
+    ...dailySust,
+    mission_id: "child-pooled",
+    own_budget_usd: null,
+    own_budget_reset_period: "total",
+    mode: "pooled",
+    max_grant_usd: 2.0,
+  };
+  const pooledFc = computeRunwayForecast({
+    budget: pooledChild,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T20:00:00Z"),
+  });
+  expect(pooledFc.resetPeriod).toBe("daily");
+  expect(pooledFc.sustainsUntilReset).toBe(true);
+  expect(pooledFc.headline).toBe("Sustains until daily reset");
+
+  // With 10 live VMs at $10/h total ($1/h each -> $0.50 30m step), $2.50 available, and $1.6667 reserved (10m left),
+  // extensions remain possible for (2.50 - 0.50) / 10 * 3600 = 720s (~12m) before pausing!
+  const upcomingCliff: MissionBudget = {
+    ...dailySust,
+    pool: {
+      ...dailySust.pool!,
+      live_machines: 10,
+      reserved_usd: 1.6667,
+      available_usd: 2.5,
+      spent_usd: 255.8333,
+      carved_usd: 40.0,
+    },
+  };
+  const upcomingFc = computeRunwayForecast({
+    budget: upcomingCliff,
+    budgetEnabled: true,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+  });
+  expect(upcomingFc.sustainsUntilReset).toBe(true);
+  expect(upcomingFc.leaseCliffSecs).toBeCloseTo(720, 0);
+  expect(upcomingFc.subline).toContain("VM extensions pause in ~12m");
 });

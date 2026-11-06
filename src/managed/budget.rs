@@ -244,6 +244,27 @@ pub fn reservation_for(ttl_minutes: u64, usd_per_hour: f64) -> f64 {
     (ttl_minutes.min(RESERVE_MINUTES as u64) as f64) / 60.0 * usd_per_hour
 }
 
+fn segment_cost_in_window(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    cost_usd: f64,
+    w0: DateTime<Utc>,
+) -> f64 {
+    if cost_usd <= 0.0 || end <= w0 {
+        return 0.0;
+    }
+    if start >= w0 {
+        return cost_usd;
+    }
+    let span = (end - start).num_milliseconds() as f64;
+    let ov = (end - start.max(w0)).num_milliseconds().max(0) as f64;
+    if span <= 0.0 {
+        cost_usd
+    } else {
+        cost_usd * (ov / span).clamp(0.0, 1.0)
+    }
+}
+
 /// Cost of one machine attributed to `pool_id` inside `[window_start, now]`
 /// (or all-time when `window_start == None`).
 fn machine_pool_spent_in_window(
@@ -278,15 +299,37 @@ fn machine_pool_spent_in_window(
         .min(m.expires_at)
         .max(min_end.min(now))
         .max(m.created_at);
+
+    // Exact ownership-interval accounting whenever billed segments have been
+    // recorded across pool changes, stops, or resumes.
+    if !m.billed_segments.is_empty() || m.segment_started_at.is_some() {
+        let mut sum = 0.0;
+        for seg in &m.billed_segments {
+            if seg.pool_id.as_deref() == Some(pool_id) {
+                sum += segment_cost_in_window(seg.start, seg.end, seg.cost_usd, w0);
+            }
+        }
+        if m.budget_pool_id.as_deref() == Some(pool_id) {
+            let open_cost = (machine_spent(m, now) - m.segment_spent_offset).max(0.0);
+            let seg_start = m
+                .segment_started_at
+                .or(m.run_started_at)
+                .unwrap_or(m.created_at);
+            sum += segment_cost_in_window(seg_start, end.max(seg_start), open_cost, w0);
+        }
+        return sum.min(total_here);
+    }
+
     if end <= w0 {
         return 0.0;
     }
     if m.created_at >= w0 {
         return total_here;
     }
-    // Machine spans across `w0`: if resumed after `w0`, `cost_before_resume`
-    // only contributes to the extent `[created_at, run_start]` overlaps `[w0, now]`,
-    // and post-resume spend falls inside `[w0, now]`. Otherwise prorate over `[created_at, end]`.
+    // Legacy fallback for persisted machines created before `billed_segments`:
+    // when `cost_before_resume > 0` and `usd_per_hour > 0`, derive the actual
+    // pre-resume active duration from `cost_before_resume / usd_per_hour` so
+    // stopped idle time before `run_started_at` is excluded from window overlap.
     let total_spent = machine_spent(m, now);
     if total_spent <= 0.0 {
         return 0.0;
@@ -294,42 +337,21 @@ fn machine_pool_spent_in_window(
     let machine_in_window = match m.run_started_at {
         Some(run_start) if run_start > m.created_at && m.cost_before_resume > 0.0 => {
             let post_resume = (total_spent - m.cost_before_resume).max(0.0);
-            let pre_end = run_start.max(m.created_at);
-            let pre_in_win = if pre_end <= w0 {
-                0.0
+            let inferred_pre_end = if m.usd_per_hour > 0.0 {
+                let billed_ms =
+                    ((m.cost_before_resume / m.usd_per_hour) * 3_600_000.0).round() as i64;
+                (m.created_at + chrono::Duration::milliseconds(billed_ms.max(0))).min(run_start)
             } else {
-                let span = (pre_end - m.created_at).num_milliseconds() as f64;
-                let ov = (pre_end - m.created_at.max(w0)).num_milliseconds().max(0) as f64;
-                if span <= 0.0 {
-                    m.cost_before_resume
-                } else {
-                    m.cost_before_resume * (ov / span)
-                }
+                run_start
             };
-            let post_in_win = if end <= w0 {
-                0.0
-            } else if run_start >= w0 {
-                post_resume
-            } else {
-                let span = (end - run_start).num_milliseconds() as f64;
-                let ov = (end - run_start.max(w0)).num_milliseconds().max(0) as f64;
-                if span <= 0.0 {
-                    post_resume
-                } else {
-                    post_resume * (ov / span)
-                }
-            };
+            let pre_end = m.stopped_at.unwrap_or(inferred_pre_end).max(m.created_at);
+            let pre_in_win =
+                segment_cost_in_window(m.created_at, pre_end, m.cost_before_resume, w0);
+            let post_in_win =
+                segment_cost_in_window(run_start, end.max(run_start), post_resume, w0);
             pre_in_win + post_in_win
         }
-        _ => {
-            let span = (end - m.created_at).num_milliseconds() as f64;
-            let ov = (end - m.created_at.max(w0)).num_milliseconds().max(0) as f64;
-            if span <= 0.0 {
-                total_spent
-            } else {
-                total_spent * (ov / span)
-            }
-        }
+        _ => segment_cost_in_window(m.created_at, end, total_spent, w0),
     };
     let frac = (machine_in_window / total_spent).clamp(0.0, 1.0);
     total_here * frac
