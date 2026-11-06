@@ -43,6 +43,7 @@ import {
   applyLiveEventsToTranscriptCache,
   applyWarmMissionPatch,
   attachMissionStream,
+  clearWarmMissionSettingsPatch,
   extractMissionSettingsPatch,
   isMissionDirtyWhileUnfocused,
   isMissionWarmLive,
@@ -51,7 +52,6 @@ import {
   peekReadyTranscript,
   peekTranscript,
   peekTranscriptHeight,
-  peekWarmMissionPatch,
   prepareTranscriptSearch,
   putTranscript,
   putTranscriptHeight,
@@ -111,6 +111,7 @@ import { fulfillSearchTarget, hasPendingSearchTarget, pendingSearchTarget } from
 
 const inflightSettings = new Map<string, Promise<unknown>>();
 function trackMissionSettings<T>(missionId: string, request: Promise<T>): Promise<T> {
+  clearWarmMissionSettingsPatch(missionId);
   const prev = inflightSettings.get(missionId) ?? Promise.resolve();
   const chained = prev.catch(() => undefined).then(() => request);
   const tracked = chained.then(() => undefined, () => undefined).finally(() => {
@@ -379,14 +380,24 @@ function MissionDock(p: {
 const sameMission = (a: Mission | null, b: Mission | null) => a === b || (!!a && !!b && shallowEqual(a, b));
 
 export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
-  const [resolved, setResolved] = createSignal<Mission | null>(applyWarmMissionPatch(p.initial), { equals: sameMission });
+  const [resolved, setResolved] = createSignal<Mission | null>(
+    applyWarmMissionPatch(p.initial, { preserveSettings: Boolean(p.id && inflightSettings.has(p.id)) }),
+    { equals: sameMission },
+  );
   const [error, setError] = createSignal("");
   createEffect(() => {
     const init = p.initial;
-    if (init) setResolved(prev => applyWarmMissionPatch(mergeIncomingMission(prev, init)));
+    if (init) {
+      setResolved(prev =>
+        applyWarmMissionPatch(mergeIncomingMission(prev, init), {
+          preserveSettings: inflightSettings.has(init.id),
+        }),
+      );
+    }
   });
   const handleMission = (next: Mission | null, authoritative = false) => {
     if (next) {
+      if (authoritative) clearWarmMissionSettingsPatch(next.id);
       setResolved(prev => (authoritative ? { ...prev, ...next, history: next.history?.length ? next.history : (prev?.history ?? []) } : mergeIncomingMission(prev, next)));
     }
     p.onMission?.(next, authoritative);
@@ -406,15 +417,25 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   onCleanup(()=>{disposed=true;});
   createEffect(()=>{if(p.id)onCleanup(retainTranscript(p.id));});
   const cached = p.id ? peekReadyTranscript(p.id) ?? (peekTranscript(p.id)?.detailsPending ? peekTranscript(p.id) : undefined) : undefined;
-  const [mission, setMission] = createSignal<Mission | null>(applyWarmMissionPatch(p.initial), { equals: sameMission });
+  const [mission, setMission] = createSignal<Mission | null>(
+    applyWarmMissionPatch(p.initial, { preserveSettings: Boolean(p.id && inflightSettings.has(p.id)) }),
+    { equals: sameMission },
+  );
   let authoritativeOnce = false;
   const applyDockMission = (next: Mission, authoritative = false) => {
+    clearWarmMissionSettingsPatch(next.id);
     authoritativeOnce = authoritative;
     setMission(prev => (authoritative ? { ...prev, ...next, history: next.history?.length ? next.history : (prev?.history ?? []) } : next));
   };
   createEffect(()=>{
     const init = p.initial;
-    if (init) setMission(prev => applyWarmMissionPatch(mergeIncomingMission(prev, init)));
+    if (init) {
+      setMission(prev =>
+        applyWarmMissionPatch(mergeIncomingMission(prev, init), {
+          preserveSettings: inflightSettings.has(init.id),
+        }),
+      );
+    }
   });
   createEffect(() => {
     const m = mission();
@@ -664,10 +685,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     };
     window.addEventListener("orb:refresh", reload);
     onCleanup(() => window.removeEventListener("orb:refresh", reload));
-    const warmPatch = peekWarmMissionPatch(id);
-    if (warmPatch) {
-      setMission(old => (old ? { ...old, ...warmPatch } : old));
-    }
+    setMission(old =>
+      old ? applyWarmMissionPatch(old, { preserveSettings: inflightSettings.has(id) }) : old,
+    );
     const warmLiveOnMount = isMissionWarmLive(id);
     const readyOnMount = peekReadyTranscript(id);
     const cleanStaleOnMount =

@@ -92,7 +92,9 @@ type WarmMissionSub = {
   cursor?: number;
   lastStatus?: string;
   lastStatusSummary?: string;
+  lastStatusAtMs?: number;
   lastSettingsPatch?: WarmMissionSettingsPatch;
+  lastSettingsAtMs?: number;
   views: Set<MissionStreamViewHandlers>;
 };
 
@@ -248,13 +250,15 @@ export function peekWarmMissionStatus(
   id: string,
 ): { status: string; summary?: string } | undefined {
   const sub = warmSubs.get(key(id));
-  if (!sub || sub.connVer !== connectionVersion() || !sub.lastStatus) return undefined;
+  if (!sub || sub.connVer !== connectionVersion() || !sub.healthy || !sub.caughtUp || !sub.lastStatus) {
+    return undefined;
+  }
   return { status: sub.lastStatus, summary: sub.lastStatusSummary };
 }
 
 export function peekWarmMissionPatch(id: string): WarmMissionPatch | undefined {
   const sub = warmSubs.get(key(id));
-  if (!sub || sub.connVer !== connectionVersion()) return undefined;
+  if (!sub || sub.connVer !== connectionVersion() || !sub.healthy || !sub.caughtUp) return undefined;
   if (!sub.lastStatus && !sub.lastSettingsPatch) return undefined;
   return {
     ...(sub.lastSettingsPatch ?? {}),
@@ -263,11 +267,42 @@ export function peekWarmMissionPatch(id: string): WarmMissionPatch | undefined {
   };
 }
 
-export function applyWarmMissionPatch(mission: Mission | null | undefined): Mission | null {
+export function clearWarmMissionSettingsPatch(id: string): void {
+  const sub = warmSubs.get(key(id));
+  if (!sub || sub.connVer !== connectionVersion()) return;
+  sub.lastSettingsPatch = undefined;
+  sub.lastSettingsAtMs = undefined;
+}
+
+export function applyWarmMissionPatch(
+  mission: Mission | null | undefined,
+  options?: { preserveSettings?: boolean },
+): Mission | null {
   if (!mission) return null;
-  const patch = peekWarmMissionPatch(mission.id);
-  if (!patch) return mission;
-  return { ...mission, ...patch };
+  const sub = warmSubs.get(key(mission.id));
+  if (!sub || sub.connVer !== connectionVersion() || !sub.healthy || !sub.caughtUp) return mission;
+  if (!sub.lastStatus && !sub.lastSettingsPatch) return mission;
+
+  const missionTs = Date.parse(mission.updated_at || "");
+  const applyStatus =
+    Boolean(sub.lastStatus) &&
+    (Number.isNaN(missionTs) || sub.lastStatusAtMs === undefined || sub.lastStatusAtMs >= missionTs);
+  const applySettings =
+    !options?.preserveSettings &&
+    Boolean(sub.lastSettingsPatch) &&
+    (Number.isNaN(missionTs) ||
+      sub.lastSettingsAtMs === undefined ||
+      sub.lastSettingsAtMs >= missionTs);
+
+  if (!applyStatus && !applySettings) return mission;
+  return {
+    ...mission,
+    ...(applySettings ? sub.lastSettingsPatch : {}),
+    ...(applyStatus && sub.lastStatus ? { status: sub.lastStatus } : {}),
+    ...(applyStatus && sub.lastStatusSummary !== undefined
+      ? { status_message: sub.lastStatusSummary }
+      : {}),
+  };
 }
 
 export function isMissionStreamCaughtUp(id: string): boolean {
@@ -332,9 +367,17 @@ function ensureWarmSub(id: string, initialSinceSeq?: number): WarmMissionSub {
   const handleEvent = (ev: StreamEvent) => {
     noteSeq(ev);
     if (ev.type === "mission_settings_updated") {
+      const extracted = extractMissionSettingsPatch(ev.data);
+      const parsedUpdated = Date.parse(extracted.updated_at || "");
+      const parsedAt = typeof ev.data.at === "string" ? Date.parse(ev.data.at) : Number.NaN;
+      sub.lastSettingsAtMs = !Number.isNaN(parsedUpdated)
+        ? parsedUpdated
+        : !Number.isNaN(parsedAt)
+          ? parsedAt
+          : Date.now();
       sub.lastSettingsPatch = {
         ...(sub.lastSettingsPatch ?? {}),
-        ...extractMissionSettingsPatch(ev.data),
+        ...extracted,
       };
       if (sub.views.size > 0) {
         for (const v of sub.views) v.onEvent(ev);
@@ -346,6 +389,8 @@ function ensureWarmSub(id: string, initialSinceSeq?: number): WarmMissionSub {
         sub.lastStatus = ev.data.status;
         sub.lastStatusSummary =
           typeof ev.data.summary === "string" ? ev.data.summary : undefined;
+        const parsedAt = typeof ev.data.at === "string" ? Date.parse(ev.data.at) : Number.NaN;
+        sub.lastStatusAtMs = !Number.isNaN(parsedAt) ? parsedAt : Date.now();
       }
       if (sub.views.size > 0) {
         for (const v of sub.views) v.onEvent(ev);
@@ -386,6 +431,11 @@ function ensureWarmSub(id: string, initialSinceSeq?: number): WarmMissionSub {
     () => {
       sub.healthy = false;
       sub.caughtUp = false;
+      sub.lastStatus = undefined;
+      sub.lastStatusSummary = undefined;
+      sub.lastStatusAtMs = undefined;
+      sub.lastSettingsPatch = undefined;
+      sub.lastSettingsAtMs = undefined;
       dirtyMissions.add(scope);
       for (const v of sub.views) v.onDisconnected();
     },

@@ -24,7 +24,9 @@ import {
 import { sideQuestionKey } from "../src/sideQuestionStorage";
 import {
   applyLiveEventsToTranscriptCache,
+  applyWarmMissionPatch,
   attachMissionStream,
+  clearWarmMissionSettingsPatch,
   forgetPrefetchPauses,
   isMissionDirtyWhileUnfocused,
   isMissionWarmLive,
@@ -945,5 +947,114 @@ describe("warm background sync & off-mode quickness", () => {
       question: "Check status",
       answer: "Status is healthy.",
     });
+  });
+
+  it("never overwrites newer mission settings or disconnected subscriptions when applying warm patches", async () => {
+    setConnection("http://patch-fresh.test", "jwt-tok");
+    setMultiplexSyncEnabledForTest(true);
+    vi.stubGlobal("WebSocket", FakeSyncSocket as unknown as typeof WebSocket);
+    setBackgroundSyncMode("auto");
+
+    const mid = "m-patch-freshness";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/queue?")) return Response.json([]);
+        if (url.includes("/snapshot?")) return new Response("none", { status: 404 });
+        if (url.includes(`/missions/${mid}/events?`)) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: 1,
+                mission_id: mid,
+                sequence: 1,
+                event_type: "user_message",
+                event_id: "u1",
+                content: "Hello",
+                timestamp: "2026-11-06T12:00:00Z",
+                metadata: {},
+              },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": "1",
+                "X-Page-Max-Sequence": "1",
+                "X-Max-Sequence": "1",
+              },
+            },
+          );
+        }
+        return Response.json({ id: mid, tags: [] });
+      }),
+    );
+
+    const release = retainTranscript(mid);
+    await loadTranscript(mid);
+    const detach = attachMissionStream(mid, {
+      onEvent: () => {},
+      onBatch: () => {},
+      onLagged: () => {},
+      onReady: () => {},
+      onDisconnected: () => {},
+    });
+
+    await vi.waitFor(() => expect(FakeSyncSocket.instances).toHaveLength(1));
+    const sock = FakeSyncSocket.instances[0];
+    await vi.waitFor(() => expect(isMissionWarmLive(mid)).toBe(true));
+
+    // Stream delivers a settings update at T1:
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "mission_settings_updated",
+        mission_id: mid,
+        sequence: 2,
+        model_override: "openai/gpt-5.2",
+        model_effort: "medium",
+        updated_at: "2026-11-06T12:05:00Z",
+      }),
+    });
+
+    const staleMission = {
+      id: mid,
+      status: "awaiting_user",
+      title: null,
+      history: [],
+      backend: "opencode",
+      model_override: "openai/gpt-5.0",
+      model_effort: "low",
+      created_at: "2026-11-06T12:00:00Z",
+      updated_at: "2026-11-06T12:01:00Z",
+    };
+    // Older mission row IS upgraded to the T1 stream patch:
+    expect(applyWarmMissionPatch(staleMission)?.model_override).toBe("openai/gpt-5.2");
+
+    // Newer optimistic/HTTP mission row (T2 > T1) is NOT overwritten by the T1 stream patch:
+    const newerMission = {
+      ...staleMission,
+      model_override: "anthropic/claude-opus-4-6",
+      model_effort: "high",
+      updated_at: "2026-11-06T12:06:00Z",
+    };
+    expect(applyWarmMissionPatch(newerMission)?.model_override).toBe("anthropic/claude-opus-4-6");
+    expect(applyWarmMissionPatch(newerMission)?.model_effort).toBe("high");
+
+    // In-flight settings guard (`preserveSettings: true`) also keeps existing settings:
+    expect(
+      applyWarmMissionPatch(staleMission, { preserveSettings: true })?.model_override,
+    ).toBe("openai/gpt-5.0");
+
+    // Disconnecting clears unhealthy warm patches so stale stream state never lingers:
+    sock.onclose?.();
+    expect(peekWarmMissionPatch(mid)).toBeUndefined();
+    expect(applyWarmMissionPatch(staleMission)?.model_override).toBe("openai/gpt-5.0");
+
+    clearWarmMissionSettingsPatch(mid);
+    detach();
+    release();
   });
 });
