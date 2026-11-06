@@ -50,6 +50,10 @@ def JobState.isTerminal : JobState → Bool
   | .succeeded | .failed | .cancelled => true
   | .queued | .running | .lost        => false
 
+def JobState.confirmsTermination : JobState → Bool
+  | .succeeded | .failed | .cancelled | .lost => true
+  | .queued | .running                        => false
+
 def canTransitionTo (fromState toState : JobState) : Bool :=
   Orb.Kernel.verifyJobTransition fromState.code toState.code == 1
 
@@ -195,11 +199,12 @@ inductive SqliteBackend where
   deriving Repr, BEq, Inhabited
 
 structure Ledger where
-  workDir       : String
-  sqliteBackend : SqliteBackend := .cli
-  store         : LeanSys.Store.Handle
-  jobs          : Std.HashMap String JobRecord
-  order         : Array String
+  workDir           : String
+  sqliteBackend     : SqliteBackend := .cli
+  store             : LeanSys.Store.Handle
+  jobs              : Std.HashMap String JobRecord
+  order             : Array String
+  pendingSqliteSync : Std.HashMap String JobRecord := {}
 
 private def jobKey (jobId : String) : String := s!"job/{jobId}"
 
@@ -253,18 +258,28 @@ private def runSqliteStdin (backend : SqliteBackend) (dbPath sql : String) (time
     if out.exitCode == 0 then return .ok ()
     else return .error s!"jobs.db write locked or failed: {out.stderr.trimAscii}"
 
+private def runSqliteStdinWithRetry
+    (backend : SqliteBackend) (dbPath sql : String)
+    (timeoutMs : Nat := 5000) (attempts : Nat := 4) : IO (Except String Unit) := do
+  let mut lastErr := "sqlite write failed"
+  for i in [0 : max 1 attempts] do
+    match ← runSqliteStdin backend dbPath sql timeoutMs with
+    | .ok () => return .ok ()
+    | .error e =>
+      lastErr := e
+      if i + 1 < attempts then
+        IO.sleep ((i + 1) * 150).toUInt32
+  return .error lastErr
+
 private def ensureLegacySqliteSchema (workDir : String) (backend : SqliteBackend) : IO (Except String Unit) := do
   let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
   let ddl :=
     "PRAGMA journal_mode=WAL; " ++
     "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, artifacts_json TEXT, cancellation_json TEXT); " ++
     "CREATE TABLE IF NOT EXISTS node_scratch (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, job_id TEXT, parent_identity TEXT NOT NULL, directory_identity TEXT NOT NULL, retired_at TEXT);"
-  runSqliteStdin backend dbPath ddl 5000
+  runSqliteStdinWithRetry backend dbPath ddl 5000 3
 
-private def syncJobToLegacySqlite
-    (workDir : String) (backend : SqliteBackend) (r : JobRecord) (timeoutMs : Nat := 5000) :
-    IO (Except String Unit) := do
-  let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
+private def jobUpsertSql (r : JobRecord) : String :=
   let exitSql := match r.exitCode? with | some c => toString c | none => "NULL"
   let artsSql :=
     if r.artifacts.isEmpty then "NULL"
@@ -273,10 +288,15 @@ private def syncJobToLegacySqlite
     match r.cancellation? with
     | some c => sqlEsc (renderCompact c.toJson)
     | none => "NULL"
-  let sql :=
-    "INSERT OR REPLACE INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json) VALUES (" ++
-    s!"{sqlEsc r.jobId}, {sqlEsc r.missionId}, {sqlEsc r.payloadJson}, {sqlEsc r.state.asString}, {exitSql}, {sqlEsc r.createdAt}, {sqlOptStr r.startedAt?}, {sqlOptStr r.finishedAt?}, {sqlOptStr r.logPath?}, {sqlOptStr r.error?}, {artsSql}, {cancSql});"
-  runSqliteStdin backend dbPath sql timeoutMs
+  "INSERT OR REPLACE INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json) VALUES (" ++
+  s!"{sqlEsc r.jobId}, {sqlEsc r.missionId}, {sqlEsc r.payloadJson}, {sqlEsc r.state.asString}, {exitSql}, {sqlEsc r.createdAt}, {sqlOptStr r.startedAt?}, {sqlOptStr r.finishedAt?}, {sqlOptStr r.logPath?}, {sqlOptStr r.error?}, {artsSql}, {cancSql});"
+
+private def syncJobToLegacySqlite
+    (workDir : String) (backend : SqliteBackend) (r : JobRecord)
+    (timeoutMs : Nat := 5000) (attempts : Nat := 4) :
+    IO (Except String Unit) := do
+  let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
+  runSqliteStdinWithRetry backend dbPath (jobUpsertSql r) timeoutMs attempts
 
 /-- Import legacy SQLite `<work_dir>/jobs.db` rows idempotently when `jobs.db` exists. -/
 private def importLegacySqliteJobs (workDir : String) (backend : SqliteBackend) : IO (Except String (Array JobRecord)) := do
@@ -374,6 +394,7 @@ def openLedger (workDir : String) : IO (Except String Ledger) := do
         jobs := jobs.insert rec.jobId rec
         order := order.push rec.jobId
   let nowTs ← nowRfc3339
+  let mut batchSql := "BEGIN IMMEDIATE; "
   for (jid, rec) in jobs.toList do
     if rec.state == .queued || rec.state == .running then
       if canTransitionTo rec.state .lost then
@@ -387,27 +408,49 @@ def openLedger (workDir : String) : IO (Except String Ledger) := do
         if let .ok h' ← LeanSys.Store.putString h (jobKey jid) serialized then
           h := h'
           jobs := jobs.insert jid lostRec
-          discard <| syncJobToLegacySqlite workDir sqliteBackend lostRec
+          batchSql := batchSql ++ jobUpsertSql lostRec ++ " "
     else
-      discard <| syncJobToLegacySqlite workDir sqliteBackend rec
+      batchSql := batchSql ++ jobUpsertSql rec ++ " "
+  batchSql := batchSql ++ "COMMIT;"
+  let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
+  if let .error syncErr ← runSqliteStdinWithRetry sqliteBackend dbPath batchSql 10000 4 then
+    return .error s!"jobs.db startup reconciliation failed: {syncErr}"
   return .ok {
     workDir := workDir
     sqliteBackend := sqliteBackend
     store := h
     jobs := jobs
     order := order
+    pendingSqliteSync := {}
   }
 
 namespace Ledger
 
-def insertQueued (l : Ledger) (rec : JobRecord) : IO (Except String Ledger) := do
+/-- Reconcile any deferred `jobs.db` transitions so `rolling_upgrade_nodes.py` never observes stale rows. -/
+def flushPendingSqlite (l : Ledger) : IO Ledger := do
+  if l.pendingSqliteSync.isEmpty then
+    return l
+  let mut sql := "BEGIN IMMEDIATE; "
+  for (_, rec) in l.pendingSqliteSync.toList do
+    sql := sql ++ jobUpsertSql rec ++ " "
+  sql := sql ++ "COMMIT;"
+  let dbPath := (System.FilePath.mk l.workDir / "jobs.db").toString
+  match ← runSqliteStdin l.sqliteBackend dbPath sql 2500 with
+  | .ok () => return { l with pendingSqliteSync := {} }
+  | .error _ => return l
+
+def insertQueued (l0 : Ledger) (rec : JobRecord) : IO (Except String Ledger) := do
+  let l ← flushPendingSqlite l0
   if l.jobs.contains rec.jobId then
     return .error "duplicate_job_id"
-  if let .error e ← syncJobToLegacySqlite l.workDir l.sqliteBackend rec 1500 then
+  if let .error e ← syncJobToLegacySqlite l.workDir l.sqliteBackend rec 1500 1 then
     return .error e
   let serialized := renderCompact (rec.toJson none)
   match ← LeanSys.Store.putString l.store (jobKey rec.jobId) serialized with
-  | .error e => return .error s!"WAL write failed: {repr e}"
+  | .error e =>
+    let dbPath := (System.FilePath.mk l.workDir / "jobs.db").toString
+    discard <| runSqliteStdinWithRetry l.sqliteBackend dbPath s!"DELETE FROM jobs WHERE id = {sqlEsc rec.jobId};" 5000 3
+    return .error s!"WAL write failed: {repr e}"
   | .ok h' =>
     return .ok {
       l with
@@ -418,8 +461,9 @@ def insertQueued (l : Ledger) (rec : JobRecord) : IO (Except String Ledger) := d
 
 /-- Transition `jobId` to `nextState` under `Orb.Kernel.verifyJobTransition` (first terminal wins). -/
 def updateJob
-    (l : Ledger) (jobId : String)
+    (l0 : Ledger) (jobId : String)
     (mutate : JobRecord → Except String JobRecord) : IO (Except String (Ledger × JobRecord)) := do
+  let l ← flushPendingSqlite l0
   let some cur := l.jobs.get? jobId
     | return .error "not_found"
   match mutate cur with
@@ -431,8 +475,24 @@ def updateJob
     match ← LeanSys.Store.putString l.store (jobKey jobId) serialized with
     | .error e => return .error s!"WAL write failed: {repr e}"
     | .ok h' =>
-      discard <| syncJobToLegacySqlite l.workDir l.sqliteBackend next
-      return .ok ({ l with store := h', jobs := l.jobs.insert jobId next }, next)
+      let nextPending ← match ← syncJobToLegacySqlite l.workDir l.sqliteBackend next 5000 3 with
+        | .ok () => pure (l.pendingSqliteSync.erase jobId)
+        | .error _ =>
+          let workDir := l.workDir
+          let backend := l.sqliteBackend
+          discard <| IO.asTask (do
+            for step in [0 : 10] do
+              IO.sleep ((step + 1) * 500).toUInt32
+              if (← syncJobToLegacySqlite workDir backend next 5000 1) matches .ok () then
+                break
+          ) Task.Priority.dedicated
+          pure (l.pendingSqliteSync.insert jobId next)
+      return .ok ({
+        l with
+        store := h'
+        jobs := l.jobs.insert jobId next
+        pendingSqliteSync := nextPending
+      }, next)
 
 def listRecent (l : Ledger) (limit : Nat) : Array JobRecord := Id.run do
   let clamped := max 1 (min 200 limit)
@@ -488,11 +548,19 @@ def acquireExecFenceReceipt (workDir : String) (backend : SqliteBackend) (execId
     createdAt := nowTs
     startedAt? := some nowTs
   }
-  syncJobToLegacySqlite workDir backend execRec 1500
+  syncJobToLegacySqlite workDir backend execRec 1500 1
 
 def releaseExecFenceReceipt (workDir : String) (backend : SqliteBackend) (execId missionId : String) : IO Unit := do
   let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
   let sql := s!"DELETE FROM jobs WHERE id = {sqlEsc execId} AND mission_id = {sqlEsc missionId};"
-  discard <| runSqliteStdin backend dbPath sql 5000
+  match ← runSqliteStdinWithRetry backend dbPath sql 5000 4 with
+  | .ok () => pure ()
+  | .error _ =>
+    discard <| IO.asTask (do
+      for step in [0 : 12] do
+        IO.sleep ((step + 1) * 500).toUInt32
+        if (← runSqliteStdin backend dbPath sql 5000) matches .ok () then
+          break
+    ) Task.Priority.dedicated
 
 end OrbNode.Store

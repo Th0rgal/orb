@@ -434,6 +434,48 @@ private def runRound3RegressionTests
      | .error msg => msg == "Decompressed tar archive exceeds staged manifest allowance"
      | .ok _ => false)
 
+  -- Round 6 regression checks: Antigravity model grouping, `.lost` log termination, turbo-lean quarantine, base_tree_sha
+  let groupedModels := groupAntigravityModels #[
+    ("agy-model-low", "Carbon (Low)"),
+    ("agy-model-high", "Carbon (High)"),
+    ("agy-demo-medium", "Argon (Medium)"),
+    ("custom-v1", "Custom Model")
+  ]
+  check "groupAntigravityModels deduplicates Carbon/Argon effort tiers matching shared/antigravity.rs"
+    (groupedModels == #[("agy-model", "Carbon"), ("agy-demo", "Argon"), ("custom-v1", "Custom Model")])
+  check "JobState.lost confirmsTermination for log drain while remaining cancellable"
+    (JobState.lost.confirmsTermination && !JobState.lost.isTerminal)
+
+  let qDir := System.FilePath.mk tmpRoot / "quarantine-test"
+  IO.FS.createDirAll (qDir / "sub" / ".turbo-lean")
+  IO.FS.writeFile (qDir / "turbo-lean.toml") "accel = true"
+  IO.FS.writeFile (qDir / "sub" / ".turbo-lean.toml") "telemetry = true"
+  IO.FS.writeFile (qDir / "sub" / ".turbo-lean" / "cfg.json") "{}"
+  IO.FS.writeFile (qDir / "keep.lean") "-- ok"
+  let _ ← quarantineCheckoutTurboLeanConfigs qDir
+  check "quarantineCheckoutTurboLeanConfigs strips tracked turbo-lean configs while preserving sources"
+    (!(← (qDir / "turbo-lean.toml").pathExists) &&
+     !(← (qDir / "sub" / ".turbo-lean.toml").pathExists) &&
+     !(← (qDir / "sub" / ".turbo-lean").pathExists) &&
+     (← (qDir / "keep.lean").pathExists))
+
+  let _ ← IO.Process.output { cmd := "git", args := #["init", "--quiet"], cwd := some qDir.toString }
+  let _ ← IO.Process.output { cmd := "git", args := #["add", "keep.lean"], cwd := some qDir.toString }
+  let _ ← IO.Process.output {
+    cmd := "git"
+    args := #["-c", "user.name=t", "-c", "user.email=t@e", "commit", "--quiet", "-m", "init"]
+    cwd := some qDir.toString
+  }
+  let badBtSrc := JVal.obj #[
+    ("commit", .str "0000000000000000000000000000000000000000"),
+    ("base_tree_sha", .str "ffffffffffffffffffffffffffffffffffffffff")
+  ]
+  let btRes ← verifyBaseTree badBtSrc qDir
+  check "verifyBaseTree fails closed with BASE_TREE_MISMATCH on mismatched tree SHA"
+    (match btRes with
+     | .error msg => msg.startsWith "BASE_TREE_MISMATCH:"
+     | .ok () => false)
+
   rt ← mtx.atomically get
   return rt
 

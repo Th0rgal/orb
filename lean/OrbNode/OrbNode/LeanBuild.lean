@@ -432,6 +432,10 @@ def validateLeanBuildPayload (payload : JVal) (allowlist : Array String) : Excep
   let commit := (src.fieldStr? "commit").getD ""
   if !isLowerHex commit 40 then
     throw s!"source.commit must be a full 40-char lowercase hex SHA (got '{commit}')"
+  if let some rawBaseTree := src.fieldStr? "base_tree_sha" then
+    let bt := rawBaseTree.trimAscii.toString
+    if !bt.isEmpty && !isLowerHex bt.toLower 40 then
+      throw s!"source.base_tree_sha must be a 40-char hex SHA (got '{bt}')"
   if let some arch := src.field? "archive" then
     if arch != .null then discard <| validateSourceArchive commit arch
   if let some bnd := src.field? "bundle" then
@@ -492,6 +496,52 @@ private def requireSafeBundleParent (checkoutRoot : System.FilePath) (relPath la
       if !st.isDir then
         return .error s!"{label} ancestor is not a directory: {cur}"
   return .ok cur
+
+/-- Verify `source.base_tree_sha` (`HEAD^{tree}`) matches the checked-out Git root tree (`src/node/lean.rs:929-956`). -/
+def verifyBaseTree (src : JVal) (checkout : System.FilePath) : IO (Except String Unit) := do
+  let expected := ((src.fieldStr? "base_tree_sha").getD "").trimAscii.toString
+  if expected.isEmpty then
+    return .ok ()
+  let commit := (src.fieldStr? "commit").getD ""
+  let res ← (IO.Process.output {
+    cmd := "git"
+    args := #["rev-parse", "HEAD^{tree}"]
+    cwd := some checkout.toString
+  }).toBaseIO
+  match res with
+  | .error _ => return .error "could not resolve the checked-out tree for base tree verification"
+  | .ok out =>
+    if out.exitCode != 0 then
+      return .error "could not resolve the checked-out tree for base tree verification"
+    let actual := out.stdout.trimAscii.toString.toLower
+    if actual != expected.toLower then
+      return .error s!"BASE_TREE_MISMATCH: submitter pinned tree {expected} but commit {commit} checks out tree {actual}"
+    return .ok ()
+
+/-- Quarantine any Git-tracked `turbo-lean.toml`, `.turbo-lean.toml`, or `.turbo-lean/` inside `root`
+    (`src/node/lean.rs:2242-2276`) without following directory symlinks. -/
+def quarantineCheckoutTurboLeanConfigs (root : System.FilePath) : IO (Except String Nat) := do
+  let mut removed : Nat := 0
+  let mut stack : Array System.FilePath := #[root]
+  while h : 0 < stack.size do
+    let dir := stack[stack.size - 1]
+    stack := stack.pop
+    let .ok entries ← dir.readDir |>.toBaseIO
+      | continue
+    for e in entries do
+      let name := e.fileName
+      if name == ".git" || name == ".lake" then
+        continue
+      let st ← statPath e.path.toString
+      if name == "turbo-lean.toml" || name == ".turbo-lean.toml" || name == ".turbo-lean" then
+        if st.isDir && !st.isSymlink then
+          let _ ← IO.Process.output { cmd := "rm", args := #["-rf", e.path.toString] }
+        else
+          try IO.FS.removeFile e.path catch _ => pure ()
+        removed := removed + 1
+      else if st.isDir && !st.isSymlink then
+        stack := stack.push e.path
+  return .ok removed
 
 /-- Materialize an isolated per-job `lean_build` checkout under
     `<work_dir>/checkouts/<repo_hash16>/jobs/<job_id>` (seeding shared base commits into
@@ -574,12 +624,17 @@ def materializeLeanCheckout
             let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmp.toString] }
             let _ ← IO.FS.writeFile logPath s!"git fetch failed: {r2.stderr}\n"
             return .error s!"git fetch failed for {repo}@{commit}: {r2.stderr.trimAscii}"
+        if let .error btErr ← verifyBaseTree src tmp then
+          let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmp.toString] }
+          return .error btErr
         try
           IO.FS.rename tmp seedDir
         catch e =>
           let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmp.toString] }
           if !(← seedDir.isDir) then
             return .error s!"failed finalizing seed checkout: {e}"
+      if let .error btErr ← verifyBaseTree src seedDir then
+        return .error btErr
       let cpRes ← IO.Process.output { cmd := "cp", args := #["-a", seedDir.toString, dest.toString] }
       if cpRes.exitCode != 0 then
         return .error s!"failed cloning isolated job checkout: {cpRes.stderr.trimAscii}"
@@ -625,6 +680,7 @@ def materializeLeanCheckout
           IO.FS.writeBinFile target decoded
           if f.fieldBool? "executable" == some true then
             let _ ← chmod target.toString 0o755
+  discard <| quarantineCheckoutTurboLeanConfigs dest
   return .ok dest.toString
 
 /-- Build confined `lean_build` environment (`cache_env_for_repo` + concurrency budget + allowlisted env). -/
@@ -678,6 +734,7 @@ def buildLeanJobEnv
     ("TURBO_LEAN_ALLOWED_AXIOMS", ""),
     ("TURBO_LEAN_ALLOWED_CSIMP", ""),
     ("TURBO_LEAN_USER_CONFIG", "/dev/null"),
+    ("SANDBOXED_REMOTE_EXECUTION", "1"),
     ("SANDBOXED_TELEMETRY_BATCH_ONLY", "1"),
     ("XDG_CACHE_HOME", xdg.toString),
     ("HOME", home.toString),
@@ -757,10 +814,21 @@ def collectArtifactsConfined (rootDir : String) (patterns : Array String) : IO (
     let full := root / rel
     let fst ← statPath full.toString
     if fst.exists_ && !fst.isSymlink && fst.isReg then
-      if let .ok bytes ← IO.FS.readBinFile full |>.toBaseIO then
-        if bytes.size.toUInt64 ≤ maxSingleArtifactBytes then
-          let sha := bytesToHexLower (sha256Bytes bytes)
-          out := out.push { path := rel, sha256 := sha, sizeBytes := bytes.size.toUInt64 }
+      if let .ok md ← full.metadata |>.toBaseIO then
+        if md.byteSize ≤ maxSingleArtifactBytes then
+          if md.byteSize ≤ 4 * 1024 * 1024 then
+            if let .ok bytes ← IO.FS.readBinFile full |>.toBaseIO then
+              let sha := bytesToHexLower (sha256Bytes bytes)
+              out := out.push { path := rel, sha256 := sha, sizeBytes := bytes.size.toUInt64 }
+          else
+            if let .ok outSum ← (IO.Process.output { cmd := "sha256sum", args := #[full.toString] }).toBaseIO then
+              if outSum.exitCode == 0 then
+                let hex := ((outSum.stdout.splitOn " ").headD "").trimAscii.toString.toLower
+                let fstAfter ← statPath full.toString
+                if let .ok mdAfter ← full.metadata |>.toBaseIO then
+                  if hex.length == 64 && fstAfter.exists_ && !fstAfter.isSymlink &&
+                     mdAfter.byteSize == md.byteSize && mdAfter.modified == md.modified then
+                    out := out.push { path := rel, sha256 := hex, sizeBytes := md.byteSize }
   return out
 
 def listCachedToolchains (workDir : String) : IO (Array String) := do

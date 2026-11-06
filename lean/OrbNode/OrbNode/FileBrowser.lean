@@ -4,6 +4,7 @@
   Managed Auth Profile Provisioning (`src/node/managed_auth.rs`).
 -/
 import LeanSys.Auth
+import LeanSys.Posix
 import OrbBin.PosixExt
 import OrbBin.Json
 import OrbNode.Posix
@@ -165,13 +166,20 @@ def executeFileBrowser (rootDir : String) (reqJson : JVal) : IO (Except String J
     | .ok (full, _) =>
       let st ← statPath full.toString
       if !st.isReg || st.isSymlink then return .error "Not a regular file"
-      let .ok allBytes ← IO.FS.readBinFile full |>.toBaseIO
-        | return .error "Cannot read file"
-      let total := allBytes.size
-      let offNat := min total offset.toNat
-      let endNat := min total (offNat + 1048576)
-      let slice := allBytes.extract offNat endNat
-      let nextOff := endNat.toUInt64
+      let (total, clampedOff, slice) ← match ← LeanSys.Posix.withFd full.toString 0 (fun fd => do
+        let fileSz ← match ← LeanSys.Posix.fstatSize fd with
+          | .ok sz => pure sz
+          | .error e => return .error e
+        let cOff : UInt64 := min fileSz offset
+        let remBytes : UInt64 := fileSz - cOff
+        let wantLen : Nat := (min 1048576 remBytes).toNat
+        let b ← if wantLen == 0 then pure ByteArray.empty
+                 else LeanSys.Posix.preadByteArray fd cOff wantLen
+        return .ok (fileSz, cOff, b)
+      ) with
+      | .ok tup => pure tup
+      | .error _ => return .error "Cannot read file"
+      let nextOff : UInt64 := clampedOff + slice.size.toUInt64
       if action == "download" then
         let mut byteVals : Array JVal := Array.mkEmpty slice.size
         for i in [0 : slice.size] do
@@ -179,7 +187,7 @@ def executeFileBrowser (rootDir : String) (reqJson : JVal) : IO (Except String J
         return .ok (.obj #[
           ("bytes", .arr byteVals),
           ("next", JVal.uint64 nextOff),
-          ("size", JVal.uint64 total.toUInt64)
+          ("size", JVal.uint64 total)
         ])
       let mut hasNul := false
       for i in [0 : slice.size] do
@@ -194,8 +202,8 @@ def executeFileBrowser (rootDir : String) (reqJson : JVal) : IO (Except String J
       return .ok (.obj #[
         ("content", contentVal),
         ("binary", .bool hasNul),
-        ("size", JVal.uint64 total.toUInt64),
-        ("truncated", .bool (endNat < total)),
+        ("size", JVal.uint64 total),
+        ("truncated", .bool (nextOff < total)),
         ("modified", JVal.int mtime)
       ])
   | _ => return .error "Unknown file operation"

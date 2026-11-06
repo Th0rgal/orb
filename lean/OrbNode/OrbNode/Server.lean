@@ -249,7 +249,8 @@ def readHttpRequest
         | return .error "failed_open_temp"
       if isChunked then
         let mut remBuf := initialRem
-        let mut totalWritten : UInt64 := 0
+        let mut totalWrittenNat : Nat := 0
+        let maxBytesNat : Nat := maxTransferBytes.toNat
         while true do
           while (findCrlf? remBuf 0).isNone && remBuf.size < 4096 do
             let c ← OrbNode.Posix.fdRead cfd 16384
@@ -264,7 +265,7 @@ def readHttpRequest
           remBuf := remBuf.extract (lineEnd + 2) remBuf.size
           if chunkSz == 0 then
             break
-          if totalWritten + chunkSz.toUInt64 > maxTransferBytes then
+          if totalWrittenNat + chunkSz > maxBytesNat then
             return .error "payload_too_large"
           let mut need := chunkSz
           if remBuf.size > 0 then
@@ -287,10 +288,10 @@ def readHttpRequest
           if remBuf.get! 0 != 13 || remBuf.get! 1 != 10 then
             return .error "missing_chunk_crlf"
           remBuf := remBuf.extract 2 remBuf.size
-          totalWritten := totalWritten + chunkSz.toUInt64
+          totalWrittenNat := totalWrittenNat + chunkSz
       else
         let contentLen := contentLen?.getD 0
-        if contentLen.toUInt64 > maxTransferBytes then
+        if contentLen > maxTransferBytes.toNat then
           return .error "payload_too_large"
         let mut written : Nat := 0
         if initialRem.size > 0 then
@@ -463,6 +464,31 @@ def scanSoftwareInventory : IO JVal := do
     ("jobs", .arr #[])
   ]
 
+/-- Group Carbon (`agy-model-{low,medium,high}`) and Argon (`agy-demo-{low,medium,high}`) variants
+    into single base `(id, label)` pairs matching `shared/antigravity.rs::group_models`! -/
+def groupAntigravityModels (raw : Array (String × String)) : Array (String × String) := Id.run do
+  let mut seen : Std.HashSet String := {}
+  let mut out : Array (String × String) := #[]
+  for (rawId, rawLabel) in raw do
+    let grouped? : Option (String × String) :=
+      if rawId.startsWith "agy-model-" then
+        let lvl := (rawId.drop 10).toString
+        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("agy-model", lvl) else none
+      else if rawId.startsWith "agy-demo-" then
+        let lvl := (rawId.drop 9).toString
+        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("agy-demo", lvl) else none
+      else none
+    let (id, label) := match grouped? with
+      | some (base, lvl) =>
+        let suf := if lvl == "low" then " (Low)" else if lvl == "medium" then " (Medium)" else " (High)"
+        let stripped := if rawLabel.endsWith suf then (rawLabel.dropEnd suf.length).toString else rawLabel
+        (base, stripped)
+      | none => (rawId, rawLabel)
+    if !seen.contains id then
+      seen := seen.insert id
+      out := out.push (id, label)
+  return out
+
 private def discoverAntigravityModels (ma : ManagedAuthConfig) (slot? : Option String) : IO (Except (Nat × String) JVal) := do
   let cleanSlot? := slot?.map (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty)
   let profile ← match cleanSlot? with
@@ -479,19 +505,35 @@ private def discoverAntigravityModels (ma : ManagedAuthConfig) (slot? : Option S
     let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpHome] }
     return .error (503, e)
   | .ok _ =>
+    let some agyBin ← resolveToolPath? "agy"
+      | let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpHome] }
+        return .error (503, "Antigravity CLI is not installed")
     let res ← (IO.Process.output {
-      cmd := "agy"
-      args := #["models", "--json"]
+      cmd := "timeout"
+      args := #["15s", agyBin, "models"]
       env := #[("HOME", some tmpHome)]
     }).toBaseIO
     let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpHome] }
     match res with
-    | .error _ => return .ok (.arr #[])
+    | .error _ => return .error (503, "Antigravity model discovery failed")
     | .ok out =>
-      if out.exitCode != 0 then return .ok (.arr #[])
-      match OrbBin.Json.parse out.stdout with
-      | .ok (.arr xs) => return .ok (.arr xs)
-      | _ => return .ok (.arr #[])
+      if out.exitCode == 124 then
+        return .error (503, "Antigravity model discovery timed out; check sign-in")
+      if out.exitCode != 0 then
+        return .error (503, "Sign in with agy as this machine's execution user")
+      let mut pairs : Array (String × String) := #[]
+      for line in out.stdout.splitOn "\n" do
+        let cleanLine := (line.dropEndWhile (· == '\r')).toString
+        let cols := cleanLine.splitOn "\t"
+        if h : cols.length >= 2 then
+          let id := cols[0]
+          let label := String.intercalate "\t" cols.tail!
+          if !id.isEmpty && !label.isEmpty then
+            pairs := pairs.push (id, label)
+      let grouped := groupAntigravityModels pairs
+      if grouped.isEmpty then
+        return .error (503, "No Antigravity models are available for this account")
+      return .ok (.arr (grouped.map fun (i, l) => .arr #[.str i, .str l]))
 
 /-- Core route dispatcher over `NodeRuntime` returning `(updatedRuntime, response, pendingLaunches, steerWatchers)`
     so `handleRequestConcurrent` runs blocking checkout preparation and tool-steer watchers outside `Std.Mutex`. -/
@@ -609,7 +651,7 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
       | return (rt, textResp 404 "job not found", preLaunches, #[])
     let off := (req.query? "offset" >>= String.toNat?).getD 0
     let maxB := (req.query? "max_bytes" >>= String.toNat?).getD 262144
-    let sl ← readJobLogSliceBounded rec.logPath? off.toUInt64 maxB rec.state.isTerminal
+    let sl ← readJobLogSliceBounded rec.logPath? off.toUInt64 maxB rec.state.confirmsTermination
     return (rt, jsonResp 200 (.obj #[
       ("job_id", .str key),
       ("offset", JVal.uint64 sl.offset),
@@ -625,12 +667,12 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
     match ← cancelJob rt key actor reason with
     | .error "not_found" => return (rt, textResp 404 s!"job {key} not found", preLaunches, #[])
     | .error msg => return (rt, textResp 500 msg, preLaunches, #[])
-    | .ok (rt', updated) =>
+    | .ok (rt', updated, cancelRequested) =>
       let (rtTicked, postLaunches) ← tickRuntimeReserve rt'
       return (rtTicked, jsonResp 200 (.obj #[
         ("job_id", .str key),
         ("state", .str updated.state.asString),
-        ("cancel_requested", .bool true)
+        ("cancel_requested", .bool cancelRequested)
       ]), preLaunches ++ postLaunches, #[])
   | "POST", ["jobs", jid, "interrupt"] =>
     let key := (parseUuidCanonical? jid).getD jid
@@ -944,7 +986,7 @@ private def spawnSteerWatchers (mtx : Std.Mutex NodeRuntime) (watchers : Array (
             IO.sleep 120
             let nextLaunches ← mtx.atomically do
               let rt ← get
-              if let .ok (rt', _) ← cancelJob rt jid "core" "Steered immediately after tool call completed" then
+              if let .ok (rt', _, _) ← cancelJob rt jid "core" "Steered immediately after tool call completed" then
                 let (rtNext, more) ← tickRuntimeReserve rt'
                 set rtNext
                 return more
@@ -1053,7 +1095,7 @@ def handleRequestConcurrent
         return (Except.error (textResp 401 "invalid node token"), preL)
       let some rec := rt.ledger.jobs.get? key
         | return (Except.error (textResp 404 "job not found"), preL)
-      return (Except.ok (rec.logPath?, rec.state.asString, rec.state.isTerminal), preL)
+      return (Except.ok (rec.logPath?, rec.state.asString, rec.state.confirmsTermination), preL)
     if !preLaunches.isEmpty then
       spawnAsyncLaunches mtx preLaunches
     match lookupRes with

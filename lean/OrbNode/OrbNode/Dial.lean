@@ -108,7 +108,7 @@ private def forwardToLocal (localPort : UInt16) (reqJson : JVal) : IO JVal := do
             hdrs := hdrs.push (k, v)
   let cleanPath := if path.startsWith "/" then path else "/" ++ path
   let localUrl := s!"http://127.0.0.1:{localPort}{cleanPath}"
-  match ← sendRequest method localUrl hdrs body (timeoutSecs * 1000).toUInt32 67108864 with
+  match ← sendRequest method localUrl hdrs body (timeoutSecs * 1000).toUInt32 1073741824 with
   | .error e =>
     return .obj #[
       ("id", .str reqId),
@@ -133,7 +133,7 @@ def spawnRelay (cred : DialCredential) (localPort : UInt16) (goneRef : IO.Ref Bo
     let extraHdrs := #[("x-orb-machine-id", cred.machineId)]
     let mut backoffMs : UInt32 := 1000
     while !(← goneRef.get) do
-      match ← sendJsonRequest "GET" pollUrl (some cred.nodeToken) none extraHdrs 60000 with
+      match ← sendJsonRequest "GET" pollUrl (some cred.nodeToken) none extraHdrs 60000 134217728 with
       | .ok (410, _, _) =>
         let cp ← credentialPath
         try IO.FS.removeFile cp catch _ => pure ()

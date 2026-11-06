@@ -279,7 +279,8 @@ def sendJsonRequest
     (bearerToken : Option String := none)
     (jsonBody : Option JVal := none)
     (extraHeaders : Array (String × String) := #[])
-    (timeoutMs : UInt32 := 30000) : IO (Except String (Nat × String × Option JVal)) := do
+    (timeoutMs : UInt32 := 30000)
+    (maxRespBytes : Nat := 16777216) : IO (Except String (Nat × String × Option JVal)) := do
   let mut hdrs := extraHeaders
   if let some tok := bearerToken then
     if !tok.isEmpty then
@@ -289,7 +290,7 @@ def sendJsonRequest
       hdrs := hdrs.push ("Content-Type", "application/json")
       pure (renderCompact j).toUTF8
     | none => pure ByteArray.empty
-  match (← sendRequest method rawUrl hdrs bodyBytes timeoutMs) with
+  match (← sendRequest method rawUrl hdrs bodyBytes timeoutMs maxRespBytes) with
   | .error e => return .error e
   | .ok resp =>
     let text := (String.fromUTF8? resp.body).getD ""

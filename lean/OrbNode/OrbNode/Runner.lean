@@ -948,11 +948,16 @@ private def prepareJobOutsideLockInner
     if let some cwdRelRaw := payload.fieldStr? "cwd_rel" then
       let cwdRel := (cwdRelRaw.dropWhile (· == '/') |>.dropEndWhile (· == '/')).toString
       if !cwdRel.isEmpty && relPathIsSafe cwdRel then
-        let sub := System.FilePath.mk checkoutDir / cwdRel
-        if !(← sub.isDir) then
+        let segs := (cwdRel.splitOn "/").filter (fun s => !s.isEmpty)
+        match ← isSymlinkFreePath (System.FilePath.mk checkoutDir) segs with
+        | some st =>
+          if !st.isDir then
+            cleanupIsolatedCheckout isolatedCheckout
+            return .error s!"cwd_rel '{cwdRel}' does not exist in checkout"
+          cwd := (System.FilePath.mk checkoutDir / cwdRel).toString
+        | none =>
           cleanupIsolatedCheckout isolatedCheckout
-          return .error s!"cwd_rel '{cwdRel}' does not exist in checkout"
-        cwd := sub.toString
+          return .error s!"cwd_rel '{cwdRel}' does not exist or traverses a symlink in checkout"
     let cmdParts := ((payload.fieldArr? "command").getD #[]).filterMap JVal.asStr?
     if h : 0 < cmdParts.size then
       prog := cmdParts[0]
@@ -965,8 +970,26 @@ private def prepareJobOutsideLockInner
     let payloadEnv := ((payload.field? "env") >>= JVal.asObj?).getD #[]
     envPairs ← buildLeanJobEnv cfg.workDir repo st.cpuTotal cfg.capacityTotal
       cfg.envAllowlist usesFanout payloadEnv
+    if prog == "turbo-lean" then
+      let searchPath := (envPairs.find? (fun (k, _) => k == "PATH")).map Prod.snd
+      let helpOut ← (IO.Process.output {
+        cmd := "turbo-lean"
+        args := #["--help"]
+        env := match searchPath with | some p => #[("PATH", some p)] | none => #[]
+      }).toBaseIO
+      if let .ok ho := helpOut then
+        let txt := ho.stdout ++ ho.stderr
+        let mut prefixFlags : Array String := #[]
+        if (txt.splitOn "--no-daemon").length > 1 && !args.contains "--no-daemon" then
+          prefixFlags := prefixFlags.push "--no-daemon"
+        if (txt.splitOn "--no-telemetry").length > 1 && !args.contains "--no-telemetry" then
+          prefixFlags := prefixFlags.push "--no-telemetry"
+        if (txt.splitOn "--no-auto-worktree-link").length > 1 && !args.contains "--no-auto-worktree-link" then
+          prefixFlags := prefixFlags.push "--no-auto-worktree-link"
+        args := prefixFlags ++ args
     envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" missionId
     envPairs := mergeEnvPair envPairs "SANDBOXED_JOB_ID" jid
+    envPairs := mergeEnvPair envPairs "SANDBOXED_REMOTE_EXECUTION" "1"
     if let some arts := payload.fieldArr? "artifacts" then
       artifacts := arts.filterMap JVal.asStr?
   else
@@ -1232,9 +1255,11 @@ def tickRuntime
     rt ← commitPreparedJob rt item.jid prepRes
   return rt
 
-def cancelJob (rt : NodeRuntime) (jid actor reason : String) : IO (Except String (NodeRuntime × JobRecord)) := do
-  let some _cur := rt.ledger.jobs.get? jid
+def cancelJob (rt : NodeRuntime) (jid actor reason : String) : IO (Except String (NodeRuntime × JobRecord × Bool)) := do
+  let some cur := rt.ledger.jobs.get? jid
     | return .error "not_found"
+  if cur.state.isTerminal then
+    return .ok (rt, cur, false)
   let nowTs ← nowRfc3339
   let cleanReason := (reason.take 256).toString
   let cleanActor :=
@@ -1249,6 +1274,11 @@ def cancelJob (rt : NodeRuntime) (jid actor reason : String) : IO (Except String
     teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout
     if !lp.forced && !lp.sideLane && !lp.coordLane then
       releasedRegular := true
+  else if cur.state == .lost then
+    if let some (mode, userRt?) ← detectSystemdScopeMode then
+      let cleanHex := (jid.splitOn "-").foldl (· ++ ·) ""
+      let unit := s!"{nodeScopePrefix rt.cfg.nodeId rt.cfg.workDir}-job-{cleanHex}.scope"
+      stopSystemdScope (some { unit := unit, mode := mode, userRuntimeDir := userRt? })
   if let some sl := rt.launching.get? jid then
     if !sl.forced && !sl.sideLane && !sl.coordLane then
       releasedRegular := true
@@ -1270,7 +1300,7 @@ def cancelJob (rt : NodeRuntime) (jid actor reason : String) : IO (Except String
       liveProcs := nextProcs
       queueOrder := nextQueue
       shrinkDebt := nextDebt
-    }, updated)
+    }, updated, true)
 
 /-- Reserve the force slot for a queued job (`POST /jobs/:id/force`), returning a `PendingAsyncLaunch`
     with the retained full in-memory payload so concurrent callers materialize checkouts outside `Std.Mutex NodeRuntime`. -/
@@ -1335,7 +1365,7 @@ def interruptJob (rt : NodeRuntime) (jid mode : String) : IO (Except String (Nod
   if cur.state == .queued then
     match ← cancelJob rt jid "core" "Cancelled queued job for controller steering" with
     | .error e => return .error e
-    | .ok (rt', updated) =>
+    | .ok (rt', updated, _) =>
       return .ok (rt', .obj #[
         ("job_id", .str jid),
         ("state", .str updated.state.asString),
@@ -1365,7 +1395,7 @@ def interruptJob (rt : NodeRuntime) (jid mode : String) : IO (Except String (Nod
     if inflight.isEmpty then
       match ← cancelJob rt jid "core" "Steered between tool calls" with
       | .error e => return .error e
-      | .ok (rt', updated) =>
+      | .ok (rt', updated, _) =>
         return .ok (rt', .obj #[
           ("job_id", .str jid),
           ("state", .str updated.state.asString),
@@ -1389,7 +1419,7 @@ def interruptJob (rt : NodeRuntime) (jid mode : String) : IO (Except String (Nod
       IO.sleep 60
     match ← cancelJob rt jid "core" "Interrupted in-flight tool via SIGINT for immediate controller steering" with
     | .error e => return .error e
-    | .ok (rt', updated) =>
+    | .ok (rt', updated, _) =>
       return .ok (rt', .obj #[
         ("job_id", .str jid),
         ("state", .str updated.state.asString),
