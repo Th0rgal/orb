@@ -759,6 +759,8 @@ impl ManagedManager {
                 if !m.cost_is_metered {
                     m.cost_usd = m.estimated_cost(now);
                 }
+                let stop_end = now.min(m.expires_at).max(m.created_at);
+                m.close_billing_segment(stop_end, now, now);
                 m.state = MachineState::Stopped;
                 m.stopped_at = Some(now);
                 m.stopped_by_reaper = by_reaper;
@@ -940,6 +942,12 @@ impl ManagedManager {
                 };
                 let machine = self
                     .update(&m.id, |x| {
+                        let pre_resume_end = x
+                            .stopped_at
+                            .unwrap_or(now)
+                            .min(x.expires_at)
+                            .max(x.created_at);
+                        x.close_billing_segment(pre_resume_end, now, now);
                         x.change_pool(resolved_budget_pool, now);
                         x.name = name;
                         x.state = MachineState::Provisioning;

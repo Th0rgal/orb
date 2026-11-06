@@ -176,24 +176,28 @@ function App() {
               ],
             };
           }}
-          save={async (_id, amount) => {
+          save={async (_id, amount, resetPeriod) => {
             await wait(150);
             if (q.get("refuse")) throw new Error("sub_budget_exceeds_pool: Sub-budget exceeds what the parent pool can grant ($1.0000 remaining)");
+            const period = resetPeriod ?? current.own_budget_reset_period ?? "total";
             current = amount == null
-              ? { ...current, own_budget_usd: null, mode: "none", pool: null, pool_id: null }
+              ? { ...current, own_budget_usd: null, own_budget_reset_period: "total", mode: "none", pool: null, pool_id: null }
               : {
                 ...current,
                 own_budget_usd: amount,
+                own_budget_reset_period: period,
                 mode: "own",
                 pool_id: "root",
                 pool: {
                   pool_id: "root",
                   budget_usd: amount,
                   spent_usd: current.pool?.spent_usd ?? 0,
+                  lifetime_spent_usd: current.pool?.lifetime_spent_usd ?? current.pool?.spent_usd ?? 0,
                   reserved_usd: current.pool?.reserved_usd ?? 0,
                   carved_usd: current.pool?.carved_usd ?? 0,
                   available_usd: amount - (current.pool ? current.pool.spent_usd + current.pool.reserved_usd + current.pool.carved_usd : 0),
                   live_machines: 0,
+                  reset_period: period,
                 },
               };
             return current;

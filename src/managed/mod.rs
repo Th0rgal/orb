@@ -839,6 +839,19 @@ pub struct ManagedMachine {
     pub prior_pool_charges: Vec<(String, f64)>,
     #[serde(default)]
     pub pool_spent_offset: f64,
+    /// Closed active billing intervals (`[start, end]` + owning `pool_id` +
+    /// `cost_usd`) recorded at every pool change, stop, and resume so daily/weekly
+    /// budget resets attribute charges strictly by ownership interval and exclude
+    /// stopped idle gaps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub billed_segments: Vec<BilledRunSegment>,
+    /// Start timestamp of the currently open billing segment (set after pool
+    /// changes or resumes; falls back to `run_started_at` / `created_at`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_started_at: Option<DateTime<Utc>>,
+    /// Cumulative `machine_spent` already recorded into `billed_segments`.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub segment_spent_offset: f64,
     /// Project slug of the owning mission (set server-side at spawn/claim).
     #[serde(default)]
     pub project: Option<String>,
@@ -891,13 +904,254 @@ pub struct ManagedMachine {
     pub forkable: bool,
 }
 
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BilledRunSegment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_id: Option<String>,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub cost_usd: f64,
+}
+
 impl ManagedMachine {
+    /// Reconstruct sequential `BilledRunSegment`s for pre-upgrade machines that
+    /// changed pools (`pool_spent_offset > 0` / `prior_pool_charges`) or resumed
+    /// (`cost_before_resume > 0`) before `billed_segments` existed, returning
+    /// `(prior_segments, current_segment_start, accounted_spent_offset)`.
+    pub(crate) fn legacy_pool_segments(
+        &self,
+        seg_end: DateTime<Utc>,
+        total_spent: f64,
+    ) -> (Vec<BilledRunSegment>, DateTime<Utc>, f64) {
+        let mut segments = Vec::new();
+        let bounded_end = seg_end.max(self.created_at);
+        let pre_resume_cap = self
+            .run_started_at
+            .filter(|r| *r > self.created_at && self.cost_before_resume > 0.0);
+        let total_span_ms = (bounded_end - self.created_at).num_milliseconds().max(0) as f64;
+        let denom_spent = total_spent
+            .max(self.pool_spent_offset)
+            .max(self.cost_before_resume);
+        let charge_duration_ms = |usd: f64| -> i64 {
+            if usd <= 0.0 {
+                return 0;
+            }
+            if self.usd_per_hour > 0.0 {
+                ((usd / self.usd_per_hour) * 3_600_000.0).round() as i64
+            } else if denom_spent > 0.0 {
+                ((usd / denom_spent) * total_span_ms).round() as i64
+            } else {
+                0
+            }
+        };
+
+        let mut cur_start = self.created_at;
+        let mut accounted_offset = 0.0;
+        for (pool_id, usd) in &self.prior_pool_charges {
+            if *usd <= 0.0 {
+                continue;
+            }
+            if let Some(run_start) = pre_resume_cap {
+                if accounted_offset >= self.cost_before_resume - 1e-9 && cur_start < run_start {
+                    cur_start = run_start;
+                }
+            }
+            let dur_ms = charge_duration_ms(*usd).max(0);
+            let mut cur_end = (cur_start + chrono::Duration::milliseconds(dur_ms))
+                .min(bounded_end)
+                .max(cur_start);
+            if let Some(run_start) = pre_resume_cap {
+                if accounted_offset + *usd <= self.cost_before_resume + 1e-9 {
+                    cur_end = cur_end.min(run_start).max(cur_start);
+                }
+            }
+            segments.push(BilledRunSegment {
+                pool_id: Some(pool_id.clone()),
+                start: cur_start,
+                end: cur_end,
+                cost_usd: *usd,
+            });
+            accounted_offset += *usd;
+            cur_start = cur_end;
+        }
+
+        let unpooled_gap = (self.pool_spent_offset - accounted_offset).max(0.0);
+        if unpooled_gap > 0.0 {
+            if let Some(run_start) = pre_resume_cap {
+                if accounted_offset >= self.cost_before_resume - 1e-9 && cur_start < run_start {
+                    cur_start = run_start;
+                }
+            }
+            let dur_ms = charge_duration_ms(unpooled_gap).max(0);
+            let mut cur_end = (cur_start + chrono::Duration::milliseconds(dur_ms))
+                .min(bounded_end)
+                .max(cur_start);
+            if let Some(run_start) = pre_resume_cap {
+                if accounted_offset + unpooled_gap <= self.cost_before_resume + 1e-9 {
+                    cur_end = cur_end.min(run_start).max(cur_start);
+                }
+            }
+            segments.push(BilledRunSegment {
+                pool_id: None,
+                start: cur_start,
+                end: cur_end,
+                cost_usd: unpooled_gap,
+            });
+            accounted_offset += unpooled_gap;
+            cur_start = cur_end;
+        }
+
+        if let Some(run_start) = pre_resume_cap {
+            let pre_resume_rem = (self.cost_before_resume - accounted_offset).max(0.0);
+            if pre_resume_rem > 0.0 {
+                let dur_ms = charge_duration_ms(pre_resume_rem).max(0);
+                let inferred_end = (cur_start + chrono::Duration::milliseconds(dur_ms))
+                    .min(run_start)
+                    .min(bounded_end)
+                    .max(cur_start);
+                let pre_end = match self.stopped_at {
+                    Some(stopped) if stopped <= run_start => {
+                        stopped.min(bounded_end).max(cur_start)
+                    }
+                    _ => inferred_end,
+                };
+                segments.push(BilledRunSegment {
+                    pool_id: self.budget_pool_id.clone(),
+                    start: cur_start,
+                    end: pre_end,
+                    cost_usd: pre_resume_rem,
+                });
+                accounted_offset += pre_resume_rem;
+            }
+            cur_start = cur_start.max(run_start);
+        }
+
+        (segments, cur_start, accounted_offset)
+    }
+
+    /// Close the currently open billing interval `[seg_start, seg_end]` under
+    /// `self.budget_pool_id` and advance `segment_started_at` to `next_start`.
+    pub fn close_billing_segment(
+        &mut self,
+        seg_end: DateTime<Utc>,
+        next_start: DateTime<Utc>,
+        now_for_spend: DateTime<Utc>,
+    ) {
+        let spent = budget::machine_spent(self, now_for_spend);
+        if self.billed_segments.is_empty()
+            && self.segment_started_at.is_none()
+            && self.segment_spent_offset == 0.0
+            && (self.pool_spent_offset > 0.0
+                || !self.prior_pool_charges.is_empty()
+                || self.cost_before_resume > 0.0)
+        {
+            let (legacy_segs, cur_start, accounted_offset) =
+                self.legacy_pool_segments(seg_end, spent);
+            self.billed_segments.extend(legacy_segs);
+            self.segment_started_at =
+                Some(cur_start.max(self.run_started_at.unwrap_or(self.created_at)));
+            self.segment_spent_offset = accounted_offset;
+        }
+        let delta = (spent - self.segment_spent_offset).max(0.0);
+        let seg_start = self
+            .segment_started_at
+            .or(self.run_started_at)
+            .unwrap_or(self.created_at);
+        if delta > 0.0 {
+            let bounded_end = seg_end.max(seg_start);
+            self.billed_segments.push(BilledRunSegment {
+                pool_id: self.budget_pool_id.clone(),
+                start: seg_start,
+                end: bounded_end,
+                cost_usd: delta,
+            });
+        }
+        self.segment_started_at = Some(next_start);
+        self.segment_spent_offset = spent;
+    }
+
+    /// Reconcile closed `billed_segments` and `prior_pool_charges` for the
+    /// current run (`>= run_started_at` or `created_at`) when `refresh_usage`
+    /// updates a non-live machine's metered `cost_usd` after `stop_inner` or
+    /// `destroy_inner` already closed its run segment with an estimate.
+    pub fn reconcile_metered_cost(&mut self) {
+        if self.state.is_live() || self.billed_segments.is_empty() {
+            return;
+        }
+        let target = self.cost_usd.max(0.0);
+        let diff = target - self.segment_spent_offset;
+        if diff.abs() <= 1e-9 {
+            return;
+        }
+        let run_floor = self.run_started_at.unwrap_or(self.created_at);
+        let run_sum: f64 = self
+            .billed_segments
+            .iter()
+            .filter(|s| s.end > run_floor)
+            .map(|s| s.cost_usd)
+            .sum();
+        if run_sum > 1e-9 {
+            let new_run_sum = (run_sum + diff).max(0.0);
+            let scale = new_run_sum / run_sum;
+            for seg in &mut self.billed_segments {
+                if seg.end > run_floor {
+                    seg.cost_usd *= scale;
+                }
+            }
+        } else if diff > 0.0 {
+            if let Some(last) = self.billed_segments.last_mut() {
+                last.cost_usd += diff;
+            }
+        }
+        self.segment_spent_offset = self.billed_segments.iter().map(|s| s.cost_usd).sum();
+        // Rebuild `prior_pool_charges` and `pool_spent_offset` from the reconciled
+        // closed segments when the machine is terminal (`!is_live()`) so
+        // `prior_here + current_here` (`total_here`) stays aligned with the
+        // metered segment totals even across mid-run pool transfers.
+        let mut rebuilt_prior: Vec<(String, f64)> = Vec::new();
+        let mut non_current_tail = 0;
+        let len = self.billed_segments.len();
+        while non_current_tail < len {
+            let idx = len - 1 - non_current_tail;
+            if self.billed_segments[idx].pool_id == self.budget_pool_id {
+                non_current_tail += 1;
+            } else {
+                break;
+            }
+        }
+        let prior_end_idx = len - non_current_tail;
+        let mut new_pool_offset = 0.0;
+        for seg in &self.billed_segments[..prior_end_idx] {
+            new_pool_offset += seg.cost_usd;
+            if let Some(pid) = &seg.pool_id {
+                if seg.cost_usd > 0.0 {
+                    rebuilt_prior.push((pid.clone(), seg.cost_usd));
+                }
+            }
+        }
+        self.prior_pool_charges = rebuilt_prior;
+        self.pool_spent_offset = new_pool_offset;
+    }
+
     /// Move the VM to `pool`: what it cost so far stays with the old pool,
     /// only future cost is charged to the new one.
     pub fn change_pool(&mut self, pool: Option<String>, now: DateTime<Utc>) {
         if self.budget_pool_id == pool {
             return;
         }
+        let min_end = self.deletable_at.unwrap_or(self.created_at);
+        let active_end = self
+            .destroyed_at
+            .or(self.stopped_at)
+            .unwrap_or(now)
+            .min(self.expires_at)
+            .max(min_end.min(now))
+            .max(self.created_at);
+        self.close_billing_segment(active_end, now, now);
         let spent = budget::machine_spent(self, now);
         if let Some(old) = self.budget_pool_id.take() {
             let share = (spent - self.pool_spent_offset).max(0.0);
@@ -4272,6 +4526,9 @@ impl ManagedManager {
                     cost_before_resume: 0.0,
                     prior_pool_charges: Vec::new(),
                     pool_spent_offset: 0.0,
+                    billed_segments: Vec::new(),
+                    segment_started_at: None,
+                    segment_spent_offset: 0.0,
                     project: req.snapshot_project.clone(),
                     root_mission_id: req
                         .root_mission_id
@@ -5280,19 +5537,22 @@ impl ManagedManager {
                 return Err(ManagedError::new("provider_error", 502, e));
             }
         }
+        let now = Utc::now();
         let m = self
             .update(id, |m| {
+                if !m.cost_is_metered {
+                    m.cost_usd = m.estimated_cost(now);
+                }
+                let stop_end = now.min(m.expires_at).max(m.created_at);
+                m.close_billing_segment(stop_end, now, now);
                 m.state = if failed {
                     MachineState::Failed
                 } else {
                     MachineState::Destroyed
                 };
-                m.destroyed_at = Some(Utc::now());
+                m.destroyed_at = Some(now);
                 if m.provider_id.is_none() {
                     m.ledger_closed = true;
-                }
-                if !m.cost_is_metered {
-                    m.cost_usd = m.estimated_cost(Utc::now());
                 }
             })
             .await
@@ -5319,6 +5579,7 @@ impl ManagedManager {
                     .update(id, |m| {
                         m.cost_usd = m.cost_before_resume + usage.dollars;
                         m.cost_is_metered = true;
+                        m.reconcile_metered_cost();
                         if closed {
                             m.ledger_closed = true;
                         }
@@ -6389,15 +6650,18 @@ pub struct EffectiveBandwidthView {
     pub source: &'static str,
     pub pool_id: Option<String>,
     pub tokens_per_min: Option<u64>,
+    pub inference_usd_per_hour: Option<f64>,
     pub compute_vcpu_per_min: Option<u32>,
     pub compute_usd_per_hour: Option<f64>,
     pub protect_root: bool,
     pub current_tokens_per_min: u64,
+    pub current_inference_usd_per_hour: f64,
     pub current_vcpu_per_min: u32,
     pub current_compute_usd_per_hour: f64,
     pub pacing_active: bool,
     pub paced_delay_ms: u64,
     pub ancestor_tokens_per_min: Option<u64>,
+    pub ancestor_inference_usd_per_hour: Option<f64>,
     pub ancestor_compute_vcpu_per_min: Option<u32>,
     pub ancestor_compute_usd_per_hour: Option<f64>,
 }
@@ -6408,6 +6672,8 @@ pub struct MissionBudgetView {
     pub mission_id: String,
     /// The mission has its own budget (a pool root).
     pub own_budget_usd: Option<f64>,
+    /// Reset period configured on this mission's own root budget (`"total"`, `"daily"`, `"weekly"`).
+    pub own_budget_reset_period: budget::BudgetResetPeriod,
     /// The pool the mission draws from (itself, an ancestor, or none).
     pub pool_id: Option<String>,
     /// `pooled` (draws from an ancestor), `own` (its own budget) or `none`.
@@ -6932,6 +7198,22 @@ impl ManagedManager {
         parent_pool: Option<String>,
         owner_user_id: Option<String>,
     ) -> Result<(), ManagedError> {
+        self.set_mission_budget_with_period(mission_id, amount, None, parent_pool, owner_user_id)
+            .await
+    }
+
+    /// Set (`Some`) or remove (`None`) a mission's own budget, optionally
+    /// updating `budget_reset_period` (`Total`, `Daily`, `Weekly`).
+    /// Only root pools (`parent_pool == None`) may select `Daily` or `Weekly`;
+    /// carved sub-budgets are always `Total` so they cannot overdraw an ancestor.
+    pub async fn set_mission_budget_with_period(
+        &self,
+        mission_id: &str,
+        amount: Option<f64>,
+        reset_period: Option<budget::BudgetResetPeriod>,
+        parent_pool: Option<String>,
+        owner_user_id: Option<String>,
+    ) -> Result<(), ManagedError> {
         let _guard = self.admission.lock().await;
         match amount {
             None => {
@@ -6942,6 +7224,7 @@ impl ManagedManager {
                             if entry.vm_limits.is_some() || entry.bandwidth_limits.is_some() =>
                         {
                             entry.budget_usd = None;
+                            entry.budget_reset_period = budget::BudgetResetPeriod::Total;
                             entry.parent_pool_id = None;
                             entry.updated_at = Utc::now();
                             false
@@ -6976,21 +7259,37 @@ impl ManagedManager {
                                 *pool = parent.clone();
                             }
                         }
+                        for seg in m.billed_segments.iter_mut() {
+                            if seg.pool_id.as_deref() == Some(mission_id) {
+                                seg.pool_id = Some(parent.clone());
+                            }
+                        }
                     }
                 }
                 drop(machines);
             }
             Some(raw) => {
+                let effective_parent = parent_pool.clone().filter(|p| p != mission_id);
+                if effective_parent.is_some() && reset_period.is_some_and(|rp| !rp.is_total()) {
+                    return Err(ManagedError::new(
+                        "invalid_budget_period",
+                        400,
+                        "Sub-budgets carved from a parent pool cannot reset daily or weekly; set reset period on the root pool instead",
+                    ));
+                }
                 let amount = budget::validate_amount(raw)
                     .map_err(|e| ManagedError::new("invalid_budget", 400, e))?;
-                if let Some(max) = self.max_grant(mission_id, parent_pool.as_deref()).await {
+                if let Some(max) = self
+                    .max_grant(mission_id, effective_parent.as_deref())
+                    .await
+                {
                     if amount > max + 1e-9 {
                         return Err(ManagedError::new(
                             "sub_budget_exceeds_pool",
                             402,
                             format!(
                                 "Sub-budget ${amount:.2} exceeds what the parent pool {} can grant (${max:.4} remaining)",
-                                parent_pool.as_deref().unwrap_or_default()
+                                effective_parent.as_deref().unwrap_or_default()
                             ),
                         ));
                     }
@@ -6998,12 +7297,20 @@ impl ManagedManager {
                 let mut pools = self.budgets.lock().await;
                 let existing = pools.get(mission_id).cloned();
                 let had_budget = existing.as_ref().is_some_and(|p| p.budget_usd.is_some());
+                let resolved_period = if effective_parent.is_some() {
+                    budget::BudgetResetPeriod::Total
+                } else {
+                    reset_period
+                        .or_else(|| existing.as_ref().map(|p| p.budget_reset_period))
+                        .unwrap_or_default()
+                };
                 pools.insert(
                     mission_id.to_string(),
                     budget::BudgetPool {
                         mission_id: mission_id.to_string(),
                         budget_usd: Some(amount),
-                        parent_pool_id: parent_pool.clone().filter(|p| p != mission_id),
+                        budget_reset_period: resolved_period,
+                        parent_pool_id: effective_parent,
                         vm_limits: existing.as_ref().and_then(|p| p.vm_limits.clone()),
                         parent_cap_pool_id: existing
                             .as_ref()
@@ -7157,6 +7464,10 @@ impl ManagedManager {
                         budget::BudgetPool {
                             mission_id: mission_id.to_string(),
                             budget_usd: existing.as_ref().and_then(|p| p.budget_usd),
+                            budget_reset_period: existing
+                                .as_ref()
+                                .map(|p| p.budget_reset_period)
+                                .unwrap_or_default(),
                             parent_pool_id: existing
                                 .as_ref()
                                 .and_then(|p| p.parent_pool_id.clone()),
@@ -7209,7 +7520,11 @@ impl ManagedManager {
             let mut pools = self.budgets.lock().await;
             match pools.get_mut(mission_id) {
                 Some(p) if p.budget_usd.is_some() && p.parent_pool_id != parent_pool => {
-                    p.parent_pool_id = parent_pool.filter(|p| p != mission_id);
+                    let next_parent = parent_pool.filter(|p| p != mission_id);
+                    if next_parent.is_some() {
+                        p.budget_reset_period = budget::BudgetResetPeriod::Total;
+                    }
+                    p.parent_pool_id = next_parent;
                     true
                 }
                 _ => false,
@@ -7372,6 +7687,20 @@ impl ManagedManager {
                             ));
                         }
                     }
+                    if let (Some(c_inf_usd), Some(a_inf_usd)) = (
+                        validated.inference_usd_per_hour,
+                        anc_bw.inference_usd_per_hour,
+                    ) {
+                        if c_inf_usd > a_inf_usd + 1e-6 {
+                            return Err(ManagedError::new(
+                                "sub_bandwidth_exceeds_pool",
+                                400,
+                                format!(
+                                    "inference_usd_per_hour (${c_inf_usd:.2}/h) exceeds ancestor pool {anc_id}'s inference_usd_per_hour (${a_inf_usd:.2}/h)"
+                                ),
+                            ));
+                        }
+                    }
                     if let (Some(c_vcpu), Some(a_vcpu)) =
                         (validated.compute_vcpu_per_min, anc_bw.compute_vcpu_per_min)
                     {
@@ -7399,7 +7728,7 @@ impl ManagedManager {
                         }
                     }
                 }
-                let had_tpm = validated.tokens_per_min.is_some();
+                let had_inf_limit = validated.has_inference_limit();
                 let pools_snapshot = {
                     let mut pools = self.budgets.lock().await;
                     let existing = pools.get(mission_id).cloned();
@@ -7408,6 +7737,10 @@ impl ManagedManager {
                         budget::BudgetPool {
                             mission_id: mission_id.to_string(),
                             budget_usd: existing.as_ref().and_then(|p| p.budget_usd),
+                            budget_reset_period: existing
+                                .as_ref()
+                                .map(|p| p.budget_reset_period)
+                                .unwrap_or_default(),
                             parent_pool_id: existing
                                 .as_ref()
                                 .and_then(|p| p.parent_pool_id.clone()),
@@ -7426,7 +7759,7 @@ impl ManagedManager {
                     );
                     pools.clone()
                 };
-                if !had_tpm {
+                if !had_inf_limit {
                     pacing::clear_pool_debt(mission_id);
                 } else {
                     pacing::notify_capacity_changed();
@@ -7504,6 +7837,11 @@ impl ManagedManager {
             .as_deref()
             .and_then(|p| budget::pool_usage(p, &pools, &machines, now, &is_open));
         let own = pools.get(mission_id).and_then(|p| p.budget_usd);
+        let own_budget_reset_period = pools
+            .get(mission_id)
+            .filter(|p| p.budget_usd.is_some() && p.parent_pool_id.is_none())
+            .map(|p| p.budget_reset_period)
+            .unwrap_or_default();
         let own_vm_limits = pools.get(mission_id).and_then(|p| p.vm_limits.clone());
         let own_bandwidth_limits = pools
             .get(mission_id)
@@ -7600,6 +7938,17 @@ impl ManagedManager {
                     .and_then(|b| b.tokens_per_min)
             })
             .min();
+        let ancestor_inference_usd_per_hour = lineage
+            .iter()
+            .skip(1)
+            .filter_map(|anc| {
+                pools
+                    .get(anc.as_str())
+                    .filter(|p| p.owner_user_id.as_deref() == Some(user_id))
+                    .and_then(|p| p.bandwidth_limits.as_ref())
+                    .and_then(|b| b.inference_usd_per_hour)
+            })
+            .reduce(f64::min);
         let ancestor_compute_vcpu_per_min = lineage
             .iter()
             .skip(1)
@@ -7640,6 +7989,15 @@ impl ManagedManager {
                         .and_then(|b| b.tokens_per_min)
                 })
                 .min();
+            let eff_inf_usd_h = bw_chain_pools
+                .iter()
+                .filter_map(|id| {
+                    pools
+                        .get(id.as_str())
+                        .and_then(|p| p.bandwidth_limits.as_ref())
+                        .and_then(|b| b.inference_usd_per_hour)
+                })
+                .reduce(f64::min);
             let eff_vcpu = bw_chain_pools
                 .iter()
                 .filter_map(|id| {
@@ -7664,26 +8022,35 @@ impl ManagedManager {
                 .is_some_and(|b| b.protect_root);
             let (cur_vcpu, cur_usd_h) =
                 budget::bandwidth_pool_compute_usage(bw_id, &pools, &machines);
-            let snap = pacing::snapshot_pool(bw_id, eff_tpm);
+            let snap = pacing::snapshot_pool(
+                bw_id,
+                pacing::InferenceRateConstraint {
+                    tokens_per_min: eff_tpm,
+                    usd_per_hour: eff_inf_usd_h,
+                },
+            );
             EffectiveBandwidthView {
                 source: "mission",
                 pool_id: Some(bw_id.clone()),
                 tokens_per_min: eff_tpm,
+                inference_usd_per_hour: eff_inf_usd_h,
                 compute_vcpu_per_min: eff_vcpu,
                 compute_usd_per_hour: eff_usd_h,
                 protect_root,
                 current_tokens_per_min: snap.current_tokens_per_min,
+                current_inference_usd_per_hour: snap.current_inference_usd_per_hour,
                 current_vcpu_per_min: cur_vcpu,
                 current_compute_usd_per_hour: cur_usd_h,
                 pacing_active: snap.pacing_active,
                 paced_delay_ms: snap.paced_delay_ms,
                 ancestor_tokens_per_min,
+                ancestor_inference_usd_per_hour,
                 ancestor_compute_vcpu_per_min,
                 ancestor_compute_usd_per_hour,
             }
         } else {
             // Even without a bandwidth pool, report live subtree/mission compute burn
-            // and rolling token throughput if observed on this mission id.
+            // and rolling token/dollar throughput if observed on this mission id.
             let (cur_vcpu, cur_usd_h) = machines
                 .iter()
                 .filter(|m| {
@@ -7696,20 +8063,24 @@ impl ManagedManager {
                 .fold((0u32, 0.0f64), |(v, u), m| {
                     (v.saturating_add(m.cpu), u + m.usd_per_hour)
                 });
-            let snap = pacing::snapshot_pool(mission_id, None);
+            let snap =
+                pacing::snapshot_pool(mission_id, pacing::InferenceRateConstraint::default());
             EffectiveBandwidthView {
                 source: "none",
                 pool_id: None,
                 tokens_per_min: None,
+                inference_usd_per_hour: None,
                 compute_vcpu_per_min: None,
                 compute_usd_per_hour: None,
                 protect_root: false,
                 current_tokens_per_min: snap.current_tokens_per_min,
+                current_inference_usd_per_hour: snap.current_inference_usd_per_hour,
                 current_vcpu_per_min: cur_vcpu,
                 current_compute_usd_per_hour: round4(cur_usd_h),
                 pacing_active: false,
                 paced_delay_ms: 0,
                 ancestor_tokens_per_min,
+                ancestor_inference_usd_per_hour,
                 ancestor_compute_vcpu_per_min,
                 ancestor_compute_usd_per_hour,
             }
@@ -7786,6 +8157,7 @@ impl ManagedManager {
         MissionBudgetView {
             mission_id: mission_id.to_string(),
             own_budget_usd: own,
+            own_budget_reset_period,
             mode: if own.is_some() {
                 "own"
             } else if pool_id.is_some() {

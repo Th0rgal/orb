@@ -2313,7 +2313,19 @@ async fn record_proxy_usage(
         // + completion tokens once so cached inputs count toward `tokens_per_min`
         // and reasoning tokens are never double-counted.
         let billed = bandwidth_billed_tokens(tokens);
-        super::mission_budget::record_mission_inference_tokens(state, mid, billed).await;
+        let usage_for_usd = crate::cost::TokenUsage {
+            input_tokens: tokens.input,
+            output_tokens: tokens.output,
+            cache_creation_input_tokens: Some(tokens.cache_creation),
+            cache_read_input_tokens: Some(tokens.cache_read),
+        };
+        let exact_usd = crate::cost::cost_usd_from_usage(&record.model, &usage_for_usd);
+        let cost_usd = if exact_usd > 0.0 {
+            exact_usd
+        } else {
+            (record.cost_cents as f64) / 100.0
+        };
+        super::mission_budget::record_mission_inference_usage(state, mid, billed, cost_usd).await;
     }
     let user = super::auth::implicit_single_tenant_user(&state.config);
     let control_state = state.control.get_or_spawn(&user).await;

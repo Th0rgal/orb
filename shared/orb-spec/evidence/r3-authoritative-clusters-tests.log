@@ -1,7 +1,7 @@
-    Finished `test` profile [unoptimized] target(s) in 0.07s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
+    Finished `test` profile [unoptimized] target(s) in 0.20s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/orb_spec-4c486aa5e7ada9e6)
 
-running 41 tests
+running 42 tests
 test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
 test privilege_bunker_deploy_tests::deploy_gate_allows_dev_zero_touch_and_requires_session_grant_on_prod ... ok
 test privilege_bunker_deploy_tests::privilege_step_enforces_biometric_session_clock_and_bunker_fence ... ok
@@ -18,6 +18,7 @@ test shadow::tests::phase6_scroll_epoch_and_client_parity_replays ... ok
 test shadow::tests::shadow_runner_classifies_exact_matches_and_known_legacy_bugs ... ok
 test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 test stateful_tests::kmp_suffix_prefix_overlap_matches_naive_across_1024_multibyte_utf8_cases ... ok
+test stateful_tests::model_account_gate_and_score_preserve_eap_entitlement_over_priority ... ok
 test stateful_tests::node_resize_and_lane_steps_enforce_debt_conservation_and_coordinator_anti_starvation ... ok
 test stateful_tests::r4_scroll_policy_and_zero_copy_slice_steppers_verified ... ok
 test stateful_tests::slot_bypass_step_enforces_operator_force_bounds_and_regular_independence ... ok
@@ -44,9 +45,9 @@ test tests::wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gate
 test tests::wave12_node_disk_pressure_and_placement_kernels_match_specs ... ok
 test tests::writer_reuse_gate_enforces_continuation_and_retag_rules ... ok
 
-test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -254,15 +255,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 52.92s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 36.45s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test provider_health::tests::subscription_cooldown_classifies_empty_chain_as_retryable ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.01s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -470,15 +471,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 50.65s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 40.35s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test provider_health::tests::account_error_cooldown_doubles_from_ten_minutes_to_six_hours ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -686,15 +687,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 1m 04s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 37.34s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test provider_health::tests::provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -902,15 +903,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 1m 39s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 40.36s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test cost::tests::test_cost_calculation_basic ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -1118,15 +1119,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 1m 03s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 41.94s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::control::host_goal::tests::armed_wakeup_gives_paused ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -1334,15 +1335,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 58.47s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 41.27s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::reconcile::tests::active_mission_with_any_liveness_signal_is_kept ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -1550,15 +1551,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 45.15s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 39.10s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::control::tests::queue_snapshot_replays_prepared_parallel_message_until_run_exists ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.01s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -1766,15 +1767,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 47.39s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 39.24s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::control::dispatch_admission_tests::rejected_actor_dispatch_with_failed_rollback_is_durably_recoverable ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.14s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.16s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -1982,15 +1983,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 36.56s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 39.90s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::usage_attribution::tests::forged_hints_are_rejected_and_keep_the_principal ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -2198,15 +2199,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 33.11s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 42.89s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::control::automation_scheduler::native_schedule_bounds_tests::native_schedule_stops_after_ttl_or_a_finished_mission ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -2414,15 +2415,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 38.01s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 38.93s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::mission_stats::tests::mission_and_subtree_totals_are_conserved_and_replays_count_once ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.01s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -2630,15 +2631,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 35.30s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 37.81s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::privilege_broker::tests::grant_lifecycle_audit_log_session_reap_and_bunker_lockdown ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.01s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -2846,15 +2847,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 49.13s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 50.45s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::system::tests::orb_and_sandboxed_service_aliases_map_to_same_deploy_tiers ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -3062,15 +3063,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 57.49s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 40.56s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test managed::tests::budget_and_concurrency_are_hard_refusals ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.01s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -3278,15 +3279,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 37.73s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 40.67s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test managed::lifecycle::tests::busy_lease_protects_everything_but_ttl ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -3494,15 +3495,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 36.12s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 43.47s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test managed::tests::claim_moves_ownership_to_the_served_mission_only ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.05s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.04s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -3710,15 +3711,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 33.91s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 41.58s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::secret_broker::tests::compute_secret_confinement_blocks_reserved_keys_and_untrusted_nodes ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -3926,15 +3927,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 33.37s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 45.36s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test node::capacity::tests::shrink_with_jobs_in_flight_never_revokes_and_blocks_until_under_cap ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.03s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.03s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -4142,15 +4143,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 35.29s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 42.21s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::runners::stream_guard::tests::matches_exhaustive_oracle_on_unicode_and_partial_repeats ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.04s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.04s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -4358,15 +4359,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 34.87s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 45.59s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::control::remote_grok::tests::phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.01s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -4574,15 +4575,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 36.32s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 1m 01s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::mission_store::harness_session_tests::phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.07s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.07s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -4790,15 +4791,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 34.42s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 51.03s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test api::approval_queue::tests::admit_is_the_shared_gate ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.01s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unused import: `super::*`
    --> src/node/tool_interrupt.rs:276:9
     |
@@ -5006,15 +5007,15 @@ warning: function `scope_oom_killed` is never used
      |          ^^^^^^^^^^^^^^^^
 
 warning: `sandboxed_sh` (lib test) generated 18 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized] target(s) in 32.37s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
+    Finished `test` profile [unoptimized] target(s) in 1m 09s
+     Running unittests src/lib.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/sandboxed_sh-0bd995fc000dbf11)
 
 running 1 test
 test node::lean::tests::turbo_lean_command_confinement_and_cache_env_verified ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3768 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3788 filtered out; finished in 0.02s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-colab-managed-provider)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/wt-governor-roadmap)
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -5068,15 +5069,15 @@ warning: function `populate_activity` is never used
      |                     ^^^^^^^^^^^^^^^^^
 
 warning: function `text_buffer_stream_looks_degenerate` is never used
-     --> src/api/mission_runner.rs:10103:15
+     --> src/api/mission_runner.rs:10127:15
       |
-10103 | pub(crate) fn text_buffer_stream_looks_degenerate(
+10127 | pub(crate) fn text_buffer_stream_looks_degenerate(
       |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: function `degenerate_repeated_substring` is never used
-     --> src/api/mission_runner.rs:10117:15
+     --> src/api/mission_runner.rs:10141:15
       |
-10117 | pub(crate) fn degenerate_repeated_substring(
+10141 | pub(crate) fn degenerate_repeated_substring(
       |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: field `billable_tokens` is never read
@@ -5211,9 +5212,9 @@ warning: field `run_intervals` is never read
     = note: `MissionResourcesStoreSnapshot` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: function `timed_response` is never used
-    --> src/api/proxy.rs:3311:4
+    --> src/api/proxy.rs:3323:4
      |
-3311 | fn timed_response(resp: Response, cell: Arc<super::proxy_timing::Timin...
+3323 | fn timed_response(resp: Response, cell: Arc<super::proxy_timing::Timin...
      |    ^^^^^^^^^^^^^^
 
 warning: method `note_activity` is never used
@@ -5236,6 +5237,14 @@ warning: function `in_flight` is never used
     |
 139 | pub fn in_flight(mission_id: Uuid) -> u32 {
     |        ^^^^^^^^^
+
+warning: associated function `symmetric` is never used
+   --> src/api/proxy_reliability.rs:119:18
+    |
+118 | impl FirstTokenDeadlines {
+    | ------------------------ associated function in this implementation
+119 |     pub const fn symmetric(limit: Duration) -> Self {
+    |                  ^^^^^^^^^
 
 warning: function `scope_oom_killed` is never used
     --> src/node/runner.rs:2124:10
@@ -5266,9 +5275,9 @@ warning: function `check_schema` is never used
 5 | pub fn check_schema(schema: &Value) -> Result<(), String> {
   |        ^^^^^^^^^^^^
 
-warning: `sandboxed_sh` (lib) generated 25 warnings (run `cargo fix --lib -p sandboxed_sh` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 3m 18s
-     Running unittests src/bin/palomactl.rs (target/debug/deps/palomactl-fd55aa90c7931d40)
+warning: `sandboxed_sh` (lib) generated 26 warnings (run `cargo fix --lib -p sandboxed_sh` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 2m 44s
+     Running unittests src/bin/palomactl.rs (/Users/thomas/.gemini/antigravity/brain/e781887f-b26a-4e2a-8fba-af7f344e039b/scratch/cargo-target/debug/deps/palomactl-fd55aa90c7931d40)
 
 running 1 test
 test tests::pr_103_green_but_conflicting_recommends_conflict_resolution ... ok

@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{ManagedMachine, CANONICAL_PROVIDERS};
@@ -34,9 +34,64 @@ pub const MAX_VM_CONCURRENCY_LIMIT: usize = 128;
 /// Bounds on per-mission inference & managed-compute bandwidth limits.
 pub const MIN_TOKENS_PER_MIN: u64 = 1_000;
 pub const MAX_TOKENS_PER_MIN: u64 = 100_000_000;
+pub const MIN_INFERENCE_USD_PER_HOUR: f64 = 0.01;
+pub const MAX_INFERENCE_USD_PER_HOUR: f64 = 10_000.0;
 pub const MAX_COMPUTE_VCPU_PER_MIN: u32 = 4_096;
 pub const MIN_COMPUTE_USD_PER_HOUR: f64 = 0.01;
 pub const MAX_COMPUTE_USD_PER_HOUR: f64 = 10_000.0;
+
+/// Reset cadence for a root mission spending budget (`parent_pool_id == None`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetResetPeriod {
+    /// Lifetime pool (never resets automatically).
+    #[default]
+    #[serde(alias = "none")]
+    Total,
+    /// Resets every UTC midnight (`00:00:00Z`).
+    Daily,
+    /// Resets every ISO Monday at `00:00:00Z`.
+    Weekly,
+}
+
+impl BudgetResetPeriod {
+    pub fn is_total(&self) -> bool {
+        matches!(self, Self::Total)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Total => "total",
+            Self::Daily => "daily",
+            Self::Weekly => "weekly",
+        }
+    }
+
+    pub fn period_bounds(self, now: DateTime<Utc>) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+        period_bounds(self, now)
+    }
+}
+
+/// Active `[period_start, period_resets_at)` UTC bounds for `period` at `now`,
+/// or `None` when `period == Total`.
+pub fn period_bounds(
+    period: BudgetResetPeriod,
+    now: DateTime<Utc>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    match period {
+        BudgetResetPeriod::Total => None,
+        BudgetResetPeriod::Daily => {
+            let start = now.date_naive().and_hms_opt(0, 0, 0)?.and_utc();
+            Some((start, start + ChronoDuration::days(1)))
+        }
+        BudgetResetPeriod::Weekly => {
+            let days_from_monday = i64::from(now.weekday().num_days_from_monday());
+            let monday = now.date_naive() - ChronoDuration::days(days_from_monday);
+            let start = monday.and_hms_opt(0, 0, 0)?.and_utc();
+            Some((start, start + ChronoDuration::days(7)))
+        }
+    }
+}
 
 /// Concurrency cap override for a mission and its descendants.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,6 +124,9 @@ pub struct BandwidthLimits {
     /// Optional LLM throughput ceiling in tokens per minute (`1_000..=100_000_000`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens_per_min: Option<u64>,
+    /// Optional LLM dollar burn ceiling in USD per hour (`0.01..=10_000.0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_usd_per_hour: Option<f64>,
     /// Optional active managed-compute vCPU bandwidth ceiling (`1..=4_096` vCPU-min/min).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute_vcpu_per_min: Option<u32>,
@@ -84,8 +142,13 @@ pub struct BandwidthLimits {
 impl BandwidthLimits {
     pub fn is_empty(&self) -> bool {
         self.tokens_per_min.is_none()
+            && self.inference_usd_per_hour.is_none()
             && self.compute_vcpu_per_min.is_none()
             && self.compute_usd_per_hour.is_none()
+    }
+
+    pub fn has_inference_limit(&self) -> bool {
+        self.tokens_per_min.is_some() || self.inference_usd_per_hour.is_some()
     }
 
     pub fn has_compute_limit(&self) -> bool {
@@ -99,6 +162,10 @@ pub struct BudgetPool {
     pub mission_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_usd: Option<f64>,
+    /// Reset cadence for a root spending pool (`Total`, `Daily`, `Weekly`).
+    /// Carved sub-budgets (`parent_pool_id.is_some()`) are always `Total`.
+    #[serde(default, skip_serializing_if = "BudgetResetPeriod::is_total")]
+    pub budget_reset_period: BudgetResetPeriod,
     /// Nearest ancestor pool with `budget_usd` when this budget was set (the
     /// pool it carves from); `None` for a root pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -128,16 +195,34 @@ impl BudgetPool {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LiveLease {
+    pub remaining_secs: u64,
+    pub usd_per_hour: f64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PoolUsage {
     pub pool_id: String,
     pub budget_usd: f64,
+    /// Spend attributed inside the active reset period (equals `lifetime_spent_usd` when `Total`).
     pub spent_usd: f64,
+    /// Cumulative all-time spend attributed to this pool across all reset windows.
+    pub lifetime_spent_usd: f64,
     pub reserved_usd: f64,
     /// Held by child sub-budgets.
     pub carved_usd: f64,
     pub available_usd: f64,
     pub live_machines: usize,
+    /// Per-VM lease horizons for live machines charged directly to this pool,
+    /// sorted by `remaining_secs` ascending so clients forecast exact `auto_extend` sweeps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_leases: Vec<LiveLease>,
+    pub reset_period: BudgetResetPeriod,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period_started_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period_resets_at: Option<DateTime<Utc>>,
 }
 
 fn round4(v: f64) -> f64 {
@@ -169,6 +254,124 @@ pub fn reservation_for(ttl_minutes: u64, usd_per_hour: f64) -> f64 {
     (ttl_minutes.min(RESERVE_MINUTES as u64) as f64) / 60.0 * usd_per_hour
 }
 
+fn segment_cost_in_window(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    cost_usd: f64,
+    w0: DateTime<Utc>,
+) -> f64 {
+    if cost_usd <= 0.0 || end <= w0 {
+        return 0.0;
+    }
+    if start >= w0 {
+        return cost_usd;
+    }
+    let span = (end - start).num_milliseconds() as f64;
+    let ov = (end - start.max(w0)).num_milliseconds().max(0) as f64;
+    if span <= 0.0 {
+        cost_usd
+    } else {
+        cost_usd * (ov / span).clamp(0.0, 1.0)
+    }
+}
+
+/// Cost of one machine attributed to `pool_id` inside `[window_start, now]`
+/// (or all-time when `window_start == None`).
+fn machine_pool_spent_in_window(
+    m: &ManagedMachine,
+    pool_id: &str,
+    now: DateTime<Utc>,
+    window_start: Option<DateTime<Utc>>,
+) -> f64 {
+    let prior_here: f64 = m
+        .prior_pool_charges
+        .iter()
+        .filter(|(p, _)| p == pool_id)
+        .map(|(_, usd)| *usd)
+        .sum();
+    let current_here = if m.budget_pool_id.as_deref() == Some(pool_id) {
+        (machine_spent(m, now) - m.pool_spent_offset).max(0.0)
+    } else {
+        0.0
+    };
+    let total_here = prior_here + current_here;
+    if total_here <= 0.0 {
+        return 0.0;
+    }
+    let Some(w0) = window_start else {
+        return total_here;
+    };
+    let min_end = m.deletable_at.unwrap_or(m.created_at);
+    let end = m
+        .destroyed_at
+        .or(m.stopped_at)
+        .unwrap_or(now)
+        .min(m.expires_at)
+        .max(min_end.min(now))
+        .max(m.created_at);
+
+    // Exact ownership-interval accounting whenever billed segments have been
+    // recorded across pool changes, stops, or resumes.
+    if !m.billed_segments.is_empty() || m.segment_started_at.is_some() {
+        let seg_sum: f64 = m.billed_segments.iter().map(|s| s.cost_usd).sum();
+        let total_spent = machine_spent(m, now);
+        // Defensive fallback if a non-live machine's metered `cost_usd` was
+        // updated without running `reconcile_metered_cost`.
+        let scale = if !m.state.is_live() && seg_sum > 1e-9 && (total_spent - seg_sum).abs() > 1e-6
+        {
+            (total_spent / seg_sum).max(0.0)
+        } else {
+            1.0
+        };
+        let mut sum = 0.0;
+        for seg in &m.billed_segments {
+            if seg.pool_id.as_deref() == Some(pool_id) {
+                sum += segment_cost_in_window(seg.start, seg.end, seg.cost_usd * scale, w0);
+            }
+        }
+        if m.state.is_live() && m.budget_pool_id.as_deref() == Some(pool_id) {
+            let open_cost = (total_spent - m.segment_spent_offset).max(0.0);
+            let seg_start = m
+                .segment_started_at
+                .or(m.run_started_at)
+                .unwrap_or(m.created_at);
+            sum += segment_cost_in_window(seg_start, end.max(seg_start), open_cost, w0);
+        }
+        return sum.min(total_here);
+    }
+
+    if end <= w0 {
+        return 0.0;
+    }
+    if m.created_at >= w0 {
+        return total_here;
+    }
+    let total_spent = machine_spent(m, now);
+    if total_spent <= 0.0 {
+        return 0.0;
+    }
+    // Legacy fallback for persisted machines that changed pools or resumed
+    // before `billed_segments` existed: reconstruct sequential pre-handoff /
+    // pre-resume intervals so neither prior-pool charges nor stopped gaps leak
+    // across daily/weekly boundaries.
+    if m.pool_spent_offset > 0.0 || !m.prior_pool_charges.is_empty() || m.cost_before_resume > 0.0 {
+        let (legacy_segs, cur_start, accounted_offset) = m.legacy_pool_segments(end, total_spent);
+        let mut sum = 0.0;
+        for seg in &legacy_segs {
+            if seg.pool_id.as_deref() == Some(pool_id) {
+                sum += segment_cost_in_window(seg.start, seg.end, seg.cost_usd, w0);
+            }
+        }
+        if m.budget_pool_id.as_deref() == Some(pool_id) {
+            let open_cost = (total_spent - accounted_offset).max(0.0);
+            let open_start = cur_start.max(m.run_started_at.unwrap_or(m.created_at));
+            sum += segment_cost_in_window(open_start, end.max(open_start), open_cost, w0);
+        }
+        return sum.min(total_here);
+    }
+    segment_cost_in_window(m.created_at, end, total_spent, w0).min(total_here)
+}
+
 /// Usage of `pool_id`. `open(mission_id)` tells whether a child pool's owner
 /// still runs (its whole sub-budget stays carved) or ended (only its use).
 pub fn pool_usage(
@@ -178,7 +381,7 @@ pub fn pool_usage(
     now: DateTime<Utc>,
     open: &dyn Fn(&str) -> bool,
 ) -> Option<PoolUsage> {
-    pool_usage_depth(pool_id, pools, machines, now, open, 0)
+    pool_usage_depth(pool_id, pools, machines, now, open, 0, None)
 }
 
 fn pool_usage_depth(
@@ -188,29 +391,38 @@ fn pool_usage_depth(
     now: DateTime<Utc>,
     open: &dyn Fn(&str) -> bool,
     depth: usize,
+    override_window_start: Option<DateTime<Utc>>,
 ) -> Option<PoolUsage> {
     let pool = pools.get(pool_id)?;
     let budget_usd = pool.budget_usd?;
-    let mut spent = 0.0;
+    let effective_period = if pool.parent_pool_id.is_some() {
+        BudgetResetPeriod::Total
+    } else {
+        pool.budget_reset_period
+    };
+    let bounds = period_bounds(effective_period, now);
+    let window_start = override_window_start.or_else(|| bounds.map(|(s, _)| s));
+
+    let mut lifetime_spent = 0.0;
+    let mut window_spent = 0.0;
     let mut reserved = 0.0;
     let mut live = 0;
+    let mut live_leases = Vec::new();
     for m in machines {
-        // Cost charged here before the VM moved to another pool.
-        spent += m
-            .prior_pool_charges
-            .iter()
-            .filter(|(p, _)| p == pool_id)
-            .map(|(_, usd)| usd)
-            .sum::<f64>();
-        if m.budget_pool_id.as_deref() != Some(pool_id) {
-            continue;
-        }
-        spent += (machine_spent(m, now) - m.pool_spent_offset).max(0.0);
-        reserved += machine_reserved(m, now);
-        if m.state.is_live() {
-            live += 1;
+        lifetime_spent += machine_pool_spent_in_window(m, pool_id, now, None);
+        window_spent += machine_pool_spent_in_window(m, pool_id, now, window_start);
+        if m.budget_pool_id.as_deref() == Some(pool_id) {
+            reserved += machine_reserved(m, now);
+            if m.state.is_live() {
+                live += 1;
+                live_leases.push(LiveLease {
+                    remaining_secs: (m.expires_at - now).num_seconds().max(0) as u64,
+                    usd_per_hour: round4(m.usd_per_hour),
+                });
+            }
         }
     }
+    live_leases.sort_by_key(|l| l.remaining_secs);
     let mut carved = 0.0;
     if depth < 32 {
         for child in pools.values().filter(|p| {
@@ -218,9 +430,15 @@ fn pool_usage_depth(
                 && p.parent_pool_id.as_deref() == Some(pool_id)
                 && p.mission_id != pool_id
         }) {
-            if let Some(u) =
-                pool_usage_depth(&child.mission_id, pools, machines, now, open, depth + 1)
-            {
+            if let Some(u) = pool_usage_depth(
+                &child.mission_id,
+                pools,
+                machines,
+                now,
+                open,
+                depth + 1,
+                window_start,
+            ) {
                 let used = u.spent_usd + u.reserved_usd + u.carved_usd;
                 let child_budget = child.budget_usd.unwrap_or(0.0);
                 carved += if open(&child.mission_id) {
@@ -234,11 +452,16 @@ fn pool_usage_depth(
     Some(PoolUsage {
         pool_id: pool_id.to_string(),
         budget_usd,
-        spent_usd: round4(spent),
+        spent_usd: round4(window_spent),
+        lifetime_spent_usd: round4(lifetime_spent),
         reserved_usd: round4(reserved),
         carved_usd: round4(carved),
-        available_usd: round4(budget_usd - spent - reserved - carved),
+        available_usd: round4(budget_usd - window_spent - reserved - carved),
         live_machines: live,
+        live_leases,
+        reset_period: effective_period,
+        period_started_at: bounds.map(|(s, _)| s),
+        period_resets_at: bounds.map(|(_, e)| e),
     })
 }
 
@@ -577,6 +800,19 @@ pub fn validate_bandwidth_limits(raw: BandwidthLimits) -> Result<BandwidthLimits
             ));
         }
     }
+    let inference_usd_per_hour = match raw.inference_usd_per_hour {
+        None => None,
+        Some(rate) => {
+            if !rate.is_finite()
+                || !(MIN_INFERENCE_USD_PER_HOUR..=MAX_INFERENCE_USD_PER_HOUR).contains(&rate)
+            {
+                return Err(format!(
+                    "inference_usd_per_hour must be between {MIN_INFERENCE_USD_PER_HOUR:.2} and {MAX_INFERENCE_USD_PER_HOUR:.0}"
+                ));
+            }
+            Some(round4(rate))
+        }
+    };
     if let Some(vcpu) = raw.compute_vcpu_per_min {
         if !(1..=MAX_COMPUTE_VCPU_PER_MIN).contains(&vcpu) {
             return Err(format!(
@@ -599,13 +835,14 @@ pub fn validate_bandwidth_limits(raw: BandwidthLimits) -> Result<BandwidthLimits
     };
     let normalized = BandwidthLimits {
         tokens_per_min: raw.tokens_per_min,
+        inference_usd_per_hour,
         compute_vcpu_per_min: raw.compute_vcpu_per_min,
         compute_usd_per_hour,
         protect_root: raw.protect_root,
     };
     if normalized.is_empty() {
         return Err(
-            "Set tokens_per_min, compute_vcpu_per_min, or compute_usd_per_hour, or clear bandwidth_limits to disable pacing"
+            "Set tokens_per_min, inference_usd_per_hour, compute_vcpu_per_min, or compute_usd_per_hour, or clear bandwidth_limits to disable pacing"
                 .into(),
         );
     }
@@ -614,8 +851,17 @@ pub fn validate_bandwidth_limits(raw: BandwidthLimits) -> Result<BandwidthLimits
 
 /// The error message an agent sees when a spend does not fit its pool.
 pub fn exceeded_message(u: &PoolUsage, needed: f64, what: &str) -> String {
+    let period_note = match (u.reset_period, u.period_resets_at) {
+        (BudgetResetPeriod::Daily, Some(r)) => {
+            format!("; daily pool resets at {}", r.format("%H:%M UTC"))
+        }
+        (BudgetResetPeriod::Weekly, Some(r)) => {
+            format!("; weekly pool resets at {}", r.format("%Y-%m-%d %H:%M UTC"))
+        }
+        _ => String::new(),
+    };
     format!(
-        "Mission budget pool {} would be exceeded by {what}: needs ${needed:.4}, remaining ${:.4} of ${:.2} (spent ${:.4}, reserved ${:.4}, sub-budgets ${:.4}). Use a smaller size or shorter TTL, destroy idle machines, or ask the owner to raise the budget.",
+        "Mission budget pool {} would be exceeded by {what}: needs ${needed:.4}, remaining ${:.4} of ${:.2} (spent ${:.4}, reserved ${:.4}, sub-budgets ${:.4}{period_note}). Use a smaller size or shorter TTL, destroy idle machines, or ask the owner to raise the budget.",
         u.pool_id,
         u.available_usd.max(0.0),
         u.budget_usd,
@@ -623,4 +869,80 @@ pub fn exceeded_message(u: &PoolUsage, needed: f64, what: &str) -> String {
         u.reserved_usd,
         u.carved_usd,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::managed::MachineState;
+
+    #[test]
+    fn pool_usage_sorts_live_leases_by_remaining_ttl_and_skips_empty_in_json() {
+        let now = Utc::now();
+        let mut pools = HashMap::new();
+        pools.insert(
+            "root".to_string(),
+            BudgetPool {
+                mission_id: "root".to_string(),
+                budget_usd: Some(50.0),
+                budget_reset_period: BudgetResetPeriod::Total,
+                parent_pool_id: None,
+                vm_limits: None,
+                parent_cap_pool_id: None,
+                bandwidth_limits: None,
+                parent_bandwidth_pool_id: None,
+                owner_user_id: Some("u1".to_string()),
+                updated_at: now,
+            },
+        );
+        let mk = |id: &str, rem_mins: i64, rate: f64, state: MachineState| {
+            let mut m: ManagedMachine = serde_json::from_value(serde_json::json!({
+                "id": id,
+                "node_id": id,
+                "name": id,
+                "provider": "boat",
+                "size": "small",
+                "cpu": 2,
+                "ram_gb": 4,
+                "disk_gb": 20,
+                "image": "ubuntu",
+                "state": "online",
+                "budget_pool_id": "root",
+                "created_at": now,
+                "expires_at": now + ChronoDuration::minutes(rem_mins),
+                "usd_per_hour": rate,
+                "cost_usd": 0.0,
+                "cost_is_metered": true,
+                "ledger_closed": false,
+            }))
+            .unwrap();
+            m.state = state;
+            m
+        };
+
+        let empty_usage = pool_usage("root", &pools, &[], now, &|_| true).unwrap();
+        assert!(empty_usage.live_leases.is_empty());
+        let empty_json = serde_json::to_value(&empty_usage).unwrap();
+        assert!(empty_json.get("live_leases").is_none());
+
+        let machines = vec![
+            mk("m-late", 25, 5.0, MachineState::Online),
+            mk("m-early", 10, 2.5, MachineState::Online),
+            mk("m-stopped", 5, 8.0, MachineState::Stopped),
+        ];
+        let usage = pool_usage("root", &pools, &machines, now, &|_| true).unwrap();
+        assert_eq!(
+            usage.live_leases,
+            vec![
+                LiveLease {
+                    remaining_secs: 600,
+                    usd_per_hour: 2.5,
+                },
+                LiveLease {
+                    remaining_secs: 1500,
+                    usd_per_hour: 5.0,
+                },
+            ]
+        );
+    }
 }

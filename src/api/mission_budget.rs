@@ -542,6 +542,10 @@ pub struct BudgetBody {
     /// a number sets it.
     #[serde(default, deserialize_with = "deserialize_patch")]
     pub budget_usd: Option<Option<f64>>,
+    /// Optional reset cadence (`"total"`, `"daily"`, `"weekly"`) for a root
+    /// spending budget. Omit to preserve the existing reset period.
+    #[serde(default)]
+    pub budget_reset_period: Option<crate::managed::budget::BudgetResetPeriod>,
     /// Omit to leave unchanged; `null` removes the mission's VM concurrency
     /// override; an object sets it.
     #[serde(default, deserialize_with = "deserialize_patch")]
@@ -563,7 +567,27 @@ async fn put_budget(
         Err(r) => return r,
     };
     if let Some(amount) = body.budget_usd {
-        if let Err(e) = set_budget(&store, &user, id, amount).await {
+        if let Err(e) =
+            set_budget_with_period(&store, &user, id, amount, body.budget_reset_period).await
+        {
+            let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST);
+            return (status, Json(e)).into_response();
+        }
+    } else if let Some(period) = body.budget_reset_period {
+        let existing_own = match view(&store, &user.id, id).await {
+            Ok(v) => v.own_budget_usd,
+            Err(r) => return r,
+        };
+        let Some(current_amount) = existing_own else {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "invalid_budget_period",
+                "Enable a mission budget (budget_usd) before setting budget_reset_period",
+            );
+        };
+        if let Err(e) =
+            set_budget_with_period(&store, &user, id, Some(current_amount), Some(period)).await
+        {
             let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST);
             return (status, Json(e)).into_response();
         }
@@ -593,6 +617,17 @@ pub(crate) async fn set_budget(
     id: Uuid,
     amount: Option<f64>,
 ) -> Result<(), crate::managed::ManagedError> {
+    set_budget_with_period(store, user, id, amount, None).await
+}
+
+/// Set or clear a mission's own budget and optional reset period.
+pub(crate) async fn set_budget_with_period(
+    store: &Arc<dyn MissionStore>,
+    user: &AuthUser,
+    id: Uuid,
+    amount: Option<f64>,
+    reset_period: Option<crate::managed::budget::BudgetResetPeriod>,
+) -> Result<(), crate::managed::ManagedError> {
     let manager = crate::managed::global().ok_or_else(|| crate::managed::ManagedError {
         error: "disabled",
         message: "Managed machines are not initialised".into(),
@@ -605,7 +640,13 @@ pub(crate) async fn set_budget(
         &user.id,
     );
     manager
-        .set_mission_budget(&id.to_string(), amount, parent, Some(user.id.clone()))
+        .set_mission_budget_with_period(
+            &id.to_string(),
+            amount,
+            reset_period,
+            parent,
+            Some(user.id.clone()),
+        )
         .await?;
     reparent_subtree(store, &user.id, id).await;
     Ok(())
@@ -674,8 +715,8 @@ pub(crate) async fn set_bandwidth_limits(
 }
 
 /// Pace an attributed LLM proxy request against any governing mission bandwidth
-/// pools (`tokens_per_min`) in `mission_id`'s lineage. Returns the total pacing
-/// delay applied in milliseconds (`0` when unthrottled).
+/// pools (`tokens_per_min` / `inference_usd_per_hour`) in `mission_id`'s lineage.
+/// Returns the total pacing delay applied in milliseconds (`0` when unthrottled).
 pub(crate) async fn pace_mission_inference(state: &Arc<AppState>, mission_id: Uuid) -> u64 {
     let Some(manager) = crate::managed::global() else {
         return 0;
@@ -684,7 +725,7 @@ pub(crate) async fn pace_mission_inference(state: &Arc<AppState>, mission_id: Uu
     if !pools_initial.values().any(|p| {
         p.bandwidth_limits
             .as_ref()
-            .is_some_and(|b| b.tokens_per_min.is_some())
+            .is_some_and(crate::managed::budget::BandwidthLimits::has_inference_limit)
     }) {
         return 0;
     }
@@ -705,7 +746,10 @@ pub(crate) async fn pace_mission_inference(state: &Arc<AppState>, mission_id: Uu
         String,
         crate::managed::budget::BudgetPool,
     >|
-     -> Vec<(String, u64)> {
+     -> Vec<(
+        String,
+        crate::managed::pacing::InferenceRateConstraint,
+    )> {
         let mut out = Vec::new();
         for anc in &chain {
             let Some(p) = pools.get(anc.as_str()) else {
@@ -720,8 +764,12 @@ pub(crate) async fn pace_mission_inference(state: &Arc<AppState>, mission_id: Uu
             if bw.protect_root && anc == &self_str {
                 continue;
             }
-            if let Some(tpm) = bw.tokens_per_min {
-                out.push((anc.clone(), tpm));
+            let c = crate::managed::pacing::InferenceRateConstraint {
+                tokens_per_min: bw.tokens_per_min,
+                usd_per_hour: bw.inference_usd_per_hour,
+            };
+            if !c.is_empty() {
+                out.push((anc.clone(), c));
             }
         }
         out
@@ -756,14 +804,15 @@ pub(crate) async fn pace_mission_inference(state: &Arc<AppState>, mission_id: Uu
     started.elapsed().as_millis() as u64
 }
 
-/// Charge billed LLM tokens (`input + output + reasoning`) to all bandwidth
-/// pools in `mission_id`'s lineage (plus `mission_id` itself for live telemetry).
-pub(crate) async fn record_mission_inference_tokens(
+/// Charge billed LLM tokens and estimated USD cost to all bandwidth pools in
+/// `mission_id`'s lineage (plus `mission_id` itself for live telemetry).
+pub(crate) async fn record_mission_inference_usage(
     state: &Arc<AppState>,
     mission_id: Uuid,
     billed_tokens: u64,
+    cost_usd: f64,
 ) {
-    if billed_tokens == 0 {
+    if billed_tokens == 0 && cost_usd <= 0.0 {
         return;
     }
     let user = super::auth::implicit_single_tenant_user(&state.config);
@@ -780,24 +829,29 @@ pub(crate) async fn record_mission_inference_tokens(
         Some(manager) => manager.budget_pools().await,
         None => std::collections::HashMap::new(),
     };
-    let mut targets: Vec<(String, Option<u64>)> = Vec::new();
+    let mut targets: Vec<(String, crate::managed::pacing::InferenceRateConstraint)> = Vec::new();
     for anc in &chain {
-        let rate = pools
+        let bw_opt = pools
             .get(anc.as_str())
             .filter(|p| p.owner_user_id.as_deref() == Some(user.id.as_str()))
-            .and_then(|p| p.bandwidth_limits.as_ref())
-            .and_then(|b| b.tokens_per_min);
-        if rate.is_some() || anc == &chain[0] || pools.contains_key(anc.as_str()) {
-            targets.push((anc.clone(), rate));
+            .and_then(|p| p.bandwidth_limits.as_ref());
+        let constraint = crate::managed::pacing::InferenceRateConstraint {
+            tokens_per_min: bw_opt.and_then(|b| b.tokens_per_min),
+            usd_per_hour: bw_opt.and_then(|b| b.inference_usd_per_hour),
+        };
+        if !constraint.is_empty() || anc == &chain[0] || pools.contains_key(anc.as_str()) {
+            targets.push((anc.clone(), constraint));
         }
     }
-    crate::managed::pacing::record_pool_tokens(&targets, billed_tokens);
+    crate::managed::pacing::record_pool_inference(&targets, billed_tokens, cost_usd);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::managed::budget::{BandwidthLimits, BudgetPool, VmConcurrencyLimits};
+    use crate::managed::budget::{
+        BandwidthLimits, BudgetPool, BudgetResetPeriod, VmConcurrencyLimits,
+    };
     use std::collections::{BTreeMap, HashMap};
 
     fn pool(id: &str, user: &str, parent: Option<&str>) -> (String, BudgetPool) {
@@ -806,6 +860,7 @@ mod tests {
             BudgetPool {
                 mission_id: id.into(),
                 budget_usd: Some(1.0),
+                budget_reset_period: BudgetResetPeriod::Total,
                 parent_pool_id: parent.map(Into::into),
                 vm_limits: None,
                 parent_cap_pool_id: None,
@@ -880,7 +935,7 @@ mod tests {
         assert_eq!(clear_limits.vm_limits, Some(None));
 
         let only_bw: BudgetBody = serde_json::from_str(
-            r#"{"bandwidth_limits": {"tokens_per_min": 120000, "compute_vcpu_per_min": 64, "compute_usd_per_hour": 3.5, "protect_root": true}}"#,
+            r#"{"bandwidth_limits": {"tokens_per_min": 120000, "inference_usd_per_hour": 12.5, "compute_vcpu_per_min": 64, "compute_usd_per_hour": 3.5, "protect_root": true}}"#,
         )
         .unwrap();
         assert_eq!(only_bw.budget_usd, None);
@@ -889,10 +944,19 @@ mod tests {
             only_bw.bandwidth_limits,
             Some(Some(BandwidthLimits {
                 tokens_per_min: Some(120_000),
+                inference_usd_per_hour: Some(12.5),
                 compute_vcpu_per_min: Some(64),
                 compute_usd_per_hour: Some(3.5),
                 protect_root: true,
             }))
+        );
+
+        let with_period: BudgetBody =
+            serde_json::from_str(r#"{"budget_usd": 300, "budget_reset_period": "daily"}"#).unwrap();
+        assert_eq!(with_period.budget_usd, Some(Some(300.0)));
+        assert_eq!(
+            with_period.budget_reset_period,
+            Some(BudgetResetPeriod::Daily)
         );
 
         let clear_bw: BudgetBody = serde_json::from_str(r#"{"bandwidth_limits": null}"#).unwrap();

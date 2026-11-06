@@ -579,6 +579,9 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         auto_extensions: 0,
         prior_pool_charges: Vec::new(),
         pool_spent_offset: 0.0,
+        billed_segments: Vec::new(),
+        segment_started_at: None,
+        segment_spent_offset: 0.0,
         stopped_at: None,
         stopped_by_reaper: false,
         source_snapshot: None,
@@ -991,6 +994,9 @@ fn spend_machine(
         auto_extensions: 0,
         prior_pool_charges: Vec::new(),
         pool_spent_offset: 0.0,
+        billed_segments: Vec::new(),
+        segment_started_at: None,
+        segment_spent_offset: 0.0,
         stopped_at: None,
         stopped_by_reaper: false,
         source_snapshot: None,
@@ -1380,6 +1386,7 @@ fn pool(id: &str, usd: f64, parent: Option<&str>) -> budget::BudgetPool {
     budget::BudgetPool {
         mission_id: id.into(),
         budget_usd: Some(usd),
+        budget_reset_period: budget::BudgetResetPeriod::Total,
         parent_pool_id: parent.map(Into::into),
         vm_limits: None,
         parent_cap_pool_id: None,
@@ -3261,6 +3268,9 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
         cost_before_resume: 0.0,
         prior_pool_charges: Vec::new(),
         pool_spent_offset: 0.0,
+        billed_segments: Vec::new(),
+        segment_started_at: None,
+        segment_spent_offset: 0.0,
         project: Some("verity".into()),
         root_mission_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
         active_mission_ids: vec!["550e8400-e29b-41d4-a716-446655440000".into()],
@@ -5610,6 +5620,7 @@ async fn mission_bandwidth_limits_enforce_ancestor_monotonicity_and_pace_subagen
         "root",
         Some(budget::BandwidthLimits {
             tokens_per_min: Some(100_000),
+            inference_usd_per_hour: None,
             compute_vcpu_per_min: Some(4),
             compute_usd_per_hour: Some(2.0),
             protect_root: true,
@@ -5627,6 +5638,7 @@ async fn mission_bandwidth_limits_enforce_ancestor_monotonicity_and_pace_subagen
             "child",
             Some(budget::BandwidthLimits {
                 tokens_per_min: Some(150_000),
+                inference_usd_per_hour: None,
                 compute_vcpu_per_min: Some(2),
                 compute_usd_per_hour: None,
                 protect_root: false,
@@ -5755,6 +5767,7 @@ async fn mission_bandwidth_protect_root_paces_auto_child_and_concurrent_burst() 
         "root",
         Some(budget::BandwidthLimits {
             tokens_per_min: None,
+            inference_usd_per_hour: None,
             compute_vcpu_per_min: Some(2),
             compute_usd_per_hour: None,
             protect_root: true,
@@ -5886,6 +5899,7 @@ async fn vastai_fallback_rejects_offer_exceeding_compute_bandwidth_ceiling() {
         "root",
         Some(budget::BandwidthLimits {
             tokens_per_min: None,
+            inference_usd_per_hour: None,
             compute_vcpu_per_min: Some(20),
             compute_usd_per_hour: None,
             protect_root: true,
@@ -6092,4 +6106,516 @@ async fn colab_managed_manager_explicit_only_orphan_safety_and_saturation() {
     assert!(crate::api::secret_broker::is_core_reserved_compute_secret(
         "colab_api_token"
     ));
+}
+
+#[test]
+fn daily_and_weekly_budget_pools_reset_window_spend_while_preserving_lifetime_spend() {
+    // 1. Verify Weekly bounds on a Sunday (2026-11-08 is Sunday -> ISO week started Monday 2026-11-02).
+    let sunday = chrono::DateTime::parse_from_rfc3339("2026-11-08T15:30:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let (wk_start, wk_end) = budget::BudgetResetPeriod::Weekly
+        .period_bounds(sunday)
+        .unwrap();
+    assert_eq!(wk_start.to_rfc3339(), "2026-11-02T00:00:00+00:00");
+    assert_eq!(wk_end.to_rfc3339(), "2026-11-09T00:00:00+00:00");
+
+    // 2. Daily pool: yesterday's closed VMs stay in `lifetime_spent_usd` while today's window starts fresh;
+    //    a VM spanning UTC midnight prorates cleanly; closed child sub-budgets only carve spend inside today's window.
+    let now = chrono::DateTime::parse_from_rfc3339("2026-11-05T02:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut root = pool("root", 300.0, None);
+    root.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    let child = pool("closed_kid", 100.0, Some("root"));
+    let mut pools = HashMap::new();
+    pools.insert("root".to_string(), root);
+    pools.insert("closed_kid".to_string(), child);
+
+    // VM 1: ran yesterday and spent $240 -> 0 in today's window, $240 in lifetime.
+    let mut m_yesterday = spend_machine(
+        "m-yest",
+        "large",
+        Some("root"),
+        "2026-11-04T10:00:00Z",
+        Some("2026-11-04T20:00:00Z"),
+        240.0,
+    );
+    m_yesterday.budget_pool_id = Some("root".into());
+
+    // VM 2: started 2 hours before midnight, still running 2 hours after midnight (4h total, $40 spent -> $20 in today's window).
+    let mut m_spanning = spend_machine(
+        "m-span",
+        "large",
+        Some("root"),
+        "2026-11-04T22:00:00Z",
+        None,
+        40.0,
+    );
+    m_spanning.expires_at = now + chrono::Duration::minutes(60);
+    m_spanning.usd_per_hour = 10.0;
+    m_spanning.budget_pool_id = Some("root".into());
+
+    // VM 3: ran yesterday on `closed_kid` and spent $50 -> closed child carved_usd in today's window must be $0, not $50!
+    let mut m_kid_yesterday = spend_machine(
+        "m-kid-yest",
+        "small",
+        Some("closed_kid"),
+        "2026-11-04T12:00:00Z",
+        Some("2026-11-04T14:00:00Z"),
+        50.0,
+    );
+    m_kid_yesterday.budget_pool_id = Some("closed_kid".into());
+
+    let machines = vec![m_yesterday, m_spanning, m_kid_yesterday];
+    let is_open = |id: &str| id == "root"; // `closed_kid` has terminated
+    let u = budget::pool_usage("root", &pools, &machines, now, &is_open).unwrap();
+    assert_eq!(u.reset_period, budget::BudgetResetPeriod::Daily);
+    assert_eq!(
+        u.period_started_at.unwrap().to_rfc3339(),
+        "2026-11-05T00:00:00+00:00"
+    );
+    assert_eq!(
+        u.period_resets_at.unwrap().to_rfc3339(),
+        "2026-11-06T00:00:00+00:00"
+    );
+    assert!(
+        (u.spent_usd - 20.0).abs() < 0.01,
+        "expected $20 prorated window spend, got {u:?}"
+    );
+    assert!(
+        (u.lifetime_spent_usd - 280.0).abs() < 0.01,
+        "expected $280 lifetime direct spend, got {u:?}"
+    );
+    assert!(
+        u.carved_usd.abs() < 0.001,
+        "closed child's yesterday spend must not carve today's daily budget: {u:?}"
+    );
+    assert!(
+        (u.reserved_usd - 10.0).abs() < 0.01,
+        "expected $10 60-min live reservation, got {u:?}"
+    );
+    assert!(
+        (u.available_usd - 270.0).abs() < 0.02,
+        "expected $270 remaining today, got {u:?}"
+    );
+}
+
+#[test]
+fn daily_pool_window_spend_respects_pool_change_intervals_and_excludes_stopped_gaps() {
+    let t_22 = chrono::DateTime::parse_from_rfc3339("2026-11-04T22:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t_23 = chrono::DateTime::parse_from_rfc3339("2026-11-04T23:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let midnight = chrono::DateTime::parse_from_rfc3339("2026-11-05T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t_01 = chrono::DateTime::parse_from_rfc3339("2026-11-05T01:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t_02 = chrono::DateTime::parse_from_rfc3339("2026-11-05T02:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    let mut pool_a = pool("pool_a", 100.0, None);
+    pool_a.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    let mut pool_b = pool("pool_b", 100.0, None);
+    pool_b.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    let mut pool_c = pool("pool_c", 100.0, None);
+    pool_c.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    let mut pools = HashMap::new();
+    pools.insert("pool_a".into(), pool_a);
+    pools.insert("pool_b".into(), pool_b);
+    pools.insert("pool_c".into(), pool_c);
+
+    // Case 1 (Finding 1): $10/h VM created at 22:00 on Pool A, transferred to
+    // Pool B at 00:00, and inspected at 02:00. Pool A incurred $0 today ($20
+    // lifetime) and Pool B incurred $20 today ($20 lifetime).
+    let mut vm_transfer = spend_machine(
+        "m-transfer",
+        "large",
+        Some("pool_a"),
+        "2026-11-04T22:00:00Z",
+        None,
+        0.0,
+    );
+    vm_transfer.usd_per_hour = 10.0;
+    vm_transfer.cost_is_metered = false;
+    vm_transfer.expires_at = t_02 + chrono::Duration::minutes(30);
+    vm_transfer.budget_pool_id = Some("pool_a".into());
+    vm_transfer.change_pool(Some("pool_b".into()), midnight);
+
+    // Case 2 (Finding 2): $10/h VM created yesterday at 22:00 on Pool C,
+    // stopped at 23:00 ($10 prior cost), resumed today at 01:00, inspected at
+    // 02:00 ($10 post-resume cost). Today's window spend must be $10 (none of
+    // yesterday's $10 spreads across the stopped [23:00, 01:00] interval).
+    let mut vm_resumed = spend_machine(
+        "m-resumed",
+        "large",
+        Some("pool_c"),
+        "2026-11-04T22:00:00Z",
+        None,
+        0.0,
+    );
+    vm_resumed.created_at = t_22;
+    vm_resumed.usd_per_hour = 10.0;
+    vm_resumed.cost_is_metered = false;
+    vm_resumed.expires_at = t_23 + chrono::Duration::minutes(30);
+    vm_resumed.budget_pool_id = Some("pool_c".into());
+    // Stop at 23:00:
+    vm_resumed.cost_usd = vm_resumed.estimated_cost(t_23);
+    vm_resumed.close_billing_segment(t_23, t_23, t_23);
+    vm_resumed.state = MachineState::Stopped;
+    vm_resumed.stopped_at = Some(t_23);
+    // Resume at 01:00:
+    let pre_end = vm_resumed.stopped_at.unwrap_or(t_01);
+    vm_resumed.close_billing_segment(pre_end, t_01, t_01);
+    vm_resumed.state = MachineState::Online;
+    vm_resumed.cost_before_resume = vm_resumed.cost_usd;
+    vm_resumed.run_started_at = Some(t_01);
+    vm_resumed.stopped_at = None;
+    vm_resumed.expires_at = t_02 + chrono::Duration::minutes(30);
+
+    let machines = vec![vm_transfer, vm_resumed];
+    let is_open = |_: &str| true;
+    let ua = budget::pool_usage("pool_a", &pools, &machines, t_02, &is_open).unwrap();
+    let ub = budget::pool_usage("pool_b", &pools, &machines, t_02, &is_open).unwrap();
+    let uc = budget::pool_usage("pool_c", &pools, &machines, t_02, &is_open).unwrap();
+
+    assert!(
+        ua.spent_usd.abs() < 0.001 && (ua.lifetime_spent_usd - 20.0).abs() < 0.01,
+        "Pool A should have $0 today and $20 lifetime, got {ua:?}"
+    );
+    assert!(
+        (ub.spent_usd - 20.0).abs() < 0.01 && (ub.lifetime_spent_usd - 20.0).abs() < 0.01,
+        "Pool B should have $20 today and $20 lifetime, got {ub:?}"
+    );
+    assert!(
+        (uc.spent_usd - 10.0).abs() < 0.01 && (uc.lifetime_spent_usd - 20.0).abs() < 0.01,
+        "Pool C should have $10 today (post-resume only) and $20 lifetime, got {uc:?}"
+    );
+}
+
+#[test]
+fn legacy_prior_pool_charges_preserved_across_stop_and_window_boundary() {
+    let t_22 = chrono::DateTime::parse_from_rfc3339("2026-11-04T22:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t_01 = chrono::DateTime::parse_from_rfc3339("2026-11-05T01:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t_02 = chrono::DateTime::parse_from_rfc3339("2026-11-05T02:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t_03 = chrono::DateTime::parse_from_rfc3339("2026-11-05T03:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    let mut pool_a = pool("pool_a", 100.0, None);
+    pool_a.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    let mut pool_b = pool("pool_b", 100.0, None);
+    pool_b.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    let mut pools = HashMap::new();
+    pools.insert("pool_a".into(), pool_a);
+    pools.insert("pool_b".into(), pool_b);
+
+    // Case A: Pre-upgrade persisted machine created today at 01:00 that already
+    // transferred from `pool_a` ($10) to `pool_b` at 02:00 with empty
+    // `billed_segments` and `segment_spent_offset == 0.0`, then stopped at 03:00.
+    // Stopping must preserve `pool_a`'s $10 charge and record only $10 under `pool_b`.
+    let mut legacy_same_day = spend_machine(
+        "m-legacy-stop",
+        "large",
+        Some("pool_b"),
+        "2026-11-05T01:00:00Z",
+        None,
+        0.0,
+    );
+    legacy_same_day.created_at = t_01;
+    legacy_same_day.usd_per_hour = 10.0;
+    legacy_same_day.cost_is_metered = false;
+    legacy_same_day.expires_at = t_03 + chrono::Duration::minutes(30);
+    legacy_same_day.prior_pool_charges = vec![("pool_a".into(), 10.0)];
+    legacy_same_day.pool_spent_offset = 10.0;
+    legacy_same_day.billed_segments.clear();
+    legacy_same_day.segment_started_at = None;
+    legacy_same_day.segment_spent_offset = 0.0;
+
+    legacy_same_day.cost_usd = legacy_same_day.estimated_cost(t_03);
+    legacy_same_day.close_billing_segment(t_03, t_03, t_03);
+    legacy_same_day.state = MachineState::Stopped;
+    legacy_same_day.stopped_at = Some(t_03);
+
+    let is_open = |_: &str| true;
+    let same_day_machines = vec![legacy_same_day];
+    let ua_stop = budget::pool_usage("pool_a", &pools, &same_day_machines, t_03, &is_open).unwrap();
+    let ub_stop = budget::pool_usage("pool_b", &pools, &same_day_machines, t_03, &is_open).unwrap();
+    assert!(
+        (ua_stop.spent_usd - 10.0).abs() < 0.01 && (ua_stop.lifetime_spent_usd - 10.0).abs() < 0.01,
+        "Legacy Pool A charge must survive first segment close: {ua_stop:?}"
+    );
+    assert!(
+        (ub_stop.spent_usd - 10.0).abs() < 0.01 && (ub_stop.lifetime_spent_usd - 10.0).abs() < 0.01,
+        "Pool B must only be charged post-handoff $10 on first segment close: {ub_stop:?}"
+    );
+
+    // Case B: Pre-upgrade persisted machine created yesterday at 22:00 that
+    // transferred from `pool_a` ($20) to `pool_b` at 00:00 and is inspected at
+    // 02:00 BEFORE any `close_billing_segment` call runs.
+    let mut legacy_cross_day = spend_machine(
+        "m-legacy-cross",
+        "large",
+        Some("pool_b"),
+        "2026-11-04T22:00:00Z",
+        None,
+        0.0,
+    );
+    legacy_cross_day.created_at = t_22;
+    legacy_cross_day.usd_per_hour = 10.0;
+    legacy_cross_day.cost_is_metered = false;
+    legacy_cross_day.expires_at = t_02 + chrono::Duration::minutes(30);
+    legacy_cross_day.prior_pool_charges = vec![("pool_a".into(), 20.0)];
+    legacy_cross_day.pool_spent_offset = 20.0;
+    legacy_cross_day.billed_segments.clear();
+    legacy_cross_day.segment_started_at = None;
+    legacy_cross_day.segment_spent_offset = 0.0;
+
+    let cross_day_machines = vec![legacy_cross_day];
+    let ua_cross =
+        budget::pool_usage("pool_a", &pools, &cross_day_machines, t_02, &is_open).unwrap();
+    let ub_cross =
+        budget::pool_usage("pool_b", &pools, &cross_day_machines, t_02, &is_open).unwrap();
+    assert!(
+        ua_cross.spent_usd.abs() < 0.01 && (ua_cross.lifetime_spent_usd - 20.0).abs() < 0.01,
+        "Legacy cross-midnight Pool A should have $0 today and $20 lifetime: {ua_cross:?}"
+    );
+    assert!(
+        (ub_cross.spent_usd - 20.0).abs() < 0.01
+            && (ub_cross.lifetime_spent_usd - 20.0).abs() < 0.01,
+        "Legacy cross-midnight Pool B should have $20 today and $20 lifetime: {ub_cross:?}"
+    );
+
+    // Case C: Pre-upgrade persisted machine that never changed pools, ran
+    // yesterday 22:00-23:00 ($10 `cost_before_resume`), resumed today at 01:00,
+    // and stops at 02:00. Stopping (`close_billing_segment`) must bootstrap
+    // yesterday's $10 pre-resume interval separately so today's segment records
+    // only $10 instead of $20.
+    let mut pool_c = pool("pool_c", 100.0, None);
+    pool_c.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    pools.insert("pool_c".into(), pool_c);
+
+    let mut legacy_resumed = spend_machine(
+        "m-legacy-resumed",
+        "large",
+        Some("pool_c"),
+        "2026-11-04T22:00:00Z",
+        None,
+        0.0,
+    );
+    legacy_resumed.created_at = t_22;
+    legacy_resumed.usd_per_hour = 10.0;
+    legacy_resumed.cost_is_metered = false;
+    legacy_resumed.cost_before_resume = 10.0;
+    legacy_resumed.run_started_at = Some(t_01);
+    legacy_resumed.expires_at = t_02 + chrono::Duration::minutes(30);
+    legacy_resumed.billed_segments.clear();
+    legacy_resumed.segment_started_at = None;
+    legacy_resumed.segment_spent_offset = 0.0;
+
+    legacy_resumed.cost_usd = legacy_resumed.estimated_cost(t_02);
+    legacy_resumed.close_billing_segment(t_02, t_02, t_02);
+    legacy_resumed.state = MachineState::Stopped;
+    legacy_resumed.stopped_at = Some(t_02);
+
+    let resumed_machines = vec![legacy_resumed];
+    let uc_resumed =
+        budget::pool_usage("pool_c", &pools, &resumed_machines, t_02, &is_open).unwrap();
+    assert!(
+        (uc_resumed.spent_usd - 10.0).abs() < 0.01
+            && (uc_resumed.lifetime_spent_usd - 20.0).abs() < 0.01,
+        "Legacy pre-resume $10 yesterday must not be folded into today's segment on close: {uc_resumed:?}"
+    );
+
+    // Case D: Stopped machine whose segment closed with a $40 estimate across
+    // [22:00 yesterday, 02:00 today] and then received a final metered bill
+    // ($36 downward or $44 upward) in `refresh_usage` (`reconcile_metered_cost`).
+    // Half of the interval lies in today's window, so today's spend must become
+    // $18 (for $36) and $22 (for $44), never stuck at $20 or lumped at 02:00.
+    let mut pool_d = pool("pool_d", 100.0, None);
+    pool_d.budget_reset_period = budget::BudgetResetPeriod::Daily;
+    pools.insert("pool_d".into(), pool_d);
+
+    let mut metered_vm = spend_machine(
+        "m-metered-reconcile",
+        "large",
+        Some("pool_d"),
+        "2026-11-04T22:00:00Z",
+        None,
+        0.0,
+    );
+    metered_vm.created_at = t_22;
+    metered_vm.usd_per_hour = 10.0;
+    metered_vm.cost_is_metered = false;
+    metered_vm.expires_at = t_02 + chrono::Duration::minutes(30);
+    metered_vm.cost_usd = metered_vm.estimated_cost(t_02); // $40.0
+    metered_vm.close_billing_segment(t_02, t_02, t_02);
+    metered_vm.state = MachineState::Stopped;
+    metered_vm.stopped_at = Some(t_02);
+
+    // Provider reports $36.0 final metered charge:
+    metered_vm.cost_usd = 36.0;
+    metered_vm.cost_is_metered = true;
+    metered_vm.reconcile_metered_cost();
+    let ud_down =
+        budget::pool_usage("pool_d", &pools, &[metered_vm.clone()], t_03, &is_open).unwrap();
+    assert!(
+        (ud_down.spent_usd - 18.0).abs() < 0.01
+            && (ud_down.lifetime_spent_usd - 36.0).abs() < 0.01,
+        "Downward metered adjustment ($40 -> $36) must scale today's window spend to $18: {ud_down:?}"
+    );
+
+    // Provider reports $44.0 final metered charge:
+    metered_vm.cost_usd = 44.0;
+    metered_vm.reconcile_metered_cost();
+    let ud_up = budget::pool_usage("pool_d", &pools, &[metered_vm], t_03, &is_open).unwrap();
+    assert!(
+        (ud_up.spent_usd - 22.0).abs() < 0.01
+            && (ud_up.lifetime_spent_usd - 44.0).abs() < 0.01,
+        "Upward metered adjustment ($36 -> $44) must scale [22:00, 02:00] window spend to $22: {ud_up:?}"
+    );
+}
+
+#[tokio::test]
+async fn sub_budget_rejects_non_total_reset_period_and_reparenting_clears_period() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    m.set_mission_budget_with_period(
+        "root",
+        Some(100.0),
+        Some(budget::BudgetResetPeriod::Daily),
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    // Updating amount with `reset_period = None` preserves `Daily`.
+    m.set_mission_budget_with_period("root", Some(120.0), None, None, Some("t1".into()))
+        .await
+        .unwrap();
+    let root_view = m.mission_budget("root", &["root".into()], &[], "t1").await;
+    assert_eq!(
+        root_view.own_budget_reset_period,
+        budget::BudgetResetPeriod::Daily
+    );
+    assert_eq!(
+        root_view.pool.as_ref().unwrap().reset_period,
+        budget::BudgetResetPeriod::Daily
+    );
+
+    // Carved child sub-budget cannot use a periodic reset period.
+    let err = m
+        .set_mission_budget_with_period(
+            "kid",
+            Some(25.0),
+            Some(budget::BudgetResetPeriod::Weekly),
+            Some("root".into()),
+            Some("t1".into()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error, "invalid_budget_period");
+    assert_eq!(err.status, 400);
+
+    // Standalone root with `Weekly` that is later reparented under `root` resets to `Total`.
+    m.set_mission_budget_with_period(
+        "orphan",
+        Some(20.0),
+        Some(budget::BudgetResetPeriod::Weekly),
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+    m.reparent_pool("orphan", Some("root".into())).await;
+    let orphan_view = m
+        .mission_budget("orphan", &["orphan".into(), "root".into()], &[], "t1")
+        .await;
+    assert_eq!(
+        orphan_view.own_budget_reset_period,
+        budget::BudgetResetPeriod::Total
+    );
+}
+
+#[tokio::test]
+async fn bandwidth_inference_usd_per_hour_validates_and_enforces_ancestor_monotonicity() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+
+    m.set_mission_bandwidth_limits(
+        "root",
+        Some(budget::BandwidthLimits {
+            tokens_per_min: None,
+            inference_usd_per_hour: Some(12.5),
+            compute_vcpu_per_min: None,
+            compute_usd_per_hour: None,
+            protect_root: true,
+        }),
+        &["root".into()],
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    let err = m
+        .set_mission_bandwidth_limits(
+            "child",
+            Some(budget::BandwidthLimits {
+                tokens_per_min: None,
+                inference_usd_per_hour: Some(15.0),
+                compute_vcpu_per_min: None,
+                compute_usd_per_hour: None,
+                protect_root: false,
+            }),
+            &["child".into(), "root".into()],
+            Some("root".into()),
+            Some("t1".into()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error, "sub_bandwidth_exceeds_pool");
+    assert_eq!(err.status, 400);
+
+    m.set_mission_bandwidth_limits(
+        "child",
+        Some(budget::BandwidthLimits {
+            tokens_per_min: None,
+            inference_usd_per_hour: Some(8.0),
+            compute_vcpu_per_min: None,
+            compute_usd_per_hour: None,
+            protect_root: false,
+        }),
+        &["child".into(), "root".into()],
+        Some("root".into()),
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    let child_view = m
+        .mission_budget("child", &["child".into(), "root".into()], &[], "t1")
+        .await;
+    assert_eq!(
+        child_view.effective_bandwidth.inference_usd_per_hour,
+        Some(8.0)
+    );
+    assert_eq!(
+        child_view
+            .effective_bandwidth
+            .ancestor_inference_usd_per_hour,
+        Some(12.5)
+    );
 }

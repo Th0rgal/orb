@@ -50,6 +50,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.ZoneOffset
 import java.util.Locale
 import kotlin.math.floor
 import kotlin.math.min
@@ -60,6 +62,7 @@ import kotlin.math.roundToLong
 data class OrbMissionBudget(
     val missionId: String,
     val ownBudget: Double?,
+    val ownBudgetResetPeriod: BudgetResetPeriod = BudgetResetPeriod.TOTAL,
     val poolId: String?,
     val mode: String,
     val pool: Pool?,
@@ -74,12 +77,34 @@ data class OrbMissionBudget(
     val effectiveBandwidth: EffectiveBandwidth? = null,
     val children: List<Child>,
 ) {
+    enum class BudgetResetPeriod(val wire: String, val label: String) {
+        TOTAL("total", "Total"),
+        DAILY("daily", "Daily"),
+        WEEKLY("weekly", "Weekly");
+
+        companion object {
+            fun fromWire(raw: String?): BudgetResetPeriod =
+                entries.firstOrNull { it.wire.equals(raw, ignoreCase = true) } ?: TOTAL
+        }
+    }
+
+    data class LiveLease(
+        val remainingSecs: Double,
+        val usdPerHour: Double,
+    )
+
     data class Pool(
         val budget: Double,
         val spent: Double,
         val reserved: Double,
         val carved: Double,
         val available: Double,
+        val liveMachines: Int = 0,
+        val liveLeases: List<LiveLease> = emptyList(),
+        val lifetimeSpent: Double = spent,
+        val resetPeriod: BudgetResetPeriod = BudgetResetPeriod.TOTAL,
+        val periodStartedAt: String? = null,
+        val periodResetsAt: String? = null,
     )
 
     data class VmConcurrencyLimits(
@@ -107,12 +132,14 @@ data class OrbMissionBudget(
 
     data class BandwidthLimits(
         val tokensPerMin: Int? = null,
+        val inferenceUsdPerHour: Double? = null,
         val computeVcpuPerMin: Int? = null,
         val computeUsdPerHour: Double? = null,
         val protectRoot: Boolean = true,
     ) {
         fun toWire(): Map<String, Any?> = mapOf(
             "tokens_per_min" to tokensPerMin,
+            "inference_usd_per_hour" to inferenceUsdPerHour,
             "compute_vcpu_per_min" to computeVcpuPerMin,
             "compute_usd_per_hour" to computeUsdPerHour,
             "protect_root" to protectRoot,
@@ -123,15 +150,18 @@ data class OrbMissionBudget(
         val source: String,
         val poolId: String?,
         val tokensPerMin: Int?,
+        val inferenceUsdPerHour: Double? = null,
         val computeVcpuPerMin: Int?,
         val computeUsdPerHour: Double?,
         val protectRoot: Boolean,
         val currentTokensPerMin: Int,
+        val currentInferenceUsdPerHour: Double = 0.0,
         val currentVcpuPerMin: Int,
         val currentComputeUsdPerHour: Double,
         val pacingActive: Boolean,
         val pacedDelayMs: Int,
         val ancestorTokensPerMin: Int?,
+        val ancestorInferenceUsdPerHour: Double? = null,
         val ancestorComputeVcpuPerMin: Int?,
         val ancestorComputeUsdPerHour: Double?,
     )
@@ -145,6 +175,10 @@ data class OrbMissionBudget(
         val availableUsd: Double,
         val observedComputeBurnUsdPerH: Double,
         val shapedComputeBurnUsdPerH: Double,
+        val resetPeriod: BudgetResetPeriod = BudgetResetPeriod.TOTAL,
+        val resetsInSecs: Double? = null,
+        val sustainsUntilReset: Boolean = false,
+        val leaseCliffSecs: Double? = null,
         val etaSecs: Double?,
         val etaGainSecs: Double?,
         val tone: Tone,
@@ -171,21 +205,27 @@ data class OrbMissionBudget(
     }
 
     /** Same derivation as desktop `optimisticBudget`. */
-    fun optimistic(amount: Double?): OrbMissionBudget {
+    fun optimistic(amount: Double?, resetPeriod: BudgetResetPeriod? = null): OrbMissionBudget {
         if (amount == null) {
             return copy(
                 ownBudget = null,
+                ownBudgetResetPeriod = BudgetResetPeriod.TOTAL,
                 mode = if (mode == "own" && maxGrant != null) "pooled" else "none",
                 pool = null,
                 poolId = null,
             )
         }
-        val p = if (pool != null && mode == "own") {
-            pool.copy(budget = amount, available = pool.available + amount - pool.budget)
+        val effPeriod = if (maxGrant != null) {
+            BudgetResetPeriod.TOTAL
         } else {
-            Pool(amount, 0.0, 0.0, 0.0, amount)
+            resetPeriod ?: pool?.resetPeriod ?: ownBudgetResetPeriod
         }
-        return copy(ownBudget = amount, mode = "own", poolId = missionId, pool = p)
+        val p = if (pool != null && mode == "own") {
+            pool.copy(budget = amount, available = pool.available + amount - pool.budget, resetPeriod = effPeriod)
+        } else {
+            Pool(amount, 0.0, 0.0, 0.0, amount, lifetimeSpent = 0.0, resetPeriod = effPeriod)
+        }
+        return copy(ownBudget = amount, ownBudgetResetPeriod = effPeriod, mode = "own", poolId = missionId, pool = p)
     }
 
     /** Same derivation as desktop `optimisticVmLimits`. */
@@ -244,14 +284,16 @@ data class OrbMissionBudget(
     fun optimisticBandwidthLimits(limits: BandwidthLimits?): OrbMissionBudget {
         val prev = effectiveBandwidth
         val ancTpm = prev?.ancestorTokensPerMin
+        val ancInfUsdH = prev?.ancestorInferenceUsdPerHour
         val ancVcpu = prev?.ancestorComputeVcpuPerMin
         val ancUsdH = prev?.ancestorComputeUsdPerHour
         val curTpm = prev?.currentTokensPerMin ?: 0
+        val curInfUsdH = prev?.currentInferenceUsdPerHour ?: 0.0
         val curVcpu = prev?.currentVcpuPerMin ?: 0
         val curUsdH = prev?.currentComputeUsdPerHour ?: 0.0
 
         if (limits == null) {
-            val inherited = bandwidthMode == "own" && (ancTpm != null || ancVcpu != null || ancUsdH != null)
+            val inherited = bandwidthMode == "own" && (ancTpm != null || ancInfUsdH != null || ancVcpu != null || ancUsdH != null)
             return copy(
                 ownBandwidthLimits = null,
                 bandwidthMode = if (inherited) "pooled" else "none",
@@ -260,15 +302,18 @@ data class OrbMissionBudget(
                     source = if (inherited) "mission" else "none",
                     poolId = null,
                     tokensPerMin = ancTpm,
+                    inferenceUsdPerHour = ancInfUsdH,
                     computeVcpuPerMin = ancVcpu,
                     computeUsdPerHour = ancUsdH,
                     protectRoot = false,
                     currentTokensPerMin = curTpm,
+                    currentInferenceUsdPerHour = curInfUsdH,
                     currentVcpuPerMin = curVcpu,
                     currentComputeUsdPerHour = curUsdH,
                     pacingActive = false,
                     pacedDelayMs = 0,
                     ancestorTokensPerMin = ancTpm,
+                    ancestorInferenceUsdPerHour = ancInfUsdH,
                     ancestorComputeVcpuPerMin = ancVcpu,
                     ancestorComputeUsdPerHour = ancUsdH,
                 ),
@@ -279,6 +324,11 @@ data class OrbMissionBudget(
             minOf(limits.tokensPerMin, ancTpm)
         } else {
             limits.tokensPerMin ?: ancTpm
+        }
+        val effInfUsdH = if (limits.inferenceUsdPerHour != null && ancInfUsdH != null) {
+            min(limits.inferenceUsdPerHour, ancInfUsdH)
+        } else {
+            limits.inferenceUsdPerHour ?: ancInfUsdH
         }
         val effVcpu = if (limits.computeVcpuPerMin != null && ancVcpu != null) {
             minOf(limits.computeVcpuPerMin, ancVcpu)
@@ -299,15 +349,18 @@ data class OrbMissionBudget(
                 source = "mission",
                 poolId = missionId,
                 tokensPerMin = effTpm,
+                inferenceUsdPerHour = effInfUsdH,
                 computeVcpuPerMin = effVcpu,
                 computeUsdPerHour = effUsdH,
                 protectRoot = limits.protectRoot,
                 currentTokensPerMin = curTpm,
+                currentInferenceUsdPerHour = curInfUsdH,
                 currentVcpuPerMin = curVcpu,
                 currentComputeUsdPerHour = curUsdH,
                 pacingActive = prev?.pacingActive ?: false,
                 pacedDelayMs = prev?.pacedDelayMs ?: 0,
                 ancestorTokensPerMin = ancTpm,
+                ancestorInferenceUsdPerHour = ancInfUsdH,
                 ancestorComputeVcpuPerMin = ancVcpu,
                 ancestorComputeUsdPerHour = ancUsdH,
             ),
@@ -316,8 +369,15 @@ data class OrbMissionBudget(
 
     val modeLine: String
         get() = when (mode) {
-            "own" -> if (maxGrant != null) "Own sub-budget, carved from the parent's pool. Its subagents share it."
-            else "Own budget. Subagents share it unless you give one a sub-budget."
+            "own" -> if (maxGrant != null) {
+                "Own sub-budget, carved from the parent's pool. Its subagents share it."
+            } else {
+                when (pool?.resetPeriod ?: ownBudgetResetPeriod) {
+                    BudgetResetPeriod.DAILY -> "Own daily budget (resets 00:00 UTC). Subagents share it unless you give one a sub-budget."
+                    BudgetResetPeriod.WEEKLY -> "Own weekly budget (resets Mon 00:00 UTC). Subagents share it unless you give one a sub-budget."
+                    BudgetResetPeriod.TOTAL -> "Own budget. Subagents share it unless you give one a sub-budget."
+                }
+            }
             "pooled" -> "Shares the pool of an ancestor agent."
             else -> "No budget. Only the daily managed-machine cap applies."
         }
@@ -354,10 +414,12 @@ data class OrbMissionBudget(
 
     fun computeRunwayForecast(
         draftBudgetUsd: String? = null,
+        draftResetPeriod: BudgetResetPeriod? = null,
         draftComputeUsdPerH: String? = null,
         draftComputeVcpu: String? = null,
         bandwidthEnabled: Boolean? = null,
         budgetEnabled: Boolean? = null,
+        nowMs: Long? = null,
     ): RunwayForecast {
         val budgetOn = budgetEnabled ?: (mode == "own" || mode == "pooled")
         var capUsd: Double? = pool?.budget ?: ownBudget
@@ -368,6 +430,32 @@ data class OrbMissionBudget(
             }
         }
         if (!budgetOn) capUsd = null
+
+        val effectiveMode = when (budgetEnabled) {
+            true -> "own"
+            false -> if (maxGrant != null) "pooled" else "none"
+            null -> mode
+        }
+
+        val resetPeriod = when {
+            capUsd == null -> BudgetResetPeriod.TOTAL
+            effectiveMode == "pooled" -> pool?.resetPeriod ?: BudgetResetPeriod.TOTAL
+            effectiveMode == "own" && maxGrant == null -> draftResetPeriod ?: pool?.resetPeriod ?: ownBudgetResetPeriod
+            else -> BudgetResetPeriod.TOTAL
+        }
+
+        val refNowMs = nowMs ?: System.currentTimeMillis()
+        val resetsInSecs: Double? = if (capUsd != null && resetPeriod != BudgetResetPeriod.TOTAL) {
+            val serverMs = if (pool?.resetPeriod == resetPeriod) {
+                pool.periodResetsAt?.let { parseIso8601Ms(it) }
+            } else {
+                null
+            }
+            val targetMs = serverMs ?: nextBudgetResetMs(resetPeriod, refNowMs)
+            targetMs?.let { maxOf(0.0, (it - refNowMs) / 1000.0) }
+        } else {
+            null
+        }
 
         val spentUsd = pool?.spent ?: 0.0
         val reservedUsd = pool?.reserved ?: 0.0
@@ -407,6 +495,34 @@ data class OrbMissionBudget(
             shapedCompute > 0.005 -> (runwayUsd / shapedCompute) * 3600.0
             else -> null
         }
+        val sustainsUntilReset = capUsd != null &&
+            resetPeriod != BudgetResetPeriod.TOTAL &&
+            resetsInSecs != null &&
+            runwayUsd > 0.0 &&
+            (etaSecs == null || etaSecs >= resetsInSecs)
+        val simLeases = buildSimulatedLeases(pool, reservedUsd, obsCompute)
+        val liveMachineCount = maxOf(1, if (simLeases.isEmpty()) (pool?.liveMachines ?: 1) else simLeases.size)
+        val minExtensionStepUsd = simLeases.minOfOrNull { it.usdPerHour * 0.5 }
+            ?: ((obsCompute / liveMachineCount.toDouble()) * 0.5)
+        val leaseCliffSecs: Double? = if (
+            capUsd != null &&
+            runwayUsd > 0.0 &&
+            reservedUsd > 0.005 &&
+            simLeases.isNotEmpty() &&
+            availableUsd < runwayUsd - 0.005
+        ) {
+            simulateLeaseCliffSecs(
+                leases = simLeases,
+                capUsd = capUsd,
+                spentUsd = spentUsd,
+                carvedUsd = carvedUsd,
+                availableUsd = availableUsd,
+                resetsInSecs = resetsInSecs,
+                resetPeriod = resetPeriod,
+            )
+        } else {
+            null
+        }
         val unshapedEtaSecs: Double? = if (capUsd != null && runwayUsd > 0.0 && obsCompute > 0.005) {
             (runwayUsd / obsCompute) * 3600.0
         } else {
@@ -420,9 +536,12 @@ data class OrbMissionBudget(
 
         var tone = RunwayForecast.Tone.OK
         if (capUsd != null) {
-            if (runwayUsd <= 0.0 || (etaSecs != null && etaSecs < 1800.0)) {
+            if (runwayUsd <= 0.0 || (!sustainsUntilReset && etaSecs != null && etaSecs < 1800.0)) {
                 tone = RunwayForecast.Tone.DANGER
-            } else if ((etaSecs != null && etaSecs < 7200.0) || (capUsd > 0.0 && runwayUsd < capUsd * 0.15)) {
+            } else if (
+                (!sustainsUntilReset && ((etaSecs != null && etaSecs < 7200.0) || (capUsd > 0.0 && runwayUsd < capUsd * 0.15))) ||
+                (leaseCliffSecs != null && leaseCliffSecs < 3600.0)
+            ) {
                 tone = RunwayForecast.Tone.WARNING
             }
         }
@@ -432,9 +551,17 @@ data class OrbMissionBudget(
         if (capUsd != null) {
             if (runwayUsd <= 0.0) {
                 headline = "Budget exhausted"
-                subline = "${money(committedPreReserved)} spent of ${money(capUsd)} pool"
+                val parts = mutableListOf("${money(committedPreReserved)} spent of ${money(capUsd)} pool")
+                if (resetPeriod != BudgetResetPeriod.TOTAL && resetsInSecs != null) {
+                    parts.add("resets in ${formatDurationEta(resetsInSecs)}")
+                }
+                subline = parts.joinToString(" · ")
             } else if (etaSecs != null) {
-                headline = "${formatDurationEta(etaSecs)} runway left"
+                headline = if (sustainsUntilReset) {
+                    "Sustains until ${resetPeriod.wire} reset"
+                } else {
+                    "${formatDurationEta(etaSecs)} runway left"
+                }
                 val remPart = if (reservedUsd > 0.005) {
                     "${money(availableUsd)} unallocated (${money(reservedUsd)} reserved · ${money(capUsd)} cap)"
                 } else {
@@ -444,14 +571,45 @@ data class OrbMissionBudget(
                     "${money(shapedCompute)}/h compute burn",
                     remPart,
                 )
+                if (resetPeriod != BudgetResetPeriod.TOTAL && resetsInSecs != null) {
+                    if (sustainsUntilReset) {
+                        parts.add("resets in ${formatDurationEta(resetsInSecs)} (${formatDurationEta(etaSecs)} runway)")
+                    } else {
+                        parts.add("exhausts ${formatDurationEta(resetsInSecs - etaSecs)} before ${resetPeriod.wire} reset")
+                    }
+                }
+                if (leaseCliffSecs != null && leaseCliffSecs < 3600.0) {
+                    parts.add(
+                        if (leaseCliffSecs <= 0.0) {
+                            when {
+                                availableUsd <= 0.005 -> "VM auto-extensions paused (0 unallocated)"
+                                availableUsd + 1e-6 < minExtensionStepUsd ->
+                                    "VM auto-extensions paused (${money(availableUsd)} < ${money(minExtensionStepUsd)} 30m step)"
+                                else ->
+                                    "VM auto-extensions paused (${money(availableUsd)} left across $liveMachineCount VMs)"
+                            }
+                        } else {
+                            "VM extensions pause in ${formatDurationEta(leaseCliffSecs)}"
+                        },
+                    )
+                }
                 if (etaGainSecs != null) {
                     val clean = formatDurationEta(etaGainSecs).replace("~", "")
                     parts.add("+$clean from bandwidth cap")
                 }
                 subline = parts.joinToString(" · ")
             } else {
-                headline = "${money(availableUsd)} available (${money(capUsd)} cap)"
-                subline = "No active managed-machine burn right now"
+                headline = if (sustainsUntilReset) {
+                    "Sustains until ${resetPeriod.wire} reset"
+                } else {
+                    "${money(availableUsd)} available (${money(capUsd)} cap)"
+                }
+                val baseSub = "No active managed-machine burn right now"
+                subline = if (resetPeriod != BudgetResetPeriod.TOTAL && resetsInSecs != null) {
+                    "$baseSub · resets in ${formatDurationEta(resetsInSecs)}"
+                } else {
+                    baseSub
+                }
             }
         } else {
             headline = if (obsCompute > 0.005) "${money(obsCompute)}/h current compute burn" else "No spending cap"
@@ -469,6 +627,10 @@ data class OrbMissionBudget(
             availableUsd = availableUsd,
             observedComputeBurnUsdPerH = obsCompute,
             shapedComputeBurnUsdPerH = shapedCompute,
+            resetPeriod = resetPeriod,
+            resetsInSecs = resetsInSecs,
+            sustainsUntilReset = sustainsUntilReset,
+            leaseCliffSecs = leaseCliffSecs,
             etaSecs = etaSecs,
             etaGainSecs = etaGainSecs,
             tone = tone,
@@ -481,6 +643,8 @@ data class OrbMissionBudget(
         const val MAX_VM_CONCURRENCY = 128
         const val MIN_TOKENS_PER_MIN = 1_000
         const val MAX_TOKENS_PER_MIN = 100_000_000
+        const val MIN_INFERENCE_USD_PER_HOUR = 0.01
+        const val MAX_INFERENCE_USD_PER_HOUR = 10_000.0
         const val MAX_COMPUTE_VCPU_PER_MIN = 4_096
         const val MIN_COMPUTE_USD_PER_HOUR = 0.01
         const val MAX_COMPUTE_USD_PER_HOUR = 10_000.0
@@ -541,9 +705,125 @@ data class OrbMissionBudget(
             if (limits == null) return ""
             return buildList {
                 limits.tokensPerMin?.let { add(formatTokensPerMin(it)) }
+                limits.inferenceUsdPerHour?.let { add("${money(it)}/h LLM") }
                 limits.computeVcpuPerMin?.let { add("$it vCPU/min") }
                 limits.computeUsdPerHour?.let { add("${money(it)}/h") }
             }.joinToString(" · ")
+        }
+
+        fun nextBudgetResetMs(period: BudgetResetPeriod, nowMs: Long): Long? {
+            if (period == BudgetResetPeriod.TOTAL) return null
+            val todayUtc = Instant.ofEpochMilli(nowMs).atZone(ZoneOffset.UTC).toLocalDate()
+            val nextDate = when (period) {
+                BudgetResetPeriod.TOTAL -> return null
+                BudgetResetPeriod.DAILY -> todayUtc.plusDays(1)
+                BudgetResetPeriod.WEEKLY -> {
+                    val daysSinceMonday = todayUtc.dayOfWeek.value - 1 // MON=1..SUN=7 -> 0..6
+                    todayUtc.plusDays((7 - daysSinceMonday).toLong())
+                }
+            }
+            return nextDate.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+        }
+
+        private fun parseIso8601Ms(raw: String): Long? =
+            runCatching { Instant.parse(raw).toEpochMilli() }.getOrNull()
+
+        private fun buildSimulatedLeases(
+            pool: Pool?,
+            reservedUsd: Double,
+            actualCompute: Double,
+        ): List<LiveLease> {
+            val raw = pool?.liveLeases?.filter { it.usdPerHour > 0.0 } ?: emptyList()
+            if (raw.isNotEmpty()) {
+                return raw.map {
+                    LiveLease(remainingSecs = maxOf(0.0, it.remainingSecs), usdPerHour = it.usdPerHour)
+                }.sortedBy { it.remainingSecs }
+            }
+            if (actualCompute <= 0.005) return emptyList()
+            val count = maxOf(1, pool?.liveMachines ?: 1)
+            val perVmUsdPerH = actualCompute / count.toDouble()
+            val avgRemainingSecs = maxOf(0.0, ((reservedUsd / actualCompute) * 3600.0).roundToLong().toDouble())
+            return List(count) { LiveLease(remainingSecs = avgRemainingSecs, usdPerHour = perVmUsdPerH) }
+        }
+
+        private fun simulateLeaseCliffSecs(
+            leases: List<LiveLease>,
+            capUsd: Double,
+            spentUsd: Double,
+            carvedUsd: Double,
+            availableUsd: Double,
+            resetsInSecs: Double?,
+            resetPeriod: BudgetResetPeriod,
+        ): Double? {
+            if (leases.isEmpty()) return null
+            val remSecs = DoubleArray(leases.size) { leases[it].remainingSecs }
+            var remAvail = maxOf(0.0, availableUsd)
+            var elapsed = 0.0
+            var nextResetAt: Double? =
+                if (resetPeriod != BudgetResetPeriod.TOTAL && (resetsInSecs ?: 0.0) > 0.0) resetsInSecs else null
+            val periodLenSecs = when (resetPeriod) {
+                BudgetResetPeriod.DAILY -> 86_400.0
+                BudgetResetPeriod.WEEKLY -> 604_800.0
+                BudgetResetPeriod.TOTAL -> 0.0
+            }
+
+            fun advanceTime(dt: Double) {
+                if (dt <= 0.0) return
+                for (i in remSecs.indices) {
+                    val unreservedSecs = maxOf(0.0, min(dt, remSecs[i] - 3600.0))
+                    if (unreservedSecs > 0.0) {
+                        remAvail -= (unreservedSecs / 3600.0) * leases[i].usdPerHour
+                    }
+                    remSecs[i] = maxOf(0.0, remSecs[i] - dt)
+                }
+                elapsed += dt
+            }
+
+            fun refreshAtResetBoundary() {
+                var curReserved = 0.0
+                for (i in remSecs.indices) {
+                    curReserved += (min(3600.0, maxOf(0.0, remSecs[i])) / 3600.0) * leases[i].usdPerHour
+                }
+                remAvail = maxOf(0.0, capUsd - carvedUsd - curReserved)
+            }
+
+            if (resetPeriod != BudgetResetPeriod.TOTAL && resetsInSecs != null && resetsInSecs <= 0.0 && spentUsd > 0.0) {
+                refreshAtResetBoundary()
+                nextResetAt = if (periodLenSecs > 0.0) periodLenSecs else null
+            }
+
+            val maxSteps = minOf(4096, maxOf(64, leases.size * 16))
+            for (step in 0 until maxSteps) {
+                var bestIdx = 0
+                var bestWait = maxOf(0.0, remSecs[0] - 600.0)
+                for (i in 1 until remSecs.size) {
+                    val w = maxOf(0.0, remSecs[i] - 600.0)
+                    if (w < bestWait) {
+                        bestWait = w
+                        bestIdx = i
+                    }
+                }
+                while (nextResetAt != null && elapsed + bestWait >= nextResetAt) {
+                    val nr = nextResetAt
+                    val toReset = maxOf(0.0, nr - elapsed)
+                    advanceTime(toReset)
+                    bestWait = maxOf(0.0, bestWait - toReset)
+                    refreshAtResetBoundary()
+                    nextResetAt = if (periodLenSecs > 0.0) nr + periodLenSecs else null
+                    if (elapsed > 86_400.0) return elapsed
+                }
+                if (bestWait > 0.0) {
+                    advanceTime(bestWait)
+                }
+                if (elapsed > 86_400.0) return elapsed
+                val stepUsd = leases[bestIdx].usdPerHour * 0.5
+                if (remAvail + 1e-6 < stepUsd) {
+                    return elapsed
+                }
+                remAvail = maxOf(0.0, remAvail - stepUsd)
+                remSecs[bestIdx] += 1800.0
+            }
+            return elapsed
         }
 
         fun from(raw: Any?): OrbMissionBudget {
@@ -584,6 +864,7 @@ data class OrbMissionBudget(
             val ownBandwidthLimits = ownBwDict?.let { bw ->
                 BandwidthLimits(
                     tokensPerMin = OrbJSON.int(bw, "tokens_per_min"),
+                    inferenceUsdPerHour = OrbJSON.double(bw, "inference_usd_per_hour"),
                     computeVcpuPerMin = OrbJSON.int(bw, "compute_vcpu_per_min"),
                     computeUsdPerHour = OrbJSON.double(bw, "compute_usd_per_hour"),
                     protectRoot = OrbJSON.bool(bw, "protect_root") ?: false,
@@ -595,33 +876,54 @@ data class OrbMissionBudget(
                     source = OrbJSON.str(eff, "source") ?: "none",
                     poolId = OrbJSON.str(eff, "pool_id"),
                     tokensPerMin = OrbJSON.int(eff, "tokens_per_min"),
+                    inferenceUsdPerHour = OrbJSON.double(eff, "inference_usd_per_hour"),
                     computeVcpuPerMin = OrbJSON.int(eff, "compute_vcpu_per_min"),
                     computeUsdPerHour = OrbJSON.double(eff, "compute_usd_per_hour"),
                     protectRoot = OrbJSON.bool(eff, "protect_root") ?: false,
                     currentTokensPerMin = OrbJSON.int(eff, "current_tokens_per_min") ?: 0,
+                    currentInferenceUsdPerHour = OrbJSON.double(eff, "current_inference_usd_per_hour") ?: 0.0,
                     currentVcpuPerMin = OrbJSON.int(eff, "current_vcpu_per_min") ?: 0,
                     currentComputeUsdPerHour = OrbJSON.double(eff, "current_compute_usd_per_hour") ?: 0.0,
                     pacingActive = OrbJSON.bool(eff, "pacing_active") ?: false,
                     pacedDelayMs = OrbJSON.int(eff, "paced_delay_ms") ?: 0,
                     ancestorTokensPerMin = OrbJSON.int(eff, "ancestor_tokens_per_min"),
+                    ancestorInferenceUsdPerHour = OrbJSON.double(eff, "ancestor_inference_usd_per_hour"),
                     ancestorComputeVcpuPerMin = OrbJSON.int(eff, "ancestor_compute_vcpu_per_min"),
                     ancestorComputeUsdPerHour = OrbJSON.double(eff, "ancestor_compute_usd_per_hour"),
                 )
             }
+            val poolObj = p?.let {
+                val spent = OrbJSON.double(it, "spent_usd") ?: 0.0
+                val leases = OrbJSON.dictList(it["live_leases"]).map { l ->
+                    LiveLease(
+                        remainingSecs = OrbJSON.double(l, "remaining_secs") ?: 0.0,
+                        usdPerHour = OrbJSON.double(l, "usd_per_hour") ?: 0.0,
+                    )
+                }
+                Pool(
+                    budget = OrbJSON.double(it, "budget_usd") ?: 0.0,
+                    spent = spent,
+                    reserved = OrbJSON.double(it, "reserved_usd") ?: 0.0,
+                    carved = OrbJSON.double(it, "carved_usd") ?: 0.0,
+                    available = OrbJSON.double(it, "available_usd") ?: 0.0,
+                    liveMachines = OrbJSON.int(it, "live_machines") ?: 0,
+                    liveLeases = leases,
+                    lifetimeSpent = OrbJSON.double(it, "lifetime_spent_usd") ?: spent,
+                    resetPeriod = BudgetResetPeriod.fromWire(OrbJSON.str(it, "reset_period")),
+                    periodStartedAt = OrbJSON.str(it, "period_started_at"),
+                    periodResetsAt = OrbJSON.str(it, "period_resets_at"),
+                )
+            }
+            val ownPeriod = OrbJSON.str(d, "own_budget_reset_period")
+                ?.let { BudgetResetPeriod.fromWire(it) }
+                ?: (poolObj?.resetPeriod ?: BudgetResetPeriod.TOTAL)
             return OrbMissionBudget(
                 missionId = OrbJSON.str(d, "mission_id") ?: "",
                 ownBudget = OrbJSON.double(d, "own_budget_usd"),
+                ownBudgetResetPeriod = ownPeriod,
                 poolId = OrbJSON.str(d, "pool_id"),
                 mode = OrbJSON.str(d, "mode") ?: "none",
-                pool = p?.let {
-                    Pool(
-                        OrbJSON.double(it, "budget_usd") ?: 0.0,
-                        OrbJSON.double(it, "spent_usd") ?: 0.0,
-                        OrbJSON.double(it, "reserved_usd") ?: 0.0,
-                        OrbJSON.double(it, "carved_usd") ?: 0.0,
-                        OrbJSON.double(it, "available_usd") ?: 0.0,
-                    )
-                },
+                pool = poolObj,
                 maxGrant = OrbJSON.double(d, "max_grant_usd"),
                 ownVmLimits = ownVmLimits,
                 vmLimitsMode = OrbJSON.str(d, "vm_limits_mode") ?: if (ownVmLimits != null) "own" else "global",
@@ -734,6 +1036,7 @@ data class OrbMissionBudget(
             computeUsdPerHRaw: String,
             protectRoot: Boolean,
             view: OrbMissionBudget? = null,
+            inferenceUsdPerHRaw: String = "",
         ): Result<BandwidthLimits> {
             val eff = view?.effectiveBandwidth
             var tokensPerMin: Int? = null
@@ -745,6 +1048,25 @@ data class OrbMissionBudget(
                     return Result.failure(IllegalArgumentException("Tokens per minute cannot exceed the parent pool (${formatTokensPerMin(anc)})"))
                 }
                 tokensPerMin = parsed
+            }
+
+            var inferenceUsdH: Double? = null
+            val infUsdTrim = inferenceUsdPerHRaw.trim().removePrefix("$")
+            if (infUsdTrim.isNotEmpty()) {
+                val n = infUsdTrim.toDoubleOrNull()
+                if (n == null || !n.isFinite() || n < MIN_INFERENCE_USD_PER_HOUR || n > MAX_INFERENCE_USD_PER_HOUR) {
+                    return Result.failure(
+                        IllegalArgumentException(
+                            "Inference burn ceiling must be between $${MIN_INFERENCE_USD_PER_HOUR} and $${MAX_INFERENCE_USD_PER_HOUR.toInt()}/h",
+                        ),
+                    )
+                }
+                val rounded = (n * 10_000.0).roundToLong() / 10_000.0
+                val anc = eff?.ancestorInferenceUsdPerHour
+                if (anc != null && rounded > anc + 1e-9) {
+                    return Result.failure(IllegalArgumentException("Inference burn ceiling cannot exceed the parent pool (${money(anc)}/h)"))
+                }
+                inferenceUsdH = rounded
             }
 
             var computeVcpu: Int? = null
@@ -778,13 +1100,14 @@ data class OrbMissionBudget(
                 computeUsdH = rounded
             }
 
-            if (tokensPerMin == null && computeVcpu == null && computeUsdH == null) {
-                return Result.failure(IllegalArgumentException("Enter at least one bandwidth limit (tokens/min, vCPU/min, or $/h)"))
+            if (tokensPerMin == null && inferenceUsdH == null && computeVcpu == null && computeUsdH == null) {
+                return Result.failure(IllegalArgumentException("Enter at least one bandwidth limit (tokens/min, LLM $/h, vCPU/min, or VM $/h)"))
             }
 
             return Result.success(
                 BandwidthLimits(
                     tokensPerMin = tokensPerMin,
+                    inferenceUsdPerHour = inferenceUsdH,
                     computeVcpuPerMin = computeVcpu,
                     computeUsdPerHour = computeUsdH,
                     protectRoot = protectRoot,
@@ -851,11 +1174,13 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
     var busy by remember { mutableStateOf(false) }
 
     var draft by remember { mutableStateOf("") }
+    var resetPeriodDraft by remember { mutableStateOf(OrbMissionBudget.BudgetResetPeriod.TOTAL) }
     var vmTotalDraft by remember { mutableStateOf("") }
     var vmProviderDrafts by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var providersExpanded by remember { mutableStateOf(false) }
 
     var bwTokensDraft by remember { mutableStateOf("") }
+    var bwInfUsdHDraft by remember { mutableStateOf("") }
     var bwVcpuDraft by remember { mutableStateOf("") }
     var bwUsdHDraft by remember { mutableStateOf("") }
     var bwProtectRoot by remember { mutableStateOf(true) }
@@ -873,6 +1198,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
 
     fun syncBwDrafts(v: OrbMissionBudget) {
         bwTokensDraft = v.ownBandwidthLimits?.tokensPerMin?.toString() ?: ""
+        bwInfUsdHDraft = formatAmount(v.ownBandwidthLimits?.inferenceUsdPerHour)
         bwVcpuDraft = v.ownBandwidthLimits?.computeVcpuPerMin?.toString() ?: ""
         bwUsdHDraft = formatAmount(v.ownBandwidthLimits?.computeUsdPerHour)
         bwProtectRoot = v.ownBandwidthLimits?.protectRoot ?: true
@@ -890,10 +1216,12 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
     fun bwDraftDirty(v: OrbMissionBudget): Boolean {
         val own = v.ownBandwidthLimits
         val curT = own?.tokensPerMin?.toString() ?: ""
+        val curI = formatAmount(own?.inferenceUsdPerHour)
         val curV = own?.computeVcpuPerMin?.toString() ?: ""
         val curU = formatAmount(own?.computeUsdPerHour)
         val curP = own?.protectRoot ?: true
         return bwTokensDraft.trim() != curT ||
+            bwInfUsdHDraft.trim() != curI ||
             bwVcpuDraft.trim() != curV ||
             bwUsdHDraft.trim() != curU ||
             bwProtectRoot != curP
@@ -905,6 +1233,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
             .onSuccess {
                 view = it
                 draft = formatAmount(it.ownBudget)
+                resetPeriodDraft = it.pool?.resetPeriod ?: it.ownBudgetResetPeriod
                 syncVmDrafts(it)
                 syncBwDrafts(it)
             }
@@ -912,23 +1241,31 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
     }
     LaunchedEffect(missionId) { load() }
 
-    fun commit(amount: Double?) {
+    fun commit(amount: Double?, period: OrbMissionBudget.BudgetResetPeriod? = null) {
         val before = view ?: return
         if (busy) return
         busy = true; saveError = null; retry = null
-        view = before.optimistic(amount)
+        view = before.optimistic(amount, period)
+        val body = if (amount != null && period != null) {
+            mapOf("budget_usd" to amount, "budget_reset_period" to period.wire)
+        } else {
+            mapOf("budget_usd" to amount)
+        }
         scope.launch {
-            runCatching { OrbMissionBudget.from(core.request(path, method = "PUT", body = mapOf("budget_usd" to amount))) }
+            runCatching { OrbMissionBudget.from(core.request(path, method = "PUT", body = body)) }
                 .onSuccess {
                     view = it
                     draft = formatAmount(it.ownBudget)
+                    resetPeriodDraft = it.pool?.resetPeriod ?: it.ownBudgetResetPeriod
                     syncVmDrafts(it)
                     syncBwDrafts(it)
                 }
                 .onFailure {
-                    view = before; draft = formatAmount(before.ownBudget)
+                    view = before
+                    draft = formatAmount(before.ownBudget)
+                    resetPeriodDraft = before.pool?.resetPeriod ?: before.ownBudgetResetPeriod
                     saveError = it.message ?: "Budget not saved."
-                    retry = { commit(amount) }
+                    retry = { commit(amount, period) }
                 }
             busy = false
         }
@@ -945,6 +1282,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                 .onSuccess {
                     view = it
                     draft = formatAmount(it.ownBudget)
+                    resetPeriodDraft = it.pool?.resetPeriod ?: it.ownBudgetResetPeriod
                     syncVmDrafts(it)
                     syncBwDrafts(it)
                 }
@@ -968,6 +1306,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                 .onSuccess {
                     view = it
                     draft = formatAmount(it.ownBudget)
+                    resetPeriodDraft = it.pool?.resetPeriod ?: it.ownBudgetResetPeriod
                     syncVmDrafts(it)
                     syncBwDrafts(it)
                 }
@@ -1028,6 +1367,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                         v != null -> {
                             val fc = v.computeRunwayForecast(
                                 draftBudgetUsd = if (v.mode == "own") draft else null,
+                                draftResetPeriod = if (v.mode == "own" && v.maxGrant == null) resetPeriodDraft else null,
                                 draftComputeUsdPerH = if (v.bandwidthMode == "own") bwUsdHDraft else null,
                                 draftComputeVcpu = if (v.bandwidthMode == "own") bwVcpuDraft else null,
                                 bandwidthEnabled = v.bandwidthMode == "own" || v.effectiveBandwidth?.source == "mission",
@@ -1099,7 +1439,8 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                         onCheckedChange = { on ->
                                             if (!on) commit(null) else {
                                                 val initial = v.maxGrant?.let { minOf(5.0, floor(it * 100) / 100) } ?: 5.0
-                                                if (initial <= 0) saveError = "The parent pool has nothing left to grant" else commit(initial)
+                                                val initialPeriod = if (v.maxGrant == null) resetPeriodDraft else OrbMissionBudget.BudgetResetPeriod.TOTAL
+                                                if (initial <= 0) saveError = "The parent pool has nothing left to grant" else commit(initial, initialPeriod)
                                             }
                                         },
                                         modifier = Modifier.testTag("mission.settings.budget.toggle"),
@@ -1107,6 +1448,8 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                 }
                                 Text(v.modeLine, color = OrbStyle.textSecondary, fontSize = 13.sp)
                                 if (v.mode == "own") {
+                                    val savedPeriod = v.pool?.resetPeriod ?: v.ownBudgetResetPeriod
+                                    val periodDirty = v.maxGrant == null && resetPeriodDraft != savedPeriod
                                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         Box(
                                             Modifier
@@ -1128,7 +1471,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                             )
                                         }
                                         TextButton(
-                                            enabled = !busy && draft != formatAmount(v.ownBudget),
+                                            enabled = !busy && (draft != formatAmount(v.ownBudget) || periodDirty),
                                             onClick = {
                                                 val amount = OrbMissionBudget.parseAmount(draft)
                                                 val max = v.maxGrant
@@ -1137,9 +1480,43 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                                     max != null && amount > max + 1e-9 -> "The parent pool has ${OrbMissionBudget.money(max)} left to grant"
                                                     else -> null
                                                 }
-                                                if (saveError == null && amount != null) commit(amount)
+                                                if (saveError == null && amount != null) {
+                                                    commit(amount, if (v.maxGrant == null) resetPeriodDraft else OrbMissionBudget.BudgetResetPeriod.TOTAL)
+                                                }
                                             },
                                         ) { Text("Save", color = Color.White) }
+                                    }
+                                    if (v.maxGrant == null) {
+                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            Text("Reset cadence", color = OrbStyle.textSecondary, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                                            Row(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(OrbStyle.card)
+                                                    .border(1.dp, OrbStyle.border, RoundedCornerShape(8.dp))
+                                                    .padding(2.dp),
+                                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                            ) {
+                                                OrbMissionBudget.BudgetResetPeriod.entries.forEach { p ->
+                                                    val selected = resetPeriodDraft == p
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .clip(RoundedCornerShape(6.dp))
+                                                            .background(if (selected) OrbStyle.surface else Color.Transparent)
+                                                            .clickable(enabled = !busy) { resetPeriodDraft = p }
+                                                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                                                            .testTag("mission.settings.budget.reset_period.${p.wire}"),
+                                                    ) {
+                                                        Text(
+                                                            p.label,
+                                                            color = if (selected) Color.White else OrbStyle.textSecondary,
+                                                            fontSize = 12.sp,
+                                                            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                     v.maxGrant?.let {
                                         Text("Up to ${OrbMissionBudget.money(it)} from the parent pool.", color = OrbStyle.textSecondary, fontSize = 12.sp)
@@ -1150,12 +1527,20 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                         progress = { ((p.spent + p.reserved + p.carved) / maxOf(p.budget, 0.0001)).toFloat().coerceIn(0f, 1f) },
                                         modifier = Modifier.fillMaxWidth(),
                                     )
-                                    listOf(
-                                        "Spent" to OrbMissionBudget.money(p.spent),
-                                        "Reserved" to OrbMissionBudget.money(p.reserved),
-                                        "Sub-budgets" to OrbMissionBudget.money(p.carved),
-                                        "Remaining" to "${OrbMissionBudget.money(maxOf(0.0, p.available))} of ${OrbMissionBudget.money(p.budget)}",
-                                    ).forEach { (label, value) ->
+                                    val spentLabel = when (p.resetPeriod) {
+                                        OrbMissionBudget.BudgetResetPeriod.DAILY -> "Spent today"
+                                        OrbMissionBudget.BudgetResetPeriod.WEEKLY -> "Spent this week"
+                                        OrbMissionBudget.BudgetResetPeriod.TOTAL -> "Spent"
+                                    }
+                                    buildList {
+                                        add(spentLabel to OrbMissionBudget.money(p.spent))
+                                        if (p.resetPeriod != OrbMissionBudget.BudgetResetPeriod.TOTAL && p.lifetimeSpent > p.spent + 0.005) {
+                                            add("Lifetime spent" to OrbMissionBudget.money(p.lifetimeSpent))
+                                        }
+                                        add("Reserved" to OrbMissionBudget.money(p.reserved))
+                                        add("Sub-budgets" to OrbMissionBudget.money(p.carved))
+                                        add("Remaining" to "${OrbMissionBudget.money(maxOf(0.0, p.available))} of ${OrbMissionBudget.money(p.budget)}")
+                                    }.forEach { (label, value) ->
                                         Row {
                                             Text(label, color = OrbStyle.textSecondary, fontSize = 13.sp, modifier = Modifier.weight(1f))
                                             Text(value, color = Color.White, fontSize = 13.sp)
@@ -1203,6 +1588,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                     val summary = OrbMissionBudget.bandwidthLimitsSummary(
                                         OrbMissionBudget.BandwidthLimits(
                                             tokensPerMin = eff.tokensPerMin,
+                                            inferenceUsdPerHour = eff.inferenceUsdPerHour,
                                             computeVcpuPerMin = eff.computeVcpuPerMin,
                                             computeUsdPerHour = eff.computeUsdPerHour,
                                             protectRoot = eff.protectRoot,
@@ -1240,6 +1626,28 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                                 textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
                                                 cursorBrush = SolidColor(Color.White),
                                                 modifier = Modifier.fillMaxWidth().testTag("mission.settings.bandwidth.tpm"),
+                                            )
+                                        }
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text("Inference ceiling ($/h)", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                                        Box(
+                                            Modifier
+                                                .width(124.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(OrbStyle.card)
+                                                .border(1.dp, OrbStyle.border, RoundedCornerShape(8.dp))
+                                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                                        ) {
+                                            if (bwInfUsdHDraft.isEmpty()) Text("Optional", color = OrbStyle.textMuted, fontSize = 13.sp)
+                                            BasicTextField(
+                                                value = bwInfUsdHDraft,
+                                                onValueChange = { bwInfUsdHDraft = it },
+                                                singleLine = true,
+                                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                                textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
+                                                cursorBrush = SolidColor(Color.White),
+                                                modifier = Modifier.fillMaxWidth().testTag("mission.settings.bandwidth.inf_usdh"),
                                             )
                                         }
                                     }
@@ -1309,6 +1717,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                                     computeUsdPerHRaw = bwUsdHDraft,
                                                     protectRoot = bwProtectRoot,
                                                     view = v,
+                                                    inferenceUsdPerHRaw = bwInfUsdHDraft,
                                                 )
                                                     .onSuccess { commitBandwidth(it) }
                                                     .onFailure { bwSaveError = it.message }
