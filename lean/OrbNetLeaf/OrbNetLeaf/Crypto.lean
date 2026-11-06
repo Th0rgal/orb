@@ -1,7 +1,7 @@
 /-
   OrbNetLeaf.Crypto: Verified AEAD (`AES-256-GCM`, `ChaCha20-Poly1305`),
-  `Ed25519` signing/verification, `X25519` ECDH, and CSPRNG primitives over
-  `orb_net_leaf.c`, strictly gated by `OrbNetLeaf.Spec`.
+  `Ed25519` signing/verification, role-separated `X25519` ECDH, and CSPRNG primitives
+  over `orb_net_leaf.c`, strictly gated by `OrbNetLeaf.Spec`.
 -/
 import LeanSys.Spec
 import OrbNetLeaf.Spec
@@ -105,7 +105,7 @@ def ed25519Verify (pub32 sig64 msg : ByteArray) : IO Bool := do
   let res ← rawEdX25519 2 pub32 sig64 msg
   return res.size == 1 && verifySliceBounds 0 1 res.size.toUInt64 == 1 && res.get! 0 == 1
 
-/-- Derive 32-byte X25519 public key from 32-byte secret scalar (`op = 3, peer = empty`). -/
+/-- Derive 32-byte X25519 public key from 32-byte secret scalar (`op = 3`). -/
 def x25519PublicKey (secret32 : ByteArray) : IO (Except String ByteArray) := do
   if verifyAsymOp 3 secret32.size.toUInt64 0 0 != 1 then
     return .error "x25519PublicKey rejected by verifyAsymOp"
@@ -113,11 +113,12 @@ def x25519PublicKey (secret32 : ByteArray) : IO (Except String ByteArray) := do
   if pub.size == 32 then return .ok pub
   else return .error "X25519 public-key derivation failed"
 
-/-- Compute 32-byte X25519 shared secret between `secret32` and `peerPub32` (`op = 3`). -/
+/-- Compute 32-byte X25519 shared secret between `secret32` and 32-byte `peerPub32` (`op = 4`).
+    Role-separated from `x25519PublicKey` (`op = 3`) so an empty peer key is rejected fail-closed. -/
 def x25519SharedSecret (secret32 peerPub32 : ByteArray) : IO (Except String ByteArray) := do
-  if verifyAsymOp 3 secret32.size.toUInt64 peerPub32.size.toUInt64 0 != 1 then
-    return .error "x25519SharedSecret rejected by verifyAsymOp"
-  let shared ← rawEdX25519 3 secret32 peerPub32 ByteArray.empty
+  if verifyAsymOp 4 secret32.size.toUInt64 peerPub32.size.toUInt64 0 != 1 then
+    return .error "x25519SharedSecret rejected by verifyAsymOp (requires 32-byte peer public key)"
+  let shared ← rawEdX25519 4 secret32 peerPub32 ByteArray.empty
   if shared.size == 32 then return .ok shared
   else return .error "X25519 key agreement failed"
 

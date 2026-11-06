@@ -1,9 +1,10 @@
 /-
   OrbNetLeaf.SelfTest: Deterministic end-to-end test suite for `OrbNetLeaf`
-  (AEAD `AES-256-GCM` & `ChaCha20-Poly1305` roundtrip + tamper rejection,
-   `Ed25519` sign/verify + tamper rejection, `X25519` symmetric ECDH,
-   `FD_CLOEXEC` `openPty` + `resizePty` + bidirectional I/O,
-   and outbound HTTP/1.1 wire builder & chunked/Content-Length response parser).
+  (AEAD `AES-256-GCM` & `ChaCha20-Poly1305` roundtrip + tamper rejection + 4096B AAD / 0B payload,
+   `Ed25519` sign/verify + tamper rejection, role-separated `X25519` ECDH + empty-peer rejection,
+   `FD_CLOEXEC` / `O_NONBLOCK` `openPty` + `resizePty` + bidirectional I/O,
+   and outbound HTTP/1.1 wire builder, Content-Length validation, TLS truncation/EOF status framing,
+   and curl HTTP/1.1 chunked fallback decoding).
 -/
 import LeanSys.Posix
 import OrbNetLeaf
@@ -26,15 +27,20 @@ def main : IO Unit := do
     (verifyAeadEnvelope 0 0 32 12 0 15 == 0)
   assertTrue "verifyAsymOp rejects 63B Ed25519 signature"
     (verifyAsymOp 2 32 63 64 == 0)
+  assertTrue "verifyAsymOp rejects empty peer key on X25519 ECDH (op = 4)"
+    (verifyAsymOp 4 32 0 0 == 0)
   assertTrue "verifyOutboundRequest rejects CR/LF host"
     (verifyOutboundRequest 0 1 443 12 64 4096 == 0)
-  assertTrue "verifyPtyWindow rejects zero rows"
-    (verifyPtyWindow 0 80 == 0)
+  assertTrue "verifyPtyWindow rejects zero rows and zero cols"
+    (verifyPtyWindow 0 80 == 0 && verifyPtyWindow 24 0 == 0)
 
-  -- 2. CSPRNG & AES-256-GCM + ChaCha20-Poly1305 AEAD roundtrip + tamper rejection
+  -- 2. CSPRNG & AES-256-GCM + ChaCha20-Poly1305 AEAD roundtrip + tamper rejection + large-AAD 0-byte payload
   let .ok key ← randBytes 32 | throw (IO.userError "randBytes 32 failed")
   let .ok nonce ← randBytes 12 | throw (IO.userError "randBytes 12 failed")
   let aad := "orb-net-leaf-aad-v1".toUTF8
+  let largeAad ← match (← randBytes 4096) with
+    | .ok b => pure b
+    | .error e => throw (IO.userError e)
   let msg := "verified-lean4-aead-payload".toUTF8
 
   for alg in [AeadAlg.aes256Gcm, AeadAlg.chacha20Poly1305] do
@@ -49,14 +55,14 @@ def main : IO Unit := do
     let badOpen ← aeadOpen alg key nonce aad tampered
     assertTrue s!"{reprStr alg} rejects tampered authentication tag" badOpen.isOk.not
 
-    -- Empty plaintext roundtrip + tampered empty-plaintext tag rejection
-    let .ok emptyCt ← aeadSeal alg key nonce aad ByteArray.empty
-      | throw (IO.userError "empty aeadSeal failed")
-    let .ok emptyPt ← aeadOpen alg key nonce aad emptyCt
-      | throw (IO.userError "empty aeadOpen failed")
-    assertTrue s!"{reprStr alg} 0-byte plaintext roundtrip" (emptyPt.isEmpty)
+    -- Empty plaintext with 4096-byte AAD roundtrip + tampered tag rejection (regression for AAD pointer offset)
+    let .ok emptyCt ← aeadSeal alg key nonce largeAad ByteArray.empty
+      | throw (IO.userError "empty aeadSeal with 4096B AAD failed")
+    let .ok emptyPt ← aeadOpen alg key nonce largeAad emptyCt
+      | throw (IO.userError "empty aeadOpen with 4096B AAD failed")
+    assertTrue s!"{reprStr alg} 0-byte plaintext + 4096B AAD roundtrip" (emptyPt.isEmpty)
     let badEmpty := emptyCt.set! 0 (emptyCt.get! 0 ^^^ 0x01)
-    let badEmptyOpen ← aeadOpen alg key nonce aad badEmpty
+    let badEmptyOpen ← aeadOpen alg key nonce largeAad badEmpty
     assertTrue s!"{reprStr alg} rejects tampered 0-byte tag" badEmptyOpen.isOk.not
 
   -- 3. Ed25519 sign/verify + tamper rejection
@@ -69,14 +75,16 @@ def main : IO Unit := do
   let okBadSig ← ed25519Verify edPub badSig msg
   assertTrue "Ed25519 tampered signature rejected" (!okBadSig)
 
-  -- 4. X25519 symmetric ECDH key agreement
+  -- 4. Role-separated X25519 symmetric ECDH key agreement + empty-peer rejection
   let .ok aliceSec ← randBytes 32 | throw (IO.userError "aliceSec failed")
   let .ok bobSec ← randBytes 32 | throw (IO.userError "bobSec failed")
   let .ok alicePub ← x25519PublicKey aliceSec | throw (IO.userError "alicePub failed")
   let .ok bobPub ← x25519PublicKey bobSec | throw (IO.userError "bobPub failed")
+  let emptyPeerRes ← x25519SharedSecret aliceSec ByteArray.empty
+  assertTrue "X25519 shared secret rejects empty peer key" emptyPeerRes.isOk.not
   let .ok sAB ← x25519SharedSecret aliceSec bobPub | throw (IO.userError "sAB failed")
   let .ok sBA ← x25519SharedSecret bobSec alicePub | throw (IO.userError "sBA failed")
-  assertTrue "X25519 ECDH shared secrets match" (sAB == sBA && sAB.size == 32)
+  assertTrue "X25519 ECDH shared secrets match" (sAB == sBA && sAB.size == 32 && sAB != alicePub)
 
   -- 5. PTY allocation, window resize, and bidirectional fd roundtrip
   let .ok pty ← openPty 24 80 | throw (IO.userError "openPty failed")
@@ -86,9 +94,19 @@ def main : IO Unit := do
   closePtyPair pty
   assertTrue "PTY master read non-empty slave payload" (!rd.isEmpty)
 
-  -- 6. Outbound HTTP/1.1 wire builder & response parser (Content-Length + chunked + smuggling rejection)
+  -- 6. Outbound HTTP/1.1 smuggling, Content-Length mismatch, whitespace path, TLS truncation, and curl fallback checks
   let badHdrReq := buildOutboundHttp11Request "GET" "example.com" "/" #[("X-Inj", "ok\r\nEvil: 1")]
   assertTrue "Outbound HTTP builder rejects CR/LF header injection" badHdrReq.isOk.not
+  let badSpacePath := buildOutboundHttp11Request "GET" "example.com" "/bad path HTTP/1.1"
+  assertTrue "Outbound HTTP builder rejects whitespace in request target" badSpacePath.isOk.not
+  let badClMismatch := buildOutboundHttp11Request "POST" "example.com" "/v1/chat" #[("Content-Length", "0")] ("hello".toUTF8)
+  assertTrue "Outbound HTTP builder rejects mismatched Content-Length" badClMismatch.isOk.not
+  let badClDup := buildOutboundHttp11Request "POST" "example.com" "/v1/chat"
+    #[("Content-Length", "5"), ("Content-Length", "5")] ("hello".toUTF8)
+  assertTrue "Outbound HTTP builder rejects duplicate Content-Length" badClDup.isOk.not
+  let goodCl := buildOutboundHttp11Request "POST" "example.com" "/v1/chat" #[("Content-Length", "5")] ("hello".toUTF8)
+  assertTrue "Outbound HTTP builder accepts matching Content-Length" goodCl.isOk
+
   let sampleChunked :=
     ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n" ++
      "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n").toUTF8
@@ -96,5 +114,24 @@ def main : IO Unit := do
     | throw (IO.userError "parseHttpResponseWire chunked failed")
   assertTrue "Chunked HTTP response decoded accurately"
     (parsedResp.status == 200 && parsedResp.body == "hello world".toUTF8)
+
+  -- TLS status framing: cap exhaustion (`status = 2`) and unauthenticated close-delimited EOF (`status = 4`) fail closed
+  let rawCloseDelim := ("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\npartial").toUTF8
+  assertTrue "TLS cap exhaustion status (2) fails closed"
+    (decodeTlsRoundtripWire (ByteArray.mk #[2] ++ rawCloseDelim) 4096).isOk.not
+  assertTrue "TLS unauthenticated EOF (4) on close-delimited response fails closed"
+    (decodeTlsRoundtripWire (ByteArray.mk #[4] ++ rawCloseDelim) 4096).isOk.not
+  assertTrue "TLS authenticated close_notify (1) on close-delimited response succeeds"
+    (decodeTlsRoundtripWire (ByteArray.mk #[1] ++ rawCloseDelim) 4096).isOk
+
+  -- Curl HTTP/1.1 chunked fallback: headers carry `Transfer-Encoding: chunked`, stdout carries already-decoded body
+  let curlHdrDump :=
+    ("HTTP/1.1 100 Continue\r\n\r\n" ++
+     "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\n").toUTF8
+  let curlDecodedBody := "{\"ok\":true}".toUTF8
+  let .ok curlResp := parseCurlDumpHeadersAndBody curlHdrDump curlDecodedBody 4096
+    | throw (IO.userError "parseCurlDumpHeadersAndBody chunked fallback failed")
+  assertTrue "Curl HTTP/1.1 chunked fallback preserves already-decoded body without double-dechunking"
+    (curlResp.status == 200 && curlResp.body == curlDecodedBody)
 
   IO.println "[OrbNetLeaf] ALL SELF-TESTS PASSED"

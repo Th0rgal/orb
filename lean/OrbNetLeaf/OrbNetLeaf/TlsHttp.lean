@@ -1,13 +1,15 @@
 /-
   OrbNetLeaf.TlsHttp: Verified outbound HTTPS / HTTP/1.1 client over OpenSSL
-  TLS 1.3/1.2 (`orb_net_leaf_tls_roundtrip`) + HTTP/2 / HTTP/3 (`curl --http2` / `--http3`
-  fallback when `curl` is requested for multiplexed/QUIC upstream endpoints),
-  with zero-copy response parsing strictly gated by `OrbNetLeaf.Spec` and `LeanSys.Spec`.
+  TLS 1.3/1.2 (`orb_net_leaf_tls_roundtrip` with socket deadlines & truncation/EOF
+  status verification) + HTTP/2 / HTTP/3 (`curl --http2` / `--http3-only` with
+  header-file separation so curl's decoded stdout body is never double-dechunked),
+  strictly gated by `OrbNetLeaf.Spec` and `LeanSys.Spec`.
 -/
 import LeanSys.Spec
 import LeanSys.Http
 import LeanSys.Posix
 import OrbNetLeaf.Spec
+import OrbNetLeaf.Crypto
 
 namespace OrbNetLeaf.TlsHttp
 
@@ -18,7 +20,8 @@ open OrbNetLeaf.Spec
 @[extern "orb_net_leaf_tls_roundtrip"]
 private opaque rawTlsRoundtrip
     (host : @& String) (port : UInt16)
-    (req : @& ByteArray) (maxResp : USize) (verifyPeer : UInt8) : IO ByteArray
+    (req : @& ByteArray) (maxResp : USize)
+    (verifyPeer : UInt8) (timeoutMs : UInt32) : IO ByteArray
 
 structure HttpsResponse where
   status  : Nat
@@ -39,17 +42,50 @@ def hasNoCrLfOrNul (s : String) : UInt8 := Id.run do
     i := i + 1
   return 1
 
-/-- Build a smuggling-safe HTTP/1.1 outbound wire request with validated header tokens & values. -/
+/-- Check that an HTTP request-target (`origin-form`, starting with `/`) contains only
+    RFC 9112 visible ASCII (`0x21..0x7E` — rejecting spaces, tabs, DEL, CR, LF, NUL, and non-ASCII). -/
+def isValidRequestTarget (path : String) : Bool := Id.run do
+  if path.isEmpty || !path.startsWith "/" then
+    return false
+  let b := path.toUTF8
+  let cap := b.size.toUInt64
+  let mut i : Nat := 0
+  while verifySliceBounds i.toUInt64 1 cap == 1 do
+    let c := b.get! i
+    if c < 0x21 || c > 0x7E then
+      return false
+    i := i + 1
+  return true
+
+/-- Check that an outbound hostname contains only visible ASCII without whitespace/controls (`0x21..0x7E`). -/
+def isValidHostChars (host : String) : Bool := Id.run do
+  if host.isEmpty then
+    return false
+  let b := host.toUTF8
+  let cap := b.size.toUInt64
+  let mut i : Nat := 0
+  while verifySliceBounds i.toUInt64 1 cap == 1 do
+    let c := b.get! i
+    if c < 0x21 || c > 0x7E then
+      return false
+    i := i + 1
+  return true
+
+/-- Build a smuggling-safe HTTP/1.1 outbound wire request:
+    - Validates `method` (`isHttpToken`), `path` (`isValidRequestTarget`, rejecting spaces/tabs/controls),
+      and `host` (`isValidHostChars`).
+    - Rejects reserved framing headers (`Host`, `Connection`, `Transfer-Encoding`) and validates
+      any caller-supplied `Content-Length` to forbid duplicates and require exact match to `body.size`. -/
 def buildOutboundHttp11Request
     (method host path : String)
     (headers : Array (String × String) := #[])
     (body : ByteArray := ByteArray.empty) : Except String ByteArray := do
   if method.isEmpty || !isHttpToken method then
     throw s!"invalid HTTP method `{method}`"
-  if path.isEmpty || !path.startsWith "/" || hasNoCrLfOrNul path != 1 then
+  if !isValidRequestTarget path then
     throw s!"invalid HTTP request target `{path}`"
-  if hasNoCrLfOrNul host != 1 then
-    throw "hostname contains CR/LF/NUL"
+  if !isValidHostChars host || hasNoCrLfOrNul host != 1 then
+    throw "hostname contains invalid whitespace or control bytes"
   let mut hdrBlock := s!"{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n"
   let mut hasCl := false
   let mut idx : Nat := 0
@@ -62,7 +98,15 @@ def buildOutboundHttp11Request
        asciiEqIgnoreCase hk "transfer-encoding" then
       throw s!"reserved outbound HTTP header `{hk}`"
     if asciiEqIgnoreCase hk "content-length" then
-      hasCl := true
+      if hasCl then
+        throw "duplicate outbound Content-Length header"
+      match parseStrictContentLength? hv.trimAscii.toString with
+      | some declaredLen =>
+        if declaredLen != body.size then
+          throw s!"outbound Content-Length ({declaredLen}) does not match body size ({body.size})"
+        hasCl := true
+      | none =>
+        throw s!"invalid outbound Content-Length `{hv}`"
     hdrBlock := hdrBlock ++ s!"{hk}: {hv}\r\n"
     idx := idx + 1
   if !hasCl && body.size > 0 then
@@ -70,21 +114,10 @@ def buildOutboundHttp11Request
   hdrBlock := hdrBlock ++ "\r\n"
   return hdrBlock.toUTF8 ++ body
 
-/-- Parse a bounded HTTP/1.x wire response (`status`, `headers`, `Content-Length` or `chunked` `body`),
-    routing every slice boundary check through `LeanSys.Spec.verifySliceBounds`. -/
-def parseHttpResponseWire (raw : ByteArray) (maxBodyBytes : Nat := 16777216) :
-    Except String HttpsResponse := do
-  let cap := raw.size.toUInt64
-  if verifySliceBounds 0 12 cap != 1 then
-    throw "truncated HTTP response status line"
-  let some bodyStart := findHeaderEnd? raw
-    | throw "unterminated HTTP response header block"
-  if verifySliceBounds 0 bodyStart.toUInt64 cap != 1 ||
-     verifySliceBounds 0 bodyStart.toUInt64 65536 != 1 then
-    throw "HTTP response header block exceeds 64 KiB cap"
-  let hdrBytes := raw.extract 0 (bodyStart - 4)
-  let some hdrStr := String.fromUTF8? hdrBytes
-    | throw "non-UTF8 HTTP response headers"
+/-- Parse a single HTTP status + header block (`without` trailing `\r\n\r\n`) into
+    `(statusCode, headers, isChunked, contentLen?)`. -/
+def parseHttpHeaderBlock (hdrStr : String) :
+    Except String (Nat × Array (String × String) × Bool × Option Nat) := do
   let lines := hdrStr.splitOn "\r\n"
   let statusLine :: rawFields := lines
     | throw "missing HTTP status line"
@@ -122,6 +155,28 @@ def parseHttpResponseWire (raw : ByteArray) (maxBodyBytes : Nat := 16777216) :
             contentLen? := some cl
           | none => throw "invalid Content-Length response value"
         parsedHeaders := parsedHeaders.push (k, v)
+  return (statusCode, parsedHeaders, isChunked, contentLen?)
+
+/-- Parse a bounded HTTP/1.x wire response (`status`, `headers`, `Content-Length` or `chunked` `body`),
+    routing every slice boundary check through `LeanSys.Spec.verifySliceBounds`.
+    When `authenticatedEof = false` (e.g., peer closed TCP without TLS `close_notify`), close-delimited
+    responses without `Content-Length` or `Transfer-Encoding: chunked` are rejected fail-closed so
+    premature transport EOF can never masquerade as a complete response. -/
+def parseHttpResponseWire
+    (raw : ByteArray) (maxBodyBytes : Nat := 16777216) (authenticatedEof : Bool := true) :
+    Except String HttpsResponse := do
+  let cap := raw.size.toUInt64
+  if verifySliceBounds 0 12 cap != 1 then
+    throw "truncated HTTP response status line"
+  let some bodyStart := findHeaderEnd? raw
+    | throw "unterminated HTTP response header block"
+  if verifySliceBounds 0 bodyStart.toUInt64 cap != 1 ||
+     verifySliceBounds 0 bodyStart.toUInt64 65536 != 1 then
+    throw "HTTP response header block exceeds 64 KiB cap"
+  let hdrBytes := raw.extract 0 (bodyStart - 4)
+  let some hdrStr := String.fromUTF8? hdrBytes
+    | throw "non-UTF8 HTTP response headers"
+  let (statusCode, parsedHeaders, isChunked, contentLen?) ← parseHttpHeaderBlock hdrStr
   let remLen := raw.size - bodyStart
   if verifySliceBounds bodyStart.toUInt64 remLen.toUInt64 cap != 1 then
     throw "invalid HTTP response body slice"
@@ -139,9 +194,30 @@ def parseHttpResponseWire (raw : ByteArray) (maxBodyBytes : Nat := 16777216) :
         throw "HTTP response body truncated or exceeds maxBodyBytes"
       return { status := statusCode, headers := parsedHeaders, body := rawBody.extract 0 cl }
     | none =>
+      if !authenticatedEof && statusCode != 204 && statusCode != 304 then
+        throw "unauthenticated TLS EOF on close-delimited HTTP response"
       if verifySliceBounds 0 rawBody.size.toUInt64 maxBodyBytes.toUInt64 != 1 then
         throw "HTTP response body exceeds maxBodyBytes"
       return { status := statusCode, headers := parsedHeaders, body := rawBody }
+
+/-- Decode the status-prefixed buffer returned by `orb_net_leaf_tls_roundtrip`:
+    - `status == 1`: clean TLS `close_notify` (`SSL_ERROR_ZERO_RETURN`) -> `authenticatedEof := true`
+    - `status == 2`: response exceeded `maxWireBytes` budget -> rejected fail-closed
+    - `status == 4`: TCP EOF without `close_notify` -> accepted only if self-delimiting (`Content-Length` / `chunked`)
+    - empty / other: TLS handshake, write, read, or socket timeout failure -> rejected fail-closed. -/
+def decodeTlsRoundtripWire (framed : ByteArray) (maxBodyBytes : Nat) : Except String HttpsResponse := do
+  if verifySliceBounds 0 1 framed.size.toUInt64 != 1 then
+    throw "TLS transport error or timeout"
+  let status := framed.get! 0
+  let wire := framed.extract 1 framed.size
+  if status == 2 then
+    throw s!"TLS response exceeded maxRespBytes budget ({maxBodyBytes})"
+  else if status == 1 then
+    parseHttpResponseWire wire maxBodyBytes true
+  else if status == 4 then
+    parseHttpResponseWire wire maxBodyBytes false
+  else
+    throw s!"TLS read failed with transport status {status}"
 
 /-- Execute a verified WebPKI TLS 1.3/1.2 roundtrip (`orb_net_leaf_tls_roundtrip`),
     strictly gated by `OrbNetLeaf.Spec.verifyOutboundRequest`. -/
@@ -150,8 +226,9 @@ def httpsRequest
     (headers : Array (String × String) := #[])
     (body : ByteArray := ByteArray.empty)
     (maxRespBytes : Nat := 4194304)
-    (verifyPeer : Bool := true) : IO (Except String HttpsResponse) := do
-  let noCrLf := hasNoCrLfOrNul host
+    (verifyPeer : Bool := true)
+    (timeoutMs : UInt32 := 30000) : IO (Except String HttpsResponse) := do
+  let noCrLf := if isValidHostChars host && hasNoCrLfOrNul host == 1 then (1 : UInt8) else 0
   let vpFlag : UInt8 := if verifyPeer then 1 else 0
   let reqWire ← match buildOutboundHttp11Request method host path headers body with
     | .ok w => pure w
@@ -159,19 +236,40 @@ def httpsRequest
   if verifyOutboundRequest noCrLf vpFlag port.toUInt32
       host.toUTF8.size.toUInt64 reqWire.size.toUInt64 maxRespBytes.toUInt64 != 1 then
     return .error "httpsRequest rejected by verifyOutboundRequest"
-  let rawResp ← rawTlsRoundtrip host port reqWire (USize.ofNat maxRespBytes) vpFlag
-  if rawResp.isEmpty then
+  let maxWireCap := maxRespBytes + 65536
+  let framed ← rawTlsRoundtrip host port reqWire (USize.ofNat maxWireCap) vpFlag timeoutMs
+  if framed.isEmpty then
     return .error s!"TLS roundtrip failed to {host}:{port}"
-  return parseHttpResponseWire rawResp maxRespBytes
+  return decodeTlsRoundtripWire framed maxRespBytes
+
+/-- Parse `curl --dump-header` output (which may contain `100 Continue` / redirect blocks separated
+    by `\r\n\r\n`, and whose stdout `decodedBody` has ALREADY had HTTP/1.1 `chunked` framing removed by curl)
+    without double-decoding `Transfer-Encoding: chunked`. -/
+def parseCurlDumpHeadersAndBody
+    (hdrDump decodedBody : ByteArray) (maxBodyBytes : Nat := 16777216) :
+    Except String HttpsResponse := do
+  if decodedBody.size > maxBodyBytes then
+    throw s!"HTTP response body ({decodedBody.size}) exceeds maxBodyBytes ({maxBodyBytes})"
+  let some dumpStr := String.fromUTF8? hdrDump
+    | throw "non-UTF8 curl response headers"
+  let blocks := (dumpStr.splitOn "\r\n\r\n").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let some lastBlock := blocks.getLast?
+    | throw "empty curl response header dump"
+  let (statusCode, parsedHeaders, isChunked, contentLen?) ← parseHttpHeaderBlock lastBlock
+  if !isChunked then
+    if let some cl := contentLen? then
+      if statusCode != 204 && statusCode != 304 && decodedBody.size != cl then
+        throw s!"curl response body size ({decodedBody.size}) mismatches Content-Length ({cl})"
+  return { status := statusCode, headers := parsedHeaders, body := decodedBody }
 
 inductive HttpWireVersion where
   | http2
   | http3
   deriving Repr, DecidableEq, BEq, Inhabited
 
-/-- Execute a verified outbound HTTP/2 or HTTP/3 request via `/usr/bin/curl` when multiplexed
-    or QUIC transport is requested before Wave 5 native `LeanH2`/`LeanQuic`/`LeanH3` cutover,
-    strictly gated by `OrbNetLeaf.Spec.verifyOutboundRequest` and parsed by `parseHttpResponseWire`. -/
+/-- Execute a verified outbound HTTP/2 or HTTP/3 request via `/usr/bin/curl` prior to Wave 5
+    native `LeanSys.{H2,Quic,H3}` cutover, separating `--dump-header <tmp>` from stdout body so
+    HTTP/1.1 chunked fallback responses are never double-dechunked. -/
 def http2Or3RequestViaCurl
     (version : HttpWireVersion)
     (method host : String) (port : UInt16 := 443) (path : String := "/")
@@ -179,18 +277,27 @@ def http2Or3RequestViaCurl
     (body : ByteArray := ByteArray.empty)
     (maxRespBytes : Nat := 4194304)
     (timeoutSecs : Nat := 30) : IO (Except String HttpsResponse) := do
-  let noCrLf := hasNoCrLfOrNul host
+  let noCrLf := if isValidHostChars host && hasNoCrLfOrNul host == 1 then (1 : UInt8) else 0
   let reqWire ← match buildOutboundHttp11Request method host path headers body with
     | .ok w => pure w
     | .error e => return .error e
   if verifyOutboundRequest noCrLf 1 port.toUInt32
       host.toUTF8.size.toUInt64 reqWire.size.toUInt64 maxRespBytes.toUInt64 != 1 then
     return .error "http2Or3RequestViaCurl rejected by verifyOutboundRequest"
+  let nonceBytes ← match (← OrbNetLeaf.Crypto.randBytes 8) with
+    | .ok b => pure b
+    | .error e => return .error e
+  let mut nonceHex := ""
+  for i in [0:nonceBytes.size] do
+    let v := (nonceBytes.get! i).toNat
+    let hex := "0123456789abcdef".toList.toArray
+    nonceHex := nonceHex.push (hex[(v / 16) % 16]!) |>.push (hex[v % 16]!)
+  let hdrFile : System.FilePath := s!"/tmp/orb_curl_hdr_{nonceHex}.tmp"
   let verFlag := match version with
     | .http2 => "--http2"
     | .http3 => "--http3"
   let mut args : Array String := #[
-    "--silent", "--show-error", "--include",
+    "--silent", "--show-error", "--dump-header", hdrFile.toString,
     "--max-time", toString (if timeoutSecs == 0 then 1 else timeoutSecs),
     "--max-filesize", toString maxRespBytes,
     verFlag, "-X", method
@@ -200,28 +307,36 @@ def http2Or3RequestViaCurl
     args := args.push s!"{hk}: {hv}"
   let url := s!"https://{host}:{port}{path}"
   args := args.push url
-  let child ← IO.Process.spawn {
-    cmd := "/usr/bin/curl"
-    args := if body.isEmpty then args else args.push "--data-binary" |>.push "@-"
-    stdin := .piped
-    stdout := .piped
-    stderr := .piped
-  }
-  if !body.isEmpty then
-    child.stdin.write body
-    child.stdin.flush
-  let (_, child') ← child.takeStdin
-  let mut outBytes := ByteArray.empty
-  while true do
-    let chunk ← child'.stdout.read 65536
-    if chunk.isEmpty then break
-    outBytes := outBytes ++ chunk
-    if outBytes.size > maxRespBytes then
-      return .error s!"curl ({verFlag}) response exceeded maxRespBytes {maxRespBytes}"
-  let errStr ← child'.stderr.readToEnd
-  let code ← child'.wait
-  if code != 0 then
-    return .error s!"curl ({verFlag}) exited with {code}: {errStr.trimAscii.toString}"
-  return parseHttpResponseWire outBytes maxRespBytes
+  try
+    let child ← IO.Process.spawn {
+      cmd := "/usr/bin/curl"
+      args := if body.isEmpty then args else args.push "--data-binary" |>.push "@-"
+      stdin := .piped
+      stdout := .piped
+      stderr := .piped
+    }
+    if !body.isEmpty then
+      child.stdin.write body
+      child.stdin.flush
+    let (_, child') ← child.takeStdin
+    let mut outBytes := ByteArray.empty
+    while true do
+      let chunk ← child'.stdout.read 65536
+      if chunk.isEmpty then break
+      outBytes := outBytes ++ chunk
+      if outBytes.size > maxRespBytes then
+        try IO.FS.removeFile hdrFile catch _ => pure ()
+        return .error s!"curl ({verFlag}) response exceeded maxRespBytes {maxRespBytes}"
+    let errStr ← child'.stderr.readToEnd
+    let code ← child'.wait
+    if code != 0 then
+      try IO.FS.removeFile hdrFile catch _ => pure ()
+      return .error s!"curl ({verFlag}) exited with {code}: {errStr.trimAscii.toString}"
+    let hdrBytes ← IO.FS.readBinFile hdrFile
+    try IO.FS.removeFile hdrFile catch _ => pure ()
+    return parseCurlDumpHeadersAndBody hdrBytes outBytes maxRespBytes
+  catch e =>
+    try IO.FS.removeFile hdrFile catch _ => pure ()
+    return .error s!"curl ({verFlag}) execution failed: {e}"
 
 end OrbNetLeaf.TlsHttp

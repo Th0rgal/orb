@@ -1,7 +1,7 @@
 /-
-  OrbNetLeaf.MutantSuite: 3-mutant kill suite (`0 import Lean`, `0 sorryAx`)
-  verifying that `OrbNetLeaf.Spec` gates strictly kill realistic cryptographic
-  and network-framing boundary mutants.
+  OrbNetLeaf.MutantSuite: 5-mutant kill suite (`0 import Lean`, `0 sorryAx`)
+  verifying that `OrbNetLeaf.Spec` gates strictly kill realistic cryptographic,
+  role-confusion, network-framing, and PTY geometry boundary mutants.
 -/
 import OrbNetLeaf.Spec
 
@@ -33,7 +33,8 @@ def m02_ed25519VerifyHalfSig (op : UInt8) (k1Len k2Len msgLen : UInt64) : UInt8 
     if op == 0 then k1Len == 32 && k2Len == 0 && msgLen == 0
     else if op == 1 then k1Len == 32 && k2Len == 0 && msgLen ≤ 16777216
     else if op == 2 then k1Len == 32 && k2Len ≥ 32 && msgLen ≤ 16777216
-    else if op == 3 then k1Len == 32 && (k2Len == 0 || k2Len == 32) && msgLen == 0
+    else if op == 3 then k1Len == 32 && k2Len == 0 && msgLen == 0
+    else if op == 4 then k1Len == 32 && k2Len == 32 && msgLen == 0
     else false
   if ok then 1 else 0
 
@@ -42,10 +43,28 @@ theorem kill_m02_ed25519VerifyHalfSig :
       verifyAsymOp 2 32 32 128 := by
   decide
 
-/-- Mutant 3 (`verifyOutboundRequest`): Weakens the SNI / `Host:` CR/LF injection
+/-- Mutant 3 (`verifyAsymOp`): Conflates X25519 public-key derivation (`k2Len == 0`)
+    with X25519 ECDH (`op == 4`), allowing an empty peer key to return a public key as a shared secret. -/
+@[inline]
+def m03_x25519EmptyPeerConfusion (op : UInt8) (k1Len k2Len msgLen : UInt64) : UInt8 :=
+  let ok :=
+    if op == 0 then k1Len == 32 && k2Len == 0 && msgLen == 0
+    else if op == 1 then k1Len == 32 && k2Len == 0 && msgLen ≤ 16777216
+    else if op == 2 then k1Len == 32 && k2Len == 64 && msgLen ≤ 16777216
+    else if op == 3 then k1Len == 32 && k2Len == 0 && msgLen == 0
+    else if op == 4 then k1Len == 32 && (k2Len == 0 || k2Len == 32) && msgLen == 0
+    else false
+  if ok then 1 else 0
+
+theorem kill_m03_x25519EmptyPeerConfusion :
+    m03_x25519EmptyPeerConfusion 4 32 0 0 ≠
+      verifyAsymOp 4 32 0 0 := by
+  decide
+
+/-- Mutant 4 (`verifyOutboundRequest`): Weakens the SNI / `Host:` CR/LF injection
     guard from `noHostCrLf == 1` to `noHostCrLf ≤ 1` (admitting `0`). -/
-@[inline, export orb_net_mut_m03]
-def m03_outboundHostCrLfBypass
+@[inline, export orb_net_mut_m04]
+def m04_outboundHostCrLfBypass
     (noHostCrLf verifyPeer : UInt8) (port : UInt32)
     (hostLen reqBytes maxRespBytes : UInt64) : UInt8 :=
   if noHostCrLf ≤ 1 && verifyPeer ≤ 1 &&
@@ -54,9 +73,19 @@ def m03_outboundHostCrLfBypass
      reqBytes ≤ 67108864 &&
      maxRespBytes ≥ 1 && maxRespBytes ≤ 67108864 then 1 else 0
 
-theorem kill_m03_outboundHostCrLfBypass :
-    m03_outboundHostCrLfBypass 0 1 443 16 128 4096 ≠
+theorem kill_m04_outboundHostCrLfBypass :
+    m04_outboundHostCrLfBypass 0 1 443 16 128 4096 ≠
       verifyOutboundRequest 0 1 443 16 128 4096 := by
+  decide
+
+/-- Mutant 5 (`verifyPtyWindow`): Admits `0`-column terminal geometry (`cols ≤ 1024`). -/
+@[inline]
+def m05_ptyZeroColsBypass (rows cols : UInt32) : UInt8 :=
+  if rows ≥ 1 && rows ≤ 1024 && cols ≤ 1024 then 1 else 0
+
+theorem kill_m05_ptyZeroColsBypass :
+    m05_ptyZeroColsBypass 24 0 ≠
+      verifyPtyWindow 24 0 := by
   decide
 
 end OrbNetLeaf.MutantSuite
