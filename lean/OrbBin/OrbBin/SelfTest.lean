@@ -307,6 +307,25 @@ def runAllTests : IO UInt32 := do
     assertEq "TOML inline gates count" gs2.size 1
     let cmdArr2 := ((gs2[0]!.fieldArr? "command").getD #[]).filterMap JVal.asStr?
     assertEq "TOML multiline 4/5-quote endings" cmdArr2 #["sh", "-c", "echo \"hello\"", "say ''hi''"]
+  assertTrue "validateMatrixJson rejects invalid mode enum"
+    (isErr (parseValidationMatrixText "project = \"orb\"\ngates = [{ id = \"g\", command = [\"true\"], mode = \"cleen\" }]\n" >>= validateMatrixJson))
+  assertTrue "validateMatrixJson rejects negative timeout_secs"
+    (isErr (parseValidationMatrixText "project = \"orb\"\ngates = [{ id = \"g\", command = [\"true\"], timeout_secs = -1 }]\n" >>= validateMatrixJson))
+  assertTrue "validateMatrixJson rejects non-string dependencies"
+    (isErr (parseValidationMatrixText "project = \"orb\"\ngates = [{ id = \"g\", command = [\"true\"], dependencies = [123] }]\n" >>= validateMatrixJson))
+  let badModelSnap :=
+    "{\"schema_version\":1,\"provider_id\":\"openai\",\"access_profile\":\"api\",\"source\":\"curated\",\"observed_at\":null,\"completeness\":\"complete\",\"models\":[{\"id\":\"gpt-5\"}]}"
+  let parsedBadModel ← match Json.parse badModelSnap with
+    | .ok j => pure j
+    | .error e => throw <| IO.userError e
+  assertTrue "mergeSnapshotJson rejects snapshot model missing name"
+    (isErr (mergeSnapshotJson parsedBadModel parsedBadModel))
+  let win1252Bytes := ByteArray.mk #[0x43, 0x61, 0x66, 0xE9, 0x20, 0x80]
+  assertEq "decodeHttpBodyText decodes windows-1252 / iso-8859-1"
+    (decodeHttpBodyText "text/html; charset=ISO-8859-1" win1252Bytes) "Café €"
+  let brokenUtf8 := ByteArray.mk #[0x68, 0x69, 0xFF, 0x21]
+  assertEq "decodeHttpBodyText replaces malformed UTF-8 byte with U+FFFD"
+    (decodeHttpBodyText "text/plain; charset=utf-8" brokenUtf8) "hi\uFFFD!"
 
   -- HTTP redirect URL resolution (RFC 3986 relative, query-only, dot segments, fragment stripping)
   assertEq "resolveRedirectUrl relative root path"

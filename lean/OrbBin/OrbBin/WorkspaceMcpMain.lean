@@ -403,6 +403,89 @@ private def extractTextFromHtml (html : String) : String := Id.run do
     |>.replace "&#39;" "'"
     |>.replace "&nbsp;" " "
 
+private def cp1252Extra : Array UInt32 := #[
+  0x20AC, 0xFFFD, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+  0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0xFFFD, 0x017D, 0xFFFD,
+  0xFFFD, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+  0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0xFFFD, 0x017E, 0x0178
+]
+
+private def decodeSingleByteCharset (bytes : ByteArray) (useCp1252 : Bool) : String := Id.run do
+  let mut out : Array Char := Array.mkEmpty bytes.size
+  for i in [0 : bytes.size] do
+    let b := bytes.get! i
+    if useCp1252 && 0x80 ≤ b && b ≤ 0x9F then
+      out := out.push (Char.ofNat (cp1252Extra[(b - 0x80).toNat]!).toNat)
+    else
+      out := out.push (Char.ofNat b.toNat)
+  return String.ofList out.toList
+
+private def decodeUtf8Lossy (bytes : ByteArray) : String := Id.run do
+  if let some s := String.fromUTF8? bytes then
+    return s
+  let mut out : Array Char := Array.mkEmpty bytes.size
+  let mut i : Nat := 0
+  while i < bytes.size do
+    let b0 := (bytes.get! i).toNat
+    if b0 < 0x80 then
+      out := out.push (Char.ofNat b0)
+      i := i + 1
+    else if 0xC2 ≤ b0 && b0 ≤ 0xDF && i + 1 < bytes.size then
+      let b1 := (bytes.get! (i + 1)).toNat
+      if 0x80 ≤ b1 && b1 ≤ 0xBF then
+        out := out.push (Char.ofNat (((b0 &&& 0x1F) <<< 6) ||| (b1 &&& 0x3F)))
+        i := i + 2
+      else
+        out := out.push (Char.ofNat 0xFFFD)
+        i := i + 1
+    else if 0xE0 ≤ b0 && b0 ≤ 0xEF && i + 2 < bytes.size then
+      let b1 := (bytes.get! (i + 1)).toNat
+      let b2 := (bytes.get! (i + 2)).toNat
+      let cp := ((b0 &&& 0x0F) <<< 12) ||| ((b1 &&& 0x3F) <<< 6) ||| (b2 &&& 0x3F)
+      let validCont := 0x80 ≤ b1 && b1 ≤ 0xBF && 0x80 ≤ b2 && b2 ≤ 0xBF
+      let validRange := cp ≥ 0x800 && !(0xD800 ≤ cp && cp ≤ 0xDFFF)
+      if validCont && validRange then
+        out := out.push (Char.ofNat cp)
+        i := i + 3
+      else
+        out := out.push (Char.ofNat 0xFFFD)
+        i := i + 1
+    else if 0xF0 ≤ b0 && b0 ≤ 0xF4 && i + 3 < bytes.size then
+      let b1 := (bytes.get! (i + 1)).toNat
+      let b2 := (bytes.get! (i + 2)).toNat
+      let b3 := (bytes.get! (i + 3)).toNat
+      let cp := ((b0 &&& 0x07) <<< 18) ||| ((b1 &&& 0x3F) <<< 12) ||| ((b2 &&& 0x3F) <<< 6) ||| (b3 &&& 0x3F)
+      let validCont := 0x80 ≤ b1 && b1 ≤ 0xBF && 0x80 ≤ b2 && b2 ≤ 0xBF && 0x80 ≤ b3 && b3 ≤ 0xBF
+      if validCont && 0x10000 ≤ cp && cp ≤ 0x10FFFF then
+        out := out.push (Char.ofNat cp)
+        i := i + 4
+      else
+        out := out.push (Char.ofNat 0xFFFD)
+        i := i + 1
+    else
+      out := out.push (Char.ofNat 0xFFFD)
+      i := i + 1
+  return String.ofList out.toList
+
+def decodeHttpBodyText (contentType : String) (bytes : ByteArray) : String := Id.run do
+  let ctl := contentType.toLower
+  let mut charset := ""
+  for seg in ctl.splitOn ";" do
+    let t := seg.trimAscii.toString
+    if t.startsWith "charset=" then
+      let rawCs := (t.drop 8).trimAscii.toString
+      let unq :=
+        if (rawCs.startsWith "\"" && rawCs.endsWith "\"") || (rawCs.startsWith "'" && rawCs.endsWith "'") then
+          ((rawCs.drop 1).dropEnd 1).toString
+        else rawCs
+      charset := unq
+  if charset == "iso-8859-1" || charset == "latin1" || charset == "latin-1" ||
+     charset == "windows-1252" || charset == "cp1252" then
+    return decodeSingleByteCharset bytes true
+  if charset == "us-ascii" || charset == "ascii" then
+    return decodeUtf8Lossy bytes
+  return decodeUtf8Lossy bytes
+
 private def execFetchUrl (args : JVal) : IO (Except String String) := do
   let some url := args.fieldStr? "url" | return .error "Missing 'url' argument"
   let hdrs := #[("User-Agent", "Mozilla/5.0 (compatible; Sandboxed/1.0)")]
@@ -412,7 +495,7 @@ private def execFetchUrl (args : JVal) : IO (Except String String) := do
     if resp.status < 200 || resp.status ≥ 300 then
       return .error s!"HTTP error: {resp.status}"
     let ct := (resp.headers.find? (fun (k, _) => k.toLower == "content-type")).map Prod.snd |>.getD ""
-    let body := (String.fromUTF8? resp.body).getD ""
+    let body := decodeHttpBodyText ct resp.body
     let ext :=
       if (findSubstrFrom? ct "application/json" 0).isSome then "json"
       else if (findSubstrFrom? ct "text/html" 0).isSome then "html"

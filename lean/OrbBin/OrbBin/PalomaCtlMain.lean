@@ -572,33 +572,105 @@ partial def checkGateCycle
     vis ← checkGateCycle dep gates (id :: visiting) vis
   return id :: vis
 
+private def requireStringArrayField (obj : JVal) (field gateCtx : String) (defaultEmpty : Bool := true) : Except String (Array String) := do
+  match obj.field? field with
+  | none =>
+    if defaultEmpty then return #[]
+    else throw s!"gate '{gateCtx}' missing required `{field}` array"
+  | some (.arr items) =>
+    let mut out : Array String := Array.mkEmpty items.size
+    for item in items do
+      match item with
+      | .str s => out := out.push s
+      | _ => throw s!"gate '{gateCtx}' field `{field}` must contain only strings"
+    return out
+  | some _ => throw s!"gate '{gateCtx}' field `{field}` must be an array of strings"
+
+private def requireBoolField (obj : JVal) (field gateCtx : String) (defaultVal : Bool) : Except String Bool := do
+  match obj.field? field with
+  | none => return defaultVal
+  | some (.bool b) => return b
+  | some _ => throw s!"gate '{gateCtx}' field `{field}` must be a boolean"
+
+private def requireOptStringField (obj : JVal) (field ctx : String) : Except String (Option String) := do
+  match obj.field? field with
+  | none | some .null => return none
+  | some (.str s) => return some s
+  | some _ => throw s!"{ctx} field `{field}` must be a string"
+
 def validateMatrixJson (m : JVal) : Except String JVal := do
-  let ver := (m.fieldNat? "version").getD 1
+  let some topFields := m.asObj?
+    | throw "validation matrix must be a JSON/TOML object"
+  let allowedTop := #["version", "project", "profile", "gates"]
+  for (k, _) in topFields do
+    if !allowedTop.contains k then
+      throw s!"unknown top-level validation matrix key `{k}`"
+  let ver ← match m.field? "version" with
+    | none => pure 1
+    | some v =>
+      match v.asNat? with
+      | some n => pure n
+      | none => throw "matrix.version must be a non-negative integer"
   if ver != 1 then throw s!"unsupported validation matrix version {ver}"
-  let proj := ((m.fieldStr? "project").getD "").trimAscii.toString
+  let some projRaw := m.fieldStr? "project"
+    | throw "matrix.project must be a string"
+  let proj := projRaw.trimAscii.toString
   if proj.isEmpty then throw "matrix.project is required"
-  let gates := (m.fieldArr? "gates").getD #[]
+  let _ ← requireOptStringField m "profile" "matrix"
+  let some gates := m.fieldArr? "gates"
+    | throw "matrix.gates must be an array"
   if gates.isEmpty then throw "matrix.gates must not be empty"
+  let allowedGate := #[
+    "id", "description", "command", "cwd", "dependencies", "depends_on",
+    "required", "mode", "reuse", "toolchain", "timeout_secs", "artifacts"
+  ]
   let mut seen : List String := []
   for g in gates do
-    let gid := (g.fieldStr? "id").getD ""
+    let some gFields := g.asObj?
+      | throw "each validation gate must be a table/object"
+    for (gk, _) in gFields do
+      if !allowedGate.contains gk then
+        throw s!"unknown validation gate field `{gk}`"
+    let some gid := g.fieldStr? "id"
+      | throw "validation gate `id` must be a string"
     if !validGateId gid then throw s!"invalid gate id '{gid}'"
     if seen.contains gid then throw s!"duplicate gate id '{gid}'"
     seen := gid :: seen
-    let cmd := ((g.fieldArr? "command").getD #[]).filterMap JVal.asStr?
+    let _ ← requireOptStringField g "description" s!"gate '{gid}'"
+    let _ ← requireOptStringField g "cwd" s!"gate '{gid}'"
+    let _ ← requireOptStringField g "toolchain" s!"gate '{gid}'"
+    let cmd ← requireStringArrayField g "command" gid (defaultEmpty := false)
     if cmd.isEmpty || cmd.any (fun a => a.any (· == '\x00')) then
       throw s!"gate '{gid}' requires a safe, non-empty argv"
-    if g.fieldNat? "timeout_secs" == some 0 then
-      throw s!"gate '{gid}' timeout_secs must be positive"
+    let _ ← requireStringArrayField g "dependencies" gid (defaultEmpty := true)
+    let _ ← requireStringArrayField g "depends_on" gid (defaultEmpty := true)
+    let _ ← requireStringArrayField g "artifacts" gid (defaultEmpty := true)
+    let _ ← requireBoolField g "required" gid true
+    let _ ← requireBoolField g "reuse" gid true
+    let mode ← match g.field? "mode" with
+      | none => pure "incremental"
+      | some (.str s) => pure s
+      | some _ => throw s!"gate '{gid}' field `mode` must be a string"
+    if mode != "incremental" && mode != "clean" then
+      throw s!"gate '{gid}' invalid mode '{mode}' (expected 'incremental' or 'clean')"
+    match g.field? "timeout_secs" with
+    | none | some .null => pure ()
+    | some v =>
+      match v.asNat? with
+      | some n =>
+        if n == 0 then throw s!"gate '{gid}' timeout_secs must be positive"
+      | none => throw s!"gate '{gid}' timeout_secs must be a positive integer"
   for g in gates do
     let gid := (g.fieldStr? "id").getD ""
-    let req := (g.fieldBool? "required").getD true
-    let deps := ((g.fieldArr? "dependencies").getD #[]).filterMap JVal.asStr?
+    let req ← requireBoolField g "required" gid true
+    let depsA ← requireStringArrayField g "dependencies" gid
+    let depsB ← requireStringArrayField g "depends_on" gid
+    let deps := if !depsA.isEmpty then depsA else depsB
     for dep in deps do
       if dep == gid then throw s!"gate '{gid}' has invalid dependency '{dep}'"
       let some dg := gates.find? (fun x => x.fieldStr? "id" == some dep)
         | throw s!"gate '{gid}' has invalid dependency '{dep}'"
-      let depReq := (dg.fieldBool? "required").getD true
+      let depReq ← requireBoolField dg "required" dep true
       if req && !depReq then
         throw s!"required gate '{gid}' depends on optional gate '{dep}'"
   let mut visited : List String := []
@@ -608,6 +680,72 @@ def validateMatrixJson (m : JVal) : Except String JVal := do
   return m
 
 /-! ### `models`: Snapshot-Directory Catalog Validate / Export / Diff / Discover / Update -/
+
+private def isLeapYear (y : Nat) : Bool :=
+  (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+
+private def daysInMonth (y m : Nat) : Nat :=
+  match m with
+  | 1 | 3 | 5 | 7 | 8 | 10 | 12 => 31
+  | 4 | 6 | 9 | 11 => 30
+  | 2 => if isLeapYear y then 29 else 28
+  | _ => 0
+
+/-- Parse an RFC3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)`) into UTC epoch seconds. -/
+def parseRfc3339Epoch? (raw : String) : Option Int := do
+  let s := raw.trimAscii.toString
+  let (datePart, rest0) ← match s.splitOn "T" with
+    | [d, t] => some (d, t)
+    | _ => match s.splitOn "t" with
+      | [d, t] => some (d, t)
+      | _ => none
+  let [yStr, mStr, dStr] := datePart.splitOn "-" | none
+  if yStr.length != 4 || mStr.length != 2 || dStr.length != 2 then none
+  let y ← yStr.toNat?
+  let mo ← mStr.toNat?
+  let da ← dStr.toNat?
+  if y < 1970 || mo < 1 || mo > 12 || da < 1 || da > daysInMonth y mo then none
+  let (timePart, tzOffsetSec) ←
+    if rest0.endsWith "Z" || rest0.endsWith "z" then
+      some ((rest0.dropEnd 1).toString, (0 : Int))
+    else if rest0.length > 6 then
+      let tzSignPos := rest0.length - 6
+      let pfx := (rest0.take tzSignPos).toString
+      let sfx := (rest0.drop tzSignPos).toString
+      let signChar := sfx.toList.headD ' '
+      if signChar != '+' && signChar != '-' then none
+      else
+        match (sfx.drop 1).toString.splitOn ":" with
+        | [ohS, omS] =>
+          if ohS.length != 2 || omS.length != 2 then none
+          else
+            let oh ← ohS.toNat?
+            let om ← omS.toNat?
+            if oh > 23 || om > 59 then none
+            else
+              let mag : Int := Int.ofNat (oh * 3600 + om * 60)
+              some (pfx, if signChar == '+' then mag else -mag)
+        | _ => none
+    else none
+  let baseTime ← match timePart.splitOn "." with
+    | [h] => some h
+    | [h, frac] =>
+      if !frac.isEmpty && frac.all Char.isDigit then some h else none
+    | _ => none
+  let [hhS, mmS, ssS] := baseTime.splitOn ":" | none
+  if hhS.length != 2 || mmS.length != 2 || ssS.length != 2 then none
+  let hh ← hhS.toNat?
+  let mm ← mmS.toNat?
+  let ss ← ssS.toNat?
+  if hh > 23 || mm > 59 || ss > 60 then none
+  let mut days : Nat := 0
+  for yr in [1970:y] do
+    days := days + (if isLeapYear yr then 366 else 365)
+  for mn in [1:mo] do
+    days := days + daysInMonth y mn
+  days := days + (da - 1)
+  let utcSec : Int := Int.ofNat (days * 86400 + hh * 3600 + mm * 60 + ss) - tzOffsetSec
+  return utcSec
 
 private def isSafeSnapshotSlug (s : String) : Bool :=
   !s.isEmpty && s.length < 100 && s.all (fun c => c.isAlphanum || c == '-' || c == '_')
@@ -620,7 +758,7 @@ private def validateSnapshotJson (v : JVal) : Except String (String × String ×
     if !allowedKeys.contains k then
       throw s!"unknown snapshot field: {k}"
   let some schemaVer := v.fieldNat? "schema_version"
-    | throw "missing schema_version"
+    | throw "missing or invalid schema_version"
   if schemaVer != 1 then
     throw "unsupported snapshot schema"
   let providerId := (v.fieldStr? "provider_id").getD ""
@@ -631,9 +769,13 @@ private def validateSnapshotJson (v : JVal) : Except String (String × String ×
   if source != "curated" && source != "discovery" then
     throw "invalid snapshot source"
   let obsOpt := v.field? "observed_at"
-  let hasObs := match obsOpt with
-    | some (.str s) => !s.isEmpty
-    | _ => false
+  let hasObs ← match obsOpt with
+    | none | some .null => pure false
+    | some (.str s) =>
+      if (parseRfc3339Epoch? s).isNone then
+        throw "snapshot observed_at must be valid RFC3339"
+      pure true
+    | some _ => throw "snapshot observed_at must be string or null"
   if source == "discovery" && !hasObs then
     throw "discovery snapshot needs observed_at"
   let completeness := (v.fieldStr? "completeness").getD ""
@@ -645,7 +787,16 @@ private def validateSnapshotJson (v : JVal) : Except String (String × String ×
     throw "empty snapshot cannot replace fallback models"
   let mut seenIds : Array String := #[]
   for m in models do
-    let mid := (m.fieldStr? "id").getD ""
+    let some _ := m.asObj?
+      | throw "snapshot model entry must be a JSON object"
+    let some mid := m.fieldStr? "id"
+      | throw "snapshot model missing required string `id`"
+    let some mname := m.fieldStr? "name"
+      | throw s!"snapshot model '{mid}' missing required string `name`"
+    let _ := mname
+    match m.field? "description" with
+    | none | some .null | some (.str _) => pure ()
+    | some _ => throw s!"snapshot model '{mid}' `description` must be string or null"
     let hasCtrl := mid.toList.any (fun c => c.toNat < 0x20 || c.toNat == 0x7F)
     if mid.trimAscii.toString != mid || mid.isEmpty || mid.length > 256 || hasCtrl ||
        (mid.splitOn "://").length > 1 || mid.contains '@' || seenIds.contains mid then
@@ -1524,72 +1675,6 @@ private def explorationLimitForMode (mode : String) : Option Nat :=
   | "aggressive" => some 3
   | "very_aggressive" => some 5
   | _ => none
-
-private def isLeapYear (y : Nat) : Bool :=
-  (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
-
-private def daysInMonth (y m : Nat) : Nat :=
-  match m with
-  | 1 | 3 | 5 | 7 | 8 | 10 | 12 => 31
-  | 4 | 6 | 9 | 11 => 30
-  | 2 => if isLeapYear y then 29 else 28
-  | _ => 0
-
-/-- Parse an RFC3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)`) into UTC epoch seconds. -/
-def parseRfc3339Epoch? (raw : String) : Option Int := do
-  let s := raw.trimAscii.toString
-  let (datePart, rest0) ← match s.splitOn "T" with
-    | [d, t] => some (d, t)
-    | _ => match s.splitOn "t" with
-      | [d, t] => some (d, t)
-      | _ => none
-  let [yStr, mStr, dStr] := datePart.splitOn "-" | none
-  if yStr.length != 4 || mStr.length != 2 || dStr.length != 2 then none
-  let y ← yStr.toNat?
-  let mo ← mStr.toNat?
-  let da ← dStr.toNat?
-  if y < 1970 || mo < 1 || mo > 12 || da < 1 || da > daysInMonth y mo then none
-  let (timePart, tzOffsetSec) ←
-    if rest0.endsWith "Z" || rest0.endsWith "z" then
-      some ((rest0.dropEnd 1).toString, (0 : Int))
-    else if rest0.length > 6 then
-      let tzSignPos := rest0.length - 6
-      let pfx := (rest0.take tzSignPos).toString
-      let sfx := (rest0.drop tzSignPos).toString
-      let signChar := sfx.toList.headD ' '
-      if signChar != '+' && signChar != '-' then none
-      else
-        match (sfx.drop 1).toString.splitOn ":" with
-        | [ohS, omS] =>
-          if ohS.length != 2 || omS.length != 2 then none
-          else
-            let oh ← ohS.toNat?
-            let om ← omS.toNat?
-            if oh > 23 || om > 59 then none
-            else
-              let mag : Int := Int.ofNat (oh * 3600 + om * 60)
-              some (pfx, if signChar == '+' then mag else -mag)
-        | _ => none
-    else none
-  let baseTime ← match timePart.splitOn "." with
-    | [h] => some h
-    | [h, frac] =>
-      if !frac.isEmpty && frac.all Char.isDigit then some h else none
-    | _ => none
-  let [hhS, mmS, ssS] := baseTime.splitOn ":" | none
-  if hhS.length != 2 || mmS.length != 2 || ssS.length != 2 then none
-  let hh ← hhS.toNat?
-  let mm ← mmS.toNat?
-  let ss ← ssS.toNat?
-  if hh > 23 || mm > 59 || ss > 60 then none
-  let mut days : Nat := 0
-  for yr in [1970:y] do
-    days := days + (if isLeapYear yr then 366 else 365)
-  for mn in [1:mo] do
-    days := days + daysInMonth y mn
-  days := days + (da - 1)
-  let utcSec : Int := Int.ofNat (days * 86400 + hh * 3600 + mm * 60 + ss) - tzOffsetSec
-  return utcSec
 
 private def loadProjectModePolicy (root : System.FilePath) (project : String) : IO (String × String × Nat) := do
   let modeFile := root / ".paloma" / "modes" / s!"{project}.json"
