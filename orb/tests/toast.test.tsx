@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { createSignal, For } from "solid-js";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 import { ErrorToast, notify } from "../src/toast";
@@ -145,5 +145,27 @@ describe("unified workspace ErrorToast & Toaster", () => {
     expect(reopened).toBe("mission-1");
     expect(onDismiss).not.toHaveBeenCalled();
     expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("keeps keyed background ErrorToast owners suppressed across cloned error maps", () => {
+    const [errors, setErrors] = createSignal<Record<string, string>>({ health: "503 Service Unavailable" });
+    render(() => (
+      <For each={Object.keys(errors())}>
+        {key => <ErrorToast error={errors()[key] ? `${key}: ${errors()[key]}` : null} title="Couldn’t load routing settings" background />}
+      </For>
+    ));
+
+    expect(screen.getByRole("alert").textContent).toContain("health: 503 Service Unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    // Next poll clones the errors object while keeping the same key and failure.
+    setErrors(prev => ({ ...prev }));
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    // Recovery deletes the key; a subsequent failure surfaces again.
+    setErrors({});
+    setErrors({ health: "503 Service Unavailable" });
+    expect(screen.getByRole("alert").textContent).toContain("health: 503 Service Unavailable");
   });
 });

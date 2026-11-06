@@ -621,8 +621,8 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
             <button aria-current={tab() === "keys" ? "page" : undefined} onClick={() => selectTab("keys")}>Proxy API Keys</button>
           </nav>
           <Show when={tab() === "keys"}><ProxyApiKeys /></Show>
-          <For each={Object.entries(errors())}>
-            {([key, error]) => <ErrorToast error={`${key}: ${error}`} title="Couldn’t load routing settings" background />}
+          <For each={Object.keys(errors())}>
+            {key => <ErrorToast error={errors()[key] ? `${key}: ${errors()[key]}` : null} title="Couldn’t load routing settings" background />}
           </For>
           <Show when={tab() === "chains"}>
           <section class="s-sec" id="routing-chains">
