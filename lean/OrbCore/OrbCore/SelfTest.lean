@@ -362,6 +362,44 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln s!"[orb-core-test] FAIL: queued user_message event missing after PATCH: {evPayload}"
     return 1
 
+  -- RFC 8259: escaped content is decoded, not stored as literal backslash sequences.
+  let escBody := "{\"content\":\"line1\\nline2\\\"q\\\"\\\\end\"}"
+  let escRaw := s!"PATCH /api/control/queue/q-2 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {escBody.utf8ByteSize}\r\n\r\n{escBody}".toUTF8
+  let .ok escReq := parseRequest escRaw none | do closeCoreStore store; return 1
+  let .ok escResp ← dispatchCoreRequest appSt escReq nowSec | do closeCoreStore store; return 1
+  if escResp.status != 200 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: escaped PATCH returned {escResp.status}: {String.fromUTF8! escResp.body}"
+    return 1
+  let .ok escListReq := parseRequest listQueueRaw none | do closeCoreStore store; return 1
+  let .ok escListResp ← dispatchCoreRequest appSt escListReq nowSec | do closeCoreStore store; return 1
+  let escListStr := String.fromUTF8! escListResp.body
+  if escListResp.status != 200 ||
+     (escListStr.splitOn "\"content\":\"line1\\nline2\\\"q\\\"\\\\end\"").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: escaped content not decoded: {escListStr}"
+    return 1
+
+  -- Whitespace-only escapes are empty after unescaping and must be rejected.
+  let wsEscBody := "{\"content\":\"\\n\\t\\r\"}"
+  let wsEscRaw := s!"PATCH /api/control/queue/q-2 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {wsEscBody.utf8ByteSize}\r\n\r\n{wsEscBody}".toUTF8
+  let .ok wsEscReq := parseRequest wsEscRaw none | do closeCoreStore store; return 1
+  let .ok wsEscResp ← dispatchCoreRequest appSt wsEscReq nowSec | do closeCoreStore store; return 1
+  if wsEscResp.status != 400 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: whitespace-escape PATCH returned {wsEscResp.status}"
+    return 1
+
+  -- Non-string and malformed bodies are rejected before the queue is touched.
+  for badBody in ["{\"content\":null}", "{\"content\":123}", "{\"content\":false}", "{not json"] do
+    let badRaw := s!"PATCH /api/control/queue/q-2 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {badBody.utf8ByteSize}\r\n\r\n{badBody}".toUTF8
+    let .ok badReq := parseRequest badRaw none | do closeCoreStore store; return 1
+    let .ok badResp ← dispatchCoreRequest appSt badReq nowSec | do closeCoreStore store; return 1
+    if badResp.status != 400 then
+      closeCoreStore store
+      IO.eprintln s!"[orb-core-test] FAIL: bad PATCH body {badBody} returned {badResp.status}"
+      return 1
+
   let emptyPatchBody := "{\"content\":\"   \"}"
   let emptyPatchRaw := s!"PATCH /api/control/queue/q-2 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {emptyPatchBody.utf8ByteSize}\r\n\r\n{emptyPatchBody}".toUTF8
   let .ok emptyPatchReq := parseRequest emptyPatchRaw none | do closeCoreStore store; return 1

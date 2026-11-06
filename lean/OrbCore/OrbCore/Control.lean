@@ -784,7 +784,11 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
   if let some params := matchRoutePattern? "/api/control/queue/:id" rawTarget then
     if req.method == "PATCH" then
       let messageId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
-      let content := ((JsonTape.lookupString? (JsonTape.indexJsonObject req.bodySlice) "content").getD "").trimAscii.toString
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let some rawContent := jv.fieldStr? "content"
+        | return .ok (mkJson 400 "{\"error\":\"content must be a string\"}")
+      let content := rawContent.trimAscii.toString
       if content.isEmpty then
         return .ok (mkJson 400 "{\"error\":\"A queued message cannot be empty; remove it instead\"}")
       match ← editRemoteMessage st.store "core" messageId content with
