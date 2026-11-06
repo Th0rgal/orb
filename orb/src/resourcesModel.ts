@@ -155,8 +155,9 @@ export function colorForSource(id: string, index = 0): string {
   if (SOURCE_PALETTE[id]) return SOURCE_PALETTE[id];
   if (id.startsWith("boat:")) return "#2f83bf";
   if (id.startsWith("hetzner:")) return "#cf5c36";
-  if (id.startsWith("vast:")) return "#7b63cf";
+  if (id.startsWith("vast:") || id.startsWith("vastai:")) return "#7b63cf";
   if (id.startsWith("scaleway:")) return "#8a5cf5";
+  if (id.startsWith("colab:")) return "#f9ab00";
   return MISSION_PALETTE[index % MISSION_PALETTE.length];
 }
 

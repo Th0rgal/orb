@@ -1,6 +1,6 @@
 # Managed VM lifecycle
 
-Goal: no managed VM (`boat`, `boost`, `hetzner`, `vastai`, `scaleway`) keeps running in
+Goal: no managed VM (`boat`, `boost`, `hetzner`, `vastai`, `scaleway`, `colab`) keeps running in
 the void, and no agent ever needs raw cloud API keys in shell. Every VM has an
 owner whose lifetime and activity govern it, and a reaper plus a per-provider
 reconciler enforce that.
@@ -18,9 +18,10 @@ Code: `src/managed/lifecycle.rs` (pure decision backed by
 | `hetzner` | Larger x86\_64 / ARM64 CPU & RAM instances (`cpx22`..`ccx43`, `cax31`; legacy `cpx21`..`cpx51` aliases map to `cpx22`..`cpx62` with EU location fallback `fsn1` -> `hel1` -> `nbg1`) | Cloud-init `user_data` -> reverse relay | No (stopped servers still bill) | No | Hourly / per-minute |
 | `vastai` | Ephemeral CUDA GPUs (`rtx4090`, `a100`, `h100`, or explicit `gpu` filter) | Offer `onstart` -> reverse relay | No (stopped instances bill storage/GPU) | No | On-demand |
 | `scaleway` | EU Linux/GPU Instances (`DEV1-*`, `PRO2-*`, `L4-*`, `H100-*`) & Apple Silicon Mac minis (`M1-M`, `M2-M`, `M2-PRO`, `M4-M`) | Cloud-init / SSH -> reverse relay | No | No | Instances: per-minute; Apple Silicon: **24h (`deletable_at`)** |
+| `colab` (`Google Colab`) | Pooled Google Colab CUDA GPUs (`colab-auto`, `t4`, `l4`, `a100`, `h100`) & TPUs (`v5e1`, `v6e1`) via `colab-api`, shadow-priced at ½ Vast.ai | Worker file/exec API -> reverse relay | No | No | On-demand (shadow-metered at ½ Vast.ai; explicit-only) |
 
 Provider credentials (`BOAT_API_KEY`, `BOOST_API_KEY`/`BOOST_TOKEN`, `HETZNER_CLOUD_APIKEY`, `VASTAI_API_KEY`,
-`SCALEWAY_SECRET_KEY`, `SCALEWAY_KEY_ID`, etc.) are resolved inside Core from
+`SCALEWAY_SECRET_KEY`, `SCALEWAY_KEY_ID`, `COLAB_API_TOKEN`, etc.) are resolved inside Core from
 operator settings (`.sandboxed-sh/managed_providers.json`, `0600`, AES-256-GCM
 via `env_crypto`), environment variables, or Bitwarden Secrets Manager
 (`bitwarden.rs`) and are classified as `CoreReserved` in `secret_broker.rs`
@@ -51,8 +52,9 @@ Bitwarden vault cannot silently activate the reconciler and reap production's
    `resume`, and sibling reuse (`409 provider_disabled`) while keeping the
    reaper and reconciler active so any already-live VMs are still metered and
    destroyed cleanly.
-4. Providers with live pool/quota introspection (`boost` via `GET /v1/vms/capabilities`)
-   surface non-persistent `availability` (`available`, `degraded`, `saturated`) on
+4. Providers with live pool/quota introspection (`boost` via `GET /v1/vms/capabilities`,
+   `colab` via `GET /v1/accounts` + `GET /v1/notebooks`) surface non-persistent
+   `availability` (`available`, `degraded`, `saturated`) on
    `ProviderCatalogEntry` without mutating operator `enabled`: unpinned
    `default_provider()` / `auto-managed` fallback skips `saturated` providers, and
    explicit spawns whose requested profile or snapshot cannot currently fit fail

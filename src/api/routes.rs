@@ -3810,6 +3810,17 @@ async fn discover_managed_providers_from_bitwarden(
             tracing::info!("Registered managed provider 'scaleway' from Bitwarden vault");
         }
     }
+    if !manager.has_base_credential("colab") {
+        if let Some(key) = read_secret(&["COLAB_API_TOKEN"]).await {
+            let base_url = std::env::var("COLAB_API_URL")
+                .or_else(|_| std::env::var("COLAB_API_BASE"))
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or(read_secret(&["COLAB_API_URL", "COLAB_API_BASE"]).await);
+            manager.register_base_credential("colab", "bitwarden", key, base_url, None);
+            tracing::info!("Registered managed provider 'colab' from Bitwarden vault");
+        }
+    }
 }
 
 #[cfg(test)]

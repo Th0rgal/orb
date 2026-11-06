@@ -3211,7 +3211,7 @@ pub(crate) fn parse_auto_managed_spec(raw: &str) -> Option<(Option<String>, Opti
     let lower = rest.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
-        "boat" | "boost" | "hetzner" | "vastai" | "scaleway"
+        "boat" | "boost" | "hetzner" | "vastai" | "scaleway" | "colab"
     ) {
         Some((Some(lower), None))
     } else {

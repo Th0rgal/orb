@@ -96,6 +96,7 @@ fn machine_class_for_managed(provider: &str, size: &str) -> (String, String) {
         "hetzner" => "Hetzner",
         "vast" | "vastai" | "vast.ai" => "Vast.ai",
         "scaleway" => "Scaleway",
+        "colab" | "google-colab" => "Google Colab",
         other => {
             if other.is_empty() {
                 "Cloud"

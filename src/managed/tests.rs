@@ -3160,7 +3160,7 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
     .unwrap();
 
     let catalog = m.provider_catalog();
-    assert_eq!(catalog.len(), 5);
+    assert_eq!(catalog.len(), 6);
     assert_eq!(catalog[0].provider, "boat");
     assert_eq!(catalog[0].display_name, "boat.dev");
     assert!(catalog[0].configured);
@@ -3207,6 +3207,12 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
             .all(|s| !scaleway::is_apple_silicon_type(s.size)),
         "worker catalog must not advertise macOS-only Apple Silicon sizes"
     );
+    assert_eq!(catalog[5].provider, "colab");
+    assert_eq!(catalog[5].display_name, "Google Colab");
+    assert!(!catalog[5].configured);
+    assert!(catalog[5].enabled);
+    assert!(!catalog[5].supports_free_stop);
+    assert!(!catalog[5].supports_snapshots);
 
     let sample_machine = ManagedMachine {
         id: "mm1001".into(),
@@ -5907,4 +5913,183 @@ async fn vastai_fallback_rejects_offer_exceeding_compute_bandwidth_ceiling() {
     assert_eq!(err.error, "bandwidth_exceeded");
     assert_eq!(err.status, 429);
     srv.abort();
+}
+
+#[tokio::test]
+async fn colab_managed_manager_explicit_only_orphan_safety_and_saturation() {
+    use axum::{extract::Path, routing::get, routing::post, Json, Router};
+    let deleted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let saturated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let deleted_c = Arc::clone(&deleted);
+    let saturated_c = Arc::clone(&saturated);
+    let app = Router::new()
+        .route(
+            "/v1/accounts",
+            get(move || {
+                let sat = saturated_c.load(std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    Json(serde_json::json!({
+                        "accounts": [
+                            {"email": "pool1@example.com", "usable": !sat, "needs_login": false, "cooldown_secs": if sat { 3600 } else { 0 }},
+                            {"email": "pool2@example.com", "usable": !sat, "needs_login": false, "cooldown_secs": if sat { 3600 } else { 0 }},
+                            {"email": "pool3@example.com", "usable": !sat, "needs_login": false, "cooldown_secs": if sat { 3600 } else { 0 }},
+                            {"email": "pool4@example.com", "usable": !sat, "needs_login": false, "cooldown_secs": if sat { 3600 } else { 0 }}
+                        ]
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/v1/accelerators",
+            get(|| async {
+                Json(serde_json::json!({
+                    "accounts": [{
+                        "account": "pool1@example.com",
+                        "tier": "SUBSCRIPTION_TIER_PRO_PLUS",
+                        "best": "A100",
+                        "available": [
+                            {"variant": "VARIANT_GPU", "accelerator": "T4", "shape": "SHAPE_STANDARD", "eligible": true},
+                            {"variant": "VARIANT_GPU", "accelerator": "L4", "shape": "SHAPE_STANDARD", "eligible": true},
+                            {"variant": "VARIANT_GPU", "accelerator": "A100", "shape": "SHAPE_STANDARD", "eligible": true},
+                            {"variant": "VARIANT_TPU", "accelerator": "V5E1", "shape": "SHAPE_STANDARD", "eligible": true},
+                            {"variant": "VARIANT_TPU", "accelerator": "V6E1", "shape": "SHAPE_STANDARD", "eligible": true}
+                        ]
+                    }]
+                }))
+            }),
+        )
+        .route(
+            "/v1/notebooks",
+            get(|| async {
+                Json(serde_json::json!({
+                    "count": 3,
+                    "notebooks": [
+                        {
+                            "id": "manual-rt~pool1@example.com",
+                            "name": null,
+                            "account": "pool1@example.com",
+                            "accelerator": "A100"
+                        },
+                        {
+                            "id": "research-rt~pool1@example.com",
+                            "name": "research-notebook",
+                            "account": "pool1@example.com",
+                            "accelerator": "L4"
+                        },
+                        {
+                            "id": "orphan-rt~pool1@example.com",
+                            "name": "orb-managed-colab-orphan",
+                            "account": "pool1@example.com",
+                            "accelerator": "T4"
+                        }
+                    ]
+                }))
+            }),
+        )
+        .route(
+            "/v1/notebooks/:id/delete",
+            post(move |Path(id): Path<String>| {
+                let deleted_c = Arc::clone(&deleted_c);
+                async move {
+                    deleted_c.lock().unwrap().push(id);
+                    Json(serde_json::json!({"deleted": true}))
+                }
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let m = Arc::new(ManagedManager::new(settings(), None, dir.path(), 3000));
+    let colab_p = Arc::new(colab::ColabProvider::new(
+        format!("http://{addr}/v1"),
+        "colab-test-token",
+    ));
+    m.register_provider(Arc::clone(&colab_p) as Arc<dyn ManagedProvider>);
+
+    // When `colab` is the ONLY configured provider, default_provider() may fall back to it.
+    m.refresh_provider_availabilities().await;
+    assert_eq!(m.default_provider().map(|p| p.name()), Some("colab"));
+    assert_eq!(
+        m.provider_catalog()
+            .into_iter()
+            .find(|p| p.provider == "colab")
+            .and_then(|p| p.availability)
+            .map(|a| a.status),
+        Some(AvailabilityStatus::Available)
+    );
+
+    // As soon as any CPU general-purpose provider is registered, `colab` stays explicit-only.
+    let hz_p = NamedFakeProvider::new("hetzner");
+    m.register_provider(hz_p);
+    assert_eq!(
+        m.default_provider().map(|p| p.name()),
+        Some("hetzner"),
+        "colab must remain explicit-only when a CPU provider is available"
+    );
+
+    // Orphan reconciler reaps ONLY `orb-managed-*` notebooks and never touches manual/unnamed Colab sessions!
+    let r1 = m.reconcile_once().await.unwrap();
+    assert_eq!(
+        r1["orphans_stopped"],
+        serde_json::json!(["orphan-rt~pool1@example.com"])
+    );
+    assert_eq!(
+        *deleted.lock().unwrap(),
+        vec!["orphan-rt~pool1@example.com".to_string()],
+        "manual/unnamed Colab sessions must never be deleted by Orb's orphan reconciler"
+    );
+
+    // Requesting H100 when the account only exposes T4/L4/A100 fails fast with 503 provider_at_capacity.
+    let h100_err = m
+        .spawn(SpawnRequest {
+            provider: Some("colab".into()),
+            size: Some("h100".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(h100_err.error, "provider_at_capacity");
+    assert_eq!(h100_err.status, 503);
+    assert!(m.machines_snapshot().await.is_empty());
+
+    // Saturating all Colab account slots surfaces `Saturated` and fails fast before DB insertion.
+    saturated.store(true, std::sync::atomic::Ordering::SeqCst);
+    colab_p.invalidate_cache();
+    m.refresh_provider_availabilities().await;
+    let cat = m
+        .provider_catalog()
+        .into_iter()
+        .find(|p| p.provider == "colab")
+        .unwrap();
+    assert_eq!(
+        cat.availability.as_ref().map(|a| a.status),
+        Some(AvailabilityStatus::Saturated)
+    );
+    let sat_err = m
+        .spawn(SpawnRequest {
+            provider: Some("colab".into()),
+            size: Some("a100".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(sat_err.error, "provider_at_capacity");
+    assert_eq!(sat_err.status, 503);
+    assert!(m.machines_snapshot().await.is_empty());
+
+    // Secret confinement blocks COLAB_API_TOKEN across all callers.
+    assert!(crate::api::secret_broker::is_core_reserved_compute_secret(
+        "COLAB_API_TOKEN"
+    ));
+    assert!(crate::api::secret_broker::is_core_reserved_compute_secret(
+        "colab_api_token"
+    ));
 }

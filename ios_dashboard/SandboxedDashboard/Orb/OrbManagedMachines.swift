@@ -190,6 +190,7 @@ enum OrbManaged {
         case "hetzner": return "Hetzner"
         case "vastai": return "Vast.ai"
         case "scaleway": return "Scaleway"
+        case "colab", "google-colab": return "Google Colab"
         default: return provider ?? "boat.dev"
         }
     }
@@ -224,7 +225,7 @@ enum OrbManaged {
             if !order.contains(key) { order.append(key) }
         }
         for p in providers ?? [] { push(p.provider) }
-        for p in ["boat", "boost", "hetzner", "vastai", "scaleway"] { push(p) }
+        for p in ["boat", "boost", "hetzner", "vastai", "scaleway", "colab"] { push(p) }
         for key in seenOrder { push(key) }
         return order.compactMap { key in
             guard let list = buckets[key], !list.isEmpty else { return nil }
@@ -248,7 +249,7 @@ enum OrbManaged {
     }
 
     static func nodeProvider(_ node: OrbJSON) -> String? {
-        let known: Set<String> = ["boat", "boost", "hetzner", "vastai", "scaleway"]
+        let known: Set<String> = ["boat", "boost", "hetzner", "vastai", "scaleway", "colab"]
         for item in node["labels"].items {
             let l = item.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if l.hasPrefix("provider=") { return String(l.dropFirst("provider=".count)) }
@@ -1147,6 +1148,17 @@ struct OrbConfigureMachineProviderSheet: View {
                             .autocorrectionDisabled()
                     }
                 }
+                if provider.provider == "colab" {
+                    Section {
+                        TextField("http://127.0.0.1:8790/v1", text: $region)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    } header: {
+                        Text("colab-api URL")
+                    } footer: {
+                        Text("Optional colab-api base URL override. Leave blank to use COLAB_API_URL or http://127.0.0.1:8790/v1.")
+                    }
+                }
                 if provider.credential_source == "settings" {
                     Section {
                         Button("Remove saved key", role: .destructive) {
@@ -1179,7 +1191,7 @@ struct OrbConfigureMachineProviderSheet: View {
                 patch["api_key"] = .string(trimmedKey)
                 patch["enabled"] = .bool(true)
             }
-            if provider.provider == "hetzner" || provider.provider == "scaleway" {
+            if provider.provider == "hetzner" || provider.provider == "scaleway" || provider.provider == "colab" {
                 patch["region"] = .string(region.trimmingCharacters(in: .whitespacesAndNewlines))
             }
             if provider.provider == "scaleway" || provider.provider == "boost" {

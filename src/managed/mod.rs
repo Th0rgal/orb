@@ -35,6 +35,7 @@
 pub mod boat;
 pub mod boost;
 pub mod budget;
+pub mod colab;
 pub mod hetzner;
 pub mod lifecycle;
 pub mod pacing;
@@ -580,7 +581,7 @@ pub fn default_provider_max_concurrent(provider: &str) -> Option<usize> {
                 .as_deref(),
             DEFAULT_BOAT_MAX_CONCURRENT,
         ),
-        "boost" | "hetzner" | "vastai" | "scaleway" => {
+        "boost" | "hetzner" | "vastai" | "scaleway" | "colab" => {
             let key = format!(
                 "SANDBOXED_MANAGED_{}_MAX_CONCURRENT",
                 provider.to_ascii_uppercase()
@@ -1419,7 +1420,8 @@ struct Persisted {
     machines: Vec<ManagedMachine>,
 }
 
-pub const CANONICAL_PROVIDERS: [&str; 5] = ["boat", "boost", "hetzner", "vastai", "scaleway"];
+pub const CANONICAL_PROVIDERS: [&str; 6] =
+    ["boat", "boost", "hetzner", "vastai", "scaleway", "colab"];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderMeta {
@@ -1719,6 +1721,7 @@ pub fn provider_display_name(provider: &str) -> &'static str {
         "hetzner" => "Hetzner Cloud",
         "vastai" => "Vast.ai",
         "scaleway" => "Scaleway",
+        "colab" => "Google Colab",
         "fake" => "Fake",
         _ => "Custom",
     }
@@ -1944,6 +1947,10 @@ impl ManagedManager {
             p.cached_availability()
                 .is_none_or(|a| a.status != AvailabilityStatus::Saturated)
         };
+        // Google Colab account-hour / GPU pools stay explicit-only (`provider: "colab"` /
+        // `auto-managed:colab:<size>`) unless Colab is the sole enabled provider or
+        // explicitly chosen as `default_provider_name`, so generic unprefixed CPU spawns
+        // never burn Colab GPU quota.
         let name = self
             .default_provider_name
             .read()
@@ -1961,33 +1968,39 @@ impl ManagedManager {
         }
         let map = self.providers.read().ok()?;
         for id in CANONICAL_PROVIDERS {
-            if self.is_provider_enabled(id) {
+            if id != "colab" && self.is_provider_enabled(id) {
                 if let Some(p) = map.get(id).filter(|p| is_not_saturated(p)) {
+                    return Some(Arc::clone(p));
+                }
+            }
+        }
+        if let Some(p) = map.values().find(|p| {
+            p.name() != "colab" && self.is_provider_enabled(p.name()) && is_not_saturated(p)
+        }) {
+            return Some(Arc::clone(p));
+        }
+        // If every non-colab enabled provider is currently reporting `Saturated`
+        // (or none are configured), return the preferred/first non-colab provider
+        // if present so preflight reports `provider_at_capacity`; fall back to
+        // `colab` only when it is the sole enabled provider on this Core.
+        if let Some(p) = preferred {
+            return Some(p);
+        }
+        for id in CANONICAL_PROVIDERS {
+            if id != "colab" && self.is_provider_enabled(id) {
+                if let Some(p) = map.get(id) {
                     return Some(Arc::clone(p));
                 }
             }
         }
         if let Some(p) = map
             .values()
-            .find(|p| self.is_provider_enabled(p.name()) && is_not_saturated(p))
+            .find(|p| p.name() != "colab" && self.is_provider_enabled(p.name()))
         {
             return Some(Arc::clone(p));
         }
-        // If every enabled provider is currently reporting `Saturated`, fall
-        // back to the operator's enabled order so preflight returns a clear
-        // `provider_at_capacity` error instead of a false `provider_disabled`.
-        if let Some(p) = preferred {
-            return Some(p);
-        }
-        for id in CANONICAL_PROVIDERS {
-            if self.is_provider_enabled(id) {
-                if let Some(p) = map.get(id) {
-                    return Some(Arc::clone(p));
-                }
-            }
-        }
-        map.values()
-            .find(|p| self.is_provider_enabled(p.name()))
+        map.get("colab")
+            .filter(|p| self.is_provider_enabled(p.name()))
             .cloned()
     }
 
@@ -2045,12 +2058,13 @@ impl ManagedManager {
             .map(|m| m.clone())
             .unwrap_or_default();
         let disabled = self.runtime_settings().disabled_providers;
-        let canonical: [(&str, bool, bool, &[SizeSpec]); 5] = [
+        let canonical: [(&str, bool, bool, &[SizeSpec]); 6] = [
             ("boat", true, true, &SIZES),
             ("boost", false, true, &boost::BOOST_SIZES),
             ("hetzner", false, false, &hetzner::HETZNER_SIZES),
             ("vastai", false, false, &vastai::VASTAI_SIZES),
             ("scaleway", false, false, scaleway::SCALEWAY_WORKER_SIZES),
+            ("colab", false, false, &colab::COLAB_SIZES),
         ];
         let mut out = Vec::with_capacity(canonical.len() + 1);
         for (id, free_stop, snapshots, fallback_sizes) in canonical {
@@ -2139,11 +2153,22 @@ impl ManagedManager {
             }
         }
         if let Ok(mut map) = self.providers.write() {
-            let prefer_default = name == "boat" || map.is_empty();
+            let prefer_default = name == "boat"
+                || (name != "colab" && (map.is_empty() || map.keys().all(|k| k == "colab")));
             map.insert(name.clone(), provider);
             if prefer_default {
                 if let Ok(mut def) = self.default_provider_name.write() {
-                    if def.is_empty() || name == "boat" || !map.contains_key(def.as_str()) {
+                    if def.is_empty()
+                        || name == "boat"
+                        || def.as_str() == "colab"
+                        || !map.contains_key(def.as_str())
+                    {
+                        *def = name.clone();
+                    }
+                }
+            } else if map.len() == 1 && name == "colab" {
+                if let Ok(mut def) = self.default_provider_name.write() {
+                    if def.is_empty() || !map.contains_key(def.as_str()) {
                         *def = name.clone();
                     }
                 }
@@ -2338,6 +2363,22 @@ impl ManagedManager {
                 let zone = Some(p.default_zone().to_string());
                 let proj = p.configured_project_id().map(str::to_string);
                 Some((Arc::new(p), zone, proj))
+            }
+            "colab" => {
+                let base = region
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        std::env::var("COLAB_API_URL")
+                            .or_else(|_| std::env::var("COLAB_API_BASE"))
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                    })
+                    .unwrap_or_else(|| colab::DEFAULT_API_BASE.to_string());
+                let p = colab::ColabProvider::new(base, api_key);
+                let url = Some(p.configured_api_base().to_string());
+                Some((Arc::new(p), url, None))
             }
             _ => None,
         }
@@ -3331,12 +3372,27 @@ impl ManagedManager {
             }
             return Ok(raw.to_string());
         }
+        if provider_name.eq_ignore_ascii_case("colab") {
+            return match requested.map(str::trim).filter(|s| !s.is_empty()) {
+                None | Some("colab-default") | Some("provider-default") | Some("orb-node-base") => {
+                    Ok("colab-default".into())
+                }
+                Some(other) => Err(ManagedError::new(
+                    "image_unknown",
+                    400,
+                    format!(
+                        "Custom image '{other}' is not supported on Google Colab; omit image to use Colab's accelerator runtime image"
+                    ),
+                )),
+            };
+        }
         Ok(match provider_name {
             "boost" => "ubuntu-26.04".into(),
             "hetzner" => "ubuntu-24.04".into(),
             "vastai" => "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04".into(),
             "scaleway" if scaleway::is_apple_silicon_type(size) => "macos-15".into(),
             "scaleway" => "ubuntu_noble".into(),
+            "colab" => "colab-default".into(),
             _ => "ubuntu-24.04".into(),
         })
     }
@@ -3581,6 +3637,30 @@ impl ManagedManager {
                             "invalid_size",
                             400,
                             "No Vast.ai GPU tier satisfies the requested CPU/RAM/arch",
+                        )
+                    })?,
+                };
+                (s, (0u8, 0u8))
+            }
+            "colab" => {
+                let s = match (requested_size, req.cpu, req.ram_gb) {
+                    (Some(name), _, _) => colab::colab_size_spec(name)
+                        .ok_or_else(|| {
+                            ManagedError::new(
+                                "invalid_size",
+                                400,
+                                format!(
+                                    "Unknown Google Colab size '{name}'; use colab-auto, t4, l4, a100, h100, v5e1 or v6e1"
+                                ),
+                            )
+                        })
+                        .and_then(check_spec)?,
+                    (None, None, None) => check_spec(colab::COLAB_SIZES[0])?,
+                    (None, _, _) => find_smallest(&colab::COLAB_SIZES).ok_or_else(|| {
+                        ManagedError::new(
+                            "invalid_size",
+                            400,
+                            "No Google Colab accelerator tier satisfies the requested CPU/RAM/arch",
                         )
                     })?,
                 };
@@ -7966,10 +8046,19 @@ pub(crate) fn cloud_bootstrap_script(
 ) -> String {
     let core_url = core_url.trim_end_matches('/');
     let gpu_label = if provider.eq_ignore_ascii_case("vastai")
+        || provider.eq_ignore_ascii_case("colab")
         || vastai::vastai_size_spec(size).is_some_and(|s| s.gpu.is_some())
         || scaleway::scaleway_size_spec(size).is_some_and(|s| s.gpu.is_some())
+        || colab::colab_size_spec(size).is_some_and(|s| s.gpu.is_some())
     {
-        ",gpu"
+        if colab::colab_size_spec(size)
+            .and_then(|s| s.gpu)
+            .is_some_and(|g| g.starts_with("TPU"))
+        {
+            ",gpu,tpu"
+        } else {
+            ",gpu"
+        }
     } else {
         ""
     };
@@ -8106,6 +8195,7 @@ pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<Managed
     let vastai_key = take_env(&["VASTAI_API_KEY", "VAST_API_KEY"]);
     let scaleway_key = take_env(&["SCALEWAY_SECRET_KEY", "SCW_SECRET_KEY"]);
     let scaleway_access_key = take_env(&["SCALEWAY_KEY_ID", "SCW_ACCESS_KEY"]);
+    let colab_key = take_env(&["COLAB_API_TOKEN"]);
 
     let boost_ws = std::env::var("BOOST_WORKSPACE_ID")
         .ok()
@@ -8124,12 +8214,17 @@ pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<Managed
         .or_else(|_| std::env::var("SCW_DEFAULT_ORGANIZATION_ID"))
         .ok()
         .filter(|s| !s.trim().is_empty());
+    let colab_url = std::env::var("COLAB_API_URL")
+        .or_else(|_| std::env::var("COLAB_API_BASE"))
+        .ok()
+        .filter(|s| !s.trim().is_empty());
 
     let any_provider = boat_key.is_some()
         || boost_key.is_some()
         || hetzner_key.is_some()
         || vastai_key.is_some()
-        || scaleway_key.is_some();
+        || scaleway_key.is_some()
+        || colab_key.is_some();
     let settings = ManagedSettings::from_env(any_provider);
     let manager = Arc::new(ManagedManager::new(settings, None, working_dir, core_port));
     if let Some(key) = boat_key {
@@ -8154,6 +8249,9 @@ pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<Managed
             scaleway_proj,
             scaleway_org,
         );
+    }
+    if let Some(key) = colab_key {
+        manager.register_base_credential("colab", "environment", key, colab_url, None);
     }
     manager.load().await;
     let _ = MANAGER.set(Arc::clone(&manager));

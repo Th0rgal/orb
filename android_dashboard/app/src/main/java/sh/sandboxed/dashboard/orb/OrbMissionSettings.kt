@@ -491,6 +491,7 @@ data class OrbMissionBudget(
             "hetzner" to "Hetzner",
             "vastai" to "Vast.ai",
             "scaleway" to "Scaleway",
+            "colab" to "Google Colab",
         )
 
         fun providerLabel(id: String): String = PROVIDERS.firstOrNull { it.first == id }?.second ?: id
