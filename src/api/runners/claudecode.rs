@@ -604,6 +604,12 @@ pub fn run_claudecode_turn<'a>(
                         let host_old_refresh = read_claude_cli_credentials(&host_path)
                             .map(|(_, _, r, _)| r)
                             .unwrap_or_default();
+                        let expected_oauth_generation =
+                            crate::ai_providers::AIProviderStore::oauth_generation_at_path(
+                                &app_working_dir.join(crate::util::AI_PROVIDERS_PATH),
+                                crate::ai_providers::ProviderType::Anthropic,
+                                &host_old_refresh,
+                            );
                         tracing::info!(
                             mission_id = %mission_id,
                             mission_expires_at = m_expires,
@@ -622,16 +628,20 @@ pub fn run_claudecode_turn<'a>(
                                 // split-brain ai_providers.json), so queue the
                                 // rotation for the proactive loop — which owns the
                                 // store — to apply against the matching record.
-                                if let Err(e) = crate::api::oauth_reconcile::record_pending_rotation(
-                                    &crate::api::oauth_reconcile::sidecar_path(app_working_dir),
-                                    crate::api::oauth_reconcile::PendingRotation {
-                                        provider: "anthropic".to_string(),
-                                        old_refresh_token: host_old_refresh,
-                                        new_refresh_token: m_refresh.clone(),
-                                        new_access_token: m_access.clone(),
-                                        expires_at: m_expires,
-                                    },
-                                ) {
+                                if let Err(e) =
+                                    crate::api::oauth_reconcile::record_pending_rotation_with_generation_async(
+                                        &crate::api::oauth_reconcile::sidecar_path(app_working_dir),
+                                        crate::api::oauth_reconcile::PendingRotation {
+                                            provider: "anthropic".to_string(),
+                                            old_refresh_token: host_old_refresh,
+                                            new_refresh_token: m_refresh.clone(),
+                                            new_access_token: m_access.clone(),
+                                            expires_at: m_expires,
+                                        },
+                                        expected_oauth_generation,
+                                    )
+                                    .await
+                                {
                                     tracing::warn!(
                                         mission_id = %mission_id,
                                         error = %e,
