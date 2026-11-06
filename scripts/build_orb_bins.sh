@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build all Wave 1 native Lean 4 companion binaries (`lean/OrbBin`) and stage
-# them into `--out-dir <dir>` (repeatable) or by default into Cargo's
+# Build all Wave 1 + Wave 2 native Lean 4 binaries (`lean/OrbBin` + `lean/OrbNode`)
+# and stage them into `--out-dir <dir>` (repeatable) or by default into Cargo's
 # `target/debug` and `target/release` directories.
 #
 # Usage:
@@ -87,6 +87,7 @@ ALL_BINS=(
   "workspace-mcp"
   "desktop-mcp"
   "automation-manager-mcp"
+  "sandboxed-node"
 )
 
 if [[ ${#ONLY_BINS[@]} -gt 0 ]]; then
@@ -95,19 +96,31 @@ else
   BINS_TO_STAGE=("${ALL_BINS[@]}")
 fi
 
-BUILD_TARGETS=()
+ORB_BIN_TARGETS=()
+BUILD_ORB_NODE=0
 for bin in "${BINS_TO_STAGE[@]}"; do
-  if [[ "$bin" == "lean-mesh" ]]; then
-    BUILD_TARGETS+=("lean-mesh-cli")
+  if [[ "$bin" == "sandboxed-node" ]]; then
+    BUILD_ORB_NODE=1
+  elif [[ "$bin" == "lean-mesh" ]]; then
+    ORB_BIN_TARGETS+=("lean-mesh-cli")
   else
-    BUILD_TARGETS+=("$bin")
+    ORB_BIN_TARGETS+=("$bin")
   fi
 done
 
-(
-  cd "$ROOT_DIR/lean/OrbBin"
-  SANDBOXED_ALLOW_RAW_LAKE=1 lake build "${BUILD_TARGETS[@]}" -- -DwarningAsError=true
-)
+if [[ ${#ORB_BIN_TARGETS[@]} -gt 0 ]]; then
+  (
+    cd "$ROOT_DIR/lean/OrbBin"
+    SANDBOXED_ALLOW_RAW_LAKE=1 lake build "${ORB_BIN_TARGETS[@]}" -- -DwarningAsError=true
+  )
+fi
+
+if [[ "$BUILD_ORB_NODE" == "1" ]]; then
+  (
+    cd "$ROOT_DIR/lean/OrbNode"
+    SANDBOXED_ALLOW_RAW_LAKE=1 lake build orb-node -- -DwarningAsError=true
+  )
+fi
 
 if [[ ${#OUT_DIRS[@]} -eq 0 ]]; then
   target_base="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
@@ -115,10 +128,15 @@ if [[ ${#OUT_DIRS[@]} -eq 0 ]]; then
 fi
 
 LAKE_BIN_DIR="$ROOT_DIR/lean/OrbBin/.lake/build/bin"
+LAKE_NODE_BIN_DIR="$ROOT_DIR/lean/OrbNode/.lake/build/bin"
 for out_dir in "${OUT_DIRS[@]}"; do
   mkdir -p "$out_dir"
   for bin in "${BINS_TO_STAGE[@]}"; do
-    src="$LAKE_BIN_DIR/$bin"
+    if [[ "$bin" == "sandboxed-node" ]]; then
+      src="$LAKE_NODE_BIN_DIR/sandboxed-node"
+    else
+      src="$LAKE_BIN_DIR/$bin"
+    fi
     if [[ ! -x "$src" ]]; then
       echo "error: expected built binary missing at $src" >&2
       exit 1

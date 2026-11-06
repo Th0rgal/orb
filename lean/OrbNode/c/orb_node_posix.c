@@ -185,11 +185,10 @@ LEAN_EXPORT lean_obj_res orb_node_spawn_job_pgrp(
         dup2(log_fd, STDERR_FILENO);
         close(log_fd);
         if (lean_string_size(cwd) > 1 && chdir(lean_string_cstr(cwd)) != 0) _exit(126);
+        clearenv();
         size_t envc = lean_array_size(env_arr);
-        for (size_t i = 0; i + 1 < envc; i += 2) {
-            setenv(lean_string_cstr(lean_array_get_core(env_arr, i)),
-                   lean_string_cstr(lean_array_get_core(env_arr, i + 1)), 1);
-        }
+        for (size_t i = 0; i + 1 < envc; i += 2)
+            setenv(lean_string_cstr(lean_array_get_core(env_arr, i)), lean_string_cstr(lean_array_get_core(env_arr, i + 1)), 1);
         size_t argc = lean_array_size(args_arr);
         char **argv = (char **)calloc(argc + 2, sizeof(char *));
         if (!argv) _exit(126);

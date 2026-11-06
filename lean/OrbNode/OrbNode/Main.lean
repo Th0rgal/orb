@@ -1,11 +1,12 @@
 /-
   OrbNode.Main: `sandboxed-node` Native Lean 4 Worker Daemon Entrypoint
-  - `(no args)`: Starts `:3088` HTTP/1.1 worker daemon (refuses UID 0 unless `SANDBOXED_NODE_ALLOW_ROOT`).
+  - `(no args)`: Optional dial-out enrollment (`OrbNode.Dial`) + `:3088` HTTP/1.1 worker daemon.
   - `reload [--unit NAME]`: Validates `sandboxed-node*` unit name and invokes `systemctl reload`.
   - `--sandboxed-scope-exec-cleared-env <KEY...> -- <program> <args...>`: Cleared-env scope trampoline.
 -/
 import OrbNode.Posix
 import OrbNode.Store
+import OrbNode.Dial
 import OrbNode.Runner
 import OrbNode.Server
 
@@ -42,7 +43,7 @@ private def runClearedEnvTrampoline (rest : List String) : IO UInt32 := do
   for k in keepKeys do
     if let some v ← IO.getEnv k then
       envArgs := envArgs.push s!"{k}={v}"
-  envArgs := envArgs.push "--" |>.push prog
+  envArgs := envArgs.push prog
   for a in progArgs do
     envArgs := envArgs.push a
   let child ← IO.Process.spawn {
@@ -61,15 +62,29 @@ def runCli (args : List String) : IO UInt32 := do
       | IO.eprintln "invalid reload unit (must start with sandboxed-node)"; return 2
     let unitFull := if unitBase.endsWith ".service" then unitBase else s!"{unitBase}.service"
     let child ← IO.Process.spawn { cmd := "systemctl", args := #["reload", unitFull] }
-    child.wait
+    let code ← child.wait
+    if code == 0 then
+      IO.println s!"reloaded {unitFull} (running jobs are not restarted)"
+    return code
   | "--sandboxed-scope-exec-cleared-env" :: rest =>
     runClearedEnvTrampoline rest
   | _ =>
-    let cfg ← loadConfigFromEnv
+    let mut cfg ← loadConfigFromEnv
     let uid ← OrbNode.Posix.geteuid
     if uid == 0 && !cfg.allowRoot then
       IO.eprintln "refusing to run sandboxed-node as UID 0 without SANDBOXED_NODE_ALLOW_ROOT=1"
       return 1
+    let dialCred? ← match ← OrbNode.Dial.enrollFromEnv with
+      | .ok c? => pure c?
+      | .error err =>
+        IO.eprintln s!"dial-out enrollment failed: {err}"
+        return 1
+    if let some cred := dialCred? then
+      cfg := {
+        cfg with
+        token := cred.nodeToken
+        nodeId := if cred.nodeId.isEmpty then cfg.nodeId else cred.nodeId
+      }
     if cfg.token.isEmpty then
       IO.eprintln "SANDBOXED_NODE_TOKEN is required"
       return 1
@@ -79,7 +94,7 @@ def runCli (args : List String) : IO UInt32 := do
       return 1
     | .ok ledger =>
       let rt : NodeRuntime := { cfg := cfg, ledger := ledger }
-      runServerLoop rt
+      runServerLoop rt dialCred?
 
 def main (args : List String) : IO UInt32 :=
   runCli args

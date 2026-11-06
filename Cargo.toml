@@ -106,10 +106,6 @@ flate2 = "1"
 name = "sandboxed-sh"
 path = "src/main.rs"
 
-[[bin]]
-name = "sandboxed-node"
-path = "src/bin/sandboxed_node.rs"
-
 [dev-dependencies]
 tokio-test = "0.4"
 

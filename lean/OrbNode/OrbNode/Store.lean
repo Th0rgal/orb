@@ -1,6 +1,7 @@
 /-
   OrbNode.Store: Durable Crash-Atomic Job Ledger (`LeanSys.Store` WAL) + Legacy `jobs.db`
-  SQLite Importer + First-Wins Terminal Transition Guard (`Orb.Kernel.verifyJobTransition`).
+  SQLite Dual-Sync (preserving `rolling_upgrade_nodes.py` `BEGIN IMMEDIATE` fencing) +
+  First-Wins Terminal Transition Guard (`Orb.Kernel.verifyJobTransition`).
 -/
 import LeanSys.Store
 import Orb.Kernel
@@ -189,22 +190,71 @@ def nowRfc3339 : IO String := do
   return formatEpochIso ep
 
 structure Ledger where
-  workDir : String
-  store   : LeanSys.Store.Handle
-  jobs    : Std.HashMap String JobRecord
-  order   : Array String
+  workDir     : String
+  hasSqlite3  : Bool := false
+  store       : LeanSys.Store.Handle
+  jobs        : Std.HashMap String JobRecord
+  order       : Array String
 
 private def jobKey (jobId : String) : String := s!"job/{jobId}"
 
+private def sqlEsc (s : String) : String :=
+  "'" ++ String.intercalate "''" (s.splitOn "'") ++ "'"
+
+private def sqlOptStr : Option String → String
+  | some s => sqlEsc s
+  | none   => "NULL"
+
+private def detectSqlite3 : IO Bool := do
+  let r ← (IO.Process.output { cmd := "sqlite3", args := #["--version"] }).toBaseIO
+  match r with
+  | .ok out => return out.exitCode == 0
+  | .error _ => return false
+
+private def ensureLegacySqliteSchema (workDir : String) (hasSqlite3 : Bool) : IO Unit := do
+  if !hasSqlite3 then return
+  let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
+  let ddl :=
+    "PRAGMA journal_mode=WAL; " ++
+    "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, artifacts_json TEXT, cancellation_json TEXT); " ++
+    "CREATE TABLE IF NOT EXISTS node_scratch (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, job_id TEXT, parent_identity TEXT NOT NULL, directory_identity TEXT NOT NULL, retired_at TEXT);"
+  discard <| (IO.Process.output { cmd := "sqlite3", args := #["-cmd", ".timeout 5000", dbPath, ddl] }).toBaseIO
+
+private def syncJobToLegacySqlite
+    (workDir : String) (hasSqlite3 : Bool) (r : JobRecord) (timeoutMs : Nat := 5000) :
+    IO (Except String Unit) := do
+  if !hasSqlite3 then return .ok ()
+  let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
+  let exitSql := match r.exitCode? with | some c => toString c | none => "NULL"
+  let artsSql :=
+    if r.artifacts.isEmpty then "NULL"
+    else sqlEsc (renderCompact (.arr (r.artifacts.map ArtifactEntry.toJson)))
+  let cancSql :=
+    match r.cancellation? with
+    | some c => sqlEsc (renderCompact c.toJson)
+    | none => "NULL"
+  let sql :=
+    "INSERT OR REPLACE INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json) VALUES (" ++
+    s!"{sqlEsc r.jobId}, {sqlEsc r.missionId}, {sqlEsc r.payloadJson}, {sqlEsc r.state.asString}, {exitSql}, {sqlEsc r.createdAt}, {sqlOptStr r.startedAt?}, {sqlOptStr r.finishedAt?}, {sqlOptStr r.logPath?}, {sqlOptStr r.error?}, {artsSql}, {cancSql});"
+  match ← (IO.Process.output {
+      cmd := "sqlite3",
+      args := #["-cmd", s!".timeout {timeoutMs}", dbPath, sql]
+    }).toBaseIO with
+  | .error e => return .error (toString e)
+  | .ok out =>
+    if out.exitCode == 0 then return .ok ()
+    else return .error s!"jobs.db write locked or failed: {out.stderr.trimAscii}"
+
 /-- Import legacy SQLite `<work_dir>/jobs.db` rows idempotently when `sqlite3` and `jobs.db` exist. -/
-private def importLegacySqliteJobs (workDir : String) : IO (Array JobRecord) := do
+private def importLegacySqliteJobs (workDir : String) (hasSqlite3 : Bool) : IO (Array JobRecord) := do
+  if !hasSqlite3 then return #[]
   let dbPath : System.FilePath := System.FilePath.mk workDir / "jobs.db"
   if !(← dbPath.pathExists) then return #[]
-  let res ← IO.Process.output {
+  let .ok res ← (IO.Process.output {
     cmd := "sqlite3"
     args := #["-json", dbPath.toString,
       "SELECT id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json FROM jobs ORDER BY created_at ASC;"]
-  }
+  }).toBaseIO | return #[]
   if res.exitCode != 0 || res.stdout.trimAscii.isEmpty then return #[]
   let .ok (.arr rows) := OrbBin.Json.parse res.stdout
     | return #[]
@@ -245,12 +295,14 @@ private def importLegacySqliteJobs (workDir : String) : IO (Array JobRecord) := 
       }
   return out
 
-/-- Open `<work_dir>/orb-node.store`, replay WAL, import legacy `jobs.db` rows if absent,
+/-- Open `<work_dir>/orb-node.store`, replay WAL, import/initialize `jobs.db`,
     and flip any in-flight (`queued` / `running`) job on daemon startup to `lost`. -/
 def openLedger (workDir : String) : IO (Except String Ledger) := do
   IO.FS.createDirAll (System.FilePath.mk workDir / "logs")
   IO.FS.createDirAll (System.FilePath.mk workDir / ".scratch")
   IO.FS.createDirAll (System.FilePath.mk workDir / "uploads")
+  let hasSqlite3 ← detectSqlite3
+  ensureLegacySqliteSchema workDir hasSqlite3
   let storeDir := (System.FilePath.mk workDir / "orb-node.store").toString
   let h0 ← match ← LeanSys.Store.openStore storeDir with
     | .ok h => pure h
@@ -265,7 +317,7 @@ def openLedger (workDir : String) : IO (Except String Ledger) := do
           if let some rec := JobRecord.fromStoreJson? jv then
             jobs := jobs.insert rec.jobId rec
             order := order.push rec.jobId
-  let legacyRows ← importLegacySqliteJobs workDir
+  let legacyRows ← importLegacySqliteJobs workDir hasSqlite3
   for rec in legacyRows do
     if !jobs.contains rec.jobId then
       let serialized := renderCompact (rec.toJson none)
@@ -287,13 +339,24 @@ def openLedger (workDir : String) : IO (Except String Ledger) := do
         if let .ok h' ← LeanSys.Store.putString h (jobKey jid) serialized then
           h := h'
           jobs := jobs.insert jid lostRec
-  return .ok { workDir := workDir, store := h, jobs := jobs, order := order }
+          discard <| syncJobToLegacySqlite workDir hasSqlite3 lostRec
+    else
+      discard <| syncJobToLegacySqlite workDir hasSqlite3 rec
+  return .ok {
+    workDir := workDir
+    hasSqlite3 := hasSqlite3
+    store := h
+    jobs := jobs
+    order := order
+  }
 
 namespace Ledger
 
 def insertQueued (l : Ledger) (rec : JobRecord) : IO (Except String Ledger) := do
   if l.jobs.contains rec.jobId then
     return .error "duplicate_job_id"
+  if let .error e ← syncJobToLegacySqlite l.workDir l.hasSqlite3 rec 1500 then
+    return .error e
   let serialized := renderCompact (rec.toJson none)
   match ← LeanSys.Store.putString l.store (jobKey rec.jobId) serialized with
   | .error e => return .error s!"WAL write failed: {repr e}"
@@ -320,6 +383,7 @@ def updateJob
     match ← LeanSys.Store.putString l.store (jobKey jobId) serialized with
     | .error e => return .error s!"WAL write failed: {repr e}"
     | .ok h' =>
+      discard <| syncJobToLegacySqlite l.workDir l.hasSqlite3 next
       return .ok ({ l with store := h', jobs := l.jobs.insert jobId next }, next)
 
 def listRecent (l : Ledger) (limit : Nat) : Array JobRecord := Id.run do
@@ -333,6 +397,10 @@ def listRecent (l : Ledger) (limit : Nat) : Array JobRecord := Id.run do
     if let some rec := l.jobs.get? jid then
       out := out.push rec
   return out
+
+def missionHasLiveJobs (l : Ledger) (missionId : String) : Bool :=
+  l.jobs.fold (fun acc _ r =>
+    acc || (r.missionId == missionId && (r.state == .queued || r.state == .running))) false
 
 end Ledger
 

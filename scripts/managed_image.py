@@ -298,15 +298,9 @@ exec > >(tee -a /home/user/build.log) 2>&1
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
 sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config libssl-dev curl ca-certificates git zstd >/dev/null
-if [ ! -x "$HOME/.cargo/bin/cargo" ]; then
-  curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable >/dev/null
-fi
-. "$HOME/.cargo/env"
-rustc --version
 rm -rf "$HOME/src" && mkdir -p "$HOME/src" && tar -xf "$HOME/src.tar" -C "$HOME/src"
 cd "$HOME/src"
-CARGO_TERM_PROGRESS_WHEN=never cargo build --release --locked --bin sandboxed-node 2>&1 | grep -vE '^\s+(Compiling|Downloaded|Downloading)' || { echo BUILD_FAILED; exit 1; }
-./scripts/build_orb_bins.sh --ensure-lean --out-dir target/release --only sandboxed-mcp || { echo BUILD_FAILED; exit 1; }
+./scripts/build_orb_bins.sh --ensure-lean --out-dir target/release --only sandboxed-node --only sandboxed-mcp || { echo BUILD_FAILED; exit 1; }
 install -m755 target/release/sandboxed-node "$HOME/sandboxed-node.out"
 install -m755 target/release/sandboxed-mcp "$HOME/sandboxed-mcp.out"
 sha256sum "$HOME/sandboxed-node.out" "$HOME/sandboxed-mcp.out"

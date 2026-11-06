@@ -5,19 +5,25 @@
 -/
 import LeanSys.Auth
 import Orb.Kernel
+import OrbBin.PosixExt
 import OrbBin.Json
 import OrbNode.Spec
 import OrbNode.Posix
 import OrbNode.Lease
 import OrbNode.Store
+import OrbNode.LeanBuild
+import OrbNode.FileBrowser
 
 namespace OrbNode.Runner
 
 open LeanSys.Auth
+open OrbBin.PosixExt
 open OrbBin.Json
 open OrbNode.Spec
 open OrbNode.Lease
 open OrbNode.Store
+open OrbNode.LeanBuild
+open OrbNode.FileBrowser
 
 structure NodeConfig where
   bindHost            : String := "127.0.0.1"
@@ -26,6 +32,7 @@ structure NodeConfig where
   token               : String := ""
   tokenPrevious?      : Option String := none
   workDir             : String := "/var/lib/sandboxed-node/work"
+  envFile             : String := "/etc/sandboxed-node.env"
   labels              : Array String := #[]
   allowRoot           : Bool := false
   capacityTotal       : UInt32 := 1
@@ -37,6 +44,7 @@ structure NodeConfig where
   envAllowlist        : Array String := #[
     "LEAN_NUM_THREADS", "LAKE_JOBS", "TURBO_LEAN_MAX_MEMORY_MB", "TURBO_LEAN_NO_AUDIT_CACHE"
   ]
+  managedAuth         : ManagedAuthConfig := {}
   deriving Repr, Inhabited
 
 def parseBindAddr (raw : String) : String × UInt16 :=
@@ -57,6 +65,22 @@ private def isTruthyEnv (s? : Option String) : Bool :=
     lv == "1" || lv == "true" || lv == "yes"
   | none => false
 
+private def parseEnvFileCapacity (envFile : String) : IO (Option UInt32) := do
+  let p := System.FilePath.mk envFile
+  if !(← p.pathExists) then return none
+  let .ok raw ← IO.FS.readFile p |>.toBaseIO | return none
+  for line in raw.splitOn "\n" do
+    let trimmed := line.trimAscii.toString
+    if trimmed.startsWith "SANDBOXED_NODE_CAPACITY=" ||
+       trimmed.startsWith "export SANDBOXED_NODE_CAPACITY=" then
+      let valRaw := (trimmed.splitOn "=").tail! |> String.intercalate "="
+      let unquoted := (valRaw.trimAscii.toString.dropWhile (fun c => c == '"' || c == '\'')
+        |>.dropEndWhile (fun c => c == '"' || c == '\'')).toString
+      if let some n := unquoted.toNat? then
+        if 1 ≤ n && n ≤ 256 then
+          return some n.toUInt32
+  return none
+
 def loadConfigFromEnv : IO NodeConfig := do
   let bindRaw := (← IO.getEnv "SANDBOXED_NODE_BIND").getD "127.0.0.1:3088"
   let (host, port) := parseBindAddr bindRaw
@@ -65,6 +89,7 @@ def loadConfigFromEnv : IO NodeConfig := do
   let prev? := (← IO.getEnv "SANDBOXED_NODE_TOKEN_PREVIOUS").map (·.trimAscii.toString)
     |>.filter (fun s => !s.isEmpty)
   let workDir := ((← IO.getEnv "SANDBOXED_NODE_WORK_DIR").getD "/var/lib/sandboxed-node/work").trimAscii.toString
+  let envFile := ((← IO.getEnv "SANDBOXED_NODE_ENV_FILE").getD "/etc/sandboxed-node.env").trimAscii.toString
   let labelsRaw := (← IO.getEnv "SANDBOXED_NODE_LABELS").getD ""
   let labels := (labelsRaw.splitOn ",").toArray.map (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty)
   let allowRoot := isTruthyEnv (← IO.getEnv "SANDBOXED_NODE_ALLOW_ROOT")
@@ -78,6 +103,7 @@ def loadConfigFromEnv : IO NodeConfig := do
   let allowRaw := (← IO.getEnv "SANDBOXED_NODE_ENV_ALLOWLIST").getD
     "LEAN_NUM_THREADS,LAKE_JOBS,TURBO_LEAN_MAX_MEMORY_MB,TURBO_LEAN_NO_AUDIT_CACHE"
   let allowKeys := (allowRaw.splitOn ",").toArray.map (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty)
+  let managedAuth ← loadManagedAuthFromEnv workDir
   let mut cfg : NodeConfig := {
     bindHost := host
     bindPort := port
@@ -85,6 +111,7 @@ def loadConfigFromEnv : IO NodeConfig := do
     token := token
     tokenPrevious? := prev?
     workDir := workDir
+    envFile := envFile
     labels := labels
     allowRoot := allowRoot
     capacityTotal := capClamped
@@ -94,7 +121,10 @@ def loadConfigFromEnv : IO NodeConfig := do
     maxJobSecs := maxJobSecs.toUInt64
     minFreeDiskBytes := minFreeGb.toUInt64 * 1024 * 1024 * 1024
     envAllowlist := allowKeys
+    managedAuth := managedAuth
   }
+  if let some envCap ← parseEnvFileCapacity envFile then
+    cfg := { cfg with capacityTotal := envCap }
   let ovPath := System.FilePath.mk workDir / "capacity_override.json"
   if ← ovPath.pathExists then
     if let .ok raw ← IO.FS.readFile ovPath |>.toBaseIO then
@@ -161,18 +191,20 @@ structure LiveProc where
   deriving Repr, Inhabited
 
 structure NodeRuntime where
-  cfg        : NodeConfig
-  shrinkDebt : UInt32 := 0
-  ledger     : Ledger
-  liveProcs  : Std.HashMap String LiveProc := {}
-  queueOrder : Array String := #[]
+  cfg            : NodeConfig
+  shrinkDebt     : UInt32 := 0
+  activeExecMain : UInt32 := 0
+  activeExecSide : UInt32 := 0
+  ledger         : Ledger
+  liveProcs      : Std.HashMap String LiveProc := {}
+  queueOrder     : Array String := #[]
 
 def activeRegularCount (rt : NodeRuntime) : UInt32 :=
-  rt.liveProcs.fold (fun acc _ lp =>
+  rt.activeExecMain + rt.liveProcs.fold (fun acc _ lp =>
     if !lp.forced && !lp.sideLane && !lp.coordLane then acc + 1 else acc) 0
 
 def activeSideCount (rt : NodeRuntime) : UInt32 :=
-  rt.liveProcs.fold (fun acc _ lp => if lp.sideLane then acc + 1 else acc) 0
+  rt.activeExecSide + rt.liveProcs.fold (fun acc _ lp => if lp.sideLane then acc + 1 else acc) 0
 
 def activeForcedCount (rt : NodeRuntime) : UInt32 :=
   rt.liveProcs.fold (fun acc _ lp => if lp.forced then acc + 1 else acc) 0
@@ -182,7 +214,8 @@ def activeCoordCount (rt : NodeRuntime) : UInt32 :=
 
 /-- Apply operator-authorized live capacity resize via `Orb.Kernel.nodeResizeStep` + `OrbNode.Spec`. -/
 def resizeCapacity
-    (rt : NodeRuntime) (targetCap : UInt32) (targetCoord? : Option UInt32) :
+    (rt : NodeRuntime) (targetCap : UInt32) (targetCoord? : Option UInt32)
+    (persistOverride : Bool := true) :
     IO (Except String NodeRuntime) := do
   let nextCoord := targetCoord?.getD rt.cfg.coordinatorCapacity
   if verifyNodeCapacityDisk targetCap nextCoord 0 0 1 0 != 1 then
@@ -196,22 +229,51 @@ def resizeCapacity
   if (lo32 &&& 256) == 0 then
     return .error s!"orb_node_resize_step rejected with code {lo32}"
   let nextCfg := { rt.cfg with capacityTotal := targetCap, coordinatorCapacity := nextCoord }
-  let ovJson := renderCompact (.obj #[
-    ("capacity", JVal.nat targetCap.toNat),
-    ("coordinator_capacity", JVal.nat nextCoord.toNat)
-  ])
-  let ovPath := System.FilePath.mk rt.cfg.workDir / "capacity_override.json"
-  IO.FS.writeFile ovPath (ovJson ++ "\n")
+  if persistOverride then
+    let nowTs ← nowRfc3339
+    let ovJson := renderCompact (.obj #[
+      ("capacity", JVal.nat targetCap.toNat),
+      ("coordinator_capacity", JVal.nat nextCoord.toNat),
+      ("updated_at", .str nowTs)
+    ])
+    let ovPath := System.FilePath.mk rt.cfg.workDir / "capacity_override.json"
+    IO.FS.writeFile ovPath (ovJson ++ "\n")
   return .ok { rt with cfg := nextCfg, shrinkDebt := nextDebt }
+
+/-- Reload capacity from `envFile` and `capacity_override.json` (`SIGHUP` handler). -/
+def reloadCapacityFromFiles (rt : NodeRuntime) : IO NodeRuntime := do
+  let mut targetCap := rt.cfg.capacityTotal
+  let mut targetCoord := rt.cfg.coordinatorCapacity
+  if let some envCap ← parseEnvFileCapacity rt.cfg.envFile then
+    targetCap := envCap
+  let ovPath := System.FilePath.mk rt.cfg.workDir / "capacity_override.json"
+  if ← ovPath.pathExists then
+    if let .ok raw ← IO.FS.readFile ovPath |>.toBaseIO then
+      if let .ok jv := OrbBin.Json.parse raw then
+        if let some c := jv.fieldNat? "capacity" then
+          if 1 ≤ c && c ≤ 256 then targetCap := c.toUInt32
+        if let some cc := jv.fieldNat? "coordinator_capacity" then
+          if 1 ≤ cc && cc ≤ 16 then targetCoord := cc.toUInt32
+  match ← resizeCapacity rt targetCap (some targetCoord) false with
+  | .ok rt' => return rt'
+  | .error _ => return rt
+
+private def detectLeanRuntimeReady (workDir : String) : IO Bool := do
+  let cachedLake := System.FilePath.mk workDir / "caches" / "elan" / "bin" / "lake"
+  if ← cachedLake.pathExists then return true
+  if ← (System.FilePath.mk "/opt/orb/elan/bin/lake").pathExists then return true
+  let pathStr := (← IO.getEnv "PATH").getD "/usr/local/bin:/usr/bin:/bin"
+  for d in (pathStr.splitOn ":").filter (·.startsWith "/") do
+    let st ← statPath ((System.FilePath.mk d / "lake").toString)
+    if st.exists_ && st.isReg then return true
+  return false
 
 def buildHeartbeatJson (rt : NodeRuntime) : IO JVal := do
   let st ← OrbNode.Posix.hostStats rt.cfg.workDir
-  let leanReady ← (System.FilePath.mk "/opt/orb/elan/bin/lake").pathExists <||>
-    (do let r ← IO.Process.output { cmd := "sh", args := #["-c", "command -v lake >/dev/null 2>&1"] }
-        pure (r.exitCode == 0))
+  let leanReady ← detectLeanRuntimeReady rt.cfg.workDir
   let labels := if leanReady then rt.cfg.labels else rt.cfg.labels.filter (· != "lean")
   let activeReg := activeRegularCount rt
-  let activeTot := rt.liveProcs.size.toUInt32
+  let activeAsync := rt.liveProcs.size.toUInt32
   let capAvail : UInt32 :=
     if rt.cfg.capacityTotal > activeReg + rt.shrinkDebt then
       rt.cfg.capacityTotal - (activeReg + rt.shrinkDebt)
@@ -219,13 +281,15 @@ def buildHeartbeatJson (rt : NodeRuntime) : IO JVal := do
   let diskWord := Orb.Kernel.nodeDiskAdmissionStep
     st.diskAvailBytes 0 rt.cfg.minFreeDiskBytes rt.cfg.minFreeDiskBytes (20 * 1024 * 1024 * 1024) 0
   let diskPinned := ((diskWord &&& 0xFFFFFFFF).toUInt32 &&& 256) == 0
+  let toolchains ← listCachedToolchains rt.cfg.workDir
+  let advAuth ← advertisedManagedAuth rt.cfg.managedAuth
   return .obj #[
     ("resource_history", .arr #[]),
     ("node_id", .str rt.cfg.nodeId),
     ("online", .bool true),
     ("capacity_total", JVal.nat rt.cfg.capacityTotal.toNat),
     ("capacity_available", JVal.nat capAvail.toNat),
-    ("active_leases", JVal.nat activeTot.toNat),
+    ("active_leases", JVal.nat rt.activeExecMain.toNat),
     ("version", .str "1.3.0-lean4"),
     ("protocol_version", JVal.nat 5),
     ("labels", .arr (labels.map .str)),
@@ -234,36 +298,31 @@ def buildHeartbeatJson (rt : NodeRuntime) : IO JVal := do
     ("mem_available_bytes", JVal.uint64 st.memAvailBytes),
     ("disk_total_bytes", JVal.uint64 st.diskTotalBytes),
     ("disk_available_bytes", JVal.uint64 st.diskAvailBytes),
-    ("active_jobs", JVal.nat activeTot.toNat),
+    ("active_jobs", JVal.nat activeAsync.toNat),
     ("queued_jobs", JVal.nat rt.queueOrder.size),
     ("side_jobs", JVal.nat (activeSideCount rt).toNat),
     ("forced_jobs", JVal.nat (activeForcedCount rt).toNat),
     ("priority_jobs", JVal.nat (activeCoordCount rt).toNat),
     ("coordinator_capacity", JVal.nat rt.cfg.coordinatorCapacity.toNat),
-    ("cached_toolchains", .arr #[]),
+    ("cached_toolchains", .arr (toolchains.map .str)),
     ("lean_runtime_ready", .bool leanReady),
     ("source_bundle_capacity", .obj #[
-      ("overlay_bytes", JVal.uint64 (1024 * 1024)),
-      ("complete_bytes", JVal.uint64 (32 * 1024 * 1024))
+      ("overlay_bytes", JVal.uint64 defaultMaxSourceBundleBytes),
+      ("complete_bytes", JVal.uint64 defaultMaxCompleteBundleBytes)
     ]),
     ("min_free_disk_bytes", JVal.uint64 rt.cfg.minFreeDiskBytes),
     ("disk_pressure_pinned", .bool diskPinned),
-    ("managed_auth", .arr #[])
+    ("managed_auth", .arr (advAuth.map .str))
   ]
 
-private def collectArtifacts (cwd : String) (relPaths : Array String) : IO (Array ArtifactEntry) := do
-  let mut out : Array ArtifactEntry := #[]
-  for rel in relPaths do
-    if !rel.isEmpty && !rel.startsWith "/" && !(rel.splitOn "..").tail.isEmpty == false then
-      let full := System.FilePath.mk cwd / rel
-      if ← full.pathExists then
-        if let .ok bytes ← IO.FS.readBinFile full |>.toBaseIO then
-          let hex := bytesToHexLower (sha256Bytes bytes)
-          out := out.push { path := rel, sha256 := hex, sizeBytes := bytes.size.toUInt64 }
+private def flattenEnvKv (pairs : Array (String × String)) : Array String := Id.run do
+  let mut out : Array String := Array.mkEmpty (pairs.size * 2)
+  for (k, v) in pairs do
+    out := out.push k |>.push v
   return out
 
-private def hasTraversalSegment (rel : String) : Bool :=
-  rel.startsWith "/" || (rel.splitOn "/").any (fun seg => seg == "..")
+private def mergeEnvPair (pairs : Array (String × String)) (k v : String) : Array (String × String) :=
+  (pairs.filter (fun (ek, _) => ek != k)).push (k, v)
 
 private def startQueuedJob (rt : NodeRuntime) (jid : String) (forcedOverride : Bool := false) :
     IO NodeRuntime := do
@@ -283,45 +342,78 @@ private def startQueuedJob (rt : NodeRuntime) (jid : String) (forcedOverride : B
   let mut cwd := missionDir
   let mut prog := "bash"
   let mut args : Array String := #[]
-  let mut envKv : Array String := #["SANDBOXED_MISSION_ID", rec.missionId, "SANDBOXED_JOB_ID", jid]
+  let mut envPairs : Array (String × String) := #[]
   let mut artifacts : Array String := #[]
+  let nowTs ← nowRfc3339
   if kind == "lean_build" then
-    if let some cwdRel := payload.fieldStr? "cwd_rel" then
-      if !cwdRel.isEmpty && !hasTraversalSegment cwdRel then
-        cwd := (System.FilePath.mk missionDir / cwdRel).toString
-        IO.FS.createDirAll cwd
-    if let some srcObj := payload.field? "source" then
-      if let some bundle := srcObj.field? "bundle" then
-        if let some files := bundle.fieldArr? "files" then
-          for f in files do
-            if let (some fpath, some b64) := (f.fieldStr? "path", f.fieldStr? "data_base64") then
-              if !hasTraversalSegment fpath then
-                if let some decoded := base64UrlDecode? (b64.replace "+" "-" |>.replace "/" "_") then
-                  let dest := System.FilePath.mk missionDir / fpath
-                  if let some parent := dest.parent then IO.FS.createDirAll parent
-                  IO.FS.writeBinFile dest decoded
-    if let some envObj := (payload.field? "env") >>= JVal.asObj? then
-      for (ek, ev) in envObj do
-        if rt.cfg.envAllowlist.contains ek then
-          if let some sv := ev.asStr? then
-            envKv := envKv.push ek |>.push sv
-    if let some arts := payload.fieldArr? "artifacts" then
-      artifacts := arts.filterMap JVal.asStr?
+    let some srcObj := payload.field? "source"
+      | match ← rt.ledger.updateJob jid (fun r => .ok {
+            r with state := .failed, finishedAt? := some nowTs, error? := some "missing source", forced := forced
+          }) with
+        | .ok (l', _) => return { rt with ledger := l' }
+        | .error _ => return rt
+    let checkoutDir ← match ← materializeLeanCheckout rt.cfg.workDir srcObj logPath with
+      | .ok d => pure d
+      | .error err =>
+        match ← rt.ledger.updateJob jid (fun r => .ok {
+            r with state := .failed, finishedAt? := some nowTs, logPath? := some logPath,
+                   error? := some err, forced := forced
+          }) with
+        | .ok (l', _) => return { rt with ledger := l' }
+        | .error _ => return rt
+    cwd := checkoutDir
+    if let some cwdRelRaw := payload.fieldStr? "cwd_rel" then
+      let cwdRel := (cwdRelRaw.dropWhile (· == '/') |>.dropEndWhile (· == '/')).toString
+      if !cwdRel.isEmpty && relPathIsSafe cwdRel then
+        let sub := System.FilePath.mk checkoutDir / cwdRel
+        if !(← sub.isDir) then
+          match ← rt.ledger.updateJob jid (fun r => .ok {
+              r with state := .failed, finishedAt? := some nowTs,
+                     error? := some s!"cwd_rel '{cwdRel}' does not exist in checkout", forced := forced
+            }) with
+          | .ok (l', _) => return { rt with ledger := l' }
+          | .error _ => return rt
+        cwd := sub.toString
     let cmdParts := ((payload.fieldArr? "command").getD #[]).filterMap JVal.asStr?
     if h : 0 < cmdParts.size then
       prog := cmdParts[0]
       args := cmdParts.extract 1 cmdParts.size
     else
       prog := "true"
+    let usesFanout := prog != "turbo-lean" || args.contains "build"
+    let st ← OrbNode.Posix.hostStats rt.cfg.workDir
+    let repo := (srcObj.fieldStr? "repo").getD ""
+    let payloadEnv := ((payload.field? "env") >>= JVal.asObj?).getD #[]
+    envPairs ← buildLeanJobEnv rt.cfg.workDir repo st.cpuTotal rt.cfg.capacityTotal
+      rt.cfg.envAllowlist usesFanout payloadEnv
+    envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" rec.missionId
+    envPairs := mergeEnvPair envPairs "SANDBOXED_JOB_ID" jid
+    if let some arts := payload.fieldArr? "artifacts" then
+      artifacts := arts.filterMap JVal.asStr?
   else
     let cmdStr := (payload.fieldStr? "command").getD "true"
     args := #["-lc", cmdStr]
+    envPairs ← prepareSharedMissionEnv rt.cfg.workDir missionDir
+    envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" rec.missionId
+    envPairs := mergeEnvPair envPairs "SANDBOXED_JOB_ID" jid
     if let some envObj := (payload.field? "env") >>= JVal.asObj? then
       for (ek, ev) in envObj do
         if let some sv := ev.asStr? then
-          envKv := envKv.push ek |>.push sv
-  let nowTs ← nowRfc3339
+          envPairs := mergeEnvPair envPairs ek sv
+    let reqProfiles := ((payload.fieldArr? "managed_auth").getD #[]).filterMap JVal.asStr?
+    if !reqProfiles.isEmpty then
+      match ← prepareManagedAuthWorkspace rt.cfg.managedAuth reqProfiles missionDir with
+      | .error err =>
+        match ← rt.ledger.updateJob jid (fun r => .ok {
+            r with state := .failed, finishedAt? := some nowTs, error? := some err, forced := forced
+          }) with
+        | .ok (l', _) => return { rt with ledger := l' }
+        | .error _ => return rt
+      | .ok authEnv =>
+        for (ak, av) in authEnv do
+          envPairs := mergeEnvPair envPairs ak av
   let nowEp ← OrbNode.Posix.nowEpoch
+  let envKv := flattenEnvKv envPairs
   match ← (OrbNode.Posix.spawnJobPgrp prog args envKv cwd logPath).toBaseIO with
   | .error e =>
     match ← rt.ledger.updateJob jid (fun r => .ok {
@@ -358,7 +450,7 @@ def tickRuntime (rt0 : NodeRuntime) : IO NodeRuntime := do
       let codeU32 := (w >>> 32).toUInt32
       let codeInt : Int := if codeU32 == 0xFFFFFFFF then -1 else Int.ofNat codeU32.toNat
       OrbNode.Posix.killPgrp lp.pid 9
-      let arts ← collectArtifacts lp.cwd lp.artifacts
+      let arts ← collectArtifactsConfined lp.cwd lp.artifacts
       let nowTs ← nowRfc3339
       let nextState : JobState := if codeInt == 0 then .succeeded else .failed
       if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
@@ -416,7 +508,7 @@ def cancelJob (rt : NodeRuntime) (jid actor reason : String) : IO (Except String
     OrbNode.Posix.killPgrp lp.pid 15
     OrbNode.Posix.killPgrp lp.pid 9
     discard <| OrbNode.Posix.pollPid lp.pid
-  let mut nextProcs := rt.liveProcs.erase jid
+  let nextProcs := rt.liveProcs.erase jid
   let nextQueue := rt.queueOrder.filter (· != jid)
   match ← rt.ledger.updateJob jid (fun r =>
     if r.state.isTerminal then .ok r
@@ -478,25 +570,42 @@ def interruptJob (rt : NodeRuntime) (jid mode : String) : IO (Except String (Nod
     ("deferred_until_tool_finishes", .bool false)
   ])
 
-/-- Synchronous `POST /execute` command under `<work_root>/<mission_id>`. -/
+/-- Run cleared-env synchronous `POST /execute` command under `<workDir>/<missionId>`. -/
+def execClearedLeaseCommand (workDir missionId command : String) (maxJobSecs : UInt64) : IO JVal := do
+  let missionDir := (System.FilePath.mk workDir / missionId).toString
+  IO.FS.createDirAll missionDir
+  let mut envPairs ← prepareSharedMissionEnv workDir missionDir
+  envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" missionId
+  let mut envArgs : Array String := #["-i"]
+  for (k, v) in envPairs do
+    envArgs := envArgs.push s!"{k}={v}"
+  let hasTimeout ← do
+    let r ← (IO.Process.output { cmd := "timeout", args := #["--version"] }).toBaseIO
+    pure (match r with | .ok o => o.exitCode == 0 | .error _ => false)
+  if hasTimeout then
+    envArgs := envArgs ++ #["timeout", "-k", "5", s!"{max 1 maxJobSecs}s", "bash", "-lc", command]
+  else
+    envArgs := envArgs ++ #["bash", "-lc", command]
+  let out ← IO.Process.output {
+    cmd := "env"
+    args := envArgs
+    cwd := some missionDir
+  }
+  return .obj #[
+    ("accepted", .bool true),
+    ("exit_code", JVal.int (Int.ofNat out.exitCode.toNat)),
+    ("stdout", .str out.stdout),
+    ("stderr", .str out.stderr)
+  ]
+
+/-- Single-threaded synchronous `POST /execute` helper (used by direct `handleRequest` tests). -/
 def runSyncExecute (rt : NodeRuntime) (missionId command : String) (sideLane : Bool := false) : IO (Nat × JVal) := do
   if sideLane then
     if activeSideCount rt >= rt.cfg.sideCapacity then
       return (429, .str "node side-lane capacity exhausted")
   else if activeRegularCount rt + rt.shrinkDebt >= rt.cfg.capacityTotal then
     return (429, .str "node capacity exhausted")
-  let missionDir := (System.FilePath.mk rt.cfg.workDir / missionId).toString
-  IO.FS.createDirAll missionDir
-  let out ← IO.Process.output {
-    cmd := "bash"
-    args := #["-lc", command]
-    cwd := some missionDir
-  }
-  return (200, .obj #[
-    ("accepted", .bool true),
-    ("exit_code", JVal.int (Int.ofNat out.exitCode.toNat)),
-    ("stdout", .str out.stdout),
-    ("stderr", .str out.stderr)
-  ])
+  let resp ← execClearedLeaseCommand rt.cfg.workDir missionId command rt.cfg.maxJobSecs
+  return (200, resp)
 
 end OrbNode.Runner
