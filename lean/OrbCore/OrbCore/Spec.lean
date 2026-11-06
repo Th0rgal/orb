@@ -613,4 +613,163 @@ def deployUnitScopedAuthority : ScopedAuthority DeployUnitCheck where
     rcases deployUnitMetaGate.sound c h with ⟨hpt, u, hdec, _, _⟩
     exact ⟨by simp [hdec], hpt⟩
 
+/-! ### 6. Proactive Provider Rate-Limit & Concurrency Pacing Gate -/
+
+def maxConfiguredRpmCap : Nat := 100000
+def maxConfiguredConcCap : Nat := 1024
+
+inductive PacingCapPolicy where
+  | uncapped
+  | bounded (limit : Nat)
+  deriving Repr, DecidableEq
+
+def PacingCapPolicy.decode? (raw maxAllowed : Nat) : Option PacingCapPolicy :=
+  if raw = 0 then some .uncapped
+  else if 1 ≤ raw ∧ raw ≤ maxAllowed then some (.bounded raw)
+  else none
+
+def PacingCapPolicy.admitsNext (p : PacingCapPolicy) (used : Nat) : Prop :=
+  match p with
+  | .uncapped      => True
+  | .bounded limit => used + 1 ≤ limit
+
+structure ProviderPacingCheck where
+  accountCaps : UInt32 × UInt32
+  modelCaps   : UInt32 × UInt32
+  accountLoad : UInt32 × UInt32
+  modelLoad   : UInt32 × UInt32
+  deriving Repr, DecidableEq
+
+/-- Independent provider pacing admission domain model over typed `PacingCapPolicy` budgets:
+    account and per-model RPM (`0` or `1..100000`) and concurrency (`0` or `1..1024`) caps decode
+    to valid `PacingCapPolicy` values, and every bounded dimension has strict headroom (`used + 1 ≤ limit`)
+    for the next request. -/
+def ProviderPacingDomainSafe (c : ProviderPacingCheck) : Prop :=
+  ∃ ar ac mr mc : PacingCapPolicy,
+    PacingCapPolicy.decode? c.accountCaps.1.toNat maxConfiguredRpmCap = some ar ∧
+    PacingCapPolicy.decode? c.accountCaps.2.toNat maxConfiguredConcCap = some ac ∧
+    PacingCapPolicy.decode? c.modelCaps.1.toNat maxConfiguredRpmCap = some mr ∧
+    PacingCapPolicy.decode? c.modelCaps.2.toNat maxConfiguredConcCap = some mc ∧
+    ar.admitsNext c.accountLoad.1.toNat ∧
+    ac.admitsNext c.accountLoad.2.toNat ∧
+    mr.admitsNext c.modelLoad.1.toNat ∧
+    mc.admitsNext c.modelLoad.2.toNat
+
+@[inline]
+def singleCapAdmitted (cap maxCap used : UInt32) : Bool :=
+  cap == 0 || (cap ≥ 1 && cap ≤ maxCap && used < cap)
+
+private theorem singleCapAdmitted_sound (cap maxCap used : UInt32)
+    (h : singleCapAdmitted cap maxCap used = true) :
+    ∃ p : PacingCapPolicy,
+      PacingCapPolicy.decode? cap.toNat maxCap.toNat = some p ∧
+      p.admitsNext used.toNat := by
+  unfold singleCapAdmitted at h
+  simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at h
+  rcases h with h0 | ⟨⟨hge, hle⟩, hlt⟩
+  · subst h0
+    exact ⟨.uncapped, rfl, trivial⟩
+  · have hc1 : 1 ≤ cap.toNat := UInt32.le_iff_toNat_le.mp hge
+    have hc2 : cap.toNat ≤ maxCap.toNat := UInt32.le_iff_toNat_le.mp hle
+    have hu : used.toNat < cap.toNat := UInt32.lt_iff_toNat_lt.mp hlt
+    have hne0 : cap.toNat ≠ 0 := by omega
+    refine ⟨.bounded cap.toNat, ?_, ?_⟩
+    · simp [PacingCapPolicy.decode?, hne0, hc1, hc2]
+    · dsimp [PacingCapPolicy.admitsNext]
+      omega
+
+private theorem singleCapAdmitted_complete (cap maxCap used : UInt32)
+    (p : PacingCapPolicy)
+    (hdec : PacingCapPolicy.decode? cap.toNat maxCap.toNat = some p)
+    (hadm : p.admitsNext used.toNat) :
+    singleCapAdmitted cap maxCap used = true := by
+  unfold singleCapAdmitted
+  unfold PacingCapPolicy.decode? at hdec
+  split at hdec
+  · rename_i hz
+    have hc0 : (cap == 0) = true := by
+      rw [beq_iff_eq]
+      apply UInt32.eq_of_toBitVec_eq
+      apply BitVec.eq_of_toNat_eq
+      change cap.toNat = 0
+      exact hz
+    simp [hc0]
+  · split at hdec
+    · rename_i hbnd
+      injection hdec with hp
+      subst hp
+      dsimp [PacingCapPolicy.admitsNext] at hadm
+      have hge : cap ≥ 1 := UInt32.le_iff_toNat_le.mpr hbnd.1
+      have hle : cap ≤ maxCap := UInt32.le_iff_toNat_le.mpr hbnd.2
+      have hlt : used < cap := by
+        apply UInt32.lt_iff_toNat_lt.mpr
+        omega
+      simp [hge, hle, hlt]
+    · contradiction
+
+@[inline, export orb_core_verify_provider_pacing]
+def verifyProviderPacingAdmission
+    (acctRpmCap acctConcCap modelRpmCap modelConcCap : UInt32)
+    (acctRpmUsed acctInflight modelRpmUsed modelInflight : UInt32) : UInt8 :=
+  if singleCapAdmitted acctRpmCap 100000 acctRpmUsed &&
+     singleCapAdmitted acctConcCap 1024 acctInflight &&
+     singleCapAdmitted modelRpmCap 100000 modelRpmUsed &&
+     singleCapAdmitted modelConcCap 1024 modelInflight then 1 else 0
+
+def providerPacingMetaGate : MetaGateSpec ProviderPacingCheck ProviderPacingDomainSafe where
+  gate c :=
+    verifyProviderPacingAdmission
+      c.accountCaps.1 c.accountCaps.2 c.modelCaps.1 c.modelCaps.2
+      c.accountLoad.1 c.accountLoad.2 c.modelLoad.1 c.modelLoad.2 == 1
+  sound c h := by
+    rcases c with ⟨⟨arC, acC⟩, ⟨mrC, mcC⟩, ⟨arU, acU⟩, ⟨mrU, mcU⟩⟩
+    change (verifyProviderPacingAdmission arC acC mrC mcC arU acU mrU mcU == 1) = true at h
+    dsimp [ProviderPacingDomainSafe]
+    unfold verifyProviderPacingAdmission at h
+    have hc :
+        (singleCapAdmitted arC 100000 arU &&
+         singleCapAdmitted acC 1024 acU &&
+         singleCapAdmitted mrC 100000 mrU &&
+         singleCapAdmitted mcC 1024 mcU) = true := by
+      cases hb :
+          (singleCapAdmitted arC 100000 arU &&
+           singleCapAdmitted acC 1024 acU &&
+           singleCapAdmitted mrC 100000 mrU &&
+           singleCapAdmitted mcC 1024 mcU)
+      · rw [hb] at h
+        contradiction
+      · rfl
+    simp only [Bool.and_eq_true] at hc
+    rcases hc with ⟨⟨⟨h1, h2⟩, h3⟩, h4⟩
+    rcases singleCapAdmitted_sound arC 100000 arU h1 with ⟨ar, har1, har2⟩
+    rcases singleCapAdmitted_sound acC 1024 acU h2 with ⟨ac, hac1, hac2⟩
+    rcases singleCapAdmitted_sound mrC 100000 mrU h3 with ⟨mr, hmr1, hmr2⟩
+    rcases singleCapAdmitted_sound mcC 1024 mcU h4 with ⟨mc, hmc1, hmc2⟩
+    exact ⟨ar, ac, mr, mc, har1, hac1, hmr1, hmc1, har2, hac2, hmr2, hmc2⟩
+  complete c h := by
+    rcases c with ⟨⟨arC, acC⟩, ⟨mrC, mcC⟩, ⟨arU, acU⟩, ⟨mrU, mcU⟩⟩
+    change (verifyProviderPacingAdmission arC acC mrC mcC arU acU mrU mcU == 1) = true
+    dsimp [ProviderPacingDomainSafe] at h
+    rcases h with ⟨ar, ac, mr, mc, har1, hac1, hmr1, hmc1, har2, hac2, hmr2, hmc2⟩
+    unfold verifyProviderPacingAdmission
+    have b1 : singleCapAdmitted arC 100000 arU = true := singleCapAdmitted_complete arC 100000 arU ar har1 har2
+    have b2 : singleCapAdmitted acC 1024 acU = true := singleCapAdmitted_complete acC 1024 acU ac hac1 hac2
+    have b3 : singleCapAdmitted mrC 100000 mrU = true := singleCapAdmitted_complete mrC 100000 mrU mr hmr1 hmr2
+    have b4 : singleCapAdmitted mcC 1024 mcU = true := singleCapAdmitted_complete mcC 1024 mcU mc hmc1 hmc2
+    simp [b1, b2, b3, b4]
+  posWitness := {
+    accountCaps := (300, 0)
+    modelCaps   := (60, 2)
+    accountLoad := (42, 1)
+    modelLoad   := (10, 1)
+  }
+  negWitness := {
+    accountCaps := (300, 0)
+    modelCaps   := (0, 2)
+    accountLoad := (2, 2)
+    modelLoad   := (2, 2)
+  }
+  nonVacuous := by decide
+  tight := by decide
+
 end OrbCore.Spec

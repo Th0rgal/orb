@@ -499,12 +499,23 @@ const API_KEY_HINTS: Record<string, { env: string; placeholder: string }> = {
   custom: { env: "OPENAI_API_KEY", placeholder: "sk-…" },
 };
 
+function parseOptionalCap(raw: string, min: number, max: number): number | null | "invalid" {
+  const t = raw.trim();
+  if (!t) return null;
+  if (!/^\d+$/.test(t)) return "invalid";
+  const n = Number(t);
+  if (!Number.isSafeInteger(n) || n < min || n > max) return "invalid";
+  return n;
+}
+
 function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: () => void}) {
   const apiKinds = KINDS.filter(k => k.methods.some(m => m.kind === "api"));
   const [type, setType] = createSignal(p.provider?.provider_type ?? "openai");
   const [name, setName] = createSignal(p.provider?.name ?? "");
   const [secret, setSecret] = createSignal("");
-  const [url, setUrl] = createSignal("");
+  const [url, setUrl] = createSignal(p.provider?.base_url ?? "");
+  const [rpmLimit, setRpmLimit] = createSignal(p.provider?.rpm_limit != null ? String(p.provider.rpm_limit) : "");
+  const [maxConcurrency, setMaxConcurrency] = createSignal(p.provider?.max_concurrency != null ? String(p.provider.max_concurrency) : "");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const version = connectionVersion();
@@ -512,22 +523,58 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
   const defaultName = createMemo(() => p.provider?.name || `${selectedKind()?.name ?? type()} key`);
   const effectiveName = createMemo(() => name().trim() || defaultName());
   const hint = createMemo(() => API_KEY_HINTS[type()]);
+  const parsedRpm = createMemo(() => parseOptionalCap(rpmLimit(), 1, 100000));
+  const parsedConcurrency = createMemo(() => parseOptionalCap(maxConcurrency(), 1, 1024));
+  const capsValid = createMemo(() => parsedRpm() !== "invalid" && parsedConcurrency() !== "invalid");
+  const dirty = createMemo(() =>
+    !!secret()
+    || name() !== (p.provider?.name ?? "")
+    || url().trim() !== (p.provider?.base_url ?? "")
+    || rpmLimit().trim() !== (p.provider?.rpm_limit != null ? String(p.provider.rpm_limit) : "")
+    || maxConcurrency().trim() !== (p.provider?.max_concurrency != null ? String(p.provider.max_concurrency) : "")
+  );
+  const canSave = createMemo(() =>
+    !busy()
+    && !!effectiveName()
+    && capsValid()
+    && (p.provider ? dirty() : !!secret().trim())
+    && (type() !== "custom" || /^https?:\/\//.test(url().trim()))
+  );
   onCleanup(() => setSecret(""));
   const save = async () => {
-    if (busy() || !secret().trim() || !effectiveName()) return;
+    if (!canSave()) return;
     if (version !== connectionVersion()) { setError("Connection changed. Close and reopen this dialog."); return; }
+    const rpm = parsedRpm();
+    const conc = parsedConcurrency();
+    if (rpm === "invalid" || conc === "invalid") return;
     setBusy(true); setError("");
     try {
+      const payload = p.provider
+        ? {
+            name: effectiveName(),
+            ...(secret().trim() ? { api_key: secret().trim() } : {}),
+            ...(type() === "custom" ? { base_url: url().trim() || null } : {}),
+            ...(rpm != null || p.provider.rpm_limit != null ? { rpm_limit: rpm } : {}),
+            ...(conc != null || p.provider.max_concurrency != null ? { max_concurrency: conc } : {}),
+          }
+        : {
+            provider_type: type(),
+            name: effectiveName(),
+            api_key: secret().trim(),
+            ...(type() === "custom" ? { base_url: url().trim() } : {}),
+            ...(rpm != null ? { rpm_limit: rpm } : {}),
+            ...(conc != null ? { max_concurrency: conc } : {}),
+          };
       await api(`/api/ai/providers${p.provider ? `/${encodeURIComponent(p.provider.id)}` : ""}`, {
         method: p.provider ? "PUT" : "POST", headers: {"Content-Type":"application/json"},
-        body: JSON.stringify(p.provider ? {name:effectiveName(),api_key:secret().trim()} : {provider_type:type(),name:effectiveName(),api_key:secret().trim(),...(type()==="custom" ? {base_url:url().trim()} : {})}),
+        body: JSON.stringify(payload),
       });
       setSecret(""); if (version === connectionVersion()) p.onDone();
-    } catch { setError("Couldn’t save the API key. Check the connection and try again."); }
+    } catch { setError("Couldn’t save the provider settings. Check the connection and try again."); }
     finally { setBusy(false); }
   };
-  return <Dialog title={p.provider ? "Edit API key" : "Add API key"} dirty={!!secret() || name() !== (p.provider?.name ?? "") || !!url()} description={p.provider ? `Update the API key stored for ${p.provider.name}.` : "Choose a provider and enter an API key to store on the connected backend."} busy={busy()} onClose={p.onClose}
-    footer={requestClose => <><DialogButton disabled={busy()} onClick={requestClose}>Cancel</DialogButton><DialogButton variant="primary" disabled={busy() || !secret().trim() || !effectiveName() || (!p.provider && type()==="custom" && !/^https?:\/\//.test(url()))} onClick={() => void save()}>{busy() ? "Saving…" : "Save"}</DialogButton></>}>
+  return <Dialog title={p.provider ? "Edit API key" : "Add API key"} dirty={dirty()} description={p.provider ? `Update the key or router pacing limits stored for ${p.provider.name}.` : "Choose a provider and enter an API key to store on the connected backend."} busy={busy()} onClose={p.onClose}
+    footer={requestClose => <><DialogButton disabled={busy()} onClick={requestClose}>Cancel</DialogButton><DialogButton variant="primary" disabled={!canSave()} onClick={() => void save()}>{busy() ? "Saving…" : "Save"}</DialogButton></>}>
     <Show when={!p.provider}>
       <div class="field">
         <span>Provider</span>
@@ -561,20 +608,27 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
       <Field label="Account label">
         <input class="s-input" value={name()} onInput={e=>setName(e.currentTarget.value)} placeholder={defaultName()} />
       </Field>
-      <Show when={!p.provider && type()==="custom"}>
+      <Show when={type()==="custom"}>
         <Field label="Base URL">
           <input class="s-input" type="url" value={url()} onInput={e=>setUrl(e.currentTarget.value)} placeholder="https://api.example.com/v1" />
         </Field>
       </Show>
       <div class="field">
         <div class="p-key-field-head">
-          <span>{p.provider ? "New API key" : "API key"}</span>
+          <span>{p.provider ? "New API key (optional)" : "API key"}</span>
           <Show when={hint()?.env}><code class="p-key-env">{hint()!.env}</code></Show>
         </div>
-        <input class="s-input p-key-secret" type="password" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck={false} placeholder={hint()?.placeholder ?? "Enter API key…"} value={secret()} onInput={e=>setSecret(e.currentTarget.value)} onKeyDown={e => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); void save(); } }} />
+        <input class="s-input p-key-secret" type="password" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck={false} placeholder={p.provider ? "Leave blank to keep existing key" : (hint()?.placeholder ?? "Enter API key…")} value={secret()} onInput={e=>setSecret(e.currentTarget.value)} onKeyDown={e => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); void save(); } }} />
       </div>
+      <Field label="Requests / min limit (optional)">
+        <input class="s-input" inputMode="numeric" value={rpmLimit()} onInput={e=>setRpmLimit(e.currentTarget.value)} placeholder="e.g. 300" />
+      </Field>
+      <Field label="Max concurrent requests (optional)">
+        <input class="s-input" inputMode="numeric" value={maxConcurrency()} onInput={e=>setMaxConcurrency(e.currentTarget.value)} placeholder="e.g. 10" />
+      </Field>
     </div>
-    <p class="s-row-desc p-key-foot-note">{p.provider ? "Enter a replacement key. The saved key is never displayed." : "Encrypted at rest on the connected backend and never shown again."}</p>
+    <p class="s-row-desc p-key-foot-note">{p.provider ? "Leave the key blank to update limits or label without rotating credentials. Saved keys are never displayed." : "Encrypted at rest on the connected backend and never shown again."}</p>
+    <Show when={!capsValid()}><p role="alert" class="inline-error">RPM limit (1–100000) and max concurrency (1–1024) must be whole numbers when set.</p></Show>
     <Show when={error()}><p role="alert" class="inline-error">{error()}</p></Show>
   </Dialog>;
 }
@@ -1098,6 +1152,12 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
           <div class="s-row-desc">
             <Show when={status() !== "connected" || !plan()}><span class={`p-st ${stClass()}`} title={stLabel()}>{statusText()}</span></Show>
             <Show when={plan()}><span class="p-plan" title={plan()}><Show when={status() !== "connected"}><span class="p-dot">·</span></Show>{plan()}</span></Show>
+            <Show when={a.rpm_limit != null || a.max_concurrency != null}>
+              <span class="p-plan">
+                <Show when={status() !== "connected" || !!plan()}><span class="p-dot">·</span></Show>
+                {[a.rpm_limit != null ? `${a.rpm_limit} RPM` : null, a.max_concurrency != null ? `${a.max_concurrency} concurrent` : null].filter(Boolean).join(" · ")}
+              </span>
+            </Show>
             <Show when={["quota_exhausted", "pool_exhausted", "quota_warning"].includes(status()) && resetInfo()}>
               {r => <span class="p-plan" data-testid="subscription-reset-hint"><span class="p-dot">·</span>{r().badge}</span>}
             </Show>

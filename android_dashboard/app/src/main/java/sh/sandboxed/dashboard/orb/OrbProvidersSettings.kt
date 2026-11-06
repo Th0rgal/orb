@@ -343,9 +343,30 @@ internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?): String 
         }
     }
     val resetSuffix = if (showResetBadge) {
-        subscriptionResetSummary(detail)?.badge?.let { " · $it" }.orEmpty()
+        subscriptionResetSummary(detail)?.badge.orEmpty()
     } else ""
-    return (if (providerType.isNotEmpty()) "$providerType · $state" else state) + resetSuffix
+    val rpmBadge = provider.int("rpm_limit")?.let { "$it RPM" }.orEmpty()
+    val concBadge = provider.int("max_concurrency")?.let { "$it concurrent" }.orEmpty()
+    return listOf(providerType, state, rpmBadge, concBadge, resetSuffix)
+        .filter { it.isNotEmpty() }
+        .joinToString(" · ")
+}
+
+internal fun parseOptionalProviderCap(raw: String, min: Int, max: Int): Pair<Boolean, Int?> {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return true to null
+    val parsed = trimmed.toIntOrNull() ?: return false to null
+    if (parsed < min || parsed > max) return false to null
+    return true to parsed
+}
+
+internal fun isValidHttpUrl(raw: String): Boolean {
+    return try {
+        val uri = java.net.URI(raw.trim())
+        (uri.scheme == "http" || uri.scheme == "https") && !uri.host.isNullOrBlank()
+    } catch (_: Throwable) {
+        false
+    }
 }
 
 /**
@@ -397,6 +418,9 @@ fun OrbProvidersSettingsPage(
     var addKeyProviderType by remember { mutableStateOf("openai") }
     var nameDraft by remember { mutableStateOf("") }
     var apiKeyDraft by remember { mutableStateOf("") }
+    var baseUrlDraft by remember { mutableStateOf("") }
+    var rpmLimitDraft by remember { mutableStateOf("") }
+    var maxConcurrencyDraft by remember { mutableStateOf("") }
     var savingKey by remember { mutableStateOf(false) }
     var statusBanner by remember { mutableStateOf<String?>(null) }
     var errorBanner by remember { mutableStateOf<String?>(null) }
@@ -719,17 +743,60 @@ fun OrbProvidersSettingsPage(
         }
     }
 
+    fun canSaveProvider(provider: OrbRow?): Boolean {
+        val pType = provider?.str("provider_type", "type") ?: addKeyProviderType.trim()
+        val (rpmOk, _) = parseOptionalProviderCap(rpmLimitDraft, 1, 100_000)
+        val (concOk, _) = parseOptionalProviderCap(maxConcurrencyDraft, 1, 1024)
+        if (!rpmOk || !concOk) return false
+        if (provider == null && apiKeyDraft.trim().isEmpty()) return false
+        if (pType == "custom" && !isValidHttpUrl(baseUrlDraft)) return false
+        return true
+    }
+
     fun saveApiKey(provider: OrbRow?) {
         val pid = provider?.id
+        val (rpmOk, rpmVal) = parseOptionalProviderCap(rpmLimitDraft, 1, 100_000)
+        val (concOk, concVal) = parseOptionalProviderCap(maxConcurrencyDraft, 1, 1024)
+        if (!rpmOk) {
+            errorBanner = "RPM limit must be between 1 and 100,000."
+            return
+        }
+        if (!concOk) {
+            errorBanner = "Max concurrency must be between 1 and 1,024."
+            return
+        }
+        val pType = provider?.str("provider_type", "type") ?: addKeyProviderType.trim()
+        if (pType == "custom" && !isValidHttpUrl(baseUrlDraft)) {
+            errorBanner = "Custom providers require an http:// or https:// base URL."
+            return
+        }
         savingKey = true
         scope.launch {
             try {
                 val body = mutableMapOf<String, Any?>(
-                    "name" to nameDraft.trim().ifEmpty { provider?.str("name") ?: addKeyProviderType },
-                    "api_key" to apiKeyDraft.trim()
+                    "name" to nameDraft.trim().ifEmpty { provider?.str("name") ?: pType }
                 )
+                val trimmedKey = apiKeyDraft.trim()
+                if (trimmedKey.isNotEmpty()) {
+                    body["api_key"] = trimmedKey
+                }
                 if (pid == null) {
-                    body["provider_type"] = addKeyProviderType
+                    body["provider_type"] = pType
+                    if (pType == "custom") {
+                        body["base_url"] = baseUrlDraft.trim()
+                    }
+                    if (rpmVal != null) body["rpm_limit"] = rpmVal
+                    if (concVal != null) body["max_concurrency"] = concVal
+                } else {
+                    if (pType == "custom") {
+                        body["base_url"] = baseUrlDraft.trim()
+                    }
+                    if (rpmVal != null || provider.int("rpm_limit") != null) {
+                        body["rpm_limit"] = rpmVal
+                    }
+                    if (concVal != null || provider.int("max_concurrency") != null) {
+                        body["max_concurrency"] = concVal
+                    }
                 }
                 core.request(
                     path = if (pid == null) "/api/ai/providers" else "/api/ai/providers/${core.encodeComponent(pid)}",
@@ -740,7 +807,10 @@ fun OrbProvidersSettingsPage(
                 showAddKeyModal = false
                 apiKeyDraft = ""
                 nameDraft = ""
-                statusBanner = "Saved API key"
+                baseUrlDraft = ""
+                rpmLimitDraft = ""
+                maxConcurrencyDraft = ""
+                statusBanner = if (pid == null || trimmedKey.isNotEmpty()) "Saved API key" else "Saved provider settings"
                 loadProvidersAndUsage()
                 core.refreshAll()
             } catch (e: Throwable) {
@@ -1105,6 +1175,9 @@ fun OrbProvidersSettingsPage(
                                                                     editingProvider = provider
                                                                     nameDraft = name
                                                                     apiKeyDraft = ""
+                                                                    baseUrlDraft = provider.str("base_url").orEmpty()
+                                                                    rpmLimitDraft = provider.int("rpm_limit")?.toString().orEmpty()
+                                                                    maxConcurrencyDraft = provider.int("max_concurrency")?.toString().orEmpty()
                                                                 }
                                                             }
                                                             .padding(horizontal = 12.dp, vertical = 6.dp)
@@ -1139,48 +1212,41 @@ fun OrbProvidersSettingsPage(
                                             }
 
                                             if (editingProvider?.id == pid) {
-                                                Row(
+                                                val isCustomProvider = (provider.str("provider_type", "type") ?: "") == "custom"
+                                                val saveReady = !savingKey && canSaveProvider(provider)
+                                                Column(
                                                     modifier = Modifier
                                                         .fillMaxWidth()
                                                         .clip(RoundedCornerShape(10.dp))
                                                         .background(OrbStyle.card)
                                                         .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(10.dp))
-                                                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(8.dp)
                                                 ) {
-                                                    Box(modifier = Modifier.weight(1f)) {
-                                                        if (apiKeyDraft.isEmpty()) {
-                                                            Text("Paste API key…", color = OrbStyle.textMuted, fontSize = 13.sp)
-                                                        }
-                                                        BasicTextField(
-                                                            value = apiKeyDraft,
-                                                            onValueChange = { apiKeyDraft = it },
-                                                            textStyle = TextStyle(
-                                                                color = Color.White,
-                                                                fontSize = 13.sp,
-                                                                fontFamily = FontFamily.Monospace
-                                                            ),
-                                                            cursorBrush = SolidColor(Color.White),
-                                                            singleLine = true,
-                                                            modifier = Modifier.fillMaxWidth()
+                                                    OrbMiniField("Name", nameDraft, enabled = !savingKey) { nameDraft = it }
+                                                    OrbMiniField("New API key (optional)", apiKeyDraft, secret = true, enabled = !savingKey) { apiKeyDraft = it }
+                                                    if (isCustomProvider) {
+                                                        OrbMiniField("Base URL", baseUrlDraft, enabled = !savingKey) { baseUrlDraft = it }
+                                                    }
+                                                    OrbMiniField("Requests / min limit (optional, e.g. 300)", rpmLimitDraft, enabled = !savingKey) { rpmLimitDraft = it }
+                                                    OrbMiniField("Max concurrent requests (optional, e.g. 10)", maxConcurrencyDraft, enabled = !savingKey) { maxConcurrencyDraft = it }
+                                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                        Text(
+                                                            text = if (savingKey) "Saving…" else "Save",
+                                                            color = Color.Black,
+                                                            fontSize = 12.sp,
+                                                            fontWeight = FontWeight.SemiBold,
+                                                            maxLines = 1,
+                                                            softWrap = false,
+                                                            modifier = Modifier
+                                                                .clip(CircleShape)
+                                                                .background(if (saveReady) Color.White else OrbStyle.border)
+                                                                .orbPressClickable(enabled = saveReady) {
+                                                                    saveApiKey(provider)
+                                                                }
+                                                                .padding(horizontal = 12.dp, vertical = 6.dp)
                                                         )
                                                     }
-                                                    Text(
-                                                        text = if (savingKey) "…" else "Save",
-                                                        color = Color.Black,
-                                                        fontSize = 12.sp,
-                                                        fontWeight = FontWeight.SemiBold,
-                                                        maxLines = 1,
-                                                        softWrap = false,
-                                                        modifier = Modifier
-                                                            .clip(CircleShape)
-                                                            .background(Color.White)
-                                                            .orbPressClickable(enabled = !savingKey && apiKeyDraft.trim().isNotEmpty()) {
-                                                                saveApiKey(provider)
-                                                            }
-                                                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                                                    )
                                                 }
                                             }
                                         }
@@ -1515,6 +1581,9 @@ fun OrbProvidersSettingsPage(
                                     showAddKeyModal = !showAddKeyModal
                                     nameDraft = ""
                                     apiKeyDraft = ""
+                                    baseUrlDraft = ""
+                                    rpmLimitDraft = ""
+                                    maxConcurrencyDraft = ""
                                 }
                                 .padding(horizontal = 16.dp, vertical = 13.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -1535,23 +1604,29 @@ fun OrbProvidersSettingsPage(
                         }
 
                         if (showAddKeyModal) {
+                            val addReady = !savingKey && canSaveProvider(null)
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 10.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                OrbMiniField("Provider type (openai, anthropic, google, xai…)", addKeyProviderType) {
+                                OrbMiniField("Provider type (openai, anthropic, google, xai, custom…)", addKeyProviderType, enabled = !savingKey) {
                                     addKeyProviderType = it
                                 }
-                                OrbMiniField("Name", nameDraft) { nameDraft = it }
-                                OrbMiniField("API key", apiKeyDraft) { apiKeyDraft = it }
+                                OrbMiniField("Name", nameDraft, enabled = !savingKey) { nameDraft = it }
+                                OrbMiniField("API key", apiKeyDraft, secret = true, enabled = !savingKey) { apiKeyDraft = it }
+                                if (addKeyProviderType.trim() == "custom") {
+                                    OrbMiniField("Base URL", baseUrlDraft, enabled = !savingKey) { baseUrlDraft = it }
+                                }
+                                OrbMiniField("Requests / min limit (optional, e.g. 300)", rpmLimitDraft, enabled = !savingKey) { rpmLimitDraft = it }
+                                OrbMiniField("Max concurrent requests (optional, e.g. 10)", maxConcurrencyDraft, enabled = !savingKey) { maxConcurrencyDraft = it }
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Box(
                                         modifier = Modifier
                                             .clip(CircleShape)
-                                            .background(Color.White)
-                                            .orbPressClickable(enabled = !savingKey && apiKeyDraft.trim().isNotEmpty()) {
+                                            .background(if (addReady) Color.White else OrbStyle.border)
+                                            .orbPressClickable(enabled = addReady) {
                                                 saveApiKey(null)
                                             }
                                             .padding(horizontal = 14.dp, vertical = 7.dp)

@@ -246,3 +246,46 @@ headers were sent. Regression tests: `src/api/proxy.rs` `latency_tests`,
    is also sent to `target`; the first successful response wins and the
    other request is dropped. Hedging can change which model answers, so it is
    never on by default.
+
+## Provider rate-limit and concurrency pacing
+
+Custom and OpenAI-compatible gateways often enforce both an account-wide
+request-per-minute (RPM) budget and tighter per-model concurrency or RPM/TPM
+quotas (for example LiteLLM gateways returning `x-litellm-key-rpm-limit` alongside
+upstream `x-ratelimit-*` headers). Orb models, learns, and enforces these limits
+directly in the proxy router (`src/ai_providers.rs`, `src/provider_health.rs`,
+`src/api/proxy.rs`):
+
+1. **Configured metadata (`POST` / `PUT /api/ai/providers`).**
+   - Account level (`AIProvider`): optional `rpm_limit` (`1..=100_000`) and
+     `max_concurrency` (`1..=1024`).
+   - Per-model level (`CustomModel`): optional `rpm_limit` (`1..=100_000`),
+     `tpm_limit` (`> 0`), and `max_concurrency` (`1..=1024`).
+   - `GET /api/model-routing/chains/:id/resolve` surfaces both the account-level
+     and resolved per-model caps on each chain entry.
+2. **Automatic header learning.**
+   - Every response from OpenAI, Custom, and OpenAI-compatible providers parses
+     `x-ratelimit-limit-{requests,tokens}`,
+     `x-ratelimit-remaining-{requests,tokens}`,
+     `x-ratelimit-reset-{requests,tokens}`, and `x-litellm-key-rpm-limit`.
+   - When `x-litellm-key-rpm-limit` is present, `RateLimitSnapshot.key_rpm_limit`
+     is persisted across subsequent snapshots on that account and acts as the
+     effective account RPM ceiling whenever an explicit `AIProvider.rpm_limit` is
+     not configured.
+3. **Proactive waterfall spillover & pacing (`pace_configured_entry_limits`).**
+   - **Concurrency gates:** Per-model (`model_max_concurrency`) and per-account
+     (`max_concurrency`) permits are held for the full lifetime of the upstream
+     request, including SSE stream delivery (`with_concurrency_permit`). When a
+     slot is busy and a later routable entry exists in the fallback chain, the
+     router waits at most `PROXY_CUSTOM_SPILLOVER_WAIT_MS` (default `500 ms`)
+     before spilling over to the next entry **without** marking the saturated
+     account degraded or cooling it down. When no fallback entry remains, the
+     request queues in FIFO order up to the upstream request timeout.
+   - **Sliding 60 s RPM windows:** Separate 60-second sliding windows track
+     account-wide (`rpm_limit` or learned `key_rpm_limit`) and per-model
+     (`model_rpm_limit`) admissions. If a burst exceeds the window and another
+     chain entry can serve immediately (different model on a per-model cap, or
+     different account on an account cap), the router spills over after
+     `PROXY_CUSTOM_SPILLOVER_WAIT_MS`; otherwise, when the next slot opens
+     within `PROXY_RPM_MAX_PACE_WAIT_MS` (default `15_000 ms`), the router
+     smoothly paces the request instead of triggering an upstream `429`.

@@ -217,4 +217,22 @@ final class OrbSettingsTests: XCTestCase {
         }
     }
 
+    func testCustomProviderKeyEditabilityAndCapParsing() {
+        let custom = OrbJSON.object([
+            "id": .string("eth-1"),
+            "provider_type": .string("custom"),
+            "name": .string("Ethereum Foundation"),
+            "has_api_key": .bool(true),
+            "uses_oauth": .bool(false),
+            "rpm_limit": .number(300),
+            "max_concurrency": .number(8),
+        ])
+        XCTAssertTrue(OrbProvidersSettings.canEditKey(custom))
+        XCTAssertFalse(OrbProvidersSettings.canConnectOAuth(custom))
+        XCTAssertEqual(OrbProviderKeyEditor.parseOptionalCap("  ", min: 1, max: 100_000), .ok(nil))
+        XCTAssertEqual(OrbProviderKeyEditor.parseOptionalCap("300", min: 1, max: 100_000), .ok(300))
+        XCTAssertEqual(OrbProviderKeyEditor.parseOptionalCap("0", min: 1, max: 100_000), .invalid)
+        XCTAssertEqual(OrbProviderKeyEditor.parseOptionalCap("100001", min: 1, max: 100_000), .invalid)
+    }
+
 }
