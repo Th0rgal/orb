@@ -189,7 +189,7 @@ function ConfigureMachineProviderDialog(p: { provider: ManagedProviderInfo; onCl
       }
       const patch: ManagedProviderPatch = patchOverride ?? {
         ...(apiKey().trim() ? { api_key: apiKey().trim(), enabled: true } : {}),
-        ...(p.provider.provider === "hetzner" || p.provider.provider === "scaleway" ? { region: region().trim() } : {}),
+        ...(p.provider.provider === "hetzner" || p.provider.provider === "scaleway" || p.provider.provider === "colab" ? { region: region().trim() } : {}),
         ...(p.provider.provider === "scaleway" || p.provider.provider === "boost" ? { project_id: projectId().trim() } : {}),
         ...maxPatch,
       };
@@ -235,6 +235,11 @@ function ConfigureMachineProviderDialog(p: { provider: ManagedProviderInfo; onCl
         </Field>
         <Field label="Project ID" description="Scaleway project UUID that owns spawned instances.">
           <input type="text" class="s-input" aria-label="Project ID" placeholder="00000000-0000-0000-0000-000000000000" value={projectId()} onInput={e => setProjectId(e.currentTarget.value)} />
+        </Field>
+      </Show>
+      <Show when={p.provider.provider === "colab"}>
+        <Field label="colab-api URL" description="Optional colab-api base URL override (defaults to COLAB_API_URL or http://127.0.0.1:8790/v1).">
+          <input type="text" class="s-input" aria-label="colab-api URL" placeholder="http://127.0.0.1:8790/v1" value={region()} onInput={e => setRegion(e.currentTarget.value)} />
         </Field>
       </Show>
       <Show when={err()}><ErrorNotice error={err()!} /></Show>

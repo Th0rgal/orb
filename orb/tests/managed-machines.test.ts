@@ -167,6 +167,7 @@ describe("ownership and reaping", () => {
     expect(providerLabel("hetzner")).toBe("Hetzner");
     expect(providerLabel("vastai")).toBe("Vast.ai");
     expect(providerLabel("scaleway")).toBe("Scaleway");
+    expect(providerLabel("colab")).toBe("Google Colab");
     expect(managedSectionTitle([{ provider: "boat", display_name: "boat.dev", configured: true, supports_snapshots: true, supports_free_stop: true, sizes: [] }], [])).toBe("Managed (boat.dev)");
     expect(managedSectionTitle([{ provider: "hetzner", display_name: "Hetzner", configured: true, supports_snapshots: false, supports_free_stop: false, sizes: [] }], [])).toBe("Managed cloud");
     expect(managedSectionTitle([
@@ -191,6 +192,7 @@ describe("ownership and reaping", () => {
       ["hetzner", "Hetzner Cloud", true, true, true, false, false],
       ["vastai", "Vast.ai", false, true, false, false, false],
       ["scaleway", "Scaleway", false, false, false, false, false],
+      ["colab", "Google Colab", false, true, false, false, false],
     ]);
     expect(resp.providers![0]!.max_concurrent).toBe(100);
     expect(resp.providers![1]!.availability?.status).toBe("degraded");
@@ -201,11 +203,15 @@ describe("ownership and reaping", () => {
     expect(providerStatusLine(resp.providers![2]!)).toBe("Configured · Settings ••••5678 · fsn1");
     expect(providerStatusLine(resp.providers![3]!)).toBe("Not configured");
     expect(providerStatusLine(resp.providers![4]!)).toBe("Disabled · Not configured");
+    expect(providerStatusLine(resp.providers![5]!)).toBe("Not configured");
     expect(managedSectionTitle(resp.providers, resp.machines)).toBe("Managed cloud");
     expect(canStopMachine(resp.machines[0]!, resp.providers)).toBe(false);
     expect(resp.machines[0]!.size).toBe("cpx42");
     const vastRtx = resp.providers?.find(p => p.provider === "vastai")?.sizes.find(s => s.size === "rtx4090");
     expect(vastRtx?.gpu).toBe("RTX 4090");
+    const colabA100 = resp.providers?.find(p => p.provider === "colab")?.sizes.find(s => s.size === "a100");
+    expect(colabA100?.gpu).toBe("A100");
+    expect(colabA100?.usd_per_hour).toBe(0.675);
     const cax = resp.providers?.find(p => p.provider === "hetzner")?.sizes.find(s => s.size === "cax31");
     expect(cax?.arch).toBe("arm64");
   });

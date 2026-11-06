@@ -291,6 +291,7 @@ export const providerLabel = (provider?: string | null): string => {
   if (key === "hetzner") return "Hetzner";
   if (key === "vastai") return "Vast.ai";
   if (key === "scaleway") return "Scaleway";
+  if (key === "colab" || key === "google-colab") return "Google Colab";
   return provider || "boat.dev";
 };
 
@@ -334,7 +335,7 @@ export function groupMachinesByProvider<M extends Pick<ManagedMachine, "provider
     if (!order.includes(key)) order.push(key);
   };
   for (const p of providers ?? []) push(p.provider);
-  for (const p of ["boat", "boost", "hetzner", "vastai", "scaleway"]) push(p);
+  for (const p of ["boat", "boost", "hetzner", "vastai", "scaleway", "colab"]) push(p);
   for (const key of buckets.keys()) push(key);
   return order
     .filter(key => (buckets.get(key)?.length ?? 0) > 0)

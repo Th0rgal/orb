@@ -401,6 +401,7 @@ pub fn is_core_reserved_compute_secret(key: &str) -> bool {
             | "VASTAI_API_KEY"
             | "VAST_API_KEY"
             | "RUNPOD_API_KEY"
+            | "COLAB_API_TOKEN"
             | "COLAB_API_DOTENV_PRIVATE_KEY"
     )
 }
@@ -2079,6 +2080,7 @@ mod tests {
             "SCALEWAY_KEY_ID",
             "VASTAI_API_KEY",
             "RUNPOD_API_KEY",
+            "COLAB_API_TOKEN",
             "COLAB_API_DOTENV_PRIVATE_KEY",
         ] {
             assert!(is_core_reserved_compute_secret(reserved));
