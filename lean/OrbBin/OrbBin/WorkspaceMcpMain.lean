@@ -397,7 +397,7 @@ private def extractTextFromHtml (html : String) : String := Id.run do
 private def execFetchUrl (args : JVal) : IO (Except String String) := do
   let some url := args.fieldStr? "url" | return .error "Missing 'url' argument"
   let hdrs := #[("User-Agent", "Mozilla/5.0 (compatible; Sandboxed/1.0)")]
-  match (← sendRequest "GET" url hdrs ByteArray.empty 60000) with
+  match (← sendRequestFollowingRedirects "GET" url hdrs ByteArray.empty 60000) with
   | .error e => return .error e
   | .ok resp =>
     if resp.status < 200 || resp.status ≥ 300 then

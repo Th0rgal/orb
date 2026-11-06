@@ -7,6 +7,7 @@
 import Orb.Kernel
 import LeanSys.Auth
 import OrbBin.PosixExt
+import OrbBin.UnicodeAlnum
 import OrbBin.Json
 import OrbBin.HttpClient
 
@@ -232,78 +233,290 @@ def loadPrGates (root : System.FilePath) (ownerRepo : String) (number : Nat) : I
   if let some headSha := prJson.fieldStr? "headRefOid" then
     let wfOut ← IO.Process.output {
       cmd := "gh"
-      args := #["api", s!"repos/{ownerRepo}/actions/runs?head_sha={headSha}&per_page=100"]
+      args := #[
+        "run", "list", "--repo", ownerRepo, "--commit", headSha, "--limit", "100",
+        "--json", "name,status,conclusion,headSha,url"
+      ]
     }
     if wfOut.exitCode == 0 then
-      if let .ok wfJson := Json.parse wfOut.stdout then
-        if let some runs := wfJson.fieldArr? "workflow_runs" then
-          let mapped := runs.map fun r => JVal.obj #[
-            ("name", .str ((r.fieldStr? "name").getD "")),
-            ("status", .str ((r.fieldStr? "status").getD "")),
-            ("conclusion", match r.fieldStr? "conclusion" with | some c => .str c | none => .null),
-            ("head_sha", .str ((r.fieldStr? "head_sha").getD "")),
-            ("url", .str ((r.fieldStr? "html_url").getD ""))
-          ]
-          enriched := enriched.setField "workflow_runs" (.arr mapped)
+      if let .ok (.arr runs) := Json.parse wfOut.stdout then
+        let mut seenWf : Array String := #[]
+        let mut mapped : Array JVal := #[]
+        for r in runs do
+          let nm := (r.fieldStr? "name").getD ""
+          if !seenWf.contains nm then
+            seenWf := seenWf.push nm
+            mapped := mapped.push <| JVal.obj #[
+              ("name", .str nm),
+              ("status", .str ((r.fieldStr? "status").getD "").toLower),
+              ("conclusion", match r.fieldStr? "conclusion" with | some c => .str c.toLower | none => .null),
+              ("head_sha", .str ((r.fieldStr? "headSha").orElse (fun _ => r.fieldStr? "head_sha") |>.getD "")),
+              ("url", .str ((r.fieldStr? "url").orElse (fun _ => r.fieldStr? "html_url") |>.getD ""))
+            ]
+        enriched := enriched.setField "workflow_runs" (.arr mapped)
   return .ok enriched
 
-/-! ### Minimal TOML/JSON Validation Matrix Parser (`validation-matrix`) -/
+/-! ### TOML / JSON Validation Matrix Parser (`validation-matrix`) -/
 
-private def stripTomlComment (line : String) : String := Id.run do
-  let mut inStr := false
-  let mut esc := false
-  let mut out : Array Char := #[]
-  for c in line.toList do
-    if esc then
-      out := out.push c; esc := false
-    else if c == '\\' && inStr then
-      out := out.push c; esc := true
-    else if c == '"' then
-      inStr := !inStr; out := out.push c
-    else if c == '#' && !inStr then
-      break
+private structure TomlLexer where
+  cs  : Array Char
+  pos : Nat
+
+private def tomlSkipWsAndComments (s : TomlLexer) : TomlLexer := Id.run do
+  let mut p := s.pos
+  while p < s.cs.size do
+    let c := s.cs[p]!
+    if c == ' ' || c == '\t' || c == '\r' || c == '\n' then
+      p := p + 1
+    else if c == '#' then
+      p := p + 1
+      while p < s.cs.size && s.cs[p]! != '\n' do p := p + 1
     else
-      out := out.push c
-  return (String.ofList out.toList).trimAscii.toString
+      break
+  return { s with pos := p }
+
+private def tomlSkipHorizWsAndComment (s : TomlLexer) : TomlLexer := Id.run do
+  let mut p := s.pos
+  while p < s.cs.size && (s.cs[p]! == ' ' || s.cs[p]! == '\t' || s.cs[p]! == '\r') do
+    p := p + 1
+  if p < s.cs.size && s.cs[p]! == '#' then
+    while p < s.cs.size && s.cs[p]! != '\n' do p := p + 1
+  return { s with pos := p }
+
+private def parseHexFixed? (cs : Array Char) (start count : Nat) : Option Nat := Id.run do
+  if start + count > cs.size then return none
+  let mut acc : Nat := 0
+  for i in [0 : count] do
+    let c := cs[start + i]!
+    let v? :=
+      if '0' ≤ c && c ≤ '9' then some (c.toNat - '0'.toNat)
+      else if 'a' ≤ c && c ≤ 'f' then some (10 + c.toNat - 'a'.toNat)
+      else if 'A' ≤ c && c ≤ 'F' then some (10 + c.toNat - 'A'.toNat)
+      else none
+    match v? with
+    | some d => acc := acc * 16 + d
+    | none => return none
+  return some acc
+
+private def tomlParseBasicString (s : TomlLexer) : Except String (String × TomlLexer) := do
+  let multiline :=
+    s.pos + 3 ≤ s.cs.size &&
+    s.cs[s.pos]! == '"' && s.cs[s.pos + 1]! == '"' && s.cs[s.pos + 2]! == '"'
+  let mut p := if multiline then s.pos + 3 else s.pos + 1
+  if multiline && p < s.cs.size then
+    if s.cs[p]! == '\r' && p + 1 < s.cs.size && s.cs[p + 1]! == '\n' then p := p + 2
+    else if s.cs[p]! == '\n' then p := p + 1
+  let mut out : Array Char := #[]
+  let mut closed := false
+  while p < s.cs.size && !closed do
+    if multiline && p + 3 ≤ s.cs.size &&
+       s.cs[p]! == '"' && s.cs[p + 1]! == '"' && s.cs[p + 2]! == '"' then
+      p := p + 3
+      closed := true
+    else if !multiline && s.cs[p]! == '"' then
+      p := p + 1
+      closed := true
+    else if !multiline && (s.cs[p]! == '\n' || s.cs[p]! == '\r') then
+      throw "unterminated TOML basic string"
+    else if s.cs[p]! == '\\' then
+      if p + 1 ≥ s.cs.size then throw "unterminated TOML escape"
+      let esc := s.cs[p + 1]!
+      match esc with
+      | 'b' => out := out.push '\x08'; p := p + 2
+      | 't' => out := out.push '\t'; p := p + 2
+      | 'n' => out := out.push '\n'; p := p + 2
+      | 'f' => out := out.push '\x0c'; p := p + 2
+      | 'r' => out := out.push '\r'; p := p + 2
+      | '"' => out := out.push '"'; p := p + 2
+      | '\\' => out := out.push '\\'; p := p + 2
+      | 'u' =>
+        let some cp := parseHexFixed? s.cs (p + 2) 4 | throw "invalid TOML \\uXXXX escape"
+        out := out.push (Char.ofNat cp)
+        p := p + 6
+      | 'U' =>
+        let some cp := parseHexFixed? s.cs (p + 2) 8 | throw "invalid TOML \\UXXXXXXXX escape"
+        out := out.push (Char.ofNat cp)
+        p := p + 10
+      | '\n' | '\r' | ' ' | '\t' =>
+        if !multiline then throw s!"invalid TOML escape \\{esc}"
+        p := p + 1
+        let mut sawNewline := false
+        while p < s.cs.size && (s.cs[p]! == ' ' || s.cs[p]! == '\t' || s.cs[p]! == '\r' || s.cs[p]! == '\n') do
+          if s.cs[p]! == '\n' then sawNewline := true
+          p := p + 1
+        if !sawNewline then throw "TOML line-ending backslash requires newline"
+      | _ => throw s!"invalid TOML escape \\{esc}"
+    else
+      out := out.push s.cs[p]!
+      p := p + 1
+  if !closed then throw "unterminated TOML string"
+  return (String.ofList out.toList, { s with pos := p })
+
+private def tomlParseLiteralString (s : TomlLexer) : Except String (String × TomlLexer) := do
+  let multiline :=
+    s.pos + 3 ≤ s.cs.size &&
+    s.cs[s.pos]! == '\'' && s.cs[s.pos + 1]! == '\'' && s.cs[s.pos + 2]! == '\''
+  let mut p := if multiline then s.pos + 3 else s.pos + 1
+  if multiline && p < s.cs.size then
+    if s.cs[p]! == '\r' && p + 1 < s.cs.size && s.cs[p + 1]! == '\n' then p := p + 2
+    else if s.cs[p]! == '\n' then p := p + 1
+  let mut out : Array Char := #[]
+  let mut closed := false
+  while p < s.cs.size && !closed do
+    if multiline && p + 3 ≤ s.cs.size &&
+       s.cs[p]! == '\'' && s.cs[p + 1]! == '\'' && s.cs[p + 2]! == '\'' then
+      p := p + 3
+      closed := true
+    else if !multiline && s.cs[p]! == '\'' then
+      p := p + 1
+      closed := true
+    else if !multiline && (s.cs[p]! == '\n' || s.cs[p]! == '\r') then
+      throw "unterminated TOML literal string"
+    else
+      out := out.push s.cs[p]!
+      p := p + 1
+  if !closed then throw "unterminated TOML literal string"
+  return (String.ofList out.toList, { s with pos := p })
+
+private def tomlIsBareKeyChar (c : Char) : Bool :=
+  ('a' ≤ c && c ≤ 'z') || ('A' ≤ c && c ≤ 'Z') || Char.isDigit c || c == '_' || c == '-'
+
+private def tomlParseKey (s0 : TomlLexer) : Except String (String × TomlLexer) := do
+  let s := tomlSkipHorizWsAndComment s0
+  if s.pos ≥ s.cs.size then throw "unexpected EOF reading TOML key"
+  let c := s.cs[s.pos]!
+  if c == '"' then tomlParseBasicString s
+  else if c == '\'' then tomlParseLiteralString s
+  else
+    let mut p := s.pos
+    while p < s.cs.size && tomlIsBareKeyChar s.cs[p]! do p := p + 1
+    if p == s.pos then throw s!"invalid TOML key character '{c}'"
+    return (String.ofList (s.cs.extract s.pos p).toList, { s with pos := p })
+
+private partial def tomlParseValue (s0 : TomlLexer) : Except String (JVal × TomlLexer) := do
+  let s := tomlSkipWsAndComments s0
+  if s.pos ≥ s.cs.size then throw "unexpected EOF reading TOML value"
+  let c := s.cs[s.pos]!
+  if c == '"' then
+    let (str, s') ← tomlParseBasicString s
+    return (.str str, s')
+  else if c == '\'' then
+    let (str, s') ← tomlParseLiteralString s
+    return (.str str, s')
+  else if c == '[' then
+    let mut cur := tomlSkipWsAndComments { s with pos := s.pos + 1 }
+    let mut items : Array JVal := #[]
+    while cur.pos < cur.cs.size && cur.cs[cur.pos]! != ']' do
+      let (v, nextS) ← tomlParseValue cur
+      items := items.push v
+      let afterVal := tomlSkipWsAndComments nextS
+      if afterVal.pos < afterVal.cs.size && afterVal.cs[afterVal.pos]! == ',' then
+        cur := tomlSkipWsAndComments { afterVal with pos := afterVal.pos + 1 }
+      else
+        cur := afterVal
+        if cur.pos < cur.cs.size && cur.cs[cur.pos]! != ']' then
+          throw "expected ',' or ']' in TOML array"
+    if cur.pos ≥ cur.cs.size || cur.cs[cur.pos]! != ']' then
+      throw "unterminated TOML array"
+    return (.arr items, { cur with pos := cur.pos + 1 })
+  else if c == '{' then
+    let mut cur := tomlSkipHorizWsAndComment { s with pos := s.pos + 1 }
+    let mut fields : Array (String × JVal) := #[]
+    while cur.pos < cur.cs.size && cur.cs[cur.pos]! != '}' do
+      let (k, sAfterK) ← tomlParseKey cur
+      let sEq := tomlSkipHorizWsAndComment sAfterK
+      if sEq.pos ≥ sEq.cs.size || sEq.cs[sEq.pos]! != '=' then
+        throw "expected '=' in TOML inline table"
+      let (v, sAfterV) ← tomlParseValue { sEq with pos := sEq.pos + 1 }
+      fields := (fields.filter (fun (ek, _) => ek != k)).push (k, v)
+      let afterField := tomlSkipHorizWsAndComment sAfterV
+      if afterField.pos < afterField.cs.size && afterField.cs[afterField.pos]! == ',' then
+        cur := tomlSkipHorizWsAndComment { afterField with pos := afterField.pos + 1 }
+      else
+        cur := afterField
+        if cur.pos < cur.cs.size && cur.cs[cur.pos]! != '}' then
+          throw "expected ',' or '}' in TOML inline table"
+    if cur.pos ≥ cur.cs.size || cur.cs[cur.pos]! != '}' then
+      throw "unterminated TOML inline table"
+    return (.obj fields, { cur with pos := cur.pos + 1 })
+  else
+    let mut p := s.pos
+    while p < s.cs.size &&
+          s.cs[p]! != ' ' && s.cs[p]! != '\t' && s.cs[p]! != '\r' && s.cs[p]! != '\n' &&
+          s.cs[p]! != ',' && s.cs[p]! != ']' && s.cs[p]! != '}' && s.cs[p]! != '#' do
+      p := p + 1
+    let rawTok := String.ofList (s.cs.extract s.pos p).toList
+    if rawTok == "true" then return (.bool true, { s with pos := p })
+    else if rawTok == "false" then return (.bool false, { s with pos := p })
+    else
+      let cleaned := String.ofList (rawTok.toList.filter (· != '_'))
+      let withoutPlus := if cleaned.startsWith "+" then (cleaned.drop 1).toString else cleaned
+      if let some n := withoutPlus.toNat? then
+        return (.nat n, { s with pos := p })
+      else if withoutPlus.startsWith "-" then
+        if let some n := (withoutPlus.drop 1).toString.toNat? then
+          return (JVal.int (-(Int.ofNat n)), { s with pos := p })
+      throw s!"invalid TOML scalar value `{rawTok}`"
 
 def parseValidationMatrixText (raw : String) : Except String JVal := do
   let trimmed := raw.trimAscii.toString
   if trimmed.startsWith "{" then
     return (← Json.parse trimmed)
+  let mut lex : TomlLexer := { cs := raw.toList.toArray, pos := 0 }
   let mut version : Nat := 1
-  let mut project : String := ""
+  let mut project? : Option String := none
   let mut profile? : Option String := none
   let mut gates : Array JVal := #[]
   let mut curGate : Option (Array (String × JVal)) := none
-  for rawLine in raw.splitOn "\n" do
-    let line := stripTomlComment rawLine
-    if !line.isEmpty then
-      if line == "[[gates]]" then
-        if let some g := curGate then
-          gates := gates.push (.obj g)
-        curGate := some #[
-          ("dependencies", .arr #[]),
-          ("required", .bool true),
-          ("mode", .str "incremental"),
-          ("reuse", .bool true),
-          ("artifacts", .arr #[])
-        ]
-      else if let keyPart :: valParts := line.splitOn "=" then
-        if !valParts.isEmpty then
-          let k := keyPart.trimAscii.toString
-          let vRaw := (String.intercalate "=" valParts).trimAscii.toString
-          let vParsed ← Json.parse vRaw
-          match curGate with
-          | none =>
-            if k == "version" then version := (vParsed.asNat?).getD 1
-            else if k == "project" then project := (vParsed.asStr?).getD ""
-            else if k == "profile" then profile? := vParsed.asStr?
-          | some g =>
-            let normKey := if k == "depends_on" then "dependencies" else k
-            let updated := JVal.setField (.obj g) normKey vParsed
-            curGate := updated.asObj?
+  while true do
+    lex := tomlSkipWsAndComments lex
+    if lex.pos ≥ lex.cs.size then break
+    if lex.pos + 2 ≤ lex.cs.size && lex.cs[lex.pos]! == '[' && lex.cs[lex.pos + 1]! == '[' then
+      lex := { lex with pos := lex.pos + 2 }
+      let (secName, afterSec) ← tomlParseKey lex
+      let sClose := tomlSkipHorizWsAndComment afterSec
+      if secName != "gates" || sClose.pos + 2 > sClose.cs.size ||
+         sClose.cs[sClose.pos]! != ']' || sClose.cs[sClose.pos + 1]! != ']' then
+        throw s!"unsupported TOML array-of-tables header `[[{secName}]]`"
+      if let some g := curGate then
+        gates := gates.push (.obj g)
+      curGate := some #[
+        ("dependencies", .arr #[]),
+        ("required", .bool true),
+        ("mode", .str "incremental"),
+        ("reuse", .bool true),
+        ("artifacts", .arr #[])
+      ]
+      lex := { sClose with pos := sClose.pos + 2 }
+    else if lex.cs[lex.pos]! == '[' then
+      throw "unexpected TOML table header in validation matrix"
+    else
+      let (k, afterKey) ← tomlParseKey lex
+      let sEq := tomlSkipHorizWsAndComment afterKey
+      if sEq.pos ≥ sEq.cs.size || sEq.cs[sEq.pos]! != '=' then
+        throw s!"expected '=' after TOML key `{k}`"
+      let (vParsed, afterVal) ← tomlParseValue { sEq with pos := sEq.pos + 1 }
+      lex := afterVal
+      match curGate with
+      | none =>
+        if k == "version" then
+          let some vNat := vParsed.asNat? | throw "version must be an integer"
+          version := vNat
+        else if k == "project" then
+          let some pStr := vParsed.asStr? | throw "project must be a string"
+          project? := some pStr
+        else if k == "profile" then
+          let some profStr := vParsed.asStr? | throw "profile must be a string"
+          profile? := some profStr
+        else
+          throw s!"unknown top-level validation matrix key `{k}`"
+      | some g =>
+        let normKey := if k == "depends_on" then "dependencies" else k
+        let updated := JVal.setField (.obj g) normKey vParsed
+        curGate := updated.asObj?
   if let some g := curGate then
     gates := gates.push (.obj g)
+  let some project := project? | throw "missing required top-level `project` field"
   return .obj #[
     ("version", .nat version),
     ("project", .str project),
@@ -1138,8 +1351,8 @@ def normalizeTrackKey (raw : String) : String := Id.run do
   let mut out : Array Char := #[]
   let mut lastDash := true
   for ch in raw.trimAscii.toString.toList do
-    if ch.isAlphanum then
-      out := out.push ch.toLower
+    if OrbBin.UnicodeAlnum.isUnicodeAlnum ch then
+      out := out.push (OrbBin.UnicodeAlnum.toUnicodeLower ch)
       lastDash := false
     else if !lastDash then
       out := out.push '-'

@@ -147,6 +147,77 @@ def sendRequest
       let _ ← LeanSys.Posix.closeFd fd
       return .error s!"HTTP transport exception: {e}"
 
+/-- Resolve a redirect `Location` header value against `baseUrl`. -/
+def resolveRedirectUrl (baseUrl location : String) : Except String String := do
+  let loc := location.trimAscii.toString
+  if loc.isEmpty then throw "Empty redirect Location header"
+  if loc.startsWith "http://" || loc.startsWith "https://" then
+    return loc
+  let base ← parseUrl baseUrl
+  let scheme := if base.isHttps then "https://" else "http://"
+  if loc.startsWith "//" then
+    return scheme ++ (loc.drop 2).toString
+  if loc.startsWith "/" then
+    return s!"{scheme}{base.hostHeader}{loc}"
+  let basePath := (base.pathQuery.splitOn "?").headD "/"
+  let parts := basePath.splitOn "/"
+  let baseDir :=
+    if parts.length > 1 then
+      String.intercalate "/" parts.dropLast ++ "/"
+    else
+      "/"
+  return s!"{scheme}{base.hostHeader}{baseDir}{loc}"
+
+/-- Execute an HTTP/1.1 or HTTPS request following up to `maxRedirects` (`301/302/303/307/308`) hops.
+    Sensitive headers (`Authorization`, `Cookie`) are stripped across cross-origin hops. -/
+def sendRequestFollowingRedirects
+    (method rawUrl : String)
+    (headers : Array (String × String) := #[])
+    (body : ByteArray := ByteArray.empty)
+    (timeoutMs : UInt32 := 30000)
+    (maxRespBytes : Nat := 16777216)
+    (maxRedirects : Nat := 10) : IO (Except String HttpsResponse) := do
+  let mut curMethod := method
+  let mut curUrl := rawUrl
+  let mut curHeaders := headers
+  let mut curBody := body
+  for _ in [0 : maxRedirects + 1] do
+    let prevParsed ← match parseUrl curUrl with
+      | .ok p => pure p
+      | .error e => return .error e
+    match (← sendRequest curMethod curUrl curHeaders curBody timeoutMs maxRespBytes) with
+    | .error e => return .error e
+    | .ok resp =>
+      let isRedirect :=
+        resp.status == 301 || resp.status == 302 || resp.status == 303 ||
+        resp.status == 307 || resp.status == 308
+      if !isRedirect then
+        return .ok resp
+      let some (_, locVal) := resp.headers.find? (fun (k, _) => k.toLower == "location")
+        | return .ok resp
+      let nextUrl ← match resolveRedirectUrl curUrl locVal with
+        | .ok u => pure u
+        | .error e => return .error e
+      let nextParsed ← match parseUrl nextUrl with
+        | .ok p => pure p
+        | .error e => return .error e
+      let sameOrigin :=
+        prevParsed.isHttps == nextParsed.isHttps &&
+        prevParsed.host.toLower == nextParsed.host.toLower &&
+        prevParsed.port == nextParsed.port
+      if !sameOrigin then
+        curHeaders := curHeaders.filter fun (k, _) =>
+          let kl := k.toLower
+          kl != "authorization" && kl != "cookie"
+      if resp.status == 303 || ((resp.status == 301 || resp.status == 302) && curMethod != "GET" && curMethod != "HEAD") then
+        curMethod := "GET"
+        curBody := ByteArray.empty
+        curHeaders := curHeaders.filter fun (k, _) =>
+          let kl := k.toLower
+          kl != "content-length" && kl != "content-type"
+      curUrl := nextUrl
+  return .error s!"Too many HTTP redirects (> {maxRedirects}) fetching `{rawUrl}`"
+
 /-- Send an HTTP/HTTPS request with optional JSON body and optional Bearer token, returning `(status, rawBody, JVal?)`. -/
 def sendJsonRequest
     (method rawUrl : String)

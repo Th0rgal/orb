@@ -278,10 +278,32 @@ def runAllTests : IO UInt32 := do
     (driftArr.any (fun d => d.fieldStr? "kind" == some "live_mismatch"))
   assertTrue "detectLocalDrift finds pr_listed_open_but_merged"
     (driftArr.any (fun d => d.fieldStr? "kind" == some "pr_listed_open_but_merged"))
-  let parsedChecklist := parseTrackerMarkdown "- [x] A1: ship feature\n- [ ] no code item here\n"
-  assertEq "parseTrackerMarkdown item count" parsedChecklist.size 2
+  let parsedChecklist := parseTrackerMarkdown "- [x] A1: ship feature\n- [ ] no code item here\n- [ ] Réparer interface Δ1\n"
+  assertEq "parseTrackerMarkdown item count" parsedChecklist.size 3
   assertEq "parseTrackerMarkdown normalizes code key" parsedChecklist[0]!.key "a1"
   assertEq "parseTrackerMarkdown derives title key" parsedChecklist[1]!.key "no-code-item-here"
+  assertEq "parseTrackerMarkdown preserves & lowercases Unicode alphanumeric title"
+    parsedChecklist[2]!.key "réparer-interface-δ1"
+
+  -- TOML validation-matrix syntax (single-quoted literal strings, multiline arrays, trailing commas)
+  let tomlMatrix :=
+    "version = 1\nproject = 'verity-core'\n\n[[gates]]\nid = 'build'\ncommand = [\n  'lake',\n  \"build\",\n] # trailing comma + multiline\nrequired = true\n"
+  match parseValidationMatrixText tomlMatrix >>= validateMatrixJson with
+  | .error e => throw <| IO.userError s!"parseValidationMatrixText TOML failed: {e}"
+  | .ok mat =>
+    assertEq "TOML validation matrix project" (mat.fieldStr? "project") (some "verity-core")
+    let gs := (mat.fieldArr? "gates").getD #[]
+    assertEq "TOML validation matrix gate count" gs.size 1
+    let cmdArr := ((gs[0]!.fieldArr? "command").getD #[]).filterMap JVal.asStr?
+    assertEq "TOML validation matrix multiline command" cmdArr #["lake", "build"]
+
+  -- HTTP redirect URL resolution
+  assertEq "resolveRedirectUrl relative root path"
+    (resolveRedirectUrl "http://example.com:8080/docs/old" "/docs/new").toOption
+    (some "http://example.com:8080/docs/new")
+  assertEq "resolveRedirectUrl scheme-relative URL"
+    (resolveRedirectUrl "https://example.com/a" "//cdn.example.com/b").toOption
+    (some "https://cdn.example.com/b")
 
   -- 10. `StdioMcpServer` cancel + reused ID ownership & 8-slot `inFlight` retention
   let inPath := tmpDir / "rpc-in.jsonl"
