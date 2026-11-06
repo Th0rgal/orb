@@ -2981,7 +2981,10 @@ fn stream_sandboxed_update(
         yield sse("log", "Building sandboxed.sh (this may take a few minutes)...", Some(20));
 
         match Command::new("bash")
-            .args(["-c", "source /root/.cargo/env && cargo build --bin sandboxed-sh --bin workspace-mcp --bin desktop-mcp --bin sandboxed-mcp"])
+            .args([
+                "-c",
+                "source /root/.cargo/env && cargo build --bin sandboxed-sh && ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/debug --only workspace-mcp --only desktop-mcp --only sandboxed-mcp",
+            ])
             .current_dir(repo_path)
             .output()
             .await
@@ -4037,13 +4040,13 @@ pub(crate) async fn run_deploy(plan: DeployPlan, tx: DeployTx) -> bool {
         deploy_log(
             &tx,
             format!(
-                "Building {} + {} + {} (cargo build, debug)",
+                "Building {} (cargo) + {} + {} (Lean OrbBin)",
                 MAIN_CARGO_BIN, MCP_CARGO_BIN, PALOMA_CARGO_BIN
             ),
             Some(25),
         );
         let build_cmd = format!(
-            "source /root/.cargo/env 2>/dev/null; cargo build --bin {} --bin {} --bin {}",
+            "source /root/.cargo/env 2>/dev/null; cargo build --bin {} && ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/debug --only {} --only {}",
             MAIN_CARGO_BIN, MCP_CARGO_BIN, PALOMA_CARGO_BIN
         );
         match Command::new("bash")

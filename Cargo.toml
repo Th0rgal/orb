@@ -107,35 +107,11 @@ name = "sandboxed-sh"
 path = "src/main.rs"
 
 [[bin]]
-name = "desktop-mcp"
-path = "src/bin/desktop_mcp.rs"
-
-[[bin]]
-name = "workspace-mcp"
-path = "src/bin/workspace_mcp.rs"
-
-[[bin]]
-name = "automation-manager-mcp"
-path = "src/bin/automation_manager_mcp.rs"
-
-[[bin]]
-name = "fido-agent-proxy"
-path = "src/bin/fido_agent_proxy.rs"
-
-[[bin]]
-name = "palomactl"
-path = "src/bin/palomactl.rs"
-
-[[bin]]
 name = "sandboxed-node"
 path = "src/bin/sandboxed_node.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"
-
-[[bin]]
-name = "sandboxed-mcp"
-path = "src/bin/sandboxed_mcp.rs"
 
 [profile.dev]
 debug = "line-tables-only"

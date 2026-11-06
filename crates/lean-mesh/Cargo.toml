@@ -10,10 +10,6 @@ repository = "https://github.com/Th0rgal/lean-mesh"
 name = "lean_mesh"
 path = "src/lib.rs"
 
-[[bin]]
-name = "lean-mesh"
-path = "src/bin/lean-mesh.rs"
-
 [dependencies]
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
@@ -22,6 +18,5 @@ serde_json = "1"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
-clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 thiserror = "2"

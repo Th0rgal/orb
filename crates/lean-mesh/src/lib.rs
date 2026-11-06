@@ -2720,9 +2720,9 @@ mod tests {
             .unwrap();
         assert_eq!(rogue_plan.action, ReconcileAction::RemovePeer);
 
-        // 6. Source-wide audit: production `lib.rs` and `bin/lean-mesh.rs` contain zero deterministic seed fallbacks.
+        // 6. Source-wide audit: production `lib.rs` and Lean CLI `MeshCli.lean` contain zero deterministic seed fallbacks.
         let lib_src = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
-        let bin_src = include_str!("bin/lean-mesh.rs");
+        let bin_src = include_str!("../../../lean/OrbBin/OrbBin/MeshCli.lean");
         for forbidden in ["[0x42", "[0x99", "unwrap_or([", "derive_default_seed"] {
             assert!(
                 !lib_src.contains(forbidden) && !bin_src.contains(forbidden),

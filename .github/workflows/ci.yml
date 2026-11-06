@@ -143,8 +143,13 @@ jobs:
           python3 -m unittest discover -s tests -p library_skills_test.py
 
       # Every scripts/test_*.py. None reaches the network: remote-build tests use
-      # example.invalid, unified-MCP tests use a 127.0.0.1 server (and skip
-      # without the binary). Nothing is excluded.
+      # example.invalid, unified-MCP tests use a 127.0.0.1 server. Build the native
+      # Lean sandboxed-mcp companion first so test_unified_mcp_runtime.py runs.
+      - name: Build native Lean sandboxed-mcp companion for runtime tests
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev zstd
+          ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/debug --only sandboxed-mcp
+
       - name: Run all script unit tests
         run: |
           python3 -m unittest discover -v -s scripts -p 'test_*.py'
@@ -289,7 +294,8 @@ jobs:
       - name: Build and stage sandboxed-mcp; stub frontend dist
         run: |
           set -euo pipefail
-          (cd ../.. && cargo build --locked --bin sandboxed-mcp)
+          sudo apt-get install -y --no-install-recommends zstd
+          (cd ../.. && ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/debug --only sandboxed-mcp)
           host="$(rustc -vV | sed -n 's/^host: //p')"
           mkdir -p ../dist binaries target/debug
           cp ../../target/debug/sandboxed-mcp "binaries/sandboxed-mcp-$host"
