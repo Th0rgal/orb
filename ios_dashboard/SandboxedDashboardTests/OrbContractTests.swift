@@ -1012,4 +1012,107 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbHierarchy.placement(of: "rapid-ios")?.pendingOpID, 0)
         OrbHierarchy.reset()
     }
+
+    func testProjectScopeFilteringAndVirtualFolderMigrationPlan() {
+        OrbHierarchy.reset()
+        // 1. In-flight project-A list response finishing after an optimistic or authoritative move to B (or unassigned)
+        // must be excluded from project-A's scoped rows even though its ID was in `ownIDs`.
+        let opMove = OrbHierarchy.allocateOpID()
+        OrbHierarchy.stageOptimisticPlacement(
+            id: "moved-opt",
+            toProject: "beta",
+            toFolder: "docs",
+            opID: opMove,
+            fallbackProject: "alpha",
+            fallbackFolder: "",
+            fallbackRevision: 1
+        )
+        _ = OrbHierarchy.commitAuthoritativePlacements([
+            OrbPlacementCommitItem(missionID: "moved-auth", project: "beta", folder: "", placementRevision: 3),
+            OrbPlacementCommitItem(missionID: "moved-unassigned", project: nil, folder: "", placementRevision: 2)
+        ])
+
+        let staleOptRow = OrbRow(.object([
+            "id": .string("moved-opt"),
+            "project": .string("alpha"),
+            "placement_revision": .number(1),
+            "status": .string("active")
+        ]))
+        let staleAuthRow = OrbRow(.object([
+            "id": .string("moved-auth"),
+            "project": .string("alpha"),
+            "placement_revision": .number(1),
+            "status": .string("completed")
+        ]))
+        let staleUnassignedRow = OrbRow(.object([
+            "id": .string("moved-unassigned"),
+            "project": .string("alpha"),
+            "placement_revision": .number(1),
+            "status": .string("completed")
+        ]))
+        let keptRow = OrbRow(.object([
+            "id": .string("still-alpha"),
+            "project": .string("alpha"),
+            "placement_revision": .number(1),
+            "status": .string("active")
+        ]))
+        let legacyPartialRow = OrbRow(.object([
+            "id": .string("legacy-partial"),
+            "folder": .string("sub"),
+            "status": .string("completed")
+        ]))
+        let crossAncestor = OrbRow(.object([
+            "id": .string("anc-beta"),
+            "project": .string("beta"),
+            "placement_revision": .number(1),
+            "status": .string("completed")
+        ]))
+
+        let ownIDs: Set<String> = ["moved-opt", "moved-auth", "moved-unassigned", "still-alpha", "legacy-partial"]
+        let scoped = OrbMissionTree.filterToProjectScope(
+            [staleOptRow, staleAuthRow, staleUnassignedRow, keptRow, legacyPartialRow, crossAncestor],
+            projectSlug: "alpha",
+            ownIDs: ownIDs
+        )
+        XCTAssertEqual(scoped.map(\.id), ["still-alpha", "legacy-partial"])
+
+        // 2. Virtual folder rename/move snapshots original folders upfront and batches fork siblings per destination.
+        let forkLeader = OrbRow(.object([
+            "id": .string("fork-leader"),
+            "project": .string("alpha"),
+            "folder": .string("old"),
+            "tags": .array([.string("fork-of:fork-v1")]),
+            "status": .string("active")
+        ]))
+        let forkOrigin = OrbRow(.object([
+            "id": .string("fork-v1"),
+            "project": .string("alpha"),
+            "folder": .string("old"),
+            "status": .string("completed")
+        ]))
+        let nestedFolderMission = OrbRow(.object([
+            "id": .string("sub-root"),
+            "project": .string("alpha"),
+            "folder": .string("old/deep"),
+            "status": .string("completed")
+        ]))
+        let childWorker = OrbRow(.object([
+            "id": .string("worker-child"),
+            "project": .string("alpha"),
+            "folder": .string("old"),
+            "parent_mission_id": .string("fork-leader"),
+            "status": .string("active")
+        ]))
+        let batches = OrbMissionTree.planVirtualFolderMigration(
+            missions: [forkLeader, forkOrigin, nestedFolderMission, childWorker],
+            from: "old",
+            to: "renamed"
+        )
+        XCTAssertEqual(batches.count, 2)
+        XCTAssertEqual(batches[0].folder, "renamed")
+        XCTAssertEqual(batches[0].ids, ["fork-leader", "fork-v1"])
+        XCTAssertEqual(batches[1].folder, "renamed/deep")
+        XCTAssertEqual(batches[1].ids, ["sub-root"])
+        OrbHierarchy.reset()
+    }
 }

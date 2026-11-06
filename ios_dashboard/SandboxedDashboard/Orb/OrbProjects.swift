@@ -2015,6 +2015,17 @@ struct OrbProjectPage: View {
             await load(force: true)
         } catch { self.error = error.localizedDescription }
     }
+    private func migrateVirtualFolderMissions(from folder: String, to destination: String) async {
+        let batches = OrbMissionTree.planVirtualFolderMigration(missions: missions, from: folder, to: destination)
+        var alreadyMoved: Set<String> = []
+        for batch in batches {
+            let remaining = batch.ids.filter { !alreadyMoved.contains($0) }
+            guard !remaining.isEmpty else { continue }
+            if let moved = try? await api.moveMissions(ids: remaining, project: project.id, folder: batch.folder) {
+                alreadyMoved.formUnion(moved.map(\.missionID))
+            }
+        }
+    }
     private func renameFolder(_ folder: String, to rawNewName: String) async {
         let input = rawNewName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty && !input.contains("/") && !input.contains("\\") else {
@@ -2038,14 +2049,7 @@ struct OrbProjectPage: View {
                     method: "POST",
                     body: .object(["path": .string(destination)])
                 )
-                let affectedIDs = missions
-                    .filter { $0.folder == folder || $0.folder.hasPrefix(folder + "/") }
-                    .map(\.id)
-                for mid in affectedIDs {
-                    let existing = missions.first(where: { $0.id == mid })?.folder ?? folder
-                    let suffix = String(existing.dropFirst(folder.count))
-                    _ = try? await api.moveMissions(ids: [mid], project: project.id, folder: destination + suffix)
-                }
+                await migrateVirtualFolderMissions(from: folder, to: destination)
             }
             OrbReadCache.invalidate("project:\(project.id)")
             OrbReadCache.invalidate("project:\(project.id):all")
@@ -2075,14 +2079,7 @@ struct OrbProjectPage: View {
                     method: "POST",
                     body: .object(["path": .string(destination)])
                 )
-                let affectedIDs = missions
-                    .filter { $0.folder == folder || $0.folder.hasPrefix(folder + "/") }
-                    .map(\.id)
-                for mid in affectedIDs {
-                    let existing = missions.first(where: { $0.id == mid })?.folder ?? folder
-                    let suffix = String(existing.dropFirst(folder.count))
-                    _ = try? await api.moveMissions(ids: [mid], project: project.id, folder: destination + suffix)
-                }
+                await migrateVirtualFolderMissions(from: folder, to: destination)
             }
             OrbReadCache.invalidate("project:\(project.id)")
             OrbReadCache.invalidate("project:\(project.id):all")

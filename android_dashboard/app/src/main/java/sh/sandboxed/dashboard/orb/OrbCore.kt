@@ -423,7 +423,51 @@ object OrbMissionTree {
 
     fun hasAuthoritativePlacement(mission: OrbRow): Boolean {
         val id = mission.str("id") ?: mission.id
-        return id.isNotEmpty() && placements.containsKey(id)
+        if (id.isEmpty()) return false
+        val st = placements[id] ?: return false
+        return st.revision > 0L || st.pendingOpId != 0
+    }
+
+    /** Filters a fetched project mission list (`ownIds` + `withAncestors`) by each row's reconciled
+     * project so stale in-flight refreshes never reinsert conversations moved out optimistically or authoritatively. */
+    fun filterToProjectScope(rows: List<OrbRow>, projectSlug: String, ownIds: Set<String>): List<OrbRow> {
+        val target = projectSlug.trim()
+        return rows.filter { m ->
+            val effective = effectiveProject(m)
+            if (effective.isNotEmpty()) {
+                effective.equals(target, ignoreCase = true)
+            } else if (hasAuthoritativePlacement(m)) {
+                false
+            } else {
+                m.id in ownIds
+            }
+        }
+    }
+
+    /** Snapshots root missions under `oldFolder` before any async move runs and groups IDs by
+     * destination folder so fork-family expansion on the leader never corrupts sibling suffixes. */
+    fun planVirtualFolderMigration(
+        missions: List<OrbRow>,
+        oldFolder: String,
+        destination: String
+    ): List<Pair<String, List<String>>> {
+        val normOld = normalizeFolder(oldFolder)
+        val normDest = normalizeFolder(destination)
+        if (normOld.isEmpty() || normOld == normDest) return emptyList()
+        val byTarget = LinkedHashMap<String, MutableList<String>>()
+        val seenIds = HashSet<String>()
+        for (m in missions) {
+            if (m.id.isEmpty() || parentId(m) != null || !seenIds.add(m.id)) continue
+            val f = folderPath(m) ?: ""
+            if (f == normOld || f.startsWith("$normOld/")) {
+                val suffix = f.removePrefix(normOld)
+                val targetFolder = normalizeFolder(normDest + suffix)
+                byTarget.getOrPut(targetFolder) { mutableListOf() }.add(m.id)
+            }
+        }
+        return byTarget.entries
+            .filter { it.value.isNotEmpty() }
+            .map { it.key to it.value.toList() }
     }
 
     fun projectSlug(mission: OrbRow): String? {
@@ -2533,16 +2577,7 @@ class OrbCore private constructor(context: Context) {
         }
         val ownIds = merged.mapTo(mutableSetOf()) { it.id }
         val withParents = OrbMissionTree.withAncestors(merged) { fetchAncestor(it) }
-        val scoped = withParents.filter { m ->
-            val effectiveProject = OrbMissionTree.effectiveProject(m)
-            if (effectiveProject.isNotEmpty()) {
-                effectiveProject.equals(projectSlug, ignoreCase = true)
-            } else if (OrbMissionTree.hasAuthoritativePlacement(m)) {
-                false
-            } else {
-                m.id in ownIds
-            }
-        }
+        val scoped = OrbMissionTree.filterToProjectScope(withParents, projectSlug = projectSlug, ownIds = ownIds)
         OrbMissionTree.filterMobile(scoped)
     }
 

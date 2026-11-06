@@ -1560,20 +1560,14 @@ fun OrbProjectPage(
     }
 
     suspend fun migrateVirtualFolderMissions(oldPath: String, destination: String) {
-        val byTarget = LinkedHashMap<String, MutableList<String>>()
-        for (m in projectMissions) {
-            if (OrbMissionTree.parentId(m) != null) continue
-            val f = OrbMissionTree.folderPath(m) ?: ""
-            if (f == oldPath || f.startsWith("$oldPath/")) {
-                val suffix = f.removePrefix(oldPath)
-                val targetFolder = OrbMissionTree.normalizeFolder(destination + suffix)
-                byTarget.getOrPut(targetFolder) { mutableListOf() }.add(m.id)
-            }
-        }
-        for ((targetFolder, ids) in byTarget) {
-            if (ids.isNotEmpty()) {
+        val batches = OrbMissionTree.planVirtualFolderMigration(projectMissions, oldPath, destination)
+        val alreadyMoved = HashSet<String>()
+        for ((targetFolder, ids) in batches) {
+            val remaining = ids.filterNot { it in alreadyMoved }
+            if (remaining.isNotEmpty()) {
                 orbTry(OrbLog.Category.Network, "core.moveMissions") {
-                    core.moveMissions(ids = ids, project = projectSlug, folder = targetFolder)
+                    val moved = core.moveMissions(ids = remaining, project = projectSlug, folder = targetFolder)
+                    for (item in moved) alreadyMoved.add(item.missionId)
                 }
             }
         }

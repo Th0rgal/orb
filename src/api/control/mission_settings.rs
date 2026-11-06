@@ -1726,7 +1726,12 @@ where
         }
     }
 
-    let _ = state.projects.clear_subtree_project_edit(&root_key);
+    if !planned_snapshots.is_empty() {
+        state
+            .projects
+            .clear_subtree_project_edit(&root_key)
+            .map_err(|e| map_str_err(internal_error(e)))?;
+    }
 
     // Rebind active `mcp_sessions_v1.project_scope` for moved missions and apply
     // the confirmed `SecretBroker` transfer policy.
@@ -4609,5 +4614,100 @@ mod subtree_move_tests {
                 .unwrap(),
             "archive/2026/sub"
         );
+    }
+
+    #[tokio::test]
+    async fn move_missions_propagates_subtree_receipt_cleanup_failure_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, store, user) = build_subtree_test_env(&dir).await;
+        let m = store
+            .create_mission(
+                Some("receipt-cleanup-guard"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                m.id,
+                crate::api::mission_store::MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    folder: Some("orig".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let broker = crate::api::secret_broker::broker(&state);
+        broker
+            .seed_grant_for_test(crate::api::secret_broker::Grant {
+                id: Uuid::new_v4(),
+                mission_id: Some(m.id),
+                root_mission_id: Some(m.id),
+                requester: Some(crate::api::approval_flow::RequesterSubject::mission(m.id)),
+                requester_label: None,
+                mission_title: Some("receipt-cleanup-guard".into()),
+                paloma_project: Some("assistant".into()),
+                scope: crate::api::secret_broker::GrantScope::Secret {
+                    key: "OPENAI_API_KEY".into(),
+                },
+                created_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
+            })
+            .await;
+
+        {
+            let conn = state.projects.connection.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER abort_subtree_receipt_delete BEFORE DELETE ON subtree_project_edits
+                 BEGIN SELECT RAISE(ABORT, 'simulated receipt cleanup failure'); END;",
+            )
+            .unwrap();
+        }
+
+        let failed_move = move_missions(
+            State(state.clone()),
+            Extension(user.clone()),
+            Json(MoveMissionsRequest {
+                mission_ids: vec![m.id],
+                project: Some(Some("verity-core".into())),
+                folder: "dest".into(),
+                approval_policy: ApprovalTransferPolicy::Revoke,
+                client_op_id: Some(11),
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(failed_move.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Secret grant was NOT revoked because cleanup failed before post-commit side effects.
+        let (grants_after_fail, _) = broker
+            .inspect_mission_transfer(&HashSet::from([m.id]))
+            .await;
+        assert_eq!(grants_after_fail.len(), 1);
+        assert_eq!(
+            grants_after_fail[0].paloma_project.as_deref(),
+            Some("assistant")
+        );
+
+        // Once the transient DB error clears, recovery rolls back the uncommitted transfer cleanly.
+        {
+            let conn = state.projects.connection.lock().unwrap();
+            conn.execute_batch("DROP TRIGGER abort_subtree_receipt_delete;")
+                .unwrap();
+        }
+        recover_subtree_project_edits_in_store(&state, &store)
+            .await
+            .unwrap();
+        let recovered = store.get_mission_metadata(m.id).await.unwrap().unwrap();
+        assert_eq!(recovered.project.project.as_deref(), Some("assistant"));
+        assert_eq!(recovered.project.folder, "orig");
+        assert!(state.projects.subtree_project_edits().unwrap().is_empty());
     }
 }

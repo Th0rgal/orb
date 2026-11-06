@@ -974,6 +974,53 @@ enum OrbMissionTree {
         return out
     }
 
+    /// Filters a fetched project mission list (`ownIDs` + `withAncestors`) by each row's reconciled
+    /// project so stale in-flight refreshes never reinsert conversations moved out optimistically or authoritatively.
+    static func filterToProjectScope(_ rows: [OrbRow], projectSlug: String, ownIDs: Set<String>) -> [OrbRow] {
+        let target = projectSlug.trimmingCharacters(in: .whitespacesAndNewlines)
+        return rows.filter { row in
+            if !row.project.isEmpty {
+                return row.project.caseInsensitiveCompare(target) == .orderedSame
+            }
+            if let st = OrbHierarchy.placement(of: row.id), (st.revision > 0 || st.pendingOpID != 0) {
+                return false
+            }
+            return ownIDs.contains(row.id)
+        }
+    }
+
+    /// Snapshots root missions under `oldFolder` before any async move runs and groups IDs by
+    /// destination folder so fork-family expansion on the leader never corrupts sibling suffixes.
+    static func planVirtualFolderMigration(
+        missions: [OrbRow],
+        from oldFolder: String,
+        to destination: String
+    ) -> [(folder: String, ids: [String])] {
+        let normOld = OrbRow.normalizeFolder(oldFolder)
+        let normDest = OrbRow.normalizeFolder(destination)
+        guard !normOld.isEmpty, normOld != normDest else { return [] }
+        var order: [String] = []
+        var byTarget: [String: [String]] = [:]
+        var seenIDs: Set<String> = []
+        for row in missions {
+            guard !row.id.isEmpty, row.parentMissionID == nil, seenIDs.insert(row.id).inserted else { continue }
+            let cur = OrbRow.normalizeFolder(row.folder)
+            guard cur == normOld || cur.hasPrefix(normOld + "/") else { continue }
+            let suffix = String(cur.dropFirst(normOld.count))
+            let target = OrbRow.normalizeFolder(normDest + suffix)
+            if byTarget[target] == nil {
+                order.append(target)
+                byTarget[target] = [row.id]
+            } else {
+                byTarget[target]?.append(row.id)
+            }
+        }
+        return order.compactMap { target in
+            guard let ids = byTarget[target], !ids.isEmpty else { return nil }
+            return (folder: target, ids: ids)
+        }
+    }
+
     /// Stand-in row for a parent that is not in the loaded rows (cross-project, or transient fetch error).
     /// Returns `nil` only when Core confirmed the parent is gone (404) or in a `/btw` subtree.
     static func placeholderParent(_ projectSlug: String) -> (String, OrbRow) -> OrbRow? {

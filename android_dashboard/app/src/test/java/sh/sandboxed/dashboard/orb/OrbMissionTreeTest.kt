@@ -548,4 +548,47 @@ class OrbMissionTreeTest {
         assertEquals("docs", cached[2].raw["folder"])
         OrbReadCache.clearMemory()
     }
+
+    @Test
+    fun projectScopeFilteringAndVirtualFolderMigrationPlan() {
+        OrbMissionTree.resetHierarchy()
+        val opMove = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("moved-opt"), opMove, "beta", "docs")
+        OrbMissionTree.commitAuthoritativePlacements(
+            listOf(
+                OrbPlacementCommitItem("moved-auth", "beta", "", 3L, explicitProject = true),
+                OrbPlacementCommitItem("moved-unassigned", null, "", 2L, explicitProject = true),
+            )
+        )
+
+        val staleOptRow = m("moved-opt", "project" to "alpha", "placement_revision" to 1, "status" to "active")
+        val staleAuthRow = m("moved-auth", "project" to "alpha", "placement_revision" to 1, "status" to "completed")
+        val staleUnassignedRow = m("moved-unassigned", "project" to "alpha", "placement_revision" to 1, "status" to "completed")
+        val keptRow = m("still-alpha", "project" to "alpha", "placement_revision" to 1, "status" to "active")
+        val legacyPartialRow = m("legacy-partial", "folder" to "sub", "status" to "completed")
+        val crossAncestor = m("anc-beta", "project" to "beta", "placement_revision" to 1, "status" to "completed")
+
+        val ownIds = setOf("moved-opt", "moved-auth", "moved-unassigned", "still-alpha", "legacy-partial")
+        val scoped = OrbMissionTree.filterToProjectScope(
+            listOf(staleOptRow, staleAuthRow, staleUnassignedRow, keptRow, legacyPartialRow, crossAncestor),
+            projectSlug = "alpha",
+            ownIds = ownIds,
+        )
+        assertEquals(listOf("still-alpha", "legacy-partial"), scoped.map { it.id })
+
+        val forkLeader = m("fork-leader", "project" to "alpha", "folder" to "old", "tags" to listOf("fork-of:fork-v1"), "status" to "active")
+        val forkOrigin = m("fork-v1", "project" to "alpha", "folder" to "old", "status" to "completed")
+        val nestedFolderMission = m("sub-root", "project" to "alpha", "folder" to "old/deep", "status" to "completed")
+        val childWorker = m("worker-child", "project" to "alpha", "folder" to "old", "parent_mission_id" to "fork-leader", "status" to "active")
+        val batches = OrbMissionTree.planVirtualFolderMigration(
+            missions = listOf(forkLeader, forkOrigin, nestedFolderMission, childWorker),
+            oldFolder = "old",
+            destination = "renamed",
+        )
+        assertEquals(
+            listOf("renamed" to listOf("fork-leader", "fork-v1"), "renamed/deep" to listOf("sub-root")),
+            batches,
+        )
+        OrbMissionTree.resetHierarchy()
+    }
 }

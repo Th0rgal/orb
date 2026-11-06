@@ -1040,7 +1040,7 @@ final class OrbCore {
         let withParents = await OrbMissionTree.withAncestors(merged) { [weak self] id in
             await self?.fetchAncestor(id)
         }
-        let scoped = withParents.filter { ownIDs.contains($0.id) || $0.raw["project"].text == project }
+        let scoped = OrbMissionTree.filterToProjectScope(withParents, projectSlug: project, ownIDs: ownIDs)
         return OrbMissionTree.filterMobile(scoped)
     }
 
