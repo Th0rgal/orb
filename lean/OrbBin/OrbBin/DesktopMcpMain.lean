@@ -149,7 +149,7 @@ private def spawnDetachedWithEnv
     merged := (merged.filter (fun (ek, _) => ek != k)).push (k, v)
   let envStrs := merged.map (fun (k, v) => s!"{k}={v}")
   try
-    let sp ← spawnPgrp prog args envStrs false
+    let sp ← spawnPgrp prog args envStrs false true
     return .ok sp.pid
   catch e =>
     return .error s!"{e}"

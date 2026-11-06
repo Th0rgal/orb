@@ -635,11 +635,323 @@ def loadFixtureMissions (root : System.FilePath) : IO (Array JVal) := do
   | .ok v => return (v.fieldArr? "missions").getD #[]
   | .error _ => return #[]
 
+private partial def collectMdFiles (dir : System.FilePath) (acc : Array System.FilePath) : IO (Array System.FilePath) := do
+  if !(← dir.isDir) then return acc
+  let entries ← try dir.readDir catch _ => pure #[]
+  let mut out := acc
+  for entry in entries do
+    let p := entry.path
+    if (← p.isDir) then
+      out ← collectMdFiles p out
+    else if p.extension == some "md" then
+      if !out.contains p then
+        out := out.push p
+  return out
+
+private def isWordChar (c : Char) : Bool :=
+  c.isAlphanum || c == '_'
+
+private def isHexLowerOrUpper (c : Char) : Bool :=
+  ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f') || ('A' ≤ c && c ≤ 'F')
+
+private def isUuidLike36 (s : String) : Bool :=
+  match s.splitOn "-" with
+  | [p1, p2, p3, p4, p5] =>
+    p1.length == 8 && p2.length == 4 && p3.length == 4 && p4.length == 4 && p5.length == 12 &&
+    [p1, p2, p3, p4, p5].all (fun p => p.all isHexLowerOrUpper)
+  | _ => false
+
+/-- Extract `(missionIdRef, byteCharIdx)` pairs matching `(?i)\bmission(?:[_ -]?id)?[:# ]+([0-9a-f][0-9a-f-]{5,36})\b`. -/
+private def extractMissionRefsWithIdx (text : String) : Array (String × Nat) := Id.run do
+  let cs := text.toList.toArray
+  let n := cs.size
+  let mut out : Array (String × Nat) := #[]
+  let mut i := 0
+  while i + 7 ≤ n do
+    let prevWord := i > 0 && isWordChar cs[i - 1]!
+    let mWord := String.ofList (cs.extract i (i + 7)).toList
+    if !prevWord && mWord.toLower == "mission" then
+      let mut j := i + 7
+      -- optional `(?:[_ -]?id)?`
+      let jSaved := j
+      if j < n && (cs[j]! == '_' || cs[j]! == ' ' || cs[j]! == '-') then
+        j := j + 1
+      if j + 2 ≤ n && (String.ofList (cs.extract j (j + 2)).toList).toLower == "id" then
+        j := j + 2
+      else
+        j := jSaved
+      let sepStart := j
+      while j < n && (cs[j]! == ':' || cs[j]! == '#' || cs[j]! == ' ') do
+        j := j + 1
+      if j > sepStart && j < n && isHexLowerOrUpper cs[j]! then
+        let idStart := j
+        while j < n && (isHexLowerOrUpper cs[j]! || cs[j]! == '-') && (j - idStart) < 37 do
+          j := j + 1
+        let idLen := j - idStart
+        let nextWord := j < n && isWordChar cs[j]!
+        if 6 ≤ idLen && idLen ≤ 37 && !nextWord then
+          let mid := String.ofList (cs.extract idStart j).toList
+          out := out.push (mid, i)
+          i := j
+        else
+          i := i + 1
+      else
+        i := i + 1
+    else
+      i := i + 1
+  return out
+
+/-- Extract PR numbers matching `(?i)\b(?:pr|pull request)\s*#?(\d+)\b`. -/
+private def extractDocPrRefs (text : String) : Array Nat := Id.run do
+  let cs := text.toList.toArray
+  let n := cs.size
+  let mut out : Array Nat := #[]
+  let mut i := 0
+  while i < n do
+    let prevWord := i > 0 && isWordChar cs[i - 1]!
+    let mut afterKw? : Option Nat := none
+    if !prevWord && i + 2 ≤ n && (String.ofList (cs.extract i (i + 2)).toList).toLower == "pr" then
+      if i + 2 == n || !isWordChar cs[i + 2]! then
+        afterKw? := some (i + 2)
+    if afterKw?.isNone && !prevWord && i + 12 ≤ n &&
+       (String.ofList (cs.extract i (i + 12)).toList).toLower == "pull request" then
+      if i + 12 == n || !isWordChar cs[i + 12]! then
+        afterKw? := some (i + 12)
+    match afterKw? with
+    | none => i := i + 1
+    | some j0 =>
+      let mut j := j0
+      while j < n && cs[j]!.isWhitespace do j := j + 1
+      if j < n && cs[j]! == '#' then j := j + 1
+      let dStart := j
+      while j < n && cs[j]!.isDigit do j := j + 1
+      let nextWord := j < n && isWordChar cs[j]!
+      if j > dStart && !nextWord then
+        if let some num := (String.ofList (cs.extract dStart j).toList).toNat? then
+          out := out.push num
+        i := j
+      else
+        i := i + 1
+  return out
+
+private def isRepoSlugChar (c : Char) : Bool :=
+  c.isAlphanum || c == '_' || c == '.' || c == '-'
+
+/-- Extract first `owner/repo` matching `(?im)\b(?:repo|repository|github repo|github_repository|owner/repo)\s*[:=]\s*(?:https://github\.com/)?([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)`. -/
+private def extractOwnerRepo? (text : String) : Option String := Id.run do
+  for rawLine in text.splitOn "\n" do
+    let cs := rawLine.toList.toArray
+    let n := cs.size
+    let mut i := 0
+    while i < n do
+      let prevWord := i > 0 && isWordChar cs[i - 1]!
+      if !prevWord then
+        let remLow := (String.ofList (cs.extract i n).toList).toLower
+        let mut kwLen := 0
+        for kw in ["github_repository", "github repo", "repository", "owner/repo", "repo"] do
+          if kwLen == 0 && remLow.startsWith kw then
+            let endIdx := i + kw.length
+            if endIdx == n || !isWordChar cs[endIdx]! then
+              kwLen := kw.length
+        if kwLen > 0 then
+          let mut j := i + kwLen
+          while j < n && (cs[j]! == ' ' || cs[j]! == '\t') do j := j + 1
+          if j < n && (cs[j]! == ':' || cs[j]! == '=') then
+            j := j + 1
+            while j < n && (cs[j]! == ' ' || cs[j]! == '\t') do j := j + 1
+            let afterSep := String.ofList (cs.extract j n).toList
+            let stripped :=
+              if afterSep.startsWith "https://github.com/" then (afterSep.drop 19).toString
+              else afterSep
+            let scs := stripped.toList.toArray
+            let mut k := 0
+            while k < scs.size && isRepoSlugChar scs[k]! do k := k + 1
+            if k > 0 && k < scs.size && scs[k]! == '/' then
+              let owner := String.ofList (scs.extract 0 k).toList
+              let mStart := k + 1
+              let mut m := mStart
+              while m < scs.size && isRepoSlugChar scs[m]! do m := m + 1
+              if m > mStart then
+                let repo := String.ofList (scs.extract mStart m).toList
+                return some s!"{owner}/{repo}"
+      i := i + 1
+  return none
+
+private def relDocPath (root full : System.FilePath) : String :=
+  let rStr := root.toString
+  let fStr := full.toString
+  let pfx := if rStr.endsWith "/" then rStr else rStr ++ "/"
+  if fStr.startsWith pfx then (fStr.drop pfx.length).toString else fStr
+
+def scanProjectDocs (root : System.FilePath) : IO (Array JVal) := do
+  let mut paths : Array System.FilePath := #[]
+  paths ← collectMdFiles (root / ".paloma" / "projects") paths
+  paths ← collectMdFiles (root / "projects") paths
+  let docsDir := root / "docs"
+  if (← docsDir.isDir) then
+    let entries ← try docsDir.readDir catch _ => pure #[]
+    for entry in entries do
+      let p := entry.path
+      if p.extension == some "md" && entry.fileName.startsWith "PALOMA_" && !paths.contains p then
+        paths := paths.push p
+  let mut out : Array (String × JVal) := #[]
+  for p in paths do
+    let text ← try IO.FS.readFile p catch _ => pure ""
+    let mRefs := (extractMissionRefsWithIdx text).map (fun (m, _) => JVal.str m)
+    let prRefs := (extractDocPrRefs text).map JVal.nat
+    let ownerRepoVal := match extractOwnerRepo? text with | some r => JVal.str r | none => JVal.null
+    let rel := relDocPath root p
+    out := out.push (rel, .obj #[
+      ("path", .str rel),
+      ("mission_refs", .arr mRefs),
+      ("pr_refs", .arr prRefs),
+      ("owner_repo", ownerRepoVal)
+    ])
+  return (out.qsort (fun a b => a.1 < b.1)).map Prod.snd
+
+private def findSubstrCharIdx? (cs : Array Char) (pat : Array Char) : Option Nat := Id.run do
+  if pat.isEmpty || pat.size > cs.size then return none
+  for i in [0 : cs.size - pat.size + 1] do
+    let mut ok := true
+    for j in [0 : pat.size] do
+      if cs[i + j]! != pat[j]! then ok := false
+    if ok then return some i
+  return none
+
+private def trackerStatusForMission? (text missionId : String) : Option String := Id.run do
+  let cs := text.toList.toArray
+  let pat := missionId.toList.toArray
+  let some startIdx := findSubstrCharIdx? cs pat | return none
+  let afterStart := startIdx + pat.size
+  let afterCs := cs.extract afterStart cs.size
+  let afterText := String.ofList afterCs.toList
+  let nextRefs := extractMissionRefsWithIdx afterText
+  let limit := Nat.min 500 (match nextRefs[0]? with | some (_, idx) => idx | none => afterCs.size)
+  let window := afterCs.extract 0 limit
+  let wn := window.size
+  let mut i := 0
+  while i + 6 ≤ wn do
+    let prevWord := i > 0 && isWordChar window[i - 1]!
+    let w6 := (String.ofList (window.extract i (i + 6)).toList).toLower
+    if !prevWord && w6 == "status" then
+      let mut j := i + 6
+      let sepStart := j
+      while j < wn && (window[j]! == ':' || window[j]! == '=' || window[j]! == ' ') do
+        j := j + 1
+      if j > sepStart then
+        let stStart := j
+        while j < wn && ((window[j]!.toLower ≥ 'a' && window[j]!.toLower ≤ 'z') || window[j]! == '_') do
+          j := j + 1
+        if j > stStart then
+          return some (String.ofList (window.extract stStart j).toList).toLower
+    i := i + 1
+  return none
+
+private def lineHasWordOpen (line : String) : Bool := Id.run do
+  let cs := line.toList.toArray
+  let n := cs.size
+  if n < 4 then return false
+  for i in [0 : n - 3] do
+    let prevWord := i > 0 && isWordChar cs[i - 1]!
+    let nextWord := i + 4 < n && isWordChar cs[i + 4]!
+    if !prevWord && !nextWord && (String.ofList (cs.extract i (i + 4)).toList).toLower == "open" then
+      return true
+  return false
+
+private def lineHasPrNumber (line : String) (number : Nat) : Bool := Id.run do
+  let numChars := (toString number).toList.toArray
+  let cs := line.toList.toArray
+  let n := cs.size
+  let mut i := 0
+  while i < n do
+    if cs[i]! == '#' then
+      if i + 1 + numChars.size ≤ n then
+        let slice := cs.extract (i + 1) (i + 1 + numChars.size)
+        let nextWord := i + 1 + numChars.size < n && isWordChar cs[i + 1 + numChars.size]!
+        if slice == numChars && !nextWord then return true
+    let prevWord := i > 0 && isWordChar cs[i - 1]!
+    if !prevWord && i + 2 ≤ n && (String.ofList (cs.extract i (i + 2)).toList).toLower == "pr" then
+      if i + 2 < n && !isWordChar cs[i + 2]! then
+        let mut j := i + 2
+        while j < n && cs[j]!.isWhitespace do j := j + 1
+        if j < n && cs[j]! == '#' then
+          j := j + 1
+          while j < n && cs[j]!.isWhitespace do j := j + 1
+        if j + numChars.size ≤ n then
+          let slice := cs.extract j (j + numChars.size)
+          let nextWord := j + numChars.size < n && isWordChar cs[j + numChars.size]!
+          if slice == numChars && !nextWord then return true
+    i := i + 1
+  return false
+
+def lineMentionsOpenPr (text : String) (number : Nat) : Bool :=
+  (text.splitOn "\n").any fun line => lineHasPrNumber line number && lineHasWordOpen line
+
+private def loadPrFixtureOnly? (root : System.FilePath) (ownerRepo? : Option String) (number : Nat) : IO (Option JVal) := do
+  let mut cands : Array System.FilePath := #[]
+  if let some repo := ownerRepo? then
+    let safe := String.intercalate "__" (repo.splitOn "/")
+    cands := cands.push (root / ".paloma" / "fixtures" / s!"pr-{safe}-{number}.json")
+  cands := cands.push (root / ".paloma" / "fixtures" / s!"pr-fixture__repo-{number}.json")
+  cands := cands.push (root / ".paloma" / "fixtures" / s!"pr-{number}.json")
+  for cand in cands do
+    if (← cand.pathExists) then
+      if let .ok j := Json.parse (← IO.FS.readFile cand) then
+        return some j
+  return none
+
+def detectLocalDrift (root : System.FilePath) (docs missions : Array JVal) : IO (Array JVal) := do
+  let liveIds := missions.filterMap (·.fieldStr? "id")
+  let mut drift : Array JVal := #[]
+  for doc in docs do
+    let docPath := (doc.fieldStr? "path").getD ""
+    let text ← try IO.FS.readFile (root / docPath) catch _ => pure ""
+    let mRefs := ((doc.fieldArr? "mission_refs").getD #[]).filterMap JVal.asStr?
+    for mid in mRefs do
+      if !isUuidLike36 mid then
+        drift := drift.push <| .obj #[
+          ("kind", .str "short_mission_id"),
+          ("source", .str docPath),
+          ("detail", .str s!"mission ref `{mid}` is not a full UUID")
+        ]
+      else if !liveIds.contains mid then
+        drift := drift.push <| .obj #[
+          ("kind", .str "stale_mission_ref"),
+          ("source", .str docPath),
+          ("detail", .str s!"mission `{mid}` is not in live missions")
+        ]
+    for m in missions do
+      let mid := (m.fieldStr? "id").getD ""
+      let liveSt := (m.fieldStr? "status").getD ""
+      if !mid.isEmpty && !liveSt.isEmpty then
+        if let some found := trackerStatusForMission? text mid then
+          if found != liveSt then
+            drift := drift.push <| .obj #[
+              ("kind", .str "live_mismatch"),
+              ("source", .str docPath),
+              ("detail", .str s!"mission `{mid}` tracker status `{found}` differs from live `{liveSt}`")
+            ]
+    let prRefs := ((doc.fieldArr? "pr_refs").getD #[]).filterMap JVal.asNat?
+    let ownerRepo? := doc.fieldStr? "owner_repo"
+    for prNum in prRefs do
+      if lineMentionsOpenPr text prNum then
+        if let some prFix ← loadPrFixtureOnly? root ownerRepo? prNum then
+          if (prFix.fieldBool? "merged").getD false then
+            drift := drift.push <| .obj #[
+              ("kind", .str "pr_listed_open_but_merged"),
+              ("source", .str docPath),
+              ("detail", .str s!"PR #{prNum} is listed open but live PR is merged")
+            ]
+  return drift
+
 def buildLocalState (root : System.FilePath) : IO JVal := do
   let missions ← loadFixtureMissions root
+  let docs ← scanProjectDocs root
+  let drift ← detectLocalDrift root docs missions
   let mut counts : Array (String × Nat) := #[]
   for m in missions do
-    let st := (m.fieldStr? "status").getD "unknown"
+    let rawSt := (m.fieldStr? "status").getD ""
+    let st := if rawSt.isEmpty then "unknown" else rawSt
     match counts.findIdx? (fun (k, _) => k == st) with
     | some idx =>
       let (k, n) := counts[idx]!
@@ -649,11 +961,19 @@ def buildLocalState (root : System.FilePath) : IO JVal := do
   let ts ← nowEpoch
   return .obj #[
     ("generated_at", .str s!"{ts}"),
-    ("project_docs", .arr #[]),
+    ("project_docs", .arr docs),
     ("mission_counts", .obj (sortedCounts.map fun (k, n) => (k, .nat n))),
     ("missions", .arr missions),
-    ("drift", .arr #[])
+    ("drift", .arr drift)
   ]
+
+private def driftKindDebugName (kind : String) : String :=
+  match kind with
+  | "short_mission_id" => "ShortMissionId"
+  | "stale_mission_ref" => "StaleMissionRef"
+  | "pr_listed_open_but_merged" => "PrListedOpenButMerged"
+  | "live_mismatch" => "LiveMismatch"
+  | other => other
 
 def renderStatusText (state : JVal) : String := Id.run do
   let docs := ((state.fieldArr? "project_docs").getD #[]).size
@@ -664,6 +984,11 @@ def renderStatusText (state : JVal) : String := Id.run do
     for (st, cnt) in mc do
       out := out ++ s!"mission_status.{st}={(cnt.asNat?).getD 0}\n"
   out := out ++ s!"drift={drift.size}\n"
+  for d in drift do
+    let k := driftKindDebugName ((d.fieldStr? "kind").getD "")
+    let det := (d.fieldStr? "detail").getD ""
+    let src := (d.fieldStr? "source").getD ""
+    out := out ++ s!"- {k}: {det} ({src})\n"
   return out
 
 def renderStatusMd (state : JVal) : String := Id.run do
@@ -675,7 +1000,16 @@ def renderStatusMd (state : JVal) : String := Id.run do
   else
     for (st, cnt) in mc do
       out := out ++ s!"- `{st}`: {(cnt.asNat?).getD 0}\n"
-  out := out ++ "\n## Drift\n\n- none\n"
+  out := out ++ "\n## Drift\n\n"
+  let drift := (state.fieldArr? "drift").getD #[]
+  if drift.isEmpty then
+    out := out ++ "- none\n"
+  else
+    for d in drift do
+      let k := driftKindDebugName ((d.fieldStr? "kind").getD "")
+      let det := (d.fieldStr? "detail").getD ""
+      let src := (d.fieldStr? "source").getD ""
+      out := out ++ s!"- `{k}`: {det} ({src})\n"
   return out
 
 /-! ### `import-trackers`, `set-mode`, and `dispatch-plan` Helpers -/
@@ -776,6 +1110,167 @@ def runImportTrackers (root : System.FilePath) (rest : List String) : IO (Except
   ]
   return .ok ()
 
+private def stripEndPunct (s : String) : String := Id.run do
+  let mut cs := s.toList
+  while !cs.isEmpty do
+    let last := cs.getLast!
+    if last == ':' || last == '.' || last == ')' then
+      cs := cs.dropLast
+    else
+      break
+  return String.ofList cs
+
+private def isTrackerCode (rawTok : String) : Bool :=
+  let tok := stripEndPunct rawTok
+  if tok.isEmpty || tok.length > 12 then false
+  else
+    let cs := tok.toList
+    let first := cs.headD '0'
+    let isAsciiAlpha := fun (c : Char) => ('a' ≤ c && c ≤ 'z') || ('A' ≤ c && c ≤ 'Z')
+    let isAsciiAlnum := fun (c : Char) => isAsciiAlpha c || Char.isDigit c
+    let lastIsDigit := Char.isDigit (cs.getLastD ' ')
+    let hasDigit := cs.any Char.isDigit
+    let allAllowed := cs.all (fun c => isAsciiAlnum c || c == '-')
+    let alphaCnt := (cs.filter isAsciiAlpha).length
+    isAsciiAlpha first && hasDigit && lastIsDigit && allAllowed && alphaCnt ≤ 6
+
+def normalizeTrackKey (raw : String) : String := Id.run do
+  let mut out : Array Char := #[]
+  let mut lastDash := true
+  for ch in raw.trimAscii.toString.toList do
+    if ch.isAlphanum then
+      out := out.push ch.toLower
+      lastDash := false
+    else if !lastDash then
+      out := out.push '-'
+      lastDash := true
+  if !out.isEmpty && out.back! == '-' then
+    out := out.pop
+  return String.ofList out.toList
+
+private def trackerKeyFromTitle (title : String) : String :=
+  let words := ((title.splitToList Char.isWhitespace).filter (!·.isEmpty)).take 5
+  let norm := normalizeTrackKey (String.intercalate "-" words)
+  let capped := String.ofList (norm.toList.take 40)
+  if capped.endsWith "-" then (capped.dropEnd 1).toString else capped
+
+structure ParsedTrackerItem where
+  key     : String
+  checked : Bool
+  line    : Nat
+  deriving Repr, BEq, Inhabited
+
+def parseTrackerMarkdown (content : String) : Array ParsedTrackerItem := Id.run do
+  let lines := content.splitOn "\n"
+  let mut items : Array ParsedTrackerItem := #[]
+  for idx in [0 : lines.length] do
+    let raw := lines[idx]!
+    let trimmedStart := String.ofList (raw.toList.dropWhile Char.isWhitespace)
+    let restOpt :=
+      if trimmedStart.startsWith "- [" then some (trimmedStart.drop 3).toString
+      else if trimmedStart.startsWith "* [" then some (trimmedStart.drop 3).toString
+      else none
+    if let some rest0 := restOpt then
+      if let mark :: afterBracket := rest0.splitOn "]" then
+        if !afterBracket.isEmpty then
+          let markTrim := mark.trimAscii.toString
+          let checked? :=
+            if markTrim == "x" || markTrim == "X" then some true
+            else if markTrim.isEmpty then some false
+            else none
+          if let some checked := checked? then
+            let text := (String.intercalate "]" afterBracket).trimAscii.toString
+            if !text.isEmpty then
+              let firstWord := ((text.splitToList Char.isWhitespace).filter (!·.isEmpty)).headD ""
+              let firstClean := stripEndPunct firstWord
+              let parts := firstClean.splitOn "/"
+              let key :=
+                if !parts.isEmpty && parts.all isTrackerCode then
+                  normalizeTrackKey parts.head!
+                else
+                  trackerKeyFromTitle text
+              if !key.isEmpty then
+                items := items.push { key, checked, line := idx + 1 }
+  return items
+
+def runReconcileLive (root : System.FilePath) (api : String) (rest : List String) : IO (Except String Unit) := do
+  let tok? ← match valueAfterFlag? rest "--token" with
+    | some t => pure (some t)
+    | none => firstEnvNonEmpty ["SANDBOXED_API_TOKEN", "HERMES_SANDBOXED_API_TOKEN", "API_TOKEN"]
+  let dir ← match (← resolveTrackersDir root rest) with
+    | .ok d => pure d
+    | .error e => return .error e
+  let only := positionalSlugs rest
+  let files ← match (← listTrackerFiles dir only) with
+    | .ok f => pure f
+    | .error e => return .error e
+  let base := stripTrailingSlash api
+  let mut projects : Array JVal := #[]
+  for (slug, path) in files do
+    let content ← try IO.FS.readFile path catch e => return .error s!"read {path}: {e}"
+    match (← sendJsonRequest "GET" s!"{base}/api/projects/{slug}/situation" tok? none #[] 60000) with
+    | .error e => return .error e
+    | .ok (404, _, _) => pure ()
+    | .ok (status, rawBody, sit?) =>
+      if status != 200 then
+        projects := projects.push <| JVal.obj #[
+          ("slug", .str slug),
+          ("error", .str s!"HTTP {status}: {rawBody}")
+        ]
+      else
+        let situation := sit?.getD (.obj #[])
+        let sitItems := (situation.fieldArr? "items").getD #[]
+        let mut plan : Array (String × String) := #[]
+        for it in sitItems do
+          if let (some k, some ds) := (it.fieldStr? "key", it.fieldStr? "derived_state") then
+            plan := (plan.filter (fun (ek, _) => ek != k)).push (k, ds)
+        let sortedPlan := plan.qsort (fun a b => a.1 < b.1)
+        let mut drift : Array JVal := #[]
+        let mut mdKeys : Array String := #[]
+        for item in parseTrackerMarkdown content do
+          if !mdKeys.contains item.key then
+            mdKeys := mdKeys.push item.key
+          match sortedPlan.find? (fun (pk, _) => pk == item.key) with
+          | none =>
+            drift := drift.push <| .obj #[
+              ("kind", .str "markdown_item_missing_in_plan"),
+              ("key", .str item.key),
+              ("line", .nat item.line)
+            ]
+          | some (_, st) =>
+            let planDone := st == "satisfied" || st == "claim_only"
+            if item.checked && !planDone then
+              drift := drift.push <| .obj #[
+                ("kind", .str "markdown_checked_but_track_open"),
+                ("key", .str item.key),
+                ("line", .nat item.line),
+                ("derived_state", .str st)
+              ]
+            else if !item.checked && planDone then
+              drift := drift.push <| .obj #[
+                ("kind", .str "markdown_open_but_track_done"),
+                ("key", .str item.key),
+                ("line", .nat item.line),
+                ("derived_state", .str st)
+              ]
+        for (pk, st) in sortedPlan do
+          if st != "cancelled" && !mdKeys.contains pk then
+            drift := drift.push <| .obj #[
+              ("kind", .str "plan_track_missing_in_markdown"),
+              ("key", .str pk),
+              ("derived_state", .str st)
+            ]
+        projects := projects.push <| .obj #[
+          ("slug", .str slug),
+          ("summary", (situation.field? "summary").getD .null),
+          ("drift", .arr drift)
+        ]
+  IO.println <| renderPretty <| JVal.obj #[
+    ("projects", .arr projects),
+    ("note", .str "read-only; the plan (project_tracks) is the truth, Markdown is narrative")
+  ]
+  return .ok ()
+
 private def explorationLimitForMode (mode : String) : Option Nat :=
   match mode with
   | "conservative" => some 0
@@ -830,9 +1325,11 @@ def parseRfc3339Epoch? (raw : String) : Option Int := do
               some (pfx, if signChar == '+' then mag else -mag)
         | _ => none
     else none
-  let baseTime := match timePart.splitOn "." with
-    | h :: _ => h
-    | [] => timePart
+  let baseTime ← match timePart.splitOn "." with
+    | [h] => some h
+    | [h, frac] =>
+      if !frac.isEmpty && frac.all Char.isDigit then some h else none
+    | _ => none
   let [hhS, mmS, ssS] := baseTime.splitOn ":" | none
   if hhS.length != 2 || mmS.length != 2 || ssS.length != 2 then none
   let hh ← hhS.toNat?
@@ -957,16 +1454,7 @@ def runPalomaCtl (args : List String) : IO (Except String Unit) := do
     return .ok ()
   | "reconcile" :: rest =>
     if let some api := valueAfterFlag? rest "--api" then
-      let tok? ← match valueAfterFlag? rest "--token" with
-        | some t => pure (some t)
-        | none => firstEnvNonEmpty ["SANDBOXED_API_TOKEN", "HERMES_SANDBOXED_API_TOKEN", "API_TOKEN"]
-      let url := stripTrailingSlash api ++ "/api/control/situation"
-      match (← sendJsonRequest "GET" url tok?) with
-      | .ok (200, _, some j) =>
-        IO.println (renderPretty j)
-        return .ok ()
-      | .ok (st, body, _) => return .error s!"HTTP {st}: {body}"
-      | .error e => return .error e
+      runReconcileLive root api rest
     else
       let st ← buildLocalState root
       let cdir := root / ".paloma"

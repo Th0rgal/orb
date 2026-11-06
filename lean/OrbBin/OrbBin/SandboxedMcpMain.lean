@@ -210,11 +210,21 @@ private def readCredentialRaw (c : McpClient) : IO (Except String String) := do
   return .ok trimmed
 
 /-- Obtain or renew a valid `mcp1.*` scoped session token. -/
-def McpClient.getToken (c : McpClient) : IO (Except String String) := do
+def McpClient.getToken
+    (c : McpClient)
+    (cancelled? : Option (IO.Ref Bool) := none) : IO (Except String String) := do
+  let checkCancelled : IO Bool := do
+    match cancelled? with
+    | some cRef => cRef.get
+    | none => pure false
+  if (← checkCancelled) then
+    return .error "Request cancelled; accepted actions continue"
   let cred ← match (← readCredentialRaw c) with
     | .ok s => pure s
     | .error e => return .error e
   c.sessionLock.atomically do
+    if (← checkCancelled) then
+      return .error "Request cancelled; accepted actions continue"
     let cached ← get
     let nowSec : Int := Int.ofNat (← nowEpoch).toNat
     if let some (tok, exp) := cached then
@@ -224,6 +234,8 @@ def McpClient.getToken (c : McpClient) : IO (Except String String) := do
     if cred.startsWith "mcp1." && curCached.isNone then
       if let some sid := decodeMcpTokenSessionId? cred then
         c.resolvedSessionId.atomically (set (some sid))
+      if (← checkCancelled) then
+        return .error "Request cancelled; accepted actions continue"
       match (← sendJsonRequest "GET" s!"{c.apiUrl}/api/mcp/capabilities" (some cred) none) with
       | .error _ => return .error "Core is unavailable"
       | .ok (status, _, caps?) =>
@@ -241,6 +253,8 @@ def McpClient.getToken (c : McpClient) : IO (Except String String) := do
           set curCached
           if expiry > nowSec + 120 && c.clientLabel?.isNone && c.hostHint?.isNone then
             return .ok cred
+    if (← checkCancelled) then
+      return .error "Request cancelled; accepted actions continue"
     let isScoped := cred.startsWith "mcp1."
     let auth :=
       if c.tokenFile?.isSome then cred
@@ -296,7 +310,7 @@ def McpClient.request
     if let some cRef := cancelled? then
       if (← cRef.get) then
         return .error "Request cancelled; accepted actions continue"
-    let tok ← match (← c.getToken) with
+    let tok ← match (← c.getToken cancelled?) with
       | .ok t => pure t
       | .error e => return .error e
     if let some cRef := cancelled? then

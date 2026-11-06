@@ -144,16 +144,17 @@ LEAN_EXPORT lean_obj_res orb_bin_spawn_pgrp(
     b_lean_obj_arg prog, b_lean_obj_arg args_arr, b_lean_obj_arg env_arr, uint8_t pipe_stdin, lean_obj_arg w
 ) {
     (void)w;
+    uint8_t use_pipe = pipe_stdin & 1u, null_out = (pipe_stdin >> 1) & 1u;
     int in_pipe[2] = {-1, -1};
-    if (pipe_stdin && pipe(in_pipe) != 0)
+    if (use_pipe && pipe(in_pipe) != 0)
         return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("pipe() failed")));
-    if (pipe_stdin) fcntl(in_pipe[1], F_SETFD, FD_CLOEXEC);
+    if (use_pipe) fcntl(in_pipe[1], F_SETFD, FD_CLOEXEC);
     size_t argc = lean_array_size(args_arr), envc = lean_array_size(env_arr);
     char **argv = (char **)calloc(argc + 2, sizeof(char *));
     char **envp = (char **)calloc(envc + 1, sizeof(char *));
     if (!argv || !envp) {
         free(argv); free(envp);
-        if (pipe_stdin) { close(in_pipe[0]); close(in_pipe[1]); }
+        if (use_pipe) { close(in_pipe[0]); close(in_pipe[1]); }
         return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("calloc failed")));
     }
     argv[0] = (char *)lean_string_cstr(prog);
@@ -163,17 +164,18 @@ LEAN_EXPORT lean_obj_res orb_bin_spawn_pgrp(
     pid_t pid = fork();
     if (pid < 0) {
         free(argv); free(envp);
-        if (pipe_stdin) { close(in_pipe[0]); close(in_pipe[1]); }
+        if (use_pipe) { close(in_pipe[0]); close(in_pipe[1]); }
         return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("fork() failed")));
     }
     if (pid == 0) {
         setpgid(0, 0);
-        if (isatty(0) == 1) {
+        if (!null_out && isatty(0) == 1) {
             void (*prev)(int) = signal(SIGTTOU, SIG_IGN);
             tcsetpgrp(0, getpgrp());
             signal(SIGTTOU, prev);
         }
-        if (pipe_stdin) { close(in_pipe[1]); dup2(in_pipe[0], 0); if (in_pipe[0] != 0) close(in_pipe[0]); }
+        if (use_pipe) { close(in_pipe[1]); dup2(in_pipe[0], 0); if (in_pipe[0] != 0) close(in_pipe[0]); }
+        if (null_out) { int dn = open("/dev/null", O_RDWR); if (dn >= 0) { if (!use_pipe) dup2(dn, 0); dup2(dn, 1); dup2(dn, 2); if (dn > 2) close(dn); } }
         signal(SIGTERM, SIG_DFL); signal(SIGINT, SIG_DFL); signal(SIGPIPE, SIG_DFL);
         extern char **environ;
         environ = envp;
@@ -183,7 +185,7 @@ LEAN_EXPORT lean_obj_res orb_bin_spawn_pgrp(
     setpgid(pid, pid);
     free(argv); free(envp);
     int32_t write_fd = -1;
-    if (pipe_stdin) { close(in_pipe[0]); write_fd = (int32_t)in_pipe[1]; }
+    if (use_pipe) { close(in_pipe[0]); write_fd = (int32_t)in_pipe[1]; }
     lean_object *res = lean_alloc_sarray(1, 12, 12);
     uint8_t *rp = lean_sarray_cptr(res);
     int64_t pid64 = (int64_t)pid;

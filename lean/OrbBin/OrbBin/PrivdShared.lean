@@ -240,17 +240,33 @@ def checkScopeRestrictions
     return .error "Rejected by orb_privd_command_step confinement gate"
   return .ok packed
 
+private def isTrustedResolvedBinary (cand : String) : IO (Option String) := do
+  let st ← statPath cand
+  if !st.exists_ then return none
+  if st.isSymlink then
+    try
+      let real ← IO.FS.realPath (System.FilePath.mk cand)
+      let realDir := (real.parent.map toString).getD ""
+      if !trustedExecDirs.contains realDir then return none
+      let rst ← statPath real.toString
+      if rst.exists_ && rst.isReg then return some real.toString
+      return none
+    catch _ =>
+      return none
+  else if st.isReg then
+    return some cand
+  else
+    return none
+
 def resolveTrustedBinary? (bin : String) : IO (Option String) := do
   if bin.any (· == '/') then
     if (← isTrustedExecutableToken bin) then
-      let st ← statPath bin
-      if st.exists_ && st.isReg then return some bin
+      return (← isTrustedResolvedBinary bin)
     return none
   for dir in trustedExecDirs do
     let cand := s!"{dir}/{bin}"
-    let st ← statPath cand
-    if st.exists_ && st.isReg then
-      return some cand
+    if let some resolved ← isTrustedResolvedBinary cand then
+      return some resolved
   return none
 
 end OrbBin.PrivdShared

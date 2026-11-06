@@ -226,12 +226,23 @@ def runAllTests : IO UInt32 := do
   assertTrue "loadSnapshotDir rejects filename/provider mismatch" (isErr badSnapLoad)
 
   assertTrue "parseRfc3339Epoch? accepts UTC Z" (parseRfc3339Epoch? "2099-01-01T00:00:00Z").isSome
+  assertTrue "parseRfc3339Epoch? accepts fractional UTC Z" (parseRfc3339Epoch? "2099-01-01T00:00:00.125Z").isSome
   assertTrue "parseRfc3339Epoch? accepts +02:00" (parseRfc3339Epoch? "2099-01-01T02:00:00+02:00").isSome
   assertTrue "parseRfc3339Epoch? rejects invalid timestamp" (parseRfc3339Epoch? "not-a-timestamp").isNone
+  assertTrue "parseRfc3339Epoch? rejects non-digit fractional suffix" (parseRfc3339Epoch? "2099-01-01T00:00:00.garbageZ").isNone
+  assertTrue "parseRfc3339Epoch? rejects empty fractional suffix" (parseRfc3339Epoch? "2099-01-01T00:00:00.Z").isNone
+  assertTrue "parseRfc3339Epoch? rejects double dot fractional suffix" (parseRfc3339Epoch? "2099-01-01T00:00:00.1.2Z").isNone
+
+  assertTrue "resolveTrustedBinary? resolves /bin/sh (even when symlinked)"
+    (← resolveTrustedBinary? "/bin/sh").isSome
+  assertTrue "resolveTrustedBinary? resolves bare sh"
+    (← resolveTrustedBinary? "sh").isSome
 
   let palomaWs := tmpDir / "paloma-ws"
   IO.FS.createDirAll (palomaWs / ".paloma" / "fixtures")
   IO.FS.createDirAll (palomaWs / ".paloma" / "modes")
+  IO.FS.createDirAll (palomaWs / ".paloma" / "projects")
+  IO.FS.createDirAll (palomaWs / "docs")
   IO.FS.writeFile (palomaWs / ".paloma" / "modes" / "orb.json")
     "{\"project\":\"orb\",\"mode\":\"conservative\",\"until\":\"2099-01-01T00:00:00Z\"}\n"
   IO.FS.writeFile (palomaWs / ".paloma" / "fixtures" / "tasks.json")
@@ -239,10 +250,38 @@ def runAllTests : IO UInt32 := do
   match (← buildDispatchPlanJson palomaWs "orb") with
   | .error e => throw <| IO.userError s!"buildDispatchPlanJson failed: {e}"
   | .ok plan =>
+    let disp := (plan.fieldArr? "dispatch").getD #[]
+    assertEq "conservative mode dispatches only 1 safe task" disp.size 1
     assertEq "conservative mode selects standard task over exploration"
-      (plan.fieldStr? "task_id") (some "t-std")
-    assertEq "dispatch-plan reports exploration_budget_exhausted"
-      (plan.fieldStr? "reason") (some "exploration_budget_exhausted")
+      (disp[0]!.fieldStr? "task_id") (some "t-std")
+    assertEq "conservative mode sets null reason when safe task is dispatched"
+      (plan.field? "reason") (some .null)
+
+  -- Local tracker doc scan + drift detection (`ShortMissionId`, `StaleMissionRef`, `LiveMismatch`, `PrListedOpenButMerged`)
+  IO.FS.writeFile (palomaWs / ".paloma" / "fixtures" / "missions.json")
+    "[{\"id\":\"11111111-1111-4111-8111-111111111111\",\"status\":\"active\"}]\n"
+  IO.FS.writeFile (palomaWs / ".paloma" / "fixtures" / "pr-lfglabs-dev__verity-103.json")
+    "{\"state\":\"closed\",\"draft\":false,\"merged\":true,\"checks\":[]}\n"
+  IO.FS.writeFile (palomaWs / ".paloma" / "projects" / "verity.md")
+    "Repo: lfglabs-dev/verity\nmission abc1234\nmission: 22222222-2222-4222-8222-222222222222\nmission: 11111111-1111-4111-8111-111111111111\nstatus: blocked\nPR #103 open\n"
+  IO.FS.writeFile (palomaWs / "docs" / "PALOMA_EXTRA.md")
+    "- [x]UX1: wire feature\n"
+  let localSt ← buildLocalState palomaWs
+  let docArr := (localSt.fieldArr? "project_docs").getD #[]
+  let driftArr := (localSt.fieldArr? "drift").getD #[]
+  assertEq "scanProjectDocs finds .paloma/projects + docs/PALOMA_*.md" docArr.size 2
+  assertTrue "detectLocalDrift finds short_mission_id"
+    (driftArr.any (fun d => d.fieldStr? "kind" == some "short_mission_id"))
+  assertTrue "detectLocalDrift finds stale_mission_ref"
+    (driftArr.any (fun d => d.fieldStr? "kind" == some "stale_mission_ref"))
+  assertTrue "detectLocalDrift finds live_mismatch"
+    (driftArr.any (fun d => d.fieldStr? "kind" == some "live_mismatch"))
+  assertTrue "detectLocalDrift finds pr_listed_open_but_merged"
+    (driftArr.any (fun d => d.fieldStr? "kind" == some "pr_listed_open_but_merged"))
+  let parsedChecklist := parseTrackerMarkdown "- [x] A1: ship feature\n- [ ] no code item here\n"
+  assertEq "parseTrackerMarkdown item count" parsedChecklist.size 2
+  assertEq "parseTrackerMarkdown normalizes code key" parsedChecklist[0]!.key "a1"
+  assertEq "parseTrackerMarkdown derives title key" parsedChecklist[1]!.key "no-code-item-here"
 
   -- 10. `StdioMcpServer` cancel + reused ID ownership & 8-slot `inFlight` retention
   let inPath := tmpDir / "rpc-in.jsonl"
@@ -253,11 +292,11 @@ def runAllTests : IO UInt32 := do
     "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fast\"}\n"
   IO.FS.writeFile inPath rpcFrames
   IO.FS.writeFile outPath ""
-  let inFd ← match (← LeanSys.Posix.openFile inPath.toString 0 0) with
-    | .ok fd => pure fd.raw
+  let inFd ← match (← LeanSys.Posix.openFd inPath.toString 0 0 0) with
+    | .ok fd => pure (Int32.ofBitVec (BitVec.ofNat 32 fd.raw.toNat))
     | .error e => throw <| IO.userError s!"open inPath: {e}"
-  let outFd ← match (← LeanSys.Posix.openFile outPath.toString (0x41) 0o600) with
-    | .ok fd => pure fd.raw
+  let outFd ← match (← LeanSys.Posix.openFd outPath.toString 4 0 0) with
+    | .ok fd => pure (Int32.ofBitVec (BitVec.ofNat 32 fd.raw.toNat))
     | .error e => throw <| IO.userError s!"open outPath: {e}"
   serveFd inFd outFd (fun req cancelRef => do
     let m := (req.fieldStr? "method").getD ""

@@ -78,8 +78,11 @@ structure SpawnedPgrp where
   stdinFd   : Int32
   deriving Repr, BEq
 
-def spawnPgrp (prog : String) (args : Array String) (env : Array String) (pipeStdin : Bool := false) : IO SpawnedPgrp := do
-  let raw ← rawSpawnPgrp prog args env (if pipeStdin then 1 else 0)
+def spawnPgrp
+    (prog : String) (args : Array String) (env : Array String)
+    (pipeStdin : Bool := false) (nullStdio : Bool := false) : IO SpawnedPgrp := do
+  let flags : UInt8 := (if pipeStdin then 1 else 0) ||| (if nullStdio then 2 else 0)
+  let raw ← rawSpawnPgrp prog args env flags
   let mut pidU64 : UInt64 := 0
   for i in [0:8] do
     pidU64 := pidU64 ||| ((raw.get! i).toUInt64 <<< (i * 8).toUInt64)
