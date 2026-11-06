@@ -297,16 +297,10 @@ BUILD_SCRIPT = r'''set -euo pipefail
 exec > >(tee -a /home/user/build.log) 2>&1
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
-sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config libssl-dev curl ca-certificates git zstd >/dev/null
-if [ ! -x "$HOME/.cargo/bin/cargo" ]; then
-  curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable >/dev/null
-fi
-. "$HOME/.cargo/env"
-rustc --version
+sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config libssl-dev curl ca-certificates git sqlite3 zstd >/dev/null
 rm -rf "$HOME/src" && mkdir -p "$HOME/src" && tar -xf "$HOME/src.tar" -C "$HOME/src"
 cd "$HOME/src"
-CARGO_TERM_PROGRESS_WHEN=never cargo build --release --locked --bin sandboxed-node 2>&1 | grep -vE '^\s+(Compiling|Downloaded|Downloading)' || { echo BUILD_FAILED; exit 1; }
-./scripts/build_orb_bins.sh --ensure-lean --out-dir target/release --only sandboxed-mcp || { echo BUILD_FAILED; exit 1; }
+./scripts/build_orb_bins.sh --ensure-lean --out-dir target/release --only sandboxed-node --only sandboxed-mcp || { echo BUILD_FAILED; exit 1; }
 install -m755 target/release/sandboxed-node "$HOME/sandboxed-node.out"
 install -m755 target/release/sandboxed-mcp "$HOME/sandboxed-mcp.out"
 sha256sum "$HOME/sandboxed-node.out" "$HOME/sandboxed-mcp.out"
@@ -479,7 +473,7 @@ def cmd_refresh_node(args):
         script = f'''set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 need=()
-for p in gh ripgrep fd-find clang llvm lld pkg-config libssl-dev; do
+for p in sqlite3 gh ripgrep fd-find clang llvm lld pkg-config libssl-dev; do
   dpkg -s "$p" >/dev/null 2>&1 || need+=("$p")
 done
 if [ "${{#need[@]}}" -gt 0 ]; then
