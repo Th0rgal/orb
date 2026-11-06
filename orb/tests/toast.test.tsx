@@ -294,4 +294,64 @@ describe("unified workspace ErrorToast & Toaster", () => {
     expect(onDismiss).toHaveBeenCalledOnce();
     await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
   });
+
+  it("isolates concurrent StatusToast instances showing identical messages", async () => {
+    const onDismissMain = vi.fn();
+    const onDismissSide = vi.fn();
+    const onReattachMain = vi.fn();
+    const onReattachSide = vi.fn();
+    const [mainMsg, setMainMsg] = createSignal<string | null>("File no longer available — re-attach: notes.pdf");
+    const [sideMsg, setSideMsg] = createSignal<string | null>("File no longer available — re-attach: notes.pdf");
+
+    render(() => (
+      <>
+        <StatusToast
+          tone="warning"
+          message={mainMsg()}
+          onDismiss={() => {
+            onDismissMain();
+            setMainMsg(null);
+          }}
+          action={{
+            label: "Re-attach",
+            primary: true,
+            run: () => {
+              onReattachMain();
+              setMainMsg(null);
+            },
+          }}
+        />
+        <StatusToast
+          tone="warning"
+          message={sideMsg()}
+          onDismiss={() => {
+            onDismissSide();
+            setSideMsg(null);
+          }}
+          action={{
+            label: "Re-attach",
+            primary: true,
+            run: () => {
+              onReattachSide();
+              setSideMsg(null);
+            },
+          }}
+        />
+      </>
+    ));
+
+    expect(screen.getAllByRole("status")).toHaveLength(2);
+    const buttons = screen.getAllByRole("button", { name: "Re-attach" });
+    expect(buttons).toHaveLength(2);
+
+    fireEvent.click(buttons[0]!);
+    expect(onReattachMain).toHaveBeenCalledOnce();
+    expect(onReattachSide).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getAllByRole("status")).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(onDismissSide).toHaveBeenCalledOnce();
+    expect(onDismissMain).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+  });
 });

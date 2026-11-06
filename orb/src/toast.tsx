@@ -231,6 +231,7 @@ export function StatusToast(p: {
   action?: ToastAction;
   actions?: ToastAction[];
 }) {
+  const instance = nextId++;
   let key: string | undefined;
   const release = () => {
     if (key !== undefined) {
@@ -241,7 +242,7 @@ export function StatusToast(p: {
   createEffect(() => {
     const msg = p.message;
     if (!msg) return release();
-    const next = `status:${p.tone ?? "info"}:${msg}`;
+    const next = `status:${instance}:${p.tone ?? "info"}:${msg}`;
     if (next !== key) release();
     key = next;
     const actions = [...(p.action ? [p.action] : []), ...(p.actions ?? [])];
