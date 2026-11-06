@@ -228,6 +228,12 @@ fn record_pending_rotation_with_generation(
     }
     let _lock = lock_pending(path)?;
     let mut envelope = load_pending(path)?;
+    if envelope.entries.iter().any(|entry| {
+        entry.rotation.provider == rot.provider
+            && entry.rotation.old_refresh_token == rot.new_refresh_token
+    }) {
+        return Ok(());
+    }
     let expected_oauth_generation = expected_oauth_generation
         .or_else(|| capture_expected_oauth_generation(path, &rot))
         .or_else(|| {
@@ -732,6 +738,80 @@ mod tests {
         let saved = reloaded.get(id).await.unwrap();
         assert_eq!(saved.oauth_generation, entries[1].rotation_id);
         assert_eq!(saved.oauth_rotation_id, Some(entries[1].rotation_id));
+        assert_eq!(saved.oauth.unwrap().refresh_token, "C");
+    }
+
+    #[tokio::test]
+    async fn duplicate_predecessor_preserves_chained_generation_and_drain_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending.json");
+        let storage_path = dir.path().join("ai_providers.json");
+        let (store, id) = store_with_account(dir.path(), "A").await;
+        for (old, new) in [("A", "B"), ("B", "C")] {
+            let expected = AIProviderStore::oauth_generation_at_path(
+                &storage_path,
+                ProviderType::Anthropic,
+                old,
+            );
+            record_pending_rotation_with_generation_async(&path, rotation(old, new), expected)
+                .await
+                .unwrap();
+        }
+        let entries = snapshot_pending(&path).unwrap();
+        assert_eq!(
+            entries[1].expected_oauth_generation,
+            Some(entries[0].rotation_id)
+        );
+        let queued = fs::read(&path).unwrap();
+        for old in ["A", "stale-predecessor"] {
+            let expected = AIProviderStore::oauth_generation_at_path(
+                &storage_path,
+                ProviderType::Anthropic,
+                old,
+            );
+            record_pending_rotation_with_generation_async(&path, rotation(old, "B"), expected)
+                .await
+                .unwrap();
+            assert_eq!(fs::read(&path).unwrap(), queued);
+        }
+        assert_eq!(
+            store.get(id).await.unwrap().oauth.unwrap().refresh_token,
+            "A"
+        );
+        assert_eq!(drain_pending(&store, &path).await, 2);
+        assert!(!path.exists());
+        let reloaded = AIProviderStore::new(storage_path).await;
+        let saved = reloaded.get(id).await.unwrap();
+        assert_eq!(saved.oauth_generation, entries[1].rotation_id);
+        assert_eq!(saved.oauth_rotation_id, Some(entries[1].rotation_id));
+        assert_eq!(saved.oauth.unwrap().refresh_token, "C");
+    }
+
+    #[tokio::test]
+    async fn lagging_superseded_rotation_after_predecessor_drained_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending.json");
+        let storage_path = dir.path().join("ai_providers.json");
+        let (store, id) = store_with_account(dir.path(), "A").await;
+        record_pending_rotation_async(&path, rotation("A", "B"))
+            .await
+            .unwrap();
+        assert_eq!(drain_pending(&store, &path).await, 1);
+        record_pending_rotation_async(&path, rotation("B", "C"))
+            .await
+            .unwrap();
+        let queued = fs::read(&path).unwrap();
+        record_pending_rotation_async(&path, rotation("A", "B"))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), queued);
+        assert_eq!(drain_pending(&store, &path).await, 1);
+        assert!(!path.exists());
+        let saved = AIProviderStore::new(storage_path)
+            .await
+            .get(id)
+            .await
+            .unwrap();
         assert_eq!(saved.oauth.unwrap().refresh_token, "C");
     }
 
