@@ -88,36 +88,42 @@ describe("unified workspace ErrorToast & Toaster", () => {
     vi.doUnmock("../src/api");
   });
 
-  it("centers across all open workspace panels and lifts above any overlapping bottom composer", () => {
-    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
+  it("centers across the full app window (including over the sidebar) and lifts above any overlapping bottom composer", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 });
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
+
+    const sidebar = document.createElement("aside");
+    sidebar.className = "sidebar";
+    sidebar.getBoundingClientRect = () => rect(0, 0, 240, 900);
 
     const main = document.createElement("main");
     main.className = "main";
-    main.getBoundingClientRect = () => rect(220, 35, 820, 900);
+    main.getBoundingClientRect = () => rect(240, 35, 700, 900);
 
     const dock = document.createElement("div");
     dock.className = "dock";
     const composer = document.createElement("div");
     composer.className = "composer";
-    composer.getBoundingClientRect = () => rect(254, 818, 786, 884);
+    composer.getBoundingClientRect = () => rect(274, 818, 666, 884);
     dock.append(composer);
     main.append(dock);
 
     const filePanel = document.createElement("aside");
     filePanel.className = "file-panel";
-    filePanel.getBoundingClientRect = () => rect(820, 35, 1440, 900);
+    filePanel.getBoundingClientRect = () => rect(700, 35, 900, 900);
 
-    document.body.append(main, filePanel);
+    document.body.append(sidebar, main, filePanel);
     try {
       notify({ key: "approval-queue", kind: "info", variant: "secret", title: "Touch ID required" });
       window.dispatchEvent(new Event("resize"));
       const toaster = document.querySelector<HTMLElement>(".toaster")!;
-      // Workspace spans 220..1440 -> exact center is 830px (not just the left 220..820 column).
-      expect(toaster.style.left).toBe("830px");
+      // Window spans 0..900 -> exact center is 450px (580px wide spans 160..740, overlapping sidebar 0..240).
+      expect(toaster.style.left).toBe("450px");
+      expect(toaster.style.width).toBe("580px");
       // Overlaps the docked composer at top=818 -> lifts to 900 - 818 + 12 = 94px.
       expect(toaster.style.bottom).toBe("94px");
     } finally {
+      sidebar.remove();
       main.remove();
       filePanel.remove();
     }
