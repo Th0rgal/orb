@@ -1,4 +1,4 @@
-import { missionAssignedNode } from "./machines/nodes";
+import { isAutoManagedTarget, missionAssignedNode } from "./machines/nodes";
 import { rememberImagePreview, imagePreviewScope } from "./imagePreviews";
 import { api, getApiUrl, connectionVersion, type Mission } from "./api";
 import { writeLocalFiles } from "./localAgents";
@@ -39,7 +39,8 @@ export async function stageRemoteImages(images: DraftImage[], mission?: Mission 
   const scope = imagePreviewScope(getApiUrl(), version, node);
   return Promise.all(images.map(async image => {
     if (node !== "core") {
-      const result = await api<{path:string}>("/api/uploads", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({node_id:node,name:image.name,data_base64:image.dataUrl.split(",")[1]})});
+      const uploadNode = isAutoManagedTarget(node) ? "core" : node;
+      const result = await api<{path:string}>("/api/uploads", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({node_id:uploadNode,name:image.name,data_base64:image.dataUrl.split(",")[1]})});
       if (!result?.path) throw new Error("Image upload did not return a file path. Your draft is kept.");
       if (version !== connectionVersion()) throw new Error("The backend changed. Your draft is kept.");
       rememberImagePreview(scope, result.path, image.dataUrl);

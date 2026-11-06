@@ -1,6 +1,7 @@
 import { jsonSignal } from "./storage";
 import type {CodexServiceTier} from './api';
 import { destinationHarnessChoices } from "./harness-models";
+import { isAutoManagedTarget } from "./machines/nodes";
 import { createSignal } from "solid-js";
 import { normalizeEffort } from "./effort";
 import {
@@ -24,7 +25,7 @@ export const [remoteHarnessChoices, setRemoteHarnessChoices] = createSignal<Harn
 export const [nodeAntigravityModels, setNodeAntigravityModels] = createSignal<Record<string, [string,string][]>>({});
 const nodeModelRequests = new Set<string>();
 export async function refreshNodeAntigravityModels(machine: string) {
-  if (!machine || machine === "local" || machine === "side") return;
+  if (!machine || machine === "local" || machine === "side" || isAutoManagedTarget(machine)) return;
   const version = connectionVersion(), key = `${version}:${machine}`;
   if (nodeModelRequests.has(key)) return;
   nodeModelRequests.add(key);

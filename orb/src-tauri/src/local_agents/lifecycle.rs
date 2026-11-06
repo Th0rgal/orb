@@ -808,6 +808,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn completed_local_run_can_be_replaced_by_a_followup() {
+        let dir = tempfile::tempdir().unwrap();
         let request = StartRequest {
             service_tier: None,
             effort: None,
@@ -817,7 +818,7 @@ mod tests {
             id: format!("followup-test-{}", uuid_like()),
             harness: "grok".into(),
             bin: "/usr/bin/true".into(),
-            cwd: "/tmp".into(),
+            cwd: dir.path().to_string_lossy().into_owned(),
             prompt: "test".into(),
             model: None,
             session_id: None,

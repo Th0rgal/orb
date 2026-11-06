@@ -244,3 +244,75 @@ describe("ownership and reaping", () => {
     ]);
   });
 });
+
+import {
+  formatAutoManagedTarget,
+  isAgentSpawnedManagedNode,
+  isAutoManagedTarget,
+  isUserManagedNode,
+  parseAutoManagedTarget,
+  rememberManagedMachines,
+} from "../src/machines/nodes";
+import { compactSizeSpec, is24hCommitmentSize } from "../src/managedMachineModel";
+import { remoteLaunchPreflight } from "../src/missionLaunch";
+
+describe("cloud VM submenus, on-demand targets, and agent-spawned VM collapsing", () => {
+  it("parses, formats, and labels auto-managed cloud VM targets", () => {
+    expect(formatAutoManagedTarget("boat", "large")).toBe("auto-managed:boat:large");
+    expect(isAutoManagedTarget("auto-managed:boat:large")).toBe(true);
+    expect(isAutoManagedTarget("auto-managed:hetzner")).toBe(true);
+    expect(isAutoManagedTarget("auto-managed")).toBe(true);
+    expect(isAutoManagedTarget("managed-abc")).toBe(false);
+    expect(isAutoManagedTarget("core")).toBe(false);
+    expect(parseAutoManagedTarget("auto-managed:boat:large")).toEqual({ provider: "boat", size: "large" });
+    expect(parseAutoManagedTarget("auto-managed:hetzner:default")).toEqual({ provider: "hetzner", size: "default" });
+    expect(parseAutoManagedTarget("auto-managed:vastai")).toEqual({ provider: "vastai" });
+    expect(parseAutoManagedTarget("auto-managed")).toEqual({});
+    expect(parseAutoManagedTarget("managed-abc")).toBeNull();
+    expect(nodeLabel("auto-managed:boat:large")).toBe("boat.dev · large");
+    expect(nodeLabel("auto-managed:hetzner:default")).toBe("Hetzner · medium");
+    expect(nodeLabel("auto-managed:colab:a100")).toBe("Google Colab · a100");
+  });
+
+  it("separates user-started VMs from agent-spawned VMs across direct, label, and catalog metadata", () => {
+    expect(isAgentSpawnedManagedNode({ id: "managed-m1", labels: ["managed"], owner_kind: "mission" })).toBe(true);
+    expect(isUserManagedNode({ id: "managed-m1", labels: ["managed"], owner_kind: "mission" })).toBe(false);
+    expect(isUserManagedNode({ id: "managed-u1", labels: ["managed"], owner_kind: "user" })).toBe(true);
+    expect(isAgentSpawnedManagedNode({ id: "managed-u1", labels: ["managed"], owner_kind: "user" })).toBe(false);
+    expect(isAgentSpawnedManagedNode({ id: "managed-l1", labels: ["managed", "owner=mission"] })).toBe(true);
+    expect(isUserManagedNode({ id: "babylon", labels: [] })).toBe(false);
+
+    rememberManagedMachines([
+      { id: "req1", node_id: "managed-req1", requested_by_mission_id: "parent-m", owner_kind: "user" },
+      { id: "usr2", node_id: "managed-usr2", owner_kind: "user" },
+    ]);
+    expect(isAgentSpawnedManagedNode({ id: "managed-req1", labels: ["managed"] })).toBe(true);
+    expect(isUserManagedNode({ id: "managed-usr2", labels: ["managed"] })).toBe(true);
+  });
+
+  it("formats compact size specs and 24h commitment badges", () => {
+    expect(compactSizeSpec({ size: "large", cpu: 8, ram_gb: 16, usd_per_hour: 0.288 })).toBe("8 vCPU · 16 GB");
+    expect(compactSizeSpec({ size: "a100", cpu: 12, ram_gb: 85, gpu: "A100", usd_per_hour: 0.675 })).toBe("12 vCPU · 85 GB · A100");
+    expect(compactSizeSpec({ size: "cax31", cpu: 8, ram_gb: 16, arch: "arm64", usd_per_hour: 0.03 })).toBe("8 vCPU · 16 GB · arm64");
+    expect(is24hCommitmentSize({ size: "boost-8", cpu: 8, ram_gb: 24, usd_per_hour: 0.2, min_billing_hours: 24 })).toBe(true);
+    expect(is24hCommitmentSize({ size: "large", cpu: 8, ram_gb: 16, usd_per_hour: 0.288 })).toBe(false);
+  });
+
+  it("validates remote launch preflight for auto-managed targets without requiring a booted node", () => {
+    const fleet = {
+      enabled: true,
+      nodes: [],
+      remote_launch: { typed: true, harnesses: ["claudecode", "codex", "opencode", "antigravity"], proxy_url_configured: true },
+      managed_compute: { enabled: true, configured_providers: ["boat"], active_machines: 0, total_machines: 0, queued_spawns: 0 },
+    };
+    expect(remoteLaunchPreflight(fleet, "auto-managed:boat:large", { backend: "claudecode", model: "claude-opus-5" })).toBeNull();
+    expect(remoteLaunchPreflight(fleet, "auto-managed:boat:large", { backend: "grok", model: "grok-4" })).toContain("not supported on managed cloud VMs");
+    expect(
+      remoteLaunchPreflight(
+        { ...fleet, managed_compute: { ...fleet.managed_compute, enabled: false } },
+        "auto-managed:boat:large",
+        { backend: "claudecode", model: "claude-opus-5" },
+      ),
+    ).toContain("managed cloud VMs are disabled");
+  });
+});

@@ -6093,3 +6093,65 @@ async fn colab_managed_manager_explicit_only_orphan_safety_and_saturation() {
         "colab_api_token"
     ));
 }
+#[tokio::test]
+async fn managed_node_owner_kind_projection_tracks_user_vs_mission_lifecycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.max_concurrent = Some(4);
+    let (m, _) = manager(dir.path(), s);
+
+    // 1. User-spawned VM projects `owner_kind == Some("user")` on RemoteNodeView.
+    let user_vm = m
+        .spawn(SpawnRequest {
+            wait: Some(false),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::managed::owner_kind(&user_vm.node_id).as_deref(),
+        Some("user")
+    );
+    crate::managed::register_test_node_with_url(&user_vm, "http://127.0.0.1:9999", "test-tok");
+    let cfg = crate::managed::node_config(&user_vm.node_id).expect("managed node config");
+    let view = crate::remote_node::RemoteNodeView::from_cache(cfg, None);
+    assert_eq!(view.owner_kind.as_deref(), Some("user"));
+
+    // 2. Claiming that VM for a mission flips the live projection to `"mission"`.
+    m.update(&user_vm.id, |row| row.state = MachineState::Online)
+        .await;
+    m.claim_for_mission(&user_vm.id, "mission-1", None, Some("t1"))
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::managed::owner_kind(&user_vm.node_id).as_deref(),
+        Some("mission")
+    );
+    let claimed_view = crate::remote_node::RemoteNodeView::from_cache(cfg, None);
+    assert_eq!(claimed_view.owner_kind.as_deref(), Some("mission"));
+
+    // 3. Agent-requested VM (`requested_by_mission_id` set, not yet claimed) also
+    // projects `"mission"` for UI collapsing while preserving `Owner::User` reaper
+    // semantics until claimed.
+    let agent_vm = m
+        .spawn(SpawnRequest {
+            wait: Some(false),
+            owner_user_id: Some("t1".into()),
+            requested_by_mission_id: Some("parent-mission".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(agent_vm.owner_kind.as_deref(), Some("user"));
+    assert_eq!(
+        crate::managed::owner_kind(&agent_vm.node_id).as_deref(),
+        Some("mission")
+    );
+
+    // 4. Destroying removes `owner_kind` from the live node registry.
+    m.destroy(&user_vm.id, "test_cleanup").await.unwrap();
+    m.destroy(&agent_vm.id, "test_cleanup").await.unwrap();
+    assert_eq!(crate::managed::owner_kind(&user_vm.node_id), None);
+    assert_eq!(crate::managed::owner_kind(&agent_vm.node_id), None);
+}

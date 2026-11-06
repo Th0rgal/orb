@@ -2357,6 +2357,23 @@ select.orb-select-native:disabled { cursor: default; }
 .machine-inline-note { color: var(--fg-3); font-size: 11px; }
 .machine-menu .machine-section-label { padding: 6px 9px 3px; font-size: 10px; letter-spacing: .03em; }
 .machine-menu .menu-sep { margin: 4px 8px; }
+.machine-provider-trigger .menu-col,
+.machine-agent-vms-toggle .menu-col { flex: 1; min-width: 0; }
+.machine-provider-trigger .menu-chevron { margin-left: auto; color: var(--fg-3); font-size: 14px; line-height: 1; flex: none; }
+.machine-provider-trigger[aria-expanded="true"] { background: var(--bg-hover); }
+.machine-disclosure-chevron { transition: transform .14s ease; }
+.machine-disclosure-chevron.open { transform: rotate(90deg); }
+.machine-agent-vm-row { padding-left: 14px !important; }
+.machine-submenu { padding: 4px; max-height: min(420px, 70vh); overflow-y: auto; }
+.machine-submenu .machine-section-label { padding: 5px 8px 4px; font-size: 10px; letter-spacing: .03em; }
+.machine-size-option { min-height: 32px; padding: 5px 8px; gap: 8px; }
+.machine-size-main { display: flex; align-items: baseline; gap: 7px; flex: 1; min-width: 0; overflow: hidden; }
+.machine-size-main .menu-title { font-weight: 500; white-space: nowrap; }
+.machine-size-main .machine-inline-note { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.machine-size-badge { flex: none; padding: 1px 5px; border-radius: 4px; background: var(--stroke-soft); color: var(--fg-2); font-size: 10px; font-weight: 500; line-height: 14px; }
+.machine-size-rate { flex: none; color: var(--fg-2); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.machine-transfer-menu .machine-provider-trigger { justify-content: flex-start; }
+.machine-transfer-menu .machine-agent-vms-toggle { justify-content: flex-start; }
 .local-scan-status { position: absolute; top: 100%; left: 0; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--fg-3); margin-top: 8px; }
 
 /* Center the new-task input itself; destination controls float above it. */
@@ -2986,6 +3003,15 @@ select.orb-select-native:disabled { cursor: default; }
 @media (max-width: 600px) { .ps-page .s-row:has(.ps-cap-ctrl) { flex-wrap: wrap; } .ps-page .s-row:has(.ps-cap-ctrl) .s-row-text { flex-basis: 100%; } }
 
 .row.drop-active { background: var(--bg-hover); outline: 1px solid var(--fg-3); outline-offset: -1px; }
+.row.drag-source { opacity: 0.45; }
+.sidebar-drag-pill {
+  position: fixed; top: 0; left: 0; z-index: 120; pointer-events: none; will-change: transform;
+  display: inline-flex; align-items: center; gap: 6px; max-width: 220px; height: 26px; padding: 0 10px;
+  border-radius: var(--radius-md); border: 1px solid var(--stroke); background: var(--bg-elev);
+  box-shadow: var(--composer-shadow); color: var(--fg); font: 500 12px/1 var(--sans);
+}
+.sidebar-drag-pill-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-drag-pill-count { flex: none; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .composer-image img { cursor: zoom-in; }
 
 /* A saved prompt must not turn the floating composer into a second transcript. */

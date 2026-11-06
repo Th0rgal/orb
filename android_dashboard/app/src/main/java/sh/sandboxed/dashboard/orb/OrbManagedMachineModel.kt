@@ -295,8 +295,118 @@ object OrbManagedMachines {
     fun isManagedNode(id: String?, labels: List<String>?): Boolean =
         labels?.contains("managed") == true || id?.startsWith("managed-") == true
 
+    fun isManagedNode(node: OrbRow): Boolean =
+        isManagedNode(node.str("id") ?: node.id, nodeLabels(node))
+
     fun nodeLabels(node: OrbRow): List<String> =
         (node.raw["labels"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
+
+    fun parseLabelsOwner(labels: List<String>?): String? {
+        for (raw in labels.orEmpty()) {
+            val l = raw.trim().lowercase(Locale.US)
+            if (l.startsWith("owner=")) return l.removePrefix("owner=")
+        }
+        return null
+    }
+
+    fun ownerByNodeId(machines: List<ManagedMachine>): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        for (m in machines) {
+            val kind = if (!m.ownerMissionId.isNullOrEmpty() || !m.requestedByMissionId.isNullOrEmpty()) {
+                "mission"
+            } else {
+                (m.ownerKind ?: "").trim().lowercase(Locale.US)
+            }
+            if (kind.isEmpty()) continue
+            if (m.nodeId.isNotEmpty()) out[m.nodeId] = kind
+            out["managed-${m.id}"] = kind
+        }
+        return out
+    }
+
+    fun isAgentSpawnedManagedNode(node: OrbRow, ownerMap: Map<String, String> = emptyMap()): Boolean {
+        val id = node.str("id") ?: node.id
+        val labels = nodeLabels(node)
+        if (!isManagedNode(id, labels)) return false
+        val direct = (node.str("owner_kind") ?: "").trim().lowercase(Locale.US)
+        val kind = if (direct.isNotEmpty()) {
+            direct
+        } else {
+            (parseLabelsOwner(labels) ?: ownerMap[id] ?: "").trim().lowercase(Locale.US)
+        }
+        return kind == "mission"
+    }
+
+    fun isUserManagedNode(node: OrbRow, ownerMap: Map<String, String> = emptyMap()): Boolean =
+        isManagedNode(node) && !isAgentSpawnedManagedNode(node, ownerMap)
+
+    data class AutoManagedTarget(val provider: String?, val size: String?)
+
+    fun parseAutoManagedTarget(raw: String?): AutoManagedTarget? {
+        val trimmed = (raw ?: "").trim()
+        if (trimmed.isEmpty()) return null
+        if (trimmed.equals("auto-managed", ignoreCase = true)) return AutoManagedTarget(null, null)
+        if (!trimmed.lowercase(Locale.US).startsWith("auto-managed:")) return null
+        val rest = trimmed.substring("auto-managed:".length).trim()
+        if (rest.isEmpty()) return AutoManagedTarget(null, null)
+        val parts = rest.split(':').map { it.trim() }.filter { it.isNotEmpty() }
+        return when (parts.size) {
+            1 -> AutoManagedTarget(parts[0].lowercase(Locale.US), null)
+            2 -> AutoManagedTarget(parts[0].lowercase(Locale.US), parts[1])
+            else -> null
+        }
+    }
+
+    fun isAutoManagedTarget(raw: String?): Boolean = parseAutoManagedTarget(raw) != null
+
+    fun formatAutoManagedTarget(provider: String, size: String): String =
+        "auto-managed:${provider.trim().lowercase(Locale.US)}:${size.trim()}"
+
+    fun autoManagedLabel(raw: String?): String? {
+        val parsed = parseAutoManagedTarget(raw) ?: return null
+        if (parsed.provider != null && parsed.size != null) {
+            return "${providerLabel(parsed.provider)} · ${sizeLabel(parsed.size)}"
+        }
+        if (parsed.provider != null) {
+            return providerLabel(parsed.provider)
+        }
+        return "Cloud VM"
+    }
+
+    fun allowedSizes(sizes: List<ManagedSize>, maxSize: String?): List<ManagedSize> {
+        if (maxSize.isNullOrEmpty()) return sizes
+        val idx = sizes.indexOfFirst { it.size == maxSize }
+        return if (idx < 0) sizes else sizes.subList(0, idx + 1)
+    }
+
+    fun usableProviders(res: ManagedMachinesResponse?): List<ManagedProviderInfo> {
+        if (res == null) return emptyList()
+        var providers = res.providers
+        if (providers.isEmpty() && res.enabled && res.sizes.isNotEmpty()) {
+            providers = listOf(
+                ManagedProviderInfo(
+                    provider = "boat",
+                    displayName = "boat.dev",
+                    configured = true,
+                    supportsSnapshots = true,
+                    supportsFreeStop = true,
+                    sizes = res.sizes,
+                    enabled = true
+                )
+            )
+        }
+        if (!res.enabled && providers.none { isProviderUsable(it) }) return emptyList()
+        return providers.filter { isProviderUsable(it) && allowedSizes(it.sizes, res.budget.maxSize).isNotEmpty() }
+    }
+
+    fun is24hCommitmentSize(size: ManagedSize?): Boolean = (size?.minBillingHours ?: 0) >= 24
+
+    fun compactSizeSpec(s: ManagedSize): String {
+        val parts = mutableListOf("${s.cpu} vCPU · ${num(s.ramGb)} GB")
+        if (!s.gpu.isNullOrEmpty()) parts.add(s.gpu)
+        if (!s.arch.isNullOrEmpty() && s.arch != "x86_64") parts.add(s.arch)
+        return parts.joinToString(" · ")
+    }
 
     fun nodeProvider(labels: List<String>?): String? {
         val known = setOf("boat", "boost", "hetzner", "vastai", "scaleway", "colab")

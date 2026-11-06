@@ -13,7 +13,7 @@ impl Machine {
     pub fn label(&self) -> String {
         match self {
             Self::Core => "Core".into(),
-            Self::Node { id } => id.clone(),
+            Self::Node { id } => crate::managed::display_name(id).unwrap_or_else(|| id.clone()),
             Self::Client { .. } => "This computer".into(),
         }
     }

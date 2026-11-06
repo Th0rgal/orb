@@ -135,6 +135,105 @@ enum OrbManaged {
     static func isManagedNode(_ node: OrbJSON) -> Bool {
         node["labels"].items.contains { $0.text == "managed" } || node["id"].text.hasPrefix("managed-")
     }
+    static func parseLabelsOwner(_ labels: [OrbJSON]) -> String? {
+        for item in labels {
+            let l = item.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if l.hasPrefix("owner=") {
+                return String(l.dropFirst("owner=".count))
+            }
+        }
+        return nil
+    }
+    static func ownerByNodeId(_ machines: [OrbManagedMachine]) -> [String: String] {
+        var out: [String: String] = [:]
+        for m in machines {
+            let kind: String
+            if !(m.owner_mission_id ?? "").isEmpty || !(m.requested_by_mission_id ?? "").isEmpty {
+                kind = "mission"
+            } else {
+                kind = (m.owner_kind ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            }
+            guard !kind.isEmpty else { continue }
+            if let nid = m.node_id, !nid.isEmpty { out[nid] = kind }
+            out["managed-\(m.id)"] = kind
+        }
+        return out
+    }
+    static func isAgentSpawnedManagedNode(_ node: OrbJSON, managedOwnerByNodeId: [String: String] = [:]) -> Bool {
+        guard isManagedNode(node) else { return false }
+        let direct = node["owner_kind"].text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let kind = !direct.isEmpty
+            ? direct
+            : (parseLabelsOwner(node["labels"].items) ?? managedOwnerByNodeId[node["id"].text] ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+        return kind == "mission"
+    }
+    static func isUserManagedNode(_ node: OrbJSON, managedOwnerByNodeId: [String: String] = [:]) -> Bool {
+        isManagedNode(node) && !isAgentSpawnedManagedNode(node, managedOwnerByNodeId: managedOwnerByNodeId)
+    }
+    static func parseAutoManagedTarget(_ raw: String?) -> (provider: String?, size: String?)? {
+        let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.lowercased() == "auto-managed" { return (nil, nil) }
+        guard trimmed.lowercased().hasPrefix("auto-managed:") else { return nil }
+        let rest = String(trimmed.dropFirst("auto-managed:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        if rest.isEmpty { return (nil, nil) }
+        let parts = rest.split(separator: ":").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        if parts.count == 1 { return (parts[0].lowercased(), nil) }
+        if parts.count == 2 { return (parts[0].lowercased(), parts[1]) }
+        return nil
+    }
+    static func isAutoManagedTarget(_ raw: String?) -> Bool {
+        parseAutoManagedTarget(raw) != nil
+    }
+    static func formatAutoManagedTarget(provider: String, size: String) -> String {
+        "auto-managed:\(provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()):\(size.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+    static func autoManagedLabel(_ raw: String?) -> String? {
+        guard let parsed = parseAutoManagedTarget(raw) else { return nil }
+        if let provider = parsed.provider, let size = parsed.size {
+            return "\(providerLabel(provider)) · \(sizeLabel(size))"
+        }
+        if let provider = parsed.provider {
+            return providerLabel(provider)
+        }
+        return "Cloud VM"
+    }
+    static func allowedSizes(_ sizes: [OrbManagedSize], maxSize: String?) -> [OrbManagedSize] {
+        guard let maxSize, !maxSize.isEmpty, let idx = sizes.firstIndex(where: { $0.size == maxSize }) else {
+            return sizes
+        }
+        return Array(sizes[...idx])
+    }
+    static func usableProviders(_ response: OrbManagedMachinesResponse?) -> [OrbManagedProviderInfo] {
+        guard let response else { return [] }
+        var providers = response.providers ?? []
+        if providers.isEmpty && response.enabled && !response.sizes.isEmpty {
+            providers = [
+                OrbManagedProviderInfo(
+                    provider: "boat",
+                    display_name: "boat.dev",
+                    configured: true,
+                    enabled: true,
+                    supports_snapshots: true,
+                    supports_free_stop: true,
+                    sizes: response.sizes
+                )
+            ]
+        }
+        guard response.enabled || providers.contains(where: isProviderUsable) else { return [] }
+        return providers.filter { isProviderUsable($0) && !allowedSizes($0.sizes, maxSize: response.budget.max_size).isEmpty }
+    }
+    static func is24hCommitmentSize(_ size: OrbManagedSize?) -> Bool {
+        (size?.min_billing_hours ?? 0) >= 24
+    }
+    static func compactSizeSpec(_ s: OrbManagedSize) -> String {
+        var parts = ["\(number(s.cpu)) vCPU · \(number(s.ram_gb)) GB"]
+        if let gpu = s.gpu, !gpu.isEmpty { parts.append(gpu) }
+        if let arch = s.arch, !arch.isEmpty, arch != "x86_64" { parts.append(arch) }
+        return parts.joined(separator: " · ")
+    }
     /// Row title: the friendly `name` ("small-a"), falling back to the id.
     static func title(_ m: OrbManagedMachine) -> String {
         if let name = m.name, !name.isEmpty { return name }

@@ -1010,6 +1010,9 @@ pub struct RemoteNodeView {
     /// Human name of a managed machine ("small-a"); `id` stays immutable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Live ownership kind of a managed machine (`"user"` vs `"mission"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_kind: Option<String>,
 }
 
 impl RemoteNodeView {
@@ -1066,6 +1069,7 @@ impl RemoteNodeView {
             cordoned: false,
             quarantined_harnesses: Vec::new(),
             display_name: crate::managed::display_name(&config.id),
+            owner_kind: crate::managed::owner_kind(&config.id),
         }
     }
 }

@@ -1,5 +1,7 @@
 /** Managed (boat.dev) machines: API client and presentation logic. */
-import { api, ApiError } from "./api";
+import { createSignal } from "solid-js";
+import { api, ApiError, connectionVersion } from "./api";
+import { rememberManagedMachines } from "./machines/nodes";
 
 export type ManagedState = "provisioning" | "enrolling" | "online" | "destroying" | "destroyed" | "failed" | "stopped";
 
@@ -125,6 +127,7 @@ export interface CreateManagedMachine {
   ttl_minutes?: number;
   image?: string;
   reason?: string;
+  owner_mission_id?: string;
 }
 
 /** `null` when the backend predates managed machines (404). */
@@ -138,6 +141,8 @@ export async function listManagedMachines(): Promise<ManagedMachinesResponse | n
 }
 const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 export const createManagedMachine = (body: CreateManagedMachine) => api<ManagedMachine>("/api/managed-machines", json(body));
+export const claimManagedMachineOwner = (id: string, owner_mission_id: string) =>
+  api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/owner`, json({ owner_mission_id }));
 export const destroyManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}`, { method: "DELETE" });
 export const stopManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/stop`, json({}));
 export const resumeManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/resume`, json({}));
@@ -179,8 +184,11 @@ export async function getManagedSettings(): Promise<ManagedSettings | null> {
   try { return await api<ManagedSettings>("/api/managed-machines/settings", { method: "GET" }); }
   catch (error) { if (error instanceof ApiError && (error.status === 404 || error.status === 405)) return null; throw error; }
 }
-export const putManagedSettings = (body: ManagedSettings) =>
-  api<ManagedSettings>("/api/managed-machines/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+export const putManagedSettings = async (body: ManagedSettings) => {
+  const saved = await api<ManagedSettings>("/api/managed-machines/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("orb:managed-providers-changed"));
+  return saved;
+};
 
 /** `null` when the backend predates per-provider configuration (404). */
 export async function listManagedProviders(): Promise<ManagedProviderInfo[] | null> {
@@ -493,3 +501,121 @@ export function reapLine(m: Pick<ManagedMachine, "reap_at" | "reap_reason" | "de
   if (min <= 0) return `Reap due${why}`;
   return min < 60 ? `Reaps in ${min} min${why}` : `Reaps in ${Math.floor(min / 60)} h ${String(min % 60).padStart(2, "0")} min${why}`;
 }
+
+export interface ManagedCatalogState {
+  loaded: boolean;
+  enabled: boolean;
+  providers: ManagedProviderInfo[];
+  budget: ManagedBudget | null;
+  settings: ManagedSettings | null;
+}
+
+const EMPTY_CATALOG: ManagedCatalogState = {
+  loaded: false,
+  enabled: false,
+  providers: [],
+  budget: null,
+  settings: null,
+};
+
+const [managedCatalog, setManagedCatalog] = createSignal<ManagedCatalogState>(EMPTY_CATALOG);
+export { managedCatalog };
+
+let catalogInFlight: Promise<void> | null = null;
+let catalogVersion = -1;
+
+export function resetManagedCatalog(): void {
+  catalogInFlight = null;
+  catalogVersion = -1;
+  setManagedCatalog(EMPTY_CATALOG);
+}
+
+export async function refreshManagedCatalog(force = false): Promise<void> {
+  const version = connectionVersion();
+  if (!force && catalogInFlight && catalogVersion === version) return catalogInFlight;
+  catalogVersion = version;
+  let run: Promise<void> | null = null;
+  run = (async () => {
+    try {
+      const [res, settings] = await Promise.all([
+        listManagedMachines().catch(() => null),
+        getManagedSettings().catch(() => null),
+      ]);
+      if (version !== connectionVersion()) return;
+      if (!res) {
+        setManagedCatalog({ loaded: true, enabled: false, providers: [], budget: null, settings });
+        return;
+      }
+      rememberManagedMachines(res.machines ?? []);
+      let providers = res.providers ?? [];
+      if (!providers.length && res.enabled) {
+        const fetched = await listManagedProviders().catch(() => null);
+        if (version !== connectionVersion()) return;
+        if (fetched?.length) {
+          providers = fetched;
+        } else if (res.sizes?.length) {
+          providers = [{
+            provider: "boat",
+            display_name: "boat.dev",
+            configured: true,
+            enabled: true,
+            supports_snapshots: true,
+            supports_free_stop: true,
+            sizes: res.sizes,
+          }];
+        }
+      }
+      setManagedCatalog({
+        loaded: true,
+        enabled: Boolean(res.enabled) || providers.some(isProviderUsable),
+        providers,
+        budget: res.budget ?? null,
+        settings,
+      });
+    } finally {
+      if (catalogInFlight === run) catalogInFlight = null;
+    }
+  })();
+  catalogInFlight = run;
+  return run;
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("orb:managed-providers-changed", () => { void refreshManagedCatalog(true); });
+}
+
+/** Configured + enabled cloud providers that expose at least one budget-allowed VM size. */
+export function usableManagedProviders(cat: ManagedCatalogState = managedCatalog()): ManagedProviderInfo[] {
+  if (!cat.enabled && !cat.providers.some(isProviderUsable)) return [];
+  return cat.providers.filter(p => isProviderUsable(p) && allowedSizes(p.sizes, cat.budget?.max_size).length > 0);
+}
+
+/** Allowed sizes for a given provider in the shared catalog. */
+export function providerAllowedSizes(
+  provider: Pick<ManagedProviderInfo, "provider" | "sizes">,
+  cat: ManagedCatalogState = managedCatalog(),
+): ManagedSize[] {
+  return allowedSizes(provider.sizes ?? [], cat.budget?.max_size);
+}
+
+export function findManagedSize(
+  provider?: string | null,
+  size?: string | null,
+  cat: ManagedCatalogState = managedCatalog(),
+): ManagedSize | undefined {
+  if (!size) return undefined;
+  const key = machineProviderKey(provider);
+  const info = cat.providers.find(p => machineProviderKey(p.provider) === key);
+  return info?.sizes.find(s => s.size === size);
+}
+
+export const is24hCommitmentSize = (size?: Pick<ManagedSize, "min_billing_hours"> | null): boolean =>
+  (size?.min_billing_hours ?? 0) >= 24;
+
+/** Compact size spec for menu submenus: "8 vCPU · 16 GB" (+ GPU/arch when present). */
+export const compactSizeSpec = (s: Pick<ManagedSize, "cpu" | "ram_gb" | "gpu" | "arch">): string =>
+  [
+    `${s.cpu} vCPU · ${s.ram_gb} GB`,
+    s.gpu ? s.gpu : "",
+    s.arch && s.arch !== "x86_64" ? s.arch : "",
+  ].filter(Boolean).join(" · ");

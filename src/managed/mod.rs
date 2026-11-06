@@ -1208,6 +1208,40 @@ pub type MissionRootsProbe = Arc<
 
 static ALIASES: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+static OWNER_KINDS: LazyLock<RwLock<HashMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Effective ownership kind (`"mission"` for agent/mission-spawned VMs, `"user"`
+/// for operator-created VMs) of a managed machine record.
+pub fn effective_owner_kind(machine: &ManagedMachine) -> Option<String> {
+    if machine.owner_mission_id.is_some() || machine.requested_by_mission_id.is_some() {
+        Some("mission".into())
+    } else {
+        machine.owner_kind.clone()
+    }
+}
+
+/// Ownership kind (`"mission"` | `"user"`) for a managed node id, if live.
+pub fn owner_kind(node_id: &str) -> Option<String> {
+    OWNER_KINDS.read().ok()?.get(node_id).cloned()
+}
+
+fn sync_owner_kind(machine: &ManagedMachine) {
+    if !machine.provisioning_mode.is_worker() || machine.node_id.is_empty() {
+        return;
+    }
+    if let Ok(mut map) = OWNER_KINDS.write() {
+        if machine.state.is_live() {
+            if let Some(kind) = effective_owner_kind(machine) {
+                map.insert(machine.node_id.clone(), kind);
+            } else {
+                map.remove(&machine.node_id);
+            }
+        } else {
+            map.remove(&machine.node_id);
+        }
+    }
+}
 
 /// Map a live machine name ("small-a") to its immutable node id; anything
 /// else is returned unchanged. Resolve at intake so a persisted mission never
@@ -1267,6 +1301,7 @@ fn register_alias(machine: &ManagedMachine) {
             map.insert(machine.name.clone(), machine.node_id.clone());
         }
     }
+    sync_owner_kind(machine);
 }
 
 fn unregister_alias(machine: &ManagedMachine) {
@@ -1274,6 +1309,9 @@ fn unregister_alias(machine: &ManagedMachine) {
         if map.get(&machine.name) == Some(&machine.node_id) {
             map.remove(&machine.name);
         }
+    }
+    if let Ok(mut map) = OWNER_KINDS.write() {
+        map.remove(&machine.node_id);
     }
 }
 
@@ -1377,6 +1415,7 @@ fn register_node(machine: &ManagedMachine, core_port: u16, token: &str) {
 
 #[cfg(test)]
 pub(crate) fn register_test_node_with_url(machine: &ManagedMachine, base_url: &str, token: &str) {
+    sync_owner_kind(machine);
     let config: &'static RemoteNodeConfig = Box::leak(Box::new(RemoteNodeConfig {
         id: machine.node_id.clone(),
         base_url: base_url.trim_end_matches('/').to_string(),
@@ -3119,6 +3158,7 @@ impl ManagedManager {
             f(m);
             m.clone()
         };
+        sync_owner_kind(&out);
         self.persist().await;
         Some(self.enrich_machine_view(out))
     }

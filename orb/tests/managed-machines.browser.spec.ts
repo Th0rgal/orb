@@ -188,13 +188,16 @@ for (const theme of ["dark", "light"] as const) test.describe(theme, () => {
     await page.screenshot({ path: `${shots}/new-machine-dialog-${theme}.png` });
   });
 
-  test("New Agent picker groups managed machines by name", async ({ page }) => {
+  test("New Agent picker collapses agent-spawned managed machines by name", async ({ page }) => {
     await mock(page, { theme });
     await page.goto("/");
     const trigger = page.locator(".na-env-machine, button").filter({ hasText: /Core \(agent-core\)|spark/ }).first();
     await trigger.click();
     const menu = page.locator(".na-menu");
-    await expect(menu.locator(".machine-managed-label")).toHaveText("Managed (boat.dev)");
+    const toggle = menu.locator(".machine-agent-vms-toggle");
+    await expect(toggle).toContainText("Agent-spawned VMs");
+    await expect(menu.locator(".machine-node-option", { hasText: "medium-a" })).toHaveCount(0);
+    await toggle.click();
     const option = menu.locator(".machine-node-option", { hasText: "medium-a" });
     await expect(option).toContainText("4 vCPU · 8 GB");
     await expect(menu.getByText("managed-mm1")).toHaveCount(0);

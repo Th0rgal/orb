@@ -17,7 +17,7 @@ export interface TransferAction {
   manifest?: Manifest | null; receipt?: { root: string; bytes: number; files: number; digest: string } | null;
   created_at: string;
 }
-export interface Destination { machine: Machine; label: string; available: boolean; reason?: string; harnesses?: string[] }
+export interface Destination { machine: Machine; label: string; available: boolean; reason?: string; harnesses?: string[]; owner_kind?: string | null }
 /** `features` and `source` are absent from a backend that predates them. */
 export interface TransferView { version: number; source?: Machine; features?: string[]; actions: TransferAction[]; destinations: Destination[] }
 export const machineLabel = (m: Machine) => m.kind === "core" ? "Core" : m.kind === "client" ? "This computer" : nodeLabel(m.id);

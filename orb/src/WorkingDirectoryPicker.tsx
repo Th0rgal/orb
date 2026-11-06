@@ -1,6 +1,6 @@
 import { nativeInvoke } from "./native";
 import { readJson, writeJson } from "./storage";
-import { missionNode } from "./machines/nodes";
+import { isAutoManagedTarget, missionNode } from "./machines/nodes";
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
@@ -292,7 +292,9 @@ export function WorkingDirectoryPicker(p: {
   });
 
 
+  const autoManaged = () => isAutoManagedTarget(p.machine);
   const choose = async () => {
+    if (autoManaged()) return;
     setError("");
     if (p.machine !== "local") {
       setOpen(!open());
@@ -323,17 +325,17 @@ export function WorkingDirectoryPicker(p: {
     setOpen(false);
   };
 
-  const label = () => p.value.replace(/\/$/, "").split("/").pop() || "Folder";
+  const label = () => autoManaged() ? "Default folder" : (p.value.replace(/\/$/, "").split("/").pop() || "Folder");
 
   return (
     <div ref={rootRef} class="directory-picker">
       <button
         type="button"
         class="model directory-button"
-        title={p.value || "Choose working folder"}
+        title={autoManaged() ? "Default workspace on new VM — created when mission starts" : (p.value || "Choose working folder")}
         aria-label="Choose working folder"
         aria-expanded={open()}
-        disabled={p.disabled || picking()}
+        disabled={p.disabled || picking() || autoManaged()}
         onClick={() => void choose()}
       >
         <FolderIcon size={14} />

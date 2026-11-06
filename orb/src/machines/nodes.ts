@@ -11,10 +11,11 @@ export const missionAssignedNode = (m: Placed): string | undefined => m?.remote_
 
 import { createSignal } from "solid-js";
 
-type Named = { id: string; display_name?: string | null; labels?: string[] | null; cpu_total?: number | null; mem_total_bytes?: number | null };
+type Named = { id: string; display_name?: string | null; owner_kind?: string | null; labels?: string[] | null; cpu_total?: number | null; mem_total_bytes?: number | null };
 const KNOWN_PROVIDERS = new Set(["boat", "boost", "hetzner", "vastai", "scaleway", "colab"]);
 const [names, setNames] = createSignal<ReadonlyMap<string, string>>(new Map());
 const [providers, setProviders] = createSignal<ReadonlyMap<string, string>>(new Map());
+const [owners, setOwners] = createSignal<ReadonlyMap<string, string>>(new Map());
 
 function parseLabelsProvider(labels?: readonly string[] | null): string | undefined {
   for (const raw of labels ?? []) {
@@ -25,21 +26,99 @@ function parseLabelsProvider(labels?: readonly string[] | null): string | undefi
   return undefined;
 }
 
-/** Remember server display names and provider labels so every machine picker follows them. */
+export function parseLabelsOwner(labels?: readonly string[] | null): string | undefined {
+  for (const raw of labels ?? []) {
+    const l = raw.trim().toLowerCase();
+    if (l.startsWith("owner=")) return l.slice("owner=".length);
+  }
+  return undefined;
+}
+
+/** Remember server display names, provider labels, and ownership kinds so every machine picker follows them. */
 export function rememberNodeNames(nodes: Named[]) {
   const next = new Map(names());
   const nextProv = new Map(providers());
+  const nextOwn = new Map(owners());
   for (const n of nodes) {
     if (n.display_name) next.set(n.id, n.display_name);
     const p = parseLabelsProvider(n.labels);
     if (p) nextProv.set(n.id, p);
+    const o = (n.owner_kind ?? parseLabelsOwner(n.labels) ?? "").trim().toLowerCase();
+    if (o) nextOwn.set(n.id, o);
   }
   if (next.size !== names().size || [...next].some(([k, v]) => names().get(k) !== v)) setNames(next);
   if (nextProv.size !== providers().size || [...nextProv].some(([k, v]) => providers().get(k) !== v)) setProviders(nextProv);
+  if (nextOwn.size !== owners().size || [...nextOwn].some(([k, v]) => owners().get(k) !== v)) setOwners(nextOwn);
 }
+
+/** Sync live managed-machine records into the shared node name/owner map. */
+export function rememberManagedMachines(
+  machines: readonly { id: string; node_id?: string | null; name?: string | null; provider?: string | null; owner_kind?: string | null; owner_mission_id?: string | null; requested_by_mission_id?: string | null }[],
+) {
+  const next = new Map(names());
+  const nextProv = new Map(providers());
+  const nextOwn = new Map(owners());
+  for (const m of machines) {
+    const ids = [...new Set([m.node_id ?? "", `managed-${m.id}`].filter(Boolean))];
+    const kind = m.owner_mission_id || m.requested_by_mission_id ? "mission" : (m.owner_kind ?? "").trim().toLowerCase();
+    const prov = (m.provider ?? "").trim().toLowerCase();
+    for (const id of ids) {
+      if (m.name) next.set(id, m.name);
+      if (prov) nextProv.set(id, prov);
+      if (kind) nextOwn.set(id, kind);
+    }
+  }
+  if (next.size !== names().size || [...next].some(([k, v]) => names().get(k) !== v)) setNames(next);
+  if (nextProv.size !== providers().size || [...nextProv].some(([k, v]) => providers().get(k) !== v)) setProviders(nextProv);
+  if (nextOwn.size !== owners().size || [...nextOwn].some(([k, v]) => owners().get(k) !== v)) setOwners(nextOwn);
+}
+
 /** Remote nodes provisioned by the managed-machine service. */
 export const isManagedNode = (node: { id?: string; labels?: readonly string[] | null } | null | undefined) =>
   !!node && (!!node.labels?.includes("managed") || !!node.id?.startsWith("managed-"));
+
+/** Managed VMs started on demand by an agent or claimed by a mission (`owner=mission`). */
+export const isAgentSpawnedManagedNode = (
+  node: { id?: string; labels?: readonly string[] | null; owner_kind?: string | null } | null | undefined,
+): boolean => {
+  if (!isManagedNode(node)) return false;
+  const kind = (node?.owner_kind ?? parseLabelsOwner(node?.labels) ?? (node?.id ? owners().get(node.id) : undefined) ?? "").trim().toLowerCase();
+  return kind === "mission";
+};
+
+/** Managed VMs explicitly started by the user (`owner=user` or unclaimed). */
+export const isUserManagedNode = (
+  node: { id?: string; labels?: readonly string[] | null; owner_kind?: string | null } | null | undefined,
+): boolean => isManagedNode(node) && !isAgentSpawnedManagedNode(node);
+
+export function managedProviderShortLabel(provider?: string | null): string {
+  const key = (provider ?? "").trim().toLowerCase();
+  if (key === "boat") return "boat.dev";
+  if (key === "boost" || key === "boost.ci") return "boost.ci";
+  if (key === "hetzner") return "Hetzner";
+  if (key === "vastai") return "Vast.ai";
+  if (key === "scaleway") return "Scaleway";
+  if (key === "colab" || key === "google-colab") return "Google Colab";
+  return provider?.trim() || "boat.dev";
+}
+
+export function parseAutoManagedTarget(raw?: string | null): { provider?: string; size?: string } | null {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return null;
+  if (trimmed.toLowerCase() === "auto-managed") return {};
+  if (!trimmed.toLowerCase().startsWith("auto-managed:")) return null;
+  const rest = trimmed.slice("auto-managed:".length).trim();
+  if (!rest) return {};
+  const parts = rest.split(":").map(s => s.trim()).filter(Boolean);
+  if (parts.length === 1) return { provider: parts[0].toLowerCase() };
+  if (parts.length === 2) return { provider: parts[0].toLowerCase(), size: parts[1] };
+  return null;
+}
+
+export const isAutoManagedTarget = (raw?: string | null): boolean => parseAutoManagedTarget(raw) !== null;
+
+export const formatAutoManagedTarget = (provider: string, size: string): string =>
+  `auto-managed:${provider.trim().toLowerCase()}:${size.trim()}`;
 /** Cloud provider of a managed node ("boat", "hetzner", "vastai", "scaleway"), when known. */
 export const nodeProvider = (node: { id?: string; labels?: readonly string[] | null } | null | undefined): string | undefined =>
   node ? parseLabelsProvider(node.labels) ?? (node.id ? providers().get(node.id) : undefined) : undefined;
@@ -144,10 +223,17 @@ export const MACHINES: Machine[] = [
   { id: "dgx-spark", name: "dgx-spark", host: "10.88.0.2", user: "th0rgal", port: 22, note: "spark-de79 · lean-mesh · GPU" },
 ];
 
-export const nodeLabel = (id: string) =>
-  names().get(id) ??
-  (id === "core" ? "Core"
-  : id === "local" ? "This computer"
-  : id === "dgx-spark" ? "DGX Spark"
-  : id === "dgx-spark-admin" ? "DGX Spark · Administration"
-  : id);
+export const nodeLabel = (id: string) => {
+  const auto = parseAutoManagedTarget(id);
+  if (auto) {
+    if (auto.provider && auto.size) return `${managedProviderShortLabel(auto.provider)} · ${auto.size === "default" ? "medium" : auto.size}`;
+    if (auto.provider) return managedProviderShortLabel(auto.provider);
+    return "Cloud VM";
+  }
+  return names().get(id) ??
+    (id === "core" ? "Core"
+    : id === "local" ? "This computer"
+    : id === "dgx-spark" ? "DGX Spark"
+    : id === "dgx-spark-admin" ? "DGX Spark · Administration"
+    : id);
+};

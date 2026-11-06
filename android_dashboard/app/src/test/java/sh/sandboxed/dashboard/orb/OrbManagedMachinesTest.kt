@@ -348,4 +348,24 @@ class OrbManagedMachinesTest {
         assertEquals(7, updated[0].int("capacity_available"))
         assertNull(updated[1].int("capacity_total"))
     }
+
+    @Test
+    fun autoManagedTargetsAndAgentSpawnedClassification() {
+        assertEquals("auto-managed:boat:large", OrbManagedMachines.formatAutoManagedTarget("boat", "large"))
+        assertTrue(OrbManagedMachines.isAutoManagedTarget("auto-managed:boat:large"))
+        assertTrue(OrbManagedMachines.isAutoManagedTarget("auto-managed"))
+        assertFalse(OrbManagedMachines.isAutoManagedTarget("managed-abc"))
+        assertEquals("boat.dev · large", OrbManagedMachines.autoManagedLabel("auto-managed:boat:large"))
+        assertEquals("Hetzner · medium", OrbManagedMachines.autoManagedLabel("auto-managed:hetzner:default"))
+
+        val r = OrbManagedMachines.parse(OrbSpec.dict("fixtures/managed-machines-response.json"))
+        assertEquals(listOf("boat", "boost", "hetzner"), OrbManagedMachines.usableProviders(r).map { it.provider })
+
+        val missionNode = OrbRow(mapOf("id" to "managed-m1", "labels" to listOf("managed"), "owner_kind" to "mission"))
+        val userNode = OrbRow(mapOf("id" to "managed-u1", "labels" to listOf("managed"), "owner_kind" to "user"))
+        assertTrue(OrbManagedMachines.isAgentSpawnedManagedNode(missionNode))
+        assertFalse(OrbManagedMachines.isUserManagedNode(missionNode))
+        assertTrue(OrbManagedMachines.isUserManagedNode(userNode))
+        assertFalse(OrbManagedMachines.isAgentSpawnedManagedNode(userNode))
+    }
 }

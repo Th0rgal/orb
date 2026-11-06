@@ -1,4 +1,33 @@
-import { isManagedNode, managedFleetLabel, missionNode, nodeLabel } from "./machines/nodes";
+import {
+  formatAutoManagedTarget,
+  isAgentSpawnedManagedNode,
+  isAutoManagedTarget,
+  isManagedNode,
+  isUserManagedNode,
+  missionNode,
+  nodeLabel,
+} from "./machines/nodes";
+import {
+  claimManagedMachineOwner,
+  createManagedMachine,
+  destroyManagedMachine,
+  is24hCommitmentSize,
+  managedCatalog,
+  managedError,
+  providerLabel,
+  refreshManagedCatalog,
+  sizeLabel,
+  usableManagedProviders,
+  usd,
+  type ManagedProviderInfo,
+  type ManagedSize,
+} from "./managedMachineModel";
+import {
+  AgentSpawnedVmsToggle,
+  CloudVmProviderRows,
+  dismissSubmenuOnSiblingHover,
+  type ActiveProviderSubmenu,
+} from "./MachineCloudMenu";
 import { swallow } from "./log";
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
@@ -68,11 +97,15 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
   const [inventory, setInventory] = createSignal<WorkspaceInventory>();
   const [choice, setChoice] = createSignal<Choice>({});
   const [light, setLight] = createSignal(true);
+  const [providerSubmenu, setProviderSubmenu] = createSignal<ActiveProviderSubmenu | undefined>();
+  const [agentVmsOpen, setAgentVmsOpen] = createSignal(false);
+  const [pendingCloudSpec, setPendingCloudSpec] = createSignal<{ provider: ManagedProviderInfo; size: ManagedSize } | null>(null);
+  let spawnedVmId: string | undefined;
   let cancelled = false;
   let alive = true;
   let root!: HTMLDivElement;
   let client: string | undefined;
-  const requestKey = crypto.randomUUID();
+  let requestKey = crypto.randomUUID();
   createEffect(() => {
     const node = missionNode(p.mission);
     if (node && p.mission.id) rememberMissionNode(p.mission.id, node);
@@ -108,7 +141,13 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
     const sorted = [...rows.filter(d => !node(d)), ...byLeastLoaded(rows.filter(d => node(d) && d.available), loadKey), ...rows.filter(d => node(d) && !d.available)];
     return [...sorted.filter(d => !managed(d)), ...sorted.filter(managed)];
   });
-  const firstManaged = () => ordered().find(managed);
+  const nonManaged = createMemo(() => ordered().filter(d => !managed(d)));
+  const userManaged = createMemo(() =>
+    ordered().filter(d => managed(d) && isUserManagedNode({ id: d.machine.kind === "node" ? d.machine.id : undefined, owner_kind: d.owner_kind })),
+  );
+  const agentManaged = createMemo(() =>
+    ordered().filter(d => managed(d) && isAgentSpawnedManagedNode({ id: d.machine.kind === "node" ? d.machine.id : undefined, owner_kind: d.owner_kind })),
+  );
   let features: string[] | undefined;
   const load = async (force = false) => {
     setLoading(true); setReady(false); setError("");
@@ -122,7 +161,12 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       setDestinations(rows);
       setReady(true);
       const previous=selected();
-      if(previous)setSelected(rows.find(row=>sameMachine(row.machine,previous.machine)));
+      if(previous){
+        const prevNodeId=previous.machine.kind==="node"?previous.machine.id:undefined;
+        if(!isAutoManagedTarget(prevNodeId)){
+          setSelected(rows.find(row=>sameMachine(row.machine,previous.machine)));
+        }
+      }
       queueMicrotask(() => {if(!root?.contains(document.activeElement))root?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();});
       const pending = [...view.actions].reverse().find(activeTransfer);
       if (pending) {
@@ -134,8 +178,53 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
   };
   onMount(() => {
     void load();
+    void refreshManagedCatalog();
   });
+  let previousCloudSelection: { target: Destination; spec: { provider: ManagedProviderInfo; size: ManagedSize } } | undefined;
+  const cleanupSpawnedVm = (restoreSelection = false) => {
+    if (!spawnedVmId) return;
+    const id = spawnedVmId;
+    spawnedVmId = undefined;
+    if (restoreSelection && previousCloudSelection && alive) {
+      requestKey = crypto.randomUUID();
+      setPendingCloudSpec(previousCloudSelection.spec);
+      setSelected(previousCloudSelection.target);
+    }
+    previousCloudSelection = undefined;
+    void destroyManagedMachine(id).catch(swallow("changeMachine.destroySpawnedVm", { id }));
+  };
   onCleanup(() => { alive = false; cancelled = true; });
+  const ensureProvisionedDestination = async (target: Destination): Promise<Destination> => {
+    const targetNodeId = target.machine.kind === "node" ? target.machine.id : undefined;
+    const spec = pendingCloudSpec();
+    if (!isAutoManagedTarget(targetNodeId) || !spec) return target;
+    setStage(`Starting ${providerLabel(spec.provider.provider)} ${sizeLabel(spec.size.size)} VM…`);
+    const spawned = await createManagedMachine({
+      provider: spec.provider.provider,
+      size: spec.size.size,
+      wait: true,
+      reason: `change_machine: ${p.mission.title || p.mission.id.slice(0, 8)}`,
+      ...(is24hCommitmentSize(spec.size) ? { allow_24h_commitment: true } : {}),
+    }).catch(e => {
+      throw new Error(managedError(e));
+    });
+    spawnedVmId = spawned.id;
+    previousCloudSelection = { target, spec };
+    void refreshManagedCatalog(true);
+    if (cancelled) {
+      cleanupSpawnedVm(true);
+      throw new Error("Transfer cancelled before preparation.");
+    }
+    const resolved: Destination = {
+      machine: { kind: "node", id: spawned.node_id },
+      label: spawned.name || nodeLabel(spawned.node_id),
+      available: true,
+      harnesses: target.harnesses,
+    };
+    setPendingCloudSpec(null);
+    setSelected(resolved);
+    return resolved;
+  };
   const stopSource = async () => {
     if (current().kind === "client") {
       await stopLocal(p.mission.id, { cancelWakeups: false });
@@ -167,14 +256,16 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
     try {
       if (current().kind === "client" && !localBinding(p.mission.id)) throw new Error("Open this conversation on its source computer before moving it.");
       if (running()) await stopSource();
-      let a: TransferAction = action() ?? await transferRequest<TransferAction>(p.mission.id, { op: "prepare", destination: target.machine, client_id: client, client_root: localBinding(p.mission.id)?.cwd, idempotency_key: requestKey, backend: backend(), model: model(), effort: backend() === p.mission.backend ? p.mission.model_effort : "" });
+      const resolvedTarget = await ensureProvisionedDestination(target);
+      setStage("Preparing workspace…");
+      let a: TransferAction = action() ?? await transferRequest<TransferAction>(p.mission.id, { op: "prepare", destination: resolvedTarget.machine, client_id: client, client_root: localBinding(p.mission.id)?.cwd, idempotency_key: requestKey, backend: backend(), model: model(), effort: backend() === p.mission.backend ? p.mission.model_effort : "" });
       setAction(a);
       // A source that cannot list its folders yet snapshots everything, as before.
       const found = await inventoryTransfer(a);
       if (found) { setChoice({}); setInventory(found); }
       else { a = await snapshotTransfer(a); setAction(a); }
       setStage("");
-    } catch (e) { fail(e); } finally { if (cancelled && action()) await cancel(); setBusy(false); }
+    } catch (e) { fail(e); if (!action()) cleanupSpawnedVm(true); } finally { if (cancelled && action()) await cancel(); setBusy(false); }
   };
   const fits = () => { const found = inventory(); if (!found) return true; const t = selectionTotals(found, choice()); return t.bytes <= found.limits.bytes && t.files <= found.limits.files; };
   const snapshot = async () => {
@@ -192,6 +283,14 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
     setStage("Verifying destination…"); a = await verifyTransfer(a); setAction(a);
     if (cancelled) throw new Error("Transfer cancelled before activation.");
     setStage("Activating destination…"); const mission = await activateTransfer(a);
+    const claimedVmId = spawnedVmId;
+    spawnedVmId = undefined;
+    previousCloudSelection = undefined;
+    if (claimedVmId) {
+      await claimManagedMachineOwner(claimedVmId, p.mission.id)
+        .then(() => refreshManagedCatalog(true))
+        .catch(swallow("changeMachine.claimSpawnedVm", { id: claimedVmId }));
+    }
     p.onMoved(mission); p.onClose();
   };
   const moveLight = async () => {
@@ -200,7 +299,9 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
     try {
       if (current().kind === "client" && running() && !localBinding(p.mission.id)) throw new Error("Open this conversation on its source computer to stop it before moving.");
       if (running()) await stopSource();
-      let a: TransferAction = action() ?? await transferRequest<TransferAction>(p.mission.id, { op: "prepare", light: true, destination: target.machine, client_id: client, idempotency_key: requestKey, backend: backend(), model: model(), effort: backend() === p.mission.backend ? p.mission.model_effort : "" });
+      const resolvedTarget = await ensureProvisionedDestination(target);
+      setStage("Preparing transfer…");
+      let a: TransferAction = action() ?? await transferRequest<TransferAction>(p.mission.id, { op: "prepare", light: true, destination: resolvedTarget.machine, client_id: client, idempotency_key: requestKey, backend: backend(), model: model(), effort: backend() === p.mission.backend ? p.mission.model_effort : "" });
       setAction(a);
       if (!a.manifest) {
         if (a.source.kind === "client" && !localBinding(p.mission.id)) throw new Error("Update the connected backend to move without workspace files.");
@@ -211,6 +312,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       await finishMove(a);
     } catch (e) {
       fail(e);
+      if (!action()) cleanupSpawnedVm(true);
       if (cancelled && action()) await cancel();
     } finally { setBusy(false); }
   };
@@ -226,20 +328,83 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
   };
   const cancel = async () => {
     const a = action();
-    try { if (a) await transferRequest(p.mission.id, { op: "cancel", transfer_id: a.id }); p.onClose(); }
-    catch (e) { fail(e); }
+    try {
+      if (a) await transferRequest(p.mission.id, { op: "cancel", transfer_id: a.id });
+      cleanupSpawnedVm();
+      p.onClose();
+    } catch (e) { fail(e); }
   };
   const STEPS = ["Prepare", "Copy", "Verify", "Activate"];
   // The step in hand: preparing until an inventory exists, then the stage of the move.
   const step = () => !action()?.manifest ? 0 : stage().startsWith("Verifying") ? 2 : stage().startsWith("Activating") ? 3 : 1;
-  const back = () => { setSelected(undefined); setError(""); queueMicrotask(() => root.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()); };
-  return <Popover ref={el => {root = el;}} class={`machine-transfer-menu ${selected() ? "transfer-dialog" : ""}`} label="Change machine" width={360} placement="top-start" busy={busy()} onClose={() => {if(action()) void cancel(); else p.onClose();}} onKeyDown={e => {if (!selected()) navigateOverlayItems(e, root, "[role=menuitem]");}}>
+  const back = () => { cleanupSpawnedVm(); previousCloudSelection = undefined; setPendingCloudSpec(null); setSelected(undefined); setError(""); queueMicrotask(() => root.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()); };
+  const renderDestinationRow = (d: Destination) => (
+    <button
+      class="menu-item"
+      role="menuitem"
+      disabled={!d.available || sameMachine(d.machine, current())}
+      title={d.reason ?? `${d.label} · ${machineLoadTitle(loadKey(d))}`}
+      onClick={() => {
+        setProviderSubmenu(undefined);
+        setPendingCloudSpec(null);
+        setSelected(d);
+        setError("");
+        queueMicrotask(() => root.querySelector<HTMLSelectElement>("select")?.focus());
+      }}
+    >
+      <span>{d.label}<Show when={d.reason}><small>{d.reason}</small></Show></span>
+      <span class="machine-transfer-end"><MachineLoadBadge machine={loadKey(d)} /><span>{sameMachine(d.machine, current()) ? "✓" : "›"}</span></span>
+    </button>
+  );
+  return <Popover ref={el => {root = el;}} class={`machine-transfer-menu ${selected() ? "transfer-dialog" : ""}`} label="Change machine" width={360} placement="top-start" busy={busy()} onClose={() => { setProviderSubmenu(undefined); if(action()) void cancel(); else { cleanupSpawnedVm(); p.onClose(); } }} onKeyDown={e => {if (!selected()) navigateOverlayItems(e, root, "[role=menuitem]");}}>
     <Show when={!selected()}>
+      <div onMouseOver={(e) => dismissSubmenuOnSiblingHover(e, providerSubmenu(), () => setProviderSubmenu(undefined))}>
       <div class="menu-group">Change machine…</div>
       <Show when={loading()}><div class="menu-group" role="status">{destinations().length?"Updating machines…":"Checking machines…"}</div></Show>
-      <For each={ordered()}>{d => <><Show when={d === firstManaged()}><div class="menu-sep" /><div class="machine-section-label">{managedFleetLabel(ordered().filter(managed).map(x => ({ id: x.machine.kind === "node" ? x.machine.id : undefined })))}</div></Show><button class="menu-item" role="menuitem" disabled={!d.available || sameMachine(d.machine, current())} title={d.reason ?? `${d.label} · ${machineLoadTitle(loadKey(d))}`} onClick={() => { setSelected(d); setError(""); queueMicrotask(() => root.querySelector<HTMLSelectElement>("select")?.focus()); }}>
-        <span>{d.label}<Show when={d.reason}><small>{d.reason}</small></Show></span><span class="machine-transfer-end"><MachineLoadBadge machine={loadKey(d)} /><span>{sameMachine(d.machine, current()) ? "✓" : "›"}</span></span>
-      </button></>}</For>
+      <For each={nonManaged()}>{renderDestinationRow}</For>
+      <CloudVmProviderRows
+        providers={usableManagedProviders()}
+        catalog={managedCatalog()}
+        subtitle="starts on move"
+        activeSubmenu={providerSubmenu()}
+        onSubmenuChange={setProviderSubmenu}
+        onSelectSize={(prov, size) => {
+          const targetId = formatAutoManagedTarget(prov.provider, size.size);
+          const allowedHarnesses = [
+            "claudecode",
+            "codex",
+            "opencode",
+            ...(managedCatalog().settings?.antigravity_on_managed !== false ? ["antigravity"] : []),
+          ];
+          setProviderSubmenu(undefined);
+          setPendingCloudSpec({ provider: prov, size });
+          setSelected({
+            machine: { kind: "node", id: targetId },
+            label: nodeLabel(targetId),
+            available: true,
+            harnesses: allowedHarnesses,
+          });
+          setError("");
+          queueMicrotask(() => root.querySelector<HTMLSelectElement>("select")?.focus());
+        }}
+      />
+      <Show when={userManaged().length > 0}>
+        <div class="menu-sep" />
+        <div class="machine-section-label">Your VMs</div>
+        <For each={userManaged()}>{renderDestinationRow}</For>
+      </Show>
+      <Show when={agentManaged().length > 0}>
+        <div class="menu-sep" />
+        <AgentSpawnedVmsToggle
+          count={agentManaged().length}
+          expanded={agentVmsOpen()}
+          onToggle={() => setAgentVmsOpen(v => !v)}
+        />
+        <Show when={agentVmsOpen()}>
+          <For each={agentManaged()}>{renderDestinationRow}</For>
+        </Show>
+      </Show>
+      </div>
     </Show>
     <Show when={selected()}>
       <header class="transfer-head">
@@ -252,6 +417,11 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       <div class="transfer-body">
         <Show when={loading()}><p role="status">{destinations().length?"Updating machines…":"Checking machines…"}</p></Show>
         <Show when={selected()?.reason}><p role="status">{selected()!.reason}</p></Show>
+        <Show when={pendingCloudSpec() && is24hCommitmentSize(pendingCloudSpec()!.size)}>
+          <p role="status">
+            Requires a {pendingCloudSpec()!.size.min_billing_hours ?? 24}-hour minimum billing commitment ({usd(pendingCloudSpec()!.size.usd_per_hour * (pendingCloudSpec()!.size.min_billing_hours ?? 24))} minimum) once started.
+          </p>
+        </Show>
         <Show when={!action()?.manifest && !inventory()}><p>{light() ? "Moves the conversation only; no workspace files are transferred. The agent waits for your next message." : "The conversation and selected workspace files move together. The agent waits for your next message."}</p></Show>
         <Show when={!action()}>
           <div class="transfer-options">

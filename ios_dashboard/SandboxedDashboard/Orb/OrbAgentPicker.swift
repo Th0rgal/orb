@@ -4,6 +4,7 @@ import UIKit
 struct OrbSelection {
     var provider = "agent", account = "", backend = "", model = "", node = "", repository = "", gitRef = ""
     var nodePinnedByUser = false
+    var allow24hCommitment = false
     var serviceTier = "standard"
     var params: OrbJSON = .array([])
     var canCancel = false
@@ -37,6 +38,9 @@ struct OrbSelection {
     }
     var machinePillLabel: String? {
         guard !cloud, !node.isEmpty, node != "core" else { return nil }
+        if let autoLabel = OrbManaged.autoManagedLabel(node) {
+            return autoLabel
+        }
         switch node {
         case "dgx-spark": return "spark"
         case "dgx-spark-admin": return "spark·admin"
@@ -93,6 +97,9 @@ struct OrbSelection {
         if !cloud && backend == "opencode" && !node.isEmpty && node != "core" && model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw OrbHTTPError(status: 400, detail: "Choose an explicit model to run OpenCode on a remote machine, or select Core.")
         }
+        if !cloud && OrbManaged.isAutoManagedTarget(node) && (backend == "grok" || backend == "vibe") {
+            throw OrbHTTPError(status: 400, detail: "\(OrbStyle.serviceName(backend)) is not supported on managed cloud VMs. Choose Claude Code, Codex, OpenCode, or Antigravity, or select Core.")
+        }
     }
     static let minAutoNodeMemBytes: Double = 8.0 * 1024.0 * 1024.0 * 1024.0
     static let minAutoNodeDiskBytes: Double = 20.0 * 1024.0 * 1024.0 * 1024.0
@@ -146,8 +153,64 @@ struct OrbAgentPicker: View {
     @State private var nodes: [OrbJSON] = []
     @State private var repos: [OrbJSON] = []
     @State private var backendModelsMap: OrbJSON = .null
+    @State private var managedResponse: OrbManagedMachinesResponse? = nil
+    @State private var agentVmsExpanded = false
     @State private var loadingOptions = false
     @State private var error = ""
+    private var managedOwners: [String: String] {
+        OrbManaged.ownerByNodeId(managedResponse?.machines ?? [])
+    }
+    private var staticComputeNodes: [OrbJSON] {
+        nodes.filter { !OrbManaged.isManagedNode($0) }
+    }
+    private var userManagedNodes: [OrbJSON] {
+        let owners = managedOwners
+        return nodes.filter { OrbManaged.isUserManagedNode($0, managedOwnerByNodeId: owners) }
+    }
+    private var agentManagedNodes: [OrbJSON] {
+        let owners = managedOwners
+        return nodes.filter { OrbManaged.isAgentSpawnedManagedNode($0, managedOwnerByNodeId: owners) }
+    }
+    private var usableCloudProviders: [OrbManagedProviderInfo] {
+        OrbManaged.usableProviders(managedResponse)
+    }
+    private func selectNode(_ id: String, allow24h: Bool = false) {
+        selection.node = id
+        selection.nodePinnedByUser = true
+        selection.allow24hCommitment = allow24h
+    }
+    @ViewBuilder private func machineNodeRow(_ node: OrbJSON, isManaged: Bool = false) -> some View {
+        let id = node["id"].text
+        let chosen = selection.node == id
+        let title = isManaged
+            ? OrbManaged.nodeTitle(node)
+            : (node["name"].text.isEmpty ? id : node["name"].text)
+        let status = node["status"].text
+        let providerBadge = isManaged ? OrbManaged.nodeProvider(node).map { OrbManaged.providerLabel($0) } : nil
+        Button {
+            selectNode(id)
+        } label: {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).foregroundStyle(.primary)
+                    if let providerBadge, !providerBadge.isEmpty {
+                        Text(providerBadge).font(.caption).foregroundStyle(.secondary)
+                    } else if !status.isEmpty && status != "online" {
+                        Text(status).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                if chosen {
+                    Image(systemName: "checkmark")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("picker.machine.\(id)")
+    }
     var body: some View {
         NavigationStack {
             Form {
@@ -179,15 +242,83 @@ struct OrbAgentPicker: View {
                         Picker("Harness", selection: $selection.backend) { Text("Choose harness").tag(""); ForEach(backends.indices, id: \.self) { Text(backends[$0]["name"].text.isEmpty ? backends[$0]["id"].text : backends[$0]["name"].text).tag(backends[$0]["id"].text) } }.accessibilityIdentifier("picker.harness")
                     }
                     if !existing {
-                        Picker("Machine", selection: Binding(
-                            get: { selection.node },
-                            set: {
-                                selection.node = $0
-                                selection.nodePinnedByUser = true
+                        Section("Machine") {
+                            Button {
+                                selectNode("core")
+                            } label: {
+                                HStack {
+                                    Text("Core").foregroundStyle(.primary)
+                                    Spacer()
+                                    if selection.node.isEmpty || selection.node == "core" {
+                                        Image(systemName: "checkmark")
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(.primary)
+                                    }
+                                }
+                                .contentShape(Rectangle())
                             }
-                        )) {
-                            Text("Core").tag("core")
-                            ForEach(nodes.indices, id: \.self) { Text(nodes[$0]["name"].text.isEmpty ? nodes[$0]["id"].text : nodes[$0]["name"].text).tag(nodes[$0]["id"].text) }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("picker.machine.core")
+
+                            ForEach(staticComputeNodes, id: \.["id"].text) { node in
+                                machineNodeRow(node)
+                            }
+                        }
+
+                        if !usableCloudProviders.isEmpty {
+                            Section {
+                                ForEach(usableCloudProviders) { provider in
+                                    let sizes = OrbManaged.allowedSizes(provider.sizes, maxSize: managedResponse?.budget.max_size)
+                                    let parsed = OrbManaged.parseAutoManagedTarget(selection.node)
+                                    let selectedSize = (parsed?.provider == OrbManaged.machineProviderKey(provider.provider)) ? parsed?.size : nil
+                                    NavigationLink {
+                                        OrbProviderSizePickerView(
+                                            provider: provider,
+                                            sizes: sizes,
+                                            selectedNode: selection.node,
+                                            onSelect: { target, allow24h in
+                                                selectNode(target, allow24h: allow24h)
+                                            }
+                                        )
+                                    } label: {
+                                        HStack(spacing: 10) {
+                                            Label(OrbManaged.providerDisplayLabel(provider.provider, providers: usableCloudProviders), systemImage: "cloud")
+                                                .foregroundStyle(.primary)
+                                            Spacer()
+                                            if let selectedSize, !selectedSize.isEmpty {
+                                                Text(OrbManaged.sizeLabel(selectedSize))
+                                                    .font(.subheadline)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
+                                    .accessibilityIdentifier("picker.cloud.\(provider.provider)")
+                                }
+                            } header: {
+                                Text("Cloud VMs (start on send)")
+                            }
+                        }
+
+                        if !userManagedNodes.isEmpty {
+                            Section("Your VMs") {
+                                ForEach(userManagedNodes, id: \.["id"].text) { node in
+                                    machineNodeRow(node, isManaged: true)
+                                }
+                            }
+                        }
+
+                        if !agentManagedNodes.isEmpty {
+                            Section {
+                                DisclosureGroup(
+                                    "Agent-spawned VMs (\(agentManagedNodes.count))",
+                                    isExpanded: $agentVmsExpanded
+                                ) {
+                                    ForEach(agentManagedNodes, id: \.["id"].text) { node in
+                                        machineNodeRow(node, isManaged: true)
+                                    }
+                                }
+                                .accessibilityIdentifier("picker.agent-vms")
+                            }
                         }
                     }
                 }
@@ -250,6 +381,13 @@ struct OrbAgentPicker: View {
         let rawBackends = response.items.isEmpty ? response["backends"].items : response.items
         backends = rawBackends.filter { $0["id"].text != "gemini" }
         nodes = OrbSelection.sortedComputeNodes(catalog["nodes"]["nodes"].items)
+        if catalog["managed"] != .null, let decoded = try? OrbManaged.decode(catalog["managed"]) {
+            managedResponse = decoded
+        }
+        let owners = OrbManaged.ownerByNodeId(managedResponse?.machines ?? [])
+        if nodes.contains(where: { $0["id"].text == selection.node && OrbManaged.isAgentSpawnedManagedNode($0, managedOwnerByNodeId: owners) }) {
+            agentVmsExpanded = true
+        }
         recomputeAutoNodeIfNeeded()
         backendModelsMap = catalog["models"]["backends"]
         models = backendModelsMap[selection.backend].items
@@ -315,6 +453,90 @@ struct OrbAgentPicker: View {
                 models = backendModelsMap[backend].items
             }
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+private struct OrbProviderSizePickerView: View {
+    let provider: OrbManagedProviderInfo
+    let sizes: [OrbManagedSize]
+    let selectedNode: String
+    let onSelect: (String, Bool) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var pending24hSize: OrbManagedSize? = nil
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(sizes, id: \.size) { s in
+                    let target = OrbManaged.formatAutoManagedTarget(provider: provider.provider, size: s.size)
+                    let chosen = selectedNode.lowercased() == target.lowercased()
+                    Button {
+                        if OrbManaged.is24hCommitmentSize(s) {
+                            pending24hSize = s
+                        } else {
+                            onSelect(target, false)
+                            dismiss()
+                        }
+                    } label: {
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text(OrbManaged.sizeLabel(s.size))
+                                        .font(.body)
+                                        .foregroundStyle(.primary)
+                                    if OrbManaged.is24hCommitmentSize(s) {
+                                        Text("24h min")
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.secondary.opacity(0.14), in: Capsule())
+                                    }
+                                }
+                                Text(OrbManaged.compactSizeSpec(s))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text(OrbManaged.usdPerHour(s.usd_per_hour))
+                                .font(.footnote.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            if chosen {
+                                Image(systemName: "checkmark")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("picker.cloud.\(provider.provider).\(s.size)")
+                }
+            } footer: {
+                Text("The VM will be provisioned automatically when you send your prompt.")
+            }
+        }
+        .navigationTitle(OrbManaged.providerDisplayLabel(provider.provider))
+        .navigationBarTitleDisplayMode(.inline)
+        .alert(
+            "24-hour minimum commitment",
+            isPresented: Binding(
+                get: { pending24hSize != nil },
+                set: { if !$0 { pending24hSize = nil } }
+            ),
+            presenting: pending24hSize
+        ) { size in
+            Button("Cancel", role: .cancel) { pending24hSize = nil }
+            Button("Select (\(OrbManaged.usd(size.usd_per_hour * Double(size.min_billing_hours ?? 24))) min)") {
+                let target = OrbManaged.formatAutoManagedTarget(provider: provider.provider, size: size.size)
+                pending24hSize = nil
+                onSelect(target, true)
+                dismiss()
+            }
+        } message: { size in
+            let hours = size.min_billing_hours ?? 24
+            Text("\(OrbManaged.providerDisplayLabel(provider.provider)) \(OrbManaged.sizeLabel(size.size)) carries a \(hours)-hour minimum lease (\(OrbManaged.usd(size.usd_per_hour * Double(hours))) total) once started on prompt send.")
+        }
     }
 }
 
