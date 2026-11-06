@@ -1563,7 +1563,7 @@ object OrbReadCache {
                     if (base != null) {
                         changed = true
                         presentIds.add(item.missionId)
-                        updated.add(0, patchRowPlacement(base, item))
+                        insertRowByRecency(updated, patchRowPlacement(base, item))
                     }
                 }
             }
@@ -1575,6 +1575,19 @@ object OrbReadCache {
                 }
             }
         }
+    }
+
+    private fun rowRecencyEpochMs(row: OrbRow): Long =
+        OrbJSON.dateEpochMs(row.str("updated_at", "created_at")) ?: 0L
+
+    internal fun insertRowByRecency(rows: MutableList<OrbRow>, candidate: OrbRow) {
+        val ts = rowRecencyEpochMs(candidate)
+        if (ts <= 0L) {
+            rows.add(0, candidate)
+            return
+        }
+        val insertIdx = rows.indexOfFirst { rowRecencyEpochMs(it) < ts }
+        if (insertIdx < 0) rows.add(candidate) else rows.add(insertIdx, candidate)
     }
 
     fun patchRowPlacement(row: OrbRow, item: OrbPlacementCommitItem): OrbRow {

@@ -521,4 +521,31 @@ class OrbMissionTreeTest {
         assertEquals(0, OrbMissionTree.placementOf("rapid-kt")?.pendingOpId)
         OrbMissionTree.resetHierarchy()
     }
+
+    @Test
+    fun readCacheApplyPlacementCommitInsertsArrivingRowsInRecencyOrder() {
+        OrbReadCache.clearMemory()
+        val newer = m("m-new", "project" to "beta", "folder" to "", "updated_at" to "2026-11-06T01:30:00Z")
+        val middle = m("m-mid", "project" to "beta", "folder" to "old", "updated_at" to "2026-11-06T01:20:00Z")
+        val older = m("m-old", "project" to "beta", "folder" to "", "updated_at" to "2026-11-06T01:10:00Z")
+        OrbReadCache.saveRowsMemoryOnly("project_missions_beta", listOf(newer, middle, older))
+
+        val arrivingBetween = m("m-arrive", "project" to "alpha", "folder" to "", "updated_at" to "2026-11-06T01:15:00Z")
+        val arrivingOldest = m("m-oldest", "project" to "alpha", "folder" to "", "updated_at" to "2026-11-06T01:00:00Z")
+        OrbReadCache.applyPlacementCommit(
+            accepted = listOf(
+                OrbPlacementCommitItem("m-mid", "beta", "renamed", 2L, explicitProject = true),
+                OrbPlacementCommitItem("m-oldest", "beta", "docs", 2L, explicitProject = true),
+                OrbPlacementCommitItem("m-arrive", "beta", "docs", 2L, explicitProject = true),
+            ),
+            fallbackRows = mapOf("m-arrive" to arrivingBetween, "m-oldest" to arrivingOldest),
+            persistToDisk = false,
+        )
+
+        val cached = OrbReadCache.readMemoryRows("project_missions_beta")
+        assertEquals(listOf("m-new", "m-mid", "m-arrive", "m-old", "m-oldest"), cached.map { it.id })
+        assertEquals("renamed", cached[1].raw["folder"])
+        assertEquals("docs", cached[2].raw["folder"])
+        OrbReadCache.clearMemory()
+    }
 }
