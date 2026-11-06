@@ -1,6 +1,7 @@
 import { useNow } from "./time";
 import { swallow } from "./log";
 import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
 import { MdView } from "./Markdown";
 import { pollWhileVisible } from "./poll";
@@ -427,9 +428,7 @@ export function ControllerView(p: { slug: string; id?: string }) {
                     </Show>
                   </div>
                 </div>
-                <Show when={error()}>
-                  <ErrorNotice error={error()!} />
-                </Show>
+                <ErrorToast error={error()} title="Couldn’t load controller" background action={{ label: "Retry", run: () => load() }} />
                 <Show when={j().last_error && state() === "attention"}>
                   <ErrorNotice error={j().last_error!} />
                 </Show>

@@ -1,4 +1,4 @@
-import { render, fireEvent, waitFor } from '@solidjs/testing-library';
+import { render, fireEvent, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
 import { Providers } from '../src/Providers';
 import { clearConnection, setConnection } from '../src/api';
@@ -9,12 +9,12 @@ it('replaces a failed initial load with a retry that can recover', async () => {
   let failed = true;
   vi.stubGlobal('fetch', vi.fn(async (url: string) => url.endsWith('/providers') && failed ? new Response('Temporary failure', {status:503}) : ok([])));
   const ui = render(() => <Providers />);
-  await waitFor(() => expect(ui.getByRole('alert').textContent).toContain('Could not load providers'));
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Could not load providers'));
   expect(ui.queryByRole('status')).toBeNull();
   failed = false;
-  fireEvent.click(ui.getByRole('button', {name:'Try again'}));
+  fireEvent.click(screen.getByRole('button', {name:'Try again'}));
   await waitFor(() => expect(ui.getByRole('heading', {name:'Subscriptions'})).toBeTruthy());
-  expect(ui.queryByRole('alert')).toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
 });
 it('retains the current list when a refresh fails', async () => {
   setConnection('http://core.test', 'test');
@@ -24,7 +24,7 @@ it('retains the current list when a refresh fails', async () => {
   await waitFor(() => expect(ui.getByText('My account')).toBeTruthy());
   failed = true;
   fireEvent.click(ui.getByRole('button', {name:'Refresh',exact:true}));
-  await waitFor(() => expect(ui.getByRole('alert').textContent).toContain('Could not refresh providers'));
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Could not refresh providers'));
   expect(ui.getByText('My account')).toBeTruthy();
 });
 it('aborts a stalled load after fifteen seconds and exposes retry', async () => {
@@ -34,8 +34,8 @@ it('aborts a stalled load after fifteen seconds and exposes retry', async () => 
   const ui = render(() => <Providers />);
   expect(ui.getByRole('status')).toBeTruthy();
   await vi.advanceTimersByTimeAsync(15_000);
-  expect(ui.getByRole('alert').textContent).toContain('timed out');
-  expect(ui.getByRole('button',{name:'Try again'})).toBeTruthy();
+  expect(screen.getByRole('alert').textContent).toContain('timed out');
+  expect(screen.getByRole('button',{name:'Try again'})).toBeTruthy();
   expect(ui.queryByRole('status')).toBeNull();
 });
 it('ignores the previous backend response and cancels work on unmount', async () => {

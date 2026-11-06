@@ -4,6 +4,7 @@ import { swallow } from "./log";
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
 import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import { Select } from "./Select";
 import { pollWhileVisible } from "./poll";
 import { useNow } from "./time";
@@ -579,8 +580,8 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
       <Show when={data()!.daily_spend} fallback={<div class="m-note managed-budget">{budgetLine(data()!.budget)}</div>}>
         {days => <SpendChart days={days()} budget={data()!.budget} />}
       </Show>
-      <Show when={actionError()}><ErrorNotice error={actionError()!} onDismiss={() => setActionError(null)} /></Show>
-      <Show when={loadError()}><ErrorNotice title="Couldn’t refresh managed machines" error={loadError()!} /></Show>
+      <ErrorToast error={actionError()} onDismiss={() => setActionError(null)} />
+      <ErrorToast title="Couldn’t refresh managed machines" error={loadError()} background action={{ label: "Retry", run: () => refresh() }} />
       <div class="m-list s-card managed-list">
         <For each={liveGroups().map(g => g.provider)}>{provider => {
           const group = () => liveGroups().find(g => g.provider === provider)!;
@@ -673,7 +674,7 @@ export function ManagedSnapshots(p: { load?: typeof listManagedSnapshots; remove
         <span class={`chev p-acc-chev ${isOpen() ? "open" : ""}`}>›</span>Snapshots · warm images agents start children from ({snaps()?.length ?? 0})
       </button>
     </Show>
-    <Show when={error()}><ErrorNotice error={error()!} onDismiss={() => setError(null)}><button class="s-btn sm" onClick={() => void load()}>Retry</button></ErrorNotice></Show>
+    <ErrorToast error={error()} onDismiss={() => setError(null)} action={{ label: "Retry", run: () => load() }} />
     <Show when={isOpen() && (snaps()?.length ?? 0) > 0}>
       <div class="m-list s-card managed-list managed-snapshots managed-bounded-scroll" aria-label="Managed snapshots">
         <For each={snaps() ?? []}>{s => <div class="managed-row" data-state={s.status}>

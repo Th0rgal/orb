@@ -3,7 +3,6 @@ import { renamedTitle } from "./renames";
 import { swallow } from "./log";
 import { projectColor, projectColors, projectColorsSynced, setProjectColor } from "./projectAppearance";
 import { ErrorToast } from "./toast";
-import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import * as Ic from "./icons";
 import { pollWhileVisible } from "./poll";
@@ -188,9 +187,7 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
         <p class="s-lead">
           Project settings
         </p>
-        <Show when={error()}>
-          <ErrorNotice error={error()!} />
-        </Show>
+        <ErrorToast error={error()} title="Couldn’t load project settings" background />
         <Show when={loaded()} fallback={<ControllerSkeleton />}>
           <section class="s-sec">
             <h3>Appearance</h3>

@@ -168,7 +168,7 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
       </div></Show>
       <Show when={!account()}><p class="cloud-note" role="status">{loaded() ? 'No connected account for this service' : 'Checking connected accounts…'}</p></Show>
       <Show when={account()?.reason && !account()?.available}><p class="cloud-note" role="status">{account()?.reason}</p></Show>
-      <Show when={error()}><p class="cloud-note inline-error" role="alert">{error()}</p></Show>
+      <ErrorToast error={error()} title="Couldn’t start the cloud agent" onDismiss={() => setError('')} />
     </div>
   </div></section></>;
 }
@@ -275,7 +275,7 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
       : t.result ? 'Writing…' : (t.detail ?? 'Working…');
   };
   return <><div class="scroll" ref={el => { scroller = el; pin.ref(el); }} onScroll={pin.onScroll}><div class="col">
-    <Show when={error()}><p class="cloud-note inline-error" role="alert">{error()}</p></Show>
+    <ErrorToast error={error()} title="Couldn’t load the conversation" onDismiss={() => setError('')} />
     <Show when={execution() || seed()} fallback={<div class="sk-transcript" role="status" aria-label="Loading conversation" aria-busy="true"><div class="sk-lines" aria-hidden="true"><i style={{ width: "58%" }} /><i style={{ width: "86%" }} /><i style={{ width: "72%" }} /></div></div>}>
       <Transcript sizeKey={`m:${p.id || 'launch'}`} items={items()} pending={launchPending() || (active() && !outgoing().length)} sending={outgoing().at(-1)?.id} working={launchPending() || active() || outgoing().length > 0} workingLabel={progress() ?? (launchPending() ? 'Working…' : 'Sending…')}/>
     </Show>

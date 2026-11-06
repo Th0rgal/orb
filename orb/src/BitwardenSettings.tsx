@@ -31,7 +31,6 @@ import { SecretAccessPanel } from "./SecretAccessPanel";
 import { enrolledDeviceId } from "./deviceApproval";
 import { copyText } from "./clipboard";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
-import { ErrorNotice } from "./ErrorNotice";
 import * as Ic from "./icons";
 import { Select } from "./Select";
 import { ErrorToast } from "./toast";
@@ -523,9 +522,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
           </div>
         </Show>
 
-        <Show when={error()}>
-          <ErrorNotice error={error()!} />
-        </Show>
+        <ErrorToast error={error()} title="Bitwarden Secrets Manager" background action={{ label: "Retry", run: () => refreshAll() }} />
 
         <Show
           when={isConnected()}

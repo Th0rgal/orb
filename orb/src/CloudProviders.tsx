@@ -5,6 +5,7 @@ import {ProviderUsageMeter} from './ProviderUsageMeter';
 import {ChevronRight,FlaskIcon} from './icons';
 import {ProviderLogo} from './ProviderLogo';
 import {mergeById,pollWhileVisible} from './poll';
+import {ErrorToast} from './toast';
 import './providerUsage.css';
 
 type AccountUsage={windows:{label:string;used_percent:number}[];details:{label:string;used_percent:number}[];reset_at?:string;reset_at_ms?:string;source:string};
@@ -30,11 +31,11 @@ export function CloudProviders() {
  };
  createEffect(on(connectionVersion,()=>{setAccounts([]);setUsage({});setLoaded(false);setError('');void refresh();}));
  onMount(()=>{const stop=pollWhileVisible(refresh,60000);window.addEventListener('orb:providers-refresh',refresh);onCleanup(()=>{disposed=true;stop();window.removeEventListener('orb:providers-refresh',refresh);});});
- return <section class="s-sec" aria-label="Cloud agents"><h3>Cloud agents</h3><div class="s-card">
+  return <section class="s-sec" aria-label="Cloud agents"><h3>Cloud agents</h3><div class="s-card">
+  <ErrorToast error={error()} title="Couldn’t load cloud accounts" background action={{label:'Retry',run:()=>refresh()}}/>
   <Show when={loaded()} fallback={<div class="s-row" role="status">Loading cloud accounts…</div>}>
-   <Show when={error()}><div class="s-row cloud-provider-error"><span class="s-row-desc" role="alert">{error()}</span><button class="s-btn sm" onClick={()=>void refresh()}>Retry</button></div></Show>
    <For each={services.filter(service=>accounts().some(a=>a.provider===service))}>{service=><CloudProviderRow provider={service} accounts={accounts().filter(a=>a.provider===service)} usage={usage()[accounts().find(a=>a.provider===service)?.id??'']}/>}</For>
-   <Show when={!error()&&!accounts().length}><div class="s-row"><span class="s-row-desc">No cloud accounts configured.</span></div></Show>
+   <Show when={!accounts().length}><div class="s-row"><span class="s-row-desc">No cloud accounts configured.</span></div></Show>
   </Show>
  </div></section>;
 }
@@ -55,6 +56,6 @@ function CloudProviderRow(p:{provider:CloudProvider;accounts:CloudAccount[];usag
   </Show>
   <Show when={dashboards[p.provider]}><div class="p-acc-actions"><button class="s-btn" onClick={()=>void visit()}>{p.provider==='cursor_cloud'?'View usage in Cursor':`Open ${cloudNames[p.provider]}`} ↗</button></div></Show>
   <Show when={p.provider==='hermes'}><div class="p-acc-actions"><button class="s-btn" onClick={()=>window.dispatchEvent(new CustomEvent('orb:open-page',{detail:'hermes-settings'}))}>Configure Hermes</button></div></Show>
-  <Show when={error()}><p class="s-row-desc inline-error" role="alert">{error()}</p></Show>
+  <ErrorToast error={error()} onDismiss={()=>setError('')}/>
  </div></Show></div>;
 }

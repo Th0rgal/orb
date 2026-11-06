@@ -173,7 +173,7 @@ describe("schedule and menu interaction", () => {
    finally { remove.mockRestore(); }
  });
 
-it("shows prompt limit failures next to Save and retains the edited instruction",async()=>{
+it("shows prompt limit failures in the workspace toast and retains the edited instruction",async()=>{
  const save=vi.fn();
  render(()=><CronForm draftKey="visible-limit" view={view()} save={save} onSaved={()=>{}}/>);
  const input=screen.getByLabelText('Instruction') as HTMLTextAreaElement;
@@ -181,7 +181,7 @@ it("shows prompt limit failures next to Save and retains the edited instruction"
  fireEvent.click(screen.getByText('Save'));
  expect(save).not.toHaveBeenCalled();
  const error=screen.getByText(/Shorten it before saving/);
- expect(error.closest('.cs-save-area')).toBeTruthy();
+ expect(error.closest('.toast.error')).toBeTruthy();
  expect(input.value.length).toBe(7466);
  expect(screen.getByText('7,466 / 5,000 characters')).toBeTruthy();
 });

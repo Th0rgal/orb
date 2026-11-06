@@ -24,7 +24,6 @@ import {
 } from "./api";
 import * as R from "./routingApi";
 import * as Ic from "./icons";
-import { ErrorNotice } from "./ErrorNotice";
 import { ConfirmDialog } from "./Dialog";
 import { SettingsCard, SettingsRow } from "./SettingsCard";
 
@@ -623,7 +622,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
           </nav>
           <Show when={tab() === "keys"}><ProxyApiKeys /></Show>
           <For each={Object.entries(errors())}>
-            {([key, error]) => <ErrorNotice error={`${key}: ${error}`} />}
+            {([key, error]) => <ErrorToast error={`${key}: ${error}`} title="Couldn’t load routing settings" background />}
           </For>
           <Show when={tab() === "chains"}>
           <section class="s-sec" id="routing-chains">
