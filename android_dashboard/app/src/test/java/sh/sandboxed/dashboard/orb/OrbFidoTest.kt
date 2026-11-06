@@ -1,13 +1,25 @@
 package sh.sandboxed.dashboard.orb
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.IOException
 
 class OrbFidoTest {
     private val event = """{"type":"fido_sign_request","request_id":"r1","key_type":"ed25519-sk","key_fingerprint":"SHA256:x","origin":"ssh:","hostname":"github.com","expires_at":"2026-10-19T12:01:00Z"}"""
+
+    @Before
+    fun setUp() {
+        OrbLog.logcatEnabled = false
+        OrbFido.clear()
+    }
 
     @After
     fun tearDown() = OrbFido.clear()
@@ -72,5 +84,152 @@ class OrbFidoTest {
         assertEquals("w", list[0].workspace)
         assertTrue(OrbFido.parsePending(null).isEmpty())
         assertTrue(OrbFido.parsePending(OrbJSON.parse("""{"requests":[]}""")).isEmpty())
+    }
+
+    @Test
+    fun respondResolvesOn200And404And410() = runBlocking {
+        for (status in listOf(200, 404, 410)) {
+            val r = OrbFido.parse(null, event)!!
+            OrbFido.enqueue(r)
+            val resolved = OrbFido.respond(
+                OrbFido.Transport { path, body ->
+                    assertEquals(OrbFido.RESPOND_PATH, path)
+                    assertEquals(mapOf("request_id" to "r1", "approved" to true), body)
+                    if (status == 200) emptyMap<String, Any?>() else throw OrbError("HTTP $status", status = status)
+                },
+                "r1",
+                approved = true,
+            )
+            assertTrue(resolved)
+            assertTrue(OrbFido.pending.value.isEmpty())
+            assertNull(OrbFido.errors.value["r1"])
+            assertTrue(OrbFido.inFlight.value.isEmpty())
+        }
+    }
+
+    @Test
+    fun respondResolvesOnlyExactStructuredAlreadyResolvedOn4xx() = runBlocking {
+        val r = OrbFido.parse(null, event)!!
+        OrbFido.enqueue(r)
+        val nonTerminal5xx = OrbFido.respond(
+            OrbFido.Transport { _, _ ->
+                throw OrbError("already_resolved", status = 503, body = """{"error":"already_resolved"}""")
+            },
+            "r1",
+            approved = true,
+        )
+        assertFalse(nonTerminal5xx)
+        assertEquals(listOf("r1"), OrbFido.pending.value.map { it.requestId })
+        assertEquals("already_resolved", OrbFido.errors.value["r1"])
+
+        val nonTerminalPlain = OrbFido.respond(
+            OrbFido.Transport { _, _ ->
+                throw OrbError("already_resolved", status = 409, body = "request is already_resolved")
+            },
+            "r1",
+            approved = true,
+        )
+        assertFalse(nonTerminalPlain)
+        assertEquals(listOf("r1"), OrbFido.pending.value.map { it.requestId })
+
+        val resolvedErrorField = OrbFido.respond(
+            OrbFido.Transport { _, _ ->
+                throw OrbError("already_resolved", status = 409, body = """{"error":"already_resolved"}""")
+            },
+            "r1",
+            approved = true,
+        )
+        assertTrue(resolvedErrorField)
+        assertTrue(OrbFido.pending.value.isEmpty())
+        assertNull(OrbFido.errors.value["r1"])
+
+        OrbFido.enqueue(r)
+        val resolvedCodeField = OrbFido.respond(
+            OrbFido.Transport { _, _ ->
+                throw OrbError("conflict", status = 409, body = """{"code":"already_resolved"}""")
+            },
+            "r1",
+            approved = false,
+        )
+        assertTrue(resolvedCodeField)
+        assertTrue(OrbFido.pending.value.isEmpty())
+    }
+
+    @Test
+    fun respondRetainsPendingOnIoExceptionAnd503ThenSucceedsOnRetry() = runBlocking {
+        val r = OrbFido.parse(null, event)!!
+        OrbFido.enqueue(r)
+        var calls = 0
+        val transport = OrbFido.Transport { _, _ ->
+            when (++calls) {
+                1 -> throw IOException("network unreachable")
+                2 -> throw OrbError("Service Unavailable", status = 503, body = """{"error":"unavailable"}""")
+                else -> emptyMap<String, Any?>()
+            }
+        }
+
+        assertFalse(OrbFido.respond(transport, "r1", approved = true))
+        assertEquals(listOf("r1"), OrbFido.pending.value.map { it.requestId })
+        assertEquals("network unreachable", OrbFido.errors.value["r1"])
+
+        assertFalse(OrbFido.respond(transport, "r1", approved = true))
+        assertEquals(listOf("r1"), OrbFido.pending.value.map { it.requestId })
+        assertEquals("Service Unavailable", OrbFido.errors.value["r1"])
+
+        OrbFido.dropExpired(nowMs = OrbJSON.dateEpochMs("2026-10-19T12:02:00Z")!!)
+        assertEquals(listOf("r1"), OrbFido.pending.value.map { it.requestId })
+
+        assertTrue(OrbFido.respond(transport, "r1", approved = true))
+        assertEquals(3, calls)
+        assertTrue(OrbFido.pending.value.isEmpty())
+        assertNull(OrbFido.errors.value["r1"])
+    }
+
+    @Test
+    fun respondCancellationRetainsPendingAndClearsInFlight() = runBlocking {
+        val r = OrbFido.parse(null, event)!!
+        OrbFido.enqueue(r)
+        val entered = CompletableDeferred<Unit>()
+        val gate = CompletableDeferred<Unit>()
+        val job = async {
+            OrbFido.respond(
+                OrbFido.Transport { _, _ ->
+                    entered.complete(Unit)
+                    gate.await()
+                },
+                "r1",
+                approved = true,
+            )
+        }
+        entered.await()
+        assertTrue("r1" in OrbFido.inFlight.value)
+        job.cancel()
+        runCatching { job.await() }
+        assertTrue(OrbFido.inFlight.value.isEmpty())
+        assertEquals(listOf("r1"), OrbFido.pending.value.map { it.requestId })
+        assertTrue(OrbFido.errors.value.containsKey("r1"))
+    }
+
+    @Test
+    fun inFlightPreventsDuplicateRespondRequests() = runBlocking {
+        val r = OrbFido.parse(null, event)!!
+        OrbFido.enqueue(r)
+        val entered = CompletableDeferred<Unit>()
+        val gate = CompletableDeferred<Unit>()
+        var calls = 0
+        val transport = OrbFido.Transport { _, _ ->
+            calls++
+            entered.complete(Unit)
+            gate.await()
+            emptyMap<String, Any?>()
+        }
+        val first = async { OrbFido.respond(transport, "r1", approved = true) }
+        entered.await()
+        assertFalse(OrbFido.respond(transport, "r1", approved = true))
+        assertEquals(1, calls)
+        gate.complete(Unit)
+        assertTrue(first.await())
+        assertEquals(1, calls)
+        assertTrue(OrbFido.pending.value.isEmpty())
     }
 }

@@ -50,13 +50,17 @@ final class FidoApprovalState {
             // Rules skip the overlay, never the Face ID / passcode check.
             Task {
                 if await authenticateDeviceOwner() {
-                    await approve(request.id)
+                    await approve(request.id, onFailureRequest: request)
                 } else {
-                    pendingRequests.append(request)
+                    if !pendingRequests.contains(where: { $0.id == request.id }) {
+                        pendingRequests.append(request)
+                    }
+                    lastError = "Authentication cancelled or failed. Tap Approve to retry or Deny."
                     OrbHaptics.error()
                 }
             }
         } else {
+            lastError = pendingRequests.isEmpty ? nil : lastError
             pendingRequests.append(request)
             OrbHaptics.error()
         }
@@ -82,34 +86,62 @@ final class FidoApprovalState {
 
     var lastError: String?
 
-    func approve(_ requestId: String) async {
+    private static func isTerminalRespondError(_ error: Error) -> Bool {
+        guard let http = error as? OrbHTTPError, http.kind == .http else { return false }
+        if http.status == 404 || http.status == 410 { return true }
+        guard (400..<500).contains(http.status),
+              let data = http.detail.data(using: .utf8),
+              let body = try? JSONDecoder().decode(OrbJSON.self, from: data) else { return false }
+        return body["error"] == .string("already_resolved") || body["code"] == .string("already_resolved")
+    }
+
+    func approve(_ requestId: String, onFailureRequest: FidoSignRequest? = nil) async {
         // Idempotent — bail out if the user double-taps Approve before the
         // first call comes back, otherwise we'd fire two `fidoRespond` calls.
         guard !inFlightRequestIds.contains(requestId) else { return }
         inFlightRequestIds.insert(requestId)
         defer { inFlightRequestIds.remove(requestId) }
+        lastError = nil
         do {
             try await api.fidoRespond(requestId: requestId, approved: true)
             Self.recordApproval(requestId, .approved, method: .deviceOwner)
             OrbHaptics.success()
+            pendingRequests.removeAll { $0.id == requestId }
+        } catch is CancellationError {
+            if let onFailureRequest, !pendingRequests.contains(where: { $0.id == requestId }) {
+                pendingRequests.append(onFailureRequest)
+            }
+            lastError = "Response interrupted. Retry approval or deny."
         } catch {
-            // Usually the 60 s server timeout already expired the request.
-            lastError = error.localizedDescription
+            if Self.isTerminalRespondError(error) {
+                pendingRequests.removeAll { $0.id == requestId }
+            } else {
+                if let onFailureRequest, !pendingRequests.contains(where: { $0.id == requestId }) {
+                    pendingRequests.append(onFailureRequest)
+                }
+                lastError = error.localizedDescription
+            }
         }
-        pendingRequests.removeAll { $0.id == requestId }
     }
 
     func deny(_ requestId: String) async {
         guard !inFlightRequestIds.contains(requestId) else { return }
         inFlightRequestIds.insert(requestId)
         defer { inFlightRequestIds.remove(requestId) }
+        lastError = nil
         do {
             try await api.fidoRespond(requestId: requestId, approved: false)
             Self.recordApproval(requestId, .denied, method: .none)
+            pendingRequests.removeAll { $0.id == requestId }
+        } catch is CancellationError {
+            lastError = "Response interrupted. Retry approval or deny."
         } catch {
-            lastError = error.localizedDescription
+            if Self.isTerminalRespondError(error) {
+                pendingRequests.removeAll { $0.id == requestId }
+            } else {
+                lastError = error.localizedDescription
+            }
         }
-        pendingRequests.removeAll { $0.id == requestId }
     }
 
     /// Usage telemetry: an SSH signing decision (never the request itself).
