@@ -602,7 +602,7 @@ struct OrbProviderKeyEditor: View {
             Form {
                 OrbSettingsError(message: error)
                 if provider == nil { Picker("Provider", selection: $type) { ForEach(Self.apiKeyTypes, id: \.self) { Text($0).tag($0) } } }
-                TextField("Name", text: $name)
+                TextField("Name", text: $name).textInputAutocapitalization(.never).autocorrectionDisabled()
                 SecureField("API key", text: $key).textInputAutocapitalization(.never).autocorrectionDisabled()
                 if provider == nil && type == "custom" { TextField("Base URL", text: $baseURL).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled() }
             }.disabled(busy)

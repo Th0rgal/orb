@@ -77,7 +77,7 @@ export function NameDialog(p: {
     footer={close => <>{p.footer}<DialogButton disabled={p.busy} onClick={close}>Cancel</DialogButton><DialogButton type="submit" form={formId} variant="primary" disabled={p.busy || p.disabled || (!p.allowEmpty && !p.value.trim())}>{p.busy ? "Working…" : p.action}</DialogButton></>}>
     <form id={formId} onSubmit={e => {e.preventDefault(); if (!composing && !p.busy && !p.disabled && (p.allowEmpty || p.value.trim())) p.onAction();}}
         onCompositionStart={() => {composing = true;}} onCompositionEnd={() => {composing = false;}}>
-        <Field label={p.label ?? p.title} error={p.error}><input class="s-input" autofocus placeholder={p.placeholder} value={p.value} disabled={p.busy} onInput={e => p.onInput(e.currentTarget.value)}/></Field>
+        <Field label={p.label ?? p.title} error={p.error}><input class="s-input" autofocus autocapitalize="off" autocorrect="off" spellcheck={false} placeholder={p.placeholder} value={p.value} disabled={p.busy} onInput={e => p.onInput(e.currentTarget.value)}/></Field>
         {p.children}
       </form>
   </Dialog>;
@@ -110,6 +110,11 @@ export function Field(p: { label: string; description?: string; error?: string |
     const input = root.querySelector<HTMLElement>("input, textarea, select");
     if (!input) return;
     input.id ||= id;
+    if (input instanceof HTMLInputElement && (!input.type || input.type === "text" || input.type === "search" || input.type === "url" || input.type === "password")) {
+      if (!input.hasAttribute("autocapitalize")) input.setAttribute("autocapitalize", "off");
+      if (!input.hasAttribute("autocorrect")) input.setAttribute("autocorrect", "off");
+      if (!input.hasAttribute("spellcheck")) input.setAttribute("spellcheck", "false");
+    }
     root.querySelector("label")!.htmlFor = input.id;
     const described = [p.description ? descriptionId : "", p.error ? errorId : ""].filter(Boolean).join(" ");
     if (described) input.setAttribute("aria-describedby", described); else input.removeAttribute("aria-describedby");

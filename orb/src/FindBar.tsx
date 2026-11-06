@@ -603,6 +603,8 @@ export function FindBar() {
           <input
             ref={input}
             type="text"
+            autocapitalize="off"
+            autocorrect="off"
             spellcheck={false}
             autocomplete="off"
             aria-label={`Find in ${label()}`}

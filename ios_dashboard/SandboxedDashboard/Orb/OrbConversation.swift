@@ -317,7 +317,7 @@ struct OrbConversation: View {
             }
             .sheet(isPresented: $transferring) { OrbForkSheet(mission: mission, transfer: true) { forkedMission = $0["id"].text }.orbTrackPage("transfer", surface: .sheet) }
             .sheet(isPresented: $showContext) { NavigationStack { OrbDocuments(project: effectiveProjectSlug, path: "").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showContext = false } } } } }
-            .alert("Rename conversation", isPresented: $rename) { TextField("Title", text: $title); Button("Save") { Task { await mutate(["title": .string(title)]) } }; Button("Cancel", role: .cancel) {} }
+            .alert("Rename conversation", isPresented: $rename) { TextField("Title", text: $title).textInputAutocapitalization(.never).autocorrectionDisabled(); Button("Save") { Task { await mutate(["title": .string(title)]) } }; Button("Cancel", role: .cancel) {} }
             .sheet(isPresented: $moving) { moveConversationSheet.orbTrackPage("move", surface: .sheet) }
             .confirmationDialog("Secret approvals affected", isPresented: moveApprovalDialogBinding, titleVisibility: .visible) {
                 moveApprovalActions

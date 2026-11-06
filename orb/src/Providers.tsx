@@ -571,7 +571,7 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
           <span>{p.provider ? "New API key" : "API key"}</span>
           <Show when={hint()?.env}><code class="p-key-env">{hint()!.env}</code></Show>
         </div>
-        <input class="s-input p-key-secret" type="password" autocomplete="new-password" spellcheck={false} placeholder={hint()?.placeholder ?? "Enter API key…"} value={secret()} onInput={e=>setSecret(e.currentTarget.value)} onKeyDown={e => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); void save(); } }} />
+        <input class="s-input p-key-secret" type="password" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck={false} placeholder={hint()?.placeholder ?? "Enter API key…"} value={secret()} onInput={e=>setSecret(e.currentTarget.value)} onKeyDown={e => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); void save(); } }} />
       </div>
     </div>
     <p class="s-row-desc p-key-foot-note">{p.provider ? "Enter a replacement key. The saved key is never displayed." : "Encrypted at rest on the connected backend and never shown again."}</p>

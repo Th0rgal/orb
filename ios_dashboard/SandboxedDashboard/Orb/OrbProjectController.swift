@@ -1096,6 +1096,8 @@ struct OrbCronEditorSheet: View {
                 }
                 Section("Schedule") {
                     TextField("Name", text: $name)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
                     TextField("every 30m or 0 9 * * *", text: $schedule)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()

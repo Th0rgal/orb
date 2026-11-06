@@ -314,7 +314,7 @@ private struct OrbChainEditor: View {
             Form {
                 Section {
                     TextField("Chain ID (e.g. builtin/smart)", text: $draft.chainID).textInputAutocapitalization(.never).autocorrectionDisabled().disabled(draft.existing)
-                    TextField("Name", text: $draft.name)
+                    TextField("Name", text: $draft.name).textInputAutocapitalization(.never).autocorrectionDisabled()
                     Toggle("Strip <think> blocks", isOn: $draft.stripThinking)
                 }
                 Section("Entries, in fallback order") {
@@ -422,7 +422,7 @@ struct OrbProxyKeysSettings: View {
             }
         }
         .alert("New API key", isPresented: $creatingKey) {
-            TextField("Key name", text: $newName)
+            TextField("Key name", text: $newName).textInputAutocapitalization(.never).autocorrectionDisabled()
             Button("Create") { Task { await create() } }
                 .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
             Button("Cancel", role: .cancel) { newName = "" }

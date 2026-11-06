@@ -744,7 +744,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
               </button>
               <button type="button" class="s-btn sm" onClick={openRemoteEditor}>Repo…</button>
             </Show>
-            <input type="search" aria-label="Filter skills" class="s-input skills-search" placeholder="Search skills…" value={search()} onInput={(e) => setSearch(e.currentTarget.value)} />
+            <input type="search" autocapitalize="off" autocorrect="off" spellcheck={false} aria-label="Filter skills" class="s-input skills-search" placeholder="Search skills…" value={search()} onInput={(e) => setSearch(e.currentTarget.value)} />
             <Show when={isConnected()}>
               <button type="button" class="s-btn sm" onClick={() => { setCreating(true); setCreateError(null); }}>+ New</button>
             </Show>
@@ -983,7 +983,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
         <NameDialog title="New Library skill" label="Name" placeholder="lean-prover" value={newName()} onInput={setNewName} action="Create" busy={createBusy()} error={createError()}
           onAction={() => void createSkill()} onClose={() => setCreating(false)}>
           <Field label="Description" description="When should an agent load this skill? Aim for one specific sentence.">
-            <input class="s-input" value={newDesc()} disabled={createBusy()} onInput={(e) => setNewDesc(e.currentTarget.value)} />
+            <input class="s-input" autocapitalize="sentences" autocorrect="on" spellcheck={true} value={newDesc()} disabled={createBusy()} onInput={(e) => setNewDesc(e.currentTarget.value)} />
           </Field>
         </NameDialog>
       </Show>

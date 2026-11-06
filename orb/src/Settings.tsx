@@ -567,6 +567,9 @@ function LocalAgentsCard() {
             <Row title={harnessName(id)} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}${found()?.auth_error ? ` · ${found()?.auth_error}` : id === "antigravity" ? ` · ${found()?.models?.length ?? 0} account models` : found()?.models?.length ? ` · ${found()!.models!.map(([, label]) => label.replace(/^Claude\s+/, "")).join(", ")}` : ""}` : found()?.auth_error ? [found()?.path, found()?.auth_error].filter(Boolean).join(" · ") : "Not found"}>
               <input
                 class="s-input"
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck={false}
                 aria-label={`${harnessName(id)} path`}
                 placeholder="Path override"
                 value={drafts()[id] ?? ""}
@@ -740,6 +743,9 @@ function BackendTab() {
         <Row title="API URL" desc="Base URL of the Core backend.">
           <input
             class="s-input"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck={false}
             value={url()}
             placeholder="https://agent-backend.thomas.md"
             onInput={(e) => setUrl(e.currentTarget.value)}

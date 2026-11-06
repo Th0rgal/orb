@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -14,6 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
@@ -157,7 +159,13 @@ fun OrbInboxSummariesSettingsPage(onBack: () -> Unit, modifier: Modifier = Modif
         }
     }
     if (editing) AlertDialog(onDismissRequest = { editing = false }, title = { Text("Custom model or chain") }, text = {
-        OutlinedTextField(value = customModel, onValueChange = { customModel = it }, label = { Text("Model or chain ID") }, singleLine = true)
+        OutlinedTextField(
+            value = customModel,
+            onValueChange = { customModel = it },
+            label = { Text("Model or chain ID") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false)
+        )
     }, confirmButton = {
         TextButton(enabled = customModel.isNotBlank(), onClick = { choose(customModel); editing = false }) { Text("Use model") }
     }, dismissButton = { TextButton(onClick = { editing = false }) { Text("Cancel") } })
