@@ -14,7 +14,7 @@ import { useSidePanel } from './FilePanel';
 import { createPinnedScroll } from './mission/pinnedScroll';
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
 import { connectionVersion, isTransientNetworkError, sendMissionMessage, type QueuedMessage } from './api';
-import { consumeSideQuestionOpenHint, readSideQuestion, peekSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion } from './sideQuestionStorage';
+import { consumeSideQuestionOpenHint, peekSavedSideQuestion, readSideQuestion, peekSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion, type SavedSideQuestion } from './sideQuestionStorage';
 import { RemoteQueue, type PendingRemoteQueueItem, type RemoteQueueHandle } from './RemoteQueue';
 import { QueuedMessages } from './QueuedMessages';
 import { createQueuedEdit } from './queuedEdit';
@@ -141,8 +141,17 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   let stale=false;onCleanup(()=>{stale=true;});
   const missionId=p.mission;
   const warmInitial='peekWarmBtwState' in btwMod && typeof btwMod.peekWarmBtwState==='function'?btwMod.peekWarmBtwState(missionId):undefined;
-  if(warmInitial?.history.length)setHistory(warmInitial.history);
+  const cachedSaved=peekSavedSideQuestion(current);
+  const cachedCleanHistory=(cachedSaved?.history??[]).filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()}));
+  const frameZeroHistory=warmInitial&&(warmInitial.clean||warmInitial.history.length>cachedCleanHistory.length)
+   ? mergeLocalAttachments(warmInitial.history,cachedCleanHistory)
+   : cachedCleanHistory;
+  if(frameZeroHistory.length)setHistory(frameZeroHistory);
   if(warmInitial?.latest)setSideSessionId(warmInitial.latest);
+  if(cachedSaved){
+   setDraft(cachedSaved.draft??'');
+   setModel(cachedSaved.model??'');
+  }
   let resync:(()=>void)|undefined;
   let migratingLegacyQueue=false;
   let unmigratedLegacyQueue:QueuedSideQuestion[]=[];
@@ -218,7 +227,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    resync?.();
   };
   if(peekSideQuestionOpen(current)){setOpen(true);side?.show();}
-  ready=readSideQuestion(current).then(saved=>{
+  const hydrateSaved=(saved:SavedSideQuestion|undefined)=>{
   if(stale)return;
   const shouldOpen=consumeSideQuestionOpenHint(current)||Boolean(saved?.open);
   const cleanHistory=(saved?.history??[]).filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()}));
@@ -230,15 +239,21 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   let reconcileServer:typeof btwMod.reconcileBtwServerHistory|undefined;
   try{if('reconcileBtwServerHistory' in btwMod)reconcileServer=btwMod.reconcileBtwServerHistory;}catch{}
   const hasReconcile=typeof reconcileServer==='function';
-  const agent=refreshSideSession(missionId,warmNow?.activeSession);
+  let agent=refreshSideSession(missionId,warmNow?.activeSession);
+  const clearStaleActive=()=>{
+   try{if('clearStaleBtwSessionActive' in btwMod&&typeof btwMod.clearStaleBtwSessionActive==='function')btwMod.clearStaleBtwSessionActive(missionId);}catch{}
+   if(agent)agent={...agent,active:false,startedAt:undefined};
+  };
+  if(agent?.active&&warmNow&&warmNow.clean&&!warmNow.activeSession&&(!warmNow.latest||warmNow.latest===agent.id))clearStaleActive();
   const warmAnsweredPending=Boolean(
    saved?.pending&&
    !saved.pending.notSent&&
    !launching&&
-   !agent?.active&&
+   (!agent?.active||(warmNow&&!warmNow.activeSession&&warmNow.clean))&&
    warmNow&&
    doesTurnAnswerPending(saved.pending,warmNow.history,cleanHistory,BTW_HISTORY_LIMIT),
   );
+  if(warmAnsweredPending&&agent?.active)clearStaleActive();
   setHistory(initialHistory);setBusy(false);setOpen(shouldOpen);
   const interruptedError='Side question interrupted. Retry to request a complete answer.';
   const rawSavedError=saved?.pending?.error||'';
@@ -322,11 +337,82 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    // polling when the heartbeat-monitored multiplex WebSocket is active.
    const poll=setInterval(()=>{if(!stale&&inFlight===0&&document.visibilityState!=='hidden'&&(!isMultiplexSyncActive()||busy()||awaitingServerPending))sync(history(),true);},15000);
    onCleanup(()=>{stopFollow?.();clearTimeout(again);clearInterval(poll);});
+   const applyReconciled=(reconciled:Awaited<ReturnType<typeof reconcile>>)=>{
+    if(reconciled.latest)setSideSessionId(prev=>prev||reconciled.latest!);
+    refreshSideSession(missionId,reconciled.activeSession);
+    if(reconciled.activeSession?.startedAt)setStartedAt(reconciled.activeSession.startedAt);
+    follow(reconciled.latest);
+    const changed=reconciled.history.length!==history().length||reconciled.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
+    if(changed)setHistory(reconciled.history);
+    if(!migratingLegacyQueue&&unmigratedLegacyQueue.length&&hasQueueFollowUp()){
+     const answered=new Set(reconciled.history.map(h=>h.question.trim()));
+     if(reconciled.activeSession?.question)answered.add(reconciled.activeSession.question.trim());
+     unmigratedLegacyQueue=unmigratedLegacyQueue.filter(item=>item.question.trim()&&!answered.has(item.question.trim()));
+     const remainingIds=new Set(unmigratedLegacyQueue.map(item=>item.id));
+     setQueue(rows=>rows.filter(r=>remainingIds.has(r.id)));
+     if(unmigratedLegacyQueue.length){
+      migratingLegacyQueue=true;
+      const batch=[...unmigratedLegacyQueue];
+      void (async()=>{
+       try{
+        for(const item of batch){
+         if(stale||key()!==current)break;
+         const ok=await ask(item.question,[],[],item.attachments??[],false,item.id as ReturnType<typeof crypto.randomUUID>).catch(()=>false);
+         if(ok){
+          unmigratedLegacyQueue=unmigratedLegacyQueue.filter(r=>r.id!==item.id);
+          setQueue(rows=>rows.filter(r=>r.id!==item.id));
+         }
+        }
+       }finally{
+        migratingLegacyQueue=false;
+       }
+      })();
+     }
+    }
+    const pendingQ=question().trim();
+    const answeredPending=pendingQ?doesTurnAnswerPending({question:pendingQ,turnId:turnId(),startedAt:startedAt()},reconciled.history,pendingBaselineHistory,BTW_HISTORY_LIMIT):false;
+    if(answeredPending&&error()){
+     pendingBaselineHistory=[];
+     setError('');setNotSent(false);setStartedAt(undefined);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());
+    }
+    // A restored pending turn ("Starting side agent…" or "Reconnecting…") that
+    // Core has since answered is finished: show Core's answer instead of a stale spinner.
+    if(answeredPending&&busy()&&!asking&&!reconciled.activeSession){
+     awaitingServerPending=false;
+     pendingBaselineHistory=[];
+     abort?.abort();setBusy(false);setStartedAt(undefined);setRunStatus('');setError('');setNotSent(false);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());
+     queueMicrotask(sendNext);
+    }
+    if(reconciled.activeSession&&(!busy()||(awaitingServerPending&&!asking)||handoffId())){
+     awaitingServerPending=false;
+     setHandoffId(undefined);
+     watchActive(reconciled.activeSession);
+    }else if(awaitingServerPending&&!asking&&!reconciled.activeSession){
+     if(reconciled.authoritative===false){
+      setBusy(true);setRunStatus('Connection interrupted — reconnecting…');
+     }else{
+      awaitingServerPending=false;
+      setBusy(false);setStartedAt(undefined);setRunStatus('');setError(interruptedError);
+     }
+    }
+   };
    const follow=(id:string|undefined)=>{
     if(!id||id===following||stale)return;
     stopFollow?.();following=id;
     stopFollow=streamMission(id,event=>{
      if(!['user_message','assistant_message','assistant_message_canonical','mission_status_changed'].includes(event.type))return;
+     if(isMultiplexSyncActive()&&'peekWarmBtwState' in btwMod&&typeof btwMod.peekWarmBtwState==='function'){
+      queueMicrotask(()=>{
+       if(stale||key()!==current)return;
+       const warmCurrent=btwMod.peekWarmBtwState(missionId);
+       if(warmCurrent&&warmCurrent.clean){
+        applyReconciled({...warmCurrent,authoritative:true});
+        return;
+       }
+       clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history(),true);},300);
+      });
+      return;
+     }
      clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history(),true);},300);
     },()=>{if(!stale)sync(history(),true);});
    };
@@ -336,63 +422,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     const mine=++generation;inFlight++;
     void reconcile(missionId,local,undefined,force?{force:true}:undefined).then(reconciled=>{
      if(stale||key()!==current||mine!==generation)return;
-     if(reconciled.latest)setSideSessionId(prev=>prev||reconciled.latest!);
-     refreshSideSession(missionId,reconciled.activeSession);
-     if(reconciled.activeSession?.startedAt)setStartedAt(reconciled.activeSession.startedAt);
-     follow(reconciled.latest);
-     const changed=reconciled.history.length!==history().length||reconciled.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
-     if(changed)setHistory(reconciled.history);
-     if(!migratingLegacyQueue&&unmigratedLegacyQueue.length&&hasQueueFollowUp()){
-      const answered=new Set(reconciled.history.map(h=>h.question.trim()));
-      if(reconciled.activeSession?.question)answered.add(reconciled.activeSession.question.trim());
-      unmigratedLegacyQueue=unmigratedLegacyQueue.filter(item=>item.question.trim()&&!answered.has(item.question.trim()));
-      const remainingIds=new Set(unmigratedLegacyQueue.map(item=>item.id));
-      setQueue(rows=>rows.filter(r=>remainingIds.has(r.id)));
-      if(unmigratedLegacyQueue.length){
-       migratingLegacyQueue=true;
-       const batch=[...unmigratedLegacyQueue];
-       void (async()=>{
-        try{
-         for(const item of batch){
-          if(stale||key()!==current)break;
-          const ok=await ask(item.question,[],[],item.attachments??[],false,item.id as ReturnType<typeof crypto.randomUUID>).catch(()=>false);
-          if(ok){
-           unmigratedLegacyQueue=unmigratedLegacyQueue.filter(r=>r.id!==item.id);
-           setQueue(rows=>rows.filter(r=>r.id!==item.id));
-          }
-         }
-        }finally{
-         migratingLegacyQueue=false;
-        }
-       })();
-      }
-     }
-     const pendingQ=question().trim();
-     const answeredPending=pendingQ?doesTurnAnswerPending({question:pendingQ,turnId:turnId(),startedAt:startedAt()},reconciled.history,pendingBaselineHistory,BTW_HISTORY_LIMIT):false;
-     if(answeredPending&&error()){
-      pendingBaselineHistory=[];
-      setError('');setNotSent(false);setStartedAt(undefined);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());
-     }
-     // A restored pending turn ("Starting side agent…" or "Reconnecting…") that
-     // Core has since answered is finished: show Core's answer instead of a stale spinner.
-     if(answeredPending&&busy()&&!asking&&!reconciled.activeSession){
-      awaitingServerPending=false;
-      pendingBaselineHistory=[];
-      abort?.abort();setBusy(false);setStartedAt(undefined);setRunStatus('');setError('');setNotSent(false);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());
-      queueMicrotask(sendNext);
-     }
-     if(reconciled.activeSession&&(!busy()||(awaitingServerPending&&!asking)||handoffId())){
-      awaitingServerPending=false;
-      setHandoffId(undefined);
-      watchActive(reconciled.activeSession);
-     }else if(awaitingServerPending&&!asking&&!reconciled.activeSession){
-      if(reconciled.authoritative===false){
-       setBusy(true);setRunStatus('Connection interrupted — reconnecting…');
-      }else{
-       awaitingServerPending=false;
-       setBusy(false);setStartedAt(undefined);setRunStatus('');setError(interruptedError);
-      }
-     }
+     applyReconciled(reconciled);
     }).catch(e=>{
      if(!stale&&key()===current&&mine===generation&&awaitingServerPending&&!asking){
       if(isTransientNetworkError(e)){
@@ -406,10 +436,28 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     }).finally(()=>{inFlight=Math.max(0,inFlight-1);});
    };
    resync=()=>{if(!stale)sync(history(),true);};
-   sync(initialHistory,Boolean((saved?.pending&&!warmAnsweredPending)||(warmNow&&!warmNow.clean)));
+   sync(initialHistory,Boolean((saved?.pending&&!warmAnsweredPending)||(warmNow&&(!warmNow.clean||Boolean(warmNow.activeSession)))));
   }
-  });
+  };
+  if(cachedSaved){
+   hydrateSaved(cachedSaved);
+   ready=Promise.resolve();
+  }else{
+   ready=readSideQuestion(current).then(hydrateSaved);
+  }
  }));
+ createEffect(()=>{
+  const missionId=p.mission;
+  const visible=side?side.visible():open();
+  if(!visible||!missionId)return;
+  let stopOpen:(()=>void)|undefined;
+  try{
+   if('noteBtwPanelOpen' in btwMod&&typeof btwMod.noteBtwPanelOpen==='function'){
+    stopOpen=btwMod.noteBtwPanelOpen(missionId,true);
+   }
+  }catch{}
+  onCleanup(()=>stopOpen?.());
+ });
  createEffect(()=>{
   const current=key();
   const snapshot={history:history(),draft:draft(),model:model(),open:side?side.visible():open(),docked:true,

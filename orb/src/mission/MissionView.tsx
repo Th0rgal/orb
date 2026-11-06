@@ -9,7 +9,7 @@ import { Popover } from "../Popover";
 import { RemoteQueue, type RemoteQueueHandle } from "../RemoteQueue";
 import { MissionCyber } from "../cyberAccess";
 import {NextReminder} from "../AutomaticReminder";
-import { CloudConversation } from "../CloudAgents";
+import { LazyCloudConversation, peekCloudAgentsModule } from "../cloudAgentsLoader";
 import {QueuedMessages} from "../QueuedMessages";
 import {enqueueLocalMessage,queuedLocalMessages,acceptedLocalMessages,forgetAcceptedLocalMessages,sendQueuedNow,resumePrompt} from "../localMessageQueue";
 import {createQueuedEdit} from "../queuedEdit";
@@ -27,7 +27,7 @@ import { ErrorToast } from "../toast";
 import { MissionFailure, LaunchStatus, MissionPending, missionPhase, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, missionGoal, dockModelLabel, type LaunchReceipt } from "../missionLaunch";
 import { chipToAttachment, loadAttachItems, mentionedChips, type AttachChip } from "../attach";
 import { shallowEqual } from "../poll";
-import { Show, batch, createMemo, createSignal, createEffect, lazy, on, onCleanup, onMount } from "solid-js";
+import { Show, Suspense, batch, createMemo, createSignal, createEffect, lazy, on, onCleanup, onMount } from "solid-js";
 import { Portal } from "solid-js/web";
 import * as Ic from "../icons";
 import { ForkMission, observeTransferDestination, stopSource, transferForDestination } from "../ForkMission";
@@ -41,7 +41,10 @@ import { cacheRemember } from "../pageCache";
 import { antigravityBaseModel, defaultEffortLabel, effortLabel, normalizeEffort, supportedEfforts } from "../effort";
 import {
   applyLiveEventsToTranscriptCache,
+  applyWarmMissionPatch,
   attachMissionStream,
+  clearWarmMissionSettingsPatch,
+  extractMissionSettingsPatch,
   isMissionDirtyWhileUnfocused,
   isMissionWarmLive,
   loadOlderTranscript,
@@ -49,7 +52,6 @@ import {
   peekReadyTranscript,
   peekTranscript,
   peekTranscriptHeight,
-  peekWarmMissionStatus,
   prepareTranscriptSearch,
   putTranscript,
   putTranscriptHeight,
@@ -109,6 +111,7 @@ import { fulfillSearchTarget, hasPendingSearchTarget, pendingSearchTarget } from
 
 const inflightSettings = new Map<string, Promise<unknown>>();
 function trackMissionSettings<T>(missionId: string, request: Promise<T>): Promise<T> {
+  clearWarmMissionSettingsPatch(missionId);
   const prev = inflightSettings.get(missionId) ?? Promise.resolve();
   const chained = prev.catch(() => undefined).then(() => request);
   const tracked = chained.then(() => undefined, () => undefined).finally(() => {
@@ -377,14 +380,24 @@ function MissionDock(p: {
 const sameMission = (a: Mission | null, b: Mission | null) => a === b || (!!a && !!b && shallowEqual(a, b));
 
 export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
-  const [resolved, setResolved] = createSignal<Mission | null>(p.initial ?? null, { equals: sameMission });
+  const [resolved, setResolved] = createSignal<Mission | null>(
+    applyWarmMissionPatch(p.initial, { preserveSettings: Boolean(p.id && inflightSettings.has(p.id)) }),
+    { equals: sameMission },
+  );
   const [error, setError] = createSignal("");
   createEffect(() => {
     const init = p.initial;
-    if (init) setResolved(prev => mergeIncomingMission(prev, init));
+    if (init) {
+      setResolved(prev =>
+        applyWarmMissionPatch(mergeIncomingMission(prev, init), {
+          preserveSettings: inflightSettings.has(init.id),
+        }),
+      );
+    }
   });
   const handleMission = (next: Mission | null, authoritative = false) => {
     if (next) {
+      if (authoritative) clearWarmMissionSettingsPatch(next.id);
       setResolved(prev => (authoritative ? { ...prev, ...next, history: next.history?.length ? next.history : (prev?.history ?? []) } : mergeIncomingMission(prev, next)));
     }
     p.onMission?.(next, authoritative);
@@ -393,7 +406,7 @@ export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
     if (p.id) void loadTranscript(p.id).catch(swallow("mission.loadTranscript", { mission: p.id }));
     if (!resolved()) void getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e)));
   });
-  return <Show when={Boolean(resolved())} fallback={<><ErrorToast error={error()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(""); return getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e))); } }} onDismiss={() => setError("")} /><ConversationSkeleton /></>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} onMission={handleMission} />}><CloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /></Show></Show>;
+  return <Show when={Boolean(resolved())} fallback={<><ErrorToast error={error()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(""); return getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e))); } }} onDismiss={() => setError("")} /><ConversationSkeleton /></>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} onMission={handleMission} />}>{(() => { const mod = peekCloudAgentsModule(); return mod ? <mod.CloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /> : <Suspense fallback={<ConversationSkeleton />}><LazyCloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /></Suspense>; })()}</Show></Show>;
 }
 
 export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null, authoritative?: boolean) => void; onFork?: (mission: Mission) => void }) {
@@ -404,15 +417,25 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   onCleanup(()=>{disposed=true;});
   createEffect(()=>{if(p.id)onCleanup(retainTranscript(p.id));});
   const cached = p.id ? peekReadyTranscript(p.id) ?? (peekTranscript(p.id)?.detailsPending ? peekTranscript(p.id) : undefined) : undefined;
-  const [mission, setMission] = createSignal<Mission | null>(p.initial ?? null, { equals: sameMission });
+  const [mission, setMission] = createSignal<Mission | null>(
+    applyWarmMissionPatch(p.initial, { preserveSettings: Boolean(p.id && inflightSettings.has(p.id)) }),
+    { equals: sameMission },
+  );
   let authoritativeOnce = false;
   const applyDockMission = (next: Mission, authoritative = false) => {
+    clearWarmMissionSettingsPatch(next.id);
     authoritativeOnce = authoritative;
     setMission(prev => (authoritative ? { ...prev, ...next, history: next.history?.length ? next.history : (prev?.history ?? []) } : next));
   };
   createEffect(()=>{
     const init = p.initial;
-    if (init) setMission(prev => mergeIncomingMission(prev, init));
+    if (init) {
+      setMission(prev =>
+        applyWarmMissionPatch(mergeIncomingMission(prev, init), {
+          preserveSettings: inflightSettings.has(init.id),
+        }),
+      );
+    }
   });
   createEffect(() => {
     const m = mission();
@@ -662,10 +685,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     };
     window.addEventListener("orb:refresh", reload);
     onCleanup(() => window.removeEventListener("orb:refresh", reload));
-    const warmStatus = peekWarmMissionStatus(id);
-    if (warmStatus) {
-      setMission(old => old ? { ...old, status: warmStatus.status, ...(warmStatus.summary ? { status_message: warmStatus.summary } : {}) } : old);
-    }
+    setMission(old =>
+      old ? applyWarmMissionPatch(old, { preserveSettings: inflightSettings.has(id) }) : old,
+    );
     const warmLiveOnMount = isMissionWarmLive(id);
     const readyOnMount = peekReadyTranscript(id);
     const cleanStaleOnMount =
@@ -691,22 +713,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const stopStream = attachMissionStream(p.id, {
       onEvent: (ev) => {
         if (ev.type === "mission_settings_updated") {
-          setMission(old => {
-            if (!old) return old;
-            const d = ev.data ?? {};
-            return {
-              ...old,
-              ...(typeof d.backend === "string" ? { backend: d.backend } : {}),
-              ...("agent" in d ? { agent: typeof d.agent === "string" ? d.agent : null } : {}),
-              ...("model_override" in d ? { model_override: typeof d.model_override === "string" ? d.model_override : null } : {}),
-              ...("model_effort" in d ? { model_effort: typeof d.model_effort === "string" ? d.model_effort : null } : {}),
-              ...(typeof d.fast_mode === "boolean" ? { fast_mode: d.fast_mode } : {}),
-              ...("service_tier" in d ? { service_tier: typeof d.service_tier === "string" ? (d.service_tier as Mission["service_tier"]) : undefined } : {}),
-              ...("config_profile" in d ? { config_profile: typeof d.config_profile === "string" ? d.config_profile : null } : {}),
-              ...("session_id" in d ? { session_id: typeof d.session_id === "string" ? d.session_id : null } : {}),
-              ...(typeof d.updated_at === "string" ? { updated_at: d.updated_at } : {}),
-            };
-          });
+          const patch = extractMissionSettingsPatch(ev.data);
+          setMission(old => (old ? { ...old, ...patch } : old));
           return;
         }
         if (ev.type === "mission_status_changed" || ev.type === "status") {

@@ -377,15 +377,17 @@ object OrbSideAgent {
         core: OrbCore,
         missionId: String,
         sinceSeq: Long,
+        types: String? = null,
         pageSize: Int = 200,
         maxPages: Int = 10
     ): List<OrbRow> {
         val encoded = core.encodeComponent(missionId)
+        val typesQuery = if (!types.isNullOrEmpty()) "&types=${core.encodeComponent(types)}" else ""
         val collected = mutableListOf<OrbRow>()
         var cursor = sinceSeq
         for (pageIndex in 0 until maxPages) {
             val page = core.fetchRows(
-                "/api/control/missions/$encoded/events?since_seq=$cursor&limit=$pageSize&include_counts=false&max_payload=${OrbReadCache.RESULT_KEEP_CHARS}",
+                "/api/control/missions/$encoded/events?since_seq=$cursor&limit=$pageSize&include_counts=false&max_payload=${OrbReadCache.RESULT_KEEP_CHARS}$typesQuery",
                 "events"
             )
             if (page.isEmpty()) break
@@ -401,13 +403,15 @@ object OrbSideAgent {
     suspend fun loadThreadEvents(
         core: OrbCore,
         missionId: String,
+        types: String? = null,
         pageSize: Int = 200,
         maxPages: Int = 25
     ): List<OrbRow> {
         val encoded = core.encodeComponent(missionId)
+        val typesQuery = if (!types.isNullOrEmpty()) "&types=${core.encodeComponent(types)}" else ""
         return loadThreadEvents(pageSize = pageSize, maxPages = maxPages) { beforeSeq ->
             val beforeQuery = if (beforeSeq != null) "&before_seq=$beforeSeq" else ""
-            core.fetchRows("/api/control/missions/$encoded/events?limit=$pageSize&include_counts=false&max_payload=${OrbReadCache.RESULT_KEEP_CHARS}$beforeQuery", "events")
+            core.fetchRows("/api/control/missions/$encoded/events?limit=$pageSize&include_counts=false&max_payload=${OrbReadCache.RESULT_KEEP_CHARS}$typesQuery$beforeQuery", "events")
         }
     }
 
@@ -760,7 +764,7 @@ fun OrbSideAgentSheet(
         val explicitId = boundId ?: session.missionId
         if (!explicitId.isNullOrEmpty() && matching.none { it.id == explicitId }) {
             try {
-                val direct = OrbRow(explicitId, core.fetchDict("/api/control/missions/${core.encodeComponent(explicitId)}"))
+                val direct = OrbRow(explicitId, core.fetchDict("/api/control/missions/${core.encodeComponent(explicitId)}?include_history=false"))
                 matching.addAll(OrbSideAgent.threads(listOf(direct), session.parentId))
             } catch (e: CancellationException) {
                 throw e
@@ -792,7 +796,7 @@ fun OrbSideAgentSheet(
             ?.removePrefix("superseded_by:")
         try {
             val detailId = if (!superseded.isNullOrEmpty() && superseded != target.id) superseded else target.id
-            target = OrbRow(detailId, core.fetchDict("/api/control/missions/${core.encodeComponent(detailId)}"))
+            target = OrbRow(detailId, core.fetchDict("/api/control/missions/${core.encodeComponent(detailId)}?include_history=false"))
         } catch (e: CancellationException) {
             throw e
         } catch (_: Throwable) {
@@ -827,13 +831,14 @@ fun OrbSideAgentSheet(
                         ThreadFetchOutcome(tid = tid, isLive = isLive, stamp = stamp, cachedHit = true, parsed = cached.second)
                     } else {
                         try {
+                            val typesFilter = if (isLive) null else "user_message,assistant_message,assistant_message_canonical"
                             val sinceSeq = priorEvents?.let { OrbSideAgent.maxEventSeq(it) }?.takeIf { it > 0L }
                             val evs = if (priorEvents != null && sinceSeq != null) {
-                                val delta = OrbSideAgent.loadThreadEventsDelta(core, tid, sinceSeq)
+                                val delta = OrbSideAgent.loadThreadEventsDelta(core, tid, sinceSeq, types = typesFilter)
                                 OrbSideAgent.mergeThreadEvents(priorEvents, delta)
-                                    ?: OrbSideAgent.loadThreadEvents(core, tid)
+                                    ?: OrbSideAgent.loadThreadEvents(core, tid, types = typesFilter)
                             } else {
-                                OrbSideAgent.loadThreadEvents(core, tid)
+                                OrbSideAgent.loadThreadEvents(core, tid, types = typesFilter)
                             }
                             val historyRows = row.rows("history").ifEmpty {
                                 if (evs.none { (it.str("event_type", "type", "kind") ?: "").equals("user_message", ignoreCase = true) }) {
