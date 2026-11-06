@@ -622,16 +622,19 @@ pub fn run_claudecode_turn<'a>(
                                 // split-brain ai_providers.json), so queue the
                                 // rotation for the proactive loop — which owns the
                                 // store — to apply against the matching record.
-                                if let Err(e) = crate::api::oauth_reconcile::record_pending_rotation(
-                                    &crate::api::oauth_reconcile::sidecar_path(app_working_dir),
-                                    crate::api::oauth_reconcile::PendingRotation {
-                                        provider: "anthropic".to_string(),
-                                        old_refresh_token: host_old_refresh,
-                                        new_refresh_token: m_refresh.clone(),
-                                        new_access_token: m_access.clone(),
-                                        expires_at: m_expires,
-                                    },
-                                ) {
+                                if let Err(e) =
+                                    crate::api::oauth_reconcile::record_pending_rotation_async(
+                                        &crate::api::oauth_reconcile::sidecar_path(app_working_dir),
+                                        crate::api::oauth_reconcile::PendingRotation {
+                                            provider: "anthropic".to_string(),
+                                            old_refresh_token: host_old_refresh,
+                                            new_refresh_token: m_refresh.clone(),
+                                            new_access_token: m_access.clone(),
+                                            expires_at: m_expires,
+                                        },
+                                    )
+                                    .await
+                                {
                                     tracing::warn!(
                                         mission_id = %mission_id,
                                         error = %e,

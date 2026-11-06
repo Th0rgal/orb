@@ -784,6 +784,63 @@ impl AIProviderStore {
         self.pending_oauth.remove(&id).map(|(_, v)| v)
     }
 
+    pub(crate) async fn persist_oauth_credentials(
+        &self,
+        id: Uuid,
+        expected_refresh_token: &str,
+        credentials: OAuthCredentials,
+    ) -> std::io::Result<Option<bool>> {
+        let _guard = self.writer.lock().await;
+        let mut updated_map = (**self.providers.load()).clone();
+        let Some(provider) = updated_map.get_mut(&id) else {
+            return Ok(None);
+        };
+        let Some(current) = provider.oauth.as_ref() else {
+            return Ok(None);
+        };
+        if current.refresh_token != expected_refresh_token
+            && current.refresh_token != credentials.refresh_token
+        {
+            return Ok(None);
+        }
+        if current.refresh_token == credentials.refresh_token
+            && current.access_token == credentials.access_token
+            && current.expires_at == credentials.expires_at
+        {
+            match tokio::fs::read(&self.storage_path).await {
+                Ok(bytes) => {
+                    let persisted: Vec<AIProvider> = serde_json::from_slice(&bytes)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                    if persisted.iter().any(|saved| {
+                        saved.id == id
+                            && saved.oauth.as_ref().is_some_and(|oauth| {
+                                oauth.refresh_token == credentials.refresh_token
+                                    && oauth.access_token == credentials.access_token
+                                    && oauth.expires_at == credentials.expires_at
+                            })
+                    }) {
+                        return Ok(Some(false));
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+        provider.oauth = Some(credentials);
+        provider.rejected_oauth_refresh_fingerprint = None;
+        provider.status = ProviderStatus::Connected;
+        provider.updated_at = chrono::Utc::now();
+        self.save_snapshot(&updated_map).await?;
+        let parent = self
+            .storage_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        tokio::fs::File::open(parent).await?.sync_all().await?;
+        self.providers.store(Arc::new(updated_map));
+        Ok(Some(true))
+    }
+
     /// Update a provider with OAuth credentials.
     pub async fn set_oauth_credentials(
         &self,
