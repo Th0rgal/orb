@@ -176,4 +176,17 @@ def main : IO Unit := do
   assertTrue "Curl HEAD response ignores non-body stdout bytes before maxBodyBytes check"
     (curlHeadSmallCap.status == 200 && curlHeadSmallCap.body.isEmpty)
 
+  assertTrue "isValidBareHost rejects userinfo @ and path / authority smuggling"
+    (!isValidBareHost "expected.example@127.0.0.1" && !isValidBareHost "example.com/evil" &&
+     !isValidHostChars "expected.example@127.0.0.1")
+  assertTrue "formatHostAuthority appends non-default port and omits 443"
+    (formatHostAuthority "example.com" 8443 443 == "example.com:8443" &&
+     formatHostAuthority "example.com" 443 443 == "example.com" &&
+     formatHostAuthority "::1" 8443 443 == "[::1]:8443")
+  let .ok nonDefaultWire := buildOutboundHttp11Request "GET" (formatHostAuthority "example.com" 8443 443) "/v1"
+    | throw (IO.userError "buildOutboundHttp11Request non-default port failed")
+  let nonDefaultStr := String.fromUTF8! nonDefaultWire
+  assertTrue "Non-default port included in outbound Host header"
+    ((nonDefaultStr.splitOn "Host: example.com:8443\r\n").length == 2)
+
   IO.println "[OrbNetLeaf] ALL SELF-TESTS PASSED"

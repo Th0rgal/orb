@@ -63,19 +63,67 @@ def isValidRequestTarget (path : String) : Bool := Id.run do
     i := i + 1
   return true
 
-/-- Check that an outbound hostname contains only visible ASCII without whitespace/controls (`0x21..0x7E`). -/
-def isValidHostChars (host : String) : Bool := Id.run do
+private def isDnsHostByte (c : UInt8) : Bool :=
+  (0x41 ≤ c && c ≤ 0x5A) || (0x61 ≤ c && c ≤ 0x7A) ||
+  (0x30 ≤ c && c ≤ 0x39) || c == 0x2D || c == 0x2E || c == 0x5F
+
+private def isIpv6LiteralByte (c : UInt8) : Bool :=
+  (0x30 ≤ c && c ≤ 0x39) || (0x41 ≤ c && c ≤ 0x46) ||
+  (0x61 ≤ c && c ≤ 0x66) || c == 0x3A || c == 0x2E
+
+/-- Validate a bare DNS hostname or IPv4/IPv6 literal (`0` URI authority delimiters such as
+    `@`, `/`, `?`, `#`, `[`, `]`, whitespace, or control bytes). -/
+def isValidBareHost (host : String) : Bool := Id.run do
   if host.isEmpty then
     return false
   let b := host.toUTF8
   let cap := b.size.toUInt64
-  let mut i : Nat := 0
-  while verifySliceBounds i.toUInt64 1 cap == 1 do
-    let c := b.get! i
-    if c < 0x21 || c > 0x7E then
-      return false
-    i := i + 1
-  return true
+  if host.contains ':' then
+    let mut i : Nat := 0
+    while verifySliceBounds i.toUInt64 1 cap == 1 do
+      if !isIpv6LiteralByte (b.get! i) then
+        return false
+      i := i + 1
+    return true
+  else
+    let mut i : Nat := 0
+    while verifySliceBounds i.toUInt64 1 cap == 1 do
+      if !isDnsHostByte (b.get! i) then
+        return false
+      i := i + 1
+    return true
+
+/-- Format RFC 9110 §7.2 `Host` / URL authority from a validated bare `host` and `port`
+    (wrapping IPv6 literals in `[...]` and appending `:port` when `port != defaultPort`). -/
+def formatHostAuthority (host : String) (port : UInt16) (defaultPort : UInt16 := 443) : String :=
+  let hostLit := if host.contains ':' then s!"[{host}]" else host
+  if port == defaultPort then hostLit else s!"{hostLit}:{port}"
+
+/-- Validate an RFC 9110 §7.2 `Host` header authority (`host`, `[ipv6]`, `host:port`, or `[ipv6]:port`),
+    forbidding `@`, `/`, `?`, `#`, whitespace, and control bytes. -/
+def isValidHostChars (hostAuth : String) : Bool :=
+  if hostAuth.isEmpty then false
+  else if hostAuth.startsWith "[" then
+    match hostAuth.splitOn "]" with
+    | [brack, rest] =>
+      let ipv6 := (brack.drop 1).toString
+      ipv6.contains ':' && isValidBareHost ipv6 &&
+      (if rest.isEmpty then true
+       else if rest.startsWith ":" then
+         match parseStrictContentLength? (rest.drop 1).toString with
+         | some p => 1 ≤ p && p ≤ 65535
+         | none => false
+       else false)
+    | _ => false
+  else
+    match hostAuth.splitOn ":" with
+    | [h] => !h.contains ':' && isValidBareHost h
+    | [h, pStr] =>
+      !h.contains ':' && isValidBareHost h &&
+      match parseStrictContentLength? pStr with
+      | some p => 1 ≤ p && p ≤ 65535
+      | none => false
+    | _ => false
 
 /-- Build a smuggling-safe HTTP/1.1 outbound wire request:
     - Validates `method` (`isHttpToken`), `path` (`isValidRequestTarget`, rejecting spaces/tabs/controls),
@@ -265,9 +313,10 @@ def httpsRequest
     (maxRespBytes : Nat := 4194304)
     (verifyPeer : Bool := true)
     (timeoutMs : UInt32 := 30000) : IO (Except String HttpsResponse) := do
-  let noCrLf := if isValidHostChars host && hasNoCrLfOrNul host == 1 then (1 : UInt8) else 0
+  let noCrLf := if isValidBareHost host && hasNoCrLfOrNul host == 1 then (1 : UInt8) else 0
   let vpFlag : UInt8 := if verifyPeer then 1 else 0
-  let reqWire ← match buildOutboundHttp11Request method host path headers body with
+  let hostAuth := formatHostAuthority host port 443
+  let reqWire ← match buildOutboundHttp11Request method hostAuth path headers body with
     | .ok w => pure w
     | .error e => return .error e
   if verifyOutboundRequest noCrLf vpFlag port.toUInt32
@@ -310,6 +359,20 @@ inductive HttpWireVersion where
   | http3
   deriving Repr, DecidableEq, BEq, Inhabited
 
+private def readBoundedFileBytes (path : System.FilePath) (maxCap : Nat) : IO (Except String ByteArray) := do
+  let h ← IO.FS.Handle.mk path .read
+  let chunk ← h.read (USize.ofNat (maxCap + 1))
+  if chunk.size > maxCap then
+    return .error s!"file `{path}` exceeds {maxCap}-byte cap"
+  return .ok chunk
+
+private def hdrDumpExceedsCap (path : System.FilePath) (maxCap : Nat) : IO Bool := do
+  try
+    let m ← path.metadata
+    return m.byteSize.toNat > maxCap
+  catch _ =>
+    return false
+
 /-- Execute a verified outbound HTTP/2 or HTTP/3 request via `/usr/bin/curl` prior to Wave 5
     native `LeanSys.{H2,Quic,H3}` cutover, separating `--dump-header <tmp>` from stdout body so
     HTTP/1.1 chunked fallback responses are never double-dechunked. -/
@@ -320,8 +383,9 @@ def http2Or3RequestViaCurl
     (body : ByteArray := ByteArray.empty)
     (maxRespBytes : Nat := 4194304)
     (timeoutSecs : Nat := 30) : IO (Except String HttpsResponse) := do
-  let noCrLf := if isValidHostChars host && hasNoCrLfOrNul host == 1 then (1 : UInt8) else 0
-  let reqWire ← match buildOutboundHttp11Request method host path headers body with
+  let noCrLf := if isValidBareHost host && hasNoCrLfOrNul host == 1 then (1 : UInt8) else 0
+  let hostAuth := formatHostAuthority host port 443
+  let reqWire ← match buildOutboundHttp11Request method hostAuth path headers body with
     | .ok w => pure w
     | .error e => return .error e
   if verifyOutboundRequest noCrLf 1 port.toUInt32
@@ -341,7 +405,8 @@ def http2Or3RequestViaCurl
     | .http2 => "--http2"
     | .http3 => "--http3"
   let mut args : Array String := #[
-    "--globoff", "--silent", "--show-error", "--dump-header", hdrFile.toString,
+    "--globoff", "--path-as-is", "--disallow-username-in-url", "--proto", "=https",
+    "--silent", "--show-error", "--dump-header", hdrFile.toString,
     "--max-time", toString (if timeoutSecs == 0 then 1 else timeoutSecs),
     verFlag
   ]
@@ -352,7 +417,8 @@ def http2Or3RequestViaCurl
   for (hk, hv) in headers do
     args := args.push "-H"
     args := args.push s!"{hk}: {hv}"
-  let url := s!"https://{host}:{port}{path}"
+  let urlHost := if host.contains ':' then s!"[{host}]" else host
+  let url := s!"https://{urlHost}:{port}{path}"
   args := args.push url
   try
     let child ← IO.Process.spawn {
@@ -369,10 +435,17 @@ def http2Or3RequestViaCurl
     let stdoutCap := if isHead then 65536 else maxRespBytes
     let mut outBytes := ByteArray.empty
     while true do
+      if ← hdrDumpExceedsCap hdrFile 65536 then
+        let _ ← LeanSys.Posix.killPid child'.pid.toInt32 9
+        let _ ← child'.wait
+        try IO.FS.removeFile hdrFile catch _ => pure ()
+        return .error "curl response header dump exceeds 64 KiB cap"
       let chunk ← child'.stdout.read 65536
       if chunk.isEmpty then break
       outBytes := outBytes ++ chunk
       if outBytes.size > stdoutCap then
+        let _ ← LeanSys.Posix.killPid child'.pid.toInt32 9
+        let _ ← child'.wait
         try IO.FS.removeFile hdrFile catch _ => pure ()
         return .error s!"curl ({verFlag}) response exceeded maxRespBytes {maxRespBytes}"
     let errStr ← child'.stderr.readToEnd
@@ -380,10 +453,11 @@ def http2Or3RequestViaCurl
     if code != 0 then
       try IO.FS.removeFile hdrFile catch _ => pure ()
       return .error s!"curl ({verFlag}) exited with {code}: {errStr.trimAscii.toString}"
-    let hdrBytes ← IO.FS.readBinFile hdrFile
+    let hdrRes ← readBoundedFileBytes hdrFile 65536
     try IO.FS.removeFile hdrFile catch _ => pure ()
-    if hdrBytes.size > 65536 then
-      return .error "curl response header dump exceeds 64 KiB cap"
+    let hdrBytes ← match hdrRes with
+      | .ok b => pure b
+      | .error _ => return .error "curl response header dump exceeds 64 KiB cap"
     return parseCurlDumpHeadersAndBody hdrBytes (if isHead then ByteArray.empty else outBytes) maxRespBytes method
   catch e =>
     try IO.FS.removeFile hdrFile catch _ => pure ()
