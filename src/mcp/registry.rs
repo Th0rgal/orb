@@ -116,6 +116,7 @@ fn reconcile_workspace_mcp_env_trust(config: &mut McpServerConfig, working_dir: 
 
 const MCP_STDIO_CHANNEL_CAPACITY: usize = 64;
 const MCP_STDIO_STDERR_LINE_CAP: usize = 4096;
+const MCP_STDIO_STDOUT_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 
 enum McpStdioCommand {
     Request {
@@ -301,6 +302,37 @@ fn dispatch_mcp_stdout_line(
     }
 }
 
+async fn drain_pending_mcp_stdout(
+    stdout_reader: &mut BufReader<ChildStdout>,
+    line: &mut String,
+    pending: &mut HashMap<u64, oneshot::Sender<anyhow::Result<serde_json::Value>>>,
+    cancel_token: &CancellationToken,
+) {
+    if pending.is_empty() || cancel_token.is_cancelled() {
+        return;
+    }
+    let drain_deadline = tokio::time::Instant::now() + MCP_STDIO_STDOUT_DRAIN_TIMEOUT;
+    while !pending.is_empty() {
+        let read_res = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => break,
+            res = tokio::time::timeout_at(drain_deadline, stdout_reader.read_line(line)) => {
+                match res {
+                    Ok(r) => r,
+                    Err(_) => break,
+                }
+            }
+        };
+        match read_res {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                dispatch_mcp_stdout_line(line.trim(), pending);
+                line.clear();
+            }
+        }
+    }
+}
+
 /// Per-server actor owning `Child`, `ChildStdin`, and `BufReader<ChildStdout>`.
 /// Multiplexes JSON-RPC responses by `"id"` while ignoring server notifications.
 async fn run_mcp_stdio_actor(
@@ -340,28 +372,7 @@ async fn run_mcp_stdio_actor(
             }
             status = child.wait() => {
                 child_exited = Some(status);
-                if !pending.is_empty() {
-                    let drain_deadline = tokio::time::Instant::now() + Duration::from_millis(50);
-                    while !pending.is_empty() {
-                        let read_res = tokio::select! {
-                            biased;
-                            _ = cancel_token.cancelled() => break,
-                            res = tokio::time::timeout_at(drain_deadline, stdout_reader.read_line(&mut line)) => {
-                                match res {
-                                    Ok(r) => r,
-                                    Err(_) => break,
-                                }
-                            }
-                        };
-                        match read_res {
-                            Ok(0) | Err(_) => break,
-                            Ok(_) => {
-                                dispatch_mcp_stdout_line(line.trim(), &mut pending);
-                                line.clear();
-                            }
-                        }
-                    }
-                }
+                drain_pending_mcp_stdout(&mut stdout_reader, &mut line, &mut pending, &cancel_token).await;
                 break "MCP child exited";
             }
             cmd = cmd_rx.recv() => {
@@ -379,6 +390,7 @@ async fn run_mcp_stdio_actor(
                             status = child.wait() => {
                                 child_exited = Some(status);
                                 let _ = resp_tx.send(Err(anyhow::anyhow!("MCP child exited")));
+                                drain_pending_mcp_stdout(&mut stdout_reader, &mut line, &mut pending, &cancel_token).await;
                                 break "MCP child exited";
                             }
                             res = async {
@@ -389,6 +401,7 @@ async fn run_mcp_stdio_actor(
                         };
                         if let Err(err) = write_outcome {
                             let _ = resp_tx.send(Err(anyhow::anyhow!("Stdin write error: {}", err)));
+                            drain_pending_mcp_stdout(&mut stdout_reader, &mut line, &mut pending, &cancel_token).await;
                             break "MCP stdin write error";
                         }
                         pending.insert(id, resp_tx);
@@ -401,6 +414,7 @@ async fn run_mcp_stdio_actor(
                             }
                             status = child.wait() => {
                                 child_exited = Some(status);
+                                drain_pending_mcp_stdout(&mut stdout_reader, &mut line, &mut pending, &cancel_token).await;
                                 break "MCP child exited";
                             }
                             res = async {
@@ -411,6 +425,7 @@ async fn run_mcp_stdio_actor(
                         };
                         if let Err(err) = write_outcome {
                             tracing::debug!(error = %err, "MCP stdio notification write failed");
+                            drain_pending_mcp_stdout(&mut stdout_reader, &mut line, &mut pending, &cancel_token).await;
                             break "MCP stdin write error";
                         }
                     }
@@ -3333,5 +3348,225 @@ time.sleep(1)
         assert!(persisted.last_connected_at.is_none());
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn stdio_actor_drains_flushed_reply_when_subsequent_write_hits_exit_or_epipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = McpRegistry::new(dir.path()).await;
+
+        let script = r#"
+import json, os, sys, time
+
+req1 = json.loads(sys.stdin.readline())
+with open(os.environ["REQ1_SEEN"], "w") as f:
+    f.write("seen")
+assert os.read(0, 1)
+with open(os.environ["WRITE2_STARTED"], "w") as f:
+    f.write("started")
+while not os.path.exists(os.environ["RELEASE_EXIT"]):
+    time.sleep(0.005)
+sys.stdout.write(json.dumps({
+    "jsonrpc": "2.0",
+    "id": req1["id"],
+    "result": {"echo": req1["method"]}
+}) + "\n")
+sys.stdout.flush()
+if os.environ.get("MODE") == "epipe":
+    os.close(0)
+    time.sleep(0.5)
+os._exit(0)
+"#;
+
+        for (case_idx, (is_notify, mode)) in [
+            (false, "exit"),
+            (false, "epipe"),
+            (true, "exit"),
+            (true, "epipe"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let req1_seen = dir.path().join(format!("req1_seen_{case_idx}"));
+            let write2_started = dir.path().join(format!("write2_started_{case_idx}"));
+            let release_exit = dir.path().join(format!("release_exit_{case_idx}"));
+            let mut env = HashMap::new();
+            env.insert(
+                "REQ1_SEEN".to_string(),
+                req1_seen.to_string_lossy().to_string(),
+            );
+            env.insert(
+                "WRITE2_STARTED".to_string(),
+                write2_started.to_string_lossy().to_string(),
+            );
+            env.insert(
+                "RELEASE_EXIT".to_string(),
+                release_exit.to_string_lossy().to_string(),
+            );
+            env.insert("MODE".to_string(), mode.to_string());
+
+            let id = add_python_stdio_mcp(
+                &registry,
+                &format!("drain-inner-write-{case_idx}"),
+                script,
+                env.clone(),
+            )
+            .await;
+            let handle = registry
+                .spawn_stdio_process(
+                    id,
+                    "python3",
+                    &["-u".to_string(), "-c".to_string(), script.to_string()],
+                    &env,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+
+            let h1 = handle.clone();
+            let req1_task = tokio::spawn(async move {
+                h1.request(
+                    1,
+                    serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "first"}).to_string(),
+                )
+                .await
+            });
+
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !req1_seen.exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("child received request 1");
+
+            let h2 = handle.clone();
+            let second_task = if is_notify {
+                let huge_notify = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/flood",
+                    "params": { "blob": "N".repeat(2 * 1024 * 1024) }
+                })
+                .to_string();
+                tokio::spawn(async move {
+                    h2.notify(huge_notify)
+                        .await
+                        .map(|_| serde_json::Value::Null)
+                })
+            } else {
+                let huge_req2 = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "second_flood",
+                    "params": { "blob": "R".repeat(2 * 1024 * 1024) }
+                })
+                .to_string();
+                tokio::spawn(async move { h2.request(2, huge_req2).await })
+            };
+
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !write2_started.exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("child observed the backpressured second write");
+            assert!(!req1_task.is_finished());
+            tokio::fs::write(&release_exit, "go").await.unwrap();
+
+            let req1_res = tokio::time::timeout(Duration::from_secs(2), req1_task)
+                .await
+                .expect("request 1 resolved promptly")
+                .unwrap()
+                .expect("request 1 should receive its already-flushed reply");
+            assert_eq!(req1_res["echo"], "first");
+
+            let second_res = tokio::time::timeout(Duration::from_secs(2), second_task)
+                .await
+                .expect("second command resolved promptly")
+                .unwrap();
+            if is_notify {
+                assert!(second_res.is_ok());
+            } else {
+                assert!(second_res.is_err());
+            }
+
+            tokio::time::timeout(Duration::from_secs(2), handle.stopped.cancelled())
+                .await
+                .expect("actor stopped cleanly");
+        }
+
+        let cancel_seen = dir.path().join("cancel_req1_seen");
+        let cancel_script = r#"
+import json, os, sys, time
+json.loads(sys.stdin.readline())
+with open(os.environ["REQ1_SEEN"], "w") as f:
+    f.write("seen")
+time.sleep(60)
+"#;
+        let mut cancel_env = HashMap::new();
+        cancel_env.insert(
+            "REQ1_SEEN".to_string(),
+            cancel_seen.to_string_lossy().to_string(),
+        );
+        let cancel_id = add_python_stdio_mcp(
+            &registry,
+            "cancel-no-drain",
+            cancel_script,
+            cancel_env.clone(),
+        )
+        .await;
+        let cancel_handle = registry
+            .spawn_stdio_process(
+                cancel_id,
+                "python3",
+                &[
+                    "-u".to_string(),
+                    "-c".to_string(),
+                    cancel_script.to_string(),
+                ],
+                &cancel_env,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let ch1 = cancel_handle.clone();
+        let cancel_req1 = tokio::spawn(async move {
+            ch1.request(
+                1,
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "first"}).to_string(),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !cancel_seen.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("cancel child received request 1");
+
+        let ch2 = cancel_handle.clone();
+        let cancel_req2 = tokio::spawn(async move {
+            ch2.request(
+                2,
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "flood",
+                    "params": { "blob": "C".repeat(2 * 1024 * 1024) }
+                })
+                .to_string(),
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        cancel_handle.kill_and_wait().await.unwrap();
+        let r1_err = cancel_req1.await.unwrap().unwrap_err().to_string();
+        let r2_err = cancel_req2.await.unwrap().unwrap_err().to_string();
+        assert!(r1_err.contains("MCP server killed"));
+        assert!(r2_err.contains("MCP server killed"));
     }
 }
