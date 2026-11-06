@@ -14,6 +14,13 @@ final class FidoApprovalTests: XCTestCase {
         "expires_at": "2026-10-19T12:00:30.500Z",
     ]
 
+    private func payload(id: String, expiresAt: String = "2026-10-19T12:00:30.500Z") -> [String: Any] {
+        var copy = event
+        copy["request_id"] = id
+        copy["expires_at"] = expiresAt
+        return copy
+    }
+
     func testSignRequestEventMapsEveryField() throws {
         let request = try XCTUnwrap(FidoSignRequest.parse(event))
         XCTAssertEqual(request.id, "6f1c0e8a-0000-4000-8000-000000000001")
@@ -59,11 +66,7 @@ final class FidoApprovalTests: XCTestCase {
 
     @MainActor
     func testDuplicateStreamDeliveryIsDeduplicated() {
-        let state = FidoApprovalState.shared
-        state.pendingRequests.removeAll()
-        let saved = state.autoApprovalRules
-        state.autoApprovalRules = []
-        defer { state.pendingRequests.removeAll(); state.autoApprovalRules = saved }
+        let state = FidoApprovalState(respond: { _, _ in }, fetchPending: { [] }, authenticate: { _ in nil }, persistRules: false)
         state.handleSignRequest(event)
         state.handleSignRequest(event)
         XCTAssertEqual(state.pendingRequests.map(\.id), ["6f1c0e8a-0000-4000-8000-000000000001"])
@@ -85,27 +88,123 @@ final class FidoApprovalTests: XCTestCase {
 
     @MainActor
     func testRemoveResolvedRequestClearsStaleHeadErrorForNextQueuedPrompt() {
-        let state = FidoApprovalState.shared
-        state.pendingRequests.removeAll()
-        state.lastError = nil
-        let saved = state.autoApprovalRules
-        state.autoApprovalRules = []
-        defer {
-            state.pendingRequests.removeAll()
-            state.lastError = nil
-            state.autoApprovalRules = saved
-        }
+        let state = FidoApprovalState(respond: { _, _ in }, fetchPending: { [] }, authenticate: { _ in nil }, persistRules: false)
+        let firstId = "6f1c0e8a-0000-4000-8000-000000000001"
+        let secondId = "6f1c0e8a-0000-4000-8000-000000000002"
 
-        var second = event
-        second["request_id"] = "6f1c0e8a-0000-4000-8000-000000000002"
-        state.handleSignRequest(event)
+        state.handleSignRequest(payload(id: firstId))
         state.lastError = "Authentication cancelled or failed."
-        state.handleSignRequest(second)
+        state.handleSignRequest(payload(id: secondId))
         XCTAssertEqual(state.pendingRequests.count, 2)
         XCTAssertEqual(state.lastError, "Authentication cancelled or failed.")
 
-        state.removeResolvedRequest("6f1c0e8a-0000-4000-8000-000000000001")
-        XCTAssertEqual(state.pendingRequests.map(\.id), ["6f1c0e8a-0000-4000-8000-000000000002"])
+        state.removeResolvedRequest(firstId)
+        XCTAssertEqual(state.pendingRequests.map(\.id), [secondId])
+        XCTAssertNil(state.lastError)
+    }
+
+    @MainActor
+    func testQueuedRequestErrorsStayIsolatedPerRequestId() async {
+        var outcomes: [String: Result<Void, Error>] = [
+            "r1": .failure(OrbHTTPError(status: 503, detail: "gateway timeout")),
+            "r2": .failure(OrbHTTPError(status: 502, detail: "upstream down")),
+        ]
+        var authMessage: String? = nil
+        let state = FidoApprovalState(
+            respond: { id, _ in try outcomes[id]?.get() },
+            fetchPending: { [] },
+            authenticate: { _ in authMessage },
+            persistRules: false
+        )
+
+        state.handleSignRequest(payload(id: "r1"))
+        await state.approve("r1")
+        XCTAssertEqual(state.lastError, "503: gateway timeout")
+
+        state.handleSignRequest(payload(id: "r2"))
+        state.handleSignRequest(payload(id: "r3"))
+        XCTAssertEqual(state.pendingRequests.map(\.id), ["r1", "r2", "r3"])
+        XCTAssertEqual(state.lastError, "503: gateway timeout")
+
+        await state.approve("r2")
+        XCTAssertEqual(state.lastError, "503: gateway timeout")
+
+        outcomes["r3"] = .success(())
+        await state.deny("r3")
+        XCTAssertEqual(state.pendingRequests.map(\.id), ["r1", "r2"])
+        XCTAssertEqual(state.lastError, "503: gateway timeout")
+
+        authMessage = ""
+        await state.approveWithAuthentication("r1")
+        XCTAssertEqual(state.lastError, "503: gateway timeout")
+
+        outcomes["r1"] = .success(())
+        authMessage = nil
+        await state.approveWithAuthentication("r1")
+        XCTAssertEqual(state.pendingRequests.map(\.id), ["r2"])
+        XCTAssertEqual(state.lastError, "502: upstream down")
+
+        outcomes["r2"] = .failure(OrbHTTPError(status: 404, detail: "Not Found"))
+        await state.deny("r2")
+        XCTAssertTrue(state.pendingRequests.isEmpty)
+        XCTAssertNil(state.lastError)
+    }
+
+    @MainActor
+    func testDropExpiredAndSyncPendingPruneCleanExpiredWhileKeepingRetryableAndInFlight() async {
+        let beforeExpiry = Date(timeIntervalSince1970: 1_792_411_200)
+        let afterExpiry = Date(timeIntervalSince1970: 1_792_411_300)
+        let futureIso = "2026-10-19T12:05:00Z"
+
+        var respondResult: Result<Void, Error> = .failure(OrbHTTPError(status: 503, detail: "temporary outage"))
+        var pendingOnHub: [[String: Any]] = []
+        var onFetchPending: (@MainActor () -> Void)?
+
+        let state = FidoApprovalState(
+            respond: { _, _ in try respondResult.get() },
+            fetchPending: {
+                onFetchPending?()
+                return pendingOnHub
+            },
+            authenticate: { _ in nil },
+            persistRules: false
+        )
+
+        state.handleSignRequest(payload(id: "expired-clean"))
+        state.handleSignRequest(payload(id: "expired-errored"))
+        state.handleSignRequest(payload(id: "expired-inflight"))
+        state.handleSignRequest(payload(id: "still-valid", expiresAt: futureIso))
+
+        await state.approve("expired-errored")
+        state.inFlightRequestIds.insert("expired-inflight")
+
+        state.dropExpired(now: beforeExpiry)
+        XCTAssertEqual(state.pendingRequests.count, 4)
+
+        state.dropExpired(now: afterExpiry)
+        XCTAssertEqual(state.pendingRequests.map(\.id), ["expired-errored", "expired-inflight", "still-valid"])
+
+        pendingOnHub = [
+            payload(id: "expired-on-hub"),
+            payload(id: "fresh-from-hub", expiresAt: futureIso),
+        ]
+        onFetchPending = {
+            state.handleSignRequest(self.payload(id: "arrived-mid-fetch", expiresAt: futureIso))
+        }
+
+        await state.syncPending(now: afterExpiry)
+        XCTAssertEqual(
+            state.pendingRequests.map(\.id),
+            ["expired-errored", "expired-inflight", "arrived-mid-fetch", "fresh-from-hub"]
+        )
+
+        state.inFlightRequestIds.remove("expired-inflight")
+        state.dropExpired(now: afterExpiry)
+        XCTAssertEqual(state.pendingRequests.map(\.id), ["expired-errored", "arrived-mid-fetch", "fresh-from-hub"])
+
+        respondResult = .failure(OrbHTTPError(status: 410, detail: "Gone"))
+        await state.approve("expired-errored")
+        XCTAssertEqual(state.pendingRequests.map(\.id), ["arrived-mid-fetch", "fresh-from-hub"])
         XCTAssertNil(state.lastError)
     }
 }

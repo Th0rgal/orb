@@ -12,8 +12,6 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -185,7 +183,6 @@ class OrbSparkRecorder(
         } catch (_: Throwable) {
             null
         }
-        currentCoroutineContext().ensureActive()
         val shouldPublish = synchronized(stateLock) {
             isCurrentGeneration(generation)
         }
@@ -367,48 +364,129 @@ object OrbSparkTranscriber {
     }
 }
 
+class OrbComposerDraftStore(initialMissionId: String? = null) {
+    private val drafts = mutableMapOf<String, String>()
+    var activeMissionId: String? = initialMissionId
+        private set
+
+    private fun key(missionId: String?): String = missionId ?: "new"
+
+    fun syncMission(
+        nextMissionId: String?,
+        currentInput: String,
+        adoptedNewMissionId: String? = null,
+    ): String {
+        if (activeMissionId == nextMissionId) {
+            return currentInput
+        }
+        val prevId = activeMissionId
+        activeMissionId = nextMissionId
+        if (prevId == null && nextMissionId != null && nextMissionId == adoptedNewMissionId) {
+            drafts.remove("new")
+            drafts[nextMissionId] = currentInput
+            return currentInput
+        }
+        drafts[key(prevId)] = currentInput
+        return drafts[key(nextMissionId)].orEmpty()
+    }
+}
+
 class OrbSparkDictationSessionCoordinator(
     val recorder: OrbSparkRecorder = OrbSparkRecorder(),
+    private val isSparkAvailable: () -> Boolean = { true },
     private val transcribeWav: suspend (ByteArray) -> String,
     private val onPhaseChange: (OrbAndroidDictationPhase) -> Unit,
     private val onAppendTranscript: (String) -> Unit,
     private val onFallbackSystemSpeech: () -> Unit,
+    private val onError: (String?) -> Unit = {},
 ) {
+    companion object {
+        const val MIC_FAILURE_MESSAGE = "Could not start the microphone. Please try again."
+    }
+
+    private val coordinatorLock = Any()
+    private val coordinatorGeneration = AtomicLong(0L)
     private val transcribeJobRef = AtomicReference<Job?>(null)
+
+    val currentCoordinatorGeneration: Long
+        get() = coordinatorGeneration.get()
 
     val activeTranscribeJob: Job?
         get() = transcribeJobRef.get()
+
+    fun isCurrentCoordinatorGeneration(generation: Long): Boolean =
+        generation > 0L && coordinatorGeneration.get() == generation
 
     fun cancelActiveTranscription() {
         transcribeJobRef.getAndSet(null)?.cancel()
     }
 
+    private fun runIfSessionCurrent(recorderGeneration: Long, sessionGeneration: Long, block: () -> Unit): Boolean {
+        synchronized(coordinatorLock) {
+            if (!isCurrentCoordinatorGeneration(sessionGeneration) || !recorder.isCurrentGeneration(recorderGeneration)) {
+                return false
+            }
+        }
+        return recorder.runIfCurrent(recorderGeneration) {
+            if (isCurrentCoordinatorGeneration(sessionGeneration)) {
+                block()
+            }
+        }
+    }
+
     fun startRecording(): Boolean {
+        val mySessionGen = synchronized(coordinatorLock) {
+            coordinatorGeneration.incrementAndGet()
+        }
         cancelActiveTranscription()
+        if (!isSparkAvailable()) {
+            synchronized(coordinatorLock) {
+                if (!isCurrentCoordinatorGeneration(mySessionGen)) return false
+            }
+            onError(null)
+            onFallbackSystemSpeech()
+            return false
+        }
         val startedGenBefore = recorder.currentGeneration
         if (!recorder.start()) {
-            if (recorder.currentGeneration > startedGenBefore && recorder.isCurrentGeneration(recorder.currentGeneration)) {
-                onFallbackSystemSpeech()
+            val failedGen = recorder.currentGeneration
+            if (failedGen > startedGenBefore) {
+                runIfSessionCurrent(failedGen, mySessionGen) {
+                    onError(MIC_FAILURE_MESSAGE)
+                    onPhaseChange(OrbAndroidDictationPhase.Failed)
+                }
             }
             return false
         }
         val startedGen = recorder.currentGeneration
-        return recorder.runIfCurrent(startedGen) {
+        val activated = runIfSessionCurrent(startedGen, mySessionGen) {
+            onError(null)
             onPhaseChange(OrbAndroidDictationPhase.Recording)
         }
+        if (!activated) {
+            recorder.cancel()
+        }
+        return activated
     }
 
     fun finishRecording(scope: CoroutineScope) {
+        val sessionGen = coordinatorGeneration.get()
+        if (sessionGen <= 0L) return
         val genAtStop = recorder.currentGeneration
         val session = recorder.stopSession()
         if (session == null) {
-            recorder.runIfCurrent(genAtStop) {
+            runIfSessionCurrent(genAtStop, sessionGen) {
+                onError(null)
                 onPhaseChange(OrbAndroidDictationPhase.Idle)
             }
             return
         }
         val (generation, wavBytes) = session
-        if (!recorder.runIfCurrent(generation) { onPhaseChange(OrbAndroidDictationPhase.Transcribing) }) {
+        if (!runIfSessionCurrent(generation, sessionGen) {
+                onError(null)
+                onPhaseChange(OrbAndroidDictationPhase.Transcribing)
+            }
+        ) {
             return
         }
         cancelActiveTranscription()
@@ -418,12 +496,14 @@ class OrbSparkDictationSessionCoordinator(
                 wav = wavBytes,
                 transcribe = transcribeWav,
                 onResult = { text ->
-                    recorder.runIfCurrent(generation) {
+                    runIfSessionCurrent(generation, sessionGen) {
                         val trimmed = text?.trim().orEmpty()
                         if (trimmed.isNotEmpty()) {
+                            onError(null)
                             onAppendTranscript(trimmed)
                             onPhaseChange(OrbAndroidDictationPhase.Idle)
                         } else {
+                            onError(null)
                             onFallbackSystemSpeech()
                         }
                     }
@@ -434,21 +514,25 @@ class OrbSparkDictationSessionCoordinator(
             transcribeJobRef.compareAndSet(launched, null)
         }
         transcribeJobRef.set(launched)
-        if (!recorder.isCurrentGeneration(generation)) {
+        if (!isCurrentCoordinatorGeneration(sessionGen) || !recorder.isCurrentGeneration(generation)) {
             transcribeJobRef.compareAndSet(launched, null)
             launched.cancel()
             return
         }
         launched.start()
-        if (!recorder.isCurrentGeneration(generation)) {
+        if (!isCurrentCoordinatorGeneration(sessionGen) || !recorder.isCurrentGeneration(generation)) {
             transcribeJobRef.compareAndSet(launched, null)
             launched.cancel()
         }
     }
 
     fun cancel(resetPhase: Boolean = true) {
+        synchronized(coordinatorLock) {
+            coordinatorGeneration.incrementAndGet()
+        }
         cancelActiveTranscription()
         recorder.cancel()
+        onError(null)
         if (resetPhase) {
             onPhaseChange(OrbAndroidDictationPhase.Idle)
         }

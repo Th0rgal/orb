@@ -362,4 +362,164 @@ class OrbDictationTest {
     @Test
     fun cancelledGen1EmptyCannotFallbackDuringGen2Transcribing() =
         overlappingTranscriptionOutcomeIsFenced { "" }
+
+    @Test
+    fun cancelAndMissionSwitchFenceNonCooperativeLateTranscriptionAndIsolateComposerDrafts() = runBlocking {
+        val readDone = CountDownLatch(1)
+        val source = FakeAudioSource(bufferSize = 16) { call, buf, _ ->
+            if (call == 1) {
+                buf[0] = 0x42
+                1
+            } else {
+                readDone.countDown()
+                -1
+            }
+        }
+        val recorder = OrbSparkRecorder(sourceFactory = { source })
+        val enteredTranscribe = CompletableDeferred<Unit>()
+        val releaseTranscribe = CompletableDeferred<Unit>()
+        val draftStore = OrbComposerDraftStore(initialMissionId = "mission-a")
+        var currentMissionId: String? = "mission-a"
+        var inputText = "draft on A"
+        var phase = OrbAndroidDictationPhase.Idle
+        var fallbacks = 0
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
+
+        val coordinatorA = OrbSparkDictationSessionCoordinator(
+            recorder = recorder,
+            transcribeWav = {
+                enteredTranscribe.complete(Unit)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    releaseTranscribe.await()
+                    "late transcript from mission A"
+                }
+            },
+            onPhaseChange = { if ("mission-a" == draftStore.activeMissionId) phase = it },
+            onAppendTranscript = { spoken ->
+                if ("mission-a" == draftStore.activeMissionId) {
+                    inputText = if (inputText.isBlank()) spoken else "$inputText $spoken"
+                }
+            },
+            onFallbackSystemSpeech = { if ("mission-a" == draftStore.activeMissionId) fallbacks++ },
+        )
+
+        try {
+            assertTrue(coordinatorA.startRecording())
+            assertTrue(readDone.await(2, TimeUnit.SECONDS))
+            coordinatorA.finishRecording(scope)
+            enteredTranscribe.await()
+            val inFlight = coordinatorA.activeTranscribeJob!!
+            assertEquals(OrbAndroidDictationPhase.Transcribing, phase)
+
+            currentMissionId = "mission-b"
+            inputText = draftStore.syncMission(nextMissionId = currentMissionId, currentInput = inputText)
+            phase = OrbAndroidDictationPhase.Idle
+            coordinatorA.cancel(resetPhase = false)
+
+            assertEquals("", inputText)
+            inputText = "fresh draft on B"
+
+            releaseTranscribe.complete(Unit)
+            inFlight.join()
+
+            assertEquals("fresh draft on B", inputText)
+            assertEquals(OrbAndroidDictationPhase.Idle, phase)
+            assertEquals(0, fallbacks)
+
+            currentMissionId = "mission-a"
+            inputText = draftStore.syncMission(nextMissionId = currentMissionId, currentInput = inputText)
+            assertEquals("draft on A", inputText)
+        } finally {
+            releaseTranscribe.complete(Unit)
+            coordinatorA.cancel(resetPhase = false)
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun composerDraftStorePreservesTypedFollowUpAcrossFirstSendMissionCreation() {
+        val store = OrbComposerDraftStore(initialMissionId = null)
+        var inputText = "first message"
+        inputText = ""
+        inputText = "typed while POST /api/control/missions is in flight"
+
+        inputText = store.syncMission(
+            nextMissionId = "created-mission-1",
+            currentInput = inputText,
+            adoptedNewMissionId = "created-mission-1",
+        )
+        assertEquals("typed while POST /api/control/missions is in flight", inputText)
+
+        inputText = store.syncMission(
+            nextMissionId = "forked-mission-2",
+            currentInput = inputText,
+        )
+        assertEquals("", inputText)
+
+        inputText = store.syncMission(
+            nextMissionId = "created-mission-1",
+            currentInput = inputText,
+        )
+        assertEquals("typed while POST /api/control/missions is in flight", inputText)
+    }
+
+    @Test
+    fun postStartMicrophoneFailureTransitionsToFailedInsteadOfSystemSpeechFallback() {
+        var sparkAvailable = true
+        var failSourceCreation = true
+        var failStartRecording = false
+        val recorder = OrbSparkRecorder(
+            sourceFactory = {
+                if (failSourceCreation) {
+                    null
+                } else {
+                    object : OrbSparkRecorder.AudioSource {
+                        override val bufferSize: Int = 32
+                        override fun startRecording() {
+                            if (failStartRecording) throw IllegalStateException("AudioRecord start failed")
+                        }
+                        override fun read(buffer: ByteArray, offset: Int, size: Int): Int = -1
+                        override fun stop() {}
+                        override fun release() {}
+                    }
+                }
+            },
+        )
+        var phase = OrbAndroidDictationPhase.Idle
+        var fallbacks = 0
+        var lastError: String? = null
+        val coordinator = OrbSparkDictationSessionCoordinator(
+            recorder = recorder,
+            isSparkAvailable = { sparkAvailable },
+            transcribeWav = { "" },
+            onPhaseChange = { phase = it },
+            onAppendTranscript = {},
+            onFallbackSystemSpeech = {
+                fallbacks++
+                phase = OrbAndroidDictationPhase.Listening
+            },
+            onError = { lastError = it },
+        )
+
+        assertFalse(coordinator.startRecording())
+        assertEquals(OrbAndroidDictationPhase.Failed, phase)
+        assertEquals(0, fallbacks)
+        assertEquals(OrbSparkDictationSessionCoordinator.MIC_FAILURE_MESSAGE, lastError)
+
+        failSourceCreation = false
+        failStartRecording = true
+        phase = OrbAndroidDictationPhase.Idle
+        lastError = null
+        assertFalse(coordinator.startRecording())
+        assertEquals(OrbAndroidDictationPhase.Failed, phase)
+        assertEquals(0, fallbacks)
+        assertEquals(OrbSparkDictationSessionCoordinator.MIC_FAILURE_MESSAGE, lastError)
+
+        sparkAvailable = false
+        phase = OrbAndroidDictationPhase.Idle
+        assertFalse(coordinator.startRecording())
+        assertEquals(OrbAndroidDictationPhase.Listening, phase)
+        assertEquals(1, fallbacks)
+        assertEquals(null, lastError)
+    }
 }
