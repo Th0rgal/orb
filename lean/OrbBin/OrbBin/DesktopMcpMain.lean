@@ -583,9 +583,37 @@ def toolDefinitions : Array JVal := #[
   ]
 ]
 
-private def dispatchTool (counterLock : Std.Mutex Nat) (name : String) (args : JVal) : IO JVal := do
+private def acquireDisplayLock
+    (displayLocks : Std.Mutex (Array (Nat × Std.Mutex Unit)))
+    (displayId : String) : IO (Option (Std.Mutex Unit)) := do
+  match parseDisplayNum displayId with
+  | .error _ => return none
+  | .ok num =>
+    displayLocks.atomically do
+      let cur ← get
+      if let some (_, m) := cur.find? (fun (k, _) => k == num) then
+        return some m
+      let m ← Std.Mutex.new ()
+      set (cur.push (num, m))
+      return some m
+
+private def withDisplayLock {α : Type}
+    (displayLocks : Std.Mutex (Array (Nat × Std.Mutex Unit)))
+    (args : JVal)
+    (act : IO α) : IO α := do
+  match args.fieldStr? "display" with
+  | none => act
+  | some d =>
+    match (← acquireDisplayLock displayLocks d) with
+    | none => act
+    | some m => m.atomically act
+
+private def dispatchTool
+    (counterLock : Std.Mutex Nat)
+    (displayLocks : Std.Mutex (Array (Nat × Std.Mutex Unit)))
+    (name : String) (args : JVal) : IO JVal := do
   if name == "desktop_screenshot" then
-    match (← toolScreenshot args) with
+    match (← withDisplayLock displayLocks args (toolScreenshot args)) with
     | .ok (txt, some b64) =>
       return .obj #[
         ("content", .arr #[
@@ -607,13 +635,13 @@ private def dispatchTool (counterLock : Std.Mutex Nat) (name : String) (args : J
   let res ←
     match name with
     | "desktop_start_session" => toolStartSession counterLock args
-    | "desktop_stop_session"  => toolStopSession args
-    | "desktop_type"          => toolTypeText args
-    | "desktop_click"         => toolClick args
-    | "desktop_mouse_move"    => toolMouseMove args
-    | "desktop_scroll"        => toolScroll args
-    | "desktop_i3_command"    => toolI3Command args
-    | "desktop_get_text"      => toolGetText args
+    | "desktop_stop_session"  => withDisplayLock displayLocks args (toolStopSession args)
+    | "desktop_type"          => withDisplayLock displayLocks args (toolTypeText args)
+    | "desktop_click"         => withDisplayLock displayLocks args (toolClick args)
+    | "desktop_mouse_move"    => withDisplayLock displayLocks args (toolMouseMove args)
+    | "desktop_scroll"        => withDisplayLock displayLocks args (toolScroll args)
+    | "desktop_i3_command"    => withDisplayLock displayLocks args (toolI3Command args)
+    | "desktop_get_text"      => withDisplayLock displayLocks args (toolGetText args)
     | _ => pure (.error s!"Unknown tool: {name}")
   match res with
   | .ok txt =>
@@ -636,6 +664,7 @@ def runMain (_args : List String) : IO UInt32 := do
       | .error _ => pure 99
     | none => pure 99
   let counterLock ← Std.Mutex.new seedDisplay
+  let displayLocks ← Std.Mutex.new (#[] : Array (Nat × Std.Mutex Unit))
   serveStdio fun req _cancelRef => do
     let idVal := req.fieldOrNull "id"
     let method := (req.fieldStr? "method").getD ""
@@ -654,7 +683,7 @@ def runMain (_args : List String) : IO UInt32 := do
       let params := req.fieldOrNull "params"
       let name := (params.fieldStr? "name").getD ""
       let args := (params.field? "arguments").getD (.obj #[])
-      let res ← dispatchTool counterLock name args
+      let res ← dispatchTool counterLock displayLocks name args
       return jsonRpcSuccess idVal res
     | _ =>
       return jsonRpcError idVal (-32601) s!"Method not found: {method}"

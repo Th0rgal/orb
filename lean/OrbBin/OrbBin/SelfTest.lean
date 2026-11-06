@@ -319,6 +319,10 @@ def runAllTests : IO UInt32 := do
     (isErr (parseValidationMatrixText "{\"project\":\"orb\",\"gates\":[{\"id\":\"a\",\"command\":[\"true\"],\"depends_on\":[\"b\"]},{\"id\":\"b\",\"command\":[\"true\"],\"depends_on\":[\"a\"]}]}" >>= validateMatrixJson))
   assertTrue "validateMatrixJson rejects duplicate dependencies + depends_on"
     (isErr (parseValidationMatrixText "{\"project\":\"orb\",\"gates\":[{\"id\":\"a\",\"command\":[\"true\"],\"dependencies\":[],\"depends_on\":[]}]}" >>= validateMatrixJson))
+  assertTrue "parseValidationMatrixText rejects duplicate TOML inline table dependencies"
+    (isErr (parseValidationMatrixText "project = \"orb\"\ngates = [{ id = \"a\", command = [\"true\"], dependencies = [\"a\"], dependencies = [] }]\n" >>= validateMatrixJson))
+  assertTrue "parseValidationMatrixText rejects duplicate TOML inline table depends_on"
+    (isErr (parseValidationMatrixText "project = \"orb\"\ngates = [{ id = \"a\", command = [\"true\"], depends_on = [\"a\"], depends_on = [] }]\n" >>= validateMatrixJson))
   assertEq "parseRfc3339Epoch? accepts pre-1970 timestamp"
     (parseRfc3339Epoch? "1969-12-31T23:59:59Z") (some (-1))
   assertTrue "parseRfc3339Epoch? rejects padded whitespace"

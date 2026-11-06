@@ -442,7 +442,9 @@ private partial def tomlParseValue (s0 : TomlLexer) : Except String (JVal × Tom
       if sEq.pos ≥ sEq.cs.size || sEq.cs[sEq.pos]! != '=' then
         throw "expected '=' in TOML inline table"
       let (v, sAfterV) ← tomlParseValue { sEq with pos := sEq.pos + 1 }
-      fields := (fields.filter (fun (ek, _) => ek != k)).push (k, v)
+      if fields.any (fun (ek, _) => ek == k) then
+        throw s!"duplicate key `{k}` in TOML inline table"
+      fields := fields.push (k, v)
       let afterField := tomlSkipHorizWsAndComment sAfterV
       if afterField.pos < afterField.cs.size && afterField.cs[afterField.pos]! == ',' then
         cur := tomlSkipHorizWsAndComment { afterField with pos := afterField.pos + 1 }
@@ -496,6 +498,7 @@ def parseValidationMatrixText (raw : String) : Except String JVal := do
   if trimmed.startsWith "{" then
     return (← Json.parse trimmed)
   let mut lex : TomlLexer := { cs := raw.toList.toArray, pos := 0 }
+  let mut sawVersion := false
   let mut version : Nat := 1
   let mut project? : Option String := none
   let mut profile? : Option String := none
@@ -531,12 +534,16 @@ def parseValidationMatrixText (raw : String) : Except String JVal := do
       match curGate with
       | none =>
         if k == "version" then
+          if sawVersion then throw "duplicate top-level `version` key"
+          sawVersion := true
           let some vNat := vParsed.asNat? | throw "version must be an integer"
           version := vNat
         else if k == "project" then
+          if project?.isSome then throw "duplicate top-level `project` key"
           let some pStr := vParsed.asStr? | throw "project must be a string"
           project? := some pStr
         else if k == "profile" then
+          if profile?.isSome then throw "duplicate top-level `profile` key"
           let some profStr := vParsed.asStr? | throw "profile must be a string"
           profile? := some profStr
         else if k == "gates" then
