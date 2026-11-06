@@ -46,7 +46,7 @@ pub struct PendingOAuth {
 }
 
 /// Stored OAuth credentials.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthCredentials {
     pub refresh_token: String,
     pub access_token: String,
@@ -377,6 +377,10 @@ pub struct AIProvider {
     /// OAuth credentials (if using OAuth auth)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OAuthCredentials>,
+    #[serde(default)]
+    pub(crate) oauth_generation: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) oauth_rotation_id: Option<Uuid>,
     /// Authoritative CLIProxyAPI auth file. `oauth` is a read-only snapshot for
     /// quota probes; only CLIProxyAPI may rotate the corresponding login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -459,6 +463,8 @@ impl AIProvider {
             mistral_subscription: false,
             mistral_usage_session: None,
             oauth: None,
+            oauth_generation: Uuid::new_v4(),
+            oauth_rotation_id: None,
             cli_proxy_auth_file: None,
             base_url: None,
             custom_models: None,
@@ -511,24 +517,61 @@ impl AIProviderStore {
         };
 
         // Load existing providers
-        if let Ok(loaded) = store.load_from_disk() {
-            store.providers.store(Arc::new(loaded));
+        if let Ok((loaded, needs_save)) = store.load_from_disk() {
+            store.providers.store(Arc::new(loaded.clone()));
+            if needs_save {
+                let _ = store.save_snapshot(&loaded).await;
+            }
         }
 
         store
     }
 
+    pub(crate) fn oauth_generation_at_path(
+        storage_path: &std::path::Path,
+        provider_type: ProviderType,
+        refresh_token: &str,
+    ) -> Option<Uuid> {
+        if refresh_token.trim().is_empty() {
+            return None;
+        }
+        let contents = std::fs::read_to_string(storage_path).ok()?;
+        let providers: Vec<AIProvider> = serde_json::from_str(&contents).ok()?;
+        providers
+            .into_iter()
+            .find(|provider| {
+                provider.enabled
+                    && provider.provider_type == provider_type
+                    && provider
+                        .oauth
+                        .as_ref()
+                        .is_some_and(|oauth| oauth.refresh_token == refresh_token)
+            })
+            .map(|provider| provider.oauth_generation)
+            .filter(|generation| !generation.is_nil())
+    }
+
     /// Load providers from disk.
-    fn load_from_disk(&self) -> Result<HashMap<Uuid, AIProvider>, std::io::Error> {
+    fn load_from_disk(&self) -> Result<(HashMap<Uuid, AIProvider>, bool), std::io::Error> {
         if !self.storage_path.exists() {
-            return Ok(HashMap::new());
+            return Ok((HashMap::new(), false));
         }
 
         let contents = std::fs::read_to_string(&self.storage_path)?;
-        let providers: Vec<AIProvider> = serde_json::from_str(&contents)
+        let mut providers: Vec<AIProvider> = serde_json::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let mut needs_save = false;
+        for provider in &mut providers {
+            if provider.oauth_generation.is_nil() {
+                provider.oauth_generation = Uuid::new_v4();
+                needs_save = true;
+            }
+        }
 
-        Ok(providers.into_iter().map(|p| (p.id, p)).collect())
+        Ok((
+            providers.into_iter().map(|p| (p.id, p)).collect(),
+            needs_save,
+        ))
     }
 
     /// Save a provider map snapshot atomically to disk (`0o600` on Unix) via `tokio::fs`
@@ -540,7 +583,22 @@ impl AIProviderStore {
         let providers_vec: Vec<&AIProvider> = providers.values().collect();
         let contents = serde_json::to_vec_pretty(&providers_vec)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        crate::concurrency::write_atomic_async(&self.storage_path, &contents, Some(0o600)).await
+        crate::concurrency::write_atomic_async(&self.storage_path, &contents, Some(0o600)).await?;
+        let parent = self
+            .storage_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        tokio::fs::File::open(parent).await?.sync_all().await
+    }
+
+    async fn publish_snapshot(&self, providers: HashMap<Uuid, AIProvider>) -> bool {
+        if let Err(error) = self.save_snapshot(&providers).await {
+            tracing::error!(%error, "Failed to save AI providers to disk");
+            return false;
+        }
+        self.providers.store(Arc::new(providers));
+        true
     }
 
     pub async fn list(&self) -> Vec<AIProvider> {
@@ -605,6 +663,8 @@ impl AIProviderStore {
     ) -> std::io::Result<()> {
         let _guard = self.writer.lock().await;
         let mut updated = (**self.providers.load()).clone();
+        provider.oauth_generation = Uuid::new_v4();
+        provider.oauth_rotation_id = None;
         if reconnect {
             let latest = updated.get_mut(&provider.id).ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "Account was removed")
@@ -618,11 +678,15 @@ impl AIProviderStore {
             // A browser exchange can take minutes. Preserve settings changed
             // during that interval and never resurrect a deleted account.
             latest.api_key = provider.api_key.take();
+            latest.oauth_generation = Uuid::new_v4();
+            latest.oauth_rotation_id = None;
             latest.updated_at = provider.updated_at;
         } else {
             if updated.is_empty() {
                 provider.is_default = true;
             }
+            provider.oauth_generation = Uuid::new_v4();
+            provider.oauth_rotation_id = None;
             updated.insert(provider.id, provider);
         }
         self.save_snapshot(&updated).await?;
@@ -638,16 +702,14 @@ impl AIProviderStore {
         // If this is the first provider, make it default
         let is_first = updated.is_empty();
         let mut prov = provider;
+        prov.oauth_generation = Uuid::new_v4();
+        prov.oauth_rotation_id = None;
         if is_first {
             prov.is_default = true;
         }
 
         updated.insert(id, prov);
-        self.providers.store(Arc::new(updated.clone()));
-
-        if let Err(e) = self.save_snapshot(&updated).await {
-            tracing::error!("Failed to save AI providers to disk: {}", e);
-        }
+        self.publish_snapshot(updated).await;
 
         id
     }
@@ -658,6 +720,12 @@ impl AIProviderStore {
         let _guard = self.writer.lock().await;
         let mut updated = (**self.providers.load()).clone();
         let existing = updated.get(&id)?;
+        let oauth_changed = existing.oauth != provider.oauth
+            || existing.provider_type != provider.provider_type
+            || existing.cli_proxy_auth_file != provider.cli_proxy_auth_file
+            || existing.rejected_oauth_refresh_fingerprint
+                != provider.rejected_oauth_refresh_fingerprint
+            || !provider.enabled;
         let existing_refresh = existing
             .oauth
             .as_ref()
@@ -669,6 +737,13 @@ impl AIProviderStore {
         if existing_refresh != replacement_refresh {
             provider.rejected_oauth_refresh_fingerprint = None;
         }
+        if oauth_changed {
+            provider.oauth_generation = Uuid::new_v4();
+            provider.oauth_rotation_id = None;
+        } else {
+            provider.oauth_generation = existing.oauth_generation;
+            provider.oauth_rotation_id = existing.oauth_rotation_id;
+        }
         // If setting as default, unset others
         if provider.is_default {
             for p in updated.values_mut() {
@@ -678,13 +753,7 @@ impl AIProviderStore {
             }
         }
         updated.insert(id, provider.clone());
-        self.providers.store(Arc::new(updated.clone()));
-
-        if let Err(e) = self.save_snapshot(&updated).await {
-            tracing::error!("Failed to save AI providers to disk: {}", e);
-        }
-
-        Some(provider)
+        self.publish_snapshot(updated).await.then_some(provider)
     }
 
     /// Set the routing order of one provider's accounts: `ids[0]` is tried
@@ -730,9 +799,8 @@ impl AIProviderStore {
                 Some(p.clone())
             })
             .collect();
-        self.providers.store(Arc::new(updated.clone()));
-        if let Err(e) = self.save_snapshot(&updated).await {
-            tracing::error!("Failed to save AI providers to disk: {}", e);
+        if !self.publish_snapshot(updated).await {
+            return Err("Failed to save AI providers to disk".into());
         }
         Ok(ordered)
     }
@@ -743,13 +811,10 @@ impl AIProviderStore {
         let existed = updated.remove(&id).is_some();
 
         if existed {
-            self.providers.store(Arc::new(updated.clone()));
-            if let Err(e) = self.save_snapshot(&updated).await {
-                tracing::error!("Failed to save AI providers to disk: {}", e);
-            }
+            return self.publish_snapshot(updated).await;
         }
 
-        existed
+        false
     }
 
     /// Set a provider as the default.
@@ -765,13 +830,7 @@ impl AIProviderStore {
             p.is_default = p.id == id;
         }
 
-        self.providers.store(Arc::new(updated.clone()));
-
-        if let Err(e) = self.save_snapshot(&updated).await {
-            tracing::error!("Failed to save AI providers to disk: {}", e);
-        }
-
-        true
+        self.publish_snapshot(updated).await
     }
 
     /// Store a pending OAuth authorization.
@@ -788,6 +847,8 @@ impl AIProviderStore {
         &self,
         id: Uuid,
         expected_refresh_token: &str,
+        expected_oauth_generation: Option<Uuid>,
+        rotation_id: Uuid,
         credentials: OAuthCredentials,
     ) -> std::io::Result<Option<bool>> {
         let _guard = self.writer.lock().await;
@@ -795,17 +856,15 @@ impl AIProviderStore {
         let Some(provider) = updated_map.get_mut(&id) else {
             return Ok(None);
         };
+        if !provider.enabled {
+            return Ok(None);
+        }
         let Some(current) = provider.oauth.as_ref() else {
             return Ok(None);
         };
-        if current.refresh_token != expected_refresh_token
-            && current.refresh_token != credentials.refresh_token
-        {
-            return Ok(None);
-        }
-        if current.refresh_token == credentials.refresh_token
-            && current.access_token == credentials.access_token
-            && current.expires_at == credentials.expires_at
+        if !rotation_id.is_nil()
+            && provider.oauth_rotation_id == Some(rotation_id)
+            && *current == credentials
         {
             match tokio::fs::read(&self.storage_path).await {
                 Ok(bytes) => {
@@ -813,11 +872,8 @@ impl AIProviderStore {
                         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
                     if persisted.iter().any(|saved| {
                         saved.id == id
-                            && saved.oauth.as_ref().is_some_and(|oauth| {
-                                oauth.refresh_token == credentials.refresh_token
-                                    && oauth.access_token == credentials.access_token
-                                    && oauth.expires_at == credentials.expires_at
-                            })
+                            && saved.oauth_rotation_id == Some(rotation_id)
+                            && saved.oauth.as_ref() == Some(&credentials)
                     }) {
                         return Ok(Some(false));
                     }
@@ -825,18 +881,25 @@ impl AIProviderStore {
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => return Err(err),
             }
+            self.save_snapshot(&updated_map).await?;
+            self.providers.store(Arc::new(updated_map));
+            return Ok(Some(true));
+        }
+        if current.refresh_token != expected_refresh_token {
+            return Ok(None);
+        }
+        if expected_oauth_generation != Some(provider.oauth_generation)
+            || expected_refresh_token.trim().is_empty()
+        {
+            return Ok(None);
         }
         provider.oauth = Some(credentials);
+        provider.oauth_generation = rotation_id;
+        provider.oauth_rotation_id = Some(rotation_id);
         provider.rejected_oauth_refresh_fingerprint = None;
         provider.status = ProviderStatus::Connected;
         provider.updated_at = chrono::Utc::now();
         self.save_snapshot(&updated_map).await?;
-        let parent = self
-            .storage_path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| std::path::Path::new("."));
-        tokio::fs::File::open(parent).await?.sync_all().await?;
         self.providers.store(Arc::new(updated_map));
         Ok(Some(true))
     }
@@ -852,17 +915,13 @@ impl AIProviderStore {
 
         if let Some(provider) = updated_map.get_mut(&id) {
             provider.oauth = Some(credentials);
+            provider.oauth_generation = Uuid::new_v4();
+            provider.oauth_rotation_id = None;
             provider.rejected_oauth_refresh_fingerprint = None;
             provider.status = ProviderStatus::Connected;
             provider.updated_at = chrono::Utc::now();
             let updated = provider.clone();
-            self.providers.store(Arc::new(updated_map.clone()));
-
-            if let Err(e) = self.save_snapshot(&updated_map).await {
-                tracing::error!("Failed to save AI providers to disk: {}", e);
-            }
-
-            Some(updated)
+            self.publish_snapshot(updated_map).await.then_some(updated)
         } else {
             None
         }
@@ -879,15 +938,11 @@ impl AIProviderStore {
         let mut updated_map = (**self.providers.load()).clone();
         let provider = updated_map.get_mut(&id)?;
         provider.rejected_oauth_refresh_fingerprint = fingerprint;
+        provider.oauth_generation = Uuid::new_v4();
+        provider.oauth_rotation_id = None;
         provider.updated_at = chrono::Utc::now();
         let updated = provider.clone();
-        self.providers.store(Arc::new(updated_map.clone()));
-
-        if let Err(e) = self.save_snapshot(&updated_map).await {
-            tracing::error!("Failed to save AI providers to disk: {}", e);
-        }
-
-        Some(updated)
+        self.publish_snapshot(updated_map).await.then_some(updated)
     }
 
     /// Update the provider's recorded organization ID (no-op when unchanged).
@@ -916,13 +971,7 @@ impl AIProviderStore {
             provider.organization_id = Some(organization_id);
             provider.updated_at = chrono::Utc::now();
             let updated = provider.clone();
-            self.providers.store(Arc::new(updated_map.clone()));
-
-            if let Err(e) = self.save_snapshot(&updated_map).await {
-                tracing::error!("Failed to save AI providers to disk: {}", e);
-            }
-
-            Some(updated)
+            self.publish_snapshot(updated_map).await.then_some(updated)
         } else {
             None
         }
@@ -940,11 +989,7 @@ impl AIProviderStore {
         provider.mistral_usage_session = session;
         provider.updated_at = chrono::Utc::now();
         let updated = provider.clone();
-        self.providers.store(Arc::new(updated_map.clone()));
-        if let Err(e) = self.save_snapshot(&updated_map).await {
-            tracing::error!("Failed to save AI providers to disk: {}", e);
-        }
-        Some(updated)
+        self.publish_snapshot(updated_map).await.then_some(updated)
     }
 
     /// Update a provider with an API key.
@@ -954,16 +999,12 @@ impl AIProviderStore {
 
         if let Some(provider) = updated_map.get_mut(&id) {
             provider.api_key = Some(api_key);
+            provider.oauth_generation = Uuid::new_v4();
+            provider.oauth_rotation_id = None;
             provider.status = ProviderStatus::Connected;
             provider.updated_at = chrono::Utc::now();
             let updated = provider.clone();
-            self.providers.store(Arc::new(updated_map.clone()));
-
-            if let Err(e) = self.save_snapshot(&updated_map).await {
-                tracing::error!("Failed to save AI providers to disk: {}", e);
-            }
-
-            Some(updated)
+            self.publish_snapshot(updated_map).await.then_some(updated)
         } else {
             None
         }
@@ -975,16 +1016,14 @@ impl AIProviderStore {
         let mut updated_map = (**self.providers.load()).clone();
 
         if let Some(provider) = updated_map.get_mut(&id) {
+            if !matches!(status, ProviderStatus::Connected | ProviderStatus::Unknown) {
+                provider.oauth_generation = Uuid::new_v4();
+                provider.oauth_rotation_id = None;
+            }
             provider.status = status;
             provider.updated_at = chrono::Utc::now();
             let updated = provider.clone();
-            self.providers.store(Arc::new(updated_map.clone()));
-
-            if let Err(e) = self.save_snapshot(&updated_map).await {
-                tracing::error!("Failed to save AI providers to disk: {}", e);
-            }
-
-            Some(updated)
+            self.publish_snapshot(updated_map).await.then_some(updated)
         } else {
             None
         }
@@ -993,3 +1032,171 @@ impl AIProviderStore {
 
 /// Shared store type.
 pub type SharedAIProviderStore = Arc<AIProviderStore>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn oauth(access: &str, refresh: &str, expires_at: i64) -> OAuthCredentials {
+        OAuthCredentials {
+            access_token: access.into(),
+            refresh_token: refresh.into(),
+            expires_at,
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_mutations_rotate_generation_and_fence_stale_rotations() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage_path = dir.path().join("ai_providers.json");
+        let store = AIProviderStore::new(storage_path.clone()).await;
+        let mut provider = AIProvider::new(ProviderType::Anthropic, "Primary".into());
+        provider.oauth = Some(oauth("access-0", "refresh-0", 100));
+        let id = store.add(provider).await;
+
+        let gen_0 = store.get(id).await.unwrap().oauth_generation;
+        assert!(!gen_0.is_nil());
+
+        let updated = store
+            .set_oauth_credentials(id, oauth("access-1", "refresh-0", 200))
+            .await
+            .unwrap();
+        assert_ne!(updated.oauth_generation, gen_0);
+        assert_eq!(updated.oauth_rotation_id, None);
+
+        assert_eq!(
+            store
+                .persist_oauth_credentials(
+                    id,
+                    "refresh-0",
+                    Some(gen_0),
+                    Uuid::new_v4(),
+                    oauth("stale-access", "refresh-1", 150),
+                )
+                .await
+                .unwrap(),
+            None
+        );
+
+        let mut same_name = store.get(id).await.unwrap();
+        same_name.name = "Renamed".into();
+        let after_rename = store.update(id, same_name).await.unwrap();
+        assert_eq!(after_rename.oauth_generation, updated.oauth_generation);
+
+        let mut same_refresh_update = after_rename.clone();
+        same_refresh_update.oauth = Some(oauth("access-2", "refresh-0", 300));
+        let after_oauth_update = store.update(id, same_refresh_update).await.unwrap();
+        assert_ne!(
+            after_oauth_update.oauth_generation,
+            after_rename.oauth_generation
+        );
+
+        let rotation_id = Uuid::new_v4();
+        let rotated_creds = oauth("access-3", "refresh-1", 400);
+        assert_eq!(
+            store
+                .persist_oauth_credentials(
+                    id,
+                    "refresh-0",
+                    Some(after_oauth_update.oauth_generation),
+                    rotation_id,
+                    rotated_creds.clone(),
+                )
+                .await
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            store
+                .persist_oauth_credentials(
+                    id,
+                    "refresh-0",
+                    Some(after_oauth_update.oauth_generation),
+                    rotation_id,
+                    rotated_creds.clone(),
+                )
+                .await
+                .unwrap(),
+            Some(false)
+        );
+
+        let reloaded = AIProviderStore::new(storage_path).await;
+        let reloaded_provider = reloaded.get(id).await.unwrap();
+        assert_eq!(reloaded_provider.oauth, Some(rotated_creds.clone()));
+        assert_eq!(reloaded_provider.oauth_rotation_id, Some(rotation_id));
+        assert_eq!(
+            reloaded
+                .persist_oauth_credentials(
+                    id,
+                    "refresh-0",
+                    Some(after_oauth_update.oauth_generation),
+                    rotation_id,
+                    rotated_creds,
+                )
+                .await
+                .unwrap(),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_disable_and_reauth_status_invalidate_pending_rotations() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AIProviderStore::new(dir.path().join("ai_providers.json")).await;
+        let mut provider = AIProvider::new(ProviderType::Anthropic, "Account".into());
+        provider.oauth = Some(oauth("access-0", "refresh-0", 100));
+        let id = store.add(provider).await;
+
+        let gen_0 = store.get(id).await.unwrap().oauth_generation;
+        store
+            .set_status(id, ProviderStatus::NeedsReauth("invalid_grant".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .persist_oauth_credentials(
+                    id,
+                    "refresh-0",
+                    Some(gen_0),
+                    Uuid::new_v4(),
+                    oauth("access-1", "refresh-1", 200),
+                )
+                .await
+                .unwrap(),
+            None
+        );
+
+        let mut disabled = store.get(id).await.unwrap();
+        let gen_1 = disabled.oauth_generation;
+        disabled.enabled = false;
+        store.update(id, disabled).await.unwrap();
+        assert_eq!(
+            store
+                .persist_oauth_credentials(
+                    id,
+                    "refresh-0",
+                    Some(gen_1),
+                    Uuid::new_v4(),
+                    oauth("access-2", "refresh-2", 300),
+                )
+                .await
+                .unwrap(),
+            None
+        );
+
+        assert!(store.delete(id).await);
+        assert_eq!(
+            store
+                .persist_oauth_credentials(
+                    id,
+                    "refresh-0",
+                    Some(gen_1),
+                    Uuid::new_v4(),
+                    oauth("access-3", "refresh-3", 400),
+                )
+                .await
+                .unwrap(),
+            None
+        );
+    }
+}

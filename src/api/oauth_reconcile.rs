@@ -50,6 +50,8 @@ struct PendingEntry {
     generation: u64,
     #[serde(default)]
     rotation_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_oauth_generation: Option<Uuid>,
     #[serde(flatten)]
     rotation: PendingRotation,
 }
@@ -177,12 +179,70 @@ pub fn clear_pending(path: &Path) {
     }
 }
 
-pub fn record_pending_rotation(path: &Path, rot: PendingRotation) -> io::Result<()> {
+fn inferred_store_path(sidecar: &Path) -> PathBuf {
+    let dir = parent_dir(sidecar);
+    let candidate = dir.join("ai_providers.json");
+    if candidate.exists() || dir.file_name().and_then(|name| name.to_str()) == Some(".sandboxed-sh")
+    {
+        candidate
+    } else {
+        dir.join(crate::util::AI_PROVIDERS_PATH)
+    }
+}
+
+fn capture_expected_oauth_generation(sidecar: &Path, rot: &PendingRotation) -> Option<Uuid> {
+    let provider_type = ProviderType::from_id(&rot.provider)?;
+    AIProviderStore::oauth_generation_at_path(
+        &inferred_store_path(sidecar),
+        provider_type,
+        &rot.old_refresh_token,
+    )
+}
+
+pub async fn record_pending_rotation_with_generation_async(
+    path: &Path,
+    rot: PendingRotation,
+    expected_oauth_generation: Option<Uuid>,
+) -> io::Result<()> {
     if rot.old_refresh_token == rot.new_refresh_token || rot.new_refresh_token.trim().is_empty() {
+        return Ok(());
+    }
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        record_pending_rotation_with_generation(&path, rot, expected_oauth_generation)
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+fn record_pending_rotation_with_generation(
+    path: &Path,
+    rot: PendingRotation,
+    expected_oauth_generation: Option<Uuid>,
+) -> io::Result<()> {
+    if rot.old_refresh_token == rot.new_refresh_token
+        || rot.old_refresh_token.trim().is_empty()
+        || rot.new_refresh_token.trim().is_empty()
+    {
         return Ok(());
     }
     let _lock = lock_pending(path)?;
     let mut envelope = load_pending(path)?;
+    let expected_oauth_generation = expected_oauth_generation
+        .or_else(|| capture_expected_oauth_generation(path, &rot))
+        .or_else(|| {
+            envelope
+                .entries
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.rotation.provider == rot.provider
+                        && entry.rotation.new_refresh_token == rot.old_refresh_token
+                        && !entry.rotation_id.is_nil()
+                        && entry.expected_oauth_generation.is_some()
+                })
+                .map(|entry| entry.rotation_id)
+        });
     let generation = envelope.next_generation.max(1);
     envelope.next_generation = generation.saturating_add(1);
     envelope.entries.retain(|entry| {
@@ -192,19 +252,18 @@ pub fn record_pending_rotation(path: &Path, rot: PendingRotation) -> io::Result<
     envelope.entries.push(PendingEntry {
         generation,
         rotation_id: Uuid::new_v4(),
+        expected_oauth_generation,
         rotation: rot,
     });
     write_pending(path, &envelope)
 }
 
+pub fn record_pending_rotation(path: &Path, rot: PendingRotation) -> io::Result<()> {
+    record_pending_rotation_with_generation(path, rot, None)
+}
+
 pub async fn record_pending_rotation_async(path: &Path, rot: PendingRotation) -> io::Result<()> {
-    if rot.old_refresh_token == rot.new_refresh_token || rot.new_refresh_token.trim().is_empty() {
-        return Ok(());
-    }
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || record_pending_rotation(&path, rot))
-        .await
-        .map_err(io::Error::other)?
+    record_pending_rotation_with_generation_async(path, rot, None).await
 }
 
 pub fn match_account_by_old_token(accounts: &[(Uuid, Option<String>)], old: &str) -> Option<Uuid> {
@@ -222,18 +281,25 @@ pub async fn apply_rotation(
     provider_type: ProviderType,
     rot: &PendingRotation,
 ) -> Option<Uuid> {
-    let accounts: Vec<(Uuid, Option<String>)> = store
+    let accounts: Vec<(Uuid, Uuid, Option<String>)> = store
         .get_all_by_type(provider_type)
         .await
         .into_iter()
-        .map(|a| (a.id, a.oauth.map(|o| o.refresh_token)))
+        .map(|a| (a.id, a.oauth_generation, a.oauth.map(|o| o.refresh_token)))
         .collect();
 
-    let id = match_account_by_old_token(&accounts, &rot.old_refresh_token)?;
+    if rot.old_refresh_token.trim().is_empty() {
+        return None;
+    }
+    let (id, expected_generation, _) = accounts
+        .into_iter()
+        .find(|(_, _, tok)| tok.as_deref() == Some(rot.old_refresh_token.as_str()))?;
     match store
         .persist_oauth_credentials(
             id,
             &rot.old_refresh_token,
+            Some(expected_generation),
+            Uuid::new_v4(),
             OAuthCredentials {
                 access_token: rot.new_access_token.clone(),
                 refresh_token: rot.new_refresh_token.clone(),
@@ -270,23 +336,29 @@ pub async fn apply_rotation(
 fn snapshot_pending(path: &Path) -> io::Result<Vec<PendingEntry>> {
     let _lock = lock_pending(path)?;
     let mut envelope = load_pending(path)?;
-    if envelope
-        .entries
-        .iter()
-        .any(|entry| entry.rotation_id.is_nil() || entry.generation == 0)
-    {
+    let needs_upgrade = envelope.entries.iter().any(|entry| {
+        entry.rotation_id.is_nil()
+            || entry.generation == 0
+            || entry.expected_oauth_generation.is_none()
+    });
+    if needs_upgrade {
         let mut next = envelope.next_generation.max(1);
+        let mut changed = false;
         for entry in &mut envelope.entries {
             if entry.generation == 0 {
                 entry.generation = next;
                 next = next.saturating_add(1);
+                changed = true;
             }
             if entry.rotation_id.is_nil() {
                 entry.rotation_id = Uuid::new_v4();
+                changed = true;
             }
         }
         envelope.next_generation = envelope.next_generation.max(next);
-        write_pending(path, &envelope)?;
+        if changed {
+            write_pending(path, &envelope)?;
+        }
     }
     Ok(envelope.entries)
 }
@@ -332,7 +404,7 @@ enum ApplyOutcome {
 
 async fn drain_pending_with<F, Fut>(path: &Path, mut apply: F) -> u32
 where
-    F: FnMut(PendingRotation) -> Fut,
+    F: FnMut(PendingEntry) -> Fut,
     Fut: Future<Output = io::Result<ApplyOutcome>>,
 {
     let snapshot = match snapshot_pending_async(path).await {
@@ -345,18 +417,20 @@ where
     let mut applied_count = 0u32;
     let mut completed = Vec::with_capacity(snapshot.len());
     for entry in snapshot {
-        match apply(entry.rotation).await {
+        let generation = entry.generation;
+        let rotation_id = entry.rotation_id;
+        match apply(entry).await {
             Ok(ApplyOutcome::Applied) => {
                 applied_count += 1;
-                completed.push((entry.generation, entry.rotation_id));
+                completed.push((generation, rotation_id));
             }
             Ok(ApplyOutcome::StaleOrUnsupported) => {
-                completed.push((entry.generation, entry.rotation_id));
+                completed.push((generation, rotation_id));
             }
             Err(err) => {
                 tracing::warn!(
-                    generation = entry.generation,
-                    rotation_id = %entry.rotation_id,
+                    generation,
+                    rotation_id = %rotation_id,
                     error = %err,
                     "Pending OAuth rotation retained for retry"
                 );
@@ -371,24 +445,46 @@ where
     applied_count
 }
 
-async fn apply_pending(store: &AIProviderStore, rot: &PendingRotation) -> io::Result<ApplyOutcome> {
-    if rot.provider != "anthropic" {
+async fn apply_pending(store: &AIProviderStore, entry: &PendingEntry) -> io::Result<ApplyOutcome> {
+    let rot = &entry.rotation;
+    if rot.provider != "anthropic"
+        || rot.old_refresh_token.trim().is_empty()
+        || rot.new_refresh_token.trim().is_empty()
+    {
         return Ok(ApplyOutcome::StaleOrUnsupported);
     }
     let accounts = store.get_all_by_type(ProviderType::Anthropic).await;
-    let Some(account) = accounts.iter().find(|account| {
-        account.oauth.as_ref().is_some_and(|oauth| {
-            oauth.refresh_token == rot.old_refresh_token
-                || oauth.refresh_token == rot.new_refresh_token
+    let id = accounts
+        .iter()
+        .find(|account| {
+            !entry.rotation_id.is_nil() && account.oauth_rotation_id == Some(entry.rotation_id)
         })
-    }) else {
+        .map(|account| account.id)
+        .or_else(|| {
+            let token_pairs: Vec<(Uuid, Option<String>)> = accounts
+                .iter()
+                .map(|account| {
+                    (
+                        account.id,
+                        account
+                            .oauth
+                            .as_ref()
+                            .map(|oauth| oauth.refresh_token.clone()),
+                    )
+                })
+                .collect();
+            match_account_by_old_token(&token_pairs, &rot.old_refresh_token)
+        });
+    let Some(id) = id else {
         return Ok(ApplyOutcome::StaleOrUnsupported);
     };
-    let id = account.id;
+    let expected_oauth_generation = entry.expected_oauth_generation;
     let outcome = store
         .persist_oauth_credentials(
             id,
             &rot.old_refresh_token,
+            expected_oauth_generation,
+            entry.rotation_id,
             OAuthCredentials {
                 access_token: rot.new_access_token.clone(),
                 refresh_token: rot.new_refresh_token.clone(),
@@ -414,7 +510,11 @@ async fn apply_pending(store: &AIProviderStore, rot: &PendingRotation) -> io::Re
 }
 
 pub async fn drain_pending(store: &AIProviderStore, path: &Path) -> u32 {
-    drain_pending_with(path, |rot| async move { apply_pending(store, &rot).await }).await
+    drain_pending_with(
+        path,
+        |entry| async move { apply_pending(store, &entry).await },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -482,13 +582,13 @@ mod tests {
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let mut hook = Some((started_tx, release_rx));
         let storage_path = dir.path().join("ai_providers.json");
-        let drain = drain_pending_with(&path, |rot| {
+        let drain = drain_pending_with(&path, |entry| {
             let (started, release) = hook.take().unwrap();
             let store = &store;
             async move {
                 started.send(()).unwrap();
                 release.await.unwrap();
-                apply_pending(store, &rot).await
+                apply_pending(store, &entry).await
             }
         });
         let writer = async {
@@ -523,7 +623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_single_and_array_apply_and_clean_up() {
+    async fn unfenced_legacy_single_and_array_are_discarded_without_mutation() {
         for array in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("pending.json");
@@ -535,7 +635,11 @@ mod tests {
                 serde_json::to_vec(&rot).unwrap()
             };
             fs::write(&path, json).unwrap();
-            assert_eq!(drain_pending(&store, &path).await, 1);
+            assert_eq!(drain_pending(&store, &path).await, 0);
+            assert_eq!(
+                store.list().await[0].oauth.as_ref().unwrap().refresh_token,
+                "old"
+            );
             assert!(!path.exists());
         }
     }
@@ -584,97 +688,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_after_unpersisted_in_memory_update_persists_without_clobbering_newer() {
+    async fn same_refresh_token_interactive_update_invalidates_stale_pending_replay() {
         let dir = tempfile::tempdir().unwrap();
-        let sidecar_dir = dir.path().join("sidecar");
-        let store_dir = dir.path().join("store");
-        fs::create_dir_all(&sidecar_dir).unwrap();
-        fs::create_dir_all(&store_dir).unwrap();
-        let path = sidecar_dir.join("pending.json");
-        let storage_path = store_dir.join("ai_providers.json");
-        let store = AIProviderStore::new(storage_path.clone()).await;
-        let mut account =
-            crate::ai_providers::AIProvider::new(ProviderType::Anthropic, "Account".into());
-        account.oauth = Some(OAuthCredentials {
-            access_token: "old-access".into(),
-            refresh_token: "old".into(),
-            expires_at: 1,
-        });
-        let id = store.add(account).await;
-
-        fs::remove_file(&storage_path).unwrap();
-        fs::create_dir(&storage_path).unwrap();
-        store
-            .set_oauth_credentials(
-                id,
-                OAuthCredentials {
-                    access_token: "stale-access".into(),
-                    refresh_token: "new".into(),
-                    expires_at: 500,
-                },
-            )
-            .await
-            .unwrap();
-        fs::remove_dir(&storage_path).unwrap();
-
-        record_pending_rotation_async(&path, rotation("old", "new"))
-            .await
-            .unwrap();
-        assert_eq!(drain_pending(&store, &path).await, 1);
-        assert!(!path.exists());
-        let reloaded = AIProviderStore::new(storage_path.clone()).await;
-        let saved = reloaded.get(id).await.unwrap().oauth.unwrap();
-        assert_eq!(saved.refresh_token, "new");
-        assert_eq!(saved.access_token, "access-new");
-        assert_eq!(saved.expires_at, 999);
-
-        record_pending_rotation_async(&path, rotation("old", "new"))
-            .await
-            .unwrap();
-        assert_eq!(drain_pending(&store, &path).await, 0);
-        assert!(!path.exists());
-
-        record_pending_rotation_async(&path, rotation("new", "newer"))
-            .await
-            .unwrap();
-        assert_eq!(drain_pending(&store, &path).await, 1);
-        record_pending_rotation_async(&path, rotation("old", "new"))
-            .await
-            .unwrap();
-        assert_eq!(drain_pending(&store, &path).await, 0);
-        assert!(!path.exists());
-        let reloaded = AIProviderStore::new(storage_path).await;
-        assert_eq!(
-            reloaded.get(id).await.unwrap().oauth.unwrap().refresh_token,
-            "newer"
-        );
-    }
-
-    #[tokio::test]
-    async fn exact_memory_match_after_failed_legacy_save_is_repaired() {
-        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending.json");
         let storage_path = dir.path().join("ai_providers.json");
         let (store, id) = store_with_account(dir.path(), "old").await;
-        fs::remove_file(&storage_path).unwrap();
-        fs::create_dir(&storage_path).unwrap();
+
+        record_pending_rotation_async(&path, rotation("old", "new"))
+            .await
+            .unwrap();
+
         store
             .set_oauth_credentials(
                 id,
                 OAuthCredentials {
-                    refresh_token: "new".into(),
-                    access_token: "access-new".into(),
-                    expires_at: 999,
+                    access_token: "fresh-access-b".into(),
+                    refresh_token: "old".into(),
+                    expires_at: 2_000,
                 },
             )
             .await
             .unwrap();
-        fs::remove_dir(&storage_path).unwrap();
-        assert_eq!(
-            apply_pending(&store, &rotation("old", "new"))
-                .await
-                .unwrap(),
-            ApplyOutcome::Applied
-        );
+
+        assert_eq!(drain_pending(&store, &path).await, 0);
+        assert!(!path.exists());
+        let saved = AIProviderStore::new(storage_path.clone())
+            .await
+            .get(id)
+            .await
+            .unwrap()
+            .oauth
+            .unwrap();
+        assert_eq!(saved.refresh_token, "old");
+        assert_eq!(saved.access_token, "fresh-access-b");
+        assert_eq!(saved.expires_at, 2_000);
+
+        record_pending_rotation_async(&path, rotation("old", "new"))
+            .await
+            .unwrap();
+        let mut updated = store.get(id).await.unwrap();
+        updated.oauth = Some(OAuthCredentials {
+            access_token: "newer-access-c".into(),
+            refresh_token: "new".into(),
+            expires_at: 3_000,
+        });
+        store.update(id, updated).await.unwrap();
+
+        assert_eq!(drain_pending(&store, &path).await, 0);
+        assert!(!path.exists());
         let saved = AIProviderStore::new(storage_path)
             .await
             .get(id)
@@ -683,8 +744,182 @@ mod tests {
             .oauth
             .unwrap();
         assert_eq!(saved.refresh_token, "new");
+        assert_eq!(saved.access_token, "newer-access-c");
+        assert_eq!(saved.expires_at, 3_000);
+    }
+
+    #[tokio::test]
+    async fn duplicate_idempotent_replay_acknowledges_without_reapplying_or_overwriting_newer_update(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending.json");
+        let storage_path = dir.path().join("ai_providers.json");
+        let (store, id) = store_with_account(dir.path(), "old").await;
+
+        record_pending_rotation_async(&path, rotation("old", "new"))
+            .await
+            .unwrap();
+        let sidecar_bytes = fs::read(&path).unwrap();
+
+        assert_eq!(drain_pending(&store, &path).await, 1);
+        let gen_after_first = store.get(id).await.unwrap().oauth_generation;
+
+        fs::write(&path, &sidecar_bytes).unwrap();
+        assert_eq!(drain_pending(&store, &path).await, 0);
+        assert!(!path.exists());
+        assert_eq!(
+            store.get(id).await.unwrap().oauth_generation,
+            gen_after_first
+        );
+
+        store
+            .set_oauth_credentials(
+                id,
+                OAuthCredentials {
+                    access_token: "access-b".into(),
+                    refresh_token: "new".into(),
+                    expires_at: 5_000,
+                },
+            )
+            .await
+            .unwrap();
+        fs::write(&path, &sidecar_bytes).unwrap();
+        assert_eq!(drain_pending(&store, &path).await, 0);
+        assert!(!path.exists());
+
+        let reloaded = AIProviderStore::new(storage_path).await;
+        let saved = reloaded.get(id).await.unwrap().oauth.unwrap();
+        assert_eq!(saved.refresh_token, "new");
+        assert_eq!(saved.access_token, "access-b");
+        assert_eq!(saved.expires_at, 5_000);
+    }
+
+    #[tokio::test]
+    async fn unacknowledged_replay_repairs_only_unpersisted_matching_rotation_and_recovers_after_restart(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending.json");
+        let storage_path = dir.path().join("ai_providers.json");
+        let (store, id) = store_with_account(dir.path(), "old").await;
+
+        record_pending_rotation_async(&path, rotation("old", "new"))
+            .await
+            .unwrap();
+        let sidecar_bytes = fs::read(&path).unwrap();
+
+        assert_eq!(drain_pending(&store, &path).await, 1);
+        let applied_generation = store.get(id).await.unwrap().oauth_generation;
+
+        fs::remove_file(&storage_path).unwrap();
+        fs::write(&path, &sidecar_bytes).unwrap();
+        assert_eq!(drain_pending(&store, &path).await, 1);
+        assert!(!path.exists());
+        assert_eq!(
+            store.get(id).await.unwrap().oauth_generation,
+            applied_generation
+        );
+
+        let restarted = AIProviderStore::new(storage_path.clone()).await;
+        fs::write(&path, &sidecar_bytes).unwrap();
+        assert_eq!(drain_pending(&restarted, &path).await, 0);
+        assert!(!path.exists());
+        let saved = restarted.get(id).await.unwrap().oauth.unwrap();
+        assert_eq!(saved.refresh_token, "new");
         assert_eq!(saved.access_token, "access-new");
         assert_eq!(saved.expires_at, 999);
+
+        restarted
+            .set_oauth_credentials(
+                id,
+                OAuthCredentials {
+                    access_token: "post-restart-access".into(),
+                    refresh_token: "new".into(),
+                    expires_at: 7_777,
+                },
+            )
+            .await
+            .unwrap();
+        let restarted_again = AIProviderStore::new(storage_path).await;
+        fs::write(&path, &sidecar_bytes).unwrap();
+        assert_eq!(drain_pending(&restarted_again, &path).await, 0);
+        assert!(!path.exists());
+        let saved = restarted_again.get(id).await.unwrap().oauth.unwrap();
+        assert_eq!(saved.access_token, "post-restart-access");
+        assert_eq!(saved.expires_at, 7_777);
+    }
+
+    #[tokio::test]
+    async fn concurrent_interactive_mutation_during_drain_fences_stale_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending.json");
+        let storage_path = dir.path().join("ai_providers.json");
+        let (store, id) = store_with_account(dir.path(), "old").await;
+
+        record_pending_rotation_async(&path, rotation("old", "new"))
+            .await
+            .unwrap();
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let mut hook = Some((started_tx, release_rx));
+        let drain = drain_pending_with(&path, |entry| {
+            let (started, release) = hook.take().unwrap();
+            let store = &store;
+            async move {
+                started.send(()).unwrap();
+                release.await.unwrap();
+                apply_pending(store, &entry).await
+            }
+        });
+        let interactive = async {
+            started_rx.await.unwrap();
+            store
+                .set_oauth_credentials(
+                    id,
+                    OAuthCredentials {
+                        access_token: "interactive-access".into(),
+                        refresh_token: "old".into(),
+                        expires_at: 8_888,
+                    },
+                )
+                .await
+                .unwrap();
+            release_tx.send(()).unwrap();
+        };
+        let (applied, ()) = tokio::join!(drain, interactive);
+        assert_eq!(applied, 0);
+        assert!(!path.exists());
+        let saved = AIProviderStore::new(storage_path)
+            .await
+            .get(id)
+            .await
+            .unwrap()
+            .oauth
+            .unwrap();
+        assert_eq!(saved.refresh_token, "old");
+        assert_eq!(saved.access_token, "interactive-access");
+        assert_eq!(saved.expires_at, 8_888);
+    }
+
+    #[tokio::test]
+    async fn empty_old_refresh_token_never_matches_or_mutates_blank_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending.json");
+        let (store, id) = store_with_account(dir.path(), "").await;
+        let legacy = PendingRotation {
+            provider: "anthropic".into(),
+            old_refresh_token: String::new(),
+            new_refresh_token: "new".into(),
+            new_access_token: "access-new".into(),
+            expires_at: 999,
+        };
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(drain_pending(&store, &path).await, 0);
+        assert!(!path.exists());
+        assert_eq!(
+            store.get(id).await.unwrap().oauth.unwrap().access_token,
+            "old-access"
+        );
     }
 
     #[tokio::test]
@@ -692,16 +927,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (store, id) = store_with_account(dir.path(), "old").await;
         let selected = store.get(id).await.unwrap();
+        let first_entry = PendingEntry {
+            generation: 1,
+            rotation_id: Uuid::new_v4(),
+            expected_oauth_generation: Some(selected.oauth_generation),
+            rotation: rotation("old", "new"),
+        };
         assert_eq!(
-            apply_pending(&store, &rotation("old", "new"))
-                .await
-                .unwrap(),
+            apply_pending(&store, &first_entry).await.unwrap(),
             ApplyOutcome::Applied
         );
+        let after_first = store.get(id).await.unwrap();
+        let second_entry = PendingEntry {
+            generation: 2,
+            rotation_id: Uuid::new_v4(),
+            expected_oauth_generation: Some(after_first.oauth_generation),
+            rotation: rotation("new", "newer"),
+        };
         assert_eq!(
-            apply_pending(&store, &rotation("new", "newer"))
-                .await
-                .unwrap(),
+            apply_pending(&store, &second_entry).await.unwrap(),
             ApplyOutcome::Applied
         );
         assert_eq!(
@@ -709,6 +953,8 @@ mod tests {
                 .persist_oauth_credentials(
                     selected.id,
                     "old",
+                    Some(selected.oauth_generation),
+                    Uuid::new_v4(),
                     OAuthCredentials {
                         refresh_token: "new".into(),
                         access_token: "access-new".into(),
