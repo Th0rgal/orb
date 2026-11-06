@@ -18,7 +18,9 @@ const apiMock = vi.fn();
 
 vi.mock("../src/api", () => ({
   api: (...args: unknown[]) => apiMock(...args),
+  connectionVersion: () => 0,
   getApiUrl: () => "https://core.test",
+  getJwt: () => "jwt-test",
   ApiError: class extends Error {},
 }));
 
@@ -85,7 +87,11 @@ describe("bitwardenApi", () => {
       revisionDate: "2026-03-04T02:27:09.64Z",
     });
     const revealed = await revealBitwardenSecret("sec-1");
-    expect(apiMock).toHaveBeenCalledWith("/api/bitwarden/secrets/sec-1/reveal", { method: "GET", headers: {} });
+    expect(apiMock).toHaveBeenCalledWith(
+      "/api/bitwarden/secrets/sec-1/reveal",
+      { method: "GET", headers: { Authorization: "Bearer jwt-test" } },
+      "https://core.test",
+    );
     expect(revealed.value).toBe("sk-live-123");
 
     apiMock.mockResolvedValueOnce({
@@ -99,11 +105,15 @@ describe("bitwardenApi", () => {
       revisionDate: "2026-03-04T02:27:09.64Z",
     });
     await createBitwardenSecret(projectId, { key: "NEW_SECRET", value: "val-2", note: "note-2" });
-    expect(apiMock).toHaveBeenCalledWith(`/api/bitwarden/projects/${projectId}/secrets`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: "NEW_SECRET", value: "val-2", note: "note-2" }),
-    });
+    expect(apiMock).toHaveBeenCalledWith(
+      `/api/bitwarden/projects/${projectId}/secrets`,
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer jwt-test", "Content-Type": "application/json" },
+        body: JSON.stringify({ key: "NEW_SECRET", value: "val-2", note: "note-2" }),
+      },
+      "https://core.test",
+    );
 
     apiMock.mockResolvedValueOnce({
       id: "sec-2",
@@ -116,18 +126,26 @@ describe("bitwardenApi", () => {
       revisionDate: "2026-03-04T02:27:09.64Z",
     });
     await updateBitwardenSecret("sec-2", { value: "val-updated", note: "note-updated" });
-    expect(apiMock).toHaveBeenCalledWith("/api/bitwarden/secrets/sec-2", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: "val-updated", note: "note-updated" }),
-    });
+    expect(apiMock).toHaveBeenCalledWith(
+      "/api/bitwarden/secrets/sec-2",
+      {
+        method: "PUT",
+        headers: { Authorization: "Bearer jwt-test", "Content-Type": "application/json" },
+        body: JSON.stringify({ value: "val-updated", note: "note-updated" }),
+      },
+      "https://core.test",
+    );
 
     apiMock.mockResolvedValueOnce({ ok: true });
     await deleteBitwardenSecret("sec-2");
-    expect(apiMock).toHaveBeenCalledWith("/api/bitwarden/secrets/sec-2", {
-      method: "DELETE",
-      headers: {},
-    });
+    expect(apiMock).toHaveBeenCalledWith(
+      "/api/bitwarden/secrets/sec-2",
+      {
+        method: "DELETE",
+        headers: { Authorization: "Bearer jwt-test" },
+      },
+      "https://core.test",
+    );
 
     apiMock.mockResolvedValueOnce({
       bws_available: true,
@@ -139,11 +157,15 @@ describe("bitwardenApi", () => {
       project_bindings: { paloma: projectId },
     });
     await updateBitwardenConfig({ default_project_id: projectId });
-    expect(apiMock).toHaveBeenCalledWith("/api/bitwarden/config", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ default_project_id: projectId }),
-    });
+    expect(apiMock).toHaveBeenCalledWith(
+      "/api/bitwarden/config",
+      {
+        method: "PUT",
+        headers: { Authorization: "Bearer jwt-test", "Content-Type": "application/json" },
+        body: JSON.stringify({ default_project_id: projectId }),
+      },
+      "https://core.test",
+    );
   });
 
   it("talks to the broker endpoints", async () => {

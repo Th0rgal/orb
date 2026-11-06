@@ -686,7 +686,11 @@ function BackendTab() {
     setError(null);
     setNotice(null);
     try {
-      await signInWithGitHubDesktop(url(), health()?.github_oauth_client_state !== false);
+      const h = health();
+      await signInWithGitHubDesktop(
+        url(),
+        h ? h.github_oauth_client_state === true : undefined,
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

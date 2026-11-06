@@ -1,5 +1,5 @@
 import { nativeInvoke } from "./native";
-import { setConnection, transportFetch } from "./api";
+import { probeHealth, setConnection, transportFetch } from "./api";
 
 /**
  * Shared-model GitHub OAuth sign-in state machine (mirrors `OrbGitHubSignIn.kt`
@@ -15,6 +15,7 @@ const STORAGE_KEY = "orb.githubOAuthPending";
 export interface PendingGitHubOAuthAttempt {
   baseUrl: string;
   state: string | null;
+  requireState?: boolean;
   startedAt: number;
 }
 
@@ -57,14 +58,15 @@ export function constantTimeEquals(a: string, b: string): boolean {
 
 export function beginGitHubOAuthAttempt(
   rawBaseUrl: string,
-  clientStateSupported = true,
+  clientStateSupported = false,
   nowMs = Date.now(),
 ): PendingGitHubOAuthAttempt | null {
   const baseUrl = normalizeAuthOrigin(rawBaseUrl);
   if (!baseUrl) return null;
   const attempt: PendingGitHubOAuthAttempt = {
     baseUrl,
-    state: clientStateSupported ? generateGitHubOAuthState() : null,
+    state: generateGitHubOAuthState(),
+    requireState: clientStateSupported === true,
     startedAt: nowMs,
   };
   try {
@@ -84,6 +86,7 @@ export function loadPendingGitHubOAuthAttempt(): PendingGitHubOAuthAttempt | nul
     return {
       baseUrl: parsed.baseUrl,
       state: typeof parsed.state === "string" ? parsed.state : null,
+      requireState: parsed.requireState === true,
       startedAt: parsed.startedAt,
     };
   } catch {
@@ -151,8 +154,13 @@ export function verifyGitHubOAuthCallback(
   if (!params.validCallbackPath) {
     return { ok: false, error: "Invalid GitHub callback URL" };
   }
-  if (attempt.state !== null) {
-    if (!params.state || !constantTimeEquals(attempt.state, params.state)) {
+  const gotState = params.state && params.state.length > 0 ? params.state : null;
+  const serverEchoesState = attempt.requireState ?? attempt.state !== null;
+  if (gotState !== null || serverEchoesState) {
+    if (!attempt.state) {
+      return { ok: false, error: "GitHub sign-in state was not recorded — please try again" };
+    }
+    if (!gotState || !constantTimeEquals(attempt.state, gotState)) {
       return { ok: false, error: "GitHub sign-in state did not match — please try again" };
     }
   }
@@ -186,9 +194,18 @@ export async function verifyIssuedAuthToken(baseUrl: string, token: string): Pro
 
 export async function signInWithGitHubDesktop(
   rawBaseUrl: string,
-  clientStateSupported = true,
+  clientStateSupported?: boolean,
 ): Promise<boolean> {
-  const attempt = beginGitHubOAuthAttempt(rawBaseUrl, clientStateSupported);
+  const baseUrl = normalizeAuthOrigin(rawBaseUrl);
+  if (!baseUrl) {
+    throw new Error("Enter a valid http:// or https:// API URL first");
+  }
+  let echoesState = clientStateSupported === true;
+  if (clientStateSupported === undefined) {
+    const health = await probeHealth(baseUrl).catch(() => null);
+    echoesState = health?.github_oauth_client_state === true;
+  }
+  const attempt = beginGitHubOAuthAttempt(baseUrl, echoesState);
   if (!attempt) {
     throw new Error("Enter a valid http:// or https:// API URL first");
   }

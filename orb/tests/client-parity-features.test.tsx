@@ -89,6 +89,33 @@ describe("OrbGitHubSignIn", () => {
       ok: false,
       error: "Server URL changed during GitHub sign-in — please try again",
     });
+
+    // Older Core omits `github_oauth_client_state` (`clientStateSupported === false`):
+    // callback without `state` succeeds via origin + TTL + `/api/auth/status`, while a
+    // forged non-empty `state` is still rejected (matching iOS & Android).
+    const legacyAttempt = beginGitHubOAuthAttempt("https://legacy.example.com/", false, 1_000);
+    expect(legacyAttempt!.state).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(legacyAttempt!.requireState).toBe(false);
+    expect(
+      verifyGitHubOAuthCallback(
+        "sandboxed://auth/callback?token=jwt-legacy",
+        legacyAttempt,
+        "https://legacy.example.com",
+        2_000,
+      ),
+    ).toEqual({
+      ok: true,
+      baseUrl: "https://legacy.example.com",
+      token: "jwt-legacy",
+    });
+    expect(
+      verifyGitHubOAuthCallback(
+        "sandboxed://auth/callback?token=jwt-legacy&state=forged-state",
+        legacyAttempt,
+        "https://legacy.example.com",
+        2_000,
+      ).ok,
+    ).toBe(false);
   });
 
   it("rejects tokens rejected by GET /api/auth/status", async () => {
@@ -417,6 +444,54 @@ describe("Settings multi-user login & GitHub integration", () => {
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
 
     expect(await screen.findByText("@octocat")).toBeTruthy();
+  });
+
+  it("allows GitHub OAuth sign-in when an older Core omits github_oauth_client_state from /api/health", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) {
+        return new Response(
+          JSON.stringify({
+            status: "ok",
+            auth_required: true,
+            auth_mode: "single_tenant",
+            github_enabled: true,
+            // github_oauth_client_state intentionally omitted (older Core)
+          }),
+        );
+      }
+      if (url.endsWith("/api/auth/status")) {
+        return new Response(
+          JSON.stringify({
+            auth_mode: "single_tenant",
+            password_source: "env",
+            dev_mode: false,
+          }),
+        );
+      }
+      if (url.endsWith("/api/cloud/accounts")) return new Response(JSON.stringify([]));
+      if (url.endsWith("/api/integrations/github/status")) {
+        return new Response(JSON.stringify({ configured: false, connected: false, pending: false, scopes: [] }));
+      }
+      return new Response(JSON.stringify({}));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const invokeSpy = vi.fn(async (cmd: string) => {
+      if (cmd === "github_oauth_sign_in") {
+        // Older Core redirects back without echoing `state`.
+        return "sandboxed://auth/callback?token=legacy-gh-jwt";
+      }
+      return undefined;
+    });
+    (window as unknown as { __TAURI_INTERNALS__?: { invoke: typeof invokeSpy } }).__TAURI_INTERNALS__ = {
+      invoke: invokeSpy,
+    };
+
+    render(() => <Settings />);
+    const ghBtn = await screen.findByRole("button", { name: "Sign in with GitHub" });
+    fireEvent.click(ghBtn);
+
+    await waitFor(() => expect(isConnected()).toBe(true));
   });
 });
 
