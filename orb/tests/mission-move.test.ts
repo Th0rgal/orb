@@ -1,11 +1,13 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import {
+  LOCAL_PLACEMENT_CLIENT_ID,
   allocatePlacementOpId,
   authoritativePlacement,
   commitAuthoritativePlacements,
   mergeMission,
   normalizeMissionFolder,
   resetMissionHierarchy,
+  resolveLocalAckOpId,
   rollbackOptimisticPlacement,
   stageOptimisticPlacement,
   stickHierarchy,
@@ -16,6 +18,7 @@ vi.mock("../src/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/api")>();
   return {
     ApprovalTransferConfirmationRequiredError: actual.ApprovalTransferConfirmationRequiredError,
+    LOCAL_PLACEMENT_CLIENT_ID,
     applyAncestorCachePlacements: vi.fn(),
     btwParentId: (m: { tags?: readonly string[] | null }) =>
       m.tags?.find(t => t.startsWith("btw-parent:"))?.slice("btw-parent:".length),
@@ -24,6 +27,7 @@ vi.mock("../src/api", async (importOriginal) => {
     getApiUrl: () => "https://core",
     moveMissionsBatch: vi.fn(),
     normalizeMissionFolder,
+    resolveLocalAckOpId,
     allocatePlacementOpId,
     stageOptimisticPlacement,
     rollbackOptimisticPlacement,

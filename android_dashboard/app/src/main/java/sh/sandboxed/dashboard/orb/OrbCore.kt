@@ -399,8 +399,60 @@ object OrbMissionTree {
         val optimisticFolder: String? = null
     )
 
+    val localClientId: String = java.util.UUID.randomUUID().toString()
     private val placements = java.util.concurrent.ConcurrentHashMap<String, PlacementState>()
+    private val stagedRows = java.util.concurrent.ConcurrentHashMap<String, OrbRow>()
     private val nextPlacementOpId = java.util.concurrent.atomic.AtomicInteger(0)
+
+    fun resolveLocalAckOpId(clientOpId: Int, clientId: String?): Int {
+        if (clientOpId <= 0 || clientId.isNullOrEmpty()) return 0
+        return if (clientId == localClientId) clientOpId else 0
+    }
+
+    fun retainStagedRows(rows: Collection<OrbRow>) {
+        if (rows.isEmpty()) return
+        if (stagedRows.size > 256) stagedRows.clear()
+        for (row in rows) {
+            if (row.id.isNotEmpty()) stagedRows[row.id] = row
+        }
+    }
+
+    fun stagedRow(id: String): OrbRow? = if (id.isEmpty()) null else stagedRows[id]
+
+    /** Merges any in-flight optimistic destination preview rows (`pendingOpId != 0`) into `rows`
+     * so a concurrent destination `projectMissions()` load finishing before `POST /move` commits never drops the preview. */
+    fun mergePendingStagedRows(rows: List<OrbRow>, projectSlug: String): List<OrbRow> {
+        val target = projectSlug.trim()
+        if (target.isEmpty()) return rows
+        val existingIds = rows.mapTo(HashSet()) { it.id }
+        val previews = ArrayList<OrbRow>()
+        for ((mid, st) in placements) {
+            if (st.pendingOpId == 0 || mid in existingIds) continue
+            val effProj = st.optimisticProject ?: st.project
+            if (!effProj.equals(target, ignoreCase = true)) continue
+            val base = stagedRows[mid] ?: continue
+            if (isBtwMission(base)) continue
+            val isChild = parentId(base) != null
+            val patched = OrbReadCache.patchRowPlacement(
+                base,
+                OrbPlacementCommitItem(
+                    missionId = mid,
+                    project = effProj,
+                    folder = if (isChild) "" else (st.optimisticFolder ?: st.folder),
+                    placementRevision = st.revision,
+                    explicitProject = true,
+                    isPreview = true
+                )
+            )
+            previews.add(patched)
+        }
+        if (previews.isEmpty()) return rows
+        val out = ArrayList<OrbRow>(rows.size + previews.size).apply { addAll(rows) }
+        for (preview in previews) {
+            OrbReadCache.insertRowByRecency(out, preview)
+        }
+        return out
+    }
 
     fun normalizeFolder(raw: String?): String {
         if (raw.isNullOrBlank()) return ""
@@ -666,7 +718,8 @@ object OrbMissionTree {
         val root = OrbJSON.dict(rawEvent) ?: return emptyList()
         val rawMoves = OrbJSON.dictList(root["moves"]).ifEmpty { OrbJSON.dictList(root["moved"]) }
         if (rawMoves.isEmpty()) return emptyList()
-        val ackOpId = maxOf(0, (root["client_op_id"] as? Number)?.toInt() ?: 0)
+        val rawOpId = maxOf(0, (root["client_op_id"] as? Number)?.toInt() ?: 0)
+        val ackOpId = resolveLocalAckOpId(rawOpId, root["client_id"] as? String)
         val items = rawMoves.mapNotNull { m ->
             val mid = OrbJSON.str(m, "mission_id", "id") ?: return@mapNotNull null
             val hasProjectKey = m.containsKey("project") && (m["project"] == null || m["project"] is String)
@@ -750,6 +803,7 @@ object OrbMissionTree {
         ancestorCache.clear()
         goneIds.clear()
         placements.clear()
+        stagedRows.clear()
         nextPlacementOpId.set(0)
     }
 
@@ -1603,8 +1657,8 @@ object OrbReadCache {
             for (item in accepted) {
                 val targetProj = item.project?.trim()?.takeIf { it.isNotEmpty() } ?: continue
                 if (targetProj.equals(slug, ignoreCase = true) && item.missionId !in presentIds) {
-                    val base = fallbackRows[item.missionId]
-                    if (base != null) {
+                    val base = fallbackRows[item.missionId] ?: OrbMissionTree.stagedRow(item.missionId)
+                    if (base != null && !OrbMissionTree.isBtwMission(base)) {
                         changed = true
                         presentIds.add(item.missionId)
                         insertRowByRecency(updated, patchRowPlacement(base, item))
@@ -2578,7 +2632,7 @@ class OrbCore private constructor(context: Context) {
         val ownIds = merged.mapTo(mutableSetOf()) { it.id }
         val withParents = OrbMissionTree.withAncestors(merged) { fetchAncestor(it) }
         val scoped = OrbMissionTree.filterToProjectScope(withParents, projectSlug = projectSlug, ownIds = ownIds)
-        OrbMissionTree.filterMobile(scoped)
+        OrbMissionTree.mergePendingStagedRows(OrbMissionTree.filterMobile(scoped), projectSlug = projectSlug)
     }
 
     /** Reconciles in-memory mission lists, delta cache, and per-project read caches after optimistic or authoritative placement changes. */
@@ -2624,7 +2678,10 @@ class OrbCore private constructor(context: Context) {
             put("folder", cleanFolder)
             put("approval_policy", approvalPolicy)
             if (!project.isNullOrBlank()) put("project", project.trim())
-            if (clientOpId > 0) put("client_op_id", clientOpId)
+            if (clientOpId > 0) {
+                put("client_op_id", clientOpId)
+                put("client_id", OrbMissionTree.localClientId)
+            }
         }
         val response = try {
             request("/api/control/missions/move", method = "POST", body = body)
@@ -2634,7 +2691,9 @@ class OrbCore private constructor(context: Context) {
         }
         val root = OrbJSON.dict(response)
         val rawMoves = OrbJSON.dictList(root?.get("moved")).ifEmpty { OrbJSON.dictList(root?.get("moves")) }
-        val respOpId = (root?.get("client_op_id") as? Number)?.toInt() ?: clientOpId
+        val rawRespOpId = (root?.get("client_op_id") as? Number)?.toInt() ?: clientOpId
+        val respClientId = (root?.get("client_id") as? String)?.takeIf { it.isNotEmpty() } ?: OrbMissionTree.localClientId
+        val respOpId = OrbMissionTree.resolveLocalAckOpId(rawRespOpId, respClientId)
         val items = rawMoves.mapNotNull { m ->
             val mid = OrbJSON.str(m, "mission_id", "id") ?: return@mapNotNull null
             val proj = OrbJSON.str(m, "project")?.takeIf { it.isNotEmpty() } ?: project?.trim()?.takeIf { it.isNotEmpty() }

@@ -330,15 +330,58 @@ enum OrbHierarchy {
         let fetchedAt: Date
     }
     static let ancestorTTLSeconds: TimeInterval = 60
+    static let localClientID: String = UUID().uuidString
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var parents: [String: String] = [:]
     nonisolated(unsafe) private static var btwIDs: Set<String> = []
     nonisolated(unsafe) private static var seenFacts: [String: Seen] = [:]
     nonisolated(unsafe) private static var placements: [String: PlacementState] = [:]
+    nonisolated(unsafe) private static var stagedRows: [String: OrbRow] = [:]
     nonisolated(unsafe) private static var nextOpID: UInt32 = 0
     nonisolated(unsafe) private static var ancestors: [String: CachedAncestor] = [:]
     nonisolated(unsafe) private static var goneIDs: Set<String> = []
+
+    static func resolveLocalAckOpID(clientOpID: UInt32, clientID: String?) -> UInt32 {
+        guard clientOpID != 0, let clientID, clientID == localClientID else { return 0 }
+        return clientOpID
+    }
+
+    static func retainStagedRows(_ rows: [OrbRow]) {
+        guard !rows.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        if stagedRows.count > 256 { stagedRows.removeAll(keepingCapacity: true) }
+        for row in rows where !row.id.isEmpty {
+            stagedRows[row.id] = row
+        }
+    }
+
+    static func stagedRow(for id: String) -> OrbRow? {
+        guard !id.isEmpty else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        return stagedRows[id]
+    }
+
+    static func pendingPreviewRows(forProject slug: String) -> [OrbRow] {
+        let target = slug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return [] }
+        lock.lock()
+        var matches: [OrbRow] = []
+        for (mid, st) in placements where st.pendingOpID != 0 {
+            guard st.project.caseInsensitiveCompare(target) == .orderedSame,
+                  let base = stagedRows[mid] else { continue }
+            let isNested = hasNestedParentLocked(id: mid, payloadParent: nil, directBtw: false)
+            matches.append(base.withPatchedPlacement(
+                project: st.project,
+                folder: isNested ? "" : st.folder,
+                revision: st.revision,
+                isPreview: true
+            ))
+        }
+        lock.unlock()
+        return matches
+    }
 
     static func allocateOpID() -> UInt32 {
         lock.lock(); defer { lock.unlock() }
@@ -795,6 +838,7 @@ enum OrbHierarchy {
         btwIDs.removeAll()
         seenFacts.removeAll()
         placements.removeAll()
+        stagedRows.removeAll()
         nextOpID = 0
         ancestors.removeAll()
         goneIDs.removeAll()
@@ -987,6 +1031,94 @@ enum OrbMissionTree {
             }
             return ownIDs.contains(row.id)
         }
+    }
+
+    private static func rowSortMs(_ row: OrbRow) -> Int64 {
+        let u = epochMs(row.updatedAt)
+        return u > 0 ? u : epochMs(row.raw["created_at"].text)
+    }
+
+    static func insertRowByRecency(_ list: inout [OrbRow], _ row: OrbRow) {
+        let ts = rowSortMs(row)
+        if ts > 0, let idx = list.firstIndex(where: { rowSortMs($0) < ts }) {
+            list.insert(row, at: idx)
+        } else if ts > 0 {
+            list.append(row)
+        } else {
+            list.insert(row, at: 0)
+        }
+    }
+
+    /// Merges any in-flight optimistic destination preview rows (`pendingOpID != 0`) into `rows`
+    /// so a concurrent destination `load()` finishing before `POST /move` commits never drops the preview.
+    static func mergePendingStagedRows(_ rows: [OrbRow], projectSlug: String) -> [OrbRow] {
+        let previews = OrbHierarchy.pendingPreviewRows(forProject: projectSlug).filter(\.mobile)
+        guard !previews.isEmpty else { return rows }
+        var out = rows
+        var existing = Set(rows.map(\.id))
+        for preview in previews where existing.insert(preview.id).inserted {
+            insertRowByRecency(&out, preview)
+        }
+        return out
+    }
+
+    /// Applies placement updates (optimistic preview, authoritative commit, or failed-move rollback)
+    /// directly to a project's loaded `OrbRow` list, inserting staged cross-project arrivals in recency
+    /// order without requiring a server reload unless an uncached remote SSE mission arrived (`missingIDs`).
+    static func applyPlacementItems(
+        to existing: [OrbRow],
+        projectSlug: String,
+        moves: [OrbPlacementCommitItem],
+        fallbackRows: [String: OrbRow] = [:]
+    ) -> (rows: [OrbRow], changed: Bool, missingIDs: [String]) {
+        guard !moves.isEmpty else { return (existing, false, []) }
+        let targetSlug = projectSlug.trimmingCharacters(in: .whitespacesAndNewlines)
+        let byID = Dictionary(uniqueKeysWithValues: moves.map { ($0.missionID, $0) })
+        var changed = false
+        var nextRows: [OrbRow] = []
+        nextRows.reserveCapacity(existing.count + moves.count)
+        var presentIDs: Set<String> = []
+        for row in existing {
+            guard let move = byID[row.id] else {
+                nextRows.append(row)
+                presentIDs.insert(row.id)
+                continue
+            }
+            let targetProj = (move.project ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if targetProj.caseInsensitiveCompare(targetSlug) != .orderedSame {
+                changed = true
+                continue
+            }
+            nextRows.append(row.withPatchedPlacement(
+                project: targetProj,
+                folder: move.folder,
+                revision: move.placementRevision,
+                isPreview: move.isPreview
+            ))
+            presentIDs.insert(row.id)
+            changed = true
+        }
+        var missingIDs: [String] = []
+        for move in moves {
+            let targetProj = (move.project ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard targetProj.caseInsensitiveCompare(targetSlug) == .orderedSame,
+                  !presentIDs.contains(move.missionID) else { continue }
+            if let source = fallbackRows[move.missionID] ?? OrbHierarchy.stagedRow(for: move.missionID) {
+                guard source.mobile else { continue }
+                let patched = source.withPatchedPlacement(
+                    project: targetProj,
+                    folder: move.folder,
+                    revision: move.placementRevision,
+                    isPreview: move.isPreview
+                )
+                insertRowByRecency(&nextRows, patched)
+                presentIDs.insert(move.missionID)
+                changed = true
+            } else if !move.isPreview {
+                missingIDs.append(move.missionID)
+            }
+        }
+        return (nextRows, changed, missingIDs)
     }
 
     /// Snapshots root missions under `oldFolder` before any async move runs and groups IDs by
@@ -1529,7 +1661,22 @@ enum OrbReadCache {
         pending[scope] = nil
         if let old = values[scope] { values[scope] = Entry(value: old.value, date: .distantPast) }
     }
-    static func applyPlacementCommit(_ accepted: [OrbPlacementCommitItem]) {
+    private static func jsonSortMs(_ raw: OrbJSON) -> Int64 {
+        let u = raw["updated_at"].text
+        if !u.isEmpty, let date = OrbStyle.parseDate(u) {
+            return Int64((date.timeIntervalSince1970 * 1000.0).rounded())
+        }
+        let c = raw["created_at"].text
+        if !c.isEmpty, let date = OrbStyle.parseDate(c) {
+            return Int64((date.timeIntervalSince1970 * 1000.0).rounded())
+        }
+        return 0
+    }
+    static func applyPlacementCommit(
+        _ accepted: [OrbPlacementCommitItem],
+        fallbackRows: [String: OrbRow] = [:],
+        persistToDisk: Bool = true
+    ) {
         guard !accepted.isEmpty else { return }
         let byID = Dictionary(uniqueKeysWithValues: accepted.map { ($0.missionID, $0) })
         var touchedProjects: Set<String> = []
@@ -1542,13 +1689,20 @@ enum OrbReadCache {
                 dict["project"] = item.project.map(OrbJSON.string) ?? .null
                 dict["folder"] = .string(item.folder)
                 dict["placement_revision"] = .number(Double(item.placementRevision))
+                if item.isPreview {
+                    dict["orb_projected_move"] = .bool(true)
+                } else {
+                    dict.removeValue(forKey: "orb_projected_move")
+                }
                 let nextVal: OrbJSON = .object(dict)
                 values[mScope] = Entry(value: nextVal, date: entry.date)
-                OrbDisk.saveAsync(nextVal, key: mKey)
+                if persistToDisk && !item.isPreview {
+                    OrbDisk.saveAsync(nextVal, key: mKey)
+                }
             }
         }
-        // Evict cross-project moved missions immediately from every cached `project:<slug>` / `project:<slug>:all` entry
-        // and update in-place on matching destination projects so stale listings never reappear.
+        // Evict cross-project moved missions immediately from every cached `project:<slug>` / `project:<slug>:all` entry,
+        // patch in-place, and insert staged arriving rows in recency order so cold destination views render immediately.
         let candidateSlugs = cachedProjectSlugs.union(touchedProjects)
         for slug in candidateSlugs where !slug.isEmpty {
             for suffix in ["", ":all"] {
@@ -1556,18 +1710,23 @@ enum OrbReadCache {
                 let scopeKey = key(cacheName)
                 guard let entry = values[scopeKey] ?? OrbDisk.read(cacheName, as: OrbJSON.self).map({ Entry(value: $0, date: .distantPast) }),
                       case var .object(root) = entry.value,
-                      case .array(let list) = root["missions"] else { continue }
+                      case .array(let list) = root["missions"] else {
+                    pending[scopeKey] = nil
+                    continue
+                }
                 var changed = false
                 var nextList: [OrbJSON] = []
-                nextList.reserveCapacity(list.count)
+                nextList.reserveCapacity(list.count + accepted.count)
+                var presentIDs: Set<String> = []
                 for raw in list {
                     let mid = raw["id"].text
                     guard let move = byID[mid] else {
                         nextList.append(raw)
+                        if !mid.isEmpty { presentIDs.insert(mid) }
                         continue
                     }
                     let targetProj = move.project ?? ""
-                    if targetProj != slug {
+                    if targetProj.caseInsensitiveCompare(slug) != .orderedSame {
                         changed = true
                         touchedProjects.insert(slug)
                         continue
@@ -1576,23 +1735,52 @@ enum OrbReadCache {
                         dict["project"] = targetProj.isEmpty ? .null : .string(targetProj)
                         dict["folder"] = .string(move.folder)
                         dict["placement_revision"] = .number(Double(move.placementRevision))
+                        if move.isPreview {
+                            dict["orb_projected_move"] = .bool(true)
+                        } else {
+                            dict.removeValue(forKey: "orb_projected_move")
+                        }
                         nextList.append(.object(dict))
+                        presentIDs.insert(mid)
                         changed = true
                     } else {
                         nextList.append(raw)
+                        if !mid.isEmpty { presentIDs.insert(mid) }
                     }
                 }
+                for move in accepted {
+                    let targetProj = move.project ?? ""
+                    guard targetProj.caseInsensitiveCompare(slug) == .orderedSame,
+                          !presentIDs.contains(move.missionID),
+                          let source = fallbackRows[move.missionID] ?? OrbHierarchy.stagedRow(for: move.missionID) else { continue }
+                    if suffix.isEmpty && source.state == "acknowledged" { continue }
+                    let patched = source.withPatchedPlacement(
+                        project: targetProj,
+                        folder: move.folder,
+                        revision: move.placementRevision,
+                        isPreview: move.isPreview
+                    ).raw
+                    let ts = jsonSortMs(patched)
+                    if ts > 0, let idx = nextList.firstIndex(where: { jsonSortMs($0) < ts }) {
+                        nextList.insert(patched, at: idx)
+                    } else if ts > 0 {
+                        nextList.append(patched)
+                    } else {
+                        nextList.insert(patched, at: 0)
+                    }
+                    presentIDs.insert(move.missionID)
+                    changed = true
+                }
+                pending[scopeKey] = nil
                 if changed {
                     root["missions"] = .array(nextList)
                     let updated: OrbJSON = .object(root)
                     values[scopeKey] = Entry(value: updated, date: .distantPast)
-                    OrbDisk.saveAsync(updated, key: cacheName)
+                    if persistToDisk && !accepted.contains(where: \.isPreview) {
+                        OrbDisk.saveAsync(updated, key: cacheName)
+                    }
                 }
             }
-        }
-        for slug in touchedProjects where !slug.isEmpty {
-            invalidate("project:\(slug)")
-            invalidate("project:\(slug):all")
         }
     }
     static func project(_ id: String, includeArchived: Bool = false, force: Bool = false) async throws -> OrbJSON {

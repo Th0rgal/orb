@@ -251,6 +251,8 @@ pub enum AgentEvent {
         moves: Vec<MissionPlacementItem>,
         #[serde(skip_serializing_if = "Option::is_none")]
         client_op_id: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
 }
 

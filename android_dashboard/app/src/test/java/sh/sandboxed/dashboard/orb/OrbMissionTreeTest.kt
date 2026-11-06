@@ -591,4 +591,78 @@ class OrbMissionTreeTest {
         )
         OrbMissionTree.resetHierarchy()
     }
+
+    @Test
+    fun clientScopedPlacementAckAndMergePendingStagedRows() {
+        OrbMissionTree.resetHierarchy()
+        val rootRow = m(
+            "stage-root",
+            "title" to "Cross-project root",
+            "project" to "alpha",
+            "folder" to "old",
+            "placement_revision" to 2L,
+            "status" to "active",
+            "updated_at" to "2026-11-06T01:20:00Z",
+        )
+        val betaNewer = m("beta-newer", "project" to "beta", "folder" to "", "placement_revision" to 1L, "updated_at" to "2026-11-06T01:30:00Z")
+        val betaOlder = m("beta-older", "project" to "beta", "folder" to "", "placement_revision" to 1L, "updated_at" to "2026-11-06T01:10:00Z")
+        OrbMissionTree.observe(rootRow)
+        OrbMissionTree.retainStagedRows(listOf(rootRow))
+
+        val op = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("stage-root"), op, "beta", "docs")
+
+        // 1. In-flight destination `projectMissions` load preserves the pending staged row in recency order.
+        val merged = OrbMissionTree.mergePendingStagedRows(listOf(betaNewer, betaOlder), projectSlug = "beta")
+        assertEquals(listOf("beta-newer", "stage-root", "beta-older"), merged.map { it.id })
+        assertEquals("docs", merged[1].raw["folder"])
+
+        // 2. Colliding `client_op_id` from a foreign client at `incRev <= curRev` is fenced without clearing `pendingOpId`.
+        val foreignAccepted = OrbMissionTree.commitIncomingPlacementEvent(
+            mapOf(
+                "client_op_id" to op,
+                "client_id" to "foreign-client-uuid",
+                "moves" to listOf(
+                    mapOf(
+                        "mission_id" to "stage-root",
+                        "project" to "gamma",
+                        "folder" to "foreign",
+                        "placement_revision" to 2L,
+                    )
+                ),
+            )
+        )
+        assertTrue(foreignAccepted.isEmpty())
+        assertEquals(op, OrbMissionTree.placementOf("stage-root")?.pendingOpId)
+        assertEquals("beta", OrbMissionTree.projectSlug(rootRow))
+
+        // 3. Failed local move rolls back cleanly to source `alpha/old` at rev 2.
+        val reverted = OrbMissionTree.rollbackOptimisticPlacement(op)
+        assertEquals(1, reverted.size)
+        assertEquals("alpha", reverted[0].project)
+        assertEquals("old", reverted[0].folder)
+        assertEquals(2L, reverted[0].placementRevision)
+
+        // 4. Event carrying `localClientId` at `incRev == curRev` acknowledges and clears `pendingOpId`.
+        val op2 = OrbMissionTree.allocateOpId()
+        OrbMissionTree.stageOptimisticPlacement(listOf("stage-root"), op2, "beta", "docs")
+        val localAccepted = OrbMissionTree.commitIncomingPlacementEvent(
+            mapOf(
+                "client_op_id" to op2,
+                "client_id" to OrbMissionTree.localClientId,
+                "moves" to listOf(
+                    mapOf(
+                        "mission_id" to "stage-root",
+                        "project" to "beta",
+                        "folder" to "docs",
+                        "placement_revision" to 2L,
+                    )
+                ),
+            )
+        )
+        assertEquals(1, localAccepted.size)
+        assertEquals(0, OrbMissionTree.placementOf("stage-root")?.pendingOpId)
+        assertEquals(2L, OrbMissionTree.placementOf("stage-root")?.revision)
+        OrbMissionTree.resetHierarchy()
+    }
 }

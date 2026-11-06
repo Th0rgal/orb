@@ -1,4 +1,5 @@
 import {
+  LOCAL_PLACEMENT_CLIENT_ID,
   applyAncestorCachePlacements,
   btwParentId,
   commitAuthoritativePlacements,
@@ -6,6 +7,7 @@ import {
   getApiUrl,
   moveMissionsBatch,
   normalizeMissionFolder,
+  resolveLocalAckOpId,
   type ApprovalTransferPolicy,
   type MissionPlacementItem,
   type PlacementCommitItem,
@@ -42,9 +44,11 @@ export const applyPendingMoves = withMovedMissions;
 export function applyServerPlacementEvent(
   moves: readonly MissionPlacementItem[],
   clientOpId?: number | null,
+  clientId?: string | null,
 ): PlacementCommitItem[] {
   if (!moves?.length) return [];
-  const accepted = commitAuthoritativePlacements(moves, clientOpId ?? 0);
+  const ackOpId = resolveLocalAckOpId(clientOpId, clientId);
+  const accepted = commitAuthoritativePlacements(moves, ackOpId);
   if (!accepted.length) return [];
   applyAncestorCachePlacements(accepted);
   window.dispatchEvent(new CustomEvent("orb:mission-placement-changed", { detail: { moves: accepted } }));
@@ -67,10 +71,10 @@ async function executeMoveBatch(
     project,
     folder: normFolder,
     approval_policy: approvalPolicy,
-    ...(opId > 0 ? { client_op_id: opId } : {}),
+    ...(opId > 0 ? { client_op_id: opId, client_id: LOCAL_PLACEMENT_CLIENT_ID } : {}),
     ...(descendantIds?.length ? { descendant_ids: [...descendantIds] } : {}),
   });
-  applyServerPlacementEvent(res.moved, res.client_op_id ?? opId);
+  applyServerPlacementEvent(res.moved, res.client_op_id ?? opId, res.client_id ?? LOCAL_PLACEMENT_CLIENT_ID);
 }
 
 export async function moveMission(

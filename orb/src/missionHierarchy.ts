@@ -69,6 +69,16 @@ type PlacementState = {
 const placements = new Map<string, PlacementState>();
 let nextClientOpId = 0;
 
+export const LOCAL_PLACEMENT_CLIENT_ID: string =
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `orb-client-${Math.random().toString(36).slice(2)}-${Date.now()}`;
+
+export function resolveLocalAckOpId(clientOpId?: number | null, clientId?: string | null): number {
+  if (typeof clientOpId !== "number" || !Number.isFinite(clientOpId) || clientOpId <= 0) return 0;
+  return clientId === LOCAL_PLACEMENT_CLIENT_ID ? Math.floor(clientOpId) : 0;
+}
+
 export function allocatePlacementOpId(): number {
   nextClientOpId = nextClientOpId >= 0xffff_fffe ? 1 : nextClientOpId + 1;
   return nextClientOpId;

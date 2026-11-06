@@ -1041,7 +1041,7 @@ final class OrbCore {
             await self?.fetchAncestor(id)
         }
         let scoped = OrbMissionTree.filterToProjectScope(withParents, projectSlug: project, ownIDs: ownIDs)
-        return OrbMissionTree.filterMobile(scoped)
+        return OrbMissionTree.mergePendingStagedRows(OrbMissionTree.filterMobile(scoped), projectSlug: project)
     }
 
     @discardableResult
@@ -1050,7 +1050,8 @@ final class OrbCore {
         project: String?,
         folder: String,
         approvalPolicy: String = "check",
-        clientOpID: UInt32 = 0
+        clientOpID: UInt32 = 0,
+        fallbackRows: [OrbRow] = []
     ) async throws -> [OrbPlacementCommitItem] {
         var payload: [String: OrbJSON] = [
             "mission_ids": .array(ids.map(OrbJSON.string)),
@@ -1060,6 +1061,7 @@ final class OrbCore {
         ]
         if clientOpID != 0 {
             payload["client_op_id"] = .number(Double(clientOpID))
+            payload["client_id"] = .string(OrbHierarchy.localClientID)
         }
         let response: OrbJSON
         do {
@@ -1070,7 +1072,9 @@ final class OrbCore {
             }
             throw error
         }
-        let ackOp = UInt32(max(0, Int(response["client_op_id"].doubleValue ?? Double(clientOpID))))
+        let rawAck = UInt32(max(0, Int(response["client_op_id"].doubleValue ?? Double(clientOpID))))
+        let respClientID = response["client_id"].text.isEmpty ? OrbHierarchy.localClientID : response["client_id"].text
+        let ackOp = OrbHierarchy.resolveLocalAckOpID(clientOpID: rawAck, clientID: respClientID)
         let items: [OrbPlacementCommitItem] = response["moved"].items.compactMap { m in
             let mid = m["mission_id"].text
             guard !mid.isEmpty else { return nil }
@@ -1081,11 +1085,15 @@ final class OrbCore {
         }
         let accepted = OrbHierarchy.commitAuthoritativePlacements(items, ackOpID: ackOp)
         if !accepted.isEmpty {
-            OrbReadCache.applyPlacementCommit(accepted)
+            var byID: [String: OrbRow] = [:]
+            for r in fallbackRows where !r.id.isEmpty && byID[r.id] == nil { byID[r.id] = r }
+            OrbReadCache.applyPlacementCommit(accepted, fallbackRows: byID)
+            var info: [String: Any] = ["moves": accepted]
+            if !fallbackRows.isEmpty { info["rows"] = fallbackRows }
             NotificationCenter.default.post(
                 name: Notification.Name("OrbMissionPlacementChanged"),
                 object: nil,
-                userInfo: ["moves": accepted]
+                userInfo: info
             )
         }
         return accepted
@@ -1117,7 +1125,8 @@ final class OrbCore {
     nonisolated static func applyIncomingPlacementEvent(_ obj: [String: Any]) -> [OrbPlacementCommitItem] {
         let rawMoves = (obj["moves"] as? [[String: Any]]) ?? (obj["moved"] as? [[String: Any]]) ?? []
         guard !rawMoves.isEmpty else { return [] }
-        let ackOp = UInt32(max(0, (obj["client_op_id"] as? NSNumber)?.intValue ?? 0))
+        let rawOp = UInt32(max(0, (obj["client_op_id"] as? NSNumber)?.intValue ?? 0))
+        let ackOp = OrbHierarchy.resolveLocalAckOpID(clientOpID: rawOp, clientID: obj["client_id"] as? String)
         let items: [OrbPlacementCommitItem] = rawMoves.compactMap { m in
             let mid = ((m["mission_id"] as? String) ?? (m["id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !mid.isEmpty else { return nil }

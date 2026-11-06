@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createMemo, createRoot } from "solid-js";
 import { ApprovalTransferConfirmationRequiredError } from "../src/api";
-import { commitAuthoritativePlacements, resetMissionHierarchy, withHierarchy } from "../src/missionHierarchy";
+import { LOCAL_PLACEMENT_CLIENT_ID, commitAuthoritativePlacements, resetMissionHierarchy, stickHierarchy, withHierarchy } from "../src/missionHierarchy";
+import { applyServerPlacementEvent } from "../src/missionMove";
 import { MOVE_CONFIRM_MS, deleteFileOptimistically, fileMoveKey, filesMovedAway, filesMovedInto, isFilePathPending, mergeArrivingMissions, missionMoveKey, missionsMovedInto, moveOptimistically, movedMission, movingOutOf, previewMove, resetMoves, settleMove, upsertMissionPreservingOrder, waitForFilePathSettled, withMovedMissions } from "../src/moves";
 
 beforeEach(() => { resetMoves(); resetMissionHierarchy(); });
@@ -160,4 +161,58 @@ it("patches intra-project placement updates in place and inserts cross-project a
   const arrivedOldest = { id: "m-oldest", project: "beta", folder: "docs", updated_at: "2026-11-06T01:00:00Z" };
   const merged = mergeArrivingMissions([newer, middle, older], [arrivedOldest, arrivingBetween]);
   expect(merged.map(m => m.id)).toEqual(["m-new", "m-mid", "m-arrive", "m-old", "m-oldest"]);
+});
+
+it("scopes placement acknowledgements to LOCAL_PLACEMENT_CLIENT_ID across colliding client_op_id SSE events", async () => {
+  // Seed authoritative revision 2 (`alpha/old`) in `missionHierarchy`.
+  const seeded = { ...mission, placement_revision: 2 };
+  stickHierarchy(seeded);
+  const request = deferred();
+  let capturedOpId = 0;
+  const inFlight = moveOptimistically(missionMoveKey("m1"), move, async (opId) => {
+    capturedOpId = opId;
+    await request.promise;
+  });
+  expect(capturedOpId).toBe(1);
+  expect(withHierarchy(seeded)).toMatchObject({ project: "beta", folder: "docs" });
+
+  // Another client broadcasts `client_op_id: 1` at `placement_revision <= curRev` (`2`)
+  // with a foreign `client_id` (e.g. a no-op/same-revision or slightly older ack on
+  // another mission/session): WITHOUT `client_id` scoping (`ackOpId === pendingOpId`),
+  // `orb_placement_merge_step` would treat it as our own ack (`incRev >= curRev`) and
+  // prematurely clear `pendingOpId = 1` + overwrite `beta/docs` with `gamma/foreign`!
+  // WITH `client_id` scoping (`ackOpId = 0`), it is fenced (`status = fenced_by_pending_op`)
+  // and `pendingOpId = 1` stays intact so subsequent rollback works!
+  expect(applyServerPlacementEvent(
+    [{ mission_id: "m1", project: "gamma", folder: "foreign", placement_revision: 2 }],
+    capturedOpId,
+    "foreign-client-id",
+  )).toEqual([]);
+  expect(withHierarchy(seeded)).toMatchObject({ project: "beta", folder: "docs" });
+
+  // When this client's in-flight move fails, rollback still works cleanly back to `alpha/old`!
+  request.reject(new ApprovalTransferConfirmationRequiredError("Confirm secret transfer", "beta", [], []));
+  await expect(inFlight).rejects.toBeInstanceOf(ApprovalTransferConfirmationRequiredError);
+  expect(withHierarchy(seeded)).toMatchObject({
+    id: "m1",
+    project: "alpha",
+    folder: "old",
+    placement_revision: 2,
+  });
+
+  // Conversely, an event carrying `LOCAL_PLACEMENT_CLIENT_ID` at the same revision (`incRev == curRev`)
+  // acknowledges and clears `pendingOpId`!
+  await moveOptimistically(missionMoveKey("m1"), move, async (opId) => {
+    applyServerPlacementEvent(
+      [{ mission_id: "m1", project: "beta", folder: "docs", placement_revision: 2 }],
+      opId,
+      LOCAL_PLACEMENT_CLIENT_ID,
+    );
+  });
+  expect(withHierarchy(seeded)).toMatchObject({
+    id: "m1",
+    project: "beta",
+    folder: "docs",
+    placement_revision: 2,
+  });
 });

@@ -11,6 +11,7 @@ import { getProjectCronFromJob, hermesPatch, normalizeControllerView, type Herme
 import { applyProjectRoster } from "./projectAppearance";
 import { note, requestDone } from "./diagnostics";
 import {
+  LOCAL_PLACEMENT_CLIENT_ID,
   allocatePlacementOpId,
   authoritativePlacement,
   btwParentId,
@@ -22,6 +23,7 @@ import {
   openBeyondPage,
   partialList,
   resetMissionHierarchy,
+  resolveLocalAckOpId,
   rollbackOptimisticPlacement,
   stageOptimisticPlacement,
   stickHierarchy,
@@ -29,6 +31,7 @@ import {
   type PlacementCommitItem,
 } from "./missionHierarchy";
 export {
+  LOCAL_PLACEMENT_CLIENT_ID,
   allocatePlacementOpId,
   authoritativePlacement,
   btwParentId,
@@ -36,6 +39,7 @@ export {
   excludeBtwMissions,
   isBtwMission,
   normalizeMissionFolder,
+  resolveLocalAckOpId,
   rollbackOptimisticPlacement,
   stageOptimisticPlacement,
   type PlacementCommitItem,
@@ -1930,12 +1934,14 @@ export interface MoveMissionsRequest {
   folder?: string;
   approval_policy?: ApprovalTransferPolicy;
   client_op_id?: number;
+  client_id?: string;
   descendant_ids?: string[];
 }
 
 export interface MoveMissionsResponse {
   moved: MissionPlacementItem[];
   client_op_id?: number;
+  client_id?: string;
 }
 
 /** Atomically move one or more mission families between folders or projects. */

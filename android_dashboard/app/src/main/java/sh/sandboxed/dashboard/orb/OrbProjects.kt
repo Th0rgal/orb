@@ -2844,6 +2844,7 @@ object OrbMoveClipboard {
         sourceSlug = slug
         val sub = if (withinRows.isNotEmpty()) OrbMissionTree.subtree(withinRows, listOf(target.id)) else listOf(target)
         familyRows = if (sub.isNotEmpty()) sub else listOf(target)
+        OrbMissionTree.retainStagedRows(familyRows)
     }
 
     fun clear() {
@@ -2868,6 +2869,7 @@ object OrbMoveClipboard {
         val m = mission ?: return false
         val cleanFolder = OrbMissionTree.normalizeFolder(folder)
         val rowsToStage = familyRows.ifEmpty { listOf(m) }
+        OrbMissionTree.retainStagedRows(rowsToStage)
         val idsToStage = rowsToStage.map { it.id }.distinct()
         val opId = OrbMissionTree.allocateOpId()
 

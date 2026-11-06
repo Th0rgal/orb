@@ -501,6 +501,7 @@ pub(crate) async fn transfer_file(
                         super::control::events::AgentEvent::MissionPlacementChanged {
                             moves: moved.clone(),
                             client_op_id: None,
+                            client_id: None,
                         },
                     );
                 }

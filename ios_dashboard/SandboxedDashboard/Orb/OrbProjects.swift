@@ -1620,37 +1620,19 @@ struct OrbProjectPage: View {
     private func handlePlacementChanged(_ note: Notification) {
         let committed = (note.userInfo?["moves"] as? [OrbPlacementCommitItem]) ?? []
         guard !committed.isEmpty else { return }
-        let byID = Dictionary(uniqueKeysWithValues: committed.map { ($0.missionID, $0) })
-        var changed = false
-        var needsReload = false
-        var nextMissions: [OrbRow] = []
-        nextMissions.reserveCapacity(missions.count)
-        let existingIDs = Set(missions.map(\.id))
-        for item in committed where (item.project ?? "") == project.id && !existingIDs.contains(item.missionID) {
-            needsReload = true
+        let passedRows = (note.userInfo?["rows"] as? [OrbRow]) ?? []
+        var fallbackByID: [String: OrbRow] = [:]
+        for r in passedRows where !r.id.isEmpty && fallbackByID[r.id] == nil { fallbackByID[r.id] = r }
+        let result = OrbMissionTree.applyPlacementItems(
+            to: missions,
+            projectSlug: project.id,
+            moves: committed,
+            fallbackRows: fallbackByID
+        )
+        if result.changed {
+            missions = result.rows
         }
-        for row in missions {
-            guard let move = byID[row.id] else {
-                nextMissions.append(row)
-                continue
-            }
-            let targetProj = move.project ?? ""
-            if targetProj != project.id {
-                changed = true
-                continue
-            }
-            nextMissions.append(row.withPatchedPlacement(
-                project: targetProj,
-                folder: move.folder,
-                revision: move.placementRevision,
-                isPreview: move.isPreview
-            ))
-            changed = true
-        }
-        if changed {
-            missions = nextMissions
-        }
-        if needsReload {
+        if !result.missingIDs.isEmpty {
             Task { await load(force: true) }
         }
     }
@@ -1973,7 +1955,10 @@ struct OrbProjectPage: View {
         } catch { self.error = error.localizedDescription }
     }
     private func apply(_ value: OrbJSON) {
-        let nextMissions = value["missions"].items.map { OrbRow($0) }.filter(\.mobile)
+        let rawRows = value["missions"].items.map { OrbRow($0) }
+        let ownIDs = Set(rawRows.map(\.id))
+        let scoped = OrbMissionTree.filterToProjectScope(rawRows, projectSlug: project.id, ownIDs: ownIDs).filter(\.mobile)
+        let nextMissions = OrbMissionTree.mergePendingStagedRows(scoped, projectSlug: project.id)
         if missions != nextMissions { missions = nextMissions }
         if case .object(let entries) = value["manifest"]["entries"] {
             let nextFolders = entries
@@ -2118,6 +2103,7 @@ final class OrbMoveClipboard {
         let destinationFolder: String
         let rootIDs: [String]
         let descendantIDs: [String]
+        let familyRows: [OrbRow]
         let confirmation: OrbApprovalTransferConfirmationError
     }
 
@@ -2126,12 +2112,16 @@ final class OrbMoveClipboard {
     private(set) var sourceProject = ""
     private(set) var rootIDs: [String] = []
     private(set) var descendantIDs: [String] = []
+    private(set) var familyRows: [OrbRow] = []
     private(set) var pendingApprovalPrompt: PendingApprovalPrompt?
 
     func pick(_ mission: OrbRow, from project: String, within rows: [OrbRow] = []) {
         self.mission = mission
         self.sourceProject = project
         let sub = OrbMissionTree.subtree(rows, rootIDs: [mission.id])
+        let activeRows = sub.isEmpty ? [mission] : sub
+        self.familyRows = activeRows
+        OrbHierarchy.retainStagedRows(activeRows)
         let roots = sub.filter { $0.parentMissionID == nil }.map(\.id)
         self.rootIDs = roots.isEmpty ? [mission.id] : roots
         let rootSet = Set(self.rootIDs)
@@ -2144,6 +2134,7 @@ final class OrbMoveClipboard {
         sourceProject = ""
         rootIDs = []
         descendantIDs = []
+        familyRows = []
         pendingApprovalPrompt = nil
     }
 
@@ -2164,6 +2155,10 @@ final class OrbMoveClipboard {
         let normalizedFolder = OrbRow.normalizeFolder(folder)
         let opID = OrbHierarchy.allocateOpID()
         let activeRootIDs = rootIDs.isEmpty ? [mission.id] : rootIDs
+        let activeFamilyRows = familyRows.isEmpty ? [mission] : familyRows
+        OrbHierarchy.retainStagedRows(activeFamilyRows)
+        var familyByID: [String: OrbRow] = [:]
+        for r in activeFamilyRows where !r.id.isEmpty && familyByID[r.id] == nil { familyByID[r.id] = r }
         let rootSet = Set(activeRootIDs)
         let allIDs = activeRootIDs + descendantIDs
         let optimistic = OrbHierarchy.stageOptimisticPlacement(
@@ -2185,10 +2180,11 @@ final class OrbMoveClipboard {
                     isPreview: true
                 )
             }
+            OrbReadCache.applyPlacementCommit(previewItems, fallbackRows: familyByID, persistToDisk: false)
             NotificationCenter.default.post(
                 name: Notification.Name("OrbMissionPlacementChanged"),
                 object: nil,
-                userInfo: ["moves": previewItems]
+                userInfo: ["moves": previewItems, "rows": activeFamilyRows]
             )
         }
         do {
@@ -2197,12 +2193,9 @@ final class OrbMoveClipboard {
                 project: project,
                 folder: normalizedFolder,
                 approvalPolicy: approvalPolicy,
-                clientOpID: opID
+                clientOpID: opID,
+                fallbackRows: activeFamilyRows
             )
-            for slug in Set([sourceProject, project]) where !slug.isEmpty {
-                OrbReadCache.invalidate("project:\(slug)")
-                OrbReadCache.invalidate("project:\(slug):all")
-            }
             OrbReadCache.invalidate("mission:\(mission.id)")
             OrbUsageTelemetry.shared.trackAction(.sidebarMove, surface: "project")
             OrbHaptics.success()
@@ -2220,10 +2213,11 @@ final class OrbMoveClipboard {
                 )
             }
             if !rollbackItems.isEmpty {
+                OrbReadCache.applyPlacementCommit(rollbackItems, fallbackRows: familyByID, persistToDisk: false)
                 NotificationCenter.default.post(
                     name: Notification.Name("OrbMissionPlacementChanged"),
                     object: nil,
-                    userInfo: ["moves": rollbackItems]
+                    userInfo: ["moves": rollbackItems, "rows": activeFamilyRows]
                 )
             }
             pendingApprovalPrompt = PendingApprovalPrompt(
@@ -2233,6 +2227,7 @@ final class OrbMoveClipboard {
                 destinationFolder: normalizedFolder,
                 rootIDs: activeRootIDs,
                 descendantIDs: descendantIDs,
+                familyRows: activeFamilyRows,
                 confirmation: confirmation
             )
             return false
@@ -2248,10 +2243,11 @@ final class OrbMoveClipboard {
                 )
             }
             if !rollbackItems.isEmpty {
+                OrbReadCache.applyPlacementCommit(rollbackItems, fallbackRows: familyByID, persistToDisk: false)
                 NotificationCenter.default.post(
                     name: Notification.Name("OrbMissionPlacementChanged"),
                     object: nil,
-                    userInfo: ["moves": rollbackItems]
+                    userInfo: ["moves": rollbackItems, "rows": activeFamilyRows]
                 )
             }
             throw error
@@ -2266,6 +2262,7 @@ final class OrbMoveClipboard {
             self.sourceProject = prompt.sourceProject
             self.rootIDs = prompt.rootIDs
             self.descendantIDs = prompt.descendantIDs
+            self.familyRows = prompt.familyRows
         }
         _ = try await drop(project: prompt.destinationProject, folder: prompt.destinationFolder, approvalPolicy: policy)
     }

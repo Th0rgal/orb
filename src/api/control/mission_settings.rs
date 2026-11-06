@@ -69,6 +69,8 @@ pub struct MoveMissionsRequest {
     #[serde(default)]
     pub client_op_id: Option<u32>,
     #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
     pub descendant_ids: Vec<Uuid>,
 }
 
@@ -78,6 +80,14 @@ pub struct MoveMissionsResponse {
     pub moved: Vec<MissionPlacementItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_op_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+}
+
+fn sanitize_placement_client_id(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 128)
+        .map(str::to_string)
 }
 
 pub(crate) fn fork_source_id(mission: &Mission) -> Option<Uuid> {
@@ -1298,10 +1308,12 @@ pub async fn move_missions(
             .await
         {
             Ok(Some(moved)) => {
+                let clean_client_id = sanitize_placement_client_id(req.client_id.as_deref());
                 if !moved.is_empty() {
                     let _ = control.events_tx.send(AgentEvent::MissionPlacementChanged {
                         moves: moved.clone(),
                         client_op_id: req.client_op_id,
+                        client_id: clean_client_id.clone(),
                     });
                 }
                 return (
@@ -1309,6 +1321,7 @@ pub async fn move_missions(
                     Json(MoveMissionsResponse {
                         moved,
                         client_op_id: req.client_op_id,
+                        client_id: clean_client_id,
                     }),
                 )
                     .into_response();
@@ -1403,15 +1416,18 @@ where
             else {
                 continue;
             };
+            let clean_client_id = sanitize_placement_client_id(req.client_id.as_deref());
             if !moved.is_empty() {
                 let _ = control.events_tx.send(AgentEvent::MissionPlacementChanged {
                     moves: moved.clone(),
                     client_op_id: req.client_op_id,
+                    client_id: clean_client_id.clone(),
                 });
             }
             return Ok(MoveMissionsResponse {
                 moved,
                 client_op_id: req.client_op_id,
+                client_id: clean_client_id,
             });
         }
         return Err((
@@ -1774,16 +1790,19 @@ where
         }
     }
 
+    let clean_client_id = sanitize_placement_client_id(req.client_id.as_deref());
     if !moved_items.is_empty() {
         let _ = control.events_tx.send(AgentEvent::MissionPlacementChanged {
             moves: moved_items.clone(),
             client_op_id: req.client_op_id,
+            client_id: clean_client_id.clone(),
         });
     }
 
     Ok(MoveMissionsResponse {
         moved: moved_items,
         client_op_id: req.client_op_id,
+        client_id: clean_client_id,
     })
 }
 
@@ -2135,6 +2154,7 @@ where
         let _ = control.events_tx.send(AgentEvent::MissionPlacementChanged {
             moves: placement_moves,
             client_op_id: None,
+            client_id: None,
         });
     }
     Ok(Json(updated))
@@ -2243,6 +2263,7 @@ pub(super) async fn update_mission_project_locked(
                 placement_revision: updated.project.placement_revision,
             }],
             client_op_id: None,
+            client_id: None,
         });
     }
     Ok(Json(updated))
@@ -3857,6 +3878,7 @@ mod subtree_move_tests {
                 folder: "/audits/2026/".into(),
                 approval_policy: ApprovalTransferPolicy::Check,
                 client_op_id: Some(77),
+                client_id: Some("  client-a  ".into()),
                 descendant_ids: Vec::new(),
             }),
         )
@@ -3869,6 +3891,7 @@ mod subtree_move_tests {
         )
         .unwrap();
         assert_eq!(body.client_op_id, Some(77));
+        assert_eq!(body.client_id.as_deref(), Some("client-a"));
         let root_item = body
             .moved
             .iter()
@@ -3893,10 +3916,12 @@ mod subtree_move_tests {
             if let AgentEvent::MissionPlacementChanged {
                 moves,
                 client_op_id,
+                client_id,
             } = ev
             {
                 saw_placement_event = true;
                 assert_eq!(client_op_id, Some(77));
+                assert_eq!(client_id.as_deref(), Some("client-a"));
                 assert!(moves
                     .iter()
                     .any(|m| m.mission_id == root.id && m.folder == "audits/2026"));
@@ -4071,6 +4096,7 @@ mod subtree_move_tests {
                 folder: "lean".into(),
                 approval_policy: ApprovalTransferPolicy::Check,
                 client_op_id: Some(12),
+                client_id: Some("client-cross".into()),
                 descendant_ids: Vec::new(),
             }),
         )
@@ -4120,6 +4146,7 @@ mod subtree_move_tests {
                 folder: "".into(),
                 approval_policy: ApprovalTransferPolicy::Check,
                 client_op_id: Some(13),
+                client_id: None,
                 descendant_ids: Vec::new(),
             }),
         )
@@ -4243,6 +4270,7 @@ mod subtree_move_tests {
                 folder: "ops".into(),
                 approval_policy: ApprovalTransferPolicy::Check,
                 client_op_id: Some(1),
+                client_id: None,
                 descendant_ids: Vec::new(),
             }),
         )
@@ -4279,6 +4307,7 @@ mod subtree_move_tests {
                 folder: "ops".into(),
                 approval_policy: ApprovalTransferPolicy::Keep,
                 client_op_id: Some(2),
+                client_id: None,
                 descendant_ids: Vec::new(),
             }),
         )
@@ -4308,6 +4337,7 @@ mod subtree_move_tests {
                 folder: "".into(),
                 approval_policy: ApprovalTransferPolicy::Revoke,
                 client_op_id: Some(3),
+                client_id: None,
                 descendant_ids: Vec::new(),
             }),
         )
@@ -4330,6 +4360,7 @@ mod subtree_move_tests {
                 folder: "".into(),
                 approval_policy: ApprovalTransferPolicy::Check,
                 client_op_id: Some(4),
+                client_id: None,
                 descendant_ids: Vec::new(),
             }),
         )
@@ -4349,6 +4380,7 @@ mod subtree_move_tests {
                 folder: "".into(),
                 approval_policy: ApprovalTransferPolicy::Check,
                 client_op_id: Some(5),
+                client_id: None,
                 descendant_ids: Vec::new(),
             }),
         )
@@ -4680,6 +4712,7 @@ mod subtree_move_tests {
                 folder: "dest".into(),
                 approval_policy: ApprovalTransferPolicy::Revoke,
                 client_op_id: Some(11),
+                client_id: None,
                 descendant_ids: Vec::new(),
             }),
         )

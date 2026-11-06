@@ -999,7 +999,8 @@ export default function App() {
               ? (event.data.moves as import("./api").MissionPlacementItem[])
               : [];
             const clientOpId = typeof event.data.client_op_id === "number" ? event.data.client_op_id : null;
-            applyServerPlacementEvent(moves, clientOpId);
+            const clientId = typeof event.data.client_id === "string" ? event.data.client_id : null;
+            applyServerPlacementEvent(moves, clientOpId, clientId);
             return;
           }
           if (event.type !== "mission_presentation") return;
