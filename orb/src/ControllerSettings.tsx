@@ -2,6 +2,7 @@ import { useContext } from "solid-js";
 import { Select } from "./Select";
 import { ConfirmDialog, DialogActions, DialogCloseContext } from "./Dialog";
 import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
 import { createStore } from "solid-js/store";
 import * as Ic from "./icons";
@@ -66,6 +67,7 @@ export function CronForm(p: {
   onBusyChange?: (busy: boolean) => void;
   onClose?: () => void;
 }) {
+  const inDialog = Boolean(useContext(DialogCloseContext));
   const draftPrefix = `orb.cronDraft:${getApiUrl()}:`;
   const storageKey = `${draftPrefix}${p.draftKey}`;
   let restored: { draft: CronDraft; base: CronDraft; skillInput?: string } | null = null;
@@ -357,9 +359,12 @@ export function CronForm(p: {
       </Show>
 
       </fieldset>
-      <Show when={p.creating || dirtyCount() > 0 || skillInput().trim() || error()}>
+      <Show when={!inDialog}>
+        <ErrorToast error={error()} title="Couldn’t save the controller" onDismiss={() => setError(null)} />
+      </Show>
+      <Show when={p.creating || dirtyCount() > 0 || skillInput().trim() || (inDialog && Boolean(error()))}>
         <DialogActions><div class="cs-save-area">
-          <Show when={error()}><ErrorNotice error={error()!} title="Couldn’t save the controller" /></Show>
+          <Show when={inDialog && error()}><ErrorNotice error={error()!} title="Couldn’t save the controller" /></Show>
           <div class="cs-savebar">
           <span>{`${dirtyCount()} unsaved change${dirtyCount() === 1 ? "" : "s"}`}</span>
           <span class="dlg-spacer" />

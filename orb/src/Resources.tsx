@@ -16,7 +16,7 @@ import {
   type ResourcesOverviewResponse,
   type ResourcesWindowRange,
 } from "./api";
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import { pollWhileVisible } from "./poll";
 import {
   buildMissionFlowSankeyInput,
@@ -237,6 +237,7 @@ export default function Resources(props: {
       [connectionVersion, () => props.missionId ?? null, range, horizon],
       ([, mid]) => {
         const needsSkeleton = mid ? detail()?.mission.id !== mid : overview() === null;
+        setError(null);
         void refresh(needsSkeleton);
       },
     ),
@@ -873,19 +874,14 @@ export default function Resources(props: {
         </div>
       </div>
 
-      <Show when={error()}>
-        {(msg) => (
-          <ErrorNotice error={msg()}>
-            <button
-              type="button"
-              class="res-btn"
-              onClick={() => void refresh(true)}
-            >
-              Retry
-            </button>
-          </ErrorNotice>
-        )}
-      </Show>
+      <ErrorToast
+        error={error()}
+        background
+        action={{
+          label: "Retry",
+          run: () => refresh(isMissionMode() ? detail()?.mission.id !== props.missionId : overview() === null),
+        }}
+      />
 
       {/* Main Flow / Fast-DAG Card */}
       <div class="res-card res-card-main" ref={cardMainEl}>

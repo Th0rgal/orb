@@ -2,7 +2,6 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, untrack }
 import { ErrorToast } from "./toast";
 import { connectionVersion, getApiUrl, isConnected } from "./api";
 import { ConfirmDialog } from "./Dialog";
-import { ErrorNotice } from "./ErrorNotice";
 import { CopyIcon, PlusIcon } from "./icons";
 import * as Keys from "./proxyKeysApi";
 import { formatCost, formatTokens, getUsageSummary, totalTokens, type UsageGroup } from "./usageApi";
@@ -240,7 +239,7 @@ export function ProxyApiKeys() {
       </div>
     </Show>
     <ErrorToast error={error()} onDismiss={() => setError("")} />
-    <Show when={listError()}><ErrorNotice error={`Could not load proxy API keys: ${listError()}`}><button class="s-btn" onClick={() => void refresh()}>Retry</button></ErrorNotice></Show>
+    <ErrorToast error={listError()} title="Could not load proxy API keys" background action={{ label: "Retry", run: () => refresh() }} />
     <Show when={!loading() && !listError() && !keys().length}><p class="routing-muted">No API keys yet. Create one to connect external tools.</p></Show>
     <div class="s-card proxy-key-list" aria-busy={loading()}>
       <For each={keys()}>{key => <div class="proxy-key-row">

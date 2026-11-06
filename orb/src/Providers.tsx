@@ -182,11 +182,9 @@ export function Providers() {
             <div class="s-row p-skeleton-row"><span class="sk-bar p-sk-logo" /><div class="p-sk-lines"><span class="sk-bar p-sk-title" /><span class="sk-bar p-sk-sub" /></div></div>
           </div>
         </Show>
-        <Show when={loadError()}>{error => <ErrorNotice title="Could not load providers" error={error()}>
-          <button class="s-btn" onClick={() => void reloadRemote()}>Try again</button>
-        </ErrorNotice>}</Show>
+        <ErrorToast title="Could not load providers" error={loadError()} background action={{ label: "Try again", run: () => reloadRemote() }} />
       </div>}>
-        <LiveProviders list={live() ?? []} health={health()} onRefresh={() => { void reloadRemote(); window.dispatchEvent(new Event("orb:providers-refresh")); }} loading={loading()} loadError={loadError()} />
+        <LiveProviders list={live() ?? []} health={health()} onRefresh={() => { const p = reloadRemote(); window.dispatchEvent(new Event("orb:providers-refresh")); return p; }} loading={loading()} loadError={loadError()} />
       </Show>
     </Show>
   );
@@ -337,9 +335,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         </button>
       </div>
       <p class="s-lead">Subscriptions, cloud connectors, and API keys on the connected Core backend.</p>
-      <Show when={p.loadError}>{error => <ErrorNotice title="Could not refresh providers" error={error()}>
-        <button class="s-btn" onClick={p.onRefresh}>Try again</button>
-      </ErrorNotice>}</Show>
+      <ErrorToast title="Could not refresh providers" error={p.loadError} background action={{ label: "Try again", run: p.onRefresh }} />
       <ErrorToast error={toggleError()} title="Couldn’t update the provider" onDismiss={() => setToggleError(null)} />
 
       <section class="s-sec">

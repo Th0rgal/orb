@@ -1,5 +1,5 @@
 import { Show, createResource, createSignal } from "solid-js";
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import { SettingsCard, SettingsRow } from "./SettingsCard";
 import { Toggle } from "./Toggle";
 import {
@@ -90,9 +90,7 @@ export function UsageTelemetrySettings() {
     <div class="s-body settings-body">
       <div class="s-inner">
         <h2>Usage telemetry</h2>
-        <Show when={error()}>
-          <ErrorNotice error={error()} onDismiss={() => setError("")} />
-        </Show>
+        <ErrorToast error={error()} title="Usage telemetry" onDismiss={() => setError("")} />
         <Show
           when={status()}
           fallback={

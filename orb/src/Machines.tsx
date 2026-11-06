@@ -1,5 +1,5 @@
 import { AgentSoftware } from "./AgentSoftware";
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import { ResourceIcon } from "./ResourceIcon";
 import { readHistory, saveHistory, freshSamples, historyScope } from "./resourceCache";
 import { ResourceHistory, appendSamples, type ResourceSample } from "./ResourceHistory";
@@ -157,11 +157,12 @@ function FleetRow(p: {
               </button>
             </div>
           </SettingsRow>
-          <Show when={capError()}>
-            <ErrorNotice error={capError()!} title="Couldn’t update slot limit" onDismiss={() => setCapError(null)}>
-              <button type="button" class="s-btn" onClick={() => void saveCapacity()}>Retry</button>
-            </ErrorNotice>
-          </Show>
+          <ErrorToast
+            error={capError()}
+            title="Couldn’t update slot limit"
+            onDismiss={() => setCapError(null)}
+            action={{ label: "Retry", run: () => saveCapacity() }}
+          />
           <SettingsRow
             title="Scheduling"
             desc={p.node!.cordoned
@@ -179,11 +180,12 @@ function FleetRow(p: {
                 : (p.node!.cordoned ? "Uncordon" : "Cordon")}
             </button>
           </SettingsRow>
-          <Show when={cordonError()}>
-            <ErrorNotice error={cordonError()!} title="Couldn’t update node scheduling" onDismiss={() => setCordonError(null)}>
-              <button type="button" class="s-btn" onClick={() => void toggleCordon()}>Retry</button>
-            </ErrorNotice>
-          </Show>
+          <ErrorToast
+            error={cordonError()}
+            title="Couldn’t update node scheduling"
+            onDismiss={() => setCordonError(null)}
+            action={{ label: "Retry", run: () => toggleCordon() }}
+          />
         </div>
       </Show>
     </div></Show></div>;

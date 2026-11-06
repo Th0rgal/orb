@@ -37,3 +37,29 @@ it("deletes a snapshot optimistically and restores it on failure", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "Delete snapshot" }));
   await waitFor(() => expect(screen.queryByRole("button", { name: "Delete snapshot warm" })).toBeNull());
 });
+
+it("restores the snapshot load error toast when Retry fails again with the same error", async () => {
+  let attempts = 0;
+  render(() => (
+    <ManagedSnapshots
+      load={async () => {
+        attempts += 1;
+        if (attempts < 3) throw new Error("Snapshot store offline");
+        return { snapshots: [snap()] };
+      }}
+    />
+  ));
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Snapshot store offline"));
+  expect(attempts).toBe(1);
+
+  // First Retry fails with the identical error -> toast and Retry control return.
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(attempts).toBe(2));
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Snapshot store offline"));
+
+  // Second Retry succeeds -> snapshots render and the error toast clears.
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(attempts).toBe(3));
+  await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  expect(screen.getByLabelText("Managed snapshots").textContent).toContain("warm");
+});

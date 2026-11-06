@@ -5,8 +5,7 @@ import { ExecutionSettings } from "./ExecutionSettings";
 import { MachineProvidersCard } from "./ManagedMachines";
 import { Select } from "./Select";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
-import { ErrorNotice } from "./ErrorNotice";
-import { For, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createSignal, on, onCleanup, onMount, type JSX } from "solid-js";
 import * as Ic from "./icons";
 import {
   clearConnection,
@@ -245,9 +244,7 @@ function GitHubIntegrationCard() {
           </Row>
         </Show>
       </Card>
-      <Show when={error()}>
-        <ErrorNotice error={error()!} title="Couldn’t load GitHub integration" onDismiss={() => setError(null)} />
-      </Show>
+      <ErrorToast error={error()} title="Couldn’t load GitHub integration" background onDismiss={() => setError(null)} />
       <Show when={confirmDisconnect()}>
         <ConfirmDialog
           title="Disconnect GitHub?"
@@ -421,11 +418,12 @@ function WorkspaceCleanupCard() {
           </button>
         </Row>
       </Card>
-      <Show when={error()}>
-        <ErrorNotice error={error()!} title="Couldn’t save workspace cleanup" onDismiss={() => setError(null)}>
-          <button type="button" class="s-btn" onClick={() => void (loaded() ? save() : load())}>Retry</button>
-        </ErrorNotice>
-      </Show>
+      <ErrorToast
+        error={error()}
+        title="Couldn’t save workspace cleanup"
+        onDismiss={() => setError(null)}
+        action={{ label: "Retry", run: () => (loaded() ? save() : load()) }}
+      />
     </Show>
   );
 }
@@ -515,8 +513,8 @@ function BackupRestoreCard() {
           </button>
         </Row>
       </Card>
-      <Show when={error()}>
-        <ErrorNotice error={error()!} title="Backup operation failed" onDismiss={() => setError(null)} />
+      <Show when={!pendingArchive()}>
+        <ErrorToast error={error()} title="Backup operation failed" onDismiss={() => setError(null)} />
       </Show>
       <Show when={pendingArchive()}>
         {(item) => (
@@ -813,9 +811,7 @@ function BackendTab() {
           </Row>
         </Show>
       </Card>
-      <Show when={error()}>
-        <ErrorNotice error={error()!} />
-      </Show>
+      <ErrorToast error={error()} title="Couldn’t connect to the backend" onDismiss={() => setError(null)} />
       <Show when={passwordDialog()}>
         <Dialog
           size="compact"

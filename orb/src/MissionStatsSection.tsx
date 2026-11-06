@@ -1,5 +1,5 @@
 import { Show, createResource, createSignal, For } from "solid-js";
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import { BreakdownTable, StatTile, type Column } from "./components/stats";
 import { getMissionStats, modelLabel, subagentsUsd, tokens, usd, type MissionStats, type ModelLine, type StatsPeriod } from "./missionStats";
 
@@ -39,7 +39,7 @@ export function MissionStatsSection(p: { missionId: string; titleOf?: (id: strin
           <button type="button" role="radio" aria-checked={period() === value} classList={{ on: period() === value }} onClick={() => setPeriod(value)}>{label}</button>}</For>
       </div>
     </div>
-    <Show when={stats.error}><ErrorNotice error={String(stats.error?.message ?? stats.error)} title="Couldn’t load stats"><button class="s-btn sm" onClick={() => void refetch()}>Retry</button></ErrorNotice></Show>
+    <ErrorToast error={stats.error ? String(stats.error?.message ?? stats.error) : null} title="Couldn’t load stats" background action={{ label: "Retry", run: () => refetch() }} />
     <div class="st-tiles" classList={{ "ms-stale": stats.loading && !!last() }}>
       <StatTile label="Total" value={money(s => s.subtree_total_usd)} title="This agent and all its subagents" />
       <StatTile label="This agent" value={money(s => s.own.total_usd)} />

@@ -25,6 +25,10 @@ it('groups cloud profiles, shows reconnect and never invents quotas',async()=>{
 it('shows an explicit service error and allows retry',async()=>{
  mocks.accounts.mockRejectedValueOnce(new Error('Cloud service unavailable')).mockResolvedValueOnce([]);
  render(()=><CloudProviders/>);await screen.findByRole('alert');
+ expect(screen.queryByText('No cloud accounts configured.')).toBeNull();
+ expect(screen.getByText('Cloud accounts could not be loaded.')).toBeTruthy();
+ fireEvent.click(screen.getByRole('button',{name:'Dismiss'}));
+ expect(screen.queryByText('No cloud accounts configured.')).toBeNull();
  fireEvent.click(screen.getByRole('button',{name:'Retry'}));
  await screen.findByText('No cloud accounts configured.');
 });

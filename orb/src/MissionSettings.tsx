@@ -1,6 +1,6 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { getMissionResources, isConnected, type MissionResourcesResponse } from "./api";
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import * as Ic from "./icons";
 import { MissionStatsSection } from "./MissionStatsSection";
 import { pollWhileVisible } from "./poll";
@@ -470,11 +470,7 @@ export function MissionSettings(p: {
           </div>
         </div>
 
-        <Show when={loadError()}>
-          <ErrorNotice error={loadError()!} title="Couldn’t load mission settings">
-            <button type="button" class="s-btn sm" onClick={() => void load(false)}>Retry</button>
-          </ErrorNotice>
-        </Show>
+        <ErrorToast error={loadError()} title="Couldn’t load mission settings" background action={{ label: "Retry", run: () => load(false) }} />
 
         <Show
           when={view()}
@@ -634,13 +630,7 @@ export function MissionSettings(p: {
                     <p class="field-error" role="alert">{fieldError()}</p>
                   </div>
                 </Show>
-                <Show when={saveError()}>
-                  <div class="ms-card-notice">
-                    <ErrorNotice error={saveError()!} title="Budget not saved" onDismiss={() => setSaveError(null)}>
-                      <Show when={retry()}>{r => <button type="button" class="s-btn sm" onClick={() => r()()}>Retry</button>}</Show>
-                    </ErrorNotice>
-                  </div>
-                </Show>
+                <ErrorToast error={saveError()} title="Budget not saved" onDismiss={() => setSaveError(null)} action={retry() ? { label: "Retry", run: () => retry()!() } : undefined} />
                 <Show when={v().pool}>
                   {pool => (
                     <div class="ms-pool-block">
@@ -820,13 +810,7 @@ export function MissionSettings(p: {
                     <p class="field-error" role="alert">{bwFieldError()}</p>
                   </div>
                 </Show>
-                <Show when={bwSaveError()}>
-                  <div class="ms-card-notice">
-                    <ErrorNotice error={bwSaveError()!} title="Bandwidth limit not saved" onDismiss={() => setBwSaveError(null)}>
-                      <Show when={bwRetry()}>{r => <button type="button" class="s-btn sm" onClick={() => r()()}>Retry</button>}</Show>
-                    </ErrorNotice>
-                  </div>
-                </Show>
+                <ErrorToast error={bwSaveError()} title="Bandwidth limit not saved" onDismiss={() => setBwSaveError(null)} action={bwRetry() ? { label: "Retry", run: () => bwRetry()!() } : undefined} />
               </SettingsCard>
 
               <SettingsCard title="Machine concurrency">
@@ -957,13 +941,7 @@ export function MissionSettings(p: {
                     <p class="field-error" role="alert">{limitFieldError()}</p>
                   </div>
                 </Show>
-                <Show when={limitSaveError()}>
-                  <div class="ms-card-notice">
-                    <ErrorNotice error={limitSaveError()!} title="Machine limit not saved" onDismiss={() => setLimitSaveError(null)}>
-                      <Show when={limitRetry()}>{r => <button type="button" class="s-btn sm" onClick={() => r()()}>Retry</button>}</Show>
-                    </ErrorNotice>
-                  </div>
-                </Show>
+                <ErrorToast error={limitSaveError()} title="Machine limit not saved" onDismiss={() => setLimitSaveError(null)} action={limitRetry() ? { label: "Retry", run: () => limitRetry()!() } : undefined} />
               </SettingsCard>
 
               <Show when={showSubagentPoolTable(v())}>

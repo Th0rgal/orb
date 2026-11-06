@@ -18,8 +18,10 @@ import {
   verifyIssuedAuthToken,
 } from "../src/githubSignIn";
 import { isDivergedLibraryError, needsLibraryRemoteInit, sameLibraryRemote } from "../src/skillsApi";
+import { clearToasts } from "../src/toast";
 
 afterEach(() => {
+  clearToasts();
   cleanup();
   delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   localStorage.clear();
