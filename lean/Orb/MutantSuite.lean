@@ -482,4 +482,311 @@ theorem kill_m21_scrollEpoch_doubleCorrectionInEpoch :
       scrollEpochStep 5 5 1 1 0 480 320 := by
   decide
 
+-- ===========================================================================
+-- Family 8: R2-A Epoch Fence (`orb_epoch_fence_step`)
+-- ===========================================================================
+
+/-- Mutant 8.1 (`orb_epoch_fence_step`): Stale `liveRevision` accepted (`revMatch` omitted). -/
+@[inline, export orb_mut_m22]
+def m22_epochFence_staleRevisionAccepted
+    (durableOwnerEpoch liveOwnerEpoch : UInt64)
+    (durableRunGeneration liveRunGeneration : UInt64)
+    (durableBootEpoch liveBootEpoch : UInt64)
+    (durableRevision liveRevision : UInt32)
+    (writerOwnerEpoch : UInt64) : UInt64 :=
+  let _ := liveRevision
+  let ownerOk : Bool := writerOwnerEpoch == durableOwnerEpoch && writerOwnerEpoch == liveOwnerEpoch
+  let runOk : Bool := liveRunGeneration == durableRunGeneration
+  let bootOk : Bool := liveBootEpoch == durableBootEpoch
+  let revRoom : Bool := durableRevision < 0xFFFFFFFF
+  let shaped : Bool :=
+    durableOwnerEpoch != 0 && durableRunGeneration != 0 && durableBootEpoch != 0 && durableRevision != 0
+  let lo32 : UInt32 :=
+    if !shaped then 0
+    else if !ownerOk then 5
+    else if !runOk then 3
+    else if !bootOk then 4
+    else if !revRoom then 6
+    else 257
+  let nextRev : UInt32 := if lo32 == 257 then durableRevision + 1 else durableRevision
+  lo32.toUInt64 ||| (nextRev.toUInt64 <<< 32)
+
+theorem kill_m22_epochFence_staleRevisionAccepted :
+    m22_epochFence_staleRevisionAccepted 11 11 3 3 5 5 10 9 11 ≠
+      epochFenceStep 11 11 3 3 5 5 10 9 11 := by
+  decide
+
+/-- Mutant 8.2 (`orb_epoch_fence_step`): Pre-crash boot epoch accepted (`bootOk` omitted). -/
+@[inline, export orb_mut_m23]
+def m23_epochFence_staleBootEpochAccepted
+    (durableOwnerEpoch liveOwnerEpoch : UInt64)
+    (durableRunGeneration liveRunGeneration : UInt64)
+    (durableBootEpoch liveBootEpoch : UInt64)
+    (durableRevision liveRevision : UInt32)
+    (writerOwnerEpoch : UInt64) : UInt64 :=
+  let _ := liveBootEpoch
+  let ownerOk : Bool := writerOwnerEpoch == durableOwnerEpoch && writerOwnerEpoch == liveOwnerEpoch
+  let runOk : Bool := liveRunGeneration == durableRunGeneration
+  let revMatch : Bool := liveRevision == durableRevision
+  let revRoom : Bool := durableRevision < 0xFFFFFFFF
+  let shaped : Bool :=
+    durableOwnerEpoch != 0 && durableRunGeneration != 0 && durableBootEpoch != 0 && durableRevision != 0
+  let lo32 : UInt32 :=
+    if !shaped then 0
+    else if !ownerOk then 5
+    else if !revMatch then 2
+    else if !runOk then 3
+    else if !revRoom then 6
+    else 257
+  let nextRev : UInt32 := if lo32 == 257 then durableRevision + 1 else durableRevision
+  lo32.toUInt64 ||| (nextRev.toUInt64 <<< 32)
+
+theorem kill_m23_epochFence_staleBootEpochAccepted :
+    m23_epochFence_staleBootEpochAccepted 11 11 3 3 6 5 10 10 11 ≠
+      epochFenceStep 11 11 3 3 6 5 10 10 11 := by
+  decide
+
+/-- Mutant 8.3 (`orb_epoch_fence_step`): Saturated `0xFFFFFFFF` revision wraps around to `0`. -/
+@[inline, export orb_mut_m24]
+def m24_epochFence_saturatedRevisionWraps
+    (durableOwnerEpoch liveOwnerEpoch : UInt64)
+    (durableRunGeneration liveRunGeneration : UInt64)
+    (durableBootEpoch liveBootEpoch : UInt64)
+    (durableRevision liveRevision : UInt32)
+    (writerOwnerEpoch : UInt64) : UInt64 :=
+  let ownerOk : Bool := writerOwnerEpoch == durableOwnerEpoch && writerOwnerEpoch == liveOwnerEpoch
+  let runOk : Bool := liveRunGeneration == durableRunGeneration
+  let bootOk : Bool := liveBootEpoch == durableBootEpoch
+  let revMatch : Bool := liveRevision == durableRevision
+  let shaped : Bool :=
+    durableOwnerEpoch != 0 && durableRunGeneration != 0 && durableBootEpoch != 0 && durableRevision != 0
+  let lo32 : UInt32 :=
+    if !shaped then 0
+    else if !ownerOk then 5
+    else if !revMatch then 2
+    else if !runOk then 3
+    else if !bootOk then 4
+    else 257
+  let nextRev : UInt32 := if lo32 == 257 then durableRevision + 1 else durableRevision
+  lo32.toUInt64 ||| (nextRev.toUInt64 <<< 32)
+
+theorem kill_m24_epochFence_saturatedRevisionWraps :
+    m24_epochFence_saturatedRevisionWraps 11 11 3 3 5 5 0xFFFFFFFF 0xFFFFFFFF 11 ≠
+      epochFenceStep 11 11 3 3 5 5 0xFFFFFFFF 0xFFFFFFFF 11 := by
+  decide
+
+-- ===========================================================================
+-- Family 9: R2-A Effect Outbox (`orb_effect_outbox_step`)
+-- ===========================================================================
+
+/-- Mutant 9.1 (`orb_effect_outbox_step`): Fresh retry (`Claim`) allowed out of `Uncertain (4)`. -/
+@[inline, export orb_mut_m25]
+def m25_effectOutbox_uncertainFreshRetry
+    (phase delivered op fenceMatches : UInt8)
+    (attemptEpoch nodeBootEpoch : UInt64) : UInt64 :=
+  let fenceOk : Bool := fenceMatches == 1 && attemptEpoch == nodeBootEpoch && attemptEpoch != 0
+  let phaseOk : Bool := phase ≤ 5
+  let opOk : Bool := op ≤ 5
+  let nextPhase : UInt8 :=
+    if !fenceOk then phase
+    else if !phaseOk then phase
+    else if !opOk then phase
+    else if op == 0 then (if phase == 3 then 0 else if phase == 5 then 0 else phase)
+    else if op == 1 then (if phase == 0 then 1 else if phase == 4 then 1 else phase)
+    else if op == 2 then (if phase == 1 then 2 else phase)
+    else if op == 3 then (if phase == 1 then 3 else phase)
+    else if op == 4 then (if phase == 1 then 4 else phase)
+    else if op == 5 then (if phase == 4 then 5 else phase)
+    else phase
+  let moved : Bool := nextPhase != phase
+  let deliveredNext : UInt8 :=
+    if !moved then delivered
+    else if nextPhase == 2 then 1
+    else if nextPhase == 0 || nextPhase == 3 then 0
+    else delivered
+  let lo32 : UInt32 :=
+    if !fenceOk then 4
+    else if !phaseOk || !opOk then 0
+    else if moved then (257 : UInt32) ||| (nextPhase.toUInt32 <<< 16)
+    else 2
+  lo32.toUInt64 ||| (deliveredNext.toUInt32.toUInt64 <<< 32)
+
+theorem kill_m25_effectOutbox_uncertainFreshRetry :
+    m25_effectOutbox_uncertainFreshRetry 4 0 1 1 9 9 ≠
+      effectOutboxStep 4 0 1 1 9 9 := by
+  decide
+
+/-- Mutant 9.2 (`orb_effect_outbox_step`): `Reconcile` fabricates delivery (`deliveredNext = 1`). -/
+@[inline, export orb_mut_m26]
+def m26_effectOutbox_reconcileDoubleDelivers
+    (phase delivered op fenceMatches : UInt8)
+    (attemptEpoch nodeBootEpoch : UInt64) : UInt64 :=
+  let fenceOk : Bool := fenceMatches == 1 && attemptEpoch == nodeBootEpoch && attemptEpoch != 0
+  let phaseOk : Bool := phase ≤ 5
+  let opOk : Bool := op ≤ 5
+  let nextPhase : UInt8 :=
+    if !fenceOk then phase
+    else if !phaseOk then phase
+    else if !opOk then phase
+    else if op == 0 then (if phase == 3 then 0 else if phase == 5 then 0 else phase)
+    else if op == 1 then (if phase == 0 then 1 else phase)
+    else if op == 2 then (if phase == 1 then 2 else phase)
+    else if op == 3 then (if phase == 1 then 3 else phase)
+    else if op == 4 then (if phase == 1 then 4 else phase)
+    else if op == 5 then (if phase == 4 then 5 else phase)
+    else phase
+  let moved : Bool := nextPhase != phase
+  let deliveredNext : UInt8 :=
+    if !moved then delivered
+    else if nextPhase == 2 then 1
+    else if nextPhase == 5 then 1
+    else if nextPhase == 0 || nextPhase == 3 then 0
+    else delivered
+  let freshRetry : Bool := (op == 1 || op == 2) && phase == 4
+  let lo32 : UInt32 :=
+    if !fenceOk then 4
+    else if !phaseOk || !opOk then 0
+    else if freshRetry then 3
+    else if moved then (257 : UInt32) ||| (nextPhase.toUInt32 <<< 16)
+    else 2
+  lo32.toUInt64 ||| (deliveredNext.toUInt32.toUInt64 <<< 32)
+
+theorem kill_m26_effectOutbox_reconcileDoubleDelivers :
+    m26_effectOutbox_reconcileDoubleDelivers 4 0 5 1 9 9 ≠
+      effectOutboxStep 4 0 5 1 9 9 := by
+  decide
+
+/-- Mutant 9.3 (`orb_effect_outbox_step`): Stale-boot attempt commits outbox transition (`attemptEpoch == nodeBootEpoch` dropped). -/
+@[inline, export orb_mut_m27]
+def m27_effectOutbox_unfencedBootCommit
+    (phase delivered op fenceMatches : UInt8)
+    (attemptEpoch nodeBootEpoch : UInt64) : UInt64 :=
+  let _ := nodeBootEpoch
+  let fenceOk : Bool := fenceMatches == 1 && attemptEpoch != 0
+  let phaseOk : Bool := phase ≤ 5
+  let opOk : Bool := op ≤ 5
+  let nextPhase : UInt8 :=
+    if !fenceOk then phase
+    else if !phaseOk then phase
+    else if !opOk then phase
+    else if op == 0 then (if phase == 3 then 0 else if phase == 5 then 0 else phase)
+    else if op == 1 then (if phase == 0 then 1 else phase)
+    else if op == 2 then (if phase == 1 then 2 else phase)
+    else if op == 3 then (if phase == 1 then 3 else phase)
+    else if op == 4 then (if phase == 1 then 4 else phase)
+    else if op == 5 then (if phase == 4 then 5 else phase)
+    else phase
+  let moved : Bool := nextPhase != phase
+  let deliveredNext : UInt8 :=
+    if !moved then delivered
+    else if nextPhase == 2 then 1
+    else if nextPhase == 0 || nextPhase == 3 then 0
+    else delivered
+  let freshRetry : Bool := (op == 1 || op == 2) && phase == 4
+  let lo32 : UInt32 :=
+    if !fenceOk then 4
+    else if !phaseOk || !opOk then 0
+    else if freshRetry then 3
+    else if moved then (257 : UInt32) ||| (nextPhase.toUInt32 <<< 16)
+    else 2
+  lo32.toUInt64 ||| (deliveredNext.toUInt32.toUInt64 <<< 32)
+
+theorem kill_m27_effectOutbox_unfencedBootCommit :
+    m27_effectOutbox_unfencedBootCommit 1 0 2 1 8 9 ≠
+      effectOutboxStep 1 0 2 1 8 9 := by
+  decide
+
+-- ===========================================================================
+-- Family 10: R2-A Crash-Boundary Conservation (`orb_crash_boundary_step`, `G-ORB-2`)
+-- ===========================================================================
+
+/-- Mutant 10.1 (`orb_crash_boundary_step`): Corrupt WAL (`durableAcked > durableQueued`) underflows `UInt32` instead of failing closed. -/
+@[inline, export orb_mut_m28]
+def m28_crashBoundary_corruptWalAdmitted
+    (durableQueued durableAcked : UInt32)
+    (stateRevision : UInt64)
+    (volatileInFlight : UInt32)
+    (leaseBootEpoch nodeBootEpoch : UInt64)
+    (volatileLeaseOwner reqOwner : UInt32) : UInt64 :=
+  let validWal : Bool := stateRevision != 0
+  let unacked : UInt32 := if validWal then durableQueued - durableAcked else 0
+  let crashReset : Bool := leaseBootEpoch != nodeBootEpoch
+  let effOwner : UInt32 := if crashReset then 0 else volatileLeaseOwner
+  let effInFlight : UInt32 := if crashReset then 0 else volatileInFlight
+  let canAcquire : Bool :=
+    validWal && unacked > 0 && reqOwner != 0 &&
+    (effOwner == 0 || effOwner == reqOwner) && effInFlight < unacked
+  let nextOwner : UInt32 := if canAcquire then reqOwner else effOwner
+  let writerBit : UInt32 := if nextOwner != 0 then 1024 else 0
+  let crashBit : UInt32 := if crashReset then 512 else 0
+  let lo32 : UInt32 :=
+    if !validWal then 0
+    else if canAcquire then 257 ||| crashBit ||| writerBit
+    else (if unacked == 0 then 2 else 3) ||| crashBit ||| writerBit
+  lo32.toUInt64 ||| (unacked.toUInt64 <<< 32)
+
+theorem kill_m28_crashBoundary_corruptWalAdmitted :
+    m28_crashBoundary_corruptWalAdmitted 2 5 1 0 9 9 0 7 ≠
+      crashBoundaryStep 2 5 1 0 9 9 0 7 := by
+  decide
+
+/-- Mutant 10.2 (`orb_crash_boundary_step`): Volatile lease owner survives node reboot (`crashReset` ignored on `effOwner`). -/
+@[inline, export orb_mut_m29]
+def m29_crashBoundary_volatileLeaseSurvivesReboot
+    (durableQueued durableAcked : UInt32)
+    (stateRevision : UInt64)
+    (volatileInFlight : UInt32)
+    (leaseBootEpoch nodeBootEpoch : UInt64)
+    (volatileLeaseOwner reqOwner : UInt32) : UInt64 :=
+  let validWal : Bool := durableAcked ≤ durableQueued && stateRevision != 0
+  let unacked : UInt32 := if validWal then durableQueued - durableAcked else 0
+  let crashReset : Bool := leaseBootEpoch != nodeBootEpoch
+  let effOwner : UInt32 := volatileLeaseOwner
+  let effInFlight : UInt32 := if crashReset then 0 else volatileInFlight
+  let canAcquire : Bool :=
+    validWal && unacked > 0 && reqOwner != 0 &&
+    (effOwner == 0 || effOwner == reqOwner) && effInFlight < unacked
+  let nextOwner : UInt32 := if canAcquire then reqOwner else effOwner
+  let writerBit : UInt32 := if nextOwner != 0 then 1024 else 0
+  let crashBit : UInt32 := if crashReset then 512 else 0
+  let lo32 : UInt32 :=
+    if !validWal then 0
+    else if canAcquire then 257 ||| crashBit ||| writerBit
+    else (if unacked == 0 then 2 else 3) ||| crashBit ||| writerBit
+  lo32.toUInt64 ||| (unacked.toUInt64 <<< 32)
+
+theorem kill_m29_crashBoundary_volatileLeaseSurvivesReboot :
+    m29_crashBoundary_volatileLeaseSurvivesReboot 5 2 1 0 8 9 4 7 ≠
+      crashBoundaryStep 5 2 1 0 8 9 4 7 := by
+  decide
+
+/-- Mutant 10.3 (`orb_crash_boundary_step`): Dual-writer steal on live node (`effOwner == 0 || effOwner == reqOwner` omitted). -/
+@[inline, export orb_mut_m30]
+def m30_crashBoundary_dualWriterSteal
+    (durableQueued durableAcked : UInt32)
+    (stateRevision : UInt64)
+    (volatileInFlight : UInt32)
+    (leaseBootEpoch nodeBootEpoch : UInt64)
+    (volatileLeaseOwner reqOwner : UInt32) : UInt64 :=
+  let validWal : Bool := durableAcked ≤ durableQueued && stateRevision != 0
+  let unacked : UInt32 := if validWal then durableQueued - durableAcked else 0
+  let crashReset : Bool := leaseBootEpoch != nodeBootEpoch
+  let effOwner : UInt32 := if crashReset then 0 else volatileLeaseOwner
+  let effInFlight : UInt32 := if crashReset then 0 else volatileInFlight
+  let canAcquire : Bool :=
+    validWal && unacked > 0 && reqOwner != 0 && effInFlight < unacked
+  let nextOwner : UInt32 := if canAcquire then reqOwner else effOwner
+  let writerBit : UInt32 := if nextOwner != 0 then 1024 else 0
+  let crashBit : UInt32 := if crashReset then 512 else 0
+  let lo32 : UInt32 :=
+    if !validWal then 0
+    else if canAcquire then 257 ||| crashBit ||| writerBit
+    else (if unacked == 0 then 2 else 3) ||| crashBit ||| writerBit
+  lo32.toUInt64 ||| (unacked.toUInt64 <<< 32)
+
+theorem kill_m30_crashBoundary_dualWriterSteal :
+    m30_crashBoundary_dualWriterSteal 5 2 1 0 9 9 4 7 ≠
+      crashBoundaryStep 5 2 1 0 9 9 4 7 := by
+  decide
+
 end Orb.MutantSuite

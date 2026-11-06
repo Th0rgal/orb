@@ -788,6 +788,41 @@ object OrbKernel {
         maxUtf16Units: Int
     ): Long
 
+    @JvmStatic
+    external fun orbEpochFenceStep(
+        durableOwnerEpoch: Long,
+        liveOwnerEpoch: Long,
+        durableRunGeneration: Long,
+        liveRunGeneration: Long,
+        durableBootEpoch: Long,
+        liveBootEpoch: Long,
+        durableRevision: Int,
+        liveRevision: Int,
+        writerOwnerEpoch: Long
+    ): Long
+
+    @JvmStatic
+    external fun orbEffectOutboxStep(
+        phase: Int,
+        delivered: Int,
+        op: Int,
+        fenceMatches: Int,
+        attemptEpoch: Long,
+        nodeBootEpoch: Long
+    ): Long
+
+    @JvmStatic
+    external fun orbCrashBoundaryStep(
+        durableQueued: Int,
+        durableAcked: Int,
+        stateRevision: Long,
+        volatileInFlight: Int,
+        leaseBootEpoch: Long,
+        nodeBootEpoch: Long,
+        volatileLeaseOwner: Int,
+        reqOwner: Int
+    ): Long
+
     data class WorkfoldVerdict(val foldItem: Boolean, val foldHasToolNext: Boolean)
 
     private fun bInt(v: Boolean): Int = if (v) 1 else 0

@@ -9099,4 +9099,987 @@ theorem uruk_carbon_eap_selection_and_fail_closed_witness :
     (step1Lacks &&& 1) = 0 := by
   decide
 
+/-! ## Phase R2-A: Composable `SpecBlock` Footprints, `EpochFence`, `EffectOutboxStep` & `G-ORB-2` Crash Conservation -/
+
+structure Footprint where
+  reads  : UInt64
+  writes : UInt64
+  deriving Repr, DecidableEq
+
+def Footprint.Disjoint (a b : Footprint) : Bool :=
+  ((a.writes &&& b.writes) == 0) &&
+  ((a.writes &&& b.reads) == 0) &&
+  ((b.writes &&& a.reads) == 0)
+
+def Footprint.union (a b : Footprint) : Footprint :=
+  ⟨a.reads ||| b.reads, a.writes ||| b.writes⟩
+
+theorem footprint_disjoint_symm (a b : Footprint) :
+    Footprint.Disjoint a b = Footprint.Disjoint b a := by
+  unfold Footprint.Disjoint
+  have h1 : (a.writes &&& b.writes) = (b.writes &&& a.writes) :=
+    UInt64.eq_of_toBitVec_eq (BitVec.and_comm _ _)
+  rw [h1]
+  cases c1 : ((b.writes &&& a.writes) == 0) <;>
+    cases c2 : ((a.writes &&& b.reads) == 0) <;>
+    cases c3 : ((b.writes &&& a.reads) == 0) <;>
+    rfl
+
+structure SpecBlock (World Slice Event Effect : Type) where
+  footprint : Footprint
+  project   : World → Slice
+  inject    : World → Slice → World
+  step      : Slice → Event → Slice × List Effect
+  frame_get : ∀ w s, project (inject w s) = s
+  frame_set : ∀ w, inject w (project w) = w
+
+def SpecBlock.liftStep {World Slice Event Effect : Type}
+    (B : SpecBlock World Slice Event Effect) (w : World) (e : Event) :
+    World × List Effect :=
+  let (s', effs) := B.step (B.project w) e
+  (B.inject w s', effs)
+
+theorem specBlock_lift_projects {World Slice Event Effect : Type}
+    (B : SpecBlock World Slice Event Effect) (w : World) (e : Event) :
+    B.project (B.liftStep w e).1 = (B.step (B.project w) e).1 ∧
+    (B.liftStep w e).2 = (B.step (B.project w) e).2 := by
+  unfold SpecBlock.liftStep
+  exact ⟨B.frame_get w _, rfl⟩
+
+theorem specBlock_orthogonal_commutes
+    {World S1 S2 E1 E2 Eff1 Eff2 : Type}
+    (B1 : SpecBlock World S1 E1 Eff1)
+    (B2 : SpecBlock World S2 E2 Eff2)
+    (h_proj12 : ∀ w s2, B1.project (B2.inject w s2) = B1.project w)
+    (h_proj21 : ∀ w s1, B2.project (B1.inject w s1) = B2.project w)
+    (h_inj_comm : ∀ w s1 s2, B2.inject (B1.inject w s1) s2 = B1.inject (B2.inject w s2) s1)
+    (w : World) (e1 : E1) (e2 : E2) :
+    (B2.liftStep (B1.liftStep w e1).1 e2).1 =
+      (B1.liftStep (B2.liftStep w e2).1 e1).1 := by
+  unfold SpecBlock.liftStep
+  dsimp only
+  rw [h_proj21, h_proj12]
+  exact h_inj_comm w (B1.step (B1.project w) e1).1 (B2.step (B2.project w) e2).1
+
+-- ---------------------------------------------------------------------------
+-- R2-A.1: `EpochFence` (`orb_epoch_fence_step`)
+-- ---------------------------------------------------------------------------
+
+structure EpochFenceCheck where
+  durableOwnerEpoch    : UInt64
+  liveOwnerEpoch       : UInt64
+  durableRunGeneration : UInt64
+  liveRunGeneration    : UInt64
+  durableBootEpoch     : UInt64
+  liveBootEpoch        : UInt64
+  durableRevision      : UInt32
+  liveRevision         : UInt32
+  writerOwnerEpoch     : UInt64
+  deriving Repr, DecidableEq
+
+def EpochFenceCheck.Admissible (c : EpochFenceCheck) : Bool :=
+  (c.durableOwnerEpoch != 0) &&
+  (c.durableRunGeneration != 0) &&
+  (c.durableBootEpoch != 0) &&
+  (c.durableRevision != 0) &&
+  (c.writerOwnerEpoch == c.durableOwnerEpoch) &&
+  (c.writerOwnerEpoch == c.liveOwnerEpoch) &&
+  (c.liveRevision == c.durableRevision) &&
+  (c.liveRunGeneration == c.durableRunGeneration) &&
+  (c.liveBootEpoch == c.durableBootEpoch) &&
+  decide (c.durableRevision < 0xFFFFFFFF)
+
+theorem epochFenceStep_admit_eq (c : EpochFenceCheck) :
+    (((epochFenceStep c.durableOwnerEpoch c.liveOwnerEpoch
+        c.durableRunGeneration c.liveRunGeneration
+        c.durableBootEpoch c.liveBootEpoch
+        c.durableRevision c.liveRevision
+        c.writerOwnerEpoch &&& 0xFFFFFFFF) &&& 256) != 0) = c.Admissible := by
+  unfold EpochFenceCheck.Admissible epochFenceStep
+  rw [pack32_lo]
+  cases hs1 : (c.durableOwnerEpoch != 0) <;>
+    cases hs2 : (c.durableRunGeneration != 0) <;>
+    cases hs3 : (c.durableBootEpoch != 0) <;>
+    cases hs4 : (c.durableRevision != 0) <;>
+    cases ho1 : (c.writerOwnerEpoch == c.durableOwnerEpoch) <;>
+    cases ho2 : (c.writerOwnerEpoch == c.liveOwnerEpoch) <;>
+    cases hr : (c.liveRevision == c.durableRevision) <;>
+    cases hg : (c.liveRunGeneration == c.durableRunGeneration) <;>
+    cases hb : (c.liveBootEpoch == c.durableBootEpoch) <;>
+    cases hrm : decide (c.durableRevision < 0xFFFFFFFF) <;>
+    (simp only [hs1, hs2, hs3, hs4, ho1, ho2, hr, hg, hb, hrm,
+      Bool.true_and, Bool.false_and, Bool.and_true, Bool.and_false,
+      Bool.not_true, Bool.not_false, Bool.false_eq_true, ite_true, ite_false];
+     decide)
+
+theorem epochFenceStep_nextRev_of_admissible (c : EpochFenceCheck)
+    (hadm : c.Admissible = true) :
+    (epochFenceStep c.durableOwnerEpoch c.liveOwnerEpoch
+      c.durableRunGeneration c.liveRunGeneration
+      c.durableBootEpoch c.liveBootEpoch
+      c.durableRevision c.liveRevision c.writerOwnerEpoch >>> 32).toUInt32 =
+    c.durableRevision + 1 ∧
+    c.liveRevision = c.durableRevision := by
+  have hparts :
+      (c.durableOwnerEpoch != 0) = true ∧
+      (c.durableRunGeneration != 0) = true ∧
+      (c.durableBootEpoch != 0) = true ∧
+      (c.durableRevision != 0) = true ∧
+      (c.writerOwnerEpoch == c.durableOwnerEpoch) = true ∧
+      (c.writerOwnerEpoch == c.liveOwnerEpoch) = true ∧
+      (c.liveRevision == c.durableRevision) = true ∧
+      (c.liveRunGeneration == c.durableRunGeneration) = true ∧
+      (c.liveBootEpoch == c.durableBootEpoch) = true ∧
+      decide (c.durableRevision < 0xFFFFFFFF) = true := by
+    unfold EpochFenceCheck.Admissible at hadm
+    revert hadm
+    cases (c.durableOwnerEpoch != 0) <;>
+      cases (c.durableRunGeneration != 0) <;>
+      cases (c.durableBootEpoch != 0) <;>
+      cases (c.durableRevision != 0) <;>
+      cases (c.writerOwnerEpoch == c.durableOwnerEpoch) <;>
+      cases (c.writerOwnerEpoch == c.liveOwnerEpoch) <;>
+      cases (c.liveRevision == c.durableRevision) <;>
+      cases (c.liveRunGeneration == c.durableRunGeneration) <;>
+      cases (c.liveBootEpoch == c.durableBootEpoch) <;>
+      cases decide (c.durableRevision < 0xFFFFFFFF) <;>
+      simp
+  rcases hparts with ⟨hs1, hs2, hs3, hs4, ho1, ho2, hr, hg, hb, hrm⟩
+  refine ⟨?_, beq_iff_eq.mp hr⟩
+  unfold epochFenceStep
+  rw [pack32_hi, toUInt32_toUInt64]
+  simp only [hs1, hs2, hs3, hs4, ho1, ho2, hr, hg, hb, hrm,
+    Bool.true_and, Bool.not_true, Bool.false_eq_true, ite_false]
+  have hc : ((257 : UInt32) == 257) = true := rfl
+  simp [hc]
+
+def epochFenceMetaGate : MetaGateSpec EpochFenceCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    ((epochFenceStep c.durableOwnerEpoch c.liveOwnerEpoch
+        c.durableRunGeneration c.liveRunGeneration
+        c.durableBootEpoch c.liveBootEpoch
+        c.durableRevision c.liveRevision
+        c.writerOwnerEpoch &&& 0xFFFFFFFF) &&& 256) != 0
+  sound c hg := by rw [← epochFenceStep_admit_eq c]; exact hg
+  complete c hadm := by rw [epochFenceStep_admit_eq c]; exact hadm
+  posWitness := ⟨7, 7, 3, 3, 11, 11, 4, 4, 7⟩
+  negWitness := ⟨7, 7, 3, 3, 11, 12, 4, 4, 7⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def epochFenceScopedAuthority : ScopedAuthority EpochFenceCheck :=
+  ⟨epochFenceMetaGate.gate, EpochFenceCheck.Admissible, epochFenceMetaGate.sound⟩
+
+structure EpochFenceState where
+  ownerEpoch    : UInt64
+  runGeneration : UInt64
+  bootEpoch     : UInt64
+  revision      : UInt32
+  deriving Repr, DecidableEq
+
+def effectiveEpochFenceCheck (s : EpochFenceState) (e : EpochFenceCheck) : EpochFenceCheck :=
+  { e with
+    durableOwnerEpoch    := s.ownerEpoch
+    durableRunGeneration := s.runGeneration
+    durableBootEpoch     := s.bootEpoch
+    durableRevision      := s.revision }
+
+def epochFenceMachineStep (s : EpochFenceState) (e : EpochFenceCheck) :
+    EpochFenceState × List UInt32 :=
+  let c := effectiveEpochFenceCheck s e
+  let w := epochFenceStep c.durableOwnerEpoch c.liveOwnerEpoch
+    c.durableRunGeneration c.liveRunGeneration
+    c.durableBootEpoch c.liveBootEpoch
+    c.durableRevision c.liveRevision c.writerOwnerEpoch
+  let nextRev := (w >>> 32).toUInt32
+  let admitted := epochFenceMetaGate.gate c
+  (⟨s.ownerEpoch, s.runGeneration, s.bootEpoch, nextRev⟩,
+   if admitted then [nextRev] else [])
+
+def epochFenceMetaStepSpec : MetaStepSpec EpochFenceState EpochFenceCheck UInt32 where
+  safety := {
+    step := epochFenceMachineStep
+    authorized := fun s e eff =>
+      let c := effectiveEpochFenceCheck s e
+      eff == s.revision + 1 && c.Admissible
+    sound := fun s e eff h_in => by
+      dsimp [epochFenceMachineStep] at h_in
+      split at h_in
+      · next h_adm =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have hadm := epochFenceMetaGate.sound (effectiveEpochFenceCheck s e) h_adm
+        have hnr := (epochFenceStep_nextRev_of_admissible (effectiveEpochFenceCheck s e) hadm).1
+        have hdr : (effectiveEpochFenceCheck s e).durableRevision = s.revision := rfl
+        rw [hnr, hdr]
+        simp [hadm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨7, 3, 11, 1⟩
+    step := epochFenceMachineStep
+    progressRequired := fun s e => (effectiveEpochFenceCheck s e).Admissible
+    expectedEffect := fun e eff => eff == e.liveRevision + 1
+    live := fun s e h_req => by
+      have hg := epochFenceMetaGate.complete (effectiveEpochFenceCheck s e) h_req
+      have ⟨hnr, hlr⟩ := epochFenceStep_nextRev_of_admissible (effectiveEpochFenceCheck s e) h_req
+      have hdr : (effectiveEpochFenceCheck s e).durableRevision = s.revision := rfl
+      have hlr' : e.liveRevision = s.revision := by simpa [effectiveEpochFenceCheck] using hlr
+      dsimp [epochFenceMachineStep]
+      rw [hg]
+      simp only [ite_true, List.mem_singleton, exists_eq_left]
+      rw [hnr, hdr, hlr']
+      exact beq_self_eq_true (s.revision + 1)
+    traceEvents := [⟨7, 7, 3, 3, 11, 11, 1, 1, 7⟩]
+    posEvent := ⟨7, 7, 3, 3, 11, 11, 2, 2, 7⟩
+    negEvent := ⟨7, 7, 3, 3, 11, 11, 1, 1, 7⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := epochFenceMachineStep
+    cpuFuel := fun s e => 10 + ((epochFenceMachineStep s e).2).length
+    inputBytes := fun _ => 64
+    outputBytes := fun s e => 28 + 4 * ((epochFenceMachineStep s e).2).length
+    c0 := 11
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 32
+    fuel_bound := fun s e => by
+      have hlen : ((epochFenceMachineStep s e).2).length ≤ 1 := by
+        dsimp [epochFenceMachineStep]; split <;> simp
+      omega
+    eff_bound := fun s e => by
+      dsimp [epochFenceMachineStep]; split <;> simp
+    out_bound := fun s e => by
+      have hlen : ((epochFenceMachineStep s e).2).length ≤ 1 := by
+        dsimp [epochFenceMachineStep]; split <;> simp
+      omega
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+theorem epochFence_monotone_and_stale_actor_rejected
+    (owner liveOwner runGen liveRun bootEp liveBoot writer : UInt64)
+    (rev liveRev : UInt32) :
+    rev ≤ (epochFenceStep owner liveOwner runGen liveRun bootEp liveBoot rev liveRev writer >>> 32).toUInt32 ∧
+    (liveRev ≠ rev →
+      ((epochFenceStep owner liveOwner runGen liveRun bootEp liveBoot rev liveRev writer &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+      (epochFenceStep owner liveOwner runGen liveRun bootEp liveBoot rev liveRev writer >>> 32).toUInt32 = rev) ∧
+    (liveBoot ≠ bootEp →
+      ((epochFenceStep owner liveOwner runGen liveRun bootEp liveBoot rev liveRev writer &&& 0xFFFFFFFF) &&& 256) = 0) ∧
+    (writer ≠ owner →
+      ((epochFenceStep owner liveOwner runGen liveRun bootEp liveBoot rev liveRev writer &&& 0xFFFFFFFF) &&& 256) = 0) := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · unfold epochFenceStep
+    rw [pack32_hi, toUInt32_toUInt64]
+    cases hs : (owner != 0 && runGen != 0 && bootEp != 0 && rev != 0) <;>
+      cases ho : (writer == owner && writer == liveOwner) <;>
+      cases hr : (liveRev == rev) <;>
+      cases hg : (liveRun == runGen) <;>
+      cases hb : (liveBoot == bootEp) <;>
+      cases hrm : decide (rev < 0xFFFFFFFF)
+    all_goals simp only [hs, ho, hr, hg, hb, hrm, Bool.not_true, Bool.not_false,
+      Bool.false_eq_true, ite_true, ite_false]
+    all_goals try exact UInt32.le_refl rev
+    · have hc : ((257 : UInt32) == 257) = true := rfl
+      simp only [hc, ite_true]
+      have hlt : rev.toNat < 0xFFFFFFFF := UInt32.lt_iff_toNat_lt.mp (of_decide_eq_true hrm)
+      apply UInt32.le_iff_toNat_le.mpr
+      rw [UInt32.toNat_add]
+      change rev.toNat ≤ (rev.toNat + 1) % 4294967296
+      omega
+    all_goals exact (by simp; exact UInt32.le_refl rev)
+  · intro hne
+    have hrf : (liveRev == rev) = false := beq_eq_false_iff_ne.mpr hne
+    constructor
+    · unfold epochFenceStep
+      rw [pack32_lo]
+      cases hs : (owner != 0 && runGen != 0 && bootEp != 0 && rev != 0) <;>
+        cases ho : (writer == owner && writer == liveOwner) <;>
+        (simp only [hs, ho, hrf, Bool.not_true, Bool.not_false, Bool.false_eq_true, ite_true, ite_false]; decide)
+    · unfold epochFenceStep
+      rw [pack32_hi, toUInt32_toUInt64]
+      cases hs : (owner != 0 && runGen != 0 && bootEp != 0 && rev != 0) <;>
+        cases ho : (writer == owner && writer == liveOwner) <;>
+        (simp only [hs, ho, hrf, Bool.not_true, Bool.not_false, Bool.false_eq_true, ite_true, ite_false]; rfl)
+  · intro hne
+    have hbf : (liveBoot == bootEp) = false := beq_eq_false_iff_ne.mpr hne
+    unfold epochFenceStep
+    rw [pack32_lo]
+    cases hs : (owner != 0 && runGen != 0 && bootEp != 0 && rev != 0) <;>
+      cases ho : (writer == owner && writer == liveOwner) <;>
+      cases hr : (liveRev == rev) <;>
+      cases hg : (liveRun == runGen) <;>
+      (simp only [hs, ho, hr, hg, hbf, Bool.not_true, Bool.not_false, Bool.false_eq_true, ite_true, ite_false]; decide)
+  · intro hne
+    have hwf : (writer == owner) = false := beq_eq_false_iff_ne.mpr hne
+    unfold epochFenceStep
+    rw [pack32_lo]
+    cases hs : (owner != 0 && runGen != 0 && bootEp != 0 && rev != 0) <;>
+      (simp only [hs, hwf, Bool.false_and, Bool.not_true, Bool.not_false, Bool.false_eq_true, ite_true, ite_false]; decide)
+
+-- ---------------------------------------------------------------------------
+-- R2-A.2: `EffectOutboxStep` (`orb_effect_outbox_step`)
+-- ---------------------------------------------------------------------------
+
+structure EffectOutboxCheck where
+  phase         : UInt8
+  delivered     : UInt8
+  op            : UInt8
+  fenceMatches  : UInt8
+  attemptEpoch  : UInt64
+  nodeBootEpoch : UInt64
+  deriving Repr, DecidableEq
+
+def EffectOutboxCheck.ValidTransition (phase op : UInt8) : Bool :=
+  (op == 0 && (phase == 3 || phase == 5)) ||
+  (op == 1 && phase == 0) ||
+  (op == 2 && phase == 1) ||
+  (op == 3 && phase == 1) ||
+  (op == 4 && phase == 1) ||
+  (op == 5 && phase == 4)
+
+def EffectOutboxCheck.Admissible (e : EffectOutboxCheck) : Bool :=
+  (e.fenceMatches == 1) &&
+  (e.attemptEpoch == e.nodeBootEpoch) &&
+  (e.attemptEpoch != 0) &&
+  decide (e.phase ≤ 5) &&
+  decide (e.op ≤ 5) &&
+  EffectOutboxCheck.ValidTransition e.phase e.op
+
+def expectedOutboxNextPhase (op : UInt8) : UInt8 :=
+  if op == 0 then 0
+  else if op == 1 then 1
+  else if op == 2 then 2
+  else if op == 3 then 3
+  else if op == 4 then 4
+  else 5
+
+private def effectOutboxLo (phase op : UInt8) : UInt32 :=
+  let phaseOk := decide (phase ≤ 5)
+  let opOk := decide (op ≤ 5)
+  let nextPhase : UInt8 :=
+    if !phaseOk then phase
+    else if !opOk then phase
+    else if op == 0 then (if phase == 3 then 0 else if phase == 5 then 0 else phase)
+    else if op == 1 then (if phase == 0 then 1 else phase)
+    else if op == 2 then (if phase == 1 then 2 else phase)
+    else if op == 3 then (if phase == 1 then 3 else phase)
+    else if op == 4 then (if phase == 1 then 4 else phase)
+    else if op == 5 then (if phase == 4 then 5 else phase)
+    else phase
+  let moved := nextPhase != phase
+  let freshRetry := (op == 1 || op == 2) && phase == 4
+  if !phaseOk || !opOk then 0
+  else if freshRetry then 3
+  else if moved then (257 : UInt32) ||| (nextPhase.toUInt32 <<< 16)
+  else 2
+
+private theorem u64_bit8_of_u32 (x : UInt32) :
+    (((x.toUInt64 &&& 256) != 0) = ((x &&& 256) != 0)) := by
+  have hcast : x.toUInt64 &&& 256 = (x &&& 256).toUInt64 := by
+    apply UInt64.toBitVec_inj.mp
+    simp [UInt64.toBitVec_and, UInt32.toBitVec_toUInt64, UInt32.toBitVec_and]
+  rw [hcast]
+  cases h64 : (((x &&& 256).toUInt64) == 0) <;>
+    cases h32 : ((x &&& 256) == 0)
+  · rfl
+  · exfalso
+    exact absurd (congrArg UInt32.toUInt64 (beq_iff_eq.mp h32)) (beq_eq_false_iff_ne.mp h64)
+  · exfalso
+    exact absurd (UInt32.toUInt64_inj.mp (beq_iff_eq.mp h64)) (beq_eq_false_iff_ne.mp h32)
+  · rfl
+
+private theorem pack_phase_extract0 :
+    (((((257 : UInt32) ||| ((0 : UInt8).toUInt32 <<< 16)) >>> 16) &&& 0xFF).toUInt8) = 0 := by decide
+private theorem pack_phase_extract1 :
+    (((((257 : UInt32) ||| ((1 : UInt8).toUInt32 <<< 16)) >>> 16) &&& 0xFF).toUInt8) = 1 := by decide
+private theorem pack_phase_extract2 :
+    (((((257 : UInt32) ||| ((2 : UInt8).toUInt32 <<< 16)) >>> 16) &&& 0xFF).toUInt8) = 2 := by decide
+private theorem pack_phase_extract3 :
+    (((((257 : UInt32) ||| ((3 : UInt8).toUInt32 <<< 16)) >>> 16) &&& 0xFF).toUInt8) = 3 := by decide
+private theorem pack_phase_extract4 :
+    (((((257 : UInt32) ||| ((4 : UInt8).toUInt32 <<< 16)) >>> 16) &&& 0xFF).toUInt8) = 4 := by decide
+private theorem pack_phase_extract5 :
+    (((((257 : UInt32) ||| ((5 : UInt8).toUInt32 <<< 16)) >>> 16) &&& 0xFF).toUInt8) = 5 := by decide
+
+private theorem pack_phase_admitted0 :
+    ((((257 : UInt32) ||| ((0 : UInt8).toUInt32 <<< 16)) &&& 256) != 0) = true := by decide
+private theorem pack_phase_admitted1 :
+    ((((257 : UInt32) ||| ((1 : UInt8).toUInt32 <<< 16)) &&& 256) != 0) = true := by decide
+private theorem pack_phase_admitted2 :
+    ((((257 : UInt32) ||| ((2 : UInt8).toUInt32 <<< 16)) &&& 256) != 0) = true := by decide
+private theorem pack_phase_admitted3 :
+    ((((257 : UInt32) ||| ((3 : UInt8).toUInt32 <<< 16)) &&& 256) != 0) = true := by decide
+private theorem pack_phase_admitted4 :
+    ((((257 : UInt32) ||| ((4 : UInt8).toUInt32 <<< 16)) &&& 256) != 0) = true := by decide
+private theorem pack_phase_admitted5 :
+    ((((257 : UInt32) ||| ((5 : UInt8).toUInt32 <<< 16)) &&& 256) != 0) = true := by decide
+
+private theorem effectOutboxLo_admitted_iff (phase op : UInt8) :
+    (((effectOutboxLo phase op) &&& 256) != 0) =
+      (decide (phase ≤ 5) && decide (op ≤ 5) && EffectOutboxCheck.ValidTransition phase op) := by
+  unfold effectOutboxLo EffectOutboxCheck.ValidTransition
+  have h0 : (((0 : UInt32) &&& 256) != 0) = false := by decide
+  have h2 : (((2 : UInt32) &&& 256) != 0) = false := by decide
+  have h3 : (((3 : UInt32) &&& 256) != 0) = false := by decide
+  cases hp : decide (phase ≤ 5)
+  · simp [hp, h0]
+  · cases ho : decide (op ≤ 5)
+    · simp [ho, h0]
+    · simp only [hp, ho, Bool.true_and, Bool.not_true, Bool.false_or, Bool.false_eq_true, ite_false]
+      cases ho0 : (op == 0)
+      · cases ho1 : (op == 1)
+        · cases ho2 : (op == 2)
+          · cases ho3 : (op == 3)
+            · cases ho4 : (op == 4)
+              · cases ho5 : (op == 5)
+                · simp [ho0, ho1, ho2, ho3, ho4, ho5, h2]
+                · have hop : op = 5 := beq_iff_eq.mp ho5; subst hop
+                  cases hp4 : (phase == 4)
+                  · simp [hp4, h2]
+                  · have hph : phase = 4 := beq_iff_eq.mp hp4; subst hph
+                    exact pack_phase_admitted5
+              · have hop : op = 4 := beq_iff_eq.mp ho4; subst hop
+                cases hp1 : (phase == 1)
+                · simp [hp1, h2]
+                · have hph : phase = 1 := beq_iff_eq.mp hp1; subst hph
+                  exact pack_phase_admitted4
+            · have hop : op = 3 := beq_iff_eq.mp ho3; subst hop
+              cases hp1 : (phase == 1)
+              · simp [hp1, h2]
+              · have hph : phase = 1 := beq_iff_eq.mp hp1; subst hph
+                exact pack_phase_admitted3
+          · have hop : op = 2 := beq_iff_eq.mp ho2; subst hop
+            cases hp1 : (phase == 1)
+            · cases hp4 : (phase == 4) <;> simp [hp1, hp4, h2, h3]
+            · have hph : phase = 1 := beq_iff_eq.mp hp1; subst hph
+              exact pack_phase_admitted2
+        · have hop : op = 1 := beq_iff_eq.mp ho1; subst hop
+          cases hp0 : (phase == 0)
+          · cases hp4 : (phase == 4) <;> simp [hp0, hp4, h2, h3]
+          · have hph : phase = 0 := beq_iff_eq.mp hp0; subst hph
+            exact pack_phase_admitted1
+      · have hop : op = 0 := beq_iff_eq.mp ho0; subst hop
+        cases hp3 : (phase == 3)
+        · cases hp5 : (phase == 5)
+          · simp [hp3, hp5, h2]
+          · have hph : phase = 5 := beq_iff_eq.mp hp5; subst hph
+            exact pack_phase_admitted0
+        · have hph : phase = 3 := beq_iff_eq.mp hp3; subst hph
+          exact pack_phase_admitted0
+
+private theorem effectOutboxLo_admitted_u32 (phase op : UInt8) :
+    (((effectOutboxLo phase op &&& 256) != 0)) =
+      (decide (phase ≤ 5) && decide (op ≤ 5) && EffectOutboxCheck.ValidTransition phase op) :=
+  effectOutboxLo_admitted_iff phase op
+
+private theorem effectOutboxLo_phase_byte (phase op : UInt8) :
+    decide (phase ≤ 5) = true → decide (op ≤ 5) = true →
+    EffectOutboxCheck.ValidTransition phase op = true →
+    (((effectOutboxLo phase op >>> 16) &&& 0xFF).toUInt8) = expectedOutboxNextPhase op := by
+  intro hp ho hv
+  unfold effectOutboxLo expectedOutboxNextPhase
+  simp only [hp, ho, Bool.not_true, Bool.false_or, Bool.false_eq_true, ite_false]
+  unfold EffectOutboxCheck.ValidTransition at hv
+  cases ho0 : (op == 0)
+  · cases ho1 : (op == 1)
+    · cases ho2 : (op == 2)
+      · cases ho3 : (op == 3)
+        · cases ho4 : (op == 4)
+          · cases ho5 : (op == 5)
+            · simp [ho0, ho1, ho2, ho3, ho4, ho5] at hv
+            · have hop : op = 5 := beq_iff_eq.mp ho5; subst hop
+              have hp4 : (phase == 4) = true := by revert hv; cases (phase == 4) <;> simp
+              have hph : phase = 4 := beq_iff_eq.mp hp4; subst hph
+              exact pack_phase_extract5
+          · have hop : op = 4 := beq_iff_eq.mp ho4; subst hop
+            have hp1 : (phase == 1) = true := by revert hv; cases (phase == 1) <;> simp
+            have hph : phase = 1 := beq_iff_eq.mp hp1; subst hph
+            exact pack_phase_extract4
+        · have hop : op = 3 := beq_iff_eq.mp ho3; subst hop
+          have hp1 : (phase == 1) = true := by revert hv; cases (phase == 1) <;> simp
+          have hph : phase = 1 := beq_iff_eq.mp hp1; subst hph
+          exact pack_phase_extract3
+      · have hop : op = 2 := beq_iff_eq.mp ho2; subst hop
+        have hp1 : (phase == 1) = true := by revert hv; cases (phase == 1) <;> simp
+        have hph : phase = 1 := beq_iff_eq.mp hp1; subst hph
+        exact pack_phase_extract2
+    · have hop : op = 1 := beq_iff_eq.mp ho1; subst hop
+      have hp0 : (phase == 0) = true := by revert hv; cases (phase == 0) <;> simp
+      have hph : phase = 0 := beq_iff_eq.mp hp0; subst hph
+      exact pack_phase_extract1
+  · have hop : op = 0 := beq_iff_eq.mp ho0; subst hop
+    cases hp3 : (phase == 3)
+    · have hp5 : (phase == 5) = true := by
+        revert hv
+        cases (phase == 5) <;> simp [hp3]
+      have hph : phase = 5 := beq_iff_eq.mp hp5; subst hph
+      exact pack_phase_extract0
+    · have hph : phase = 3 := beq_iff_eq.mp hp3; subst hph
+      exact pack_phase_extract0
+
+theorem effectOutboxStep_admit_eq (e : EffectOutboxCheck) :
+    (((effectOutboxStep e.phase e.delivered e.op e.fenceMatches e.attemptEpoch e.nodeBootEpoch
+        &&& 0xFFFFFFFF) &&& 256) != 0) = e.Admissible := by
+  unfold EffectOutboxCheck.Admissible effectOutboxStep
+  rw [pack32_lo, u64_bit8_of_u32]
+  cases hf : (e.fenceMatches == 1 && e.attemptEpoch == e.nodeBootEpoch && e.attemptEpoch != 0)
+  · simp only [hf, Bool.not_false, ite_true]
+    cases hfm : (e.fenceMatches == 1) <;>
+      cases hae : (e.attemptEpoch == e.nodeBootEpoch) <;>
+      cases hnz : (e.attemptEpoch != 0) <;>
+      (simp_all; try decide)
+  · have hfm_parts :
+        (e.fenceMatches == 1) = true ∧
+        (e.attemptEpoch == e.nodeBootEpoch) = true ∧
+        (e.attemptEpoch != 0) = true := by
+      revert hf
+      cases (e.fenceMatches == 1) <;>
+        cases (e.attemptEpoch == e.nodeBootEpoch) <;>
+        cases (e.attemptEpoch != 0) <;>
+        simp
+    rcases hfm_parts with ⟨hf1, hf2, hf3⟩
+    simp only [hf, hf1, hf2, hf3, Bool.true_and, Bool.not_true, Bool.false_eq_true, ite_false, Bool.false_or]
+    exact effectOutboxLo_admitted_iff e.phase e.op
+
+def effectOutboxMetaGate : MetaGateSpec EffectOutboxCheck
+    (fun e => e.Admissible = true) where
+  gate e :=
+    ((effectOutboxStep e.phase e.delivered e.op e.fenceMatches e.attemptEpoch e.nodeBootEpoch
+        &&& 0xFFFFFFFF) &&& 256) != 0
+  sound e hg := by rw [← effectOutboxStep_admit_eq e]; exact hg
+  complete e hadm := by rw [effectOutboxStep_admit_eq e]; exact hadm
+  posWitness := ⟨0, 0, 1, 1, 9, 9⟩
+  negWitness := ⟨4, 0, 1, 1, 9, 9⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+structure EffectOutboxState where
+  phase     : UInt8
+  delivered : UInt8
+  deriving Repr, DecidableEq
+
+structure EffectOutboxEvent where
+  op            : UInt8
+  fenceMatches  : UInt8
+  attemptEpoch  : UInt64
+  nodeBootEpoch : UInt64
+  deriving Repr, DecidableEq
+
+def effectOutboxTransition (s : EffectOutboxState) (ev : EffectOutboxEvent) : EffectOutboxState :=
+  let w := effectOutboxStep s.phase s.delivered ev.op ev.fenceMatches ev.attemptEpoch ev.nodeBootEpoch
+  let lo := (w &&& 0xFFFFFFFF).toUInt32
+  let nextPhase := if (lo &&& 256) != 0 then ((lo >>> 16) &&& 0xFF).toUInt8 else s.phase
+  let nextDeliv := (w >>> 32).toUInt8
+  ⟨nextPhase, nextDeliv⟩
+
+private theorem effectOutboxTransition_phase_eq (s : EffectOutboxState) (ev : EffectOutboxEvent) :
+    (effectOutboxTransition s ev).phase =
+      if (ev.fenceMatches == 1 && ev.attemptEpoch == ev.nodeBootEpoch && ev.attemptEpoch != 0) then
+        let lo := effectOutboxLo s.phase ev.op
+        if (lo &&& 256) != 0 then ((lo >>> 16) &&& 0xFF).toUInt8 else s.phase
+      else s.phase := by
+  dsimp only [effectOutboxTransition]
+  unfold effectOutboxStep
+  rw [pack32_lo, toUInt32_toUInt64]
+  cases hfence : (ev.fenceMatches == 1 && ev.attemptEpoch == ev.nodeBootEpoch && ev.attemptEpoch != 0)
+  · simp only [hfence, Bool.not_false, Bool.false_eq_true, ite_true, ite_false]
+    have h4 : (((4 : UInt32) &&& 256) != 0) = false := by decide
+    simp [h4]
+  · simp only [hfence, Bool.not_true, Bool.false_eq_true, ite_true, ite_false, Bool.false_or]
+    rfl
+
+def effectOutboxUncertainStickyFence : StickyFence EffectOutboxState EffectOutboxEvent where
+  fenced s := s.phase == 4 || s.phase == 5
+  preFenceAct s := s.phase == 1 || s.phase == 2
+  step s ev :=
+    if ev.op == 0 then s else effectOutboxTransition s ev
+  sticky s ev hf := by
+    by_cases hop0 : ev.op == 0
+    · simp [hop0, hf]
+    · have hop0f : (ev.op == 0) = false := by
+        cases hop : (ev.op == 0) <;> simp_all
+      simp only [hop0f, Bool.false_eq_true, ite_false]
+      rw [effectOutboxTransition_phase_eq]
+      split
+      · have h2_256 : (((2 : UInt32) &&& 256) != 0) = false := by decide
+        have h0_256 : (((0 : UInt32) &&& 256) != 0) = false := by decide
+        cases h4 : (s.phase == 4)
+        · simp only [h4, Bool.false_or] at hf
+          have hph : s.phase = 5 := beq_iff_eq.mp hf
+          rw [hph]
+          unfold effectOutboxLo
+          have hp5 : decide ((5 : UInt8) ≤ 5) = true := rfl
+          have h5ne0 : ((5 : UInt8) == 0) = false := rfl
+          have h5ne1 : ((5 : UInt8) == 1) = false := rfl
+          have h5ne4 : ((5 : UInt8) == 4) = false := rfl
+          cases ho : decide (ev.op ≤ 5)
+          · simp only [hp5, ho, Bool.not_true, Bool.not_false, Bool.false_or, ite_true, h0_256,
+              Bool.false_eq_true, ite_false]
+            decide
+          · simp only [hp5, ho, hop0f, h5ne0, h5ne1, h5ne4, Bool.not_true, Bool.false_or,
+              Bool.false_and, Bool.and_false, bne_self_eq_false, Bool.false_eq_true, ite_false, ite_self, h2_256]
+            decide
+        · have hph : s.phase = 4 := beq_iff_eq.mp h4
+          rw [hph]
+          unfold effectOutboxLo
+          have hp4 : decide ((4 : UInt8) ≤ 5) = true := rfl
+          have h4ne0 : ((4 : UInt8) == 0) = false := rfl
+          have h4ne1 : ((4 : UInt8) == 1) = false := rfl
+          have h4eq4 : ((4 : UInt8) == 4) = true := rfl
+          cases ho : decide (ev.op ≤ 5)
+          · simp only [hp4, ho, Bool.not_true, Bool.not_false, Bool.false_or, ite_true, h0_256,
+              Bool.false_eq_true, ite_false]
+            decide
+          · cases ho1 : (ev.op == 1)
+            · cases ho2 : (ev.op == 2)
+              · cases ho5 : (ev.op == 5)
+                · simp only [hp4, ho, hop0f, ho1, ho2, ho5, h4ne0, h4ne1, h4eq4,
+                    Bool.not_true, Bool.false_or, Bool.false_and, Bool.and_false,
+                    bne_self_eq_false, Bool.false_eq_true, ite_false, ite_self, h2_256]
+                  decide
+                · have hop : ev.op = 5 := beq_iff_eq.mp ho5
+                  rw [hop]; decide
+              · have hop : ev.op = 2 := beq_iff_eq.mp ho2
+                rw [hop]; decide
+            · have hop : ev.op = 1 := beq_iff_eq.mp ho1
+              rw [hop]; decide
+      · exact hf
+  forbids_post s ev hf := by
+    have h45_not_12 : ∀ ph : UInt8, (ph == 4 || ph == 5) = true → (ph == 1 || ph == 2) = false := by
+      intro ph hph
+      cases hc4 : (ph == 4)
+      · simp only [hc4, Bool.false_or] at hph
+        have heq : ph = 5 := beq_iff_eq.mp hph
+        subst heq; rfl
+      · have heq : ph = 4 := beq_iff_eq.mp hc4
+        subst heq; rfl
+    by_cases hop0 : ev.op == 0
+    · simp only [hop0, ite_true]
+      exact h45_not_12 s.phase hf
+    · have hop0f : (ev.op == 0) = false := by
+        cases hop : (ev.op == 0) <;> simp_all
+      simp only [hop0f, Bool.false_eq_true, ite_false]
+      rw [effectOutboxTransition_phase_eq]
+      split
+      · have h2_256 : (((2 : UInt32) &&& 256) != 0) = false := by decide
+        have h0_256 : (((0 : UInt32) &&& 256) != 0) = false := by decide
+        cases h4 : (s.phase == 4)
+        · simp only [h4, Bool.false_or] at hf
+          have hph : s.phase = 5 := beq_iff_eq.mp hf
+          rw [hph]
+          unfold effectOutboxLo
+          have hp5 : decide ((5 : UInt8) ≤ 5) = true := rfl
+          have h5ne0 : ((5 : UInt8) == 0) = false := rfl
+          have h5ne1 : ((5 : UInt8) == 1) = false := rfl
+          have h5ne4 : ((5 : UInt8) == 4) = false := rfl
+          cases ho : decide (ev.op ≤ 5)
+          · simp only [hp5, ho, Bool.not_true, Bool.not_false, Bool.false_or, ite_true, h0_256,
+              Bool.false_eq_true, ite_false]
+            decide
+          · simp only [hp5, ho, hop0f, h5ne0, h5ne1, h5ne4, Bool.not_true, Bool.false_or,
+              Bool.false_and, Bool.and_false, bne_self_eq_false, Bool.false_eq_true, ite_false, ite_self, h2_256]
+            decide
+        · have hph : s.phase = 4 := beq_iff_eq.mp h4
+          rw [hph]
+          unfold effectOutboxLo
+          have hp4 : decide ((4 : UInt8) ≤ 5) = true := rfl
+          have h4ne0 : ((4 : UInt8) == 0) = false := rfl
+          have h4ne1 : ((4 : UInt8) == 1) = false := rfl
+          have h4eq4 : ((4 : UInt8) == 4) = true := rfl
+          cases ho : decide (ev.op ≤ 5)
+          · simp only [hp4, ho, Bool.not_true, Bool.not_false, Bool.false_or, ite_true, h0_256,
+              Bool.false_eq_true, ite_false]
+            decide
+          · cases ho1 : (ev.op == 1)
+            · cases ho2 : (ev.op == 2)
+              · cases ho5 : (ev.op == 5)
+                · simp only [hp4, ho, hop0f, ho1, ho2, ho5, h4ne0, h4ne1, h4eq4,
+                    Bool.not_true, Bool.false_or, Bool.false_and, Bool.and_false,
+                    bne_self_eq_false, Bool.false_eq_true, ite_false, ite_self, h2_256]
+                  decide
+                · have hop : ev.op = 5 := beq_iff_eq.mp ho5
+                  rw [hop]; decide
+              · have hop : ev.op = 2 := beq_iff_eq.mp ho2
+                rw [hop]; decide
+            · have hop : ev.op = 1 := beq_iff_eq.mp ho1
+              rw [hop]; decide
+      · exact h45_not_12 s.phase hf
+
+def effectOutboxMachineStep (s : EffectOutboxState) (ev : EffectOutboxEvent) :
+    EffectOutboxState × List UInt8 :=
+  let chk : EffectOutboxCheck := ⟨s.phase, s.delivered, ev.op, ev.fenceMatches, ev.attemptEpoch, ev.nodeBootEpoch⟩
+  let s' := effectOutboxTransition s ev
+  (s', if effectOutboxMetaGate.gate chk then [s'.phase] else [])
+
+private theorem effectOutboxTransition_phase_of_admissible
+    (s : EffectOutboxState) (ev : EffectOutboxEvent)
+    (hadm : (⟨s.phase, s.delivered, ev.op, ev.fenceMatches, ev.attemptEpoch, ev.nodeBootEpoch⟩ : EffectOutboxCheck).Admissible = true) :
+    (effectOutboxTransition s ev).phase = expectedOutboxNextPhase ev.op := by
+  have hparts : (ev.fenceMatches == 1 && ev.attemptEpoch == ev.nodeBootEpoch && ev.attemptEpoch != 0) = true ∧
+      decide (s.phase ≤ 5) = true ∧ decide (ev.op ≤ 5) = true ∧
+      EffectOutboxCheck.ValidTransition s.phase ev.op = true := by
+    unfold EffectOutboxCheck.Admissible at hadm
+    revert hadm
+    cases (ev.fenceMatches == 1) <;> cases (ev.attemptEpoch == ev.nodeBootEpoch) <;>
+      cases (ev.attemptEpoch != 0) <;> cases decide (s.phase ≤ 5) <;>
+      cases decide (ev.op ≤ 5) <;> cases EffectOutboxCheck.ValidTransition s.phase ev.op <;> simp
+  rcases hparts with ⟨hf, hp, ho, hv⟩
+  rw [effectOutboxTransition_phase_eq]
+  simp only [hf, ite_true]
+  have hadmLo := effectOutboxLo_admitted_u32 s.phase ev.op
+  simp only [hp, ho, hv, Bool.true_and] at hadmLo
+  simp only [hadmLo, ite_true]
+  exact effectOutboxLo_phase_byte s.phase ev.op hp ho hv
+
+def effectOutboxMetaStepSpec : MetaStepSpec EffectOutboxState EffectOutboxEvent UInt8 where
+  safety := {
+    step := effectOutboxMachineStep
+    authorized := fun s ev eff =>
+      let chk : EffectOutboxCheck := ⟨s.phase, s.delivered, ev.op, ev.fenceMatches, ev.attemptEpoch, ev.nodeBootEpoch⟩
+      eff == expectedOutboxNextPhase ev.op && chk.Admissible
+    sound := fun s ev eff h_in => by
+      dsimp [effectOutboxMachineStep] at h_in
+      split at h_in
+      · next hg =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have hadm := effectOutboxMetaGate.sound ⟨s.phase, s.delivered, ev.op, ev.fenceMatches, ev.attemptEpoch, ev.nodeBootEpoch⟩ hg
+        have hp := effectOutboxTransition_phase_of_admissible s ev hadm
+        simp [hp, hadm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨0, 0⟩
+    step := effectOutboxMachineStep
+    progressRequired := fun s ev =>
+      (⟨s.phase, s.delivered, ev.op, ev.fenceMatches, ev.attemptEpoch, ev.nodeBootEpoch⟩ : EffectOutboxCheck).Admissible
+    expectedEffect := fun ev eff => eff == expectedOutboxNextPhase ev.op
+    live := fun s ev h_req => by
+      let chk : EffectOutboxCheck := ⟨s.phase, s.delivered, ev.op, ev.fenceMatches, ev.attemptEpoch, ev.nodeBootEpoch⟩
+      have hg := effectOutboxMetaGate.complete chk h_req
+      have hp := effectOutboxTransition_phase_of_admissible s ev h_req
+      dsimp [effectOutboxMachineStep]
+      rw [hg]
+      simp [hp]
+    traceEvents := [⟨1, 1, 9, 9⟩, ⟨4, 1, 9, 9⟩]
+    posEvent := ⟨5, 1, 9, 9⟩
+    negEvent := ⟨1, 1, 9, 9⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := effectOutboxMachineStep
+    cpuFuel := fun s ev => 8 + ((effectOutboxMachineStep s ev).2).length
+    inputBytes := fun _ => 24
+    outputBytes := fun s ev => 8 + ((effectOutboxMachineStep s ev).2).length
+    c0 := 9
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 9
+    fuel_bound := fun s ev => by
+      have hlen : ((effectOutboxMachineStep s ev).2).length ≤ 1 := by
+        dsimp [effectOutboxMachineStep]; split <;> simp
+      omega
+    eff_bound := fun s ev => by dsimp [effectOutboxMachineStep]; split <;> simp
+    out_bound := fun s ev => by
+      have hlen : ((effectOutboxMachineStep s ev).2).length ≤ 1 := by
+        dsimp [effectOutboxMachineStep]; split <;> simp
+      omega
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+theorem effectOutbox_no_fresh_retry_on_uncertain_and_conservation
+    (delivered fenceMatches : UInt8) (attemptEp bootEp : UInt64) :
+    ((effectOutboxStep 4 delivered 1 fenceMatches attemptEp bootEp &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    ((effectOutboxStep 4 delivered 2 fenceMatches attemptEp bootEp &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    (effectOutboxStep 4 delivered 5 1 9 9 >>> 32).toUInt8 = delivered ∧
+    (effectOutboxStep 1 0 3 1 9 9 >>> 32).toUInt8 = 0 ∧
+    (effectOutboxStep 1 0 2 1 9 9 >>> 32).toUInt8 = 1 := by
+  refine ⟨?_, ?_, ?_, by decide, by decide⟩
+  · unfold effectOutboxStep
+    rw [pack32_lo]
+    cases hf : (fenceMatches == 1 && attemptEp == bootEp && attemptEp != 0) <;>
+      (simp only [hf, Bool.not_true, Bool.not_false, Bool.false_eq_true, ite_true, ite_false]; decide)
+  · unfold effectOutboxStep
+    rw [pack32_lo]
+    cases hf : (fenceMatches == 1 && attemptEp == bootEp && attemptEp != 0) <;>
+      (simp only [hf, Bool.not_true, Bool.not_false, Bool.false_eq_true, ite_true, ite_false]; decide)
+  · unfold effectOutboxStep
+    rw [pack32_hi]
+    have h9 : ((1 : UInt8) == 1 && (9 : UInt64) == 9 && (9 : UInt64) != 0) = true := by decide
+    have hmv : (((5 : UInt8) != 4) = true) := by decide
+    simp only [h9, Bool.not_true, Bool.false_eq_true, ite_false, ite_true]
+    have hd8 : (delivered.toUInt32.toUInt64).toUInt8 = delivered := by
+      apply UInt8.toBitVec_inj.mp
+      apply BitVec.eq_of_getLsbD_eq
+      intro i hi
+      simp [UInt64.toBitVec_toUInt8, UInt32.toBitVec_toUInt64, UInt8.toBitVec_toUInt32, hi,
+        show i < 32 from by omega, show i < 64 from by omega]
+    simp [hd8]
+
+-- ---------------------------------------------------------------------------
+-- R2-A.3 (`G-ORB-2`): Persistent + Volatile Crash-Boundary Conservation (`orb_crash_boundary_step`)
+-- ---------------------------------------------------------------------------
+
+structure CrashBoundaryCheck where
+  durableQueued      : UInt32
+  durableAcked       : UInt32
+  stateRevision      : UInt64
+  volatileInFlight   : UInt32
+  leaseBootEpoch     : UInt64
+  nodeBootEpoch      : UInt64
+  volatileLeaseOwner : UInt32
+  reqOwner           : UInt32
+  deriving Repr, DecidableEq
+
+def CrashBoundaryCheck.Admissible (c : CrashBoundaryCheck) : Bool :=
+  let validWal := decide (c.durableAcked ≤ c.durableQueued) && (c.stateRevision != 0)
+  let unacked := if validWal then c.durableQueued - c.durableAcked else 0
+  let crashReset := c.leaseBootEpoch != c.nodeBootEpoch
+  let effOwner := if crashReset then 0 else c.volatileLeaseOwner
+  let effInFlight := if crashReset then 0 else c.volatileInFlight
+  validWal && decide (0 < unacked) && (c.reqOwner != 0) &&
+  (effOwner == 0 || effOwner == c.reqOwner) && decide (effInFlight < unacked)
+
+theorem crashBoundaryStep_admit_eq (c : CrashBoundaryCheck) :
+    (((crashBoundaryStep c.durableQueued c.durableAcked c.stateRevision c.volatileInFlight
+        c.leaseBootEpoch c.nodeBootEpoch c.volatileLeaseOwner c.reqOwner
+        &&& 0xFFFFFFFF) &&& 256) != 0) = c.Admissible := by
+  unfold CrashBoundaryCheck.Admissible crashBoundaryStep
+  rw [pack32_lo]
+  dsimp only [GT.gt]
+  cases hvw : (decide (c.durableAcked ≤ c.durableQueued) && (c.stateRevision != 0))
+  · simp only [hvw, Bool.false_eq_true, Bool.false_and, Bool.not_false, ite_true, ite_false]
+    decide
+  · simp only [hvw, Bool.true_and, Bool.not_true, Bool.false_eq_true, ite_true, ite_false]
+    cases hcr : (c.leaseBootEpoch != c.nodeBootEpoch)
+    · simp only [hcr, Bool.false_eq_true, ite_false]
+      cases hun : decide ((0 : UInt32) < c.durableQueued - c.durableAcked) <;>
+        cases hzero : (c.durableQueued - c.durableAcked == 0) <;>
+        cases hreq : (c.reqOwner != 0) <;>
+        cases heow : (c.volatileLeaseOwner == 0 || c.volatileLeaseOwner == c.reqOwner) <;>
+        cases hinf : decide (c.volatileInFlight < c.durableQueued - c.durableAcked) <;>
+        cases hno : (c.volatileLeaseOwner != 0) <;>
+        (simp only [hun, hzero, hreq, heow, hinf, hno, Bool.true_and, Bool.false_and,
+          Bool.and_true, Bool.and_false, Bool.false_eq_true, ite_true, ite_false];
+         decide)
+    · simp only [hcr, ite_true]
+      have h00 : ((0 : UInt32) == 0) = true := by decide
+      have ho0 : ((0 : UInt32) == 0 || (0 : UInt32) == c.reqOwner) = true := by simp [h00]
+      have hn0 : ((0 : UInt32) != 0) = false := by decide
+      cases hun : decide ((0 : UInt32) < c.durableQueued - c.durableAcked) <;>
+        cases hzero : (c.durableQueued - c.durableAcked == 0) <;>
+        cases hreq : (c.reqOwner != 0) <;>
+        (simp only [hun, hzero, hreq, ho0, hn0, Bool.true_and, Bool.false_and,
+          Bool.and_true, Bool.and_false, Bool.false_eq_true, ite_true, ite_false];
+         decide)
+
+def crashBoundaryMetaGate : MetaGateSpec CrashBoundaryCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    ((crashBoundaryStep c.durableQueued c.durableAcked c.stateRevision c.volatileInFlight
+        c.leaseBootEpoch c.nodeBootEpoch c.volatileLeaseOwner c.reqOwner
+        &&& 0xFFFFFFFF) &&& 256) != 0
+  sound c hg := by rw [← crashBoundaryStep_admit_eq c]; exact hg
+  complete c hadm := by rw [crashBoundaryStep_admit_eq c]; exact hadm
+  posWitness := ⟨6, 2, 1, 2, 10, 11, 88, 5⟩
+  negWitness := ⟨6, 2, 0, 2, 10, 11, 88, 5⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def crashBoundaryConservedResource : ConservedResource CrashBoundaryCheck :=
+  ⟨crashBoundaryMetaGate.gate,
+   fun c => decide (c.durableAcked ≤ c.durableQueued) && (c.stateRevision != 0),
+   fun c hg => by
+     have hadm := crashBoundaryMetaGate.sound c hg
+     unfold CrashBoundaryCheck.Admissible at hadm
+     revert hadm
+     cases (decide (c.durableAcked ≤ c.durableQueued) && (c.stateRevision != 0)) <;> simp⟩
+
+structure R2WorldState where
+  fence  : EpochFenceState
+  outbox : EffectOutboxState
+  wal    : OutboxWalState
+  deriving Repr, DecidableEq
+
+def fenceSpecBlock : SpecBlock R2WorldState EpochFenceState EpochFenceCheck UInt32 where
+  footprint := ⟨0x01, 0x01⟩
+  project w := w.fence
+  inject w s := { w with fence := s }
+  step := epochFenceMachineStep
+  frame_get _ _ := rfl
+  frame_set w := by cases w; rfl
+
+def outboxSpecBlock : SpecBlock R2WorldState EffectOutboxState EffectOutboxEvent UInt8 where
+  footprint := ⟨0x02, 0x02⟩
+  project w := w.outbox
+  inject w s := { w with outbox := s }
+  step := effectOutboxMachineStep
+  frame_get _ _ := rfl
+  frame_set w := by cases w; rfl
+
+def walSpecBlock : SpecBlock R2WorldState OutboxWalState OutboxReconcileCheck UInt32 where
+  footprint := ⟨0x04, 0x04⟩
+  project w := w.wal
+  inject w s := { w with wal := s }
+  step := outboxMachineStep
+  frame_get _ _ := rfl
+  frame_set w := by cases w; rfl
+
+theorem r2_specBlocks_pairwise_disjoint_and_commute
+    (w : R2WorldState) (ef : EpochFenceCheck) (eo : EffectOutboxEvent) :
+    Footprint.Disjoint fenceSpecBlock.footprint outboxSpecBlock.footprint = true ∧
+    Footprint.Disjoint fenceSpecBlock.footprint walSpecBlock.footprint = true ∧
+    Footprint.Disjoint outboxSpecBlock.footprint walSpecBlock.footprint = true ∧
+    (outboxSpecBlock.liftStep (fenceSpecBlock.liftStep w ef).1 eo).1 =
+      (fenceSpecBlock.liftStep (outboxSpecBlock.liftStep w eo).1 ef).1 := by
+  refine ⟨rfl, rfl, rfl, ?_⟩
+  exact specBlock_orthogonal_commutes fenceSpecBlock outboxSpecBlock
+    (fun _ _ => rfl) (fun _ _ => rfl) (fun _ _ _ => rfl) w ef eo
+
+theorem crashBoundary_conserves_backlog_and_excludes_dual_writers
+    (queued acked inFlight curOwner rivalOwner : UInt32)
+    (rev leaseEp bootEp : UInt64)
+    (h_wal : acked ≤ queued)
+    (h_rev : rev != 0)
+    (h_crash : leaseEp ≠ bootEp)
+    (h_cur_nz : curOwner != 0)
+    (h_rival : rivalOwner ≠ curOwner) :
+    let wCrash := crashBoundaryStep queued acked rev inFlight leaseEp bootEp curOwner rivalOwner
+    let wSame  := crashBoundaryStep queued acked rev inFlight bootEp bootEp curOwner rivalOwner
+    (wCrash >>> 32).toUInt32 + acked = queued ∧
+    ((wCrash &&& 0xFFFFFFFF) &&& 512) = 512 ∧
+    ((wSame &&& 0xFFFFFFFF) &&& 256) = 0 := by
+  have hle : decide (acked ≤ queued) = true := decide_eq_true h_wal
+  have hcr : (leaseEp != bootEp) = true := bne_iff_ne.mpr h_crash
+  have hsame : (bootEp != bootEp) = false := by simp
+  have hneq : (curOwner == rivalOwner) = false := beq_eq_false_iff_ne.mpr (Ne.symm h_rival)
+  have hc0 : (curOwner == 0) = false := by
+    cases hc : (curOwner == 0)
+    · rfl
+    · exfalso
+      have hnz : (curOwner != 0) = false := by
+        simp [bne, hc]
+      exact Bool.noConfusion (h_cur_nz.symm.trans hnz)
+  refine ⟨?_, ?_, ?_⟩
+  · unfold crashBoundaryStep
+    rw [pack32_hi, toUInt32_toUInt64]
+    simp only [hle, h_rev, Bool.true_and, ite_true]
+    exact UInt32.sub_add_cancel queued acked
+  · unfold crashBoundaryStep
+    rw [pack32_lo]
+    simp only [hle, h_rev, hcr, Bool.true_and, Bool.not_true, Bool.false_eq_true, ite_true, ite_false]
+    cases hun : decide ((0 : UInt32) < queued - acked) <;>
+      cases hz : (queued - acked == 0) <;>
+      cases hr : (rivalOwner != 0) <;>
+      cases hro : (if (0 : UInt32) < queued - acked && (rivalOwner != 0) = true then rivalOwner else 0) != 0 <;>
+      (simp_all; try decide)
+  · unfold crashBoundaryStep
+    rw [pack32_lo]
+    simp only [hle, h_rev, hsame, hc0, hneq, Bool.true_and, Bool.or_self, Bool.and_false,
+      Bool.false_and, Bool.not_true, Bool.false_eq_true, ite_false]
+    cases hz : (queued - acked == 0) <;>
+      (simp only [hz, h_cur_nz, ite_true, ite_false]; decide)
+
 end Orb.Spec

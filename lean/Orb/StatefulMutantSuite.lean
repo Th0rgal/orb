@@ -568,4 +568,150 @@ theorem kill_placement_foreign_event_clears_pending :
 #guard ((placementMergeStep 0 1 3 0 0 1 &&& 0xFFFFFFFF) &&& 512) == 0
 #guard ((placementMergeStep 0 1 1 0 1 1 &&& 0xFFFFFFFF) &&& 512) == 0
 
+-- ===========================================================================
+-- Family 10 (`G-ORB-2`): R2-A Epoch Fence, Effect Outbox, Crash Boundary (M29..M37)
+-- ===========================================================================
+
+/-- Mutant 10A (`epochFence`): stale `liveRevision` still matches the durable row. -/
+def mutantEpochFenceStaleRevision (c : EpochFenceCheck) : Bool :=
+  (c.durableOwnerEpoch != 0) &&
+  (c.durableRunGeneration != 0) &&
+  (c.durableBootEpoch != 0) &&
+  (c.durableRevision != 0) &&
+  (c.writerOwnerEpoch == c.durableOwnerEpoch) &&
+  (c.writerOwnerEpoch == c.liveOwnerEpoch) &&
+  (c.liveRunGeneration == c.durableRunGeneration) &&
+  (c.liveBootEpoch == c.durableBootEpoch) &&
+  decide (c.durableRevision < 0xFFFFFFFF)
+
+/-- Mutant 10B (`epochFence`): pre-crash `liveBootEpoch` is treated as current. -/
+def mutantEpochFenceStaleBoot (c : EpochFenceCheck) : Bool :=
+  (c.durableOwnerEpoch != 0) &&
+  (c.durableRunGeneration != 0) &&
+  (c.durableBootEpoch != 0) &&
+  (c.durableRevision != 0) &&
+  (c.writerOwnerEpoch == c.durableOwnerEpoch) &&
+  (c.writerOwnerEpoch == c.liveOwnerEpoch) &&
+  (c.liveRevision == c.durableRevision) &&
+  (c.liveRunGeneration == c.durableRunGeneration) &&
+  decide (c.durableRevision < 0xFFFFFFFF)
+
+/-- Mutant 10C (`epochFence`): saturated revision `0xFFFFFFFF` is still advanced. -/
+def mutantEpochFenceSaturatedWrap (c : EpochFenceCheck) : Bool :=
+  (c.durableOwnerEpoch != 0) &&
+  (c.durableRunGeneration != 0) &&
+  (c.durableBootEpoch != 0) &&
+  (c.durableRevision != 0) &&
+  (c.writerOwnerEpoch == c.durableOwnerEpoch) &&
+  (c.writerOwnerEpoch == c.liveOwnerEpoch) &&
+  (c.liveRevision == c.durableRevision) &&
+  (c.liveRunGeneration == c.durableRunGeneration) &&
+  (c.liveBootEpoch == c.durableBootEpoch)
+
+/-- Mutant 10D (`effectOutbox`): `Claim` retries out of sticky `Uncertain`. -/
+def mutantEffectOutboxFreshRetry (e : EffectOutboxCheck) : Bool :=
+  (e.fenceMatches == 1) &&
+  (e.attemptEpoch == e.nodeBootEpoch) &&
+  (e.attemptEpoch != 0) &&
+  decide (e.phase ≤ 5) &&
+  decide (e.op ≤ 5) &&
+  ((e.op == 0 && (e.phase == 3 || e.phase == 5)) ||
+   (e.op == 1 && (e.phase == 0 || e.phase == 4)) ||
+   (e.op == 2 && e.phase == 1) ||
+   (e.op == 3 && e.phase == 1) ||
+   (e.op == 4 && e.phase == 1) ||
+   (e.op == 5 && e.phase == 4))
+
+/-- Mutant 10E (`effectOutbox`): `Reconcile` fabricates a delivery instead of preserving `s.delivered`. -/
+def mutantEffectOutboxDoubleDelivery (s : EffectOutboxState) (ev : EffectOutboxEvent) : UInt8 :=
+  if ev.fenceMatches == 1 && ev.attemptEpoch == ev.nodeBootEpoch && ev.attemptEpoch != 0 &&
+     s.phase == 4 && ev.op == 5 then 1
+  else s.delivered
+
+/-- Mutant 10F (`effectOutbox`): stale node boot still fences the attempt. -/
+def mutantEffectOutboxStaleBoot (e : EffectOutboxCheck) : Bool :=
+  (e.fenceMatches == 1) &&
+  (e.attemptEpoch != 0) &&
+  decide (e.phase ≤ 5) &&
+  decide (e.op ≤ 5) &&
+  EffectOutboxCheck.ValidTransition e.phase e.op
+
+/-- Mutant 10G (`crashBoundary`): corrupt WAL (`acked > queued`) is treated as valid. -/
+def mutantCrashBoundaryCorruptWal (c : CrashBoundaryCheck) : Bool :=
+  (c.stateRevision != 0) &&
+  decide (0 < c.durableQueued - c.durableAcked) &&
+  (c.reqOwner != 0) &&
+  (c.volatileLeaseOwner == 0 || c.volatileLeaseOwner == c.reqOwner) &&
+  decide (c.volatileInFlight < c.durableQueued - c.durableAcked) &&
+  (c.leaseBootEpoch == c.nodeBootEpoch)
+
+/-- Mutant 10H (`crashBoundary`): volatile lease owner survives a reboot. -/
+def mutantCrashBoundaryLeaseSurvivesReboot (c : CrashBoundaryCheck) : UInt32 :=
+  let validWal := decide (c.durableAcked ≤ c.durableQueued) && (c.stateRevision != 0)
+  let unacked := if validWal then c.durableQueued - c.durableAcked else 0
+  let crashReset := c.leaseBootEpoch != c.nodeBootEpoch
+  let effOwner := c.volatileLeaseOwner
+  let effInFlight := if crashReset then 0 else c.volatileInFlight
+  let canAcquire :=
+    validWal && decide (0 < unacked) && (c.reqOwner != 0) &&
+    (effOwner == 0 || effOwner == c.reqOwner) && decide (effInFlight < unacked)
+  if canAcquire then c.reqOwner else effOwner
+
+/-- Mutant 10I (`crashBoundary`): a second live writer steals an owned lease. -/
+def mutantCrashBoundaryDualWriter (c : CrashBoundaryCheck) : Bool :=
+  let validWal := decide (c.durableAcked ≤ c.durableQueued) && (c.stateRevision != 0)
+  let unacked := if validWal then c.durableQueued - c.durableAcked else 0
+  let crashReset := c.leaseBootEpoch != c.nodeBootEpoch
+  let effInFlight := if crashReset then 0 else c.volatileInFlight
+  validWal && decide (0 < unacked) && (c.reqOwner != 0) && decide (effInFlight < unacked)
+
+theorem kill_epoch_fence_stale_revision :
+    mutantEpochFenceStaleRevision ⟨11, 11, 3, 3, 5, 5, 10, 9, 11⟩ ≠
+      epochFenceMetaGate.gate ⟨11, 11, 3, 3, 5, 5, 10, 9, 11⟩ := by
+  decide
+
+theorem kill_epoch_fence_stale_boot :
+    mutantEpochFenceStaleBoot ⟨11, 11, 3, 3, 6, 5, 10, 10, 11⟩ ≠
+      epochFenceMetaGate.gate ⟨11, 11, 3, 3, 6, 5, 10, 10, 11⟩ := by
+  decide
+
+theorem kill_epoch_fence_saturated_wrap :
+    mutantEpochFenceSaturatedWrap ⟨11, 11, 3, 3, 5, 5, 0xFFFFFFFF, 0xFFFFFFFF, 11⟩ ≠
+      epochFenceMetaGate.gate ⟨11, 11, 3, 3, 5, 5, 0xFFFFFFFF, 0xFFFFFFFF, 11⟩ := by
+  decide
+
+theorem kill_effect_outbox_fresh_retry :
+    mutantEffectOutboxFreshRetry ⟨4, 0, 1, 1, 9, 9⟩ ≠
+      effectOutboxMetaGate.gate ⟨4, 0, 1, 1, 9, 9⟩ := by
+  decide
+
+theorem kill_effect_outbox_double_delivery :
+    mutantEffectOutboxDoubleDelivery ⟨4, 0⟩ ⟨5, 1, 9, 9⟩ ≠
+      (effectOutboxTransition ⟨4, 0⟩ ⟨5, 1, 9, 9⟩).delivered := by
+  decide
+
+theorem kill_effect_outbox_stale_boot :
+    mutantEffectOutboxStaleBoot ⟨1, 0, 2, 1, 8, 9⟩ ≠
+      effectOutboxMetaGate.gate ⟨1, 0, 2, 1, 8, 9⟩ := by
+  decide
+
+theorem kill_crash_boundary_corrupt_wal :
+    mutantCrashBoundaryCorruptWal ⟨2, 5, 1, 0, 9, 9, 0, 7⟩ ≠
+      crashBoundaryMetaGate.gate ⟨2, 5, 1, 0, 9, 9, 0, 7⟩ := by
+  decide
+
+theorem kill_crash_boundary_lease_survives_reboot :
+    mutantCrashBoundaryLeaseSurvivesReboot ⟨5, 2, 1, 0, 8, 9, 4, 7⟩ ≠
+      (if ((crashBoundaryStep 5 2 1 0 8 9 4 7 &&& 0xFFFFFFFF) &&& 256) != 0 then (7 : UInt32) else 0) := by
+  decide
+
+theorem kill_crash_boundary_dual_writer :
+    mutantCrashBoundaryDualWriter ⟨5, 2, 1, 0, 9, 9, 4, 7⟩ ≠
+      crashBoundaryMetaGate.gate ⟨5, 2, 1, 0, 9, 9, 4, 7⟩ := by
+  decide
+
+#guard epochFenceMetaGate.gate ⟨11, 11, 3, 3, 5, 5, 10, 9, 11⟩ == false
+#guard effectOutboxMetaGate.gate ⟨4, 0, 1, 1, 9, 9⟩ == false
+#guard crashBoundaryMetaGate.gate ⟨2, 5, 1, 0, 9, 9, 0, 7⟩ == false
+
 end Orb.StatefulMutantSuite

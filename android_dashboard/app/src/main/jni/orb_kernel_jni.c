@@ -425,3 +425,18 @@ JNIEXPORT jlong JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_orbUtf8Utf16WindowStep(JNIEnv *env, jclass clazz, jint byteIdx, jint byteLen, jint leadByte, jint utf16Units, jint maxUtf16Units) {
     return (jlong)orb_utf8_utf16_window_step((uint32_t)byteIdx, (uint32_t)byteLen, (uint32_t)leadByte, (uint32_t)utf16Units, (uint32_t)maxUtf16Units);
 }
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbEpochFenceStep(JNIEnv *env, jclass clazz, jlong durableOwnerEpoch, jlong liveOwnerEpoch, jlong durableRunGeneration, jlong liveRunGeneration, jlong durableBootEpoch, jlong liveBootEpoch, jint durableRevision, jint liveRevision, jlong writerOwnerEpoch) {
+    return (jlong)orb_epoch_fence_step((uint64_t)durableOwnerEpoch, (uint64_t)liveOwnerEpoch, (uint64_t)durableRunGeneration, (uint64_t)liveRunGeneration, (uint64_t)durableBootEpoch, (uint64_t)liveBootEpoch, (uint32_t)durableRevision, (uint32_t)liveRevision, (uint64_t)writerOwnerEpoch);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbEffectOutboxStep(JNIEnv *env, jclass clazz, jint phase, jint delivered, jint op, jint fenceMatches, jlong attemptEpoch, jlong nodeBootEpoch) {
+    return (jlong)orb_effect_outbox_step((uint8_t)phase, (uint8_t)delivered, (uint8_t)op, (uint8_t)fenceMatches, (uint64_t)attemptEpoch, (uint64_t)nodeBootEpoch);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbCrashBoundaryStep(JNIEnv *env, jclass clazz, jint durableQueued, jint durableAcked, jlong stateRevision, jint volatileInFlight, jlong leaseBootEpoch, jlong nodeBootEpoch, jint volatileLeaseOwner, jint reqOwner) {
+    return (jlong)orb_crash_boundary_step((uint32_t)durableQueued, (uint32_t)durableAcked, (uint64_t)stateRevision, (uint32_t)volatileInFlight, (uint64_t)leaseBootEpoch, (uint64_t)nodeBootEpoch, (uint32_t)volatileLeaseOwner, (uint32_t)reqOwner);
+}

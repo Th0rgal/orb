@@ -1,6 +1,6 @@
 /-
   OrbCore.HostTests: Pure-Lean Host Evidence Test Suite (`0 import Lean`, `0 sorryAx`)
-  verifying all 82 host-evidence test invariants over `OrbCore.HostObservers` and `OrbCore.ConformanceRunner`
+   verifying all 83 host-evidence test invariants over `OrbCore.HostObservers` and `OrbCore.ConformanceRunner`
   with concrete expected C-ABI outputs on distinct admit vs. reject witness vectors (zero reflexive tautologies).
 -/
 import OrbCore.ConformanceRunner
@@ -639,6 +639,20 @@ def wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts (_ : Unit := ())
   (tokenize_unicode61 0 != tokenize_unicode61 1) &&
   (build_search_excerpt_utf16 0 != build_search_excerpt_utf16 1)
 
+def r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrupt_inputs (_ : Unit := ()) : Bool :=
+  -- Matching epoch fences admit `257` and publish `revision + 1` (`11`) in hi32; a stale live revision is rejected with the durable revision unchanged.
+  (callExportU64? "orb_epoch_fence_step" #[11, 11, 3, 3, 5, 5, 10, 10, 11] == some 47244640513) &&
+  (callExportU64? "orb_epoch_fence_step" #[11, 11, 3, 3, 5, 5, 10, 9, 11] == some 42949672962) &&
+  -- A fenced `Accept` moves to phase 2, sets the admitted bit, and delivers exactly once (`hi32 = 1`); `Claim` out of sticky `Uncertain` is refused without delivery.
+  (callExportU64? "orb_effect_outbox_step" #[1, 0, 2, 1, 9, 9] == some 4295098625) &&
+  (callExportU64? "orb_effect_outbox_step" #[4, 0, 1, 1, 9, 9] == some 3) &&
+  -- A consistent WAL reattaches one writer (`257 ||| 1024`) and reports `unacked = 3`; `acked > queued` fails closed.
+  (callExportU64? "orb_crash_boundary_step" #[5, 2, 1, 0, 9, 9, 0, 7] == some 12884903169) &&
+  (callExportU64? "orb_crash_boundary_step" #[2, 5, 1, 0, 9, 9, 0, 7] == some 0) &&
+  (observe_epoch_fence_shadow 0 != observe_epoch_fence_shadow 1) &&
+  (observe_effect_outbox_shadow 0 != observe_effect_outbox_shadow 1) &&
+  (observe_crash_boundary_shadow 0 != observe_crash_boundary_shadow 1)
+
 def runAllHostTests (emitLogPath? : Option String := none) : IO Bool := do
   let cases : Array (String × Bool) := #[
     ("shadow_state_observation_detects_independent_host_poststate_and_effect_divergences", shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ()),
@@ -722,7 +736,8 @@ def runAllHostTests (emitLogPath? : Option String := none) : IO Bool := do
     ("keepalive_only_stream_hits_semantic_deadline_without_resetting_clock", keepalive_only_stream_hits_semantic_deadline_without_resetting_clock ()),
     ("mobile_and_leansys_extensions_roundtrip_via_cabi", mobile_and_leansys_extensions_roundtrip_via_cabi ()),
     ("placement_merge_step_fences_stale_polls_and_advances_monotonically", placement_merge_step_fences_stale_polls_and_advances_monotonically ()),
-    ("wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts", wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts ())
+    ("wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts", wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts ()),
+    ("r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrupt_inputs", r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrupt_inputs ())
   ]
   let mut passed : Nat := 0
   let mut failed : Nat := 0

@@ -3269,4 +3269,116 @@ def modelAccountScore
       if priorityRank ≤ 65535 then priorityRank.toUInt64 else 65535
     entPen ||| quotaPen ||| waitField ||| rankClamped
 
+/--
+  R2-A Epoch Fence (`orb_epoch_fence_step`):
+  Monotone compare-and-swap over `(ownerEpoch, runGeneration, nodeBootEpoch, stateRevision)`.
+  A writer commits only when every live fence field equals the durable row and `stateRevision`
+  has not saturated. Success returns `257` and publishes `stateRevision + 1` in `hi32`.
+  A stale actor, a boot-epoch mismatch, or a saturated revision is rejected and the durable
+  revision is unchanged.
+  Reason codes: `2` stale revision, `3` stale run generation, `4` stale boot epoch,
+  `5` owner mismatch, `6` revision saturated, `0` malformed (`0` epoch/generation/revision).
+-/
+@[inline, export orb_epoch_fence_step]
+def epochFenceStep
+    (durableOwnerEpoch liveOwnerEpoch : UInt64)
+    (durableRunGeneration liveRunGeneration : UInt64)
+    (durableBootEpoch liveBootEpoch : UInt64)
+    (durableRevision liveRevision : UInt32)
+    (writerOwnerEpoch : UInt64) : UInt64 :=
+  let ownerOk : Bool := writerOwnerEpoch == durableOwnerEpoch && writerOwnerEpoch == liveOwnerEpoch
+  let runOk : Bool := liveRunGeneration == durableRunGeneration
+  let bootOk : Bool := liveBootEpoch == durableBootEpoch
+  let revMatch : Bool := liveRevision == durableRevision
+  let revRoom : Bool := durableRevision < 0xFFFFFFFF
+  let shaped : Bool :=
+    durableOwnerEpoch != 0 && durableRunGeneration != 0 && durableBootEpoch != 0 && durableRevision != 0
+  let lo32 : UInt32 :=
+    if !shaped then 0
+    else if !ownerOk then 5
+    else if !revMatch then 2
+    else if !runOk then 3
+    else if !bootOk then 4
+    else if !revRoom then 6
+    else 257
+  let nextRev : UInt32 := if lo32 == 257 then durableRevision + 1 else durableRevision
+  lo32.toUInt64 ||| (nextRev.toUInt64 <<< 32)
+
+/--
+  R2-A Effect Outbox (`orb_effect_outbox_step`):
+  `Planned (0) -> Claimed (1) -> Accepted (2) | RejectedPreCommit (3) | Uncertain (4) -> Reconciled (5)`.
+  `Uncertain` is a sticky fence: `Claim` and `Accept` cannot start a fresh attempt. Only `Reconcile`
+  leaves `Uncertain`, and it lands in `Reconciled` without a second delivery (`deliveredNext` stays `delivered`).
+  `RejectedPreCommit` returns the effect to the durable backlog (`deliveredNext = 0`) so it can be
+  planned again. `Accepted` is the only state that sets `deliveredNext = 1` from a claim.
+  Op codes: `0` Plan, `1` Claim, `2` Accept, `3` RejectPreCommit, `4` MarkUncertain, `5` Reconcile.
+  Returns `lo32 = reason | admittedBit(256) | phaseBit(phase <<< 16)`, `hi32 = deliveredNext`.
+-/
+@[inline, export orb_effect_outbox_step]
+def effectOutboxStep
+    (phase delivered : UInt8)
+    (op : UInt8)
+    (fenceMatches : UInt8)
+    (attemptEpoch nodeBootEpoch : UInt64) : UInt64 :=
+  let fenceOk : Bool := fenceMatches == 1 && attemptEpoch == nodeBootEpoch && attemptEpoch != 0
+  let phaseOk : Bool := phase ≤ 5
+  let opOk : Bool := op ≤ 5
+  let nextPhase : UInt8 :=
+    if !fenceOk then phase
+    else if !phaseOk then phase
+    else if !opOk then phase
+    else if op == 0 then (if phase == 3 then 0 else if phase == 5 then 0 else phase)
+    else if op == 1 then (if phase == 0 then 1 else phase)
+    else if op == 2 then (if phase == 1 then 2 else phase)
+    else if op == 3 then (if phase == 1 then 3 else phase)
+    else if op == 4 then (if phase == 1 then 4 else phase)
+    else if op == 5 then (if phase == 4 then 5 else phase)
+    else phase
+  let moved : Bool := nextPhase != phase
+  let deliveredNext : UInt8 :=
+    if !moved then delivered
+    else if nextPhase == 2 then 1
+    else if nextPhase == 0 || nextPhase == 3 then 0
+    else delivered
+  let freshRetry : Bool := (op == 1 || op == 2) && phase == 4
+  let lo32 : UInt32 :=
+    if !fenceOk then 4
+    else if !phaseOk || !opOk then 0
+    else if freshRetry then 3
+    else if moved then (257 : UInt32) ||| (nextPhase.toUInt32 <<< 16)
+    else 2
+  lo32.toUInt64 ||| (deliveredNext.toUInt32.toUInt64 <<< 32)
+
+/--
+  R2-A Crash-Boundary Conservation (`orb_crash_boundary_step`, `G-ORB-2`):
+  Persistent `durableQueued`, `durableAcked`, and `stateRevision` survive a boot-epoch change.
+  Volatile `inFlight` and `leaseOwner` are wiped when `leaseBootEpoch ≠ nodeBootEpoch`.
+  A corrupt WAL (`durableAcked > durableQueued`) fails closed (`lo32 = 0`). Otherwise the word
+  publishes `unacked = queued - acked` in `hi32`, `crashBit = 512` on reboot, and `writerBit = 1024`
+  only for the single reattached owner. No message is both lost and newly delivered: `deliveredDelta = 0`.
+-/
+@[inline, export orb_crash_boundary_step]
+def crashBoundaryStep
+    (durableQueued durableAcked : UInt32)
+    (stateRevision : UInt64)
+    (volatileInFlight : UInt32)
+    (leaseBootEpoch nodeBootEpoch : UInt64)
+    (volatileLeaseOwner reqOwner : UInt32) : UInt64 :=
+  let validWal : Bool := durableAcked ≤ durableQueued && stateRevision != 0
+  let unacked : UInt32 := if validWal then durableQueued - durableAcked else 0
+  let crashReset : Bool := leaseBootEpoch != nodeBootEpoch
+  let effOwner : UInt32 := if crashReset then 0 else volatileLeaseOwner
+  let effInFlight : UInt32 := if crashReset then 0 else volatileInFlight
+  let canAcquire : Bool :=
+    validWal && unacked > 0 && reqOwner != 0 &&
+    (effOwner == 0 || effOwner == reqOwner) && effInFlight < unacked
+  let nextOwner : UInt32 := if canAcquire then reqOwner else effOwner
+  let writerBit : UInt32 := if nextOwner != 0 then 1024 else 0
+  let crashBit : UInt32 := if crashReset then 512 else 0
+  let lo32 : UInt32 :=
+    if !validWal then 0
+    else if canAcquire then 257 ||| crashBit ||| writerBit
+    else (if unacked == 0 then 2 else 3) ||| crashBit ||| writerBit
+  lo32.toUInt64 ||| (unacked.toUInt64 <<< 32)
+
 end Orb.Kernel

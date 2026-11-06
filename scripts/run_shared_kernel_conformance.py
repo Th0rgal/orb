@@ -33,6 +33,7 @@ REQUIRED_ADAPTERS = ("rust_orb_spec", "jni_x86_64", "projection_invariants")
 MUTATION_FAMILIES = (
     "mission_merge_hierarchy", "transcript_reducer_streaming", "durable_outbox_queue_leases",
     "provider_attempt_lifecycle", "authorization", "scheduling_resources", "incremental_parsing_scroll",
+    "r2a_epoch_fence", "r2a_effect_outbox", "r2a_crash_boundary",
 )
 
 
@@ -359,6 +360,25 @@ DOMAIN_MUTANTS = (
      "Orb.MutantSuite.kill_m20_streamCommit_commitsInsideOpenFence", [0, 1, 3, 1, 0, 0, 0, 10, 4]),
     ("m21", "orb_mut_m21", "incremental_parsing_scroll", "orb_scroll_epoch_step",
      "Orb.MutantSuite.kill_m21_scrollEpoch_doubleCorrectionInEpoch", [5, 5, 1, 1, 0, 480, 320]),
+    ("m22", "orb_mut_m22", "r2a_epoch_fence", "orb_epoch_fence_step",
+     "Orb.MutantSuite.kill_m22_epochFence_staleRevisionAccepted", [11, 11, 3, 3, 5, 5, 10, 9, 11]),
+    ("m23", "orb_mut_m23", "r2a_epoch_fence", "orb_epoch_fence_step",
+     "Orb.MutantSuite.kill_m23_epochFence_staleBootEpochAccepted", [11, 11, 3, 3, 6, 5, 10, 10, 11]),
+    ("m24", "orb_mut_m24", "r2a_epoch_fence", "orb_epoch_fence_step",
+     "Orb.MutantSuite.kill_m24_epochFence_saturatedRevisionWraps",
+     [11, 11, 3, 3, 5, 5, 0xFFFFFFFF, 0xFFFFFFFF, 11]),
+    ("m25", "orb_mut_m25", "r2a_effect_outbox", "orb_effect_outbox_step",
+     "Orb.MutantSuite.kill_m25_effectOutbox_uncertainFreshRetry", [4, 0, 1, 1, 9, 9]),
+    ("m26", "orb_mut_m26", "r2a_effect_outbox", "orb_effect_outbox_step",
+     "Orb.MutantSuite.kill_m26_effectOutbox_reconcileDoubleDelivers", [4, 0, 5, 1, 9, 9]),
+    ("m27", "orb_mut_m27", "r2a_effect_outbox", "orb_effect_outbox_step",
+     "Orb.MutantSuite.kill_m27_effectOutbox_unfencedBootCommit", [1, 0, 2, 1, 8, 9]),
+    ("m28", "orb_mut_m28", "r2a_crash_boundary", "orb_crash_boundary_step",
+     "Orb.MutantSuite.kill_m28_crashBoundary_corruptWalAdmitted", [2, 5, 1, 0, 9, 9, 0, 7]),
+    ("m29", "orb_mut_m29", "r2a_crash_boundary", "orb_crash_boundary_step",
+     "Orb.MutantSuite.kill_m29_crashBoundary_volatileLeaseSurvivesReboot", [5, 2, 1, 0, 8, 9, 4, 7]),
+    ("m30", "orb_mut_m30", "r2a_crash_boundary", "orb_crash_boundary_step",
+     "Orb.MutantSuite.kill_m30_crashBoundary_dualWriterSteal", [5, 2, 1, 0, 9, 9, 4, 7]),
 )
 
 
@@ -385,7 +405,7 @@ def public_export_functions(manifest):
     # `internal` also marks public-prefix steppers not exposed to mobile.
     # The roadmap includes those steppers; exclude only the compiler helper.
     functions = [f for f in manifest["functions"] if f["name"].startswith(("orb_", "leansys_"))]
-    if len(functions) != 163 or len(manifest["functions"]) != 164:
+    if len(functions) != 166 or len(manifest["functions"]) != 167:
         raise ValueError("public export inventory changed; qualify the new surface explicitly")
     return functions
 
@@ -791,7 +811,7 @@ for c in json.loads(Path(sys.argv[3]).read_text()):
         report["loop_alias_rc"] = {"status": "BLOCKED", "reason": str(error)}
         qualification_failed |= isinstance(error, (RowFailure, ValueError))
 
-    # 3. Scalar bit-flip & 21 Lean-witnessed domain mutants across all 7 roadmap families.
+    # 3. Scalar bit-flip & 30 Lean-witnessed domain mutants across all 10 roadmap families.
     report["mutation_checks"] = {}
     try:
         # Rename the real target, then interpose a bit-flipping forwarding shim.
