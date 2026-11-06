@@ -723,6 +723,17 @@ final class OrbWarmSyncCoordinator {
     func notePresentationHint(missionId: String, kind: String?, btwParentId: String?) {
         ensureScope()
         if let btwParentId, !btwParentId.isEmpty {
+            if !missionId.isEmpty {
+                let sKey = OrbBtwConfig.sessionKey(btwParentId)
+                let known = OrbBtwStore.peek(btwParentId)?.boundID ?? UserDefaults.standard.string(forKey: sKey)
+                if known != missionId {
+                    UserDefaults.standard.set(missionId, forKey: sKey)
+                    OrbBtwStore.peek(btwParentId)?.noteExternalSessionHint(missionId: missionId)
+                    dirtyBtwParents.insert(btwParentId)
+                    checkedCleanBtwParents.remove(btwParentId)
+                    reconcile()
+                }
+            }
             if let store = OrbBtwStore.peek(btwParentId), store.isWarmCaughtUp {
                 if kind == "mission_status" {
                     Task { try? await store.refreshStatusOnly() }
@@ -895,6 +906,25 @@ final class OrbWarmSyncCoordinator {
                   let cachedMission = OrbReadCache.read("mission:\(missionId)"),
                   case var .object(fields) = cachedMission {
             fields["status"] = .string(newStatus)
+            if let summary = data["summary"] as? String, !summary.isEmpty {
+                fields["status_message"] = .string(summary)
+            }
+            OrbReadCache.seed("mission:\(missionId)", value: .object(fields))
+        } else if type == "mission_settings_updated",
+                  let cachedMission = OrbReadCache.read("mission:\(missionId)"),
+                  case var .object(fields) = cachedMission {
+            for k in ["backend", "agent", "model_override", "model_effort", "service_tier", "config_profile", "session_id", "updated_at"] {
+                if let val = data[k] {
+                    if let s = val as? String {
+                        fields[k] = .string(s)
+                    } else if val is NSNull {
+                        fields[k] = .null
+                    }
+                }
+            }
+            if let fast = data["fast_mode"] as? Bool {
+                fields["fast_mode"] = .bool(fast)
+            }
             OrbReadCache.seed("mission:\(missionId)", value: .object(fields))
         }
 

@@ -368,6 +368,19 @@ final class OrbBtwStore {
         syncStreamSubscription()
     }
 
+    func noteExternalSessionHint(missionId: String) {
+        guard !missionId.isEmpty else { return }
+        if boundID != missionId {
+            UserDefaults.standard.set(missionId, forKey: OrbBtwConfig.sessionKey(parent))
+            if boundID == nil {
+                bound = .object(["id": .string(missionId), "status": .string("running")])
+            }
+            if warmFollowWanted {
+                syncStreamSubscription()
+            }
+        }
+    }
+
     /// Concurrent callers share one refresh.
     func refresh(force: Bool = false) async throws {
         if !force && loaded && !running && OrbWarmSyncCoordinator.shared.canSkipBtwServerCrawl(parentId: parent) {
@@ -435,13 +448,14 @@ final class OrbBtwStore {
             }
             let priorEvents = eventCache[id]?.events
             let sinceSeq = priorEvents?.map(\.sequence).max()
+            let typesFilter: [String]? = live ? nil : ["user_message", "assistant_message", "assistant_message_canonical"]
             reads.append((id, stamp, Task {
                 if let priorEvents, let sinceSeq,
-                   let delta = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 1000, sinceSeq: sinceSeq).events,
+                   let delta = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: typesFilter, limit: 1000, sinceSeq: sinceSeq).events,
                    let merged = OrbBtwThreads.mergeEvents(existing: priorEvents, delta: delta) {
                     return merged
                 }
-                return try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 1000).events
+                return try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: typesFilter, limit: 1000).events
             }))
         }
         for read in reads {
@@ -1025,7 +1039,7 @@ struct OrbSideQuestionSheet: View {
         }
         do {
             if !store.loaded { try await store.refresh() }
-            let parent = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(parentID))")
+            let parent = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(parentID))?include_history=false")
             if parent["tags"].items.contains(where: { $0.text == "placement:client" }) {
                 throw OrbHTTPError(status: 409, detail: "This conversation runs on a computer. Ask side questions from Orb on that computer.")
             }

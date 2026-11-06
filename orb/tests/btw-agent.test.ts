@@ -27,7 +27,7 @@ it('creates a distinct side agent and never sends to the parent',async()=>{
  await askBtwAgent('parent','Inspect the repo','Main context',[],new AbortController().signal,e=>events.push(e));
  expect(api).toHaveBeenCalledWith('/api/control/missions/parent/btw/agent',expect.objectContaining({body:expect.stringContaining('builtin/smart')}));
  // Placement must come from Core, never a pre-transfer local-origin row.
- expect(getMission).toHaveBeenCalledWith('parent',{coreOnly:true});
+ expect(getMission).toHaveBeenCalledWith('parent',{coreOnly:true,includeHistory:false});
  expect(btwSession('parent')?.id).toBe('child');expect(events.at(-1).type).toBe('done');expect(sendMissionMessage).not.toHaveBeenCalled();
  const {getMissionEvents}=await import('../src/stream');
  vi.mocked(getMissionEvents).mockResolvedValueOnce([]);
@@ -48,7 +48,17 @@ it('follows multiple recovered side missions with a fresh sequence boundary',asy
  expect(btwSession('recovered-parent')).toMatchObject({id:'new-side',baseline:0,active:false});
  expect(btwSession('recovered-parent')?.afterSequence).toBeUndefined();
  expect(getMissionEvents).toHaveBeenCalledWith('new-side',expect.objectContaining({enough:expect.any(Function)}));
- expect(streamMission).toHaveBeenCalledWith('new-side',expect.any(Function),expect.any(Function));
+ expect(streamMission).toHaveBeenCalledWith(
+  'new-side',
+  expect.any(Function),
+  expect.any(Function),
+  expect.any(Function),
+  undefined,
+  expect.any(Function),
+  expect.any(Function),
+  undefined,
+  expect.any(Function),
+ );
  expect(events.at(-1)).toEqual({type:'done',answer:'Recovered answer'});
 });
 
@@ -1013,8 +1023,8 @@ it('arms startFreshBtwSession across server reconciles and polls live /btw threa
  await reconcileBtwServerHistory('fresh-parent',[]);
  await reconcileBtwServerHistory('fresh-parent',[]);
  expect(eventCalls.slice(0,2)).toEqual([
-  {id:'live-side',opts:{view:'history'}},
-  {id:'live-side',opts:{view:'history',since:1}},
+  {id:'live-side',opts:{view:'history',types:'user_message,assistant_message,assistant_message_canonical,text_delta'}},
+  {id:'live-side',opts:{view:'history',types:'user_message,assistant_message,assistant_message_canonical,text_delta',since:1}},
  ]);
  liveStatus='completed';
  const settled=await reconcileBtwServerHistory('fresh-parent',[]);
@@ -1184,7 +1194,7 @@ it('recovers known btwSession by direct getMission lookup when omitted from the 
   ];
  });
  const res=await reconcileBtwServerHistory('06203bdc-3543-483e-a8c5-3bf20eb5c34a',[]);
- expect(getMission).toHaveBeenCalledWith('1013a4da-ba7a-4628-91a7-0c859b78438c',{coreOnly:true});
+ expect(getMission).toHaveBeenCalledWith('1013a4da-ba7a-4628-91a7-0c859b78438c',{coreOnly:true,includeHistory:false});
  expect(res.history.map(h=>h.answer)).toEqual(['First status.','Merge queue explanation.']);
 
  // Duplicate question disambiguation ("and now?" asked a second time):

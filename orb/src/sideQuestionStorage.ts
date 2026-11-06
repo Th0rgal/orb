@@ -28,12 +28,22 @@ export function sideQuestionKey(mission: string): string {
   } catch { account = 'authenticated'; }
   return `orb.btw:v1:${JSON.stringify([getApiUrl().replace(/\/+$/, ''), account, mission])}`;
 }
-// Last known open/closed state per thread, so a mission switch can place the dock in the
-// same frame as the transcript instead of after the async storage read.
+// Last known open/closed state and full saved payload per thread, so a mission switch
+// can hydrate the /btw dock in the same frame as the transcript instead of flashing
+// empty or waiting on an async IndexedDB read.
 const openHints = new Map<string, boolean>();
 const forcedOpen = new Set<string>();
+const savedCache = new Map<string, SavedSideQuestion>();
 export function peekSideQuestionOpen(key: string): boolean | undefined {
   return forcedOpen.has(key) ? true : openHints.get(key);
+}
+export function peekSavedSideQuestion(key: string): SavedSideQuestion | undefined {
+  return savedCache.get(key);
+}
+export function resetSideQuestionStorageForTest(): void {
+  openHints.clear();
+  forcedOpen.clear();
+  savedCache.clear();
 }
 export function hintSideQuestionOpen(key: string): void {
   forcedOpen.add(key);
@@ -74,19 +84,34 @@ function normalizeSavedSideQuestion(value: SavedSideQuestion | undefined): Saved
     queue: Array.isArray(value.queue) ? value.queue.filter((v: QueuedSideQuestion) => typeof v?.id === 'string' && typeof v?.question === 'string').slice(0, 20) : [],
   };
 }
+function cacheSavedSideQuestion(key: string, normalized: SavedSideQuestion): void {
+  savedCache.delete(key);
+  savedCache.set(key, normalized);
+  while (savedCache.size > 64) {
+    const oldest = savedCache.keys().next().value;
+    if (oldest === undefined) break;
+    savedCache.delete(oldest);
+  }
+  openHints.set(key, Boolean(normalized.open));
+}
 export async function readSideQuestion(key: string): Promise<SavedSideQuestion | undefined> {
   return withSideQuestionLock(key, async () => {
     try {
       const raw = await drafts.readSideThread<SavedSideQuestion>(key).catch(() => undefined) ?? readLegacySideQuestion(key);
       const normalized = normalizeSavedSideQuestion(raw);
-      if (!normalized) return undefined;
-      openHints.set(key, Boolean(normalized.open));
+      if (!normalized) {
+        savedCache.delete(key);
+        return undefined;
+      }
+      cacheSavedSideQuestion(key, normalized);
       return normalized;
     } catch { return undefined; }
   });
 }
 export async function writeSideQuestion(key: string, value: SavedSideQuestion): Promise<boolean> {
-  openHints.set(key, Boolean(value.open));
+  const normalized = normalizeSavedSideQuestion(value);
+  if (normalized) cacheSavedSideQuestion(key, normalized);
+  else openHints.set(key, Boolean(value.open));
   return withSideQuestionLock(key, async () => {
     try {
       await drafts.saveSideThread(key, value);
@@ -145,7 +170,8 @@ export async function reconcileSavedSideQuestion(
         }
       }
       if (updated && nextValue) {
-        openHints.set(key, Boolean(nextValue.open));
+        const normalized = normalizeSavedSideQuestion(nextValue) ?? nextValue;
+        cacheSavedSideQuestion(key, normalized);
         localStorage.removeItem(key);
       }
       return updated;

@@ -7,14 +7,14 @@ import {prepareBtwContext,type ConversationCursor} from './btwContext';
 import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion,isTransientNetworkError} from './api';
 import {note} from './diagnostics';
 import {btwConfig} from './btwSettings';
-import {reconcileSavedSideQuestion,sideQuestionKey,BTW_HISTORY_LIMIT} from './sideQuestionStorage';
+import {reconcileSavedSideQuestion,resetSideQuestionStorageForTest,sideQuestionKey,BTW_HISTORY_LIMIT} from './sideQuestionStorage';
 import {forkSource} from './missionTree';
 import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
 import {enqueueLocalMessage,queuedLocalMessages} from './localMessageQueue';
 import {extractBtwAttachmentPaths,extractBtwUserQuestion as extractBtwQuestion,replaceBtwUserQuestion as replaceBtwQuestion} from './messagePresentation';
-import {getMissionEvents,isMultiplexSyncActive,storedToStream,streamMission,type StoredEvent} from './stream';
+import {getMissionEvents,isMultiplexSyncActive,storedToStream,type StoredEvent,type StreamEvent} from './stream';
 import {isBackgroundSyncActive,onBackgroundSyncActiveChange} from './backgroundSync';
-import {warmRecentMissionIds} from './missionCache';
+import {attachMissionStream,reconcileWarmSubscriptions,registerWarmBtwTargets,warmRecentMissionIds} from './missionCache';
 import {TranscriptReducer,type StreamItem} from './transcriptModel';
 const [agentItems,setAgentItems]=createSignal<Record<string,StreamItem[]>>({});
 export function btwItems(parent:string){const s=btwSession(parent);return s?agentItems()[s.id]??[]:[];}
@@ -157,7 +157,7 @@ async function currentSide(parent:string,s:BtwSession,signal?:AbortSignal,versio
  const seen=new Set<string>();
  const check=()=>{if(version!==connectionVersion())throw new Error('Connection changed.');if(signal?.aborted)throw new Error('Side question cancelled.');};
  check();
- let mission=await getMission(s.id);check();
+ let mission=await getMission(s.id,{includeHistory:false});check();
  for(let hop=0;hop<16;hop++){
   seen.add(mission.id);
   const next=mission.tags?.find(tag=>tag.startsWith('superseded_by:'))?.slice('superseded_by:'.length);
@@ -166,7 +166,7 @@ async function currentSide(parent:string,s:BtwSession,signal?:AbortSignal,versio
    return mission;
   }
   if(seen.has(next))throw new Error('Side session recovery contains a cycle.');
-  mission=await getMission(next).catch(error=>{
+  mission=await getMission(next,{includeHistory:false}).catch(error=>{
    // A missing replacement is not proof that the saved side session was deleted.
    if(error instanceof ApiError&&error.status===404)throw new Error('Recovered side session is unavailable (404). Retry after recovery finishes.');
    throw error;
@@ -201,7 +201,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   if(signal.aborted||connectionVersion()!==version)return;
   await Promise.all([
    reconcileLocalRun(s.id),
-   getMission(s.id).then(m=>{if(connectionVersion()===version&&ACTIVE.includes(m.status))follow(s.id);}).catch(swallow("btw.watchStatus", { mission: s.id })),
+   getMission(s.id,{includeHistory:false}).then(m=>{if(connectionVersion()===version&&ACTIVE.includes(m.status))follow(s.id);}).catch(swallow("btw.watchStatus", { mission: s.id })),
   ]);
   if(signal.aborted||connectionVersion()!==version)return;
   // The native receipt owns completion; Core synchronization must not keep the UI busy.
@@ -240,7 +240,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   if(streamId!==undefined)publish(streamed);
   const id=s.id;streamId=id;
   setLiveThoughts(all=>({...all,[id]:[]}));
-  stopStream=streamMission(id,event=>{
+  const handleWatchEvent=(event:StreamEvent)=>{
    if(id!==s.id||signal.aborted||connectionVersion()!==version)return;
    if(event.type==='user_message'&&event.data?.queued!==true){
     live=new TranscriptReducer();streamed={answer:'',narration:[]};
@@ -253,7 +253,14 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
    if(streamed.answer)publish(streamed);
    if(event.type==='mission_status_changed'||event.type==='status')wake?.();
    setLiveThoughts(all=>({...all,[id]:thoughtsOf(live.items).map(item=>({...item}))}));
-  },()=>{});
+  };
+  stopStream=attachMissionStream(id,{
+   onEvent:handleWatchEvent,
+   onBatch:evs=>{for(const ev of evs)handleWatchEvent(ev);},
+   onLagged:()=>wake?.(),
+   onReady:()=>{},
+   onDisconnected:()=>{},
+  },{initialSinceSeq:s.lastSequence});
  };
  const abortWake=()=>wake?.();signal.addEventListener('abort',abortWake);
  try{
@@ -433,7 +440,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   // Placement decides where the snapshot is written. getMission falls back to
   // this computer's origin journal when Core is slow, and that journal still
   // says placement:client after a transfer, so read Core's record directly.
-  const source=await getMission(parent,{coreOnly:true}),config=btwConfig();
+  const source=await getMission(parent,{coreOnly:true,includeHistory:false}),config=btwConfig();
   const machine=source.machine_transfer?.destination;
   let local=machine?machine.kind==='client':source.tags?.includes('placement:client')??false;
   const node=machine?.kind==='node'?machine.id:machine?.kind==='core'?undefined:missionAssignedNode(source);
@@ -582,7 +589,7 @@ export async function queueBtwFollowUp(
  if(!s)throw new Error('No active side session to queue onto.');
  const [current, source] = await Promise.all([
   currentSide(parent,s,undefined,version),
-  getMission(parent,{coreOnly:true}),
+  getMission(parent,{coreOnly:true,includeHistory:false}),
  ]);
  const config=btwConfig();
  const machine=source.machine_transfer?.destination;
@@ -663,6 +670,7 @@ export async function queueBtwFollowUp(
  * id: its /btw tab is the same tab. Returns `parent` then the versions it
  * continues, newest first. */
 const chains=new Map<string,Promise<string[]>>();
+const BTW_EVENT_TYPES='user_message,assistant_message,assistant_message_canonical,text_delta';
 export function btwThreadChain(parent:string):Promise<string[]>{
  const key=`${connectionVersion()}:${parent}`;
  let chain=chains.get(key);
@@ -670,7 +678,7 @@ export function btwThreadChain(parent:string):Promise<string[]>{
   chain=(async()=>{
    const ids=[parent];
    for(let id=parent;ids.length<16;){
-    const mission=await getMission(id,{coreOnly:true}).catch(err=>{
+    const mission=await getMission(id,{coreOnly:true,includeHistory:false}).catch(err=>{
      if(err instanceof ApiError&&err.status===404)return {} as Mission;
      throw err;
     });
@@ -744,8 +752,8 @@ function parseBtwThread(m:Mission,events:StoredEvent[]):Omit<ParsedBtwThread,'st
 export async function reconnectBtwSession(parent:string,sideId:string):Promise<BtwSession>{
  const existing=btwSession(parent);
  const [mission, events]=await Promise.all([
-  getMission(sideId,{coreOnly:true}),
-  getMissionEvents(sideId,{view:'history'}).catch(()=>[] as StoredEvent[]),
+  getMission(sideId,{coreOnly:true,includeHistory:false}),
+  getMissionEvents(sideId,{view:'history',types:BTW_EVENT_TYPES}).catch(()=>[] as StoredEvent[]),
  ]);
  const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
  let question=existing?.id===mission.id?existing.question:'';
@@ -785,6 +793,9 @@ type WarmBtwEntry = {
  history: SideExchange[];
  activeSession?: BtwSession;
  latest?: string;
+ latestMission?: Mission;
+ baseHistory?: SideExchange[];
+ caughtUp: boolean;
  dirty: boolean;
  followingId?: string;
  stopFollow?: () => void;
@@ -793,7 +804,76 @@ type WarmBtwEntry = {
 
 const warmBtwByParent = new Map<string, WarmBtwEntry>();
 const pendingDirtyBtwParents = new Set<string>();
+const openBtwPanelRefs = new Map<string, number>();
 const warmBtwKey = (parent: string) => `${connectionVersion()}:${parent}`;
+
+export function noteBtwPanelOpen(parent: string, open: boolean): () => void {
+ if (!open || !parent) return () => {};
+ const ver = connectionVersion();
+ const k = `${ver}:${parent}`;
+ openBtwPanelRefs.set(k, (openBtwPanelRefs.get(k) ?? 0) + 1);
+ reconcileWarmSubscriptions();
+ return () => {
+  const cur = openBtwPanelRefs.get(k) ?? 0;
+  if (cur <= 1) openBtwPanelRefs.delete(k);
+  else openBtwPanelRefs.set(k, cur - 1);
+  reconcileWarmSubscriptions();
+ };
+}
+
+function getOpenBtwParentIds(ver: number): string[] {
+ const prefix = `${ver}:`;
+ const out: string[] = [];
+ for (const [k, refs] of openBtwPanelRefs) {
+  if (refs > 0 && k.startsWith(prefix)) {
+   out.push(k.slice(prefix.length));
+  }
+ }
+ return out;
+}
+
+function getKnownWarmBtwTargets(): {
+ btwByParent: Record<string, string | undefined>;
+ openBtwParentIds: string[];
+} {
+ const ver = connectionVersion();
+ const prefix = `${ver}:`;
+ const btwByParent: Record<string, string | undefined> = {};
+ for (const [k, entry] of warmBtwByParent) {
+  if (entry.connVer === ver && entry.latest) {
+   btwByParent[entry.parent] = entry.latest;
+  }
+ }
+ const candidates = new Set<string>([...warmRecentMissionIds(false), ...getOpenBtwParentIds(ver)]);
+ for (const parent of candidates) {
+  if (!btwByParent[parent]) {
+   const saved = btwSession(parent);
+   if (saved?.id) btwByParent[parent] = saved.id;
+  }
+ }
+ for (const k of pendingDirtyBtwParents) {
+  if (k.startsWith(prefix)) {
+   const parent = k.slice(prefix.length);
+   if (!btwByParent[parent]) {
+    const saved = btwSession(parent);
+    if (saved?.id) btwByParent[parent] = saved.id;
+   }
+  }
+ }
+ return {
+  btwByParent,
+  openBtwParentIds: getOpenBtwParentIds(ver),
+ };
+}
+
+export function clearStaleBtwSessionActive(parent: string): void {
+ const existing = btwSession(parent);
+ if (existing?.active) {
+  const next: BtwSession = { ...existing, active: false };
+  delete next.startedAt;
+  save(parent, next);
+ }
+}
 
 export function peekWarmBtwState(
  parent: string,
@@ -814,7 +894,8 @@ export function updateWarmBtwHistory(
  activeSession?: BtwSession,
  latest?: string,
 ): void {
- const k = warmBtwKey(parent);
+ const ver = connectionVersion();
+ const k = `${ver}:${parent}`;
  const existing = warmBtwByParent.get(k);
  if (existing) {
   if (history.length >= existing.history.length) existing.history = history;
@@ -822,11 +903,12 @@ export function updateWarmBtwHistory(
   if (latest !== undefined) existing.latest = latest;
  } else {
   warmBtwByParent.set(k, {
-   connVer: connectionVersion(),
+   connVer: ver,
    parent,
    history,
    activeSession,
    latest,
+   caughtUp: false,
    dirty: true,
   });
  }
@@ -838,7 +920,25 @@ function noteWarmBtwSessionStarted(parent: string, session: BtwSession): void {
  const k = `${ver}:${parent}`;
  const existing = warmBtwByParent.get(k);
  if (existing) {
+  if (existing.latest && existing.latest !== session.id) {
+   existing.baseHistory = [...existing.history];
+  }
   existing.latest = session.id;
+  existing.latestMission = {
+   ...(existing.latestMission?.id === session.id
+    ? existing.latestMission
+    : {
+       id: session.id,
+       title: null,
+       history: [],
+       created_at: session.startedAt || new Date().toISOString(),
+       updated_at: new Date().toISOString(),
+      }),
+   status: session.active ? "active" : "completed",
+   backend: session.harness,
+   model_override: session.model,
+   tags: [`btw-parent:${parent}`, ...(session.local ? ["placement:client"] : [])],
+  };
   if (session.active) existing.activeSession = session;
   existing.dirty = true;
  } else {
@@ -848,6 +948,19 @@ function noteWarmBtwSessionStarted(parent: string, session: BtwSession): void {
    history: [],
    activeSession: session.active ? session : undefined,
    latest: session.id,
+   latestMission: {
+    id: session.id,
+    status: session.active ? "active" : "completed",
+    title: null,
+    history: [],
+    backend: session.harness,
+    model_override: session.model,
+    tags: [`btw-parent:${parent}`, ...(session.local ? ["placement:client"] : [])],
+    created_at: session.startedAt || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+   },
+   baseHistory: [],
+   caughtUp: false,
    dirty: true,
   });
  }
@@ -871,7 +984,10 @@ function recordWarmBtwTurnCompleted(
  }
  existing.activeSession = nextActive;
  if (latestId) existing.latest = latestId;
- existing.dirty = true;
+ if (!nextActive && existing.latestMission && (!latestId || existing.latestMission.id === latestId)) {
+  existing.latestMission = { ...existing.latestMission, status: "completed" };
+ }
+ existing.dirty = !existing.caughtUp;
  reconcileWarmBtwFollows();
 }
 
@@ -883,64 +999,318 @@ function scheduleWarmBtwRefresh(entry: WarmBtwEntry): void {
  }, 300);
 }
 
-export function reconcileWarmBtwFollows(): void {
- const ver = connectionVersion();
- const bgActive =
-  isMultiplexSyncActive() &&
-  isBackgroundSyncActive() &&
-  (typeof document === "undefined" || document.visibilityState !== "hidden");
- const warmParents = bgActive ? new Set(warmRecentMissionIds()) : new Set<string>();
- for (const [k, entry] of [...warmBtwByParent]) {
-  if (entry.connVer !== ver) {
-   entry.stopFollow?.();
-   if (entry.refreshTimer) clearTimeout(entry.refreshTimer);
-   warmBtwByParent.delete(k);
+function reduceLiveBtwStreamEvents(
+ entry: WarmBtwEntry,
+ childMissionId: string,
+ evs: StreamEvent[],
+): void {
+ if (!evs.length) return;
+ const ver = entry.connVer;
+ if (ver !== connectionVersion()) return;
+ const cacheKey = `${ver}:${childMissionId}`;
+ let known = liveThreadEventCache.get(cacheKey);
+ if (!known) {
+  known = new Map<number, StoredEvent>();
+  liveThreadEventCache.set(cacheKey, known);
+  while (liveThreadEventCache.size > 64) {
+   const oldest = liveThreadEventCache.keys().next().value;
+   if (oldest === undefined) break;
+   liveThreadEventCache.delete(oldest);
+  }
+ }
+
+ let relevant = false;
+ let statusChangedTo: string | undefined;
+
+ for (const ev of evs) {
+  if (ev.type === "mission_status_changed" && typeof ev.data.status === "string" && ev.data.status) {
+   statusChangedTo = ev.data.status;
+   relevant = true;
    continue;
   }
-  const wantFollowId = bgActive && warmParents.has(entry.parent) ? entry.latest : undefined;
-  if (!wantFollowId) {
-   if (entry.stopFollow) {
-    entry.stopFollow();
-    entry.stopFollow = undefined;
-    entry.followingId = undefined;
+  if (ev.type === "text_delta") {
+   const delta = typeof ev.data.content === "string" ? ev.data.content : "";
+   if (!delta) continue;
+   let prevDeltaSeq: number | undefined;
+   let prevDeltaContent = "";
+   for (const [seq, row] of known) {
+    if (row.event_type === "text_delta") {
+     prevDeltaSeq = seq;
+     prevDeltaContent = row.content;
+    }
    }
+   if (prevDeltaSeq !== undefined) known.delete(prevDeltaSeq);
+   const maxSeq = known.size ? Math.max(...known.keys()) : 0;
+   const seq =
+    typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence)
+     ? ev.sequence
+     : maxSeq + 1;
+   known.set(seq, {
+    id: seq,
+    sequence: seq,
+    event_type: "text_delta",
+    event_id: "text_delta_latest",
+    timestamp: typeof ev.data.at === "string" ? ev.data.at : new Date().toISOString(),
+    content: prevDeltaContent + delta,
+    metadata: {},
+   });
+   statusChangedTo ??= "active";
+   relevant = true;
    continue;
   }
-  if (entry.followingId !== wantFollowId || !entry.stopFollow) {
-   entry.stopFollow?.();
-   entry.followingId = wantFollowId;
-   entry.stopFollow = streamMission(
-    wantFollowId,
-    (ev) => {
-     if (
-      ["user_message", "assistant_message", "assistant_message_canonical", "mission_status_changed"].includes(
-       ev.type,
-      )
-     ) {
-      entry.dirty = true;
-      scheduleWarmBtwRefresh(entry);
-     }
+  if (
+   ev.type === "user_message" ||
+   ev.type === "assistant_message" ||
+   ev.type === "assistant_message_canonical"
+  ) {
+   const maxSeq = known.size ? Math.max(...known.keys()) : 0;
+   const seq =
+    typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence)
+     ? ev.sequence
+     : maxSeq + 1;
+   const canonical = ev.type === "assistant_message_canonical" || ev.data.canonical === true;
+   const eventType =
+    ev.type === "user_message"
+     ? "user_message"
+     : canonical
+       ? "assistant_message_canonical"
+       : "assistant_message";
+   const content = typeof ev.data.content === "string" ? ev.data.content : "";
+   if (eventType !== "user_message" && !content.trim()) continue;
+   if (ev.data.queued !== true) {
+    for (const [kSeq, row] of [...known]) {
+     if (row.event_type === "text_delta") known.delete(kSeq);
+    }
+   }
+   known.set(seq, {
+    id: ev.storedId ?? seq,
+    sequence: seq,
+    event_type: eventType,
+    event_id: ev.eventId ?? (typeof ev.data.id === "string" ? ev.data.id : null),
+    timestamp: typeof ev.data.at === "string" ? ev.data.at : new Date().toISOString(),
+    content,
+    metadata: {
+     ...(ev.data.queued === true ? { queued: true } : {}),
+     ...(typeof ev.data.client_message_id === "string"
+      ? { client_message_id: ev.data.client_message_id }
+      : {}),
+     ...(ev.data.partial === true ? { partial: true } : {}),
+     ...(ev.data.success === false ? { success: false } : {}),
     },
-    () => {
-     entry.dirty = true;
-     scheduleWarmBtwRefresh(entry);
-    },
+   });
+   if (eventType === "user_message" && ev.data.queued !== true) {
+    statusChangedTo = "active";
+   }
+   relevant = true;
+  }
+ }
+
+ if (!relevant) return;
+
+ const existingSession = btwSession(entry.parent);
+ const missionMeta: Mission = {
+  ...(entry.latestMission?.id === childMissionId
+   ? entry.latestMission
+   : {
+      id: childMissionId,
+      status: existingSession?.id === childMissionId && existingSession.active ? "active" : "completed",
+      title: null,
+      history: [],
+      backend: existingSession?.harness || "opencode",
+      model_override: existingSession?.model || "builtin/smart",
+      tags: [`btw-parent:${entry.parent}`, ...(existingSession?.local ? ["placement:client"] : [])],
+      created_at: existingSession?.startedAt || new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+     }),
+  ...(statusChangedTo ? { status: statusChangedTo } : {}),
+  updated_at: new Date().toISOString(),
+ };
+ entry.latestMission = missionMeta;
+ entry.latest = childMissionId;
+
+ const events = [...known.values()].sort((a, b) => a.sequence - b.sequence);
+ if (!events.some(e => e.event_type === "user_message" && !isQueuedUserEvent(e))) {
+  // Missing initial user_message (e.g. cold entry seeded mid-turn): reconcile once via HTTP.
+  if (statusChangedTo && !ACTIVE.includes(statusChangedTo) && existingSession?.id === childMissionId && existingSession.active) {
+   const cleared: BtwSession = { ...existingSession, active: false };
+   delete cleared.startedAt;
+   save(entry.parent, cleared);
+  }
+  entry.dirty = true;
+  scheduleWarmBtwRefresh(entry);
+  return;
+ }
+
+ const parsed = parseBtwThread(missionMeta, events);
+ const live = ACTIVE.includes(missionMeta.status);
+ if (!live) {
+  const stamp = `${btwActivity(missionMeta)}\u0000${missionMeta.status}`;
+  terminalThreadCache.set(cacheKey, { stamp, ...parsed });
+ } else {
+  terminalThreadCache.delete(cacheKey);
+ }
+
+ const base = entry.baseHistory ?? entry.history.filter(row => !row.id?.startsWith(`btw:${childMissionId}:`));
+ entry.baseHistory = base;
+ const childTurns: SideExchange[] = parsed.turns.map(({ sortAt: _sortAt, ...turn }) => turn);
+ entry.history = [...base, ...childTurns].slice(-BTW_HISTORY_LIMIT);
+ entry.activeSession = parsed.active;
+ if (entry.caughtUp && !pendingDirtyBtwParents.has(`${ver}:${entry.parent}`)) {
+  entry.dirty = false;
+ }
+
+ // Keep localStorage `btwSession(parent)` in lockstep with live warm transitions so
+ // remounting `SideQuestions` never sees stale `active: true` from an hour ago.
+ if (parsed.active) {
+  const cur = btwSession(entry.parent);
+  if (
+   !cur ||
+   !cur.active ||
+   cur.id !== parsed.active.id ||
+   (parsed.active.startedAt && cur.startedAt !== parsed.active.startedAt) ||
+   cur.question !== parsed.active.question
+  ) {
+   save(
+    entry.parent,
+    cur?.id === parsed.active.id
+     ? syncSessionCursors(entry.parent, { ...cur, ...parsed.active })
+     : parsed.active,
    );
   }
+ } else if (!live) {
+  const cur = btwSession(entry.parent);
+  const lastTurn = childTurns.at(-1) ?? entry.history.at(-1);
+  if (cur && cur.id === childMissionId && (cur.active || cur.lastSequence !== parsed.lastSequence || cur.turnCount !== parsed.turns.length)) {
+   const nextSession: BtwSession = {
+    ...syncSessionCursors(entry.parent, { ...cur }),
+    active: false,
+    ...(lastTurn ? { question: lastTurn.question } : {}),
+    ...(parsed.turns.length ? { turnCount: parsed.turns.length } : {}),
+    ...(parsed.lastSequence > 0 ? { lastSequence: parsed.lastSequence } : {}),
+   };
+   if (nextSession.pendingCursor && RESUMABLE.includes(missionMeta.status)) {
+    nextSession.conversationCursor = nextSession.pendingCursor;
+    delete nextSession.pendingCursor;
+   }
+   delete nextSession.startedAt;
+   save(entry.parent, nextSession);
+  }
+  healSavedSideQuestionFromServer(ver, entry.parent, {
+   history: entry.history,
+   activeSession: undefined,
+  });
  }
 }
 
-export function noteBtwPresentationHint(parent: string, childMissionId?: string): void {
- const k = warmBtwKey(parent);
- const entry = warmBtwByParent.get(k);
- if (entry) {
-  entry.dirty = true;
-  if (childMissionId && childMissionId !== entry.latest) {
-   entry.latest = childMissionId;
-   reconcileWarmBtwFollows();
+let reconcilingBtw = false;
+export function reconcileWarmBtwFollows(): void {
+ if (reconcilingBtw) return;
+ reconcilingBtw = true;
+ try {
+  const ver = connectionVersion();
+  const wantedMissionIds = new Set(warmRecentMissionIds(true));
+  for (const [k, entry] of [...warmBtwByParent]) {
+   if (entry.connVer !== ver) {
+    entry.stopFollow?.();
+    if (entry.refreshTimer) clearTimeout(entry.refreshTimer);
+    warmBtwByParent.delete(k);
+    continue;
+   }
+   const wantFollowId =
+    entry.latest && wantedMissionIds.has(entry.latest) && isMultiplexSyncActive()
+     ? entry.latest
+     : undefined;
+   if (!wantFollowId) {
+    if (entry.stopFollow) {
+     entry.stopFollow();
+     entry.stopFollow = undefined;
+     entry.followingId = undefined;
+     entry.caughtUp = false;
+    }
+    continue;
+   }
+   if (entry.followingId !== wantFollowId || !entry.stopFollow) {
+    entry.stopFollow?.();
+    entry.followingId = wantFollowId;
+    entry.caughtUp = false;
+    const cacheKey = `${ver}:${wantFollowId}`;
+    const known = liveThreadEventCache.get(cacheKey);
+    const cachedSince =
+     known && known.size
+      ? Math.max(...known.keys())
+      : terminalThreadCache.get(cacheKey)?.lastSequence || btwSession(entry.parent)?.lastSequence;
+    const handlers = {
+     onEvent: (ev: StreamEvent) => reduceLiveBtwStreamEvents(entry, wantFollowId, [ev]),
+     onBatch: (evs: StreamEvent[]) => reduceLiveBtwStreamEvents(entry, wantFollowId, evs),
+     onLagged: () => {
+      entry.caughtUp = false;
+      entry.dirty = true;
+      scheduleWarmBtwRefresh(entry);
+     },
+     onReady: () => {},
+     onDisconnected: () => {
+      entry.caughtUp = false;
+      entry.dirty = true;
+     },
+     onCaughtUp: () => {
+      entry.caughtUp = true;
+      const knownNow = liveThreadEventCache.get(cacheKey);
+      const hasEvents =
+       Boolean(knownNow && [...knownNow.values()].some(e => e.event_type === "user_message" && !isQueuedUserEvent(e))) ||
+       terminalThreadCache.has(cacheKey);
+      if (hasEvents && !pendingDirtyBtwParents.has(`${ver}:${entry.parent}`)) {
+       entry.dirty = false;
+      } else if (entry.dirty) {
+       scheduleWarmBtwRefresh(entry);
+      }
+     },
+    };
+    entry.stopFollow = attachMissionStream(wantFollowId, handlers, {
+     initialSinceSeq: cachedSince && cachedSince > 0 ? cachedSince : undefined,
+    });
+   }
   }
-  if (isMultiplexSyncActive() && isBackgroundSyncActive() && warmRecentMissionIds().includes(parent)) {
-   scheduleWarmBtwRefresh(entry);
+ } finally {
+  reconcilingBtw = false;
+ }
+ reconcileWarmSubscriptions();
+}
+
+export function noteBtwPresentationHint(parent: string, childMissionId?: string): void {
+ const ver = connectionVersion();
+ const k = `${ver}:${parent}`;
+ let entry = warmBtwByParent.get(k);
+ const bgWarm =
+  isMultiplexSyncActive() &&
+  isBackgroundSyncActive() &&
+  (typeof document === "undefined" || document.visibilityState !== "hidden") &&
+  (warmRecentMissionIds(false).includes(parent) || getOpenBtwParentIds(ver).includes(parent));
+ if (!entry && childMissionId && bgWarm) {
+  entry = {
+   connVer: ver,
+   parent,
+   history: [],
+   latest: childMissionId,
+   caughtUp: false,
+   dirty: true,
+  };
+  warmBtwByParent.set(k, entry);
+  reconcileWarmBtwFollows();
+  scheduleWarmBtwRefresh(entry);
+  return;
+ }
+ if (entry) {
+  if (childMissionId && childMissionId !== entry.latest) {
+   entry.baseHistory = [...entry.history];
+   entry.latest = childMissionId;
+   entry.dirty = true;
+   reconcileWarmBtwFollows();
+   if (bgWarm) scheduleWarmBtwRefresh(entry);
+   return;
+  }
+  if (!entry.caughtUp) {
+   entry.dirty = true;
+   if (bgWarm) scheduleWarmBtwRefresh(entry);
   }
  } else {
   pendingDirtyBtwParents.add(k);
@@ -949,7 +1319,7 @@ export function noteBtwPresentationHint(parent: string, childMissionId?: string)
 
 export function markUnfocusedBtwDirty(): void {
  for (const [, entry] of warmBtwByParent) {
-  entry.dirty = true;
+  if (!entry.caughtUp) entry.dirty = true;
  }
 }
 
@@ -960,10 +1330,16 @@ export function resetWarmBtwForTest(): void {
  }
  warmBtwByParent.clear();
  pendingDirtyBtwParents.clear();
+ openBtwPanelRefs.clear();
  launchErrors.clear();
  chains.clear();
+ resetSideQuestionStorageForTest();
+ reconcileWarmSubscriptions();
 }
 
+registerWarmBtwTargets(getKnownWarmBtwTargets, () => {
+ if (!reconcilingBtw) reconcileWarmBtwFollows();
+});
 onBackgroundSyncActiveChange(() => reconcileWarmBtwFollows());
 
 function healSavedSideQuestionFromServer(
@@ -981,7 +1357,13 @@ function healSavedSideQuestionFromServer(
 function storeWarmBtwResult(
  version: number,
  parent: string,
- result: { history: SideExchange[]; activeSession?: BtwSession; latest?: string },
+ result: {
+  history: SideExchange[];
+  activeSession?: BtwSession;
+  latest?: string;
+  latestMission?: Mission;
+  baseHistory?: SideExchange[];
+ },
 ): { history: SideExchange[]; activeSession?: BtwSession; latest?: string } {
  const k = `${version}:${parent}`;
  pendingDirtyBtwParents.delete(k);
@@ -990,6 +1372,8 @@ function storeWarmBtwResult(
   existing.history = result.history;
   existing.activeSession = result.activeSession;
   existing.latest = result.latest;
+  if (result.latestMission) existing.latestMission = result.latestMission;
+  if (result.baseHistory) existing.baseHistory = result.baseHistory;
   existing.dirty = false;
  } else {
   while (warmBtwByParent.size >= 32) {
@@ -1006,12 +1390,15 @@ function storeWarmBtwResult(
    history: result.history,
    activeSession: result.activeSession,
    latest: result.latest,
+   latestMission: result.latestMission,
+   baseHistory: result.baseHistory,
+   caughtUp: false,
    dirty: false,
   });
  }
  reconcileWarmBtwFollows();
  healSavedSideQuestionFromServer(version, parent, result);
- return result;
+ return { history: result.history, activeSession: result.activeSession, latest: result.latest };
 }
 
 export async function reconcileBtwServerHistory(
@@ -1062,7 +1449,7 @@ export async function reconcileBtwServerHistory(
  const knownSession = btwSession(parent);
  if (knownSession?.id && !seen.has(knownSession.id)) {
   try {
-   let direct = await getMission(knownSession.id, { coreOnly: true });
+   let direct = await getMission(knownSession.id, { coreOnly: true, includeHistory: false });
    const visited = new Set<string>();
    for (let hop = 0; hop < 16; hop++) {
     const nextId = direct?.tags?.find(tag => tag.startsWith('superseded_by:'))?.slice('superseded_by:'.length);
@@ -1072,7 +1459,7 @@ export async function reconcileBtwServerHistory(
      direct = undefined as unknown as Mission;
      break;
     }
-    direct = await getMission(nextId, { coreOnly: true });
+    direct = await getMission(nextId, { coreOnly: true, includeHistory: false });
    }
    if (
     direct &&
@@ -1090,7 +1477,13 @@ export async function reconcileBtwServerHistory(
   }
  }
  if (signal?.aborted || connectionVersion() !== version) return { history: localHistory, authoritative: false };
- const finalize = (result: { history: SideExchange[]; activeSession?: BtwSession; latest?: string }) => {
+ const finalize = (result: {
+  history: SideExchange[];
+  activeSession?: BtwSession;
+  latest?: string;
+  latestMission?: Mission;
+  baseHistory?: SideExchange[];
+ }) => {
   if (authoritative) {
    return { ...storeWarmBtwResult(version, parent, result), authoritative: true };
   }
@@ -1146,32 +1539,29 @@ export async function reconcileBtwServerHistory(
     } else {
      terminalThreadCache.delete(cacheKey);
     }
-    // History, not transcript: the streamed text repairs a truncated final (repairedFinal).
+    // History filtered to /btw-relevant types: skips tool_call/tool_result/thinking/text_op
+    // while keeping text_delta so repairedFinal still repairs truncated final answers.
     let events: StoredEvent[];
     try {
      let known = liveThreadEventCache.get(cacheKey) ?? new Map<number, StoredEvent>();
      const maxKnown = known.size ? Math.max(...known.keys()) : undefined;
      if (maxKnown !== undefined) {
-      const delta = await getMissionEvents(m.id, { view: 'history', since: maxKnown });
+      const delta = await getMissionEvents(m.id, { view: 'history', types: BTW_EVENT_TYPES, since: maxKnown });
       if (delta.length && Math.max(...delta.map(e => e.sequence)) < maxKnown) {
        known = new Map<number, StoredEvent>();
-       for (const ev of await getMissionEvents(m.id, { view: 'history' })) known.set(ev.sequence, ev);
+       for (const ev of await getMissionEvents(m.id, { view: 'history', types: BTW_EVENT_TYPES })) known.set(ev.sequence, ev);
       } else {
        for (const ev of delta) known.set(ev.sequence, ev);
       }
      } else {
-      for (const ev of await getMissionEvents(m.id, { view: 'history' })) known.set(ev.sequence, ev);
+      for (const ev of await getMissionEvents(m.id, { view: 'history', types: BTW_EVENT_TYPES })) known.set(ev.sequence, ev);
      }
      events = [...known.values()].sort((a, b) => a.sequence - b.sequence);
-     if (live) {
-      liveThreadEventCache.set(cacheKey, known);
-      while (liveThreadEventCache.size > 64) {
-       const oldest = liveThreadEventCache.keys().next().value;
-       if (oldest === undefined) break;
-       liveThreadEventCache.delete(oldest);
-      }
-     } else {
-      liveThreadEventCache.delete(cacheKey);
+     liveThreadEventCache.set(cacheKey, known);
+     while (liveThreadEventCache.size > 64) {
+      const oldest = liveThreadEventCache.keys().next().value;
+      if (oldest === undefined) break;
+      liveThreadEventCache.delete(oldest);
      }
     } catch {
      authoritative = false;
@@ -1205,13 +1595,16 @@ export async function reconcileBtwServerHistory(
  const latest = [...sorted].sort((a, b) => btwActivity(a).localeCompare(btwActivity(b))).at(-1);
  let existing = btwSession(parent);
  // A session saved as running whose thread Core reports finished (or that is
- // no longer listed on an authoritative read) is stale: it must not pin the tab to an old thread.
+ // no longer listed on an authoritative read) is stale: persist active=false
+ // immediately so reopening the mission never flashes "Starting side agent…".
  if (
   existing?.active &&
   !valid.some(m => m.id === existing!.id && ACTIVE.includes(m.status)) &&
   (authoritative || valid.some(m => m.id === existing!.id))
  ) {
   existing = { ...existing, active: false };
+  delete existing.startedAt;
+  save(parent, existing);
  }
  if (
   latestActive &&
@@ -1254,7 +1647,15 @@ export async function reconcileBtwServerHistory(
    });
   }
  }
- if (!serverTurns.length) return finalize({ history: localHistory, activeSession: latestActive, latest: latest?.id });
+ if (!serverTurns.length) {
+  return finalize({
+   history: localHistory,
+   activeSession: latestActive,
+   latest: latest?.id,
+   latestMission: latest,
+   baseHistory: localHistory,
+  });
+ }
  // Core is the record: its turns across every thread, in the order they were
  // asked, newest last. A locally cached turn never outranks it: appending
  // cache-only rows after Core's put an old answer below the newest one.
@@ -1264,7 +1665,14 @@ export async function reconcileBtwServerHistory(
   const cached = local.get(turn.question.trim() + '\u0000' + turn.answer.trim());
   return cached?.attachments ? { ...turn, attachments: cached.attachments } : turn;
  });
- return finalize({ history: merged.slice(-BTW_HISTORY_LIMIT), activeSession: latestActive, latest: latest?.id });
+ const baseHistory = latest ? merged.filter(row => !row.id?.startsWith(`btw:${latest.id}:`)) : merged;
+ return finalize({
+  history: merged.slice(-BTW_HISTORY_LIMIT),
+  activeSession: latestActive,
+  latest: latest?.id,
+  latestMission: latest,
+  baseHistory,
+ });
 }
 
 /** Core before the fix of 2026-10-21 kept only an OpenCode closing line written

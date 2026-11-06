@@ -14,7 +14,9 @@ import {
   type BackgroundSyncMode,
 } from "../src/backgroundSync";
 import {
+  btwSession,
   noteBtwPresentationHint,
+  peekWarmBtwState,
   reconcileBtwServerHistory,
   resetWarmBtwForTest,
 } from "../src/btwAgent";
@@ -27,6 +29,7 @@ import {
   loadTranscript,
   noteMissionPresentationHint,
   peekReadyTranscript,
+  peekWarmMissionPatch,
   retainTranscript,
 } from "../src/missionCache";
 import { cacheReset } from "../src/pageCache";
@@ -341,5 +344,207 @@ describe("warm background sync & off-mode quickness", () => {
     expect(isMissionDirtyWhileUnfocused("m-off")).toBe(true);
     await reconcileBtwServerHistory("m-off", []);
     expect(btwTagQueries).toBe(2);
+  });
+
+  it("reduces live /btw events in memory, clears stale localStorage active on completion, and skips tool pages on cold /btw crawl", async () => {
+    setConnection("http://unified.test", "jwt-tok");
+    setMultiplexSyncEnabledForTest(true);
+    vi.stubGlobal("WebSocket", FakeSyncSocket as unknown as typeof WebSocket);
+
+    const parentId = "9409f9a9-d3eb-416a-b5a8-978508bed734";
+    const childId = "btw-child-9409";
+    const fetchedUrls: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        fetchedUrls.push(url);
+        if (url.includes("/queue?")) return Response.json([]);
+        if (url.includes("/snapshot?")) return new Response("none", { status: 404 });
+        if (url.includes("tag=btw-parent")) {
+          return Response.json([
+            {
+              id: childId,
+              status: "active",
+              backend: "opencode",
+              model_override: "builtin/smart",
+              tags: [`btw-parent:${parentId}`],
+              created_at: "2026-11-06T05:00:00Z",
+              updated_at: "2026-11-06T05:00:01Z",
+            },
+          ]);
+        }
+        if (url.includes(`/missions/${childId}/events?`)) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: 1,
+                mission_id: childId,
+                sequence: 4,
+                event_type: "user_message",
+                event_id: "u-btw-1",
+                timestamp: "2026-11-06T05:00:01Z",
+                content:
+                  "You are the independent /btw agent sharing the main agent's working folder.\n\nCurrent request:\npropose a clean plan to update files\n",
+                metadata: {},
+              },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": "4",
+                "X-Page-Max-Sequence": "4",
+                "X-Max-Sequence": "4",
+              },
+            },
+          );
+        }
+        if (url.includes(`/missions/${parentId}/events?`)) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: 1,
+                mission_id: parentId,
+                sequence: 10,
+                event_type: "user_message",
+                event_id: "u-main-1",
+                timestamp: "2026-11-06T04:55:00Z",
+                content: "Main goal prompt",
+                metadata: {},
+              },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": "10",
+                "X-Page-Max-Sequence": "10",
+                "X-Max-Sequence": "10",
+              },
+            },
+          );
+        }
+        return Response.json({ id: parentId, tags: [] });
+      }),
+    );
+
+    const releaseParent = retainTranscript(parentId);
+    await loadTranscript(parentId);
+    const detachParent = attachMissionStream(parentId, {
+      onEvent: () => {},
+      onBatch: () => {},
+      onLagged: () => {},
+      onReady: () => {},
+      onDisconnected: () => {},
+    });
+
+    await vi.waitFor(() => expect(FakeSyncSocket.instances).toHaveLength(1));
+    const sock = FakeSyncSocket.instances[0];
+
+    // Initial cold /btw reconciliation uses include_history=false on fork lookup and types=... on /events:
+    const initialBtw = await reconcileBtwServerHistory(parentId, []);
+    expect(initialBtw.activeSession?.active).toBe(true);
+    expect(btwSession(parentId)?.active).toBe(true);
+    expect(fetchedUrls.some((u) => u.includes(`/missions/${parentId}?include_history=false`))).toBe(true);
+    expect(
+      fetchedUrls.some(
+        (u) =>
+          u.includes(`/missions/${childId}/events?`) &&
+          u.includes("types=user_message%2Cassistant_message%2Cassistant_message_canonical%2Ctext_delta"),
+      ),
+    ).toBe(true);
+
+    // Wait for the unified WarmMissionSub on childId to subscribe & catch up over /api/control/sync:
+    await vi.waitFor(() =>
+      expect(sock.sent).toContainEqual(
+        expect.objectContaining({ op: "subscribe", mission_id: childId, since_seq: 4 }),
+      ),
+    );
+
+    // User switches away from parentId while /btw childId is still running:
+    detachParent();
+    releaseParent();
+    const urlCountBeforeUnfocusedCompletion = fetchedUrls.length;
+
+    // Unfocused main mission receives streaming delta, settings update, and terminal status:
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "text_delta",
+        mission_id: parentId,
+        sequence: 11,
+        content: "Streaming main text...",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "mission_settings_updated",
+        mission_id: parentId,
+        model_override: "openai/gpt-5.4",
+        model_effort: "high",
+        updated_at: "2026-11-06T05:02:00Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "mission_status_changed",
+        mission_id: parentId,
+        status: "completed",
+      }),
+    });
+
+    // Unfocused /btw child mission finishes on WS:
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "assistant_message",
+        mission_id: childId,
+        id: "a-btw-5",
+        sequence: 5,
+        content: "Here is the clean 5-step plan for ethlib.",
+        success: true,
+        at: "2026-11-06T05:01:30Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "mission_status_changed",
+        mission_id: childId,
+        status: "completed",
+      }),
+    });
+
+    await new Promise((r) => setTimeout(r, 30));
+
+    // 1) Zero debounced HTTP /events or ?tag=btw-parent crawls occurred!
+    expect(fetchedUrls.length).toBe(urlCountBeforeUnfocusedCompletion);
+
+    // 2) Warm /btw state is clean, has the completed turn, and localStorage `btwSession(parent).active` is false!
+    const warmAfter = peekWarmBtwState(parentId);
+    expect(warmAfter?.clean).toBe(true);
+    expect(warmAfter?.activeSession).toBeUndefined();
+    expect(warmAfter?.history).toHaveLength(1);
+    expect(warmAfter?.history[0]?.answer).toBe("Here is the clean 5-step plan for ethlib.");
+    expect(btwSession(parentId)?.active).toBe(false);
+    expect(btwSession(parentId)?.startedAt).toBeUndefined();
+
+    // 3) Reopening /btw reconcile returns immediately from warm memory with zero HTTP requests:
+    const reopenBtw = await reconcileBtwServerHistory(parentId, []);
+    expect(reopenBtw.history[0]?.answer).toBe("Here is the clean 5-step plan for ethlib.");
+    expect(fetchedUrls.length).toBe(urlCountBeforeUnfocusedCompletion);
+
+    // 4) Unfocused main mission closed its streaming bubble and cached its settings + status patch:
+    const mainSnap = peekReadyTranscript(parentId);
+    const mainTextItem = mainSnap?.items.find((i) => i.kind === "text");
+    expect(mainTextItem && mainTextItem.kind === "text" ? mainTextItem.live : undefined).toBe(false);
+    expect(peekWarmMissionPatch(parentId)).toMatchObject({
+      status: "completed",
+      model_override: "openai/gpt-5.4",
+      model_effort: "high",
+    });
   });
 });

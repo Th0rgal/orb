@@ -174,11 +174,12 @@ export async function fullToolCall(missionId:string,callId:string):Promise<{args
  for(const row of rows){const event=storedToStream(row);if(event?.type==='tool_call')out.args=event.data.args;else if(event?.type==='tool_result')out.result=event.data.result;}
  return out;
 }
-export async function getMissionEventPage(id:string, cursor:{since?:number;before?:number;view?:'transcript'|'trace'|'history'|'all';limit?:number}={}):Promise<EventPage>{
+export async function getMissionEventPage(id:string, cursor:{since?:number;before?:number;view?:'transcript'|'trace'|'history'|'all';types?:string;limit?:number}={}):Promise<EventPage>{
  // Large tool outputs arrive shortened; a row loads its full call when opened
  // (fullToolCall). Older Cores ignore the parameter.
  const query=new URLSearchParams({limit:String(cursor.limit??200),include_counts:'false',max_payload:String(MAX_EVENT_PAYLOAD)});
  if(cursor.view)query.set('view',cursor.view);
+ if(cursor.types)query.set('types',cursor.types);
  if(cursor.since!==undefined)query.set('since_seq',String(cursor.since));
  if(cursor.before!==undefined)query.set('before_seq',String(cursor.before));
  const response=await apiRaw(`/api/control/missions/${id}/events?${query}`);
@@ -211,13 +212,14 @@ export function getMissionEventPreview(id:string):Promise<EventPage>{
  * long thread (a /btw thread easily exceeds it with tool rows). This walks
  * back with the exclusive `before` cursor until the history is complete, or
  * until `enough` says the rows read so far suffice (e.g. the latest turn). */
-export async function getMissionEvents(id:string,options:{view?:'transcript'|'trace'|'history'|'all';since?:number;limit?:number;enough?:(newestFirst:StoredEvent[])=>boolean}={}):Promise<StoredEvent[]>{
+export async function getMissionEvents(id:string,options:{view?:'transcript'|'trace'|'history'|'all';types?:string;since?:number;limit?:number;enough?:(newestFirst:StoredEvent[])=>boolean}={}):Promise<StoredEvent[]>{
  const bySequence=new Map<number,StoredEvent>();
  const pageLimit=options.limit!==undefined?{limit:options.limit}:{};
+ const filterOpts={...(options.view?{view:options.view}:{}),...(options.types?{types:options.types}:{})};
  if(options.since!==undefined){
   let since=options.since,reset=false;
   for(let pages=0;pages<500;pages++){
-   const page=await getMissionEventPage(id,{...(options.view?{view:options.view}:{}),...pageLimit,since});
+   const page=await getMissionEventPage(id,{...filterOpts,...pageLimit,since});
    if(page.reset){reset=true;bySequence.clear();break;}
    for(const event of page.events)bySequence.set(event.sequence,event);
    if(!page.hasMore||page.nextCursor===undefined||!page.events.length)break;
@@ -229,7 +231,7 @@ export async function getMissionEvents(id:string,options:{view?:'transcript'|'tr
  }
  let before:number|undefined;
  for(let pages=0;pages<500;pages++){
-  const page=await getMissionEventPage(id,{...(options.view?{view:options.view}:{}),...pageLimit,...(before!==undefined?{before}:{})});
+  const page=await getMissionEventPage(id,{...filterOpts,...pageLimit,...(before!==undefined?{before}:{})});
   for(const event of page.events)bySequence.set(event.sequence,event);
   if(!page.hasMore||page.nextCursor===undefined||!page.events.length)break;
   if(before!==undefined&&page.nextCursor>=before)throw Error('Event cursor did not advance.');

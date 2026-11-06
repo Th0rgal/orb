@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS missions (
 CREATE INDEX IF NOT EXISTS idx_missions_updated_at ON missions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_missions_status ON missions(status);
 CREATE INDEX IF NOT EXISTS idx_missions_status_updated ON missions(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_missions_btw_tags ON missions(updated_at DESC) WHERE tags LIKE '%"btw-parent:%';
 
 CREATE TABLE IF NOT EXISTS mission_native_prompt_attempts (
     mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
@@ -1416,6 +1417,12 @@ impl SqliteMissionStore {
             [],
         )
         .map_err(|e| format!("Failed to create durable_schedule execution index: {}", e))?;
+
+        conn.execute(
+            r#"CREATE INDEX IF NOT EXISTS idx_missions_btw_tags ON missions(updated_at DESC) WHERE tags LIKE '%"btw-parent:%'"#,
+            [],
+        )
+        .map_err(|e| format!("Failed to create missions btw_tags index: {}", e))?;
 
         for (column, ddl_type) in [
             (

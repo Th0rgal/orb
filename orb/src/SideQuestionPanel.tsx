@@ -14,7 +14,7 @@ import { useSidePanel } from './FilePanel';
 import { createPinnedScroll } from './mission/pinnedScroll';
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
 import { connectionVersion, isTransientNetworkError, sendMissionMessage, type QueuedMessage } from './api';
-import { consumeSideQuestionOpenHint, readSideQuestion, peekSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion } from './sideQuestionStorage';
+import { consumeSideQuestionOpenHint, peekSavedSideQuestion, readSideQuestion, peekSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion, type SavedSideQuestion } from './sideQuestionStorage';
 import { RemoteQueue, type PendingRemoteQueueItem, type RemoteQueueHandle } from './RemoteQueue';
 import { QueuedMessages } from './QueuedMessages';
 import { createQueuedEdit } from './queuedEdit';
@@ -141,8 +141,17 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   let stale=false;onCleanup(()=>{stale=true;});
   const missionId=p.mission;
   const warmInitial='peekWarmBtwState' in btwMod && typeof btwMod.peekWarmBtwState==='function'?btwMod.peekWarmBtwState(missionId):undefined;
-  if(warmInitial?.history.length)setHistory(warmInitial.history);
+  const cachedSaved=peekSavedSideQuestion(current);
+  const cachedCleanHistory=(cachedSaved?.history??[]).filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()}));
+  const frameZeroHistory=warmInitial&&(warmInitial.clean||warmInitial.history.length>cachedCleanHistory.length)
+   ? mergeLocalAttachments(warmInitial.history,cachedCleanHistory)
+   : cachedCleanHistory;
+  if(frameZeroHistory.length)setHistory(frameZeroHistory);
   if(warmInitial?.latest)setSideSessionId(warmInitial.latest);
+  if(cachedSaved){
+   setDraft(cachedSaved.draft??'');
+   setModel(cachedSaved.model??'');
+  }
   let resync:(()=>void)|undefined;
   let migratingLegacyQueue=false;
   let unmigratedLegacyQueue:QueuedSideQuestion[]=[];
@@ -218,7 +227,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    resync?.();
   };
   if(peekSideQuestionOpen(current)){setOpen(true);side?.show();}
-  ready=readSideQuestion(current).then(saved=>{
+  const hydrateSaved=(saved:SavedSideQuestion|undefined)=>{
   if(stale)return;
   const shouldOpen=consumeSideQuestionOpenHint(current)||Boolean(saved?.open);
   const cleanHistory=(saved?.history??[]).filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()}));
@@ -230,15 +239,31 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   let reconcileServer:typeof btwMod.reconcileBtwServerHistory|undefined;
   try{if('reconcileBtwServerHistory' in btwMod)reconcileServer=btwMod.reconcileBtwServerHistory;}catch{}
   const hasReconcile=typeof reconcileServer==='function';
-  const agent=refreshSideSession(missionId,warmNow?.activeSession);
+  let agent=refreshSideSession(missionId,warmNow?.activeSession);
+  if(agent?.active&&warmNow&&warmNow.clean&&!warmNow.activeSession&&(!warmNow.latest||warmNow.latest===agent.id)){
+   try{
+    if('clearStaleBtwSessionActive' in btwMod&&typeof btwMod.clearStaleBtwSessionActive==='function'){
+     btwMod.clearStaleBtwSessionActive(missionId);
+    }
+   }catch{}
+   agent={...agent,active:false,startedAt:undefined};
+  }
   const warmAnsweredPending=Boolean(
    saved?.pending&&
    !saved.pending.notSent&&
    !launching&&
-   !agent?.active&&
+   (!agent?.active||(warmNow&&!warmNow.activeSession&&warmNow.clean))&&
    warmNow&&
    doesTurnAnswerPending(saved.pending,warmNow.history,cleanHistory,BTW_HISTORY_LIMIT),
   );
+  if(warmAnsweredPending&&agent?.active){
+   try{
+    if('clearStaleBtwSessionActive' in btwMod&&typeof btwMod.clearStaleBtwSessionActive==='function'){
+     btwMod.clearStaleBtwSessionActive(missionId);
+    }
+   }catch{}
+   agent={...agent,active:false,startedAt:undefined};
+  }
   setHistory(initialHistory);setBusy(false);setOpen(shouldOpen);
   const interruptedError='Side question interrupted. Retry to request a complete answer.';
   const rawSavedError=saved?.pending?.error||'';
@@ -327,6 +352,20 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     stopFollow?.();following=id;
     stopFollow=streamMission(id,event=>{
      if(!['user_message','assistant_message','assistant_message_canonical','mission_status_changed'].includes(event.type))return;
+     if(isMultiplexSyncActive()&&'peekWarmBtwState' in btwMod&&typeof btwMod.peekWarmBtwState==='function'){
+      queueMicrotask(()=>{
+       if(stale||key()!==current)return;
+       const warmNow=btwMod.peekWarmBtwState(missionId);
+       if(warmNow&&warmNow.clean){
+        const changed=warmNow.history.length!==history().length||warmNow.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
+        if(changed)setHistory(warmNow.history);
+        refreshSideSession(missionId,warmNow.activeSession);
+        return;
+       }
+       clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history(),true);},300);
+      });
+      return;
+     }
      clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history(),true);},300);
     },()=>{if(!stale)sync(history(),true);});
    };
@@ -408,8 +447,26 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    resync=()=>{if(!stale)sync(history(),true);};
    sync(initialHistory,Boolean((saved?.pending&&!warmAnsweredPending)||(warmNow&&!warmNow.clean)));
   }
-  });
+  };
+  if(cachedSaved){
+   hydrateSaved(cachedSaved);
+   ready=Promise.resolve();
+  }else{
+   ready=readSideQuestion(current).then(hydrateSaved);
+  }
  }));
+ createEffect(()=>{
+  const missionId=p.mission;
+  const visible=side?side.visible():open();
+  if(!visible||!missionId)return;
+  let stopOpen:(()=>void)|undefined;
+  try{
+   if('noteBtwPanelOpen' in btwMod&&typeof btwMod.noteBtwPanelOpen==='function'){
+    stopOpen=btwMod.noteBtwPanelOpen(missionId,true);
+   }
+  }catch{}
+  onCleanup(()=>stopOpen?.());
+ });
  createEffect(()=>{
   const current=key();
   const snapshot={history:history(),draft:draft(),model:model(),open:side?side.visible():open(),docked:true,

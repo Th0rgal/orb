@@ -124,12 +124,19 @@ Android (`OrbBackgroundSync.kt`) share one per-device **Background sync** policy
      `sync_caught_up`.
    - `mission_presentation` frames include `btw_parent_id` when emitted by a
      `btw-parent:<uuid>` side mission so warm parents discover new `/btw` runs
-     without polling `GET /missions?tag=btw-parent:...`.
+     without polling `GET /missions?tag=btw-parent:...` (seeding the bound `/btw`
+     child ID immediately on Desktop, iOS, and Android even when no prior `/btw`
+     snapshot existed for that parent).
    - When **Background sync** resolves to active, the client keeps all focused
      missions plus up to `12` MRU recently opened missions (and each warm
-     mission's active `/btw` child mission) subscribed in memory (`WarmLive`),
-     reducing live events directly into the transcript and `/btw` caches so
-     switching back requires zero HTTP requests.
+     mission's active `/btw` child mission) subscribed in memory (`WarmLive`)
+     through a single shared `WarmMissionSub` primitive per platform, reducing
+     live events (`user_message`, `text_delta`, `assistant_message`,
+     `mission_status_changed`, and `mission_settings_updated`) directly into the
+     transcript, mission metadata/settings patch, and `/btw` caches so switching
+     back requires zero HTTP requests. Unfocused `mission_status_changed` frames
+     also fold into cached transcripts so live streaming bubbles close and
+     terminal notices persist before reopen.
 
 3. **Zero-cost quickness and bandwidth wins in `Off` / paused mode:**
    - Both `/api/control/sync` subscriptions and mobile `/events` HTTP reads bound

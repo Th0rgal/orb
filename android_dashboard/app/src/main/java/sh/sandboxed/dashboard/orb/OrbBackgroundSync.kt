@@ -889,20 +889,33 @@ object OrbWarmSyncCoordinator {
     }
 
     fun notePresentationHint(core: OrbCore, missionId: String, kind: String?, btwParentId: String?) {
+        var shouldReconcile = false
         synchronized(lock) {
             ensureScopeLocked(core)
             if (!btwParentId.isNullOrEmpty()) {
+                if (missionId.isNotEmpty()) {
+                    val curSnap = btwSnapshots[btwParentId]
+                    if (curSnap?.boundMission?.id != missionId) {
+                        val seededBound = OrbRow(missionId, mapOf("id" to missionId, "status" to "running"))
+                        btwSnapshots[btwParentId] = (curSnap ?: OrbWarmBtwSnapshot()).copy(boundMission = seededBound)
+                        dirtyBtwParents.add(btwParentId)
+                        checkedCleanBtwParents.remove(btwParentId)
+                        shouldReconcile = true
+                    }
+                }
                 if (warmBtwSubs[btwParentId]?.caughtUp != true) {
                     dirtyBtwParents.add(btwParentId)
                     checkedCleanBtwParents.remove(btwParentId)
                 }
             }
             val sub = warmSubs[missionId]
-            if (sub != null && sub.isCaughtUpHealthy) return
-            if (kind != "mission_activity") {
-                dirtyMissions.add(missionId)
+            if (sub == null || !sub.isCaughtUpHealthy) {
+                if (kind != "mission_activity") {
+                    dirtyMissions.add(missionId)
+                }
             }
         }
+        if (shouldReconcile) reconcile(core)
     }
 
     fun notePresentationStreamDisrupted(core: OrbCore) {
@@ -1109,7 +1122,7 @@ object OrbWarmSyncCoordinator {
                 }
             }
         }
-        if (evType == "mission_status_changed") {
+        if (evType == "mission_status_changed" || evType == "mission_settings_updated") {
             coordinatorScope.launch {
                 core.refreshMissionsQuietly()
             }

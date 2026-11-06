@@ -228,7 +228,28 @@ fabricates an interruption or drops completed turns:
    - Only `btwAgent.ts` mutates `warmBtwByParent`: starting or queueing onto a
      side session records `latest` and marks `dirty = true`; completing a turn
      appends without erasing prior turns; only an authoritative Core
-     reconciliation (`storeWarmBtwResult`) marks `dirty = false`.
+     reconciliation (`storeWarmBtwResult`) or a caught-up live `/api/control/sync`
+     stream with a known turn baseline marks `dirty = false`.
+   - `btwAgent.ts` shares `missionCache.ts`'s unified `WarmMissionSub`
+     (`attachMissionStream` + `registerWarmBtwTargets`, `since_seq` cursor, and
+     `sync_caught_up` fence) for warm `/btw` child missions, reducing live
+     `user_message`, `text_delta`, `assistant_message`, and `mission_status_changed`
+     frames directly in memory (`reduceLiveBtwStreamEvents`) without debounced
+     HTTP crawls. When `mission_status_changed` transitions the `/btw` child out
+     of `ACTIVE`, `btwAgent.ts` immediately clears `btwSession(parent).active`
+     (and `startedAt`) in `localStorage` and invokes `healSavedSideQuestionFromServer`,
+     preventing stale `"Starting side agent… · 1 h 17"` banners on reopen
+     (observed on `9409f9a9-d3eb-416a-b5a8-978508bed734`).
+   - `sideQuestionStorage.ts` maintains a bounded in-memory write-through cache
+     (`peekSavedSideQuestion`) so reopening a mission hydrates the `/btw` dock
+     synchronously on frame 0 alongside `MissionView`; if `peekWarmBtwState(parent)`
+     is clean and already answers `saved.pending`, any stale `btwSession(parent).active`
+     flag is cleared in place instead of entering `watchBtw`.
+   - Cold `/btw` reconciliations pass `include_history=false` on metadata/fork
+     reads, filter `/events` to `types=user_message,assistant_message,assistant_message_canonical,text_delta`
+     (skipping `tool_call`/`tool_result`/`thinking`/`text_op` pages while keeping
+     `repairedFinal`), and query Core's partial SQLite index `idx_missions_btw_tags`
+     on `?tag=btw-parent:<id>`.
    - On mount, if `peekWarmBtwState(parent)` already holds reconciled turns,
      async `readSideQuestion` preserves those warm turns (merging local
      attachment metadata) instead of rolling `history` back to an older

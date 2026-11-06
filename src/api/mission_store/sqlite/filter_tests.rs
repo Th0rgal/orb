@@ -544,3 +544,69 @@ async fn updated_since_filter_returns_only_missions_updated_after_cursor() {
     );
     assert!(!ids.contains(&old_id), "old mission must be excluded");
 }
+
+#[tokio::test]
+async fn btw_parent_tag_filter_uses_partial_index_and_matches_exact_parent() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = store(&dir).await;
+    let parent_a = uuid::Uuid::new_v4();
+    let parent_b = uuid::Uuid::new_v4();
+    let btw_a = seed(&store, "btw-a", None, None, None).await;
+    let btw_b = seed(&store, "btw-b", None, None, None).await;
+    for i in 0..50 {
+        seed(&store, &format!("main {i}"), None, None, None).await;
+    }
+    store
+        .update_mission_project(
+            btw_a,
+            MissionProjectPatch {
+                tags: Some(vec![format!("btw-parent:{parent_a}")]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("tag btw_a");
+    store
+        .update_mission_project(
+            btw_b,
+            MissionProjectPatch {
+                tags: Some(vec![format!("btw-parent:{parent_b}")]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("tag btw_b");
+
+    let rows = store
+        .list_missions_filtered(
+            &MissionFilter {
+                tag: Some(format!("btw-parent:{parent_a}")),
+                ..Default::default()
+            },
+            50,
+            0,
+        )
+        .await
+        .expect("btw_parent query");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, btw_a);
+
+    let plan_details = {
+        let conn = store.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                r#"EXPLAIN QUERY PLAN SELECT id FROM missions WHERE tags LIKE '%"btw-parent:%' AND tags LIKE '%' || ?1 || '%' ESCAPE '\' ORDER BY updated_at DESC LIMIT 50"#,
+            )
+            .expect("prepare explain");
+        stmt.query_map(["\"btw-parent:test\""], |row| row.get::<_, String>(3))
+            .expect("query explain")
+            .collect::<Result<Vec<String>, _>>()
+            .expect("collect explain")
+    };
+    assert!(
+        plan_details
+            .iter()
+            .any(|d| d.contains("idx_missions_btw_tags")),
+        "expected partial index idx_missions_btw_tags in query plan, got {plan_details:?}"
+    );
+}

@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { connectionVersion, listQueuedMessages } from "./api";
+import { connectionVersion, listQueuedMessages, type Mission } from "./api";
 import {
   MAX_WARM_MISSIONS,
   isBackgroundSyncActive,
@@ -57,6 +57,31 @@ export type MissionStreamViewHandlers = {
   onCaughtUp?: (cursor: number | null, replayed: number) => void;
 };
 
+export type WarmMissionSettingsPatch = Partial<
+  Pick<
+    Mission,
+    | "backend"
+    | "agent"
+    | "model_override"
+    | "model_effort"
+    | "fast_mode"
+    | "service_tier"
+    | "config_profile"
+    | "session_id"
+    | "updated_at"
+  >
+>;
+
+export type WarmMissionPatch = WarmMissionSettingsPatch & {
+  status?: string;
+  status_message?: string;
+};
+
+export type WarmBtwTargets = {
+  btwByParent: Readonly<Record<string, string | undefined>>;
+  openBtwParentIds: readonly string[];
+};
+
 type WarmMissionSub = {
   scope: string;
   connVer: number;
@@ -64,8 +89,10 @@ type WarmMissionSub = {
   stop: () => void;
   healthy: boolean;
   caughtUp: boolean;
+  cursor?: number;
   lastStatus?: string;
   lastStatusSummary?: string;
+  lastSettingsPatch?: WarmMissionSettingsPatch;
   views: Set<MissionStreamViewHandlers>;
 };
 
@@ -73,6 +100,39 @@ const recentlyOpened = new Map<string, string>();
 const active = new Map<string, { refs: number; snapshot?: TranscriptSnap }>();
 const warmSubs = new Map<string, WarmMissionSub>();
 const dirtyMissions = new Set<string>();
+let warmBtwProvider: (() => WarmBtwTargets) | undefined;
+let warmReconcileListeners = new Set<() => void>();
+
+export function registerWarmBtwTargets(
+  provider: () => WarmBtwTargets,
+  onReconcile?: () => void,
+): () => void {
+  warmBtwProvider = provider;
+  if (onReconcile) warmReconcileListeners.add(onReconcile);
+  return () => {
+    if (warmBtwProvider === provider) warmBtwProvider = undefined;
+    if (onReconcile) warmReconcileListeners.delete(onReconcile);
+  };
+}
+
+export function extractMissionSettingsPatch(
+  data: Record<string, unknown> | undefined,
+): WarmMissionSettingsPatch {
+  const d = data ?? {};
+  return {
+    ...(typeof d.backend === "string" ? { backend: d.backend } : {}),
+    ...("agent" in d ? { agent: typeof d.agent === "string" ? d.agent : null } : {}),
+    ...("model_override" in d ? { model_override: typeof d.model_override === "string" ? d.model_override : null } : {}),
+    ...("model_effort" in d ? { model_effort: typeof d.model_effort === "string" ? d.model_effort : null } : {}),
+    ...(typeof d.fast_mode === "boolean" ? { fast_mode: d.fast_mode } : {}),
+    ...("service_tier" in d
+      ? { service_tier: typeof d.service_tier === "string" ? (d.service_tier as Mission["service_tier"]) : undefined }
+      : {}),
+    ...("config_profile" in d ? { config_profile: typeof d.config_profile === "string" ? d.config_profile : null } : {}),
+    ...("session_id" in d ? { session_id: typeof d.session_id === "string" ? d.session_id : null } : {}),
+    ...(typeof d.updated_at === "string" ? { updated_at: d.updated_at } : {}),
+  };
+}
 
 function saveSnapshot(scope: string, snapshot: TranscriptSnap) {
   const entry = active.get(scope);
@@ -188,8 +248,31 @@ export function peekWarmMissionStatus(
   id: string,
 ): { status: string; summary?: string } | undefined {
   const sub = warmSubs.get(key(id));
-  if (!sub?.lastStatus) return undefined;
+  if (!sub || sub.connVer !== connectionVersion() || !sub.lastStatus) return undefined;
   return { status: sub.lastStatus, summary: sub.lastStatusSummary };
+}
+
+export function peekWarmMissionPatch(id: string): WarmMissionPatch | undefined {
+  const sub = warmSubs.get(key(id));
+  if (!sub || sub.connVer !== connectionVersion()) return undefined;
+  if (!sub.lastStatus && !sub.lastSettingsPatch) return undefined;
+  return {
+    ...(sub.lastSettingsPatch ?? {}),
+    ...(sub.lastStatus ? { status: sub.lastStatus } : {}),
+    ...(sub.lastStatusSummary !== undefined ? { status_message: sub.lastStatusSummary } : {}),
+  };
+}
+
+export function applyWarmMissionPatch(mission: Mission | null | undefined): Mission | null {
+  if (!mission) return null;
+  const patch = peekWarmMissionPatch(mission.id);
+  if (!patch) return mission;
+  return { ...mission, ...patch };
+}
+
+export function isMissionStreamCaughtUp(id: string): boolean {
+  const sub = warmSubs.get(key(id));
+  return Boolean(sub && sub.connVer === connectionVersion() && sub.healthy && sub.caughtUp);
 }
 
 export function noteMissionPresentationHint(id: string, kind: unknown): void {
@@ -210,13 +293,14 @@ export function markUnfocusedMissionsDirty(): void {
   }
 }
 
-function ensureWarmSub(id: string): WarmMissionSub {
+function ensureWarmSub(id: string, initialSinceSeq?: number): WarmMissionSub {
   const scope = key(id);
   const ver = connectionVersion();
   const existing = warmSubs.get(scope);
   if (existing && existing.connVer === ver) return existing;
   existing?.stop();
 
+  const startCursor = peekReadyTranscript(id)?.cursor ?? initialSinceSeq;
   const sub: WarmMissionSub = {
     scope,
     connVer: ver,
@@ -224,21 +308,40 @@ function ensureWarmSub(id: string): WarmMissionSub {
     stop: () => {},
     healthy: false,
     caughtUp: false,
+    cursor: startCursor,
     views: new Set(),
   };
   warmSubs.set(scope, sub);
 
+  const noteSeq = (ev: StreamEvent) => {
+    if (typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence)) {
+      sub.cursor = sub.cursor === undefined ? ev.sequence : Math.max(sub.cursor, ev.sequence);
+    }
+  };
+
   const handleBatch = (evs: StreamEvent[]) => {
     if (!evs.length) return;
+    for (const ev of evs) noteSeq(ev);
     if (sub.views.size > 0) {
       for (const v of sub.views) v.onBatch(evs);
-    } else {
+    } else if (peekTranscript(id)) {
       applyLiveEventsToTranscriptCache(id, evs);
     }
   };
 
   const handleEvent = (ev: StreamEvent) => {
-    if (ev.type === "mission_status_changed" || ev.type === "status" || ev.type === "mission_settings_updated") {
+    noteSeq(ev);
+    if (ev.type === "mission_settings_updated") {
+      sub.lastSettingsPatch = {
+        ...(sub.lastSettingsPatch ?? {}),
+        ...extractMissionSettingsPatch(ev.data),
+      };
+      if (sub.views.size > 0) {
+        for (const v of sub.views) v.onEvent(ev);
+      }
+      return;
+    }
+    if (ev.type === "mission_status_changed" || ev.type === "status") {
       if (ev.type === "mission_status_changed" && typeof ev.data.status === "string") {
         sub.lastStatus = ev.data.status;
         sub.lastStatusSummary =
@@ -246,6 +349,9 @@ function ensureWarmSub(id: string): WarmMissionSub {
       }
       if (sub.views.size > 0) {
         for (const v of sub.views) v.onEvent(ev);
+      } else if (ev.type === "mission_status_changed" && peekTranscript(id)) {
+        // Close open live bubbles and record terminal error notices in the unfocused cache.
+        applyLiveEventsToTranscriptCache(id, [ev]);
       }
       return;
     }
@@ -283,12 +389,13 @@ function ensureWarmSub(id: string): WarmMissionSub {
       dirtyMissions.add(scope);
       for (const v of sub.views) v.onDisconnected();
     },
-    peekReadyTranscript(id)?.cursor,
+    startCursor,
     (cursor, replayed) => {
       sub.healthy = true;
       sub.caughtUp = true;
       dirtyMissions.delete(scope);
       if (typeof cursor === "number" && Number.isSafeInteger(cursor)) {
+        sub.cursor = sub.cursor === undefined ? cursor : Math.max(sub.cursor, cursor);
         const snap = peekReadyTranscript(id);
         if (snap && (snap.cursor === undefined || cursor > snap.cursor)) {
           saveSnapshot(scope, { ...snap, cursor });
@@ -303,15 +410,16 @@ function ensureWarmSub(id: string): WarmMissionSub {
 export function attachMissionStream(
   id: string,
   handlers: MissionStreamViewHandlers,
+  options?: { initialSinceSeq?: number; keepWarmOnDetach?: boolean },
 ): () => void {
-  const sub = ensureWarmSub(id);
+  const sub = ensureWarmSub(id, options?.initialSinceSeq);
   sub.views.add(handlers);
   if (sub.healthy) {
     queueMicrotask(() => {
       if (sub.views.has(handlers) && sub.healthy) {
         handlers.onReady();
         if (sub.caughtUp) {
-          handlers.onCaughtUp?.(peekReadyTranscript(id)?.cursor ?? null, 0);
+          handlers.onCaughtUp?.(sub.cursor ?? peekReadyTranscript(id)?.cursor ?? null, 0);
         }
       }
     });
@@ -322,7 +430,7 @@ export function attachMissionStream(
   };
 }
 
-export function warmRecentMissionIds(): string[] {
+export function warmRecentMissionIds(includeBtw = false): string[] {
   const ver = connectionVersion();
   const prefix = `c:${ver}:`;
   const focusedIds: string[] = [];
@@ -342,37 +450,52 @@ export function warmRecentMissionIds(): string[] {
     Boolean(streamModule.isMultiplexSyncActive?.()) &&
     isBackgroundSyncActive() &&
     (typeof document === "undefined" || document.visibilityState !== "hidden");
+  const btwTargets = includeBtw ? warmBtwProvider?.() : undefined;
   return selectWarmMissionIds({
     backgroundActive: bgActive,
     maxWarm: MAX_WARM_MISSIONS,
     focusedIds,
     recentIds,
+    ...(btwTargets
+      ? {
+          btwByParent: btwTargets.btwByParent,
+          openBtwParentIds: btwTargets.openBtwParentIds,
+        }
+      : {}),
   });
 }
 
+let reconcilingWarmSubs = false;
 export function reconcileWarmSubscriptions(): void {
-  const ver = connectionVersion();
-  for (const [scope, sub] of [...warmSubs]) {
-    if (sub.connVer !== ver) {
-      sub.stop();
-      warmSubs.delete(scope);
-    }
-  }
-  const wanted = new Set(warmRecentMissionIds());
-  for (const [scope, sub] of [...warmSubs]) {
-    if (sub.views.size === 0 && !wanted.has(sub.id)) {
-      if (!sub.caughtUp) dirtyMissions.add(scope);
-      sub.stop();
-      warmSubs.delete(scope);
-    }
-  }
-  if (Boolean(streamModule.isMultiplexSyncActive?.()) && isBackgroundSyncActive()) {
-    for (const mid of wanted) {
-      const scope = key(mid);
-      if (!warmSubs.has(scope) && peekReadyTranscript(mid)) {
-        ensureWarmSub(mid);
+  if (reconcilingWarmSubs) return;
+  reconcilingWarmSubs = true;
+  try {
+    for (const cb of warmReconcileListeners) cb();
+    const ver = connectionVersion();
+    for (const [scope, sub] of [...warmSubs]) {
+      if (sub.connVer !== ver) {
+        sub.stop();
+        warmSubs.delete(scope);
       }
     }
+    const wanted = new Set(warmRecentMissionIds(true));
+    for (const [scope, sub] of [...warmSubs]) {
+      if (sub.views.size === 0 && !wanted.has(sub.id)) {
+        if (!sub.caughtUp) dirtyMissions.add(scope);
+        sub.stop();
+        warmSubs.delete(scope);
+      }
+    }
+    if (Boolean(streamModule.isMultiplexSyncActive?.()) && isBackgroundSyncActive()) {
+      for (const mid of wanted) {
+        const scope = key(mid);
+        if (!warmSubs.has(scope) && peekReadyTranscript(mid)) {
+          ensureWarmSub(mid);
+        }
+      }
+    }
+  } finally {
+    reconcilingWarmSubs = false;
   }
 }
 

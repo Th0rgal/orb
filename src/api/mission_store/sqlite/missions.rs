@@ -367,6 +367,9 @@ impl SqliteMissionStore {
                 // loop page through them holding the connection lock — a
                 // selective prefilter is what keeps this off the critical path.
                 // Escape the escape character first, or `\` would be doubled.
+                if v.starts_with("btw-parent:") {
+                    clauses.push(r#"tags LIKE '%"btw-parent:%'"#.to_string());
+                }
                 let encoded = serde_json::to_string(v).unwrap_or_else(|_| format!("\"{v}\""));
                 let pattern = encoded
                     .replace('\\', "\\\\")

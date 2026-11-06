@@ -41,7 +41,9 @@ import { cacheRemember } from "../pageCache";
 import { antigravityBaseModel, defaultEffortLabel, effortLabel, normalizeEffort, supportedEfforts } from "../effort";
 import {
   applyLiveEventsToTranscriptCache,
+  applyWarmMissionPatch,
   attachMissionStream,
+  extractMissionSettingsPatch,
   isMissionDirtyWhileUnfocused,
   isMissionWarmLive,
   loadOlderTranscript,
@@ -49,7 +51,7 @@ import {
   peekReadyTranscript,
   peekTranscript,
   peekTranscriptHeight,
-  peekWarmMissionStatus,
+  peekWarmMissionPatch,
   prepareTranscriptSearch,
   putTranscript,
   putTranscriptHeight,
@@ -377,11 +379,11 @@ function MissionDock(p: {
 const sameMission = (a: Mission | null, b: Mission | null) => a === b || (!!a && !!b && shallowEqual(a, b));
 
 export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
-  const [resolved, setResolved] = createSignal<Mission | null>(p.initial ?? null, { equals: sameMission });
+  const [resolved, setResolved] = createSignal<Mission | null>(applyWarmMissionPatch(p.initial), { equals: sameMission });
   const [error, setError] = createSignal("");
   createEffect(() => {
     const init = p.initial;
-    if (init) setResolved(prev => mergeIncomingMission(prev, init));
+    if (init) setResolved(prev => applyWarmMissionPatch(mergeIncomingMission(prev, init)));
   });
   const handleMission = (next: Mission | null, authoritative = false) => {
     if (next) {
@@ -404,7 +406,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   onCleanup(()=>{disposed=true;});
   createEffect(()=>{if(p.id)onCleanup(retainTranscript(p.id));});
   const cached = p.id ? peekReadyTranscript(p.id) ?? (peekTranscript(p.id)?.detailsPending ? peekTranscript(p.id) : undefined) : undefined;
-  const [mission, setMission] = createSignal<Mission | null>(p.initial ?? null, { equals: sameMission });
+  const [mission, setMission] = createSignal<Mission | null>(applyWarmMissionPatch(p.initial), { equals: sameMission });
   let authoritativeOnce = false;
   const applyDockMission = (next: Mission, authoritative = false) => {
     authoritativeOnce = authoritative;
@@ -412,7 +414,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   };
   createEffect(()=>{
     const init = p.initial;
-    if (init) setMission(prev => mergeIncomingMission(prev, init));
+    if (init) setMission(prev => applyWarmMissionPatch(mergeIncomingMission(prev, init)));
   });
   createEffect(() => {
     const m = mission();
@@ -662,9 +664,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     };
     window.addEventListener("orb:refresh", reload);
     onCleanup(() => window.removeEventListener("orb:refresh", reload));
-    const warmStatus = peekWarmMissionStatus(id);
-    if (warmStatus) {
-      setMission(old => old ? { ...old, status: warmStatus.status, ...(warmStatus.summary ? { status_message: warmStatus.summary } : {}) } : old);
+    const warmPatch = peekWarmMissionPatch(id);
+    if (warmPatch) {
+      setMission(old => (old ? { ...old, ...warmPatch } : old));
     }
     const warmLiveOnMount = isMissionWarmLive(id);
     const readyOnMount = peekReadyTranscript(id);
@@ -691,22 +693,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const stopStream = attachMissionStream(p.id, {
       onEvent: (ev) => {
         if (ev.type === "mission_settings_updated") {
-          setMission(old => {
-            if (!old) return old;
-            const d = ev.data ?? {};
-            return {
-              ...old,
-              ...(typeof d.backend === "string" ? { backend: d.backend } : {}),
-              ...("agent" in d ? { agent: typeof d.agent === "string" ? d.agent : null } : {}),
-              ...("model_override" in d ? { model_override: typeof d.model_override === "string" ? d.model_override : null } : {}),
-              ...("model_effort" in d ? { model_effort: typeof d.model_effort === "string" ? d.model_effort : null } : {}),
-              ...(typeof d.fast_mode === "boolean" ? { fast_mode: d.fast_mode } : {}),
-              ...("service_tier" in d ? { service_tier: typeof d.service_tier === "string" ? (d.service_tier as Mission["service_tier"]) : undefined } : {}),
-              ...("config_profile" in d ? { config_profile: typeof d.config_profile === "string" ? d.config_profile : null } : {}),
-              ...("session_id" in d ? { session_id: typeof d.session_id === "string" ? d.session_id : null } : {}),
-              ...(typeof d.updated_at === "string" ? { updated_at: d.updated_at } : {}),
-            };
-          });
+          const patch = extractMissionSettingsPatch(ev.data);
+          setMission(old => (old ? { ...old, ...patch } : old));
           return;
         }
         if (ev.type === "mission_status_changed" || ev.type === "status") {

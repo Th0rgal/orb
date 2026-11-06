@@ -4,6 +4,7 @@ import { createSignal } from 'solid-js';
 import { Composer } from '../src/composer/Composer';
 import { SideQuestions, type SideQuestionsHandle } from '../src/SideQuestionPanel';
 import { askSide, boundedHistory, sideContext } from '../src/sideQuestionClient';
+import { resetSideQuestionStorageForTest } from '../src/sideQuestionStorage';
 const serverReconcile=vi.hoisted(()=>({
  fn:async(_parent:string,local:any[],_signal?:AbortSignal,_options?:{force?:boolean})=>({history:local} as {history:any[];activeSession?:any;latest?:string;authoritative?:boolean}),
  reconnect:async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0}),
@@ -19,7 +20,7 @@ const launchMock=vi.hoisted(()=>({
  lastError:undefined as {error:string;notSent:boolean}|undefined,
 }));
 const sessionMock=vi.hoisted(()=>({current:undefined as any,rev:undefined as (()=>number)|undefined,bump:undefined as (()=>void)|undefined}));
-vi.mock('../src/btwAgent',async()=>{const {createSignal}=await import('solid-js');const [rev,setRev]=createSignal(0);sessionMock.rev=rev;sessionMock.bump=()=>setRev(v=>v+1);const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>{sessionMock.rev?.();return sessionMock.current;},btwLaunchPending:()=>launchMock.pending,btwLastLaunchError:()=>launchMock.lastError,startFreshBtwSession:()=>{if(sessionMock.current){sessionMock.current={...sessionMock.current,freshSession:true};sessionMock.bump?.();}},btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[],signal?:AbortSignal,options?:{force?:boolean})=>serverReconcile.fn(parent,local,signal,options),peekWarmBtwState:(parent:string)=>warmMock.current.get(parent),updateWarmBtwHistory:(...args:any[])=>warmMock.updateSpy(...args),get queueBtwFollowUp(){return queueFollowUpMock.enabled?queueFollowUpMock.fn:undefined;},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
+vi.mock('../src/btwAgent',async()=>{const {createSignal}=await import('solid-js');const [rev,setRev]=createSignal(0);sessionMock.rev=rev;sessionMock.bump=()=>setRev(v=>v+1);const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>{sessionMock.rev?.();return sessionMock.current;},clearStaleBtwSessionActive:()=>{if(sessionMock.current?.active){sessionMock.current={...sessionMock.current,active:false,startedAt:undefined};sessionMock.bump?.();}},noteBtwPanelOpen:()=>()=>{},btwLaunchPending:()=>launchMock.pending,btwLastLaunchError:()=>launchMock.lastError,startFreshBtwSession:()=>{if(sessionMock.current){sessionMock.current={...sessionMock.current,freshSession:true};sessionMock.bump?.();}},btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[],signal?:AbortSignal,options?:{force?:boolean})=>serverReconcile.fn(parent,local,signal,options),peekWarmBtwState:(parent:string)=>warmMock.current.get(parent),updateWarmBtwHistory:(...args:any[])=>warmMock.updateSpy(...args),get queueBtwFollowUp(){return queueFollowUpMock.enabled?queueFollowUpMock.fn:undefined;},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
 const thoughts=vi.hoisted(()=>({value:[] as {kind:'think';key:string;text:string;done:boolean}[]}));
 const storage=vi.hoisted(()=>new Map<string,unknown>());
 vi.mock('../src/composerDrafts',()=>({
@@ -28,7 +29,7 @@ vi.mock('../src/composerDrafts',()=>({
  readSideThread:async(key:string)=>storage.get('thread:'+key),
  saveSideThread:async(key:string,value:unknown)=>{storage.set('thread:'+key,structuredClone(value));},
 }));
-afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];sessionMock.current=undefined;launchMock.pending=undefined;launchMock.lastError=undefined;warmMock.current.clear();warmMock.updateSpy.mockReset();queueFollowUpMock.enabled=false;queueFollowUpMock.fn.mockReset();watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();resetSideQuestionStorageForTest();thoughts.value=[];sessionMock.current=undefined;launchMock.pending=undefined;launchMock.lastError=undefined;warmMock.current.clear();warmMock.updateSpy.mockReset();queueFollowUpMock.enabled=false;queueFollowUpMock.fn.mockReset();watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
 it('routes /btw away from the working agent while it is busy',async()=>{
  const send=vi.fn(),ask=vi.fn(()=>true),stop=vi.fn();
  render(()=><Composer placeholder="Follow-up" busy onSend={send} onStop={stop} onBtw={ask}/>);
@@ -735,4 +736,52 @@ it('reconciles with Core when an unmounted btwLaunchPending settles to inactive,
   expect(saved?.pending?.notSent).toBe(true);
  });
 });
+
+it('replays 9409f9a9: renders completed /btw turn synchronously on frame 0 without flashing Starting side agent… even if localStorage still had active=true',async()=>{
+ const parentId='9409f9a9-d3eb-416a-b5a8-978508bed734';
+ const sideId='side-9409';
+ const oneHourSeventeenMinAgo=new Date(Date.now()-4_620_000).toISOString();
+ const {sideQuestionKey,readSideQuestion,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ const qText='I sent A as a steering. Regarding B and the remaining gaps and high-value tooling and patterns from ethlib, propose a clean plan to update files, send steering, /goal and hindsight updates';
+ await writeSideQuestion(sideQuestionKey(parentId),{
+  history:[],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{
+   question:qText,
+   answer:'',
+   error:'',
+   turnId:'turn-9409',
+   startedAt:oneHourSeventeenMinAgo,
+  },
+ });
+ // Even if localStorage still had `active: true, startedAt: 1h17m ago`, clean warm state has the completed answer:
+ sessionMock.current={id:sideId,question:qText,harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,startedAt:oneHourSeventeenMinAgo};
+ warmMock.current.set(parentId,{
+  history:[{id:`btw:${sideId}:4`,question:qText,answer:'1. Adopt EthLib module + @[expose] public section convention.',userEventId:'turn-9409'}],
+  latest:sideId,
+  clean:true,
+ });
+ const watchSpy=vi.fn(async()=>{});
+ watchMock.fn=watchSpy;
+ serverReconcile.fn=async(parent)=>({
+  history:warmMock.current.get(parent)?.history??[],
+  latest:sideId,
+  authoritative:true,
+ });
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission={parentId} items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ // Rendered synchronously on frame 0 (no await needed!) and never calls watchBtw or shows "Starting side agent…":
+ expect(screen.getByText('Adopt EthLib module + @[expose] public section convention.')).toBeTruthy();
+ expect(screen.queryByText(/Starting side agent/)).toBeNull();
+ expect(watchSpy).not.toHaveBeenCalled();
+ expect(sessionMock.current.active).toBe(false);
+ await waitFor(async()=>{
+  const healed=await readSideQuestion(sideQuestionKey(parentId));
+  expect(healed?.pending).toBeUndefined();
+ });
+});
+
 
