@@ -854,12 +854,13 @@ def reloadCapacityFromFiles (rt : NodeRuntime) : IO NodeRuntime := do
 
 private def detectLeanRuntimeReady (workDir : String) : IO Bool := do
   let cachedLake := System.FilePath.mk workDir / "caches" / "elan" / "bin" / "lake"
-  if ← cachedLake.pathExists then return true
-  if ← (System.FilePath.mk "/opt/orb/elan/bin/lake").pathExists then return true
+  if (← cachedLake.pathExists) && !(← cachedLake.isDir) then return true
+  let optLake := System.FilePath.mk "/opt/orb/elan/bin/lake"
+  if (← optLake.pathExists) && !(← optLake.isDir) then return true
   let pathStr := (← IO.getEnv "PATH").getD "/usr/local/bin:/usr/bin:/bin"
   for d in (pathStr.splitOn ":").filter (·.startsWith "/") do
-    let st ← statPath ((System.FilePath.mk d / "lake").toString)
-    if st.exists_ && st.isReg then return true
+    let cand := System.FilePath.mk d / "lake"
+    if (← cand.pathExists) && !(← cand.isDir) then return true
   return false
 
 def buildHeartbeatJson (rt : NodeRuntime) : IO JVal := do
@@ -960,7 +961,7 @@ private def prepareJobOutsideLockInner
       prog := "true"
     let usesFanout := prog != "turbo-lean" || args.contains "build"
     let st ← OrbNode.Posix.hostStats cfg.workDir
-    let repo := (srcObj.fieldStr? "repo").getD ""
+    let repo := ((srcObj.fieldStr? "repo").getD "").trimAscii.toString
     let payloadEnv := ((payload.field? "env") >>= JVal.asObj?).getD #[]
     envPairs ← buildLeanJobEnv cfg.workDir repo st.cpuTotal cfg.capacityTotal
       cfg.envAllowlist usesFanout payloadEnv
@@ -1005,7 +1006,8 @@ private def prepareJobOutsideLockInner
 
 /-- Clean up any partial per-job isolated checkout directory `<workDir>/checkouts/<repoHash16>/jobs/<jid>`. -/
 private def cleanupPartialJobCheckout (workDir : String) (jid : String) (payload : JVal) : IO Unit := do
-  if let some repo := (payload.field? "source").bind (·.fieldStr? "repo") then
+  if let some rawRepo := (payload.field? "source").bind (·.fieldStr? "repo") then
+    let repo := rawRepo.trimAscii.toString
     let rh16 := (bytesToHexLower (sha256Bytes repo.toUTF8)).take 16 |>.toString
     let cand := (System.FilePath.mk workDir / "checkouts" / rh16 / "jobs" / jid).toString
     discard <| (IO.Process.output { cmd := "rm", args := #["-rf", cand] }).toBaseIO
@@ -1422,25 +1424,36 @@ private def drainHandleCapped (h : IO.FS.Handle) (capBytes : Nat) : IO String :=
     text := text ++ "\n[node output truncated to fit 16 MiB JSON limit]\n"
   return text
 
-/-- Spawn a child process and drain `stdout` and `stderr` concurrently with bounded retention
-    (`capBytes = 2796032`), discarding excess bytes while draining pipes to EOF so noisy commands
-    never exhaust daemon memory or block on full OS pipe buffers! -/
-def runBoundedOutput (sa : IO.Process.SpawnArgs) (capBytes : Nat := syncExecOutputCapBytes) : IO IO.Process.Output := do
+/-- Spawn a child process in its own session (`setsid` when non-scoped) and drain `stdout`/`stderr`
+    concurrently with bounded retention (`capBytes = 2796032`), tearing down `activeScope?` and
+    sending `SIGKILL` to the child process group (`-pid`) IMMEDIATELY after `child.wait` returns
+    (BEFORE awaiting `outTask`/`errTask` EOF!) so backgrounded descendants inheriting stdout/stderr FDs
+    can never wedge node capacity or rolling-upgrade fencing! -/
+def runBoundedOutput
+    (sa : IO.Process.SpawnArgs)
+    (activeScope? : Option SystemdScope := none)
+    (killChildPgrp : Bool := false)
+    (capBytes : Nat := syncExecOutputCapBytes) : IO IO.Process.Output := do
   let child ← IO.Process.spawn {
     sa with
     stdin := .null
     stdout := .piped
     stderr := .piped
   }
+  let childPid := child.pid.toUInt64
   let outTask ← IO.asTask (drainHandleCapped child.stdout capBytes) Task.Priority.dedicated
   let errTask ← IO.asTask (drainHandleCapped child.stderr capBytes) Task.Priority.dedicated
   let exitCode ← child.wait
+  stopSystemdScope activeScope?
+  if killChildPgrp && childPid > 1 then
+    OrbNode.Posix.killPgrp childPid 9
   let stdout := (← IO.wait outTask).toOption.getD ""
   let stderr := (← IO.wait errTask).toOption.getD ""
   return { exitCode, stdout, stderr }
 
 /-- Run cleared-env synchronous `POST /execute` command under `<cfg.workDir>/<missionId>`,
-    fenced via `jobs.db` and contained in a transient `systemd-run --scope` unit when available. -/
+    fenced via `jobs.db` and contained in a transient `systemd-run --scope` unit (or `setsid` process group
+    fallback) so all spawned descendants are terminated as soon as the top-level command exits. -/
 def execClearedLeaseCommand
     (cfg : NodeConfig) (sqliteBackend : SqliteBackend) (missionId command : String) :
     IO (Except String JVal) := do
@@ -1456,6 +1469,9 @@ def execClearedLeaseCommand
     let hasTimeout ← do
       let r ← (IO.Process.output { cmd := "timeout", args := #["--version"] }).toBaseIO
       pure (match r with | .ok o => o.exitCode == 0 | .error _ => false)
+    let hasSetsid ← do
+      let r ← (IO.Process.output { cmd := "setsid", args := #["--version"] }).toBaseIO
+      pure (match r with | .ok o => o.exitCode == 0 | .error _ => false)
     let baseProg := if hasTimeout then "timeout" else "bash"
     let baseArgs :=
       if hasTimeout then #["-k", "5", s!"{max 1 cfg.maxJobSecs}s", "bash", "-lc", command]
@@ -1465,22 +1481,27 @@ def execClearedLeaseCommand
     activeScope? := scope?
     let out ←
       if scope?.isSome then
-        runBoundedOutput {
+        let r ← runBoundedOutput {
           cmd := wrappedProg
           args := wrappedArgs
           cwd := some missionDir
           env := wrappedEnv.map (fun (k, v) => (k, some v))
-        }
+        } activeScope? false
+        activeScope? := none
+        pure r
       else
         let mut envArgs : Array String := #["-i"]
         for (k, v) in envPairs do
           envArgs := envArgs.push s!"{k}={v}"
         envArgs := envArgs ++ #[baseProg] ++ baseArgs
+        let (spawnCmd, spawnArgs) :=
+          if hasSetsid then ("setsid", #["env"] ++ envArgs)
+          else ("env", envArgs)
         runBoundedOutput {
-          cmd := "env"
-          args := envArgs
+          cmd := spawnCmd
+          args := spawnArgs
           cwd := some missionDir
-        }
+        } none hasSetsid
     return .ok (.obj #[
       ("accepted", .bool true),
       ("exit_code", JVal.int (Int.ofNat out.exitCode.toNat)),

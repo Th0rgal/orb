@@ -176,11 +176,16 @@ private def findCrlf? (buf : ByteArray) (startIdx : Nat := 0) : Option Nat := Id
   return none
 
 /-- Read HTTP/1.1 request from `cfd`:
+    - When `authTokens? = some (tok, tokPrev?)` is supplied, verifies `Authorization: Bearer` IMMEDIATELY after
+      reading HTTP headers (`<= 64 KiB`) BEFORE allocating any request body buffer or disk temp file, preventing
+      unauthenticated disk or memory DoS!
     - Normal routes enforce `maxBodyBytes` (`128 MiB`) in memory.
-    - `POST /machine-transfer/archive/unpack` supports both `Transfer-Encoding: chunked` (`reqwest::Body::wrap_stream`)
-      and `Content-Length` up to `maxTransferBytes` (`10 GiB`), streaming directly into a temporary file under
-      `<workDir>/.transfers/` in `64 KiB` chunks so archive uploads never buffer in daemon RAM! -/
-def readHttpRequest (cfd : UInt32) (workDir : String := "/tmp") (maxBodyBytes : Nat := 134217728) : IO (Except String HttpRequest) := do
+    - `POST /machine-transfer/archive/unpack` validates canonical `mission_id`/`transfer_id` UUIDs and checks that
+      `<workDir>/.transfers/<tid>/destination/manifest.json` is staged (and unsealed) before streaming up to
+      `maxTransferBytes` (`10 GiB`) directly to disk in `64 KiB` chunks! -/
+def readHttpRequest
+    (cfd : UInt32) (workDir : String := "/tmp") (maxBodyBytes : Nat := 134217728)
+    (authTokens? : Option (String × Option String) := none) : IO (Except String HttpRequest) := do
   let mut buf := ByteArray.emptyWithCapacity 8192
   let mut hdrEnd? : Option Nat := none
   while hdrEnd?.isNone && buf.size < 65536 do
@@ -202,6 +207,7 @@ def readHttpRequest (cfd : UInt32) (workDir : String := "/tmp") (maxBodyBytes : 
   let mut headers : Array (String × String) := #[]
   let mut contentLen? : Option Nat := none
   let mut isChunked := false
+  let mut authHeader? : Option String := none
   for hl in rawHdrs do
     if let p :: vs := hl.splitOn ":" then
       let k := p.trimAscii.toString.toLower
@@ -211,6 +217,11 @@ def readHttpRequest (cfd : UInt32) (workDir : String := "/tmp") (maxBodyBytes : 
         contentLen? := v.toNat?
       else if k == "transfer-encoding" && (v.toLower.splitOn "chunked").length > 1 then
         isChunked := true
+      else if k == "authorization" then
+        authHeader? := some v
+  if let some (tok, tokPrev?) := authTokens? then
+    if !verifyBearerHeader authHeader? tok tokPrev? then
+      return .error "unauthorized"
   let (path, query) := parsePathAndQuery rawTarget
   let methodUp := method.toUpper
   let segs := (path.splitOn "/").filter (fun s => !s.isEmpty)
@@ -218,6 +229,17 @@ def readHttpRequest (cfd : UInt32) (workDir : String := "/tmp") (maxBodyBytes : 
   let bodyStart := hdrEnd + 4
   let initialRem := if bodyStart < buf.size then buf.extract bodyStart buf.size else ByteArray.empty
   if isArchiveUnpack then
+    let qLookup (key : String) : Option String :=
+      (query.find? (fun (k, _) => k == key)).map Prod.snd
+    let (some rawMid, some rawTid) := (qLookup "mission_id", qLookup "transfer_id")
+      | return .error "bad_request:missing mission_id or transfer_id query parameter"
+    let (some _mid, some tid) := (parseUuidCanonical? rawMid, parseUuidCanonical? rawTid)
+      | return .error "bad_request:invalid UUID"
+    let destArea := System.FilePath.mk workDir / ".transfers" / tid / "destination"
+    if ← (destArea / "verified").pathExists then
+      return .error "conflict:Checkpoint already sealed"
+    if !(← (destArea / "manifest.json").pathExists) then
+      return .error "conflict:Stage destination manifest first"
     let tmpDir := System.FilePath.mk workDir / ".transfers"
     IO.FS.createDirAll tmpDir
     let nonce ← newUuidV4
@@ -355,10 +377,9 @@ private def resolveToolPath? (bin : String) : IO (Option String) := do
     dirs := dirs ++ #[s!"{home}/.local/bin", s!"{home}/.bun/bin", s!"{home}/.cargo/bin"]
   dirs := dirs ++ #["/opt/orb/bin", "/opt/sandboxed-tools/bin", "/opt/orb-tools/bin", "/usr/local/bin", "/usr/bin", "/bin"]
   for d in dirs do
-    let cand := (System.FilePath.mk d / bin).toString
-    let st ← statPath cand
-    if st.exists_ && (st.isReg || st.isSymlink) then
-      return some cand
+    let candPath := System.FilePath.mk d / bin
+    if (← candPath.pathExists) && !(← candPath.isDir) then
+      return some candPath.toString
   return none
 
 private def classifyComponentOwner (path? : Option String) : String :=
@@ -369,6 +390,10 @@ private def classifyComponentOwner (path? : Option String) : String :=
       "Fleet installer"
     else if (p.splitOn "/.bun/").length > 1 then
       "Bun"
+    else if (p.splitOn "/pnpm/").length > 1 then
+      "pnpm"
+    else if (p.splitOn "/.cargo/").length > 1 then
+      "Cargo"
     else if (p.splitOn "/node_modules/").length > 1 then
       "npm"
     else
@@ -380,6 +405,9 @@ def scanSoftwareInventory : IO JVal := do
   let exePathJson ← match ← (IO.appPath).toBaseIO with
     | .ok p => pure (JVal.str p.toString)
     | .error _ => pure JVal.null
+  let hasTimeout ← do
+    let r ← (IO.Process.output { cmd := "timeout", args := #["--version"] }).toBaseIO
+    pure (match r with | .ok o => o.exitCode == 0 | .error _ => false)
   let tools := #[
     ("claudecode", "Claude Code", "claude"),
     ("codex", "Codex", "codex"),
@@ -393,7 +421,9 @@ def scanSoftwareInventory : IO JVal := do
     let path? ← resolveToolPath? bin
     let mut ver? : Option String := none
     if let some binPath := path? then
-      if let .ok out ← (IO.Process.output { cmd := binPath, args := #["--version"] }).toBaseIO then
+      let probeArgs := if hasTimeout then #["5s", binPath, "--version"] else #["--version"]
+      let probeCmd := if hasTimeout then "timeout" else binPath
+      if let .ok out ← (IO.Process.output { cmd := probeCmd, args := probeArgs }).toBaseIO then
         if out.exitCode == 0 then
           let firstLine := ((out.stdout.splitOn "\n").find? (fun ln => !ln.trimAscii.isEmpty)).getD ""
           let clean := (firstLine.trimAscii.toString.take 200).toString
@@ -1066,6 +1096,33 @@ def handleRequestConcurrent
       return textResp 401 "invalid node token"
     let inv ← scanSoftwareInventory
     return jsonResp 200 inv
+  else if req.method == "GET" && segs == ["machine-transfer", "capabilities"] then
+    let maCheck ← mtx.atomically do
+      let rt ← get
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return Except.error (textResp 401 "invalid node token")
+      return Except.ok rt.cfg.managedAuth
+    match maCheck with
+    | .error errResp => return errResp
+    | .ok ma =>
+      let harnesses ← detectTransferHarnesses ma
+      return jsonResp 200 (.obj #[
+        ("version", JVal.nat 2),
+        ("harnesses", .arr (harnesses.map .str)),
+        ("features", .arr #[.str "links", .str "selection", .str "bulk_copy", .str "archive-zstd-v1"])
+      ])
+  else if req.method == "GET" && segs == ["antigravity", "models"] then
+    let maCheck ← mtx.atomically do
+      let rt ← get
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return Except.error (textResp 401 "invalid node token")
+      return Except.ok rt.cfg.managedAuth
+    match maCheck with
+    | .error errResp => return errResp
+    | .ok ma =>
+      match ← discoverAntigravityModels ma (req.query? "slot") with
+      | .ok res => return jsonResp 200 res
+      | .error (code, msg) => return textResp code msg
   else if req.method == "POST" && segs == ["project-context", "prepare"] then
     let authCheck ← mtx.atomically do
       let rt ← get
@@ -1187,9 +1244,10 @@ def handleRequestConcurrent
       let unpackRes ← transferMtx.atomically do
         match req.bodyTempFile? with
         | some fp => do
-          let r ← unpackTransferArchiveFromFile area fp
-          try IO.FS.removeFile fp catch _ => pure ()
-          pure r
+          try
+            unpackTransferArchiveFromFile area fp
+          finally
+            try IO.FS.removeFile fp catch _ => pure ()
         | none => unpackTransferArchive area req.body
       match unpackRes with
       | .ok written => return jsonResp 200 (.obj #[("ok", .bool true), ("bytes", JVal.uint64 written)])
@@ -1238,6 +1296,7 @@ def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCr
   let mtx ← Std.Mutex.new rtInit
   let transferMtx ← Std.Mutex.new ()
   let workDirConst := rtInit.cfg.workDir
+  let authTokensConst := some (rtInit.cfg.token, rtInit.cfg.tokenPrevious?)
   let goneRef ← IO.mkRef false
   let _ ← startProjectContextDaemon rtInit.cfg.workDir goneRef
   if let some cred := dialCred? then
@@ -1267,11 +1326,18 @@ def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCr
       else
         let _ ← IO.asTask do
           try
-            match ← readHttpRequest cfd workDirConst with
+            match ← readHttpRequest cfd workDirConst 134217728 authTokensConst with
+            | .error "unauthorized" =>
+              sendHttpResponse cfd (textResp 401 "invalid node token")
             | .error "payload_too_large" =>
               sendHttpResponse cfd (textResp 413 "payload too large")
-            | .error _ =>
-              pure ()
+            | .error err =>
+              if err.startsWith "bad_request:" then
+                sendHttpResponse cfd (textResp 400 (err.drop 12).toString)
+              else if err.startsWith "conflict:" then
+                sendHttpResponse cfd (textResp 409 (err.drop 9).toString)
+              else
+                pure ()
             | .ok req =>
               let resp ← handleRequestConcurrent mtx transferMtx req
               sendHttpResponse cfd resp

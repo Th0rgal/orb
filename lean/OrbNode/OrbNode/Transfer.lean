@@ -181,14 +181,22 @@ def detectTransferHarnesses (ma : ManagedAuthConfig) : IO (Array String) := do
   let adv ← advertisedManagedAuth ma
   let grokOk := adv.contains "grok"
   let agOk := adv.contains "antigravity"
-  let pyRes ← IO.Process.output { cmd := "python3", args := #["-c", "import sys; raise SystemExit(0 if sys.version_info >= (3,12) else 1)"] }
-  let pyOk := pyRes.exitCode == 0
+  let pyOk ← do
+    match ← (IO.Process.output {
+      cmd := "python3"
+      args := #["-c", "import sys; raise SystemExit(0 if sys.version_info >= (3,12) else 1)"]
+    }).toBaseIO with
+    | .ok pyRes => pure (pyRes.exitCode == 0)
+    | .error _ => pure false
   let pathStr := (← IO.getEnv "PATH").getD "/usr/local/bin:/usr/bin:/bin"
-  let dirs := (pathStr.splitOn ":").filter (fun s => !s.isEmpty)
+  let mut dirs : Array String := (pathStr.splitOn ":").toArray.filter (fun s => !s.isEmpty)
+  if let some home ← IO.getEnv "HOME" then
+    dirs := dirs ++ #[s!"{home}/.local/bin", s!"{home}/.bun/bin", s!"{home}/.cargo/bin"]
+  dirs := dirs ++ #["/opt/orb/bin", "/opt/sandboxed-tools/bin", "/opt/orb-tools/bin", "/usr/local/bin", "/usr/bin", "/bin"]
   let hasBin (bin : String) : IO Bool := do
     for d in dirs do
-      let st ← statPath ((System.FilePath.mk d / bin).toString)
-      if st.exists_ && st.isReg then return true
+      let cand := System.FilePath.mk d / bin
+      if (← cand.pathExists) && !(← cand.isDir) then return true
     return false
   let candidates := #[
     ("grok", "grok", grokOk),
@@ -983,27 +991,40 @@ private def parsePaxPath? (paxBytes : ByteArray) : Option String := Id.run do
         found := some (kv.drop 5).toString
   return found
 
-private def readExactHandle (h : IO.FS.Handle) (n : Nat) : IO (Option ByteArray) := do
-  if n == 0 then return some ByteArray.empty
+private def readExactHandleBounded
+    (h : IO.FS.Handle) (n : Nat) (bytesReadRef : IO.Ref UInt64) (maxAllowed : UInt64) :
+    IO (Except String ByteArray) := do
+  if n == 0 then return .ok ByteArray.empty
   let mut acc := ByteArray.emptyWithCapacity n
   while acc.size < n do
     let want := min 65536 (n - acc.size)
     let .ok chunk ← (h.read (USize.ofNat want)).toBaseIO
-      | return none
+      | return .error "Archive truncated"
     if chunk.isEmpty then
-      return if acc.isEmpty then some ByteArray.empty else none
+      if acc.isEmpty then return .ok ByteArray.empty
+      else return .error "Archive truncated"
+    let nextTotal := (← bytesReadRef.get) + chunk.size.toUInt64
+    bytesReadRef.set nextTotal
+    if nextTotal > maxAllowed then
+      return .error "Decompressed tar archive exceeds staged manifest allowance"
     acc := acc ++ chunk
-  return some acc
+  return .ok acc
 
-private def discardExactHandle (h : IO.FS.Handle) (n : Nat) : IO Bool := do
+private def discardExactHandleBounded
+    (h : IO.FS.Handle) (n : Nat) (bytesReadRef : IO.Ref UInt64) (maxAllowed : UInt64) :
+    IO (Except String Unit) := do
   let mut rem := n
   while rem > 0 do
     let want := min 65536 rem
     let .ok chunk ← (h.read (USize.ofNat want)).toBaseIO
-      | return false
-    if chunk.isEmpty then return false
+      | return .error "Archive block padding truncated"
+    if chunk.isEmpty then return .error "Archive block padding truncated"
+    let nextTotal := (← bytesReadRef.get) + chunk.size.toUInt64
+    bytesReadRef.set nextTotal
+    if nextTotal > maxAllowed then
+      return .error "Decompressed tar archive exceeds staged manifest allowance"
     rem := rem - chunk.size
-  return true
+  return .ok ()
 
 /-- Stream a single manifest file into open tar handle `hTar` in `64 KiB` chunks (zero whole-file RAM allocation). -/
 private def writeTarEntryStreaming
@@ -1046,19 +1067,20 @@ private def writeTarEntryStreaming
       | return .error "Failed writing tar block padding"
   return .ok ()
 
-/-- Stream-unpack an uncompressed `tar` file on disk (`outTar`) into `root` in `64 KiB` chunks
+/-- Stream-unpack an uncompressed `tar` byte stream (`hTar`, e.g. live `zstd -d -c` pipe) into `root` in `64 KiB` chunks
     (handling GNU `@LongLink`, PAX `x` headers, GNU base-256 `>= 8 GiB` sizes, and ustar `prefix`),
-    rejecting non-regular entries, unlisted files, wrong sizes, or cumulative bytes `> maxTransferBytes`! -/
-private def streamUnpackTarFile
-    (outTar : System.FilePath) (root : System.FilePath)
-    (wanted : Std.HashMap String TransferEntry) : IO (Except String UInt64) := do
-  let .ok hTar ← (IO.FS.Handle.mk outTar .read).toBaseIO
-    | return .error "Failed opening decompressed tar archive"
+    enforcing online `maxAllowed` decompressed byte bounds so a zstd bomb aborts immediately before filling disk! -/
+private def streamUnpackTarHandle
+    (hTar : IO.FS.Handle) (root : System.FilePath)
+    (wanted : Std.HashMap String TransferEntry)
+    (maxAllowed : UInt64) : IO (Except String UInt64) := do
+  let bytesReadRef ← IO.mkRef (0 : UInt64)
   let mut pendingLongName? : Option String := none
   let mut written : UInt64 := 0
   while true do
-    let some hdr ← readExactHandle hTar 512
-      | return .error "Archive header truncated"
+    let hdr ← match ← readExactHandleBounded hTar 512 bytesReadRef maxAllowed with
+      | .ok b => pure b
+      | .error e => return .error e
     if hdr.isEmpty || isAllZeroBlock hdr then
       break
     let some szU64 := parseTarSizeField? hdr 124 12
@@ -1067,10 +1089,12 @@ private def streamUnpackTarFile
     let padLen : Nat := (((512 : UInt64) - (szU64 % 512)) % 512).toNat
     if tf == 76 then -- 'L' GNU LongLink
       if szU64 > 65536 then return .error "Oversized tar LongLink path"
-      let some payload ← readExactHandle hTar szU64.toNat
-        | return .error "Archive LongLink truncated"
+      let payload ← match ← readExactHandleBounded hTar szU64.toNat bytesReadRef maxAllowed with
+        | .ok b => pure b
+        | .error e => return .error e
       if payload.size != szU64.toNat then return .error "Archive LongLink truncated"
-      if !(← discardExactHandle hTar padLen) then return .error "Archive block padding truncated"
+      if let .error e ← discardExactHandleBounded hTar padLen bytesReadRef maxAllowed then
+        return .error e
       let mut endIdx := payload.size
       while endIdx > 0 && payload.get! (endIdx - 1) == 0 do
         endIdx := endIdx - 1
@@ -1079,16 +1103,18 @@ private def streamUnpackTarFile
       pendingLongName? := some lname
     else if tf == 120 then -- 'x' PAX extended header
       if szU64 > 1048576 then return .error "Oversized PAX extended header"
-      let some payload ← readExactHandle hTar szU64.toNat
-        | return .error "Archive PAX header truncated"
+      let payload ← match ← readExactHandleBounded hTar szU64.toNat bytesReadRef maxAllowed with
+        | .ok b => pure b
+        | .error e => return .error e
       if payload.size != szU64.toNat then return .error "Archive PAX header truncated"
-      if !(← discardExactHandle hTar padLen) then return .error "Archive block padding truncated"
+      if let .error e ← discardExactHandleBounded hTar padLen bytesReadRef maxAllowed then
+        return .error e
       if let some pname := parsePaxPath? payload then
         pendingLongName? := some pname
     else if tf == 103 then -- 'g' global PAX header
       if szU64 > 1048576 then return .error "Oversized global PAX header"
-      if !(← discardExactHandle hTar (szU64.toNat + padLen)) then
-        return .error "Archive global PAX header truncated"
+      if let .error e ← discardExactHandleBounded hTar (szU64.toNat + padLen) bytesReadRef maxAllowed then
+        return .error e
     else if tf == 0 || tf == 48 then -- '\0' or '0' regular file
       let rawName ← match pendingLongName? with
         | some ln => pure ln
@@ -1118,19 +1144,49 @@ private def streamUnpackTarFile
           | return .error s!"Archive entry truncated: {clean}"
         if chunk.isEmpty then
           return .error s!"Archive entry truncated: {clean}"
+        let nextTotal := (← bytesReadRef.get) + chunk.size.toUInt64
+        bytesReadRef.set nextTotal
+        if nextTotal > maxAllowed then
+          return .error "Decompressed tar archive exceeds staged manifest allowance"
         let .ok () ← (hDst.write chunk).toBaseIO
           | return .error s!"Failed writing destination file: {clean}"
         rem := rem - chunk.size.toUInt64
       discard <| (hDst.flush).toBaseIO
-      if !(← discardExactHandle hTar padLen) then
-        return .error "Archive block padding truncated"
+      if let .error e ← discardExactHandleBounded hTar padLen bytesReadRef maxAllowed then
+        return .error e
       written := written + szU64
     else
       return .error "Archive contains a non-regular entry"
+  -- Drain any remaining tar end-of-archive zero trailer blocks while still enforcing `maxAllowed`!
+  while true do
+    let .ok tail ← (hTar.read 65536).toBaseIO | break
+    if tail.isEmpty then break
+    let nextTotal := (← bytesReadRef.get) + tail.size.toUInt64
+    bytesReadRef.set nextTotal
+    if nextTotal > maxAllowed then
+      return .error "Decompressed tar archive exceeds staged manifest allowance"
   return .ok written
 
-/-- Pack verified source checkpoint `area` into a compressed `tar + zstd` file on disk (`outArchive`)
-    using `64 KiB` streaming chunks (zero whole-archive `ByteArray` in memory!). -/
+/-- Helper owning `zstdStdin` (`IO.FS.Handle`) by value so its `FILE*` finalizer closes EOF on `zstd` stdin
+    the instant `feedTarToZstdStdin` returns! -/
+@[noinline]
+private def feedTarToZstdStdin
+    (zstdStdin : IO.FS.Handle) (root : System.FilePath) (files : Array TransferEntry) :
+    IO (Except String Unit) := do
+  for f in files do
+    let fp ← match ← confinedCheckpointPath root f.path with
+      | .ok v => pure v
+      | .error e => return .error e
+    if let .error err ← writeTarEntryStreaming zstdStdin f.path f.executable fp f.bytes then
+      return .error err
+  let .ok () ← (zstdStdin.write (padZeroBytes 1024)).toBaseIO
+    | return .error "Failed finalizing tar trailer"
+  discard <| (zstdStdin.flush).toBaseIO
+  return .ok ()
+
+/-- Pack verified source checkpoint `area` directly into compressed `tar + zstd` file `outArchive`
+    by piping `writeTarEntryStreaming` (`64 KiB` chunks) straight into `zstd -3 -q -f -o outArchive -` stdin
+    (zero intermediate `.tar` file on disk and zero whole-archive `ByteArray` in RAM!). -/
 def packTransferArchiveToFile (area : System.FilePath) : IO (Except String System.FilePath) := do
   let manifestFile := area / "manifest.json"
   if !(← manifestFile.pathExists) then
@@ -1140,29 +1196,35 @@ def packTransferArchiveToFile (area : System.FilePath) : IO (Except String Syste
   let some m := TransferManifest.fromJson? jv | return .error "Corrupt manifest"
   let root := area / "workspace"
   let nonce ← newUuidV4
-  let rawTarFile := area / s!".pack-raw-{nonce}.tar"
   let outArchive := area / s!".pack-out-{nonce}.tar.zst"
-  let packStep : IO (Except String Unit) := do
-    let .ok hTar ← (IO.FS.Handle.mk rawTarFile .write).toBaseIO
-      | return .error "Failed creating temporary tar file"
-    for f in m.files do
-      let fp ← match ← confinedCheckpointPath root f.path with
-        | .ok v => pure v
-        | .error e => return .error e
-      if let .error err ← writeTarEntryStreaming hTar f.path f.executable fp f.bytes then
-        return .error err
-    let .ok () ← (hTar.write (padZeroBytes 1024)).toBaseIO
-      | return .error "Failed finalizing tar trailer"
-    discard <| (hTar.flush).toBaseIO
-    return .ok ()
-  if let .error err ← packStep then
-    try IO.FS.removeFile rawTarFile catch _ => pure ()
-    return .error err
-  let res ← IO.Process.output { cmd := "zstd", args := #["-3", "-q", "-f", "-o", outArchive.toString, rawTarFile.toString] }
-  try IO.FS.removeFile rawTarFile catch _ => pure ()
-  if res.exitCode != 0 then
+  let .ok zstdChild ← (IO.Process.spawn {
+    cmd := "zstd"
+    args := #["-3", "-q", "-f", "-o", outArchive.toString, "-"]
+    stdin := .piped
+    stdout := .null
+    stderr := .piped
+  }).toBaseIO
+    | try IO.FS.removeFile outArchive catch _ => pure ()
+      return .error "Failed spawning zstd compressor"
+  let errTask ← IO.asTask (do
+    let mut s := ""
+    if let .ok txt ← zstdChild.stderr.readToEnd.toBaseIO then s := txt
+    return s
+  ) Task.Priority.dedicated
+  let (zstdStdin, zstdWaiter) ← zstdChild.takeStdin
+  let stepRes ← feedTarToZstdStdin zstdStdin root m.files
+  if stepRes matches .error _ then
+    discard <| zstdWaiter.kill.toBaseIO
+  let exitCode ← match ← zstdWaiter.wait.toBaseIO with
+    | .ok ec => pure ec
+    | .error _ => pure 1
+  let errTxt := (← IO.wait errTask).toOption.getD ""
+  if let .error err := stepRes then
     try IO.FS.removeFile outArchive catch _ => pure ()
-    return .error s!"Archive pack failed: {res.stderr.trimAscii}"
+    return .error err
+  if exitCode != 0 then
+    try IO.FS.removeFile outArchive catch _ => pure ()
+    return .error s!"Archive pack failed: {errTxt.trimAscii}"
   return .ok outArchive
 
 /-- Pack verified source checkpoint `area` into a `tar + zstd` archive (`ByteArray`) without invoking `tar` CLI. -/
@@ -1176,9 +1238,10 @@ def packTransferArchive (area : System.FilePath) : IO (Except String ByteArray) 
   try IO.FS.removeFile outArchive catch _ => pure ()
   return .ok archiveBytes
 
-/-- Unpack a `tar + zstd` archive file on disk (`inArchive`) into staged destination checkpoint `area`,
-    streaming tar blocks in `64 KiB` chunks and enforcing manifest & size bounds so a highly compressible
-    multi-GiB `.tar.zst` payload never expands into daemon RAM! -/
+/-- Unpack a `tar + zstd` archive file on disk (`inArchive`) into staged destination checkpoint `area`
+    by piping `zstd -d -q -c inArchive` stdout directly into `streamUnpackTarHandle` (`64 KiB` chunks),
+    enforcing online `maxAllowed` decompressed byte bounds (`min maxTarAllowance (maxTransferBytes + 64 MiB)`)
+    so zstd bombs abort and kill `zstd` immediately with zero intermediate `.tar` file on disk! -/
 def unpackTransferArchiveFromFile (area : System.FilePath) (inArchive : System.FilePath) : IO (Except String UInt64) := do
   if ← (area / "verified").pathExists then
     return .error "Checkpoint already sealed"
@@ -1193,20 +1256,37 @@ def unpackTransferArchiveFromFile (area : System.FilePath) (inArchive : System.F
     wanted := wanted.insert f.path f
   let root := area / "workspace"
   IO.FS.createDirAll root
-  let nonce ← newUuidV4
-  let outTar := area / s!".unpack-out-{nonce}.tar"
-  let decRes ← IO.Process.output { cmd := "zstd", args := #["-d", "-q", "-f", "-o", outTar.toString, inArchive.toString] }
-  if decRes.exitCode != 0 then
-    try IO.FS.removeFile outTar catch _ => pure ()
-    return .error s!"Invalid tar+zstd archive: {decRes.stderr.trimAscii}"
   let maxTarAllowance : UInt64 := m.bytes + (m.files.size.toUInt64 + 8) * 4096 + 67108864
-  if let .ok md ← outTar.metadata |>.toBaseIO then
-    if md.byteSize > maxTarAllowance || md.byteSize > maxTransferBytes + 67108864 then
-      try IO.FS.removeFile outTar catch _ => pure ()
-      return .error "Decompressed tar archive exceeds staged manifest allowance"
-  let res ← streamUnpackTarFile outTar root wanted
-  try IO.FS.removeFile outTar catch _ => pure ()
-  return res
+  let maxCap : UInt64 := min maxTarAllowance (maxTransferBytes + 67108864)
+  let .ok zstdChild ← (IO.Process.spawn {
+    cmd := "zstd"
+    args := #["-d", "-q", "-c", inArchive.toString]
+    stdin := .null
+    stdout := .piped
+    stderr := .piped
+  }).toBaseIO
+    | return .error "Failed spawning zstd decompressor"
+  let errTask ← IO.asTask (do
+    let mut s := ""
+    if let .ok txt ← zstdChild.stderr.readToEnd.toBaseIO then s := txt
+    return s
+  ) Task.Priority.dedicated
+  let res ← streamUnpackTarHandle zstdChild.stdout root wanted maxCap
+  if res matches .error _ then
+    discard <| zstdChild.kill.toBaseIO
+  let exitCode ← match ← zstdChild.wait.toBaseIO with
+    | .ok ec => pure ec
+    | .error _ => pure 1
+  let errTxt := (← IO.wait errTask).toOption.getD ""
+  match res with
+  | .error err =>
+    if exitCode != 0 && err == "Archive truncated" then
+      return .error s!"Invalid tar+zstd archive: {errTxt.trimAscii}"
+    return .error err
+  | .ok written =>
+    if exitCode != 0 then
+      return .error s!"Invalid tar+zstd archive: {errTxt.trimAscii}"
+    return .ok written
 
 /-- Unpack an in-memory `tar + zstd` `ByteArray` into staged destination checkpoint `area`. -/
 def unpackTransferArchive (area : System.FilePath) (archiveBytes : ByteArray) : IO (Except String UInt64) := do

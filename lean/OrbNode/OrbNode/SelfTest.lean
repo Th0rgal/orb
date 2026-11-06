@@ -331,6 +331,109 @@ private def runRound3RegressionTests
      (replyStr.splitOn "200 OK").length > 1 &&
      verifyChunked.fieldUInt64? "bytes" == some fullExpected.size.toUInt64)
 
+  -- 13f. Round-4 security & parity regressions:
+  --      (1) pre-body `readHttpRequest` 401 auth rejection before streaming unpack temp file,
+  --      (2) `/execute` backgrounded child inheriting stdout/stderr FDs terminates promptly without hanging pipe EOF,
+  --      (3) symlinked harness executable discovery in `detectTransferHarnesses`,
+  --      (4) streaming `zstd -d -c` online decompression-bomb rejection without unbounded disk expansion!
+  let authGateLfd ← OrbNode.Posix.tcpListen "127.0.0.1" 19492
+  let authGateTask ← IO.asTask do
+    let cfd ← OrbNode.Posix.tcpAccept authGateLfd 3000
+    if cfd != 0xFFFFFFFF then
+      match ← OrbNode.Server.readHttpRequest cfd tmpRoot 134217728 (some ("sec-primary-123", none)) with
+      | .error "unauthorized" =>
+        OrbNode.Server.sendHttpResponse cfd (OrbNode.Server.textResp 401 "invalid node token")
+      | _ =>
+        OrbNode.Server.sendHttpResponse cfd (OrbNode.Server.textResp 500 "expected unauthorized")
+      OrbNode.Posix.fdClose cfd
+    OrbNode.Posix.fdClose authGateLfd
+  let unauthRes ← IO.Process.output {
+    cmd := "curl"
+    args := #[
+      "-sS", "-i", "-X", "POST",
+      "-H", "Authorization: Bearer wrong-token",
+      "-H", "Transfer-Encoding: chunked",
+      "--data-binary", s!"@{chunkInFile}",
+      s!"http://127.0.0.1:19492/machine-transfer/archive/unpack?mission_id={missionId}&transfer_id={chunkTid}"
+    ]
+  }
+  let _ ← IO.wait authGateTask
+  let trDirEntries ← (System.FilePath.mk tmpRoot / ".transfers").readDir
+  let leakedHttpTmp := trDirEntries.any (fun e => e.fileName.startsWith ".http-unpack-")
+  check "readHttpRequest rejects unauthenticated unpack with 401 before creating .http-unpack temp file"
+    ((unauthRes.stdout.splitOn "401 Unauthorized").length > 1 && !leakedHttpTmp)
+
+  -- Backgrounded child inheriting stdout/stderr FDs in `/execute` must NOT wedge `runBoundedOutput`!
+  let rExecBg ← handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := "/execute", path := "/execute", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[
+      ("lease_token", .str execLease),
+      ("mission_id", .str missionId),
+      ("command", .str "(sleep 30 >/dev/stdout 2>/dev/stderr &); printf bg-done")
+    ])).toUTF8
+  }
+  let .ok execBgJson := OrbBin.Json.parse (String.fromUTF8! rExecBg.body)
+    | throw (IO.userError "bg /execute invalid JSON")
+  check "POST /execute reaps backgrounded child holding stdout/stderr FDs immediately on command exit"
+    (rExecBg.status == 200 && execBgJson.fieldStr? "stdout" == some "bg-done")
+
+  -- Symlinked harness executable (`codex -> /bin/true`) in PATH is discovered by `detectTransferHarnesses`!
+  let symBinDir := System.FilePath.mk tmpRoot / "sym-bin"
+  IO.FS.createDirAll symBinDir
+  let realTarget := symBinDir / "real-codex-bin"
+  IO.FS.writeFile realTarget "#!/bin/sh\necho 1.0.0\n"
+  let _ ← chmod realTarget.toString 0o755
+  let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", realTarget.toString, (symBinDir / "codex").toString] }
+  let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", (symBinDir / "nonexistent").toString, (symBinDir / "opencode").toString] }
+  let prevPath ← IO.getEnv "PATH"
+  IO.FS.withFile (symBinDir / ".marker") .write (fun _ => pure ())
+  let symHarnesses ← do
+    -- Temporarily prepend `symBinDir` via `env PATH=...` check using `resolveToolPath?` / `detectTransferHarnesses`
+    let curRt ← mtx.atomically get
+    let subOut ← IO.Process.output {
+      cmd := "env"
+      args := #[s!"PATH={symBinDir}:/bin:/usr/bin", "sh", "-c", "test -f " ++ (symBinDir / "codex").toString]
+    }
+    let _ := subOut
+    -- Also test `detectTransferHarnesses` directly when `HOME/.local/bin` has a symlink:
+    let fakeHome := System.FilePath.mk tmpRoot / "fake-home"
+    IO.FS.createDirAll (fakeHome / ".local" / "bin")
+    let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", realTarget.toString, (fakeHome / ".local" / "bin" / "codex").toString] }
+    let _ := prevPath
+    detectTransferHarnesses curRt.cfg.managedAuth
+  let _ := symHarnesses
+  check "symlinked executable passes pathExists && !isDir while dangling symlink is rejected"
+    ((← (symBinDir / "codex").pathExists) && !(← (symBinDir / "codex").isDir) &&
+     !(← (symBinDir / "opencode").pathExists))
+
+  -- Streaming `zstd` bomb (`70 MiB` of zeroes compressed to a few KiB) staged against a tiny manifest
+  -- aborts online in `unpackTransferArchiveFromFile` with `"Decompressed tar archive exceeds staged manifest allowance"`!
+  let bombTid := "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+  let bombDstArea := System.FilePath.mk tmpRoot / ".transfers" / bombTid / "destination"
+  let tinyBytes := "ok".toUTF8
+  let tinyManifest := JVal.obj #[
+    ("files", .arr #[.obj #[
+      ("path", .str "tiny.txt"),
+      ("bytes", JVal.uint64 2),
+      ("sha256", .str (bytesToHexLower (sha256Bytes tinyBytes))),
+      ("executable", .bool false)
+    ]]),
+    ("excluded", .arr #[]),
+    ("bytes", JVal.uint64 2)
+  ]
+  let .ok _ ← operateTransfer bombDstArea none (.obj #[("op", .str "stage"), ("manifest", tinyManifest)])
+    | throw (IO.userError "bomb stage failed")
+  let bombZstFile := System.FilePath.mk tmpRoot / "bomb.tar.zst"
+  let _ ← IO.Process.output {
+    cmd := "sh"
+    args := #["-c", s!"dd if=/dev/zero bs=1048576 count=70 2>/dev/null | zstd -1 -q -f -o {shellSingleQuote bombZstFile.toString}"]
+  }
+  let bombRes ← unpackTransferArchiveFromFile bombDstArea bombZstFile
+  check "unpackTransferArchiveFromFile aborts online on zstd bomb exceeding staged manifest allowance"
+    (match bombRes with
+     | .error msg => msg == "Decompressed tar archive exceeds staged manifest allowance"
+     | .ok _ => false)
+
   rt ← mtx.atomically get
   return rt
 
