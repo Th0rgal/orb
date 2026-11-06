@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::settings::Settings;
 use crate::util::internal_error;
-use crate::workspace;
 
 use super::routes::AppState;
 
@@ -341,37 +340,47 @@ async fn update_library_remote(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    // Hold the library write lock across checkout initialization + settings update
+    // so concurrent `/api/library/*` callers (`ensure_library`) never observe the
+    // new `LibraryStore` paired with the old `settings.library_remote` (or vice versa).
+    let mut library_guard = state.library.write().await;
     let configured_remote = state.settings.get_library_remote().await;
-    let active_remote = state
-        .library
-        .read()
-        .await
-        .as_ref()
-        .map(|lib| lib.remote().to_string());
+    let active_remote = library_guard.as_ref().map(|lib| lib.remote().to_string());
 
     if let Some(ref remote) = new_remote {
         let needs_reinit = req.force_reinitialize
             || configured_remote.as_deref() != Some(remote.as_str())
             || active_remote.as_deref() != Some(remote.as_str());
         if needs_reinit {
-            match reinitialize_library(&state, remote).await {
-                Ok(()) => {
+            match crate::library::LibraryStore::new(state.config.library_path.clone(), remote).await
+            {
+                Ok(store) => {
+                    tracing::info!("Skills library reinitialized from {}", remote);
+                    let library = Arc::new(store);
+                    *library_guard = Some(Arc::clone(&library));
                     state
                         .settings
                         .set_library_remote(new_remote.clone())
                         .await
                         .map_err(internal_error)?;
+                    drop(library_guard);
+
+                    super::library::sync_all_workspaces(&state, &library).await;
+
                     Ok(Json(UpdateLibraryRemoteResponse {
                         library_remote: new_remote,
                         library_reinitialized: true,
                         library_error: None,
                     }))
                 }
-                Err(e) => Ok(Json(UpdateLibraryRemoteResponse {
-                    library_remote: configured_remote,
-                    library_reinitialized: false,
-                    library_error: Some(e),
-                })),
+                Err(e) => {
+                    tracing::error!("Failed to reinitialize library from {}: {}", remote, e);
+                    Ok(Json(UpdateLibraryRemoteResponse {
+                        library_remote: configured_remote,
+                        library_reinitialized: false,
+                        library_error: Some(e.to_string()),
+                    }))
+                }
             }
         } else {
             Ok(Json(UpdateLibraryRemoteResponse {
@@ -388,7 +397,7 @@ async fn update_library_remote(
             .map_err(internal_error)?;
         let had_active = active_remote.is_some();
         if changed || had_active || req.force_reinitialize {
-            *state.library.write().await = None;
+            *library_guard = None;
             tracing::info!("Library cleared (remote set to None)");
             Ok(Json(UpdateLibraryRemoteResponse {
                 library_remote: None,
@@ -401,42 +410,6 @@ async fn update_library_remote(
                 library_reinitialized: false,
                 library_error: None,
             }))
-        }
-    }
-}
-
-/// Reinitialize the library with a new remote URL.
-async fn reinitialize_library(state: &Arc<AppState>, remote: &str) -> Result<(), String> {
-    let library_path = state.config.library_path.clone();
-
-    match crate::library::LibraryStore::new(library_path, remote).await {
-        Ok(store) => {
-            tracing::info!("Skills library reinitialized from {}", remote);
-            let library = Arc::new(store);
-            *state.library.write().await = Some(Arc::clone(&library));
-
-            // Sync skills/tools to all workspaces
-            let workspaces = state.workspaces.list().await;
-            for ws in workspaces {
-                let is_default_host = ws.id == workspace::DEFAULT_WORKSPACE_ID
-                    && ws.workspace_type == workspace::WorkspaceType::Host;
-
-                if is_default_host || !ws.skills.is_empty() {
-                    if let Err(e) = workspace::sync_workspace_skills(&ws, &library).await {
-                        tracing::warn!(
-                            workspace = %ws.name,
-                            error = %e,
-                            "Failed to sync skills after library reinit"
-                        );
-                    }
-                }
-            }
-
-            Ok(())
-        }
-        Err(e) => {
-            tracing::error!("Failed to reinitialize library from {}: {}", remote, e);
-            Err(e.to_string())
         }
     }
 }
