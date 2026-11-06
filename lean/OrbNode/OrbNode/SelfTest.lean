@@ -180,6 +180,160 @@ private def runRound2RegressionTests
     (rt.shrinkDebt == 0 && (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded)
   return rt
 
+/-- Section 13: Round-3 regression checks (terminal vs running incomplete UTF-8 log drain,
+    bounded `/execute` stdout capture, GNU base-256 `>= 8 GiB` tar size roundtrip, seek-based
+    multi-block `"write"`/`"read"`, streaming `packTransferArchiveToFile`/`unpackTransferArchiveFromFile`,
+    chunked HTTP `POST /machine-transfer/archive/unpack`, `GET /software` `Inventory` schema,
+    and `GET /machine-transfer/capabilities` `bulk_copy`). -/
+private def runRound3RegressionTests
+    (check : String → Bool → IO Unit)
+    (tmpRoot missionId : String)
+    (nowEp : UInt64)
+    (authHdrs : Array (String × String))
+    (rt0 : NodeRuntime) : IO NodeRuntime := do
+  let mut rt := rt0
+  -- 13a. Terminal vs active incomplete trailing UTF-8 log drain (`#[0x61, 0xE2, 0x82]` = `'a'` + 2 bytes of `'€'`)
+  let partialUtf8 := ByteArray.mk #[0x61, 0xE2, 0x82]
+  let liveSlice := sliceJobLogBytes partialUtf8 0 64 false
+  let termSlice := sliceJobLogBytes partialUtf8 liveSlice.nextOffset.toNat 64 true
+  check "sliceJobLogBytes withholds incomplete trailing UTF-8 while running and drains to log_len once terminal"
+    (liveSlice.data == "a" && liveSlice.nextOffset == 1 && termSlice.nextOffset == 3)
+
+  -- 13b. Bounded `/execute` stdout capture (`syncExecOutputCapBytes = 2,796,032`) prevents >16 MiB OOM
+  let execLease := signLeaseToken "sec-primary-123" {
+    missionId := missionId, nodeId := "test-node", scope := .missionExecute, expiresAt := nowEp + 600
+  }
+  let mtx ← Std.Mutex.new rt
+  let transferMtx ← Std.Mutex.new ()
+  let rExecBig ← handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := "/execute", path := "/execute", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[
+      ("lease_token", .str execLease),
+      ("mission_id", .str missionId),
+      ("command", .str "yes X | head -c 3000000")
+    ])).toUTF8
+  }
+  let .ok execBigJson := OrbBin.Json.parse (String.fromUTF8! rExecBig.body)
+    | throw (IO.userError "bounded /execute invalid JSON")
+  let execBigOut := (execBigJson.fieldStr? "stdout").getD ""
+  check "POST /execute bounds 3 MiB child stdout with truncation marker without exceeding 16 MiB JSON limit"
+    (rExecBig.status == 200 &&
+     execBigOut.length > 2796000 &&
+     execBigOut.length < 2850000 &&
+     (execBigOut.splitOn "[node output truncated to fit 16 MiB JSON limit]").length > 1)
+
+  -- 13c. GNU base-256 `>= 8 GiB` (`9,000,000,000`) tar header roundtrip + overflow rejection
+  let nineGib : UInt64 := 9000000000
+  let hdr9 := makeTarHeaderBlock "huge.bin" 48 0o600 nineGib
+  let parsed9 := parseTarSizeField? hdr9 124 12
+  let mut badOverflowHdr := hdr9
+  badOverflowHdr := badOverflowHdr.set! 125 1 -- non-zero upper byte in 96-bit base-256 field
+  check "makeTarHeaderBlock/parseTarSizeField? roundtrips >= 8 GiB GNU base-256 size and rejects >64-bit overflow"
+    (parsed9 == some nineGib && (parseTarSizeField? badOverflowHdr 124 12).isNone)
+
+  -- 13d. Multi-block `O(1)` positional `"write"` & `preadByteArray` `"read"` across two 1 MiB blocks
+  let blkTid := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  let blkDstArea := System.FilePath.mk tmpRoot / ".transfers" / blkTid / "destination"
+  let blk0 := ByteArray.mk (Array.replicate 1048576 (0x41 : UInt8)) -- 1 MiB 'A'
+  let blk1 := "tail-block-payload".toUTF8
+  let fullExpected := blk0 ++ blk1
+  let fullSha := bytesToHexLower (sha256Bytes fullExpected)
+  let blkManifest := JVal.obj #[
+    ("files", .arr #[.obj #[
+      ("path", .str "multi.bin"),
+      ("bytes", JVal.uint64 fullExpected.size.toUInt64),
+      ("sha256", .str fullSha),
+      ("executable", .bool false)
+    ]]),
+    ("excluded", .arr #[]),
+    ("bytes", JVal.uint64 fullExpected.size.toUInt64)
+  ]
+  let .ok _ ← operateTransfer blkDstArea none (.obj #[("op", .str "stage"), ("manifest", blkManifest)])
+    | throw (IO.userError "multi-block stage failed")
+  -- Write block 1 FIRST (at offset 1 MiB) before block 0 to prove sparse positional `ftruncateFd` + `mmapRegionWrite`!
+  let .ok _ ← operateTransfer blkDstArea none (.obj #[
+    ("op", .str "write"), ("path", .str "multi.bin"),
+    ("offset", JVal.uint64 1048576), ("data", .str (base64Encode blk1 false true))
+  ]) | throw (IO.userError "multi-block write@1MiB failed")
+  let .ok _ ← operateTransfer blkDstArea none (.obj #[
+    ("op", .str "write"), ("path", .str "multi.bin"),
+    ("offset", JVal.uint64 0), ("data", .str (base64Encode blk0 false true))
+  ]) | throw (IO.userError "multi-block write@0 failed")
+  let .ok _ ← operateTransfer blkDstArea none (.obj #[("op", .str "verify")])
+    | throw (IO.userError "multi-block verify failed")
+  let .ok rdBlk1 ← operateTransfer blkDstArea none (.obj #[
+    ("op", .str "read"), ("path", .str "multi.bin"), ("offset", JVal.uint64 1048576)
+  ]) | throw (IO.userError "multi-block read@1MiB failed")
+  check "out-of-order multi-block positional write + verify + preadByteArray read roundtrips 1 MiB+ file"
+    ((rdBlk1.fieldStr? "data").bind base64Decode? == some blk1)
+
+  -- 13e. Streaming HTTP `POST /machine-transfer/archive/pack` (`tempFile?`) + `Transfer-Encoding: chunked`
+  --      `POST /machine-transfer/archive/unpack` (`readHttpRequest` -> `bodyTempFile?`) + `GET /software` + `bulk_copy`
+  let rSoft ← handleRequestConcurrent mtx transferMtx {
+    method := "GET", rawPath := "/software", path := "/software", query := #[], headers := authHdrs, body := ByteArray.empty
+  }
+  let .ok softJson := OrbBin.Json.parse (String.fromUTF8! rSoft.body)
+    | throw (IO.userError "GET /software invalid JSON")
+  let comps := (softJson.fieldArr? "components").getD #[]
+  let rCaps ← handleRequestConcurrent mtx transferMtx {
+    method := "GET", rawPath := "/machine-transfer/capabilities", path := "/machine-transfer/capabilities",
+    query := #[], headers := authHdrs, body := ByteArray.empty
+  }
+  let .ok capsJson := OrbBin.Json.parse (String.fromUTF8! rCaps.body)
+    | throw (IO.userError "capabilities invalid JSON")
+  let capFeats := ((capsJson.fieldArr? "features").getD #[]).filterMap JVal.asStr?
+  check "GET /software matches Core Inventory schema and GET /machine-transfer/capabilities advertises bulk_copy"
+    (rSoft.status == 200 &&
+     (softJson.fieldUInt64? "checked_at").isSome &&
+     comps.size == 6 &&
+     (comps[0]!.fieldStr? "owner").isSome &&
+     (comps[0]!.fieldBool? "update_supported").isSome &&
+     ((softJson.field? "runtime").bind (·.fieldStr? "name")) == some "sandboxed-node" &&
+     ((softJson.fieldArr? "jobs").map (·.size)) == some 0 &&
+     capFeats.contains "bulk_copy")
+
+  let .ok packedTempFile ← packTransferArchiveToFile blkDstArea
+    | throw (IO.userError "packTransferArchiveToFile failed")
+  let packedZst ← IO.FS.readBinFile packedTempFile
+  try IO.FS.removeFile packedTempFile catch _ => pure ()
+  let chunkTid := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+  let chunkDstArea := System.FilePath.mk tmpRoot / ".transfers" / chunkTid / "destination"
+  let .ok _ ← operateTransfer chunkDstArea none (.obj #[("op", .str "stage"), ("manifest", blkManifest)])
+    | throw (IO.userError "chunked unpack stage failed")
+  let chunkLfd ← OrbNode.Posix.tcpListen "127.0.0.1" 19491
+  let chunkSrvTask ← IO.asTask do
+    let cfd ← OrbNode.Posix.tcpAccept chunkLfd 3000
+    if cfd != 0xFFFFFFFF then
+      if let .ok creq ← OrbNode.Server.readHttpRequest cfd tmpRoot then
+        let cresp ← handleRequestConcurrent mtx transferMtx creq
+        OrbNode.Server.sendHttpResponse cfd cresp
+      OrbNode.Posix.fdClose cfd
+    OrbNode.Posix.fdClose chunkLfd
+  let chunkInFile := System.FilePath.mk tmpRoot / "chunked-upload.tar.zst"
+  IO.FS.writeBinFile chunkInFile packedZst
+  let curlChunkRes ← IO.Process.output {
+    cmd := "curl"
+    args := #[
+      "-sS", "-i",
+      "-X", "POST",
+      "-H", "Authorization: Bearer sec-primary-123",
+      "-H", "Transfer-Encoding: chunked",
+      "--data-binary", s!"@{chunkInFile}",
+      s!"http://127.0.0.1:19491/machine-transfer/archive/unpack?mission_id={missionId}&transfer_id={chunkTid}"
+    ]
+  }
+  let _ ← IO.wait chunkSrvTask
+  let .ok verifyChunked ← operateTransfer chunkDstArea none (.obj #[("op", .str "verify")])
+    | throw (IO.userError "chunked unpack verify failed")
+  let replyStr := curlChunkRes.stdout
+  check "HTTP Transfer-Encoding: chunked streaming unpack + verify restores 1 MiB+ archive via disk temp file"
+    (curlChunkRes.exitCode == 0 &&
+     (replyStr.splitOn "200 OK").length > 1 &&
+     verifyChunked.fieldUInt64? "bytes" == some fullExpected.size.toUInt64)
+
+  rt ← mtx.atomically get
+  return rt
+
 set_option maxRecDepth 2048 in
 def runTests : IO UInt32 := do
   let passedRef ← IO.mkRef (0 : Nat)
@@ -817,6 +971,9 @@ def runTests : IO UInt32 := do
 
   -- 12. Round-2 regression checks
   rt ← runRound2RegressionTests check tmpRoot missionId submitLease nowEp authHdrs rt
+
+  -- 13. Round-3 regression checks
+  rt ← runRound3RegressionTests check tmpRoot missionId nowEp authHdrs rt
 
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get

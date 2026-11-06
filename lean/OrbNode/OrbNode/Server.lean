@@ -32,12 +32,13 @@ open OrbNode.ProjectContext
 open OrbNode.Runner
 
 structure HttpRequest where
-  method  : String
-  rawPath : String
-  path    : String
-  query   : Array (String × String)
-  headers : Array (String × String)
-  body    : ByteArray
+  method        : String
+  rawPath       : String
+  path          : String
+  query         : Array (String × String)
+  headers       : Array (String × String)
+  body          : ByteArray
+  bodyTempFile? : Option System.FilePath := none
   deriving Inhabited
 
 def HttpRequest.header? (req : HttpRequest) (nameLower : String) : Option String :=
@@ -49,7 +50,8 @@ def HttpRequest.query? (req : HttpRequest) (key : String) : Option String :=
 structure HttpResponse where
   status      : Nat
   contentType : String := "application/json"
-  body        : ByteArray
+  body        : ByteArray := ByteArray.empty
+  tempFile?   : Option System.FilePath := none
   deriving Inhabited
 
 def jsonResp (status : Nat) (v : JVal) : HttpResponse :=
@@ -79,6 +81,32 @@ def encodeHttpResponse (resp : HttpResponse) : ByteArray :=
     s!"Content-Length: {resp.body.size}\r\n" ++
     "Connection: close\r\n\r\n"
   head.toUTF8 ++ resp.body
+
+/-- Stream `HttpResponse` onto socket `cfd` without loading `tempFile?` into RAM, unlinking `tempFile?` afterwards. -/
+def sendHttpResponse (cfd : UInt32) (resp : HttpResponse) : IO Unit := do
+  match resp.tempFile? with
+  | none =>
+    discard <| OrbNode.Posix.fdWriteAll cfd (encodeHttpResponse resp)
+  | some fp =>
+    try
+      let fileLen ← match ← fp.metadata |>.toBaseIO with
+        | .ok md => pure md.byteSize
+        | .error _ => pure 0
+      let head :=
+        s!"HTTP/1.1 {resp.status} {statusReason resp.status}\r\n" ++
+        s!"Content-Type: {resp.contentType}\r\n" ++
+        s!"Content-Length: {fileLen}\r\n" ++
+        "Connection: close\r\n\r\n"
+      let rc ← OrbNode.Posix.fdWriteAll cfd head.toUTF8
+      if rc == 0 && fileLen > 0 then
+        if let .ok h ← (IO.FS.Handle.mk fp .read).toBaseIO then
+          while true do
+            let .ok chunk ← (h.read 65536).toBaseIO | break
+            if chunk.isEmpty then break
+            let wrc ← OrbNode.Posix.fdWriteAll cfd chunk
+            if wrc != 0 then break
+    finally
+      try IO.FS.removeFile fp catch _ => pure ()
 
 private def hexNibble? (c : Char) : Option UInt8 :=
   if '0' ≤ c && c ≤ '9' then some (c.toNat - '0'.toNat).toUInt8
@@ -130,8 +158,29 @@ private def findHeaderEnd? (buf : ByteArray) : Option Nat := Id.run do
       return some i
   return none
 
-/-- Read a bounded HTTP/1.1 request (`<= 128 MiB`, per-route limits enforced below) from `cfd`. -/
-def readHttpRequest (cfd : UInt32) (maxBodyBytes : Nat := 134217728) : IO (Except String HttpRequest) := do
+private def parseHexChunkSize? (line : String) : Option Nat := Id.run do
+  let clean := ((line.splitOn ";").headD "").trimAscii.toString
+  if clean.isEmpty then return none
+  let mut acc : Nat := 0
+  for c in clean.toList do
+    match hexNibble? c with
+    | some n => acc := acc * 16 + n.toNat
+    | none => return none
+  return some acc
+
+private def findCrlf? (buf : ByteArray) (startIdx : Nat := 0) : Option Nat := Id.run do
+  if startIdx + 2 > buf.size then return none
+  for i in [startIdx : buf.size - 1] do
+    if buf.get! i == 13 && buf.get! (i + 1) == 10 then
+      return some i
+  return none
+
+/-- Read HTTP/1.1 request from `cfd`:
+    - Normal routes enforce `maxBodyBytes` (`128 MiB`) in memory.
+    - `POST /machine-transfer/archive/unpack` supports both `Transfer-Encoding: chunked` (`reqwest::Body::wrap_stream`)
+      and `Content-Length` up to `maxTransferBytes` (`10 GiB`), streaming directly into a temporary file under
+      `<workDir>/.transfers/` in `64 KiB` chunks so archive uploads never buffer in daemon RAM! -/
+def readHttpRequest (cfd : UInt32) (workDir : String := "/tmp") (maxBodyBytes : Nat := 134217728) : IO (Except String HttpRequest) := do
   let mut buf := ByteArray.emptyWithCapacity 8192
   let mut hdrEnd? : Option Nat := none
   while hdrEnd?.isNone && buf.size < 65536 do
@@ -151,64 +200,238 @@ def readHttpRequest (cfd : UInt32) (maxBodyBytes : Nat := 134217728) : IO (Excep
   let method :: rawTarget :: _ := reqParts
     | return .error "malformed HTTP request line"
   let mut headers : Array (String × String) := #[]
-  let mut contentLen : Nat := 0
+  let mut contentLen? : Option Nat := none
+  let mut isChunked := false
   for hl in rawHdrs do
     if let p :: vs := hl.splitOn ":" then
       let k := p.trimAscii.toString.toLower
       let v := (String.intercalate ":" vs).trimAscii.toString
       headers := headers.push (k, v)
       if k == "content-length" then
-        contentLen := v.toNat?.getD 0
-  if contentLen > maxBodyBytes then
-    return .error "payload_too_large"
-  let bodyStart := hdrEnd + 4
-  let mut body := if bodyStart < buf.size then buf.extract bodyStart buf.size else ByteArray.empty
-  while body.size < contentLen do
-    let want := min 65536 (contentLen - body.size)
-    let chunk ← OrbNode.Posix.fdRead cfd (USize.ofNat want)
-    if chunk.isEmpty then break
-    body := body ++ chunk
-  if body.size > contentLen then
-    body := body.extract 0 contentLen
+        contentLen? := v.toNat?
+      else if k == "transfer-encoding" && (v.toLower.splitOn "chunked").length > 1 then
+        isChunked := true
   let (path, query) := parsePathAndQuery rawTarget
-  return .ok {
-    method := method.toUpper
-    rawPath := rawTarget
-    path := path
-    query := query
-    headers := headers
-    body := body
-  }
+  let methodUp := method.toUpper
+  let segs := (path.splitOn "/").filter (fun s => !s.isEmpty)
+  let isArchiveUnpack := methodUp == "POST" && segs == ["machine-transfer", "archive", "unpack"]
+  let bodyStart := hdrEnd + 4
+  let initialRem := if bodyStart < buf.size then buf.extract bodyStart buf.size else ByteArray.empty
+  if isArchiveUnpack then
+    let tmpDir := System.FilePath.mk workDir / ".transfers"
+    IO.FS.createDirAll tmpDir
+    let nonce ← newUuidV4
+    let tmpFile := tmpDir / s!".http-unpack-{nonce}.tar.zst"
+    let streamRes : IO (Except String Unit) := do
+      let .ok hOut ← (IO.FS.Handle.mk tmpFile .write).toBaseIO
+        | return .error "failed_open_temp"
+      if isChunked then
+        let mut remBuf := initialRem
+        let mut totalWritten : UInt64 := 0
+        while true do
+          while (findCrlf? remBuf 0).isNone && remBuf.size < 4096 do
+            let c ← OrbNode.Posix.fdRead cfd 16384
+            if c.isEmpty then break
+            remBuf := remBuf ++ c
+          let some lineEnd := findCrlf? remBuf 0
+            | return .error "malformed_chunk_header"
+          let some lineStr := String.fromUTF8? (remBuf.extract 0 lineEnd)
+            | return .error "malformed_chunk_header"
+          let some chunkSz := parseHexChunkSize? lineStr
+            | return .error "malformed_chunk_size"
+          remBuf := remBuf.extract (lineEnd + 2) remBuf.size
+          if chunkSz == 0 then
+            break
+          if totalWritten + chunkSz.toUInt64 > maxTransferBytes then
+            return .error "payload_too_large"
+          let mut need := chunkSz
+          if remBuf.size > 0 then
+            let takeNow := min need remBuf.size
+            let .ok () ← (hOut.write (remBuf.extract 0 takeNow)).toBaseIO
+              | return .error "write_failed"
+            remBuf := remBuf.extract takeNow remBuf.size
+            need := need - takeNow
+          while need > 0 do
+            let want := min 65536 need
+            let c ← OrbNode.Posix.fdRead cfd (USize.ofNat want)
+            if c.isEmpty then return .error "truncated_chunk_body"
+            let .ok () ← (hOut.write c).toBaseIO
+              | return .error "write_failed"
+            need := need - c.size
+          while remBuf.size < 2 do
+            let c ← OrbNode.Posix.fdRead cfd 4096
+            if c.isEmpty then return .error "missing_chunk_crlf"
+            remBuf := remBuf ++ c
+          if remBuf.get! 0 != 13 || remBuf.get! 1 != 10 then
+            return .error "missing_chunk_crlf"
+          remBuf := remBuf.extract 2 remBuf.size
+          totalWritten := totalWritten + chunkSz.toUInt64
+      else
+        let contentLen := contentLen?.getD 0
+        if contentLen.toUInt64 > maxTransferBytes then
+          return .error "payload_too_large"
+        let mut written : Nat := 0
+        if initialRem.size > 0 then
+          let takeNow := min contentLen initialRem.size
+          let .ok () ← (hOut.write (initialRem.extract 0 takeNow)).toBaseIO
+            | return .error "write_failed"
+          written := takeNow
+        while written < contentLen do
+          let want := min 65536 (contentLen - written)
+          let c ← OrbNode.Posix.fdRead cfd (USize.ofNat want)
+          if c.isEmpty then return .error "truncated_body"
+          let .ok () ← (hOut.write c).toBaseIO
+            | return .error "write_failed"
+          written := written + c.size
+      discard <| (hOut.flush).toBaseIO
+      return .ok ()
+    match ← streamRes with
+    | .error err =>
+      try IO.FS.removeFile tmpFile catch _ => pure ()
+      return .error err
+    | .ok () =>
+      return .ok {
+        method := methodUp
+        rawPath := rawTarget
+        path := path
+        query := query
+        headers := headers
+        body := ByteArray.empty
+        bodyTempFile? := some tmpFile
+      }
+  else
+    let contentLen := contentLen?.getD 0
+    if contentLen > maxBodyBytes then
+      return .error "payload_too_large"
+    let mut body := initialRem
+    if isChunked then
+      let mut outBody := ByteArray.empty
+      while true do
+        while (findCrlf? body 0).isNone && body.size < 4096 do
+          let c ← OrbNode.Posix.fdRead cfd 16384
+          if c.isEmpty then break
+          body := body ++ c
+        let some lineEnd := findCrlf? body 0
+          | return .error "malformed_chunk_header"
+        let some lineStr := String.fromUTF8? (body.extract 0 lineEnd)
+          | return .error "malformed_chunk_header"
+        let some chunkSz := parseHexChunkSize? lineStr
+          | return .error "malformed_chunk_size"
+        body := body.extract (lineEnd + 2) body.size
+        if chunkSz == 0 then break
+        if outBody.size + chunkSz > maxBodyBytes then
+          return .error "payload_too_large"
+        while body.size < chunkSz + 2 do
+          let c ← OrbNode.Posix.fdRead cfd (USize.ofNat (min 65536 (chunkSz + 2 - body.size)))
+          if c.isEmpty then return .error "truncated_chunk_body"
+          body := body ++ c
+        outBody := outBody ++ body.extract 0 chunkSz
+        body := body.extract (chunkSz + 2) body.size
+      body := outBody
+    else
+      while body.size < contentLen do
+        let want := min 65536 (contentLen - body.size)
+        let chunk ← OrbNode.Posix.fdRead cfd (USize.ofNat want)
+        if chunk.isEmpty then break
+        body := body ++ chunk
+      if body.size > contentLen then
+        body := body.extract 0 contentLen
+    return .ok {
+      method := methodUp
+      rawPath := rawTarget
+      path := path
+      query := query
+      headers := headers
+      body := body
+    }
 
 private def readLogTail64K (logPath? : Option String) : IO (Option String) :=
   readJobLogTailBounded logPath? 65536
 
-private def scanSoftwareInventory : IO JVal := do
-  let candidates := #[
-    ("sandboxed-node", "sandboxed-node", "--version"),
-    ("turbo-lean", "turbo-lean", "--version"),
-    ("lean", "lean", "--version"),
-    ("lake", "lake", "--version"),
-    ("git", "git", "--version"),
-    ("codex", "codex", "--version"),
-    ("opencode", "opencode", "--version"),
-    ("claude", "claude", "--version"),
-    ("agy", "agy", "--version")
+private def resolveToolPath? (bin : String) : IO (Option String) := do
+  let envPath := (← IO.getEnv "PATH").getD "/usr/local/bin:/usr/bin:/bin"
+  let mut dirs : Array String := (envPath.splitOn ":").toArray.filter (fun s => !s.isEmpty)
+  if let some home ← IO.getEnv "HOME" then
+    dirs := dirs ++ #[s!"{home}/.local/bin", s!"{home}/.bun/bin", s!"{home}/.cargo/bin"]
+  dirs := dirs ++ #["/opt/orb/bin", "/opt/sandboxed-tools/bin", "/opt/orb-tools/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+  for d in dirs do
+    let cand := (System.FilePath.mk d / bin).toString
+    let st ← statPath cand
+    if st.exists_ && (st.isReg || st.isSymlink) then
+      return some cand
+  return none
+
+private def classifyComponentOwner (path? : Option String) : String :=
+  match path? with
+  | none => "External"
+  | some p =>
+    if p.startsWith "/opt/orb/" || p.startsWith "/opt/sandboxed-tools/" || p.startsWith "/opt/orb-tools/" || p.startsWith "/usr/local/bin/" then
+      "Fleet installer"
+    else if (p.splitOn "/.bun/").length > 1 then
+      "Bun"
+    else if (p.splitOn "/node_modules/").length > 1 then
+      "npm"
+    else
+      "External"
+
+/-- Build the `shared/agent_software.rs::Inventory` payload expected by `GET /api/agent-software` on Core! -/
+def scanSoftwareInventory : IO JVal := do
+  let nowEp ← OrbNode.Posix.nowEpoch
+  let exePathJson ← match ← (IO.appPath).toBaseIO with
+    | .ok p => pure (JVal.str p.toString)
+    | .error _ => pure JVal.null
+  let tools := #[
+    ("claudecode", "Claude Code", "claude"),
+    ("codex", "Codex", "codex"),
+    ("opencode", "OpenCode", "opencode"),
+    ("grok", "Grok", "grok"),
+    ("antigravity", "Antigravity", "agy"),
+    ("vibe", "Mistral Vibe", "vibe-acp")
   ]
   let mut comps : Array JVal := #[]
-  for (cid, bin, flag) in candidates do
-    let res ← (IO.Process.output { cmd := bin, args := #[flag] }).toBaseIO
-    match res with
-    | .ok out =>
-      if out.exitCode == 0 then
-        let ver := ((out.stdout.splitOn "\n").headD "").trimAscii.toString
-        comps := comps.push (.obj #[
-          ("id", .str cid),
-          ("installed", .bool true),
-          ("version", .str ver)
-        ])
-    | .error _ => pure ()
-  return .obj #[("target", .str "Node runner"), ("components", .arr comps), ("active_update", .null)]
+  for (cid, cname, bin) in tools do
+    let path? ← resolveToolPath? bin
+    let mut ver? : Option String := none
+    if let some binPath := path? then
+      if let .ok out ← (IO.Process.output { cmd := binPath, args := #["--version"] }).toBaseIO then
+        if out.exitCode == 0 then
+          let firstLine := ((out.stdout.splitOn "\n").find? (fun ln => !ln.trimAscii.isEmpty)).getD ""
+          let clean := (firstLine.trimAscii.toString.take 200).toString
+          if !clean.isEmpty then
+            ver? := some clean
+    let isInstalled := path?.isSome
+    let owner := classifyComponentOwner path?
+    let verJson := match ver? with | some v => JVal.str v | none => JVal.null
+    let pathJson := match path? with | some p => JVal.str p | none => JVal.null
+    comps := comps.push (.obj #[
+      ("id", .str cid),
+      ("name", .str cname),
+      ("version", verJson),
+      ("path", pathJson),
+      ("installed", .bool isInstalled),
+      ("owner", .str owner),
+      ("update_supported", .bool false),
+      ("latest", .null),
+      ("release_error", .null),
+      ("running", .arr #[]),
+      ("instructions", .str "Managed out-of-band by host image / fleet provisioning"),
+      ("ready", .bool isInstalled),
+      ("ready_detail", .null)
+    ])
+  let runtimeObj := JVal.obj #[
+    ("name", .str "sandboxed-node"),
+    ("version", .str "1.3.0-lean4"),
+    ("build", .str "1.3.0-lean4 · turbo-lean"),
+    ("path", exePathJson),
+    ("restart_required", .bool false),
+    ("running", .arr #[])
+  ]
+  return .obj #[
+    ("checked_at", JVal.uint64 nowEp),
+    ("components", .arr comps),
+    ("runtime", runtimeObj),
+    ("jobs", .arr #[])
+  ]
 
 private def discoverAntigravityModels (ma : ManagedAuthConfig) (slot? : Option String) : IO (Except (Nat × String) JVal) := do
   let cleanSlot? := slot?.map (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty)
@@ -356,7 +579,7 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
       | return (rt, textResp 404 "job not found", preLaunches, #[])
     let off := (req.query? "offset" >>= String.toNat?).getD 0
     let maxB := (req.query? "max_bytes" >>= String.toNat?).getD 262144
-    let sl ← readJobLogSliceBounded rec.logPath? off.toUInt64 maxB
+    let sl ← readJobLogSliceBounded rec.logPath? off.toUInt64 maxB rec.state.isTerminal
     return (rt, jsonResp 200 (.obj #[
       ("job_id", .str key),
       ("offset", JVal.uint64 sl.offset),
@@ -490,7 +713,7 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
     return (rt, jsonResp 200 (.obj #[
       ("version", JVal.nat 2),
       ("harnesses", .arr (harnesses.map .str)),
-      ("features", .arr #[.str "links", .str "selection", .str "archive-zstd-v1"])
+      ("features", .arr #[.str "links", .str "selection", .str "bulk_copy", .str "archive-zstd-v1"])
     ]), preLaunches, #[])
   | "POST", ["machine-transfer", "files"] =>
     if req.body.size > 16 * 1024 * 1024 then
@@ -542,14 +765,27 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
     | .error msg =>
       return (rt, textResp 409 msg, preLaunches, #[])
   | "POST", ["machine-transfer", "archive", "unpack"] =>
+    let cleanupBodyTmp : IO Unit :=
+      match req.bodyTempFile? with
+      | some fp => do try IO.FS.removeFile fp catch _ => pure ()
+      | none => pure ()
     let (some rawMid, some rawTid) := (req.query? "mission_id", req.query? "transfer_id")
-      | return (rt, textResp 400 "missing mission_id or transfer_id query parameter", preLaunches, #[])
+      | cleanupBodyTmp
+        return (rt, textResp 400 "missing mission_id or transfer_id query parameter", preLaunches, #[])
     let (some mid, some tid) := (parseUuidCanonical? rawMid, parseUuidCanonical? rawTid)
-      | return (rt, textResp 400 "invalid UUID", preLaunches, #[])
+      | cleanupBodyTmp
+        return (rt, textResp 400 "invalid UUID", preLaunches, #[])
     if rt.ledger.missionHasLiveJobs mid then
+      cleanupBodyTmp
       return (rt, textResp 409 "Source execution has not terminated", preLaunches, #[])
     let area := System.FilePath.mk rt.cfg.workDir / ".transfers" / tid / "destination"
-    match ← unpackTransferArchive area req.body with
+    let unpackRes ← match req.bodyTempFile? with
+      | some fp => do
+        let r ← unpackTransferArchiveFromFile area fp
+        try IO.FS.removeFile fp catch _ => pure ()
+        pure r
+      | none => unpackTransferArchive area req.body
+    match unpackRes with
     | .ok written => return (rt, jsonResp 200 (.obj #[("ok", .bool true), ("bytes", JVal.uint64 written)]), preLaunches, #[])
     | .error msg => return (rt, textResp 409 msg, preLaunches, #[])
   | "POST", ["machine-transfer", "browse"] =>
@@ -614,7 +850,10 @@ def handleNonExecRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRunti
     rt ← commitPreparedJob rt item.jid prepRes
   return (rt, resp)
 
-/-- Spawn background `IO.asTask` workers for `PendingAsyncLaunch` items outside `Std.Mutex NodeRuntime`. -/
+/-- Spawn background `IO.asTask` workers for `PendingAsyncLaunch` items outside `Std.Mutex NodeRuntime`.
+    Exception-hardened: even if `commitPreparedJob` or `tickRuntimeReserve` raises an unexpected `IO.Error`,
+    the reserved `launching` slot, `queuedPayloads` entry, `shrinkDebt`, and any spawned PID/scope/checkout
+    are ALWAYS cleaned up so a worker exception can never wedge node capacity! -/
 private partial def spawnAsyncLaunches (mtx : Std.Mutex NodeRuntime) (launches : Array PendingAsyncLaunch) : IO Unit := do
   for item in launches do
     let _ ← IO.asTask do
@@ -624,10 +863,33 @@ private partial def spawnAsyncLaunches (mtx : Std.Mutex NodeRuntime) (launches :
         | .error e => pure (.error s!"unexpected launch exception: {e}")
       let more ← mtx.atomically do
         let rt ← get
-        let rtCommitted ← commitPreparedJob rt item.jid prepRes
-        let (rtNext, nextLaunches) ← tickRuntimeReserve rtCommitted
-        set rtNext
-        return nextLaunches
+        let stepAction : IO (NodeRuntime × Array PendingAsyncLaunch) := do
+          let rtCommitted ← commitPreparedJob rt item.jid prepRes
+          tickRuntimeReserve rtCommitted
+        match ← stepAction.toBaseIO with
+        | .ok (rtNext, nextLaunches) =>
+          set rtNext
+          return nextLaunches
+        | .error commitErr =>
+          if let .ok spec := prepRes then
+            teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
+          let nextDebt :=
+            if !item.forced && !item.sideLane && !item.coordLane && rt.shrinkDebt > 0 then
+              rt.shrinkDebt - 1
+            else rt.shrinkDebt
+          let mut rtClean := {
+            rt with
+            launching := rt.launching.erase item.jid
+            queuedPayloads := rt.queuedPayloads.erase item.jid
+            shrinkDebt := nextDebt
+          }
+          let updOut ← (rtClean.ledger.updateJob item.jid (fun r =>
+              if r.state.isTerminal then .ok r
+              else .ok { r with state := .failed, error? := some s!"commit failed: {commitErr}" })).toBaseIO
+          if let .ok (.ok (l', _)) := updOut then
+            rtClean := { rtClean with ledger := l' }
+          set rtClean
+          return #[]
       if !more.isEmpty then
         spawnAsyncLaunches mtx more
 
@@ -690,10 +952,12 @@ def handleRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRuntime × H
     handleNonExecRequest rt0 req
 
 /-- Concurrent `Std.Mutex NodeRuntime` route handler:
-    - `POST /execute`, `POST /project-context/prepare`, and async job checkout preparation ALL execute
-      outside `Std.Mutex NodeRuntime` so slow network/git/command I/O never blocks `/heartbeat`, `/cancel`,
+    - `POST /execute`, `POST /project-context/prepare`, `POST /machine-transfer/*`, `GET /software`,
+      `GET /jobs/:id/log`, `GET /jobs/:id`, and async job checkout preparation ALL execute outside
+      `Std.Mutex NodeRuntime` so slow network/git/archive/command I/O never blocks `/heartbeat`, `/cancel`,
       `/jobs/:id/log`, or deadline enforcement! -/
-def handleRequestConcurrent (mtx : Std.Mutex NodeRuntime) (req : HttpRequest) : IO HttpResponse := do
+def handleRequestConcurrent
+    (mtx : Std.Mutex NodeRuntime) (transferMtx : Std.Mutex Unit) (req : HttpRequest) : IO HttpResponse := do
   let segs := (req.path.splitOn "/").filter (fun s => !s.isEmpty)
   if req.method == "POST" && segs == ["execute"] then
     let (prep, preLaunches) ← mtx.atomically do
@@ -724,14 +988,14 @@ def handleRequestConcurrent (mtx : Std.Mutex NodeRuntime) (req : HttpRequest) : 
           if activeRegularCount rt + rt.shrinkDebt >= rt.cfg.capacityTotal then
             return (Except.error (textResp 429 "node capacity exhausted"), preL)
           set { rt with activeExecMain := rt.activeExecMain + 1 }
-        return (Except.ok (rt.cfg, rt.ledger.hasSqlite3, missionId, command, sideLane), preL)
+        return (Except.ok (rt.cfg, rt.ledger.sqliteBackend, missionId, command, sideLane), preL)
     if !preLaunches.isEmpty then
       spawnAsyncLaunches mtx preLaunches
     match prep with
     | .error errResp => return errResp
-    | .ok (cfg, hasSqlite3, missionId, command, sideLane) =>
+    | .ok (cfg, sqliteBackend, missionId, command, sideLane) =>
       try
-        match ← execClearedLeaseCommand cfg hasSqlite3 missionId command with
+        match ← execClearedLeaseCommand cfg sqliteBackend missionId command with
         | .ok outVal => return jsonResp 200 outVal
         | .error fenceErr => return textResp 503 fenceErr
       finally
@@ -759,15 +1023,15 @@ def handleRequestConcurrent (mtx : Std.Mutex NodeRuntime) (req : HttpRequest) : 
         return (Except.error (textResp 401 "invalid node token"), preL)
       let some rec := rt.ledger.jobs.get? key
         | return (Except.error (textResp 404 "job not found"), preL)
-      return (Except.ok (rec.logPath?, rec.state.asString), preL)
+      return (Except.ok (rec.logPath?, rec.state.asString, rec.state.isTerminal), preL)
     if !preLaunches.isEmpty then
       spawnAsyncLaunches mtx preLaunches
     match lookupRes with
     | .error errResp => return errResp
-    | .ok (logPath?, stateStr) =>
+    | .ok (logPath?, stateStr, isTerminal) =>
       let off := (req.query? "offset" >>= String.toNat?).getD 0
       let maxB := (req.query? "max_bytes" >>= String.toNat?).getD 262144
-      let sl ← readJobLogSliceBounded logPath? off.toUInt64 maxB
+      let sl ← readJobLogSliceBounded logPath? off.toUInt64 maxB isTerminal
       return jsonResp 200 (.obj #[
         ("job_id", .str key),
         ("offset", JVal.uint64 sl.offset),
@@ -794,6 +1058,14 @@ def handleRequestConcurrent (mtx : Std.Mutex NodeRuntime) (req : HttpRequest) : 
     | .ok rec =>
       let tail? ← readLogTail64K rec.logPath?
       return jsonResp 200 (rec.toStatusJson tail?)
+  else if req.method == "GET" && segs == ["software"] then
+    let authOk ← mtx.atomically do
+      let rt ← get
+      return verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious?
+    if !authOk then
+      return textResp 401 "invalid node token"
+    let inv ← scanSoftwareInventory
+    return jsonResp 200 inv
   else if req.method == "POST" && segs == ["project-context", "prepare"] then
     let authCheck ← mtx.atomically do
       let rt ← get
@@ -810,6 +1082,141 @@ def handleRequestConcurrent (mtx : Std.Mutex NodeRuntime) (req : HttpRequest) : 
       match ← prepareNodeProjectContext workDir jv with
       | .ok res => return jsonResp 200 res
       | .error msg => return textResp 400 msg
+  else if req.method == "POST" && segs == ["machine-transfer", "files"] then
+    if req.body.size > 16 * 1024 * 1024 then
+      return textResp 413 "payload too large"
+    let some bodyStr := String.fromUTF8? req.body
+      | return textResp 400 "invalid UTF-8 body"
+    let .ok jv := OrbBin.Json.parse bodyStr
+      | return textResp 400 "invalid JSON body"
+    let (some rawMid, some rawTid, some side, some opVal) :=
+        (jv.fieldStr? "mission_id", jv.fieldStr? "transfer_id", jv.fieldStr? "side", jv.field? "operation")
+      | return textResp 400 "missing mission_id, transfer_id, side, or operation"
+    let (some mid, some tid) := (parseUuidCanonical? rawMid, parseUuidCanonical? rawTid)
+      | return textResp 400 "invalid UUID"
+    if side != "source" && side != "destination" then
+      return textResp 400 "Invalid side"
+    let srcMid := ((jv.fieldStr? "source_mission_id") >>= parseUuidCanonical?).getD mid
+    let (gate, preLaunches) ← mtx.atomically do
+      let (rt, preL) ← tickRuntimeReserve (← get)
+      set rt
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return (Except.error (textResp 401 "invalid node token"), preL)
+      if rt.ledger.missionHasLiveJobs mid || rt.ledger.missionHasLiveJobs srcMid then
+        return (Except.error (textResp 409 "Source execution has not terminated"), preL)
+      return (Except.ok rt.cfg.workDir, preL)
+    if !preLaunches.isEmpty then
+      spawnAsyncLaunches mtx preLaunches
+    match gate with
+    | .error errResp => return errResp
+    | .ok workDir =>
+      let area := System.FilePath.mk workDir / ".transfers" / tid / side
+      let srcTransfer? := (jv.fieldStr? "source_transfer") >>= parseUuidCanonical?
+      let sourceDir := match srcTransfer? with
+        | some stid => System.FilePath.mk workDir / ".transfers" / stid / "destination" / "workspace"
+        | none => System.FilePath.mk workDir / srcMid
+      let opName := (opVal.fieldStr? "op").getD ""
+      let res ← transferMtx.atomically do
+        if side == "source" && srcTransfer?.isNone && (opName == "inventory" || opName == "snapshot") then
+          let sst ← statPath sourceDir.toString
+          let wst ← statPath workDir
+          if !sst.exists_ && wst.exists_ && wst.isDir && !wst.isSymlink then
+            IO.FS.createDirAll sourceDir
+        operateTransfer area (some sourceDir) opVal
+      match res with
+      | .ok out => return jsonResp 200 out
+      | .error msg => return textResp 409 msg
+  else if req.method == "POST" && segs == ["machine-transfer", "archive", "pack"] then
+    let some bodyStr := String.fromUTF8? req.body
+      | return textResp 400 "invalid UTF-8 body"
+    let .ok jv := OrbBin.Json.parse bodyStr
+      | return textResp 400 "invalid JSON body"
+    let (some rawMid, some rawTid) := (jv.fieldStr? "mission_id", jv.fieldStr? "transfer_id")
+      | return textResp 400 "missing mission_id or transfer_id"
+    let (some mid, some tid) := (parseUuidCanonical? rawMid, parseUuidCanonical? rawTid)
+      | return textResp 400 "invalid UUID"
+    let srcMid := ((jv.fieldStr? "source_mission_id") >>= parseUuidCanonical?).getD mid
+    let (gate, preLaunches) ← mtx.atomically do
+      let (rt, preL) ← tickRuntimeReserve (← get)
+      set rt
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return (Except.error (textResp 401 "invalid node token"), preL)
+      if rt.ledger.missionHasLiveJobs mid || rt.ledger.missionHasLiveJobs srcMid then
+        return (Except.error (textResp 409 "Source execution has not terminated"), preL)
+      return (Except.ok rt.cfg.workDir, preL)
+    if !preLaunches.isEmpty then
+      spawnAsyncLaunches mtx preLaunches
+    match gate with
+    | .error errResp => return errResp
+    | .ok workDir =>
+      let area := System.FilePath.mk workDir / ".transfers" / tid / "source"
+      let packRes ← transferMtx.atomically do
+        packTransferArchiveToFile area
+      match packRes with
+      | .ok outFile =>
+        return { status := 200, contentType := "application/zstd", tempFile? := some outFile }
+      | .error msg =>
+        return textResp 409 msg
+  else if req.method == "POST" && segs == ["machine-transfer", "archive", "unpack"] then
+    let cleanupBodyTmp : IO Unit :=
+      match req.bodyTempFile? with
+      | some fp => do try IO.FS.removeFile fp catch _ => pure ()
+      | none => pure ()
+    let (some rawMid, some rawTid) := (req.query? "mission_id", req.query? "transfer_id")
+      | cleanupBodyTmp
+        return textResp 400 "missing mission_id or transfer_id query parameter"
+    let (some mid, some tid) := (parseUuidCanonical? rawMid, parseUuidCanonical? rawTid)
+      | cleanupBodyTmp
+        return textResp 400 "invalid UUID"
+    let (gate, preLaunches) ← mtx.atomically do
+      let (rt, preL) ← tickRuntimeReserve (← get)
+      set rt
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return (Except.error (textResp 401 "invalid node token"), preL)
+      if rt.ledger.missionHasLiveJobs mid then
+        return (Except.error (textResp 409 "Source execution has not terminated"), preL)
+      return (Except.ok rt.cfg.workDir, preL)
+    if !preLaunches.isEmpty then
+      spawnAsyncLaunches mtx preLaunches
+    match gate with
+    | .error errResp =>
+      cleanupBodyTmp
+      return errResp
+    | .ok workDir =>
+      let area := System.FilePath.mk workDir / ".transfers" / tid / "destination"
+      let unpackRes ← transferMtx.atomically do
+        match req.bodyTempFile? with
+        | some fp => do
+          let r ← unpackTransferArchiveFromFile area fp
+          try IO.FS.removeFile fp catch _ => pure ()
+          pure r
+        | none => unpackTransferArchive area req.body
+      match unpackRes with
+      | .ok written => return jsonResp 200 (.obj #[("ok", .bool true), ("bytes", JVal.uint64 written)])
+      | .error msg => return textResp 409 msg
+  else if req.method == "POST" && segs == ["machine-transfer", "browse"] then
+    let some bodyStr := String.fromUTF8? req.body
+      | return textResp 400 "invalid UTF-8 body"
+    let .ok jv := OrbBin.Json.parse bodyStr
+      | return textResp 400 "invalid JSON body"
+    let (some rawTid, some opVal) := (jv.fieldStr? "transfer_id", jv.field? "operation")
+      | return textResp 400 "missing transfer_id or operation"
+    let some tid := parseUuidCanonical? rawTid
+      | return textResp 400 "invalid transfer_id UUID"
+    let authCheck ← mtx.atomically do
+      let rt ← get
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return Except.error (textResp 401 "invalid node token")
+      return Except.ok rt.cfg.workDir
+    match authCheck with
+    | .error errResp => return errResp
+    | .ok workDir =>
+      let area := System.FilePath.mk workDir / ".transfers" / tid / "destination"
+      if !(← (area / "verified").pathExists) then
+        return textResp 409 "Workspace is not verified"
+      match ← executeFileBrowser (area / "workspace").toString opVal with
+      | .ok res => return jsonResp 200 res
+      | .error msg => return textResp 409 msg
   else
     let (resp, launches, watchers) ← mtx.atomically do
       let rt ← get
@@ -829,6 +1236,8 @@ def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCr
   OrbNode.Posix.installSignals
   let lfd ← OrbNode.Posix.tcpListen rtInit.cfg.bindHost rtInit.cfg.bindPort
   let mtx ← Std.Mutex.new rtInit
+  let transferMtx ← Std.Mutex.new ()
+  let workDirConst := rtInit.cfg.workDir
   let goneRef ← IO.mkRef false
   let _ ← startProjectContextDaemon rtInit.cfg.workDir goneRef
   if let some cred := dialCred? then
@@ -858,14 +1267,14 @@ def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCr
       else
         let _ ← IO.asTask do
           try
-            match ← readHttpRequest cfd with
+            match ← readHttpRequest cfd workDirConst with
             | .error "payload_too_large" =>
-              discard <| OrbNode.Posix.fdWriteAll cfd (encodeHttpResponse (textResp 413 "payload too large"))
+              sendHttpResponse cfd (textResp 413 "payload too large")
             | .error _ =>
               pure ()
             | .ok req =>
-              let resp ← handleRequestConcurrent mtx req
-              discard <| OrbNode.Posix.fdWriteAll cfd (encodeHttpResponse resp)
+              let resp ← handleRequestConcurrent mtx transferMtx req
+              sendHttpResponse cfd resp
           finally
             OrbNode.Posix.fdClose cfd
   finally

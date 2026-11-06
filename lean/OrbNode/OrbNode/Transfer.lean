@@ -5,6 +5,7 @@
   preservation & restoration, overlap/escape confinement, and block/bulk resume.
 -/
 import Std.Data.HashMap
+import LeanSys.Posix
 import LeanSys.Auth
 import OrbBin.PosixExt
 import OrbBin.Json
@@ -347,6 +348,51 @@ private def gitIgnoredPaths (dir : System.FilePath) (rel : String) : IO (Option 
           set := set.insert full ()
   return some set
 
+/-- Compute `(byteSize, lowercaseHexSha256)` of `fp` via streaming `sha256sum` when large (`> 4 MiB`)
+    or direct `sha256Bytes` for small files so multi-GiB checkpoint files never require whole-file RAM buffers! -/
+private def streamFileSizeAndSha256 (fp : System.FilePath) : IO (Except String (UInt64 × String)) := do
+  let .ok md ← fp.metadata |>.toBaseIO
+    | return .error s!"Failed stating {fp}"
+  if md.byteSize <= 4 * 1024 * 1024 then
+    let .ok bytes ← IO.FS.readBinFile fp |>.toBaseIO
+      | return .error s!"Failed reading {fp}"
+    return .ok (bytes.size.toUInt64, bytesToHexLower (sha256Bytes bytes))
+  match ← (IO.Process.output { cmd := "sha256sum", args := #[fp.toString] }).toBaseIO with
+  | .ok out =>
+    if out.exitCode == 0 then
+      let hex := ((out.stdout.splitOn " ").headD "").trimAscii.toString.toLower
+      if hex.length == 64 then
+        let .ok mdAfter ← fp.metadata |>.toBaseIO
+          | return .error s!"Failed stating {fp}"
+        if mdAfter.byteSize == md.byteSize && mdAfter.modified == md.modified then
+          return .ok (md.byteSize, hex)
+        else
+          return .error s!"File changed during hash: {fp}"
+    let .ok bytes ← IO.FS.readBinFile fp |>.toBaseIO
+      | return .error s!"Failed reading {fp}"
+    return .ok (bytes.size.toUInt64, bytesToHexLower (sha256Bytes bytes))
+  | .error _ =>
+    let .ok bytes ← IO.FS.readBinFile fp |>.toBaseIO
+      | return .error s!"Failed reading {fp}"
+    return .ok (bytes.size.toUInt64, bytesToHexLower (sha256Bytes bytes))
+
+/-- Copy `src` to `dst` in `64 KiB` streaming chunks while tracking total bytes copied. -/
+private def streamCopyFile (src dst : System.FilePath) : IO (Except String UInt64) := do
+  let .ok hIn ← (IO.FS.Handle.mk src .read).toBaseIO
+    | return .error s!"Failed opening {src}"
+  let .ok hOut ← (IO.FS.Handle.mk dst .write).toBaseIO
+    | return .error s!"Failed creating {dst}"
+  let mut copied : UInt64 := 0
+  while true do
+    let .ok chunk ← (hIn.read 65536).toBaseIO
+      | return .error s!"Failed reading {src}"
+    if chunk.isEmpty then break
+    let .ok () ← (hOut.write chunk).toBaseIO
+      | return .error s!"Failed writing {dst}"
+    copied := copied + chunk.size.toUInt64
+  discard <| (hOut.flush).toBaseIO
+  return .ok copied
+
 private def walkWorkspace
     (sourceRoot : System.FilePath) (roots : Array String) (omitList inclList : Array String) :
     IO (Except String TransferManifest) := do
@@ -406,24 +452,24 @@ private def walkWorkspace
         pending := pending.push (item.path, rel, incHere, ownIgnored?.getD ignoredSet)
       else if st.isReg then
         let beforeMd? ← (item.path.metadata |>.toBaseIO).map (fun r => r.toOption)
-        let .ok bytes ← IO.FS.readBinFile item.path |>.toBaseIO
-          | return .error s!"Failed reading {rel}"
+        let (szBytes, sha) ← match ← streamFileSizeAndSha256 item.path with
+          | .ok v => pure v
+          | .error _ => return .error s!"Failed reading {rel}"
         let afterSt ← statPath item.path.toString
         let afterMd? ← (item.path.metadata |>.toBaseIO).map (fun r => r.toOption)
         let changed :=
           !afterSt.exists_ || afterSt.isSymlink || !afterSt.isReg ||
           match beforeMd?, afterMd? with
           | some bmd, some amd =>
-            amd.byteSize != bytes.size.toUInt64 || amd.modified != bmd.modified
+            amd.byteSize != szBytes || amd.modified != bmd.modified
           | _, _ => true
         if changed then
           return .error s!"File changed during snapshot: {rel}"
-        let sha := bytesToHexLower (sha256Bytes bytes)
         let exec := (st.mode &&& 0o111) != 0
-        totalBytes := totalBytes + bytes.size.toUInt64
+        totalBytes := totalBytes + szBytes
         if totalBytes > maxTransferBytes || files.size + links.size + 1 > maxTransferFiles then
           return .error "Workspace exceeds transfer limit (10 GiB / 50,000 files)"
-        files := files.push { path := rel, bytes := bytes.size.toUInt64, sha256 := sha, executable := exec }
+        files := files.push { path := rel, bytes := szBytes, sha256 := sha, executable := exec }
       else
         skipped := skipped.push (rel, specialFileReason)
   let sortedFiles := files.qsort (fun a b => a.path < b.path)
@@ -576,11 +622,14 @@ def operateTransfer
         | .ok v => pure v
         | .error e => return .error e
       if let some par := dstFile.parent then IO.FS.createDirAll par
-      let .ok bytes ← IO.FS.readBinFile srcFile |>.toBaseIO
-        | return .error s!"Failed copying {f.path}"
-      if bytes.size.toUInt64 != f.bytes || bytesToHexLower (sha256Bytes bytes) != f.sha256 then
+      let copied ← match ← streamCopyFile srcFile dstFile with
+        | .ok c => pure c
+        | .error _ => return .error s!"Failed copying {f.path}"
+      let (dstSz, dstSha) ← match ← streamFileSizeAndSha256 dstFile with
+        | .ok v => pure v
+        | .error _ => return .error s!"Failed hashing {f.path}"
+      if copied != f.bytes || dstSz != f.bytes || dstSha != f.sha256.toLower then
         return .error s!"File changed during snapshot: {f.path}"
-      IO.FS.writeBinFile dstFile bytes
       let _ ← chmod dstFile.toString (if f.executable then 0o700 else 0o600)
     let afterWalk ← match ← walkWorkspace src roots omitList inclList with
       | .ok v => pure v
@@ -606,17 +655,17 @@ def operateTransfer
         }
         if bOut.exitCode != 0 then
           return .error "Could not checkpoint Git history"
-        let .ok bBytes ← IO.FS.readBinFile bundleDst |>.toBaseIO
-          | return .error "Could not read Git bundle"
-        if m.bytes + bBytes.size.toUInt64 > maxTransferBytes then
+        let (bSz, bSha) ← match ← streamFileSizeAndSha256 bundleDst with
+          | .ok v => pure v
+          | .error _ => return .error "Could not read Git bundle"
+        if m.bytes + bSz > maxTransferBytes then
           return .error "Git history exceeds transfer size or available disk space"
-        let bSha := bytesToHexLower (sha256Bytes bBytes)
         m := {
           m with
-          bytes := m.bytes + bBytes.size.toUInt64
+          bytes := m.bytes + bSz
           files := m.files.push {
             path := bundleRel
-            bytes := bBytes.size.toUInt64
+            bytes := bSz
             sha256 := bSha
             executable := false
           }
@@ -693,9 +742,16 @@ def operateTransfer
     let fp ← match ← confinedCheckpointPath root p with
       | .ok v => pure v
       | .error e => return .error e
-    let .ok allBytes ← IO.FS.readBinFile fp |>.toBaseIO | return .error "Failed reading file"
-    let endIdx := min allBytes.size (off.toNat + transferBlockBytes)
-    let slice := allBytes.extract off.toNat endIdx
+    let wantLen := min transferBlockBytes (f.bytes.toNat - off.toNat)
+    let slice ← if wantLen == 0 then
+      pure ByteArray.empty
+    else
+      match ← LeanSys.Posix.withFd fp.toString 0 (fun fd => do
+        let b ← LeanSys.Posix.preadByteArray fd off wantLen
+        return .ok b
+      ) with
+      | .ok b => pure b
+      | .error _ => return .error "Failed reading file"
     return .ok (.obj #[("data", .str (base64Encode slice false true))])
   | "write" =>
     if ← (area / "verified").pathExists then return .error "Checkpoint already sealed"
@@ -717,17 +773,37 @@ def operateTransfer
       | .ok v => pure v
       | .error e => return .error e
     if let some par := fp.parent then IO.FS.createDirAll par
-    let existing ← if ← fp.pathExists then
-      match ← IO.FS.readBinFile fp |>.toBaseIO with
-      | .ok b => pure b
-      | .error _ => pure ByteArray.empty
-    else pure ByteArray.empty
-    let prefixBytes :=
-      if existing.size >= off.toNat then existing.extract 0 off.toNat
-      else existing ++ ByteArray.mk (Array.replicate (off.toNat - existing.size) 0)
-    let suffixStart := off.toNat + chunk.size
-    let suffixBytes := if existing.size > suffixStart then existing.extract suffixStart existing.size else ByteArray.empty
-    IO.FS.writeBinFile fp (prefixBytes ++ chunk ++ suffixBytes)
+    if chunk.isEmpty then
+      if !(← fp.pathExists) then
+        IO.FS.writeBinFile fp ByteArray.empty
+    else
+      -- Page-aligned `MAP_SHARED` positional write (`LeanSys.Posix.mmapMapShared` + `mmapRegionWrite`)
+      -- so writing a 1 MiB block at `off` is strictly `O(1)` (`1 MiB` page window) with zero whole-file reads/rewrites!
+      let writeRes ← LeanSys.Posix.withFd fp.toString 1 (fun fd => do
+        let curSz ← match ← LeanSys.Posix.fstatSize fd with
+          | .ok sz => pure sz.toNat
+          | .error e => return .error e
+        let endOff := off.toNat + chunk.size
+        if curSz < endOff then
+          if let .error e ← LeanSys.Posix.ftruncateFd fd endOff then
+            return .error e
+        let pageBase : Nat := (off.toNat / 4096) * 4096
+        let relOff : Nat := off.toNat - pageBase
+        let mapLen : Nat := relOff + chunk.size
+        let reg ← match ← LeanSys.Posix.mmapMapShared fd mapLen pageBase false with
+          | .ok r => pure r
+          | .error e => return .error e
+        try
+          let _ ← match ← LeanSys.Posix.mmapRegionWrite reg relOff chunk with
+            | .ok n => pure n
+            | .error e => return .error e
+          return .ok ()
+        finally
+          discard <| LeanSys.Posix.mmapUnmap reg
+      )
+      match writeRes with
+      | .error _ => return .error "Failed writing block"
+      | .ok () => pure ()
     return .ok (.obj #[("ok", .bool true)])
   | "verify" =>
     if !(← manifestFile.pathExists) then return .error "Manifest not found"
@@ -744,9 +820,10 @@ def operateTransfer
         if f.bytes == 0 && !(← fp.pathExists) then
           if let some par := fp.parent then IO.FS.createDirAll par
           IO.FS.writeBinFile fp ByteArray.empty
-        let .ok fb ← IO.FS.readBinFile fp |>.toBaseIO
-          | return .error s!"Checkpoint mismatch: {f.path}"
-        if fb.size.toUInt64 != f.bytes || bytesToHexLower (sha256Bytes fb) != f.sha256.toLower then
+        let (fbSz, fbSha) ← match ← streamFileSizeAndSha256 fp with
+          | .ok v => pure v
+          | .error _ => return .error s!"Checkpoint mismatch: {f.path}"
+        if fbSz != f.bytes || fbSha != f.sha256.toLower then
           return .error s!"Checkpoint mismatch: {f.path}"
         let _ ← chmod fp.toString (if f.executable then 0o700 else 0o600)
       if let .error e ← restoreManifestLinks root m.links then
@@ -814,6 +891,22 @@ private def writeOctalField (buf : ByteArray) (off width : Nat) (val : UInt64) :
   out := out.set! (off + width - 1) 0
   return out
 
+/-- Encode a 12-byte tar `size` field (`off = 124..136`), using standard 11-digit ASCII octal for
+    `val < 8 GiB` (`8589934592`) and GNU base-256 (`0x80` high-bit prefix + big-endian 64-bit `UInt64`)
+    for `val >= 8 GiB` so checkpoints up to `maxTransferBytes` (`10 GiB`) roundtrip losslessly! -/
+def writeTarSizeField (buf : ByteArray) (off : Nat) (val : UInt64) : ByteArray := Id.run do
+  if val < (8589934592 : UInt64) then
+    return writeOctalField buf off 12 val
+  let mut out := buf
+  out := out.set! off 0x80
+  out := out.set! (off + 1) 0
+  out := out.set! (off + 2) 0
+  out := out.set! (off + 3) 0
+  for i in [0:8] do
+    let shift : UInt64 := ((7 - i) * 8).toUInt64
+    out := out.set! (off + 4 + i) ((val >>> shift) &&& 0xFF).toUInt8
+  return out
+
 private def finalizeTarChecksum (hdr0 : ByteArray) : ByteArray := Id.run do
   let mut hdr := hdr0
   for i in [148:156] do
@@ -827,13 +920,13 @@ private def finalizeTarChecksum (hdr0 : ByteArray) : ByteArray := Id.run do
   hdr := hdr.set! 155 32
   return hdr
 
-private def makeTarHeaderBlock (name : String) (typeFlag : UInt8) (mode : UInt64) (size : UInt64) : ByteArray := Id.run do
+def makeTarHeaderBlock (name : String) (typeFlag : UInt8) (mode : UInt64) (size : UInt64) : ByteArray := Id.run do
   let mut hdr := padZeroBytes 512
   hdr := writeAsciiField hdr 0 100 name
   hdr := writeOctalField hdr 100 8 mode
   hdr := writeOctalField hdr 108 8 0
   hdr := writeOctalField hdr 116 8 0
-  hdr := writeOctalField hdr 124 12 size
+  hdr := writeTarSizeField hdr 124 size
   hdr := writeOctalField hdr 136 12 0
   hdr := hdr.set! 156 typeFlag
   hdr := writeAsciiField hdr 257 6 "ustar"
@@ -841,32 +934,16 @@ private def makeTarHeaderBlock (name : String) (typeFlag : UInt8) (mode : UInt64
   hdr := writeAsciiField hdr 263 2 "00"
   return finalizeTarChecksum hdr
 
-private def appendTarEntry (tarBuf : ByteArray) (path : String) (executable : Bool) (content : ByteArray) : ByteArray := Id.run do
-  let mut out := tarBuf
-  let pathBytes := path.toUTF8
-  if pathBytes.size > 99 then
-    let longPayload := pathBytes.push 0
-    let longHdr := makeTarHeaderBlock "././@LongLink" 76 0o644 longPayload.size.toUInt64
-    out := out ++ longHdr ++ longPayload
-    let remL := (512 - (longPayload.size % 512)) % 512
-    if remL > 0 then
-      out := out ++ padZeroBytes remL
-  let shortName := if pathBytes.size > 99 then (String.fromUTF8? (pathBytes.extract 0 99) |>.getD "entry") else path
-  let mode : UInt64 := if executable then 0o700 else 0o600
-  let hdr := makeTarHeaderBlock shortName 48 mode content.size.toUInt64
-  out := out ++ hdr ++ content
-  let remC := (512 - (content.size % 512)) % 512
-  if remC > 0 then
-    out := out ++ padZeroBytes remC
-  return out
-
-private def parseOctalField? (hdr : ByteArray) (off width : Nat) : Option UInt64 := Id.run do
-  if off + width > hdr.size then return none
+def parseTarSizeField? (hdr : ByteArray) (off width : Nat) : Option UInt64 := Id.run do
+  if off + width > hdr.size || width < 12 then return none
   if (hdr.get! off &&& 0x80) != 0 then
-    -- Base-256 GNU binary size encoding
-    let mut acc : UInt64 := (hdr.get! off &&& 0x7F).toUInt64
-    for i in [1:width] do
-      acc := (acc <<< 8) ||| (hdr.get! (off + i)).toUInt64
+    -- Base-256 GNU binary size encoding: require high bytes `off+1 .. off+(width-8)` to be 0 so UInt64 cannot overflow!
+    if hdr.get! off != 0x80 then return none
+    for j in [1 : width - 8] do
+      if hdr.get! (off + j) != 0 then return none
+    let mut acc : UInt64 := 0
+    for j in [width - 8 : width] do
+      acc := (acc <<< 8) ||| (hdr.get! (off + j)).toUInt64
     return some acc
   let mut i := off
   let endOff := off + width
@@ -906,30 +983,94 @@ private def parsePaxPath? (paxBytes : ByteArray) : Option String := Id.run do
         found := some (kv.drop 5).toString
   return found
 
-/-- Parse an uncompressed `tar` byte stream directly in Lean (handling GNU `@LongLink`, PAX `x` headers,
-    and ustar `prefix`), returning `(path, contentBytes)` for every regular file and failing closed on
-    any non-regular entry or truncated archive. -/
-private def parseTarRegularEntries (tarBytes : ByteArray) : Except String (Array (String × ByteArray)) := Id.run do
-  let mut off : Nat := 0
+private def readExactHandle (h : IO.FS.Handle) (n : Nat) : IO (Option ByteArray) := do
+  if n == 0 then return some ByteArray.empty
+  let mut acc := ByteArray.emptyWithCapacity n
+  while acc.size < n do
+    let want := min 65536 (n - acc.size)
+    let .ok chunk ← (h.read (USize.ofNat want)).toBaseIO
+      | return none
+    if chunk.isEmpty then
+      return if acc.isEmpty then some ByteArray.empty else none
+    acc := acc ++ chunk
+  return some acc
+
+private def discardExactHandle (h : IO.FS.Handle) (n : Nat) : IO Bool := do
+  let mut rem := n
+  while rem > 0 do
+    let want := min 65536 rem
+    let .ok chunk ← (h.read (USize.ofNat want)).toBaseIO
+      | return false
+    if chunk.isEmpty then return false
+    rem := rem - chunk.size
+  return true
+
+/-- Stream a single manifest file into open tar handle `hTar` in `64 KiB` chunks (zero whole-file RAM allocation). -/
+private def writeTarEntryStreaming
+    (hTar : IO.FS.Handle) (path : String) (executable : Bool)
+    (srcPath : System.FilePath) (expectedBytes : UInt64) : IO (Except String Unit) := do
+  let .ok md ← srcPath.metadata |>.toBaseIO
+    | return .error s!"Checkpoint file missing: {path}"
+  if md.byteSize != expectedBytes then
+    return .error s!"Checkpoint file changed: {path}"
+  let pathBytes := path.toUTF8
+  if pathBytes.size > 99 then
+    let longPayload := pathBytes.push 0
+    let longHdr := makeTarHeaderBlock "././@LongLink" 76 0o644 longPayload.size.toUInt64
+    let .ok () ← (hTar.write longHdr).toBaseIO | return .error "Failed writing tar LongLink header"
+    let .ok () ← (hTar.write longPayload).toBaseIO | return .error "Failed writing tar LongLink payload"
+    let remL := (512 - (longPayload.size % 512)) % 512
+    if remL > 0 then
+      let .ok () ← (hTar.write (padZeroBytes remL)).toBaseIO | return .error "Failed writing tar padding"
+  let shortName := if pathBytes.size > 99 then (String.fromUTF8? (pathBytes.extract 0 99) |>.getD "entry") else path
+  let mode : UInt64 := if executable then 0o700 else 0o600
+  let hdr := makeTarHeaderBlock shortName 48 mode expectedBytes
+  let .ok () ← (hTar.write hdr).toBaseIO | return .error "Failed writing tar entry header"
+  let .ok hIn ← (IO.FS.Handle.mk srcPath .read).toBaseIO
+    | return .error s!"Checkpoint file missing: {path}"
+  let mut copied : UInt64 := 0
+  while copied < expectedBytes do
+    let want := min 65536 (expectedBytes - copied).toNat
+    let .ok chunk ← (hIn.read (USize.ofNat want)).toBaseIO
+      | return .error s!"Failed reading checkpoint file: {path}"
+    if chunk.isEmpty then
+      return .error s!"Checkpoint file changed: {path}"
+    let .ok () ← (hTar.write chunk).toBaseIO
+      | return .error "Failed writing tar entry payload"
+    copied := copied + chunk.size.toUInt64
+  if copied != expectedBytes then
+    return .error s!"Checkpoint file changed: {path}"
+  let remC := ((512 : UInt64) - (expectedBytes % 512)) % 512
+  if remC > 0 then
+    let .ok () ← (hTar.write (padZeroBytes remC.toNat)).toBaseIO
+      | return .error "Failed writing tar block padding"
+  return .ok ()
+
+/-- Stream-unpack an uncompressed `tar` file on disk (`outTar`) into `root` in `64 KiB` chunks
+    (handling GNU `@LongLink`, PAX `x` headers, GNU base-256 `>= 8 GiB` sizes, and ustar `prefix`),
+    rejecting non-regular entries, unlisted files, wrong sizes, or cumulative bytes `> maxTransferBytes`! -/
+private def streamUnpackTarFile
+    (outTar : System.FilePath) (root : System.FilePath)
+    (wanted : Std.HashMap String TransferEntry) : IO (Except String UInt64) := do
+  let .ok hTar ← (IO.FS.Handle.mk outTar .read).toBaseIO
+    | return .error "Failed opening decompressed tar archive"
   let mut pendingLongName? : Option String := none
-  let mut entries : Array (String × ByteArray) := #[]
-  while off + 512 <= tarBytes.size do
-    let hdr := tarBytes.extract off (off + 512)
-    off := off + 512
-    if isAllZeroBlock hdr then
+  let mut written : UInt64 := 0
+  while true do
+    let some hdr ← readExactHandle hTar 512
+      | return .error "Archive header truncated"
+    if hdr.isEmpty || isAllZeroBlock hdr then
       break
-    let some szU64 := parseOctalField? hdr 124 12
+    let some szU64 := parseTarSizeField? hdr 124 12
       | return .error "Corrupt tar entry size"
-    let sz := szU64.toNat
-    if off + sz > tarBytes.size then
-      return .error "Archive entry truncated"
-    let payload := tarBytes.extract off (off + sz)
-    let padded := sz + ((512 - (sz % 512)) % 512)
-    if off + padded > tarBytes.size then
-      return .error "Archive block padding truncated"
-    off := off + padded
     let tf := hdr.get! 156
+    let padLen : Nat := (((512 : UInt64) - (szU64 % 512)) % 512).toNat
     if tf == 76 then -- 'L' GNU LongLink
+      if szU64 > 65536 then return .error "Oversized tar LongLink path"
+      let some payload ← readExactHandle hTar szU64.toNat
+        | return .error "Archive LongLink truncated"
+      if payload.size != szU64.toNat then return .error "Archive LongLink truncated"
+      if !(← discardExactHandle hTar padLen) then return .error "Archive block padding truncated"
       let mut endIdx := payload.size
       while endIdx > 0 && payload.get! (endIdx - 1) == 0 do
         endIdx := endIdx - 1
@@ -937,10 +1078,17 @@ private def parseTarRegularEntries (tarBytes : ByteArray) : Except String (Array
         | return .error "Invalid archive path"
       pendingLongName? := some lname
     else if tf == 120 then -- 'x' PAX extended header
+      if szU64 > 1048576 then return .error "Oversized PAX extended header"
+      let some payload ← readExactHandle hTar szU64.toNat
+        | return .error "Archive PAX header truncated"
+      if payload.size != szU64.toNat then return .error "Archive PAX header truncated"
+      if !(← discardExactHandle hTar padLen) then return .error "Archive block padding truncated"
       if let some pname := parsePaxPath? payload then
         pendingLongName? := some pname
     else if tf == 103 then -- 'g' global PAX header
-      pure ()
+      if szU64 > 1048576 then return .error "Oversized global PAX header"
+      if !(← discardExactHandle hTar (szU64.toNat + padLen)) then
+        return .error "Archive global PAX header truncated"
     else if tf == 0 || tf == 48 then -- '\0' or '0' regular file
       let rawName ← match pendingLongName? with
         | some ln => pure ln
@@ -951,13 +1099,39 @@ private def parseTarRegularEntries (tarBytes : ByteArray) : Except String (Array
           pure (if pfx.isEmpty then baseName else s!"{pfx}/{baseName}")
       pendingLongName? := none
       let clean := if rawName.startsWith "./" then (rawName.drop 2).toString else rawName
-      entries := entries.push (clean, payload)
+      let some f := wanted.get? clean
+        | return .error s!"Archive entry absent from manifest: {clean}"
+      if szU64 != f.bytes then
+        return .error s!"Archive entry has the wrong size: {clean}"
+      if written + szU64 > maxTransferBytes then
+        return .error "Archive exceeds 10 GiB transfer limit"
+      let dst ← match ← confinedCheckpointPath root clean with
+        | .ok v => pure v
+        | .error e => return .error e
+      if let some par := dst.parent then IO.FS.createDirAll par
+      let .ok hDst ← (IO.FS.Handle.mk dst .write).toBaseIO
+        | return .error s!"Failed creating destination file: {clean}"
+      let mut rem : UInt64 := szU64
+      while rem > 0 do
+        let want := min 65536 rem.toNat
+        let .ok chunk ← (hTar.read (USize.ofNat want)).toBaseIO
+          | return .error s!"Archive entry truncated: {clean}"
+        if chunk.isEmpty then
+          return .error s!"Archive entry truncated: {clean}"
+        let .ok () ← (hDst.write chunk).toBaseIO
+          | return .error s!"Failed writing destination file: {clean}"
+        rem := rem - chunk.size.toUInt64
+      discard <| (hDst.flush).toBaseIO
+      if !(← discardExactHandle hTar padLen) then
+        return .error "Archive block padding truncated"
+      written := written + szU64
     else
       return .error "Archive contains a non-regular entry"
-  return .ok entries
+  return .ok written
 
-/-- Pack verified source checkpoint `area` into a `tar + zstd` archive (`ByteArray`) without invoking `tar` CLI. -/
-def packTransferArchive (area : System.FilePath) : IO (Except String ByteArray) := do
+/-- Pack verified source checkpoint `area` into a compressed `tar + zstd` file on disk (`outArchive`)
+    using `64 KiB` streaming chunks (zero whole-archive `ByteArray` in memory!). -/
+def packTransferArchiveToFile (area : System.FilePath) : IO (Except String System.FilePath) := do
   let manifestFile := area / "manifest.json"
   if !(← manifestFile.pathExists) then
     return .error "Transfer checkpoint not found"
@@ -965,35 +1139,47 @@ def packTransferArchive (area : System.FilePath) : IO (Except String ByteArray) 
   let .ok jv := OrbBin.Json.parse raw | return .error "Corrupt manifest"
   let some m := TransferManifest.fromJson? jv | return .error "Corrupt manifest"
   let root := area / "workspace"
-  let mut tarBuf := ByteArray.empty
-  for f in m.files do
-    let fp ← match ← confinedCheckpointPath root f.path with
-      | .ok v => pure v
-      | .error e => return .error e
-    let .ok bytes ← IO.FS.readBinFile fp |>.toBaseIO
-      | return .error s!"Checkpoint file missing: {f.path}"
-    if bytes.size.toUInt64 != f.bytes then
-      return .error s!"Checkpoint file changed: {f.path}"
-    tarBuf := appendTarEntry tarBuf f.path f.executable bytes
-  tarBuf := tarBuf ++ padZeroBytes 1024
   let nonce ← newUuidV4
   let rawTarFile := area / s!".pack-raw-{nonce}.tar"
   let outArchive := area / s!".pack-out-{nonce}.tar.zst"
-  IO.FS.writeBinFile rawTarFile tarBuf
+  let packStep : IO (Except String Unit) := do
+    let .ok hTar ← (IO.FS.Handle.mk rawTarFile .write).toBaseIO
+      | return .error "Failed creating temporary tar file"
+    for f in m.files do
+      let fp ← match ← confinedCheckpointPath root f.path with
+        | .ok v => pure v
+        | .error e => return .error e
+      if let .error err ← writeTarEntryStreaming hTar f.path f.executable fp f.bytes then
+        return .error err
+    let .ok () ← (hTar.write (padZeroBytes 1024)).toBaseIO
+      | return .error "Failed finalizing tar trailer"
+    discard <| (hTar.flush).toBaseIO
+    return .ok ()
+  if let .error err ← packStep then
+    try IO.FS.removeFile rawTarFile catch _ => pure ()
+    return .error err
   let res ← IO.Process.output { cmd := "zstd", args := #["-3", "-q", "-f", "-o", outArchive.toString, rawTarFile.toString] }
   try IO.FS.removeFile rawTarFile catch _ => pure ()
   if res.exitCode != 0 then
     try IO.FS.removeFile outArchive catch _ => pure ()
     return .error s!"Archive pack failed: {res.stderr.trimAscii}"
+  return .ok outArchive
+
+/-- Pack verified source checkpoint `area` into a `tar + zstd` archive (`ByteArray`) without invoking `tar` CLI. -/
+def packTransferArchive (area : System.FilePath) : IO (Except String ByteArray) := do
+  let outArchive ← match ← packTransferArchiveToFile area with
+    | .ok p => pure p
+    | .error e => return .error e
   let .ok archiveBytes ← IO.FS.readBinFile outArchive |>.toBaseIO
     | try IO.FS.removeFile outArchive catch _ => pure ()
       return .error "Failed reading packed archive"
   try IO.FS.removeFile outArchive catch _ => pure ()
   return .ok archiveBytes
 
-/-- Unpack a `tar + zstd` archive into staged destination checkpoint `area`, enforcing manifest confinement
-    and parsing tar blocks directly in Lean (rejecting non-regular entries and path directives). -/
-def unpackTransferArchive (area : System.FilePath) (archiveBytes : ByteArray) : IO (Except String UInt64) := do
+/-- Unpack a `tar + zstd` archive file on disk (`inArchive`) into staged destination checkpoint `area`,
+    streaming tar blocks in `64 KiB` chunks and enforcing manifest & size bounds so a highly compressible
+    multi-GiB `.tar.zst` payload never expands into daemon RAM! -/
+def unpackTransferArchiveFromFile (area : System.FilePath) (inArchive : System.FilePath) : IO (Except String UInt64) := do
   if ← (area / "verified").pathExists then
     return .error "Checkpoint already sealed"
   let manifestFile := area / "manifest.json"
@@ -1008,33 +1194,28 @@ def unpackTransferArchive (area : System.FilePath) (archiveBytes : ByteArray) : 
   let root := area / "workspace"
   IO.FS.createDirAll root
   let nonce ← newUuidV4
-  let inArchive := area / s!".unpack-in-{nonce}.tar.zst"
   let outTar := area / s!".unpack-out-{nonce}.tar"
-  IO.FS.writeBinFile inArchive archiveBytes
   let decRes ← IO.Process.output { cmd := "zstd", args := #["-d", "-q", "-f", "-o", outTar.toString, inArchive.toString] }
-  try IO.FS.removeFile inArchive catch _ => pure ()
   if decRes.exitCode != 0 then
     try IO.FS.removeFile outTar catch _ => pure ()
     return .error s!"Invalid tar+zstd archive: {decRes.stderr.trimAscii}"
-  let .ok tarBytes ← IO.FS.readBinFile outTar |>.toBaseIO
-    | try IO.FS.removeFile outTar catch _ => pure ()
-      return .error "Failed reading decompressed tar archive"
+  let maxTarAllowance : UInt64 := m.bytes + (m.files.size.toUInt64 + 8) * 4096 + 67108864
+  if let .ok md ← outTar.metadata |>.toBaseIO then
+    if md.byteSize > maxTarAllowance || md.byteSize > maxTransferBytes + 67108864 then
+      try IO.FS.removeFile outTar catch _ => pure ()
+      return .error "Decompressed tar archive exceeds staged manifest allowance"
+  let res ← streamUnpackTarFile outTar root wanted
   try IO.FS.removeFile outTar catch _ => pure ()
-  let entries ← match parseTarRegularEntries tarBytes with
-    | .ok es => pure es
-    | .error e => return .error e
-  let mut written : UInt64 := 0
-  for (clean, bytes) in entries do
-    let some f := wanted.get? clean
-      | return .error s!"Archive entry absent from manifest: {clean}"
-    if bytes.size.toUInt64 != f.bytes then
-      return .error s!"Archive entry has the wrong size: {clean}"
-    let dst ← match ← confinedCheckpointPath root clean with
-      | .ok v => pure v
-      | .error e => return .error e
-    if let some par := dst.parent then IO.FS.createDirAll par
-    IO.FS.writeBinFile dst bytes
-    written := written + bytes.size.toUInt64
-  return .ok written
+  return res
+
+/-- Unpack an in-memory `tar + zstd` `ByteArray` into staged destination checkpoint `area`. -/
+def unpackTransferArchive (area : System.FilePath) (archiveBytes : ByteArray) : IO (Except String UInt64) := do
+  IO.FS.createDirAll area
+  let nonce ← newUuidV4
+  let inArchive := area / s!".unpack-in-{nonce}.tar.zst"
+  IO.FS.writeBinFile inArchive archiveBytes
+  let res ← unpackTransferArchiveFromFile area inArchive
+  try IO.FS.removeFile inArchive catch _ => pure ()
+  return res
 
 end OrbNode.Transfer

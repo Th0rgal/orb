@@ -205,8 +205,12 @@ private def decodeUtf8LossyPreservingValid (sub : ByteArray) : String := Id.run 
 
 /-- Core pure log-window slicer given `window` (`rawLog[offset .. offset + window.size]`), `offset`,
     and total `fileLen` (`fstatSize`), cutting at the last `\n` when not at EOF and leaving any
-    trailing incomplete UTF-8 multi-byte sequence unread for the next poll! -/
-def sliceJobLogWindow (window : ByteArray) (offset : UInt64) (fileLen : UInt64) (maxBytes : Nat := 262144) : LogSliceResult := Id.run do
+    trailing incomplete UTF-8 multi-byte sequence unread while the job is active (`!isTerminal`),
+    while consuming trailing malformed bytes lossily (`\uFFFD`) once the job is terminal (`isTerminal`)
+    so Core's `next_offset >= log_len` drain loop always terminates! -/
+def sliceJobLogWindow
+    (window : ByteArray) (offset : UInt64) (fileLen : UInt64)
+    (maxBytes : Nat := 262144) (isTerminal : Bool := false) : LogSliceResult := Id.run do
   if offset >= fileLen || window.isEmpty then
     let clamped := min offset fileLen
     return {
@@ -227,7 +231,7 @@ def sliceJobLogWindow (window : ByteArray) (offset : UInt64) (fileLen : UInt64) 
         cutLen := k + 1
         break
   let rawSub := window.extract 0 cutLen
-  let trimmed := trimIncompleteUtf8Suffix rawSub
+  let trimmed := if isTerminal && atEof then rawSub else trimIncompleteUtf8Suffix rawSub
   let text := decodeUtf8LossyPreservingValid trimmed
   return {
     offset := offset
@@ -237,18 +241,20 @@ def sliceJobLogWindow (window : ByteArray) (offset : UInt64) (fileLen : UInt64) 
   }
 
 /-- Slice in-memory `rawLog` from `offset` up to `clampedMax` (`4..=262144` bytes). -/
-def sliceJobLogBytes (rawLog : ByteArray) (offset : Nat) (maxBytes : Nat := 262144) : LogSliceResult :=
+def sliceJobLogBytes (rawLog : ByteArray) (offset : Nat) (maxBytes : Nat := 262144) (isTerminal : Bool := false) : LogSliceResult :=
   let total := rawLog.size
   if offset >= total then
     { offset := total.toUInt64, nextOffset := total.toUInt64, logLen := total.toUInt64, data := "" }
   else
     let cap := max 4 (min 262144 maxBytes)
     let window := rawLog.extract offset (min total (offset + cap))
-    sliceJobLogWindow window offset.toUInt64 total.toUInt64 maxBytes
+    sliceJobLogWindow window offset.toUInt64 total.toUInt64 maxBytes isTerminal
 
 /-- Seek-based bounded log file reader (`fstatSize` + `preadByteArray` of at most `262144` bytes)
     so `/jobs/:id/log` polls never load multi-gigabyte logs into memory! -/
-def readJobLogSliceBounded (logPath? : Option String) (offset : UInt64) (maxBytes : Nat := 262144) : IO LogSliceResult := do
+def readJobLogSliceBounded
+    (logPath? : Option String) (offset : UInt64)
+    (maxBytes : Nat := 262144) (isTerminal : Bool := false) : IO LogSliceResult := do
   let empty : LogSliceResult := { offset := 0, nextOffset := 0, logLen := 0, data := "" }
   let some lp := logPath? | return empty
   let cap := max 4 (min 262144 maxBytes)
@@ -259,7 +265,7 @@ def readJobLogSliceBounded (logPath? : Option String) (offset : UInt64) (maxByte
     if offset >= fileLen then
       return .ok { offset := fileLen, nextOffset := fileLen, logLen := fileLen, data := "" }
     let window ← LeanSys.Posix.preadByteArray fd offset cap
-    return .ok (sliceJobLogWindow window offset fileLen cap)
+    return .ok (sliceJobLogWindow window offset fileLen cap isTerminal)
   ) with
   | .ok res => return res
   | .error _ => return empty
@@ -602,8 +608,9 @@ private def wrapWithSystemdScope
   sArgs := sArgs ++ args
   return ("systemd-run", sArgs, sEnv, some scope)
 
-/-- Stop and reset a transient `SystemdScope` (`systemctl stop` + `systemctl reset-failed`),
-    reaping even `setsid()`-detached descendants inside the job's cgroup! -/
+/-- Immediately send `SIGKILL` to every process in `SystemdScope` (`systemctl kill --kill-who=all --signal=SIGKILL`),
+    then `systemctl stop` and `systemctl reset-failed` so even `SIGTERM`-ignoring or `setsid()`-detached
+    descendants inside the job's cgroup are reaped instantaneously without waiting for `TimeoutStopSec`! -/
 def stopSystemdScope (scope? : Option SystemdScope) : IO Unit := do
   let some sc := scope? | return
   let mut baseArgs : Array String := #[]
@@ -616,11 +623,24 @@ def stopSystemdScope (scope? : Option SystemdScope) : IO Unit := do
         ("DBUS_SESSION_BUS_ADDRESS", some s!"unix:path={rtDir}/bus")
       ]
   discard <| (IO.Process.output {
+    cmd := "systemctl", args := baseArgs ++ #["kill", "--kill-who=all", "--signal=SIGKILL", sc.unit], env := envMods
+  }).toBaseIO
+  discard <| (IO.Process.output {
     cmd := "systemctl", args := baseArgs ++ #["stop", sc.unit], env := envMods
   }).toBaseIO
   discard <| (IO.Process.output {
     cmd := "systemctl", args := baseArgs ++ #["reset-failed", sc.unit], env := envMods
   }).toBaseIO
+
+/-- Detach `stopSystemdScope` and `cleanupIsolatedCheckout` onto a background worker so callers holding
+    `Std.Mutex NodeRuntime` never block on `systemctl` D-Bus / `rm -rf` subprocess I/O! -/
+def teardownJobResourcesAsync (scope? : Option SystemdScope) (iso? : Option String) : IO Unit := do
+  if scope?.isNone && iso?.isNone then return
+  discard <| IO.asTask do
+    stopSystemdScope scope?
+    if let some dir := iso? then
+      if !dir.isEmpty then
+        discard <| (IO.Process.output { cmd := "rm", args := #["-rf", dir] }).toBaseIO
 
 /-- Reap any leftover `sandboxed-node-<prefix>-{sync,job}-*.scope` units from a previous daemon start. -/
 def reapPreviousScopesOnStart (cfg : NodeConfig) : IO Unit := do
@@ -983,19 +1003,26 @@ private def prepareJobOutsideLockInner
     artifacts := artifacts
   }
 
+/-- Clean up any partial per-job isolated checkout directory `<workDir>/checkouts/<repoHash16>/jobs/<jid>`. -/
+private def cleanupPartialJobCheckout (workDir : String) (jid : String) (payload : JVal) : IO Unit := do
+  if let some repo := (payload.field? "source").bind (·.fieldStr? "repo") then
+    let rh16 := (bytesToHexLower (sha256Bytes repo.toUTF8)).take 16 |>.toString
+    let cand := (System.FilePath.mk workDir / "checkouts" / rh16 / "jobs" / jid).toString
+    discard <| (IO.Process.output { cmd := "rm", args := #["-rf", cand] }).toBaseIO
+
 /-- Materialize checkout & environment outside `Std.Mutex NodeRuntime`, catching any `IO.Error`
-    and cleaning up any partial per-job isolated checkout so `launching` slots can never strand! -/
+    and cleaning up any partial per-job isolated checkout on BOTH `.ok (.error _)` and `.error _`
+    so `launching` slots and disk checkouts can never strand! -/
 def prepareJobOutsideLock
     (cfg : NodeConfig) (jid missionId : String) (payload : JVal) (logPath : String)
     (forced sideLane coordLane : Bool) : IO (Except String PreparedJobSpec) := do
   match ← (prepareJobOutsideLockInner cfg jid missionId payload logPath forced sideLane coordLane).toBaseIO with
-  | .ok res => return res
+  | .ok (.ok spec) => return .ok spec
+  | .ok (.error msg) =>
+    cleanupPartialJobCheckout cfg.workDir jid payload
+    return .error msg
   | .error ioErr =>
-    -- Clean up any partially created `<workDir>/checkouts/<repoHash16>/jobs/<jid>` directory
-    if let some repo := (payload.field? "source").bind (·.fieldStr? "repo") then
-      let rh16 := (bytesToHexLower (sha256Bytes repo.toUTF8)).take 16 |>.toString
-      let cand := (System.FilePath.mk cfg.workDir / "checkouts" / rh16 / "jobs" / jid).toString
-      discard <| (IO.Process.output { cmd := "rm", args := #["-rf", cand] }).toBaseIO
+    cleanupPartialJobCheckout cfg.workDir jid payload
     return .error s!"job preparation I/O error: {ioErr}"
 
 /-- Commit a `PreparedJobSpec` into `NodeRuntime` (clearing its `launching` reservation and `queuedPayloads`,
@@ -1016,10 +1043,10 @@ def commitPreparedJob
       else r
     | none => r
   let some cur := rt.ledger.jobs.get? jid
-    | if let .ok spec := prepRes then cleanupIsolatedCheckout spec.isolatedCheckout
+    | if let .ok spec := prepRes then teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
       return releaseDebt rt
   if cur.state != .queued then
-    if let .ok spec := prepRes then cleanupIsolatedCheckout spec.isolatedCheckout
+    if let .ok spec := prepRes then teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
     return releaseDebt rt
   let nowTs ← nowRfc3339
   match prepRes with
@@ -1033,8 +1060,7 @@ def commitPreparedJob
     let nowEp ← OrbNode.Posix.nowEpoch
     match ← (OrbNode.Posix.spawnJobPgrp spec.prog spec.args spec.envKv spec.cwd spec.logPath).toBaseIO with
     | .error e =>
-      stopSystemdScope spec.systemdScope?
-      cleanupIsolatedCheckout spec.isolatedCheckout
+      teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
       if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
         r with state := .failed, finishedAt? := some nowTs, error? := some (toString e), forced := spec.forced
       }) then
@@ -1059,10 +1085,9 @@ def commitPreparedJob
         }
         return { rt with ledger := l', liveProcs := rt.liveProcs.insert jid lp }
       | .error _ =>
-        stopSystemdScope spec.systemdScope?
         OrbNode.Posix.killPgrp pid 9
         discard <| OrbNode.Posix.pollPid pid
-        cleanupIsolatedCheckout spec.isolatedCheckout
+        teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
         return releaseDebt rt
 
 structure PendingAsyncLaunch where
@@ -1075,8 +1100,8 @@ structure PendingAsyncLaunch where
   sideLane  : Bool
   coordLane : Bool
 
-/-- Reap exited/timed-out/steered process groups (`-pgid` + systemd scope zero-orphan kill) and reserve lane slots
-    for eligible queued jobs, returning `(updatedRuntime, jobsToLaunchOutsideLock)`. -/
+/-- Reap exited/timed-out/steered process groups (`-pgid` + detached `SIGKILL` systemd scope teardown)
+    and reserve lane slots for eligible queued jobs, returning `(updatedRuntime, jobsToLaunchOutsideLock)`. -/
 def tickRuntimeReserve
     (rt0 : NodeRuntime) (payloadHints : Std.HashMap String JVal := {}) :
     IO (NodeRuntime × Array PendingAsyncLaunch) := do
@@ -1088,10 +1113,9 @@ def tickRuntimeReserve
     if done then
       let codeU32 := (w >>> 32).toUInt32
       let codeInt : Int := if codeU32 == 0xFFFFFFFF then -1 else Int.ofNat codeU32.toNat
-      stopSystemdScope lp.systemdScope?
       OrbNode.Posix.killPgrp lp.pid 9
       let arts ← collectArtifactsConfined lp.cwd lp.artifacts
-      cleanupIsolatedCheckout lp.isolatedCheckout
+      teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout
       let nowTs ← nowRfc3339
       let nextState : JobState := if codeInt == 0 then .succeeded else .failed
       if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
@@ -1107,11 +1131,10 @@ def tickRuntimeReserve
         rt := { rt with shrinkDebt := rt.shrinkDebt - 1 }
     else if let some limitSecs := lp.timeoutSecs? then
       if nowEp > lp.startedEp + limitSecs then
-        stopSystemdScope lp.systemdScope?
         OrbNode.Posix.killPgrp lp.pid 15
         OrbNode.Posix.killPgrp lp.pid 9
         discard <| OrbNode.Posix.pollPid lp.pid
-        cleanupIsolatedCheckout lp.isolatedCheckout
+        teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout
         let nowTs ← nowRfc3339
         if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
           r with
@@ -1127,11 +1150,10 @@ def tickRuntimeReserve
       else if lp.steerAfterTool then
         let inflight ← collectInflightChildToolPids lp.pid (lp.systemdScope?.map (·.unit))
         if inflight.isEmpty then
-          stopSystemdScope lp.systemdScope?
           OrbNode.Posix.killPgrp lp.pid 15
           OrbNode.Posix.killPgrp lp.pid 9
           discard <| OrbNode.Posix.pollPid lp.pid
-          cleanupIsolatedCheckout lp.isolatedCheckout
+          teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout
           let nowTs ← nowRfc3339
           let cInfo : JobCancellation := {
             actor := "core", reason := "Steered immediately after tool call completed", requestedAt := nowTs
@@ -1146,11 +1168,10 @@ def tickRuntimeReserve
     else if lp.steerAfterTool then
       let inflight ← collectInflightChildToolPids lp.pid (lp.systemdScope?.map (·.unit))
       if inflight.isEmpty then
-        stopSystemdScope lp.systemdScope?
         OrbNode.Posix.killPgrp lp.pid 15
         OrbNode.Posix.killPgrp lp.pid 9
         discard <| OrbNode.Posix.pollPid lp.pid
-        cleanupIsolatedCheckout lp.isolatedCheckout
+        teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout
         let nowTs ← nowRfc3339
         let cInfo : JobCancellation := {
           actor := "core", reason := "Steered immediately after tool call completed", requestedAt := nowTs
@@ -1220,11 +1241,10 @@ def cancelJob (rt : NodeRuntime) (jid actor reason : String) : IO (Except String
   let cInfo : JobCancellation := { actor := cleanActor, reason := cleanReason, requestedAt := nowTs }
   let mut releasedRegular := false
   if let some lp := rt.liveProcs.get? jid then
-    stopSystemdScope lp.systemdScope?
     OrbNode.Posix.killPgrp lp.pid 15
     OrbNode.Posix.killPgrp lp.pid 9
     discard <| OrbNode.Posix.pollPid lp.pid
-    cleanupIsolatedCheckout lp.isolatedCheckout
+    teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout
     if !lp.forced && !lp.sideLane && !lp.coordLane then
       releasedRegular := true
   if let some sl := rt.launching.get? jid then
@@ -1376,13 +1396,56 @@ def interruptJob (rt : NodeRuntime) (jid mode : String) : IO (Except String (Nod
         ("deferred_until_tool_finishes", .bool false)
       ], none)
 
+/-- Maximum retained bytes per stream (`stdout`, `stderr`) for synchronous `POST /execute`
+    (`(16 * 1024 * 1024 - 1024) / 6 = 2796032`, matching `src/node/runner.rs::read_capped`). -/
+def syncExecOutputCapBytes : Nat := 2796032
+
+private def drainHandleCapped (h : IO.FS.Handle) (capBytes : Nat) : IO String := do
+  let mut kept := ByteArray.emptyWithCapacity (min capBytes 65536)
+  let mut truncated := false
+  while true do
+    let chunk ← match ← (h.read 8192).toBaseIO with
+      | .ok b => pure b
+      | .error _ => pure ByteArray.empty
+    if chunk.isEmpty then break
+    let rem := capBytes - kept.size
+    if rem > 0 then
+      let takeLen := min chunk.size rem
+      kept := kept ++ chunk.extract 0 takeLen
+      if takeLen < chunk.size then
+        truncated := true
+    else
+      truncated := true
+  let clean := trimIncompleteUtf8Suffix kept
+  let mut text := decodeUtf8LossyPreservingValid clean
+  if truncated then
+    text := text ++ "\n[node output truncated to fit 16 MiB JSON limit]\n"
+  return text
+
+/-- Spawn a child process and drain `stdout` and `stderr` concurrently with bounded retention
+    (`capBytes = 2796032`), discarding excess bytes while draining pipes to EOF so noisy commands
+    never exhaust daemon memory or block on full OS pipe buffers! -/
+def runBoundedOutput (sa : IO.Process.SpawnArgs) (capBytes : Nat := syncExecOutputCapBytes) : IO IO.Process.Output := do
+  let child ← IO.Process.spawn {
+    sa with
+    stdin := .null
+    stdout := .piped
+    stderr := .piped
+  }
+  let outTask ← IO.asTask (drainHandleCapped child.stdout capBytes) Task.Priority.dedicated
+  let errTask ← IO.asTask (drainHandleCapped child.stderr capBytes) Task.Priority.dedicated
+  let exitCode ← child.wait
+  let stdout := (← IO.wait outTask).toOption.getD ""
+  let stderr := (← IO.wait errTask).toOption.getD ""
+  return { exitCode, stdout, stderr }
+
 /-- Run cleared-env synchronous `POST /execute` command under `<cfg.workDir>/<missionId>`,
     fenced via `jobs.db` and contained in a transient `systemd-run --scope` unit when available. -/
 def execClearedLeaseCommand
-    (cfg : NodeConfig) (hasSqlite3 : Bool) (missionId command : String) :
+    (cfg : NodeConfig) (sqliteBackend : SqliteBackend) (missionId command : String) :
     IO (Except String JVal) := do
   let execId ← newUuidV4
-  if let .error fenceErr ← acquireExecFenceReceipt cfg.workDir hasSqlite3 execId missionId then
+  if let .error fenceErr ← acquireExecFenceReceipt cfg.workDir sqliteBackend execId missionId then
     return .error fenceErr
   let mut activeScope? : Option SystemdScope := none
   try
@@ -1402,7 +1465,7 @@ def execClearedLeaseCommand
     activeScope? := scope?
     let out ←
       if scope?.isSome then
-        IO.Process.output {
+        runBoundedOutput {
           cmd := wrappedProg
           args := wrappedArgs
           cwd := some missionDir
@@ -1413,7 +1476,7 @@ def execClearedLeaseCommand
         for (k, v) in envPairs do
           envArgs := envArgs.push s!"{k}={v}"
         envArgs := envArgs ++ #[baseProg] ++ baseArgs
-        IO.Process.output {
+        runBoundedOutput {
           cmd := "env"
           args := envArgs
           cwd := some missionDir
@@ -1426,7 +1489,7 @@ def execClearedLeaseCommand
     ])
   finally
     stopSystemdScope activeScope?
-    releaseExecFenceReceipt cfg.workDir hasSqlite3 execId missionId
+    releaseExecFenceReceipt cfg.workDir sqliteBackend execId missionId
 
 /-- Single-threaded synchronous `POST /execute` helper (used by direct `handleRequest` tests). -/
 def runSyncExecute (rt : NodeRuntime) (missionId command : String) (sideLane : Bool := false) : IO (Nat × JVal) := do
@@ -1435,7 +1498,7 @@ def runSyncExecute (rt : NodeRuntime) (missionId command : String) (sideLane : B
       return (429, .str "node side-lane capacity exhausted")
   else if activeRegularCount rt + rt.shrinkDebt >= rt.cfg.capacityTotal then
     return (429, .str "node capacity exhausted")
-  match ← execClearedLeaseCommand rt.cfg rt.ledger.hasSqlite3 missionId command with
+  match ← execClearedLeaseCommand rt.cfg rt.ledger.sqliteBackend missionId command with
   | .ok resp => return (200, resp)
   | .error fenceErr => return (503, .str fenceErr)
 

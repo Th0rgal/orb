@@ -1459,7 +1459,7 @@
         },
         {
           "path": "src/managed/mod.rs",
-          "sha256": "d8a579129f120b623906235f0bd13343d0e1cf1b5e82592ab96a21b58c653a9c"
+          "sha256": "54570fa1a496e01ba81bd9377d51d9fdff30d17f81c39484899d1a8ae48d50b0"
         },
         {
           "path": "src/managed/tests.rs",
@@ -1679,7 +1679,7 @@
         },
         {
           "path": "src/managed/mod.rs",
-          "sha256": "d8a579129f120b623906235f0bd13343d0e1cf1b5e82592ab96a21b58c653a9c"
+          "sha256": "54570fa1a496e01ba81bd9377d51d9fdff30d17f81c39484899d1a8ae48d50b0"
         },
         {
           "path": "src/managed/tests.rs",
@@ -4145,7 +4145,7 @@
         },
         {
           "path": "src/managed/mod.rs",
-          "sha256": "d8a579129f120b623906235f0bd13343d0e1cf1b5e82592ab96a21b58c653a9c"
+          "sha256": "54570fa1a496e01ba81bd9377d51d9fdff30d17f81c39484899d1a8ae48d50b0"
         },
         {
           "path": "src/managed/tests.rs",
@@ -4271,7 +4271,7 @@
         },
         {
           "path": "src/managed/mod.rs",
-          "sha256": "d8a579129f120b623906235f0bd13343d0e1cf1b5e82592ab96a21b58c653a9c"
+          "sha256": "54570fa1a496e01ba81bd9377d51d9fdff30d17f81c39484899d1a8ae48d50b0"
         },
         {
           "path": "src/managed/tests.rs",

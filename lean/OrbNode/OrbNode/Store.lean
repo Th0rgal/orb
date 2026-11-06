@@ -189,12 +189,17 @@ def nowRfc3339 : IO String := do
   let ep ← OrbNode.Posix.nowEpoch
   return formatEpochIso ep
 
+inductive SqliteBackend where
+  | cli
+  | python3
+  deriving Repr, BEq, Inhabited
+
 structure Ledger where
-  workDir     : String
-  hasSqlite3  : Bool := false
-  store       : LeanSys.Store.Handle
-  jobs        : Std.HashMap String JobRecord
-  order       : Array String
+  workDir       : String
+  sqliteBackend : SqliteBackend := .cli
+  store         : LeanSys.Store.Handle
+  jobs          : Std.HashMap String JobRecord
+  order         : Array String
 
 private def jobKey (jobId : String) : String := s!"job/{jobId}"
 
@@ -205,36 +210,60 @@ private def sqlOptStr : Option String → String
   | some s => sqlEsc s
   | none   => "NULL"
 
-private def detectSqlite3 : IO Bool := do
-  let r ← (IO.Process.output { cmd := "sqlite3", args := #["--version"] }).toBaseIO
-  match r with
-  | .ok out => return out.exitCode == 0
-  | .error _ => return false
+/-- Detect mandatory SQLite backend (`sqlite3` CLI or `python3` stdlib `sqlite3`).
+    Fails closed (`none`) only when neither is installed on the host! -/
+def detectSqliteBackend : IO (Option SqliteBackend) := do
+  match ← (IO.Process.output { cmd := "sqlite3", args := #["--version"] }).toBaseIO with
+  | .ok out => if out.exitCode == 0 then return some .cli
+  | .error _ => pure ()
+  match ← (IO.Process.output { cmd := "python3", args := #["-c", "import sqlite3"] }).toBaseIO with
+  | .ok out => if out.exitCode == 0 then return some .python3
+  | .error _ => pure ()
+  return none
 
-private def runSqliteStdin (dbPath sql : String) (timeoutMs : Nat := 5000) : IO (Except String Unit) := do
-  let res ← (IO.Process.output {
-    cmd := "sqlite3"
-    args := #["-cmd", s!".timeout {timeoutMs}", dbPath]
-  } (input? := some (sql ++ "\n"))).toBaseIO
+private def pySqliteExecSnippet : String :=
+  "import sqlite3,sys\n" ++
+  "con=sqlite3.connect(sys.argv[1],timeout=float(sys.argv[2])/1000.0,isolation_level=None)\n" ++
+  "con.executescript(sys.stdin.read())\n" ++
+  "con.close()\n"
+
+private def pySqliteQueryJsonSnippet : String :=
+  "import json,sqlite3,sys\n" ++
+  "con=sqlite3.connect(sys.argv[1],timeout=5.0)\n" ++
+  "con.row_factory=sqlite3.Row\n" ++
+  "rows=[dict(r) for r in con.execute(sys.stdin.read()).fetchall()]\n" ++
+  "con.close()\n" ++
+  "sys.stdout.write(json.dumps(rows))\n"
+
+private def runSqliteStdin (backend : SqliteBackend) (dbPath sql : String) (timeoutMs : Nat := 5000) : IO (Except String Unit) := do
+  let res ← match backend with
+    | .cli =>
+      (IO.Process.output {
+        cmd := "sqlite3"
+        args := #["-cmd", s!".timeout {timeoutMs}", dbPath]
+      } (input? := some (sql ++ "\n"))).toBaseIO
+    | .python3 =>
+      (IO.Process.output {
+        cmd := "python3"
+        args := #["-c", pySqliteExecSnippet, dbPath, toString timeoutMs]
+      } (input? := some sql)).toBaseIO
   match res with
   | .error e => return .error (toString e)
   | .ok out =>
     if out.exitCode == 0 then return .ok ()
     else return .error s!"jobs.db write locked or failed: {out.stderr.trimAscii}"
 
-private def ensureLegacySqliteSchema (workDir : String) (hasSqlite3 : Bool) : IO Unit := do
-  if !hasSqlite3 then return
+private def ensureLegacySqliteSchema (workDir : String) (backend : SqliteBackend) : IO (Except String Unit) := do
   let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
   let ddl :=
     "PRAGMA journal_mode=WAL; " ++
     "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, artifacts_json TEXT, cancellation_json TEXT); " ++
     "CREATE TABLE IF NOT EXISTS node_scratch (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, job_id TEXT, parent_identity TEXT NOT NULL, directory_identity TEXT NOT NULL, retired_at TEXT);"
-  discard <| runSqliteStdin dbPath ddl 5000
+  runSqliteStdin backend dbPath ddl 5000
 
 private def syncJobToLegacySqlite
-    (workDir : String) (hasSqlite3 : Bool) (r : JobRecord) (timeoutMs : Nat := 5000) :
+    (workDir : String) (backend : SqliteBackend) (r : JobRecord) (timeoutMs : Nat := 5000) :
     IO (Except String Unit) := do
-  if !hasSqlite3 then return .ok ()
   let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
   let exitSql := match r.exitCode? with | some c => toString c | none => "NULL"
   let artsSql :=
@@ -247,21 +276,31 @@ private def syncJobToLegacySqlite
   let sql :=
     "INSERT OR REPLACE INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json) VALUES (" ++
     s!"{sqlEsc r.jobId}, {sqlEsc r.missionId}, {sqlEsc r.payloadJson}, {sqlEsc r.state.asString}, {exitSql}, {sqlEsc r.createdAt}, {sqlOptStr r.startedAt?}, {sqlOptStr r.finishedAt?}, {sqlOptStr r.logPath?}, {sqlOptStr r.error?}, {artsSql}, {cancSql});"
-  runSqliteStdin dbPath sql timeoutMs
+  runSqliteStdin backend dbPath sql timeoutMs
 
-/-- Import legacy SQLite `<work_dir>/jobs.db` rows idempotently when `sqlite3` and `jobs.db` exist. -/
-private def importLegacySqliteJobs (workDir : String) (hasSqlite3 : Bool) : IO (Array JobRecord) := do
-  if !hasSqlite3 then return #[]
+/-- Import legacy SQLite `<work_dir>/jobs.db` rows idempotently when `jobs.db` exists. -/
+private def importLegacySqliteJobs (workDir : String) (backend : SqliteBackend) : IO (Except String (Array JobRecord)) := do
   let dbPath : System.FilePath := System.FilePath.mk workDir / "jobs.db"
-  if !(← dbPath.pathExists) then return #[]
-  let .ok res ← (IO.Process.output {
-    cmd := "sqlite3"
-    args := #["-json", dbPath.toString,
-      "SELECT id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json FROM jobs ORDER BY created_at ASC;"]
-  }).toBaseIO | return #[]
-  if res.exitCode != 0 || res.stdout.trimAscii.isEmpty then return #[]
-  let .ok (.arr rows) := OrbBin.Json.parse res.stdout
-    | return #[]
+  if !(← dbPath.pathExists) then return .ok #[]
+  let query :=
+    "SELECT id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json FROM jobs ORDER BY created_at ASC;"
+  let res ← match backend with
+    | .cli =>
+      (IO.Process.output {
+        cmd := "sqlite3"
+        args := #["-json", dbPath.toString, query]
+      }).toBaseIO
+    | .python3 =>
+      (IO.Process.output {
+        cmd := "python3"
+        args := #["-c", pySqliteQueryJsonSnippet, dbPath.toString]
+      } (input? := some query)).toBaseIO
+  let .ok outRes := res | return .error "failed reading legacy jobs.db"
+  if outRes.exitCode != 0 then
+    return .error s!"legacy jobs.db query failed: {outRes.stderr.trimAscii}"
+  if outRes.stdout.trimAscii.isEmpty then return .ok #[]
+  let .ok (.arr rows) := OrbBin.Json.parse outRes.stdout
+    | return .error "corrupt JSON output while importing legacy jobs.db"
   let mut out : Array JobRecord := #[]
   for row in rows do
     if let some id := row.fieldStr? "id" then
@@ -297,16 +336,19 @@ private def importLegacySqliteJobs (workDir : String) (hasSqlite3 : Bool) : IO (
         artifacts := artifacts
         cancellation? := cancellation?
       }
-  return out
+  return .ok out
 
-/-- Open `<work_dir>/orb-node.store`, replay WAL, import/initialize `jobs.db`,
+/-- Open `<work_dir>/orb-node.store`, require SQLite support for `jobs.db` compatibility and
+    rolling-upgrade fencing (failing closed if unavailable), replay WAL, import/initialize `jobs.db`,
     and flip any in-flight (`queued` / `running`) job on daemon startup to `lost`. -/
 def openLedger (workDir : String) : IO (Except String Ledger) := do
   IO.FS.createDirAll (System.FilePath.mk workDir / "logs")
   IO.FS.createDirAll (System.FilePath.mk workDir / ".scratch")
   IO.FS.createDirAll (System.FilePath.mk workDir / "uploads")
-  let hasSqlite3 ← detectSqlite3
-  ensureLegacySqliteSchema workDir hasSqlite3
+  let some sqliteBackend ← detectSqliteBackend
+    | return .error "SQLite support (sqlite3 CLI or python3 sqlite3) is required before accepting node work"
+  if let .error schemaErr ← ensureLegacySqliteSchema workDir sqliteBackend then
+    return .error s!"jobs.db schema initialization failed: {schemaErr}"
   let storeDir := (System.FilePath.mk workDir / "orb-node.store").toString
   let h0 ← match ← LeanSys.Store.openStore storeDir with
     | .ok h => pure h
@@ -321,7 +363,9 @@ def openLedger (workDir : String) : IO (Except String Ledger) := do
           if let some rec := JobRecord.fromStoreJson? jv then
             jobs := jobs.insert rec.jobId rec
             order := order.push rec.jobId
-  let legacyRows ← importLegacySqliteJobs workDir hasSqlite3
+  let legacyRows ← match ← importLegacySqliteJobs workDir sqliteBackend with
+    | .ok rows => pure rows
+    | .error importErr => return .error importErr
   for rec in legacyRows do
     if !jobs.contains rec.jobId then
       let serialized := renderCompact (rec.toJson none)
@@ -343,12 +387,12 @@ def openLedger (workDir : String) : IO (Except String Ledger) := do
         if let .ok h' ← LeanSys.Store.putString h (jobKey jid) serialized then
           h := h'
           jobs := jobs.insert jid lostRec
-          discard <| syncJobToLegacySqlite workDir hasSqlite3 lostRec
+          discard <| syncJobToLegacySqlite workDir sqliteBackend lostRec
     else
-      discard <| syncJobToLegacySqlite workDir hasSqlite3 rec
+      discard <| syncJobToLegacySqlite workDir sqliteBackend rec
   return .ok {
     workDir := workDir
-    hasSqlite3 := hasSqlite3
+    sqliteBackend := sqliteBackend
     store := h
     jobs := jobs
     order := order
@@ -359,7 +403,7 @@ namespace Ledger
 def insertQueued (l : Ledger) (rec : JobRecord) : IO (Except String Ledger) := do
   if l.jobs.contains rec.jobId then
     return .error "duplicate_job_id"
-  if let .error e ← syncJobToLegacySqlite l.workDir l.hasSqlite3 rec 1500 then
+  if let .error e ← syncJobToLegacySqlite l.workDir l.sqliteBackend rec 1500 then
     return .error e
   let serialized := renderCompact (rec.toJson none)
   match ← LeanSys.Store.putString l.store (jobKey rec.jobId) serialized with
@@ -387,7 +431,7 @@ def updateJob
     match ← LeanSys.Store.putString l.store (jobKey jobId) serialized with
     | .error e => return .error s!"WAL write failed: {repr e}"
     | .ok h' =>
-      discard <| syncJobToLegacySqlite l.workDir l.hasSqlite3 next
+      discard <| syncJobToLegacySqlite l.workDir l.sqliteBackend next
       return .ok ({ l with store := h', jobs := l.jobs.insert jobId next }, next)
 
 def listRecent (l : Ledger) (limit : Nat) : Array JobRecord := Id.run do
@@ -433,9 +477,8 @@ def sanitizePersistedPayload (payloadVal : JVal) : JVal :=
 /-- Fence synchronous `POST /execute` admission against `rolling_upgrade_nodes.py`'s `BEGIN IMMEDIATE`
     transaction on `jobs.db`: inserts a temporary `running` row into `jobs.db` before execution
     starts (failing closed if `jobs.db` is write-locked) and removes it on completion. -/
-def acquireExecFenceReceipt (workDir : String) (hasSqlite3 : Bool) (execId missionId : String) :
+def acquireExecFenceReceipt (workDir : String) (backend : SqliteBackend) (execId missionId : String) :
     IO (Except String Unit) := do
-  if !hasSqlite3 then return .ok ()
   let nowTs ← nowRfc3339
   let execRec : JobRecord := {
     jobId := execId
@@ -445,12 +488,11 @@ def acquireExecFenceReceipt (workDir : String) (hasSqlite3 : Bool) (execId missi
     createdAt := nowTs
     startedAt? := some nowTs
   }
-  syncJobToLegacySqlite workDir hasSqlite3 execRec 1500
+  syncJobToLegacySqlite workDir backend execRec 1500
 
-def releaseExecFenceReceipt (workDir : String) (hasSqlite3 : Bool) (execId missionId : String) : IO Unit := do
-  if !hasSqlite3 then return
+def releaseExecFenceReceipt (workDir : String) (backend : SqliteBackend) (execId missionId : String) : IO Unit := do
   let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
   let sql := s!"DELETE FROM jobs WHERE id = {sqlEsc execId} AND mission_id = {sqlEsc missionId};"
-  discard <| runSqliteStdin dbPath sql 5000
+  discard <| runSqliteStdin backend dbPath sql 5000
 
 end OrbNode.Store

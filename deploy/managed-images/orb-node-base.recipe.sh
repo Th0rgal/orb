@@ -107,7 +107,7 @@ log "apt base packages (signed Ubuntu archive)"
 export DEBIAN_FRONTEND=noninteractive
 need=()
 # gh, ripgrep, fd, clang/llvm/lld: used by most missions (boat review 2026-10-24).
-for p in curl ca-certificates git jq xz-utils zstd tar gzip python3 build-essential libssl3 dbus-user-session \
+for p in curl ca-certificates git jq sqlite3 xz-utils zstd tar gzip python3 build-essential libssl3 dbus-user-session \
          gh ripgrep fd-find clang llvm lld pkg-config libssl-dev; do
   dpkg -s "$p" >/dev/null 2>&1 || need+=("$p")
 done

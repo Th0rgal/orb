@@ -297,7 +297,7 @@ BUILD_SCRIPT = r'''set -euo pipefail
 exec > >(tee -a /home/user/build.log) 2>&1
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
-sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config libssl-dev curl ca-certificates git zstd >/dev/null
+sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config libssl-dev curl ca-certificates git sqlite3 zstd >/dev/null
 rm -rf "$HOME/src" && mkdir -p "$HOME/src" && tar -xf "$HOME/src.tar" -C "$HOME/src"
 cd "$HOME/src"
 ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/release --only sandboxed-node --only sandboxed-mcp || { echo BUILD_FAILED; exit 1; }
@@ -473,7 +473,7 @@ def cmd_refresh_node(args):
         script = f'''set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 need=()
-for p in gh ripgrep fd-find clang llvm lld pkg-config libssl-dev; do
+for p in sqlite3 gh ripgrep fd-find clang llvm lld pkg-config libssl-dev; do
   dpkg -s "$p" >/dev/null 2>&1 || need+=("$p")
 done
 if [ "${{#need[@]}}" -gt 0 ]; then
