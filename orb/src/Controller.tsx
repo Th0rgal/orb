@@ -455,9 +455,7 @@ export function ControllerView(p: { slug: string; id?: string }) {
                     </Show>
                   </div>
                 </div>
-                <Show when={j().last_error && state() === "attention"}>
-                  <ErrorNotice error={j().last_error!} />
-                </Show>
+                <ErrorToast error={state() === "attention" ? j().last_error : null} title="Controller run failed" background />
 
                 <div class="cr-tabs">
                   <button class={tab() === "runs" ? "on" : ""} onClick={() => setTab("runs")}>

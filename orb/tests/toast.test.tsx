@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { clearConnection, setConnection } from "../src/api";
 import { CloudConversation } from "../src/CloudAgents";
 import { CloudProviders } from "../src/CloudProviders";
-import { ErrorToast, notify } from "../src/toast";
+import { ErrorToast, StatusToast, notify } from "../src/toast";
 
 const rect = (left: number, top: number, right: number, bottom: number): DOMRect => ({
   x: left,
@@ -259,5 +259,39 @@ describe("unified workspace ErrorToast & Toaster", () => {
       clearConnection();
       vi.useRealTimers();
     }
+  });
+
+  it("renders StatusToast as role=status (never role=alert) with warning tone, action, and dismiss callback", async () => {
+    const onDismiss = vi.fn();
+    const onReattach = vi.fn();
+    const [msg, setMsg] = createSignal<string | null>("File no longer available — re-attach: notes.pdf");
+    render(() => (
+      <StatusToast
+        tone="warning"
+        message={msg()}
+        detail="Removed from the message; your text is kept."
+        onDismiss={() => {
+          onDismiss();
+          setMsg(null);
+        }}
+        action={{ label: "Re-attach", primary: true, run: onReattach }}
+      />
+    ));
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    const status = screen.getByRole("status");
+    expect(status.classList.contains("warning")).toBe(true);
+    expect(status.textContent).toContain("File no longer available — re-attach: notes.pdf");
+    expect(status.textContent).toContain("Removed from the message; your text is kept.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Re-attach" }));
+    expect(onReattach).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("status")).toBeNull();
+
+    setMsg("Synced Library skills");
+    expect(screen.getByRole("status").textContent).toContain("Synced Library skills");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(onDismiss).toHaveBeenCalledOnce();
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
   });
 });

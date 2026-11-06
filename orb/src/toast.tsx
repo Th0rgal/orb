@@ -217,6 +217,53 @@ export function ErrorToast(p: {
   return null;
 }
 
+/**
+ * Shows a non-error status or warning notice in the shared bottom Toaster
+ * (`role="status"`). Closing or timing out invokes `onDismiss`.
+ */
+export function StatusToast(p: {
+  message?: string | null | false;
+  detail?: string;
+  tone?: "warning";
+  icon?: JSX.Element;
+  timeout?: number;
+  onDismiss?: () => void;
+  action?: ToastAction;
+  actions?: ToastAction[];
+}) {
+  let key: string | undefined;
+  const release = () => {
+    if (key !== undefined) {
+      dismissToast(key);
+      key = undefined;
+    }
+  };
+  createEffect(() => {
+    const msg = p.message;
+    if (!msg) return release();
+    const next = `status:${p.tone ?? "info"}:${msg}`;
+    if (next !== key) release();
+    key = next;
+    const actions = [...(p.action ? [p.action] : []), ...(p.actions ?? [])];
+    notify({
+      key,
+      kind: "info",
+      tone: p.tone,
+      icon: p.icon,
+      title: msg,
+      message: p.detail,
+      actions: actions.length ? actions : undefined,
+      timeout: p.timeout,
+      onDismiss: () => {
+        key = undefined;
+        p.onDismiss?.();
+      },
+    });
+  });
+  onCleanup(release);
+  return null;
+}
+
 function ToastItem(p: { toast: Toast }) {
   const [copied, setCopied] = createSignal(false);
   const t = () => p.toast;
@@ -240,11 +287,12 @@ function ToastItem(p: { toast: Toast }) {
   };
   const content = t().content;
   if (content) return <div class={`toast ${t().kind} custom${t().variant ? ` ${t().variant}` : ""}`} role="status">{content()}</div>;
+  const showAlertIcon = () => t().kind === "error" || (t().tone === "warning" && !t().icon);
   return <div class={`toast ${t().kind}${t().tone === "warning" ? " warning" : ""}${t().variant ? ` ${t().variant}` : ""}`} role={t().kind === "error" ? "alert" : "status"} onMouseEnter={pause} onMouseLeave={resume} onFocusIn={pause} onFocusOut={resume}>
-    <Show when={t().kind === "error"}>
+    <Show when={showAlertIcon()}>
       <svg class="toast-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 4.5v4M8 10.5v1" /></svg>
     </Show>
-    <Show when={t().kind !== "error" && t().icon}><span class="toast-glyph" aria-hidden="true">{t().icon}</span></Show>
+    <Show when={!showAlertIcon() && t().icon}><span class="toast-glyph" aria-hidden="true">{t().icon}</span></Show>
     <div class="toast-body">
       <span class="toast-title">{t().title}</span>
       <Show when={t().message}><span class="toast-message">{t().message}</span></Show>

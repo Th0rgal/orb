@@ -1703,21 +1703,24 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 button.fork-trigger { color: inherit; cursor: pointer; }
 button.fork-trigger:hover { color: var(--fg); }
 
-/* Timeline/modal error cards share the same neutral surface as floating toasts; only the alert glyph carries red/amber. */
-.error-notice { display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin-top: 10px; padding: 10px 10px 10px 14px; border: 1px solid var(--overlay-border, var(--stroke)); border-radius: var(--radius-md); background: var(--overlay-surface, var(--bg-elev)); color: var(--fg-2); text-align: left; font-size: 12.5px; line-height: 1.5; }
+/* Timeline/modal error cards share the exact card grammar of floating toasts (toast.tsx). */
+.error-notice { display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin-top: 10px; padding: 10px 8px 10px 14px; border: 1px solid var(--overlay-border, var(--stroke)); border-radius: 8px; background: var(--overlay-surface, var(--bg-elev)); color: var(--fg-2); text-align: left; font-size: 12px; line-height: 1.4; }
 .error-notice-icon { flex: none; color: var(--red); margin-top: 2px; }
 /* Provider limits are a wait, not a failure: amber instead of red. */
 .error-notice.warning .error-notice-icon { color: var(--amber); }
-.error-notice-link { padding: 3px 10px; border: 1px solid var(--stroke-strong); border-radius: var(--radius-sm); background: var(--bg-btn); color: var(--fg); font: inherit; font-size: 12px; cursor: pointer; }
-.error-notice-link:hover { background: var(--hover-1); }
+.error-notice-link { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 9px; border: 0; border-radius: 6px; background: var(--bg-active); color: var(--fg); font: 500 11.5px/1 var(--sans); cursor: pointer; }
+.error-notice-link:hover:not(:disabled) { background: var(--overlay-hover); }
+.error-notice-link.primary { background: var(--fg); color: var(--bg); }
+.error-notice-link.primary:hover:not(:disabled) { background: var(--fg); opacity: .88; }
+.error-notice-link:disabled { opacity: .5; cursor: default; }
 .error-notice-body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.error-notice strong { color: var(--fg); font-weight: 500; }
-.error-notice p { margin: 3px 0 0; white-space: pre-wrap; }
-.error-notice details, .legacy-log { margin-top: 8px; color: var(--fg-3); font-size: 12px; }
+.error-notice strong { color: var(--fg); font-size: 12px; font-weight: 500; line-height: 1.4; }
+.error-notice p { margin: 2px 0 0; font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; }
+.error-notice details, .legacy-log { margin-top: 6px; color: var(--fg-3); font-size: 11px; }
 .error-notice summary, .legacy-log summary { cursor: pointer; width: fit-content; }
-.error-notice pre, .legacy-log pre { margin: 8px 0 0; padding: 10px; border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--fg-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
-.error-notice-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
-.error-notice > .icon-btn { flex: none; width: 22px; height: 22px; }
+.error-notice pre, .legacy-log pre { margin: 6px 0 0; padding: 8px; border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--fg-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; }
+.error-notice-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.error-notice > .icon-btn { flex: none; width: 24px; height: 24px; align-self: flex-start; }
 
 .machine-menu { width: 280px; }
 .machine-section-label { padding: 7px 10px 5px; font-size: 10.5px; font-weight: 500; color: var(--fg-3); letter-spacing: .04em; text-transform: uppercase; }
@@ -3159,26 +3162,6 @@ select.orb-select-native:disabled { cursor: default; }
   display: flex; align-items: center; gap: 8px; flex: none; margin-top: 8px;
 }
 
-.skills-banner {
-  display: flex; align-items: center; gap: 10px;
-  padding: 9px 12px; margin-bottom: 14px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--stroke-soft);
-  background: var(--bg-elev);
-  color: var(--fg-2); font-size: 12.5px; line-height: 17px;
-}
-.skills-banner > span { flex: 1; min-width: 0; }
-.skills-banner.ok {
-  border-color: color-mix(in srgb, var(--green) 28%, var(--stroke));
-  background: color-mix(in srgb, var(--green) 7%, var(--bg-elev));
-}
-.skills-banner.ok > svg { color: var(--green); flex: none; }
-.skills-banner.error {
-  border-color: color-mix(in srgb, var(--red) 32%, var(--stroke));
-  background: color-mix(in srgb, var(--red) 8%, var(--bg-elev));
-  color: var(--red);
-}
-
 .skills-sec-head {
   display: flex; align-items: center; justify-content: space-between;
   flex-wrap: wrap; gap: 8px 12px; margin-bottom: 8px;
@@ -3560,44 +3543,6 @@ select.orb-select-native:disabled { cursor: default; }
   font-size: 11.5px;
 }
 
-.composer-large-confirm {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  margin: 4px 2px 2px;
-  padding: 8px 10px;
-  border-radius: var(--radius-md);
-  border: 1px solid color-mix(in srgb, var(--amber) 34%, var(--stroke));
-  background: color-mix(in srgb, var(--amber) 6%, var(--bg-elev));
-  font-size: 12px;
-  color: var(--fg-2);
-}
-.composer-large-confirm-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
-  min-width: 200px;
-}
-.composer-large-confirm-text strong {
-  color: var(--fg);
-  font-weight: 500;
-}
-.composer-large-confirm-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-}
-.composer-large-confirm-actions .s-btn {
-  min-height: 26px;
-  padding: 2px 9px;
-  font-size: 11.5px;
-}
-
 .composer-bg-uploads {
   grid-column: 1 / -1;
   display: flex;
@@ -3683,9 +3628,9 @@ select.orb-select-native:disabled { cursor: default; }
 
 /* Bottom notifications (toast.tsx). Window-centered across the full app (including over the sidebar); shared by errors, approvals, and undo. */
 .toaster { position: fixed; left: 50%; transform: translateX(-50%); z-index: 90; display: flex; flex-direction: column; align-items: center; gap: 8px; width: max-content; max-width: min(580px, calc(100vw - 32px)); pointer-events: none; }
-.toaster.fit .toast.secret, .toaster.fit .toast.error { align-self: stretch; }
+.toaster.fit .toast.secret, .toaster.fit .toast.error, .toaster.fit .toast.warning { align-self: stretch; }
 .toast { pointer-events: auto; display: flex; align-items: center; gap: 10px; max-width: 100%; padding: 8px 8px 8px 14px; border-radius: 8px; background: var(--overlay-surface); border: 1px solid var(--overlay-border); box-shadow: var(--shadow-lg); color: var(--fg-2); font-size: 12px; animation: toast-in 140ms ease-out; }
-.toast.error { align-items: flex-start; padding-top: 10px; padding-bottom: 10px; }
+.toast.error, .toast.warning { align-items: flex-start; padding-top: 10px; padding-bottom: 10px; }
 .toast-icon { flex: none; align-self: flex-start; margin-top: 2px; color: var(--red); }
 .toast.warning .toast-icon { color: var(--amber); }
 .toast-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; overflow-wrap: anywhere; }
@@ -3765,9 +3710,6 @@ select.orb-select-native:disabled { cursor: default; }
 .bw-badge { font: 11px/1.3 var(--mono); padding: 2px 6px; border-radius: 4px; background: var(--bg-inset); border: 1px solid var(--stroke-soft); color: var(--fg-2); }
 .bw-mono { font-family: var(--mono); font-size: 11.5px; }
 .bw-binding-ctrl { display: inline-flex; align-items: center; gap: 8px; }
-.bw-notice { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; margin-bottom: 14px; border-radius: var(--radius-sm); background: var(--bg-elev); border: 1px solid var(--stroke-soft); color: var(--fg); font-size: 12.5px; }
-.bw-notice-close { background: none; border: none; color: var(--fg-3); cursor: pointer; display: grid; place-items: center; padding: 2px; border-radius: 4px; }
-.bw-notice-close:hover { color: var(--fg); background: var(--bg-hover); }
 
 .bw-secrets-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
 .bw-secrets-title { display: inline-flex; align-items: center; gap: 8px; }
@@ -4183,9 +4125,7 @@ select.orb-select-native:disabled { cursor: default; }
 .folder-upload-files li > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); }
 .folder-upload-files li.failed .folder-upload-file-state { color: var(--amber); }
 .folder-upload-file-state { white-space: nowrap; flex-shrink: 0; max-width: 55%; overflow: hidden; text-overflow: ellipsis; }
-.composer-stale-attachments { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin: 4px 2px 2px; padding: 6px 8px; border-radius: var(--radius-sm); border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--stroke)); background: var(--bg-inset); font-size: 11.5px; color: var(--fg-2); }
-.composer-stale-attachments > span { margin-right: auto; overflow: hidden; text-overflow: ellipsis; }
-.composer-stale-attachments .bg-upload-btn, .folder-upload .bg-upload-btn { white-space: nowrap; flex-shrink: 0; }
+.folder-upload .bg-upload-btn { white-space: nowrap; flex-shrink: 0; }
 
 /* Side by side (⌘⇧E): the sidebar steps aside and the panel takes the right half at full height. */
 .app[data-files-split="true"], .app.sb-hidden[data-files-split="true"] { grid-template-columns:0 minmax(0,1fr) minmax(0,1fr); }

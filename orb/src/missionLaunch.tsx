@@ -1,7 +1,7 @@
 import { isRecord, readJson, writeJson } from "./storage";
 import { missionNode, nodeLabel } from "./machines/nodes";
 import { REMOTE_PROXY_HARNESSES } from "./harnesses";
-import { canForceSlot, isQueued, queueWaitLabel } from "./missionStatus";
+import { canForceSlot, hasFailureTerminalReason, isQueued, queueWaitLabel, remoteJobFailed } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { remoteContinuation } from "./remoteContinuation";
 import { ErrorNotice, isNonResumableError } from "./ErrorNotice";
@@ -272,8 +272,12 @@ export function missionPhase(mission: Mission | null, activity: boolean): {label
   if (job || mission?.execution?.state === "waiting_remote_job") {
     if (job?.phase === "reconnecting" || job?.node_state === "reconnecting") return {label:"Reconnecting",moving:true,detail:"The node is temporarily unreachable. The existing job is preserved; no replacement will start until its outcome is known."};
     // Active means durable acceptance, not that the selected harness is running.
-    if (["failed", "lost", "cancelled", "canceled"].includes(job?.node_state ?? "") || (job?.exit_code != null && job.exit_code !== 0)) return {label:"Remote job stopped",moving:false,failed:true,detail:job?.error ?? job?.terminal_reason ?? `Remote job ${job?.node_state ?? "exited"}${job?.exit_code != null ? ` (exit ${job.exit_code})` : ""}.`};
-    if ((job?.phase === "finished" || job?.finished_at) && job?.terminal_reason) return {label:"Remote job stopped",moving:false,failed:true,detail:job.error ?? job.terminal_reason.replaceAll("_", " ")};
+    if (remoteJobFailed(job)) {
+      const detail = job?.error
+        ?? (hasFailureTerminalReason(job?.terminal_reason) ? job!.terminal_reason!.replaceAll("_", " ") : undefined)
+        ?? `Remote job ${job?.node_state ?? "exited"}${job?.exit_code != null ? ` (exit ${job.exit_code})` : ""}.`;
+      return { label: "Remote job stopped", moving: false, failed: true, detail };
+    }
     if (job?.phase === "finished" || job?.finished_at) return {label:"Remote job finished",moving:false,detail:"Waiting for the backend to finalize the mission."};
     if (job?.phase === "submit_ambiguous") return {label:"Checking submission",moving:true,detail:"The backend is checking whether the remote node accepted the job."};
     if (job?.phase === "unobserved" || job?.phase === "lease_only") return {label:"Checking remote job",moving:true,detail:"Waiting for a current remote job status. Execution is not confirmed."};
@@ -337,7 +341,7 @@ export function MissionFailure(p: { mission?: Mission | null; error?: string; ac
     : phase().detail || "The mission stopped before completion.");
   const resumable = () => !!p.onResume && phase().label !== "Cancelled" && !isNonResumableError(message(), p.mission?.backend);
   return <Show when={!p.active && !p.failureInTranscript && (p.error || phase().failed)}><ErrorNotice backend={p.mission?.backend} title={phase().failed && !["Failed", "Interrupted", "Cancelled"].includes(phase().label) ? phase().label : phase().label === "Cancelled" ? "Mission cancelled" : phase().label === "Interrupted" && !p.error ? "Mission interrupted" : "Mission failed"} error={message()}>
-    <Show when={resumable()}><button type="button" class="error-notice-link" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></Show>
+    <Show when={resumable()}><button type="button" class="error-notice-link primary" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></Show>
     <Show when={p.onOpenSource}><button type="button" class="error-notice-link" onClick={() => p.onOpenSource?.()}>Open original conversation</button></Show>
   </ErrorNotice></Show>;
 }

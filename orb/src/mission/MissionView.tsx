@@ -120,19 +120,33 @@ function trackMissionSettings<T>(missionId: string, request: Promise<T>): Promis
   inflightSettings.set(missionId, tracked);
   return chained;
 }
-function mergeIncomingMission(prev: Mission | null, incoming: Mission): Mission {
+export function mergeIncomingMission(prev: Mission | null, incoming: Mission): Mission {
   if (!prev || prev.id !== incoming.id) return incoming;
   const history = incoming.history?.length ? incoming.history : prev.history;
   const prevTs = Date.parse(prev.updated_at || "");
   const nextTs = Date.parse(incoming.updated_at || "");
-  const keepSettings =
-    inflightSettings.has(incoming.id) ||
-    (!Number.isNaN(prevTs) && !Number.isNaN(nextTs) && nextTs < prevTs);
-  if (!keepSettings) return { ...prev, ...incoming, history };
+  if (!Number.isNaN(prevTs) && !Number.isNaN(nextTs) && nextTs < prevTs) {
+    return prev.history === history ? prev : { ...prev, history };
+  }
+  const staleActiveEndedJob =
+    !isLive(prev.status) &&
+    isLive(incoming.status) &&
+    !!incoming.remote_job &&
+    remoteJobEnded(incoming.remote_job) &&
+    (!prev.remote_job?.job_id || prev.remote_job.job_id === incoming.remote_job.job_id);
+  const merged = staleActiveEndedJob
+    ? {
+        ...prev,
+        ...incoming,
+        history,
+        status: prev.status,
+        terminal_reason: prev.terminal_reason ?? incoming.terminal_reason,
+        status_message: prev.status_message ?? incoming.status_message,
+      }
+    : { ...prev, ...incoming, history };
+  if (!inflightSettings.has(incoming.id)) return merged;
   return {
-    ...prev,
-    ...incoming,
-    history,
+    ...merged,
     backend: prev.backend,
     agent: prev.agent,
     model_override: prev.model_override,
@@ -140,7 +154,6 @@ function mergeIncomingMission(prev: Mission | null, incoming: Mission): Mission 
     fast_mode: prev.fast_mode,
     service_tier: prev.service_tier,
     config_profile: prev.config_profile,
-    updated_at: !Number.isNaN(prevTs) && !Number.isNaN(nextTs) && prevTs > nextTs ? prev.updated_at : incoming.updated_at,
   };
 }
 
@@ -1360,10 +1373,16 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.id} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
             <Show when={awaiting() && items().length > 0}><ActivitySkeleton /></Show>
             <TurnRecap mission={mission() ?? undefined} items={viewItems()} busy={busy()} onDraft={text=>setSideRevision({text,append:false})} />
+            <ErrorToast
+              error={!resendKnown() && resend()?.state === "error" ? resend()?.error : null}
+              title="Couldn’t send your message"
+              onDismiss={() => setResend(r => (r?.state === "error" ? { ...r, error: undefined } : r))}
+              action={{ label: "Retry", primary: true, run: () => void deliverResend() }}
+            />
             <Show when={!resendKnown() ? resend() : undefined}>{row=><div class="resend-feedback">
               <UserTurn text={row().text}/>
-              <div class="resend-status" role="status">{row().state==='error' ? row().error : row().state==='sending' ? (row().waiting ? "Sending · queued after the current turn…" : "Sending…") : row().waiting ? "Queued after the current turn" : "Sent"}
-                <Show when={row().state==='error'}><button onClick={()=>void deliverResend()}>Retry</button></Show>
+              <div class="resend-status" role="status">{row().state==='error' ? "Not sent" : row().state==='sending' ? (row().waiting ? "Sending · queued after the current turn…" : "Sending…") : row().waiting ? "Queued after the current turn" : "Sent"}
+                <Show when={row().state==='error'}><button type="button" onClick={()=>void deliverResend()}>Retry</button></Show>
               </div>
             </div>}</Show>
             <Show when={clientPlaced() && localActivities(p.id).some(a => a.background || a.id.startsWith("task:"))}>

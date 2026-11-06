@@ -11,7 +11,8 @@ import { readComposerDraft, saveComposerDraft } from "../composerDrafts";
 import { BATCH_MAX_BYTES, BATCH_MAX_FILES, BATCH_WARN_BYTES, BATCH_WARN_FILES, batchTotals, createFolderUpload, localFolderPath, folderPathFromResults, sourcesFromDataTransfer, splitSources, type FolderUpload } from "../uploadBatch";
 import { FolderUploadChip } from "./FolderUploadChip";
 import { readImagePaste, IMAGE_COUNT, type DraftImage } from "../imageAttachments";
-import { ErrorToast } from "../toast";
+import { ConfirmDialog } from "../Dialog";
+import { ErrorToast, StatusToast } from "../toast";
 import { type RemoteSupport } from "../missionLaunch";
 import { absorbGoalPrefix, composerModes, filterSlash, slashQuery, modePrompt, ModeChip, type ComposerMode } from "../goal";
 import { atQuery, browseAttachItems, filterAttach, folderPrefixFromQuery, insertMention, loadAttachItems, mentionedChips, type AttachChip, type AttachItem } from "../attach";
@@ -933,18 +934,14 @@ export function Composer(p: {
       {atMenu}
       <Show when={uploading()}><div class="composer-upload-status" role="status">Attaching file…</div></Show>
       <Show when={pendingLargeUploads().length > 0}>
-        <div class="composer-large-confirm" role="alertdialog" aria-label="Confirm large file upload" onClick={(e) => e.stopPropagation()}>
-          <div class="composer-large-confirm-text">
-            <strong>Large file{pendingLargeUploads().length > 1 ? "s" : ""}</strong>
-            <span>
-              {pendingLargeUploads().map((item) => `${item.source.name} (${formatFileSize(item.size)})`).join(", ")} exceed{pendingLargeUploads().length === 1 ? "s" : ""} the standard limit ({formatFileSize(softLimitForDestination(attachmentTarget()))}). Upload in the background with resumable chunks?
-            </span>
-          </div>
-          <div class="composer-large-confirm-actions">
-            <button type="button" class="s-btn" onClick={() => setPendingLargeUploads([])}>Cancel</button>
-            <button type="button" class="s-btn primary" onClick={confirmLargeUploads}>Upload in background</button>
-          </div>
-        </div>
+        <ConfirmDialog
+          title={`Upload large file${pendingLargeUploads().length > 1 ? "s" : ""} in background?`}
+          description={`${pendingLargeUploads().map((item) => `${item.source.name} (${formatFileSize(item.size)})`).join(", ")} exceed${pendingLargeUploads().length === 1 ? "s" : ""} the standard limit (${formatFileSize(softLimitForDestination(attachmentTarget()))}). Upload in the background with resumable chunks?`}
+          action="Upload in background"
+          destructive={false}
+          onConfirm={confirmLargeUploads}
+          onClose={() => setPendingLargeUploads([])}
+        />
       </Show>
       <Show when={scopedBgUploads().length > 0}>
         <div class="composer-bg-uploads" role="status" aria-live="polite" onClick={(e) => e.stopPropagation()}>
@@ -976,16 +973,14 @@ export function Composer(p: {
         </div>
       </Show>
       <Show when={pendingFolder()}>{request => (
-        <div class="composer-large-confirm" role="alertdialog" aria-label="Confirm folder upload" onClick={(e) => e.stopPropagation()}>
-          <div class="composer-large-confirm-text">
-            <strong>Large folder</strong>
-            <span>{request().root}/ has {request().files.length} files ({formatFileSize(request().files.reduce((sum, file) => sum + file.size, 0))}). Upload all of them?</span>
-          </div>
-          <div class="composer-large-confirm-actions">
-            <button type="button" class="s-btn" onClick={() => setPendingFolder(null)}>Cancel</button>
-            <button type="button" class="s-btn primary" onClick={() => { const next = request(); setPendingFolder(null); void startFolder(next); }}>Upload folder</button>
-          </div>
-        </div>
+        <ConfirmDialog
+          title="Upload large folder?"
+          description={`${request().root}/ has ${request().files.length} files (${formatFileSize(request().files.reduce((sum, file) => sum + file.size, 0))}). Upload all of them?`}
+          action="Upload folder"
+          destructive={false}
+          onConfirm={() => { const next = request(); setPendingFolder(null); void startFolder(next); }}
+          onClose={() => setPendingFolder(null)}
+        />
       )}</Show>
       <Show when={folderUploads().length || fileChips().some(file => file.folder)}>
         <div class="composer-bg-uploads" aria-label="Attached folders">
@@ -996,13 +991,13 @@ export function Composer(p: {
           <For each={fileChips().filter(file => file.folder)}>{file => <FolderUploadChip folder={file.folder} onRemove={() => removeUploadedFile(file)} />}</For>
         </div>
       </Show>
-      <Show when={staleFiles().length}>
-        <div class="composer-stale-attachments" role="status" onClick={(e) => e.stopPropagation()}>
-          <span>File no longer available — re-attach: {staleFiles().join(", ")}. Removed from the message; your text is kept.</span>
-          <Show when={!p.textOnly && !p.imagesOnly}><button type="button" class="bg-upload-btn" onClick={() => { setStaleFiles([]); void chooseFiles(); }}>Re-attach</button></Show>
-          <button type="button" class="bg-upload-btn" aria-label="Dismiss" onClick={() => setStaleFiles([])}>×</button>
-        </div>
-      </Show>
+      <StatusToast
+        tone="warning"
+        message={staleFiles().length ? `File no longer available — re-attach: ${staleFiles().join(", ")}` : null}
+        detail="Removed from the message; your text is kept."
+        onDismiss={() => setStaleFiles([])}
+        action={!p.textOnly && !p.imagesOnly ? { label: "Re-attach", primary: true, run: () => { setStaleFiles([]); void chooseFiles(); } } : undefined}
+      />
       <ErrorToast error={uploadError()} title="Couldn’t upload the file" onDismiss={() => setUploadError(null)} />
       <Show when={mode()}>{m => <ModeChip mode={m()} onClear={clearMode} />}</Show>
       <Show when={!mode() && p.editingQueued}>{editing => <span class="mode-chip edit-queued" role="status" aria-label="Editing a queued message">
