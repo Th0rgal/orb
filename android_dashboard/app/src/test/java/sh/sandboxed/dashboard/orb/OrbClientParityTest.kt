@@ -154,6 +154,10 @@ class OrbClientParityTest {
             continuity = false
         )
         assertTrue(unchangedPatch.isEmpty())
+        assertEquals(
+            "Steer saved, but the controller could not start: scheduler offline. Use Run now to retry.",
+            OrbControllerModel.steerRunFailureMessage("scheduler offline")
+        )
     }
 
     @Test

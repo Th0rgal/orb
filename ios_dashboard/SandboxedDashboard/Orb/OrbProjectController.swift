@@ -263,6 +263,12 @@ enum OrbControllerModel {
         }
         return .success(n)
     }
+
+    static func steerRunFailureMessage(_ detail: String) -> String {
+        let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reason = trimmed.isEmpty ? "unknown error" : trimmed
+        return "Steer saved, but the controller could not start: \(reason). Use Run now to retry."
+    }
 }
 
 /// Mobile Project Controller, Scheduled Crons, and Standing Grant page (`OrbProjectPage` → `Controller & crons`).
@@ -275,6 +281,7 @@ struct OrbProjectAutomationView: View {
         var id: String { rawValue }
     }
 
+    @Environment(\.scenePhase) private var scenePhase
     @State private var tab: Tab = .controller
     @State private var controllerView: OrbJSON?
     @State private var steers: OrbJSON?
@@ -288,6 +295,7 @@ struct OrbProjectAutomationView: View {
     @State private var steerText = ""
     @State private var steerRunNow = true
     @State private var steerSending = false
+    @State private var steerError: String?
     @State private var actionBusy: String?
     @State private var editingController = false
     @State private var creatingCron = false
@@ -388,8 +396,12 @@ struct OrbProjectAutomationView: View {
                 onDelete: nil
             )
         }
-        .refreshable { await loadAll() }
-        .task { await loadAll() }
+        .refreshable { _ = await loadAll() }
+        .task(id: slug) {
+            await Poller.run(every: .seconds(15), while: { scenePhase == .active }) {
+                await loadAll()
+            }
+        }
     }
 
     private var controllerJob: OrbJSON? {
@@ -510,6 +522,26 @@ struct OrbProjectAutomationView: View {
                 Task { await sendSteer() }
             }
             .disabled(steerSending || steerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if let steerError, !steerError.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(steerError)
+                        .font(.footnote)
+                        .foregroundStyle(OrbStyle.error)
+                    HStack(spacing: 12) {
+                        if controllerJob != nil {
+                            Button(actionBusy == "run" ? "Starting…" : "Retry run now") {
+                                Task { await runControllerAction("run") }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .disabled(actionBusy != nil || controllerRunning)
+                        }
+                        Button("Dismiss") { self.steerError = nil }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    }
+                }
+            }
         } header: {
             Text("Steer")
         } footer: {
@@ -713,21 +745,30 @@ struct OrbProjectAutomationView: View {
         return date.formatted(date: .omitted, time: .shortened)
     }
 
-    private func loadAll() async {
-        await withTaskGroup(of: Void.self) { group in
+    @discardableResult
+    private func loadAll() async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
             group.addTask { await loadController() }
-            group.addTask { await loadCrons() }
-            group.addTask { await loadGrant() }
+            group.addTask { await loadCrons(); return true }
+            group.addTask { await loadGrant(); return true }
+            var ok = true
+            for await r in group where !r { ok = false }
+            return ok
         }
     }
 
-    private func loadController() async {
+    @discardableResult
+    private func loadController() async -> Bool {
         do {
             controllerView = try await api.call("/api/projects/\(OrbCore.escape(slug))/controller?limit=40")
             steers = try? await api.call("/api/projects/\(OrbCore.escape(slug))/steers")
             error = nil
-        } catch is CancellationError {} catch {
+            return true
+        } catch is CancellationError {
+            return true
+        } catch {
             self.error = error.localizedDescription
+            return false
         }
     }
 
@@ -759,6 +800,7 @@ struct OrbProjectAutomationView: View {
             )
             controllerView = next
             error = nil
+            if action == "run" { steerError = nil }
         } catch {
             self.error = error.localizedDescription
         }
@@ -768,6 +810,7 @@ struct OrbProjectAutomationView: View {
         let body = steerText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty, !steerSending else { return }
         steerSending = true
+        steerError = nil
         defer { steerSending = false }
         do {
             let next = try await api.call(
@@ -779,12 +822,21 @@ struct OrbProjectAutomationView: View {
             steers = next
             steerText = ""
             if steerRunNow && !controllerRunning && controllerJob != nil {
-                _ = try? await api.call(
-                    "/api/projects/\(OrbCore.escape(slug))/controller/action",
-                    method: "POST",
-                    body: .object(["action": .string("run")])
-                )
-                await loadController()
+                do {
+                    let updated = try await api.call(
+                        "/api/projects/\(OrbCore.escape(slug))/controller/action",
+                        method: "POST",
+                        body: .object(["action": .string("run")])
+                    )
+                    if updated["job"] != .null || !updated["runs"].items.isEmpty {
+                        controllerView = updated
+                    } else {
+                        _ = await loadController()
+                    }
+                } catch {
+                    self.steerError = OrbControllerModel.steerRunFailureMessage(error.localizedDescription)
+                    _ = await loadController()
+                }
             }
         } catch {
             self.error = error.localizedDescription
@@ -824,6 +876,7 @@ struct OrbProjectCronDetailView: View {
     var onChanged: () -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var job: OrbJSON
     @State private var runs: [OrbJSON] = []
     @State private var busy: String?
@@ -839,7 +892,11 @@ struct OrbProjectCronDetailView: View {
     }
 
     var body: some View {
-        let state = OrbControllerModel.cronState(job: job)
+        let running = runs.contains {
+            let st = $0["status"].text
+            return st == "running" || st == "claimed"
+        }
+        let state = OrbControllerModel.cronState(job: job, running: running)
         List {
             if let error {
                 Section { OrbNotice(message: error) }
@@ -928,18 +985,27 @@ struct OrbProjectCronDetailView: View {
                 }
             )
         }
-        .refreshable { await load() }
-        .task { await load() }
+        .refreshable { _ = await load() }
+        .task(id: cronID) {
+            await Poller.run(every: .seconds(15), while: { scenePhase == .active }) {
+                await load()
+            }
+        }
     }
 
-    private func load() async {
+    @discardableResult
+    private func load() async -> Bool {
         do {
             let data = try await OrbCore.shared.call("/api/projects/\(OrbCore.escape(slug))/crons/\(OrbCore.escape(cronID))")
             if data["job"] != .null { job = data["job"] }
             runs = data["runs"].items
             error = nil
-        } catch is CancellationError {} catch {
+            return true
+        } catch is CancellationError {
+            return true
+        } catch {
             self.error = error.localizedDescription
+            return false
         }
     }
 

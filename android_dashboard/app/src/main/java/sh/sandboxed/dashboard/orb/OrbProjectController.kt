@@ -59,9 +59,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -339,6 +344,11 @@ object OrbControllerModel {
         }
         return Result.success(n)
     }
+
+    fun steerRunFailureMessage(detail: String?): String {
+        val reason = detail?.trim()?.takeIf { it.isNotEmpty() } ?: "unknown error"
+        return "Steer saved, but the controller could not start: $reason. Use Run now to retry."
+    }
 }
 
 enum class OrbAutomationTab(val label: String) {
@@ -386,6 +396,7 @@ fun OrbProjectAutomationPage(
     var steerText by remember { mutableStateOf("") }
     var steerRunNow by remember { mutableStateOf(true) }
     var steerSending by remember { mutableStateOf(false) }
+    var steerError by remember { mutableStateOf<String?>(null) }
     var actionBusy by remember { mutableStateOf<String?>(null) }
 
     var isRefreshing by remember { mutableStateOf(false) }
@@ -430,11 +441,6 @@ fun OrbProjectAutomationPage(
         a.await(); b.await(); c.await()
     }
 
-    LaunchedEffect(slug) {
-        isRefreshing = true
-        try { loadAll() } finally { isRefreshing = false }
-    }
-
     val openCron = selectedCron
     if (openCron != null) {
         val cronId = OrbJSON.str(openCron, "id").orEmpty()
@@ -452,6 +458,23 @@ fun OrbProjectAutomationPage(
             }
         )
         return
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(slug, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            val initial = controllerView == null
+            if (initial) isRefreshing = true
+            try {
+                loadAll()
+            } finally {
+                if (initial) isRefreshing = false
+            }
+            while (isActive) {
+                delay(15_000L)
+                loadAll()
+            }
+        }
     }
 
     val controllerJob = OrbJSON.dict(controllerView?.get("job"))
@@ -474,6 +497,7 @@ fun OrbProjectAutomationPage(
             )
             if (next != null) controllerView = next
             error = null
+            if (action == "run") steerError = null
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
@@ -487,6 +511,7 @@ fun OrbProjectAutomationPage(
         val body = steerText.trim()
         if (body.isEmpty() || steerSending) return
         steerSending = true
+        steerError = null
         try {
             val next = OrbJSON.dict(
                 core.request(
@@ -499,14 +524,25 @@ fun OrbProjectAutomationPage(
             if (next != null) steers = next
             steerText = ""
             if (steerRunNow && !controllerRunning && controllerJob != null) {
-                runCatching {
-                    core.request(
-                        "/api/projects/${core.encodeComponent(slug)}/controller/action",
-                        "POST",
-                        body = mapOf("action" to "run")
+                try {
+                    val updated = OrbJSON.dict(
+                        core.request(
+                            "/api/projects/${core.encodeComponent(slug)}/controller/action",
+                            "POST",
+                            body = mapOf("action" to "run")
+                        )
                     )
+                    if (updated != null && (OrbJSON.dict(updated["job"]) != null || OrbJSON.dictList(updated["runs"]).isNotEmpty())) {
+                        controllerView = updated
+                    } else {
+                        loadController()
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    steerError = OrbControllerModel.steerRunFailureMessage(e.message)
+                    loadController()
                 }
-                loadController()
             }
         } catch (e: CancellationException) {
             throw e
@@ -798,6 +834,22 @@ fun OrbProjectAutomationPage(
                                     onClick = { scope.launch { sendSteer() } }
                                 ) {
                                     Text(if (steerSending) "Sending…" else "Send steer")
+                                }
+                                steerError?.let { msg ->
+                                    Text(msg, color = OrbStyle.error, fontSize = 12.sp)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        if (controllerJob != null) {
+                                            TextButton(
+                                                enabled = actionBusy == null && !controllerRunning,
+                                                onClick = { scope.launch { runControllerAction("run") } }
+                                            ) {
+                                                Text(if (actionBusy == "run") "Starting…" else "Retry run now")
+                                            }
+                                        }
+                                        TextButton(onClick = { steerError = null }) {
+                                            Text("Dismiss")
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1172,11 +1224,22 @@ private fun OrbProjectCronDetailSubpage(
         }
     }
 
-    LaunchedEffect(cronId) {
-        load()
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(cronId, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            load()
+            while (isActive) {
+                delay(15_000L)
+                load()
+            }
+        }
     }
 
-    val state = OrbControllerModel.cronState(job)
+    val cronRunning = runs.any {
+        val st = OrbJSON.str(it, "status")
+        st == "running" || st == "claimed"
+    }
+    val state = OrbControllerModel.cronState(job, running = cronRunning)
 
     Column(modifier = Modifier.fillMaxSize().background(OrbStyle.background)) {
         Row(
