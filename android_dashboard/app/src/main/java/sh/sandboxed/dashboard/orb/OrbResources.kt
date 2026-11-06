@@ -1,5 +1,7 @@
 package sh.sandboxed.dashboard.orb
 
+import android.graphics.Paint
+import android.graphics.Typeface
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -12,13 +14,23 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -34,14 +46,19 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.util.Locale
@@ -110,6 +127,7 @@ object OrbResourcesModel {
         val x1: Double,
         var y0: Double,
         var y1: Double,
+        var showLabel: Boolean = true,
     )
 
     data class SankeyLayoutLink(
@@ -384,8 +402,16 @@ object OrbResourcesModel {
             val effPad = nodePadding * compress
             val finalH = heights.sumOf { it * compress } + max(0, col.size - 1) * effPad
             var cursorY = marginY + max(0.0, (innerH - finalH) / 2.0)
+            var lastLabelBottom = Double.NEGATIVE_INFINITY
             for (i in col.indices) {
                 val h = max(4.0, heights[i] * compress)
+                val midY = cursorY + h / 2.0
+                if (midY - 7.0 >= lastLabelBottom + 2.0) {
+                    col[i].showLabel = true
+                    lastLabelBottom = midY + 7.0
+                } else {
+                    col[i].showLabel = false
+                }
                 col[i].y0 = cursorY
                 col[i].y1 = cursorY + h
                 nodeMap[col[i].id] = col[i]
@@ -678,22 +704,38 @@ fun OrbResourcesSettingsPage(
         }
     }
 
+    val config = LocalConfiguration.current
+    val isCompactHeight = config.screenHeightDp < 480
+    val sankeyHeightDp = max(
+        if (isCompactHeight) 210 else 280,
+        min(420, (config.screenHeightDp * (if (isCompactHeight) 0.62f else 0.42f)).roundToInt()),
+    ).dp
+    var timelineMenuOpen by remember { mutableStateOf(false) }
+
+    val activeTimelineShort = if (selectedMissionId != null) {
+        val horizons = OrbJSON.dictList(detail?.get("available_horizons"))
+        val match = horizons.firstOrNull { OrbJSON.str(it, "id") == horizon }
+        OrbJSON.str(match, "id")?.ifEmpty { horizon } ?: horizon
+    } else {
+        range
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(OrbStyle.background),
     ) {
-        // Header bar
+        // Compact header bar with inline Timeline selector pill (replaces persistent bottom bar)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 14.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             OrbCircle(
                 icon = Icons.AutoMirrored.Filled.ArrowBack,
-                size = 38.dp,
-                iconSize = 17.dp,
+                size = 32.dp,
+                iconSize = 15.dp,
                 contentDescription = "Back",
                 modifier = Modifier.orbPressClickable {
                     if (selectedMissionId != null) {
@@ -708,10 +750,10 @@ fun OrbResourcesSettingsPage(
                 text = if (selectedMissionId == null) {
                     "Resources"
                 } else {
-                    OrbJSON.str(OrbJSON.dict(detail?.get("mission")), "title")?.ifEmpty { null } ?: "Mission Resources"
+                    OrbJSON.str(OrbJSON.dict(detail?.get("mission")), "title")?.ifEmpty { null } ?: "Mission Flow"
                 },
                 color = Color.White,
-                fontSize = 17.sp,
+                fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -720,7 +762,93 @@ fun OrbResourcesSettingsPage(
                     .padding(horizontal = 8.dp),
                 textAlign = TextAlign.Center,
             )
-            Spacer(modifier = Modifier.width(38.dp))
+            Box {
+                Row(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.07f))
+                        .border(1.dp, OrbStyle.border, CircleShape)
+                        .orbPressClickable { timelineMenuOpen = true }
+                        .padding(horizontal = 9.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Schedule,
+                        contentDescription = null,
+                        tint = OrbStyle.textSecondary,
+                        modifier = Modifier.size(12.dp),
+                    )
+                    Text(
+                        text = activeTimelineShort,
+                        color = Color.White,
+                        fontSize = 11.5.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                    )
+                    Icon(
+                        imageVector = Icons.Default.KeyboardArrowDown,
+                        contentDescription = "Timeline window",
+                        tint = OrbStyle.textSecondary,
+                        modifier = Modifier.size(13.dp),
+                    )
+                }
+                DropdownMenu(
+                    expanded = timelineMenuOpen,
+                    onDismissRequest = { timelineMenuOpen = false },
+                    containerColor = OrbStyle.elevated,
+                ) {
+                    if (selectedMissionId != null) {
+                        val horizons = OrbJSON.dictList(detail?.get("available_horizons"))
+                            .map { (OrbJSON.str(it, "id") ?: "6h") to (OrbJSON.str(it, "label") ?: "Fast-DAG (6h)") }
+                            .ifEmpty { listOf("6h" to "Fast-DAG (6h)") }
+                        horizons.forEach { (hid, lbl) ->
+                            DropdownMenuItem(
+                                text = { Text(lbl, color = Color.White, fontSize = 13.sp) },
+                                trailingIcon = if (horizon == hid) {
+                                    {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(15.dp),
+                                        )
+                                    }
+                                } else {
+                                    null
+                                },
+                                onClick = {
+                                    horizon = hid
+                                    timelineMenuOpen = false
+                                },
+                            )
+                        }
+                    } else {
+                        FLEET_RANGES.forEach { r ->
+                            DropdownMenuItem(
+                                text = { Text("Last $r", color = Color.White, fontSize = 13.sp) },
+                                trailingIcon = if (range == r) {
+                                    {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(15.dp),
+                                        )
+                                    }
+                                } else {
+                                    null
+                                },
+                                onClick = {
+                                    range = r
+                                    timelineMenuOpen = false
+                                },
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         PullToRefreshBox(
@@ -743,35 +871,74 @@ fun OrbResourcesSettingsPage(
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 20.dp, vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                    .padding(horizontal = if (isCompactHeight) 10.dp else 12.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(if (isCompactHeight) 8.dp else 10.dp),
             ) {
-                error?.let { Text(it, color = OrbStyle.warning, fontSize = 12.sp) }
+                error?.let {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.warning.copy(alpha = 0.35f), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(it, color = OrbStyle.warning, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    }
+                }
 
                 if (selectedMissionId != null) {
-                    SegmentedPillRow(
-                        options = listOf(
-                            "flow" to "Flow",
-                            "dag" to "Fast-DAG",
-                        ),
-                        selected = submode,
-                        onSelect = { submode = it },
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                    )
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        SegmentedPillRow(
+                            options = listOf(
+                                "flow" to "Flow",
+                                "dag" to "DAG",
+                            ),
+                            selected = submode,
+                            onSelect = { submode = it },
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (submode == "flow") {
+                            SegmentedPillRow(
+                                options = listOf(
+                                    OrbResourcesModel.Lens.Inference to "Inf",
+                                    OrbResourcesModel.Lens.Compute to "CPU",
+                                ),
+                                selected = lens,
+                                onSelect = { lens = it },
+                                modifier = Modifier.width(92.dp),
+                            )
+                            SegmentedPillRow(
+                                options = listOf(
+                                    OrbResourcesModel.Metric.Raw to if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "tok",
+                                    OrbResourcesModel.Metric.Usd to "$",
+                                ),
+                                selected = metric,
+                                onSelect = { metric = it },
+                                modifier = Modifier.width(84.dp),
+                            )
+                        }
+                    }
                     if (submode == "flow") {
                         MissionFlowCard(
                             detail = detail,
                             lens = lens,
                             metric = metric,
+                            canvasHeight = max(sankeyHeightDp.value, 260f).dp,
                         )
                     } else {
                         MissionFastDagCard(detail = detail)
                     }
                 } else {
-                    // Top Lens + Unit [vCPU / B tok/h | $] Toggle Row
+                    // Single compact Lens + Unit [vCPU / B tok/h | $] Toggle Row
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         SegmentedPillRow(
@@ -790,7 +957,7 @@ fun OrbResourcesSettingsPage(
                             ),
                             selected = metric,
                             onSelect = { metric = it },
-                            modifier = Modifier.width(116.dp),
+                            modifier = Modifier.width(108.dp),
                         )
                     }
 
@@ -799,6 +966,7 @@ fun OrbResourcesSettingsPage(
                         lens = lens,
                         metric = metric,
                         range = range,
+                        canvasHeight = sankeyHeightDp,
                         onSelectMission = {
                             submode = "flow"
                             selectedMissionId = it
@@ -810,48 +978,14 @@ fun OrbResourcesSettingsPage(
                     overview = overview,
                     detail = detail,
                     isMission = selectedMissionId != null,
+                    showInlineControls = selectedMissionId != null && submode == "dag",
+                    isCompactHeight = isCompactHeight,
                     lens = lens,
                     metric = metric,
                     onSelectLens = { lens = it },
                     onSelectMetric = { metric = it },
                 )
-            }
-        }
-
-        // Bottom-anchored Timeline Bar
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(OrbStyle.surface)
-                .border(1.dp, OrbStyle.border)
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Text(
-                text = "TIMELINE",
-                color = OrbStyle.textSecondary,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(modifier = Modifier.weight(1f))
-            if (selectedMissionId != null) {
-                val horizons = OrbJSON.dictList(detail?.get("available_horizons"))
-                    .map { (OrbJSON.str(it, "id") ?: "6h") to (OrbJSON.str(it, "label") ?: "Fast-DAG (6h)") }
-                    .ifEmpty { listOf("6h" to "Fast-DAG (6h)") }
-                SegmentedPillRow(
-                    options = horizons,
-                    selected = horizon,
-                    onSelect = { horizon = it },
-                    modifier = Modifier.width(220.dp),
-                )
-            } else {
-                SegmentedPillRow(
-                    options = FLEET_RANGES.map { it to it },
-                    selected = range,
-                    onSelect = { range = it },
-                    modifier = Modifier.width(240.dp),
-                )
+                Spacer(modifier = Modifier.height(8.dp))
             }
         }
     }
@@ -895,12 +1029,135 @@ private fun <T> SegmentedPillRow(
     }
 }
 
+private fun DrawScope.drawSankeyDiagram(
+    layout: OrbResourcesModel.SankeyLayoutResult,
+    lens: OrbResourcesModel.Lens,
+    metric: OrbResourcesModel.Metric,
+    maxLabelChars: Int,
+) {
+    for (link in layout.links) {
+        val mx = ((link.sourceX + link.targetX) / 2.0).toFloat()
+        val syTop = (link.y0 - link.sourceWidth / 2.0).toFloat()
+        val syBot = (link.y0 + link.sourceWidth / 2.0).toFloat()
+        val tyTop = (link.y1 - link.width / 2.0).toFloat()
+        val tyBot = (link.y1 + link.width / 2.0).toFloat()
+        val path = Path().apply {
+            moveTo(link.sourceX.toFloat(), syTop)
+            cubicTo(mx, syTop, mx, tyTop, link.targetX.toFloat(), tyTop)
+            lineTo(link.targetX.toFloat(), tyBot)
+            cubicTo(mx, tyBot, mx, syBot, link.sourceX.toFloat(), syBot)
+            close()
+        }
+        val col = OrbResourcesModel.parseColor(link.colorHex)
+        drawPath(
+            path = path,
+            color = col.copy(alpha = 0.36f),
+        )
+        if (link.degraded) {
+            drawPath(
+                path = path,
+                color = col.copy(alpha = 0.68f),
+                style = Stroke(
+                    width = 1.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 3.dp.toPx())),
+                ),
+            )
+        }
+    }
+
+    val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.WHITE
+        textSize = 11.dp.toPx()
+        typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+    }
+    val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.rgb(155, 155, 155)
+        textSize = 9.5f.dp.toPx()
+        typeface = Typeface.MONOSPACE
+    }
+    val lastCol = max(1, layout.columns - 1)
+    val padPx = 6.dp.toPx()
+
+    for (node in layout.nodes) {
+        val nodeH = max(4.0, node.y1 - node.y0).toFloat()
+        drawRoundRect(
+            color = OrbResourcesModel.parseColor(node.colorHex),
+            topLeft = Offset(node.x0.toFloat(), node.y0.toFloat()),
+            size = Size((node.x1 - node.x0).toFloat(), nodeH),
+            cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx()),
+        )
+        if (!node.showLabel) continue
+
+        val isLeft = node.column == 0
+        val isRight = node.column == lastCol
+        val trimmed = if (node.label.length > maxLabelChars) {
+            node.label.take(maxLabelChars - 1) + "…"
+        } else {
+            node.label
+        }
+        val midY = (node.y0.toFloat() + nodeH / 2f)
+
+        labelPaint.textAlign = when {
+            isLeft -> Paint.Align.RIGHT
+            isRight -> Paint.Align.LEFT
+            else -> Paint.Align.CENTER
+        }
+        subPaint.textAlign = labelPaint.textAlign
+
+        val tx = when {
+            isLeft -> node.x0.toFloat() - padPx
+            isRight -> node.x1.toFloat() + padPx
+            else -> ((node.x0 + node.x1) / 2.0).toFloat()
+        }
+
+        if (!isLeft && !isRight) {
+            val textW = labelPaint.measureText(trimmed)
+            val pillW = textW + 12.dp.toPx()
+            val pillH = 16.dp.toPx()
+            drawRoundRect(
+                color = OrbStyle.surface.copy(alpha = 0.9f),
+                topLeft = Offset(tx - pillW / 2f, midY - pillH / 2f),
+                size = Size(pillW, pillH),
+                cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
+            )
+            drawRoundRect(
+                color = OrbStyle.border,
+                topLeft = Offset(tx - pillW / 2f, midY - pillH / 2f),
+                size = Size(pillW, pillH),
+                cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
+                style = Stroke(width = 1.dp.toPx()),
+            )
+        }
+
+        val showSub = (isLeft || isRight) && nodeH >= 24.dp.toPx()
+        if (showSub) {
+            val rateText = OrbResourcesModel.formatResourceRate(
+                if (metric == OrbResourcesModel.Metric.Usd) node.usdValue else node.rawValue,
+                lens,
+                metric,
+            )
+            drawContext.canvas.nativeCanvas.drawText(trimmed, tx, midY - 2.dp.toPx(), labelPaint)
+            drawContext.canvas.nativeCanvas.drawText(rateText, tx, midY + 9.dp.toPx(), subPaint)
+        } else {
+            drawContext.canvas.nativeCanvas.drawText(trimmed, tx, midY + 3.5f.dp.toPx(), labelPaint)
+        }
+    }
+}
+
+private fun statusDotColor(status: String?): Color = when (status) {
+    "active", "running", "waiting_background" -> Color(0xFF3B82F6)
+    "completed", "acknowledged", "done" -> OrbStyle.success
+    "blocked", "failed" -> OrbStyle.warning
+    else -> OrbStyle.textMuted
+}
+
 @Composable
 private fun FleetSankeyCard(
     overview: OrbDict?,
     lens: OrbResourcesModel.Lens,
     metric: OrbResourcesModel.Metric,
     range: String,
+    canvasHeight: Dp,
     onSelectMission: (String) -> Unit,
 ) {
     Column(
@@ -908,15 +1165,14 @@ private fun FleetSankeyCard(
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(OrbStyle.surface)
-            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp)),
     ) {
         if (overview == null) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(190.dp)
+                    .padding(12.dp)
+                    .height(canvasHeight)
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color.White.copy(alpha = 0.04f)),
             )
@@ -944,26 +1200,45 @@ private fun FleetSankeyCard(
             }
             OrbResourcesModel.formatResourceRate(v, lens, metric)
         }
+        val secondaryStamp = if (lens == OrbResourcesModel.Lens.Compute) {
+            "${missions.size} missions"
+        } else if (metric == OrbResourcesModel.Metric.Usd) {
+            "${OrbResourcesModel.formatResourceRate(OrbJSON.double(inference, "window_est_usd") ?: 0.0, lens, metric, false)} ($range)"
+        } else {
+            range
+        }
 
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 9.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = if (lens == OrbResourcesModel.Lens.Compute) "Machines → Missions" else "Quota Pools → Missions",
+                text = if (lens == OrbResourcesModel.Lens.Compute) "MACHINES → MISSIONS" else "QUOTA POOLS → MISSIONS",
                 color = OrbStyle.textSecondary,
-                fontSize = 11.sp,
+                fontSize = 10.5.sp,
                 fontWeight = FontWeight.SemiBold,
             )
-            Text(
-                text = "$primaryStamp ($range)",
-                color = Color.White,
-                fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = primaryStamp,
+                    color = Color.White,
+                    fontSize = 11.5.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "· $secondaryStamp",
+                    color = OrbStyle.textSecondary,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
         }
+
+        HorizontalDivider(color = OrbStyle.border, thickness = 1.dp)
 
         val inputNodes = mutableListOf<OrbResourcesModel.SankeyInputNode>()
         if (lens == OrbResourcesModel.Lens.Compute) {
@@ -1101,94 +1376,104 @@ private fun FleetSankeyCard(
             )
         }
 
-        if (inputNodes.isNotEmpty()) {
+        if (inputNodes.isEmpty()) {
+            Text(
+                text = "No ${lens.id} flow recorded in this window",
+                color = OrbStyle.textSecondary,
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 32.dp, horizontal = 16.dp),
+            )
+        } else {
             Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(180.dp),
+                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                    .height(canvasHeight),
             ) {
+                val edgeMargin = min(116.dp.toPx().toDouble(), max(90.dp.toPx().toDouble(), size.width * 0.27))
                 val layout = OrbResourcesModel.computeSankeyLayout(
                     inputNodes = inputNodes,
                     inputLinks = inputLinks,
                     width = size.width.toDouble(),
                     height = size.height.toDouble(),
                     metric = metric,
-                    marginX = 24.0,
-                    marginY = 8.0,
+                    marginX = edgeMargin,
+                    marginY = 12.dp.toPx().toDouble(),
                 )
-                for (link in layout.links) {
-                    val mx = ((link.sourceX + link.targetX) / 2.0).toFloat()
-                    val syTop = (link.y0 - link.sourceWidth / 2.0).toFloat()
-                    val syBot = (link.y0 + link.sourceWidth / 2.0).toFloat()
-                    val tyTop = (link.y1 - link.width / 2.0).toFloat()
-                    val tyBot = (link.y1 + link.width / 2.0).toFloat()
-                    val path = Path().apply {
-                        moveTo(link.sourceX.toFloat(), syTop)
-                        cubicTo(mx, syTop, mx, tyTop, link.targetX.toFloat(), tyTop)
-                        lineTo(link.targetX.toFloat(), tyBot)
-                        cubicTo(mx, tyBot, mx, syBot, link.sourceX.toFloat(), syBot)
-                        close()
-                    }
-                    val col = OrbResourcesModel.parseColor(link.colorHex)
-                    drawPath(
-                        path = path,
-                        color = col.copy(alpha = 0.36f),
-                    )
-                    if (link.degraded) {
-                        drawPath(
-                            path = path,
-                            color = col.copy(alpha = 0.68f),
-                            style = Stroke(
-                                width = 2f,
-                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f)),
-                            ),
-                        )
-                    }
-                }
-                for (node in layout.nodes) {
-                    drawRoundRect(
-                        color = OrbResourcesModel.parseColor(node.colorHex),
-                        topLeft = Offset(node.x0.toFloat(), node.y0.toFloat()),
-                        size = Size((node.x1 - node.x0).toFloat(), max(4.0, node.y1 - node.y0).toFloat()),
-                        cornerRadius = CornerRadius(4f, 4f),
-                    )
-                }
+                val wide = size.width > 500.dp.toPx()
+                drawSankeyDiagram(
+                    layout = layout,
+                    lens = lens,
+                    metric = metric,
+                    maxLabelChars = if (wide) 22 else 16,
+                )
             }
         }
 
-        // Tappable mission rows for 1-tap drilldown into Fast-DAG
-        missions.forEach { m ->
-            val mid = OrbJSON.str(m, "id") ?: return@forEach
-            val title = OrbJSON.str(m, "title")?.ifEmpty { mid.take(8) } ?: mid.take(8)
-            val rateVal = if (lens == OrbResourcesModel.Lens.Compute) {
-                if (metric == OrbResourcesModel.Metric.Usd) OrbJSON.double(m, "compute_usd_per_h") ?: 0.0 else OrbJSON.double(m, "vcpu") ?: 0.0
-            } else {
-                if (metric == OrbResourcesModel.Metric.Usd) OrbJSON.double(m, "inference_usd_per_h") ?: 0.0 else OrbJSON.double(m, "b_tok_per_h") ?: 0.0
-            }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color.White.copy(alpha = 0.03f))
-                    .orbPressClickable { onSelectMission(mid) }
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(
-                        "${OrbResourcesModel.formatLargeNumber((OrbJSON.int(m, "subagent_total") ?: 1).toDouble())} spans · tap for Flow",
-                        color = OrbStyle.textSecondary,
-                        fontSize = 11.sp,
+        if (missions.isNotEmpty()) {
+            HorizontalDivider(color = OrbStyle.border, thickness = 1.dp)
+            missions.forEachIndexed { idx, m ->
+                if (idx > 0) {
+                    HorizontalDivider(
+                        color = OrbStyle.border,
+                        thickness = 1.dp,
+                        modifier = Modifier.padding(start = 12.dp),
                     )
                 }
-                Text(
-                    OrbResourcesModel.formatResourceRate(rateVal, lens, metric),
-                    color = OrbStyle.textSecondary,
-                    fontSize = 11.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
+                val mid = OrbJSON.str(m, "id") ?: return@forEachIndexed
+                val title = OrbJSON.str(m, "title")?.ifEmpty { mid.take(8) } ?: mid.take(8)
+                val status = OrbJSON.str(m, "status")
+                val rateVal = if (lens == OrbResourcesModel.Lens.Compute) {
+                    if (metric == OrbResourcesModel.Metric.Usd) OrbJSON.double(m, "compute_usd_per_h") ?: 0.0 else OrbJSON.double(m, "vcpu") ?: 0.0
+                } else {
+                    if (metric == OrbResourcesModel.Metric.Usd) OrbJSON.double(m, "inference_usd_per_h") ?: 0.0 else OrbJSON.double(m, "b_tok_per_h") ?: 0.0
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .orbPressClickable { onSelectMission(mid) }
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(statusDotColor(status)),
+                    )
+                    Text(
+                        text = title,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Text(
+                        text = "· ${OrbResourcesModel.formatLargeNumber((OrbJSON.int(m, "subagent_total") ?: 1).toDouble())} spans",
+                        color = OrbStyle.textMuted,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    Text(
+                        text = OrbResourcesModel.formatResourceRate(rateVal, lens, metric),
+                        color = OrbStyle.textSecondary,
+                        fontSize = 11.5.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = OrbStyle.textMuted,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
             }
         }
     }
@@ -1199,21 +1484,21 @@ private fun MissionFlowCard(
     detail: OrbDict?,
     lens: OrbResourcesModel.Lens,
     metric: OrbResourcesModel.Metric,
+    canvasHeight: Dp,
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(OrbStyle.surface)
-            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp)),
     ) {
         if (detail == null) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(190.dp)
+                    .padding(12.dp)
+                    .height(canvasHeight)
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color.White.copy(alpha = 0.04f)),
             )
@@ -1226,24 +1511,27 @@ private fun MissionFlowCard(
         val elapsedSecs = OrbJSON.double(mission, "elapsed_secs")
 
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 9.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = if (lens == OrbResourcesModel.Lens.Compute) {
-                    "Machines → Tracks → Subagents"
+                    "MACHINES → TRACKS → SUBAGENTS"
                 } else {
-                    "Pools → Tracks → Subagents"
+                    "POOLS → TRACKS → SUBAGENTS"
                 },
                 color = OrbStyle.textSecondary,
-                fontSize = 11.sp,
+                fontSize = 10.5.sp,
                 fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
             )
             val stamp = if (etaSecs != null && etaSecs > 0.0) {
                 "ETA ~${OrbResourcesModel.formatDurationCompact(etaSecs)}"
             } else if (elapsedSecs != null) {
-                "${OrbResourcesModel.formatDurationCompact(elapsedSecs)} elapsed"
+                OrbResourcesModel.formatDurationCompact(elapsedSecs)
             } else {
                 ""
             }
@@ -1251,11 +1539,13 @@ private fun MissionFlowCard(
                 Text(
                     text = stamp,
                     color = OrbStyle.textSecondary,
-                    fontSize = 11.5.sp,
+                    fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                 )
             }
         }
+
+        HorizontalDivider(color = OrbStyle.border, thickness = 1.dp)
 
         val inputNodes = mutableListOf<OrbResourcesModel.SankeyInputNode>()
         val inputLinks = mutableListOf<OrbResourcesModel.SankeyInputLink>()
@@ -1382,47 +1672,35 @@ private fun MissionFlowCard(
                 text = "No ${lens.id} flow recorded in this window.",
                 color = OrbStyle.textSecondary,
                 fontSize = 12.sp,
-                modifier = Modifier.padding(vertical = 12.dp),
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 28.dp),
             )
         } else {
             Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(210.dp),
+                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                    .height(canvasHeight),
             ) {
+                val edgeMargin = min(96.dp.toPx().toDouble(), max(68.dp.toPx().toDouble(), size.width * 0.21))
                 val layout = OrbResourcesModel.computeSankeyLayout(
                     inputNodes = inputNodes,
                     inputLinks = inputLinks,
                     width = size.width.toDouble(),
                     height = size.height.toDouble(),
                     metric = metric,
-                    marginX = 24.0,
-                    marginY = 8.0,
+                    marginX = edgeMargin,
+                    marginY = 12.dp.toPx().toDouble(),
                 )
-                for (link in layout.links) {
-                    val mx = ((link.sourceX + link.targetX) / 2.0).toFloat()
-                    val syTop = (link.y0 - link.sourceWidth / 2.0).toFloat()
-                    val syBot = (link.y0 + link.sourceWidth / 2.0).toFloat()
-                    val tyTop = (link.y1 - link.width / 2.0).toFloat()
-                    val tyBot = (link.y1 + link.width / 2.0).toFloat()
-                    val path = Path().apply {
-                        moveTo(link.sourceX.toFloat(), syTop)
-                        cubicTo(mx, syTop, mx, tyTop, link.targetX.toFloat(), tyTop)
-                        lineTo(link.targetX.toFloat(), tyBot)
-                        cubicTo(mx, tyBot, mx, syBot, link.sourceX.toFloat(), syBot)
-                        close()
-                    }
-                    val col = OrbResourcesModel.parseColor(link.colorHex)
-                    drawPath(path = path, color = col.copy(alpha = 0.36f))
-                }
-                for (node in layout.nodes) {
-                    drawRoundRect(
-                        color = OrbResourcesModel.parseColor(node.colorHex),
-                        topLeft = Offset(node.x0.toFloat(), node.y0.toFloat()),
-                        size = Size((node.x1 - node.x0).toFloat(), max(4.0, node.y1 - node.y0).toFloat()),
-                        cornerRadius = CornerRadius(4f, 4f),
-                    )
-                }
+                val wide = size.width > 500.dp.toPx()
+                drawSankeyDiagram(
+                    layout = layout,
+                    lens = lens,
+                    metric = metric,
+                    maxLabelChars = if (wide) 18 else 13,
+                )
             }
         }
     }
@@ -1437,21 +1715,22 @@ private fun MissionFastDagCard(
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(OrbStyle.surface)
-            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp)),
     ) {
         if (detail == null) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(160.dp)
+                    .padding(12.dp)
+                    .height(180.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color.White.copy(alpha = 0.04f)),
             )
             return@Column
         }
 
+        val mission = OrbJSON.dict(detail["mission"]) ?: emptyMap()
+        val etaSecs = OrbJSON.double(mission, "eta_remaining_secs")
         val dag = OrbJSON.dict(detail["dag"]) ?: emptyMap()
         val horizonSecs = OrbJSON.double(dag, "horizon_secs") ?: 21600.0
         val bars = OrbJSON.dictList(dag["bars"]).map { b ->
@@ -1472,96 +1751,123 @@ private fun MissionFastDagCard(
         val laneCount = rows.size
         val spanCount = rows.sumOf { it.spans.size }
 
-        Text(
-            text = if (laneCount > 0 && spanCount > laneCount) {
-                "Execution Fast-DAG · ${OrbResourcesModel.formatLargeNumber(laneCount.toDouble())} lanes · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} spans"
-            } else {
-                "Subagent Execution Fast-DAG · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} spans"
-            },
-            color = OrbStyle.textSecondary,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-
-        rows.forEach { row ->
-            row.sectionHeader?.let { sec ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 9.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = if (laneCount > 0 && spanCount > laneCount) {
+                    "FAST-DAG · ${OrbResourcesModel.formatLargeNumber(laneCount.toDouble())} LANES · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} SPANS"
+                } else {
+                    "FAST-DAG · ${OrbResourcesModel.formatLargeNumber(spanCount.toDouble())} SPANS"
+                },
+                color = OrbStyle.textSecondary,
+                fontSize = 10.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                modifier = Modifier.weight(1f),
+            )
+            if (etaSecs != null && etaSecs > 0.0) {
                 Text(
-                    text = sec.uppercase(Locale.US),
+                    text = "ETA ~${OrbResourcesModel.formatDurationCompact(etaSecs)}",
                     color = OrbStyle.textSecondary,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(top = 4.dp),
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
                 )
             }
-            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text(row.bar.label, color = Color.White, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                    val durText = if (row.spans.size > 1) {
-                        "${row.spans.size}× ${OrbResourcesModel.formatDurationCompact(row.totalDurationSecs)}"
-                    } else {
-                        OrbResourcesModel.formatDurationCompact(row.bar.durationSecs)
-                    }
+        }
+
+        HorizontalDivider(color = OrbStyle.border, thickness = 1.dp)
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            rows.forEach { row ->
+                row.sectionHeader?.let { sec ->
                     Text(
-                        durText,
-                        color = OrbStyle.textSecondary,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
+                        text = sec.uppercase(Locale.US),
+                        color = OrbStyle.textMuted,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(top = 2.dp),
                     )
                 }
-                Canvas(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(8.dp),
-                ) {
-                    val w = size.width
-                    drawRoundRect(
-                        color = Color.White.copy(alpha = 0.08f),
-                        size = size,
-                        cornerRadius = CornerRadius(4f, 4f),
-                    )
-                    row.spans.forEachIndexed { spIdx, sp ->
-                        val barColor = if (sp.bar.role == "vm") {
-                            when (sp.bar.state) {
-                                "active" -> Color(0xFF22959D)
-                                "done" -> Color(0xFF1D9A78)
-                                "capped" -> Color(0xFFD9B23A)
-                                else -> Color(0xFF6A6A6A)
-                            }
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(row.bar.label, color = Color.White, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        val durText = if (row.spans.size > 1) {
+                            "${row.spans.size}× ${OrbResourcesModel.formatDurationCompact(row.totalDurationSecs)}"
                         } else {
-                            when (sp.bar.state) {
-                                "done" -> Color(0xFF80B28D)
-                                "active" -> Color(0xFF86AEE4)
-                                "capped" -> Color(0xFFD9B23A)
-                                "cancelled" -> Color(0xFF7D8590).copy(alpha = 0.55f)
-                                else -> Color(0xFF6A6A6A)
-                            }
+                            OrbResourcesModel.formatDurationCompact(row.bar.durationSecs)
                         }
-                        val x0 = (sp.startFrac * w).toFloat()
-                        val rawBw = max(6f, ((sp.endFrac - sp.startFrac) * w).toFloat())
-                        val bw = if (spIdx + 1 < row.spans.size) {
-                            val nextX = (row.spans[spIdx + 1].startFrac * w).toFloat() - 2f
-                            max(4f, min(rawBw, nextX - x0))
-                        } else {
-                            rawBw
-                        }
-                        drawRoundRect(
-                            color = barColor,
-                            topLeft = Offset(x0, 0f),
-                            size = Size(bw, size.height),
-                            cornerRadius = CornerRadius(4f, 4f),
+                        Text(
+                            durText,
+                            color = OrbStyle.textSecondary,
+                            fontSize = 10.5.sp,
+                            fontFamily = FontFamily.Monospace,
                         )
-                        sp.etaEndFrac?.let { etaEnd ->
-                            val ew = max(0f, ((etaEnd - sp.endFrac) * w).toFloat())
-                            if (ew > 2f) {
-                                drawRoundRect(
-                                    color = barColor.copy(alpha = 0.25f),
-                                    topLeft = Offset(x0 + bw, 0f),
-                                    size = Size(ew, size.height),
-                                    cornerRadius = CornerRadius(4f, 4f),
-                                )
+                    }
+                    Canvas(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(8.dp),
+                    ) {
+                        val w = size.width
+                        drawRoundRect(
+                            color = Color.White.copy(alpha = 0.08f),
+                            size = size,
+                            cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
+                        )
+                        row.spans.forEachIndexed { spIdx, sp ->
+                            val barColor = if (sp.bar.role == "vm") {
+                                when (sp.bar.state) {
+                                    "active" -> Color(0xFF22959D)
+                                    "done" -> Color(0xFF1D9A78)
+                                    "capped" -> Color(0xFFD9B23A)
+                                    else -> Color(0xFF6A6A6A)
+                                }
+                            } else {
+                                when (sp.bar.state) {
+                                    "done" -> Color(0xFF80B28D)
+                                    "active" -> Color(0xFF86AEE4)
+                                    "capped" -> Color(0xFFD9B23A)
+                                    "cancelled" -> Color(0xFF7D8590).copy(alpha = 0.55f)
+                                    else -> Color(0xFF6A6A6A)
+                                }
+                            }
+                            val x0 = (sp.startFrac * w).toFloat()
+                            val rawBw = max(5.dp.toPx(), ((sp.endFrac - sp.startFrac) * w).toFloat())
+                            val bw = if (spIdx + 1 < row.spans.size) {
+                                val nextX = (row.spans[spIdx + 1].startFrac * w).toFloat() - 2.dp.toPx()
+                                max(4.dp.toPx(), min(rawBw, nextX - x0))
+                            } else {
+                                rawBw
+                            }
+                            drawRoundRect(
+                                color = barColor,
+                                topLeft = Offset(x0, 0f),
+                                size = Size(bw, size.height),
+                                cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
+                            )
+                            sp.etaEndFrac?.let { etaEnd ->
+                                val ew = max(0f, ((etaEnd - sp.endFrac) * w).toFloat())
+                                if (ew > 2f) {
+                                    drawRoundRect(
+                                        color = barColor.copy(alpha = 0.25f),
+                                        topLeft = Offset(x0 + bw, 0f),
+                                        size = Size(ew, size.height),
+                                        cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
+                                    )
+                                }
                             }
                         }
                     }
@@ -1576,6 +1882,8 @@ private fun ConsumptionCurveCard(
     overview: OrbDict?,
     detail: OrbDict?,
     isMission: Boolean,
+    showInlineControls: Boolean = false,
+    isCompactHeight: Boolean = false,
     lens: OrbResourcesModel.Lens,
     metric: OrbResourcesModel.Metric,
     onSelectLens: (OrbResourcesModel.Lens) -> Unit = {},
@@ -1645,78 +1953,117 @@ private fun ConsumptionCurveCard(
         }
     }
 
+    val peak = values.maxOrNull() ?: 0.0
+    val unitLabel = if (metric == OrbResourcesModel.Metric.Usd) "$/H" else if (lens == OrbResourcesModel.Lens.Compute) "VCPU" else "B TOK/H"
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(OrbStyle.surface)
-            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp)),
     ) {
-        if (isMission) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                SegmentedPillRow(
-                    options = listOf(
-                        OrbResourcesModel.Lens.Inference to "Inference",
-                        OrbResourcesModel.Lens.Compute to "Compute",
-                    ),
-                    selected = lens,
-                    onSelect = onSelectLens,
-                    modifier = Modifier.weight(1f),
-                )
-                SegmentedPillRow(
-                    options = listOf(
-                        OrbResourcesModel.Metric.Raw to if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "B tok/h",
-                        OrbResourcesModel.Metric.Usd to "$",
-                    ),
-                    selected = metric,
-                    onSelect = onSelectMetric,
-                    modifier = Modifier.width(116.dp),
-                )
-            }
-        }
-        val peak = values.maxOrNull() ?: 0.0
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                text = "Consumption",
-                color = OrbStyle.textSecondary,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = "Peak ${OrbResourcesModel.formatResourceRate(peak, lens, metric)}",
-                color = OrbStyle.textSecondary,
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
-            )
-        }
-        Canvas(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(74.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (values.size < 2) return@Canvas
-            val denom = if (peak > 0.0) peak * 1.12 else 1.0
-            val path = Path()
-            val n = max(1, values.size - 1)
-            values.forEachIndexed { i, v ->
-                val x = (i.toFloat() / n.toFloat()) * size.width
-                val y = size.height - ((v / denom).toFloat() * (size.height - 8f))
-                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
-            }
-            drawPath(
-                path = path,
-                color = if (lens == OrbResourcesModel.Lens.Compute) Color(0xFF86AEE4) else Color(0xFFA08CE0),
-                style = Stroke(width = 3.5f),
+            Text(
+                text = "CONSUMPTION · $unitLabel",
+                color = OrbStyle.textSecondary,
+                fontSize = 10.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
             )
+            if (showInlineControls) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    SegmentedPillRow(
+                        options = listOf(
+                            OrbResourcesModel.Lens.Inference to "Inf",
+                            OrbResourcesModel.Lens.Compute to "CPU",
+                        ),
+                        selected = lens,
+                        onSelect = onSelectLens,
+                        modifier = Modifier.width(88.dp),
+                    )
+                    SegmentedPillRow(
+                        options = listOf(
+                            OrbResourcesModel.Metric.Raw to if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "tok",
+                            OrbResourcesModel.Metric.Usd to "$",
+                        ),
+                        selected = metric,
+                        onSelect = onSelectMetric,
+                        modifier = Modifier.width(80.dp),
+                    )
+                }
+            } else {
+                Text(
+                    text = "Peak ${OrbResourcesModel.formatResourceRate(peak, lens, metric)}",
+                    color = OrbStyle.textSecondary,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        }
+
+        HorizontalDivider(color = OrbStyle.border, thickness = 1.dp)
+
+        if (values.size < 2) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(76.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "Waiting for timeline samples…",
+                    color = OrbStyle.textMuted,
+                    fontSize = 12.sp,
+                )
+            }
+        } else {
+            val accent = if (lens == OrbResourcesModel.Lens.Compute) Color(0xFF5C9EED) else Color(0xFF9E85E6)
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .height(if (isCompactHeight) 72.dp else 90.dp),
+            ) {
+                val denom = if (peak > 0.0) peak * 1.12 else 1.0
+                val linePath = Path()
+                val areaPath = Path()
+                val n = max(1, values.size - 1)
+                val baseY = size.height - 4.dp.toPx()
+                values.forEachIndexed { i, v ->
+                    val x = (i.toFloat() / n.toFloat()) * size.width
+                    val y = baseY - ((v / denom).toFloat() * (baseY - 6.dp.toPx()))
+                    if (i == 0) {
+                        linePath.moveTo(x, y)
+                        areaPath.moveTo(x, baseY)
+                        areaPath.lineTo(x, y)
+                    } else {
+                        linePath.lineTo(x, y)
+                        areaPath.lineTo(x, y)
+                    }
+                }
+                areaPath.lineTo(size.width, baseY)
+                areaPath.close()
+                drawPath(
+                    path = areaPath,
+                    brush = Brush.verticalGradient(
+                        colors = listOf(accent.copy(alpha = 0.24f), accent.copy(alpha = 0.01f)),
+                        startY = 0f,
+                        endY = baseY,
+                    ),
+                )
+                drawPath(
+                    path = linePath,
+                    color = accent,
+                    style = Stroke(width = 1.8.dp.toPx()),
+                )
+            }
         }
     }
 }
