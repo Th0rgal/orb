@@ -696,7 +696,8 @@ export function btwThreadChain(parent:string):Promise<string[]>{
 type ParsedBtwThread={stamp:string;turns:(SideExchange&{sortAt:string})[];active?:BtwSession;lastSequence:number};
 const terminalThreadCache=new Map<string,ParsedBtwThread>();
 const liveThreadEventCache=new Map<string,Map<number,StoredEvent>>();
-export function resetBtwThreadCache(){terminalThreadCache.clear();liveThreadEventCache.clear();resetWarmBtwForTest();}
+const liveThreadTextReducers=new Map<string,TranscriptReducer>();
+export function resetBtwThreadCache(){terminalThreadCache.clear();liveThreadEventCache.clear();liveThreadTextReducers.clear();resetWarmBtwForTest();}
 const btwActivity=(m:Mission)=>(m as Mission&{last_activity_at?:string}).last_activity_at||m.updated_at||m.created_at||'';
 function parseBtwThread(m:Mission,events:StoredEvent[]):Omit<ParsedBtwThread,'stamp'>{
  const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
@@ -1007,6 +1008,76 @@ function scheduleWarmBtwRefresh(entry: WarmBtwEntry): void {
  }, 300);
 }
 
+function maxDurableBtwSequence(known: Map<number, StoredEvent>): number | undefined {
+ let max: number | undefined;
+ for (const [seq, row] of known) {
+  if (seq > 0 && (row.metadata as { provisional?: boolean } | undefined)?.provisional !== true) {
+   max = max === undefined ? seq : Math.max(max, seq);
+  }
+ }
+ return max;
+}
+
+function nextProvisionalBtwSeq(known: Map<number, StoredEvent>): number {
+ let max = 0;
+ for (const seq of known.keys()) {
+  if (seq > max) max = seq;
+ }
+ return max + 1;
+}
+
+function upsertBtwStoredRow(
+ known: Map<number, StoredEvent>,
+ incoming: StoredEvent,
+): { alreadyDurable: boolean } {
+ const incomingProvisional =
+  (incoming.metadata as { provisional?: boolean } | undefined)?.provisional === true;
+ const incomingMetaClientId =
+  typeof (incoming.metadata as { client_message_id?: unknown } | undefined)?.client_message_id ===
+  "string"
+   ? (incoming.metadata as { client_message_id: string }).client_message_id
+   : undefined;
+ const incomingIdentity = incoming.event_id || incomingMetaClientId;
+
+ for (const [seq, existing] of [...known]) {
+  if (existing.event_type !== incoming.event_type) continue;
+  const existingProvisional =
+   (existing.metadata as { provisional?: boolean } | undefined)?.provisional === true;
+  const existingMetaClientId =
+   typeof (existing.metadata as { client_message_id?: unknown } | undefined)?.client_message_id ===
+   "string"
+    ? (existing.metadata as { client_message_id: string }).client_message_id
+    : undefined;
+  const existingIdentity = existing.event_id || existingMetaClientId;
+  const sameByIdentity = Boolean(incomingIdentity && existingIdentity && incomingIdentity === existingIdentity);
+  const sameUnidentifiedProvisional =
+   !incomingProvisional &&
+   existingProvisional &&
+   !incomingIdentity &&
+   !existingIdentity &&
+   existing.content === incoming.content;
+  if (sameByIdentity || sameUnidentifiedProvisional) {
+   if (incomingProvisional && !existingProvisional) {
+    // Already have the durable sequenced row; ignore a late unsequenced copy.
+    return { alreadyDurable: true };
+   }
+   if (seq !== incoming.sequence) {
+    // Preserve repairedFinal content if the provisional row already repaired a truncated final.
+    if (
+     incoming.event_type === "assistant_message" &&
+     existing.content.length > incoming.content.length &&
+     existing.content.endsWith(incoming.content)
+    ) {
+     incoming = { ...incoming, content: existing.content };
+    }
+    known.delete(seq);
+   }
+  }
+ }
+ known.set(incoming.sequence, incoming);
+ return { alreadyDurable: false };
+}
+
 function reduceLiveBtwStreamEvents(
  entry: WarmBtwEntry,
  childMissionId: string,
@@ -1021,6 +1092,11 @@ function reduceLiveBtwStreamEvents(
   known = new Map<number, StoredEvent>();
   setBounded(liveThreadEventCache, cacheKey, known, 64);
  }
+ let textReducer = liveThreadTextReducers.get(cacheKey);
+ if (!textReducer) {
+  textReducer = new TranscriptReducer();
+  setBounded(liveThreadTextReducers, cacheKey, textReducer, 64);
+ }
 
  let relevant = false;
  let statusChangedTo: string | undefined;
@@ -1031,85 +1107,90 @@ function reduceLiveBtwStreamEvents(
    relevant = true;
    continue;
   }
-  if (ev.type === "text_delta") {
-   const delta = typeof ev.data.content === "string" ? ev.data.content : "";
-   if (!delta) continue;
-   let prevDeltaSeq: number | undefined;
-   let prevDeltaContent = "";
-   for (const [seq, row] of known) {
-    if (row.event_type === "text_delta" && row.event_id === "text_delta_latest") {
-     prevDeltaSeq = seq;
-     prevDeltaContent = row.content;
+   if (ev.type === "text_delta" || ev.type === "text_op") {
+    const bubble = String(ev.data.bubble_id ?? "text_delta_latest");
+    if (ev.type === "text_op" && bubble !== "text_delta_latest") continue;
+    const hasDurableSeq = typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence);
+    textReducer.apply(ev);
+    let liveText = "";
+    for (let i = textReducer.items.length - 1; i >= 0; i--) {
+     const item = textReducer.items[i];
+     if (item.kind === "text") {
+      liveText = item.text;
+      break;
+     }
     }
-   }
-   if (prevDeltaSeq !== undefined) known.delete(prevDeltaSeq);
-   const maxSeq = known.size ? Math.max(...known.keys()) : 0;
-   const seq =
-    typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence)
-     ? ev.sequence
-     : maxSeq + 1;
-   known.set(seq, {
-    id: seq,
-    sequence: seq,
-    event_type: "text_delta",
-    event_id: "text_delta_latest",
-    timestamp: typeof ev.data.at === "string" ? ev.data.at : new Date().toISOString(),
-    content: prevDeltaContent + delta,
-    metadata: {},
-   });
-   statusChangedTo ??= "active";
-   relevant = true;
-   continue;
-  }
-  if (
-   ev.type === "user_message" ||
-   ev.type === "assistant_message" ||
-   ev.type === "assistant_message_canonical"
-  ) {
-   const maxSeq = known.size ? Math.max(...known.keys()) : 0;
-   const seq =
-    typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence)
-     ? ev.sequence
-     : maxSeq + 1;
-   const canonical = ev.type === "assistant_message_canonical" || ev.data.canonical === true;
-   const eventType =
-    ev.type === "user_message"
-     ? "user_message"
-     : canonical
-       ? "assistant_message_canonical"
-       : "assistant_message";
-   const rawContent = typeof ev.data.content === "string" ? ev.data.content : "";
-   if (eventType !== "user_message" && !rawContent.trim()) continue;
-   let liveDeltaContent: string | undefined;
-   for (const [kSeq, row] of [...known]) {
-    if (row.event_type === "text_delta" && row.event_id === "text_delta_latest") {
-     liveDeltaContent = row.content;
-     if (ev.data.queued !== true) known.delete(kSeq);
+    if (!liveText) continue;
+    for (const [seq, row] of [...known]) {
+     if (row.event_type === "text_delta" && row.event_id === "text_delta_latest") {
+      known.delete(seq);
+     }
     }
+    const seq = hasDurableSeq ? (ev.sequence as number) : nextProvisionalBtwSeq(known);
+    known.set(seq, {
+     id: seq,
+     sequence: seq,
+     event_type: "text_delta",
+     event_id: "text_delta_latest",
+     timestamp: typeof ev.data.at === "string" ? ev.data.at : new Date().toISOString(),
+     content: liveText,
+     metadata: hasDurableSeq ? {} : { provisional: true },
+    });
+    if (!hasDurableSeq) statusChangedTo ??= "active";
+    relevant = true;
+    continue;
    }
-   const content =
-    eventType === "assistant_message" ? repairedFinal(rawContent, liveDeltaContent) : rawContent;
-   known.set(seq, {
-    id: ev.storedId ?? seq,
-    sequence: seq,
-    event_type: eventType,
-    event_id: ev.eventId ?? (typeof ev.data.id === "string" ? ev.data.id : null),
-    timestamp: typeof ev.data.at === "string" ? ev.data.at : new Date().toISOString(),
-    content,
-    metadata: {
-     ...(ev.data.queued === true ? { queued: true } : {}),
-     ...(typeof ev.data.client_message_id === "string"
-      ? { client_message_id: ev.data.client_message_id }
-      : {}),
-     ...(ev.data.partial === true ? { partial: true } : {}),
-     ...(ev.data.success === false ? { success: false } : {}),
-    },
-   });
-   if (eventType === "user_message" && ev.data.queued !== true) {
-    statusChangedTo = "active";
+   if (
+    ev.type === "user_message" ||
+    ev.type === "assistant_message" ||
+    ev.type === "assistant_message_canonical"
+   ) {
+    const hasDurableSeq = typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence);
+    const seq = hasDurableSeq ? (ev.sequence as number) : nextProvisionalBtwSeq(known);
+    const canonical = ev.type === "assistant_message_canonical" || ev.data.canonical === true;
+    const eventType =
+     ev.type === "user_message"
+      ? "user_message"
+      : canonical
+        ? "assistant_message_canonical"
+        : "assistant_message";
+    const rawContent = typeof ev.data.content === "string" ? ev.data.content : "";
+    if (eventType !== "user_message" && !rawContent.trim()) continue;
+    let liveDeltaContent: string | undefined;
+    for (const [kSeq, row] of [...known]) {
+     if (row.event_type === "text_delta" && row.event_id === "text_delta_latest") {
+      liveDeltaContent = row.content;
+      if (ev.data.queued !== true) known.delete(kSeq);
+     }
+    }
+    if (ev.data.queued !== true) {
+     textReducer = new TranscriptReducer();
+     setBounded(liveThreadTextReducers, cacheKey, textReducer, 64);
+    }
+    const content =
+     eventType === "assistant_message" ? repairedFinal(rawContent, liveDeltaContent) : rawContent;
+    const { alreadyDurable } = upsertBtwStoredRow(known, {
+     id: ev.storedId ?? seq,
+     sequence: seq,
+     event_type: eventType,
+     event_id: ev.eventId ?? (typeof ev.data.id === "string" ? ev.data.id : null),
+     timestamp: typeof ev.data.at === "string" ? ev.data.at : new Date().toISOString(),
+     content,
+     metadata: {
+      ...(hasDurableSeq ? {} : { provisional: true }),
+      ...(ev.data.queued === true ? { queued: true } : {}),
+      ...(typeof ev.data.client_message_id === "string"
+       ? { client_message_id: ev.data.client_message_id }
+       : {}),
+      ...(ev.data.partial === true ? { partial: true } : {}),
+      ...(ev.data.success === false ? { success: false } : {}),
+     },
+    });
+    if (eventType === "user_message" && ev.data.queued !== true && !hasDurableSeq && !alreadyDurable) {
+     statusChangedTo = "active";
+    }
+    relevant = true;
    }
-   relevant = true;
-  }
  }
 
  if (!relevant) return;
@@ -1140,10 +1221,16 @@ function reduceLiveBtwStreamEvents(
  }
 
  const parsed = parseBtwThread(missionMeta, events);
+ const durableLastSequence = maxDurableBtwSequence(known) ?? 0;
  const live = ACTIVE.includes(missionMeta.status);
- if (!live) {
+ if (!live && durableLastSequence > 0) {
   const stamp = `${btwActivity(missionMeta)}\u0000${missionMeta.status}`;
-  setBounded(terminalThreadCache, cacheKey, { stamp, ...parsed }, 256);
+  setBounded(
+   terminalThreadCache,
+   cacheKey,
+   { stamp, ...parsed, lastSequence: durableLastSequence },
+   256,
+  );
  } else {
   terminalThreadCache.delete(cacheKey);
  }
@@ -1161,9 +1248,10 @@ function reduceLiveBtwStreamEvents(
    prev = priorChildRows.find(
     r =>
      !consumedPriorChildRows.has(r) &&
-     r.question.trim() === turn.question.trim() &&
-     (r.answer.trim() === turn.answer.trim() ||
-      (r.answer.length > turn.answer.length && r.answer.endsWith(turn.answer))),
+     ((Boolean(r.userEventId) && r.userEventId === turn.userEventId) ||
+      (r.question.trim() === turn.question.trim() &&
+       (r.answer.trim() === turn.answer.trim() ||
+        (r.answer.length > turn.answer.length && r.answer.endsWith(turn.answer))))),
    );
   }
   if (prev) consumedPriorChildRows.add(prev);
@@ -1178,39 +1266,48 @@ function reduceLiveBtwStreamEvents(
    (!childTurnIds.has(row.id) && !consumedPriorChildRows.has(row)),
  );
  entry.history = [...preserved, ...childTurns].slice(-BTW_HISTORY_LIMIT);
- entry.activeSession = parsed.active;
+ const existingSaved = btwSession(entry.parent);
+ const priorDurableSeq =
+  existingSaved?.id === childMissionId ? existingSaved.lastSequence : undefined;
+ const effectiveLastSeq = durableLastSequence > 0 ? durableLastSequence : priorDurableSeq;
+ entry.activeSession = parsed.active
+  ? {
+     ...parsed.active,
+     lastSequence: effectiveLastSeq,
+    }
+  : undefined;
  if (entry.caughtUp && !pendingDirtyBtwParents.has(`${ver}:${entry.parent}`)) {
   entry.dirty = false;
  }
 
  // Keep localStorage `btwSession(parent)` in lockstep with live warm transitions so
  // remounting `SideQuestions` never sees stale `active: true` from an hour ago.
- if (parsed.active) {
-  const cur = btwSession(entry.parent);
+ if (entry.activeSession) {
+  const cur = existingSaved;
   if (
    !cur ||
    !cur.active ||
-   cur.id !== parsed.active.id ||
-   (parsed.active.startedAt && cur.startedAt !== parsed.active.startedAt) ||
-   cur.question !== parsed.active.question
+   cur.id !== entry.activeSession.id ||
+   (entry.activeSession.startedAt && cur.startedAt !== entry.activeSession.startedAt) ||
+   cur.question !== entry.activeSession.question
   ) {
    save(
     entry.parent,
-    cur?.id === parsed.active.id
-     ? syncSessionCursors(entry.parent, { ...cur, ...parsed.active })
-     : parsed.active,
+    cur?.id === entry.activeSession.id
+     ? syncSessionCursors(entry.parent, { ...cur, ...entry.activeSession })
+     : entry.activeSession,
    );
   }
  } else if (!live) {
-  const cur = btwSession(entry.parent);
+  const cur = existingSaved;
   const lastTurn = childTurns.at(-1) ?? entry.history.at(-1);
-  if (cur && cur.id === childMissionId && (cur.active || cur.lastSequence !== parsed.lastSequence || cur.turnCount !== parsed.turns.length)) {
+  if (cur && cur.id === childMissionId && (cur.active || (effectiveLastSeq !== undefined && cur.lastSequence !== effectiveLastSeq) || cur.turnCount !== parsed.turns.length)) {
    const nextSession: BtwSession = {
     ...syncSessionCursors(entry.parent, { ...cur }),
     active: false,
     ...(lastTurn ? { question: lastTurn.question } : {}),
     ...(parsed.turns.length ? { turnCount: parsed.turns.length } : {}),
-    ...(parsed.lastSequence > 0 ? { lastSequence: parsed.lastSequence } : {}),
+    ...(effectiveLastSeq && effectiveLastSeq > 0 ? { lastSequence: effectiveLastSeq } : {}),
    };
    if (nextSession.pendingCursor && RESUMABLE.includes(missionMeta.status)) {
     nextSession.conversationCursor = nextSession.pendingCursor;
@@ -1260,21 +1357,22 @@ export function reconcileWarmBtwFollows(): void {
     const cacheKey = `${ver}:${wantFollowId}`;
     const known = liveThreadEventCache.get(cacheKey);
     const cachedSince =
-     known && known.size
-      ? Math.max(...known.keys())
-      : terminalThreadCache.get(cacheKey)?.lastSequence || btwSession(entry.parent)?.lastSequence;
+     (known ? maxDurableBtwSequence(known) : undefined) ??
+     (terminalThreadCache.get(cacheKey)?.lastSequence || btwSession(entry.parent)?.lastSequence);
     const handlers = {
      onEvent: (ev: StreamEvent) => reduceLiveBtwStreamEvents(entry, wantFollowId, [ev]),
      onBatch: (evs: StreamEvent[]) => reduceLiveBtwStreamEvents(entry, wantFollowId, evs),
      onLagged: () => {
       entry.caughtUp = false;
       entry.dirty = true;
+      liveThreadTextReducers.delete(cacheKey);
       scheduleWarmBtwRefresh(entry);
      },
      onReady: () => {},
      onDisconnected: () => {
       entry.caughtUp = false;
       entry.dirty = true;
+      liveThreadTextReducers.delete(cacheKey);
      },
      onCaughtUp: () => {
       entry.caughtUp = true;
@@ -1568,17 +1666,17 @@ export async function reconcileBtwServerHistory(
     let events: StoredEvent[];
     try {
      let known = liveThreadEventCache.get(cacheKey) ?? new Map<number, StoredEvent>();
-     const maxKnown = known.size ? Math.max(...known.keys()) : undefined;
+     const maxKnown = maxDurableBtwSequence(known);
      if (maxKnown !== undefined) {
       const delta = await getMissionEvents(m.id, { view: 'history', types: BTW_EVENT_TYPES, since: maxKnown });
       if (delta.length && Math.max(...delta.map(e => e.sequence)) < maxKnown) {
        known = new Map<number, StoredEvent>();
-       for (const ev of await getMissionEvents(m.id, { view: 'history', types: BTW_EVENT_TYPES })) known.set(ev.sequence, ev);
+       for (const ev of await getMissionEvents(m.id, { view: 'history', types: BTW_EVENT_TYPES })) upsertBtwStoredRow(known, ev);
       } else {
-       for (const ev of delta) known.set(ev.sequence, ev);
+       for (const ev of delta) upsertBtwStoredRow(known, ev);
       }
      } else {
-      for (const ev of await getMissionEvents(m.id, { view: 'history', types: BTW_EVENT_TYPES })) known.set(ev.sequence, ev);
+      for (const ev of await getMissionEvents(m.id, { view: 'history', types: BTW_EVENT_TYPES })) upsertBtwStoredRow(known, ev);
      }
      events = [...known.values()].sort((a, b) => a.sequence - b.sequence);
      setBounded(liveThreadEventCache, cacheKey, known, 64);

@@ -1057,4 +1057,229 @@ describe("warm background sync & off-mode quickness", () => {
     detach();
     release();
   });
+
+  it("handles unsequenced live text_op + message frames and reconciles them cleanly with sequenced replay without duplicates", async () => {
+    setConnection("http://textop-replay.test", "jwt-tok");
+    setMultiplexSyncEnabledForTest(true);
+    vi.stubGlobal("WebSocket", FakeSyncSocket as unknown as typeof WebSocket);
+    setBackgroundSyncMode("auto");
+
+    const parentId = "m-parent-textop";
+    const childId = "m-btw-textop";
+    const closingLine = "Done.";
+    const fullTextOpAnswer =
+      "Complete architectural diagnosis produced via text_op insert frames on /api/control/sync before the harness emitted its short closing summary.\n\n" +
+      "Includes concrete verification steps exceeding the 200-char and 3x repairedFinal threshold.\n\n" +
+      closingLine;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/queue?")) return Response.json([]);
+        if (url.includes("/snapshot?")) return new Response("none", { status: 404 });
+        if (url.includes("/api/control/missions?tag=")) {
+          return Response.json([
+            {
+              id: childId,
+              status: "awaiting_user",
+              backend: "opencode",
+              model_override: "builtin/smart",
+              tags: [`btw-parent:${parentId}`],
+              created_at: "2026-11-06T12:10:00Z",
+              updated_at: "2026-11-06T12:10:05Z",
+              history: [],
+              title: null,
+            },
+          ]);
+        }
+        if (url.includes(`/missions/${childId}/events?`)) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: 1,
+                mission_id: childId,
+                sequence: 1,
+                event_type: "user_message",
+                event_id: "u-seed-1",
+                content: "Seed question",
+                timestamp: "2026-11-06T12:10:01Z",
+                metadata: {},
+              },
+              {
+                id: 2,
+                mission_id: childId,
+                sequence: 2,
+                event_type: "assistant_message",
+                event_id: "a-seed-1",
+                content: "Seed answer.",
+                timestamp: "2026-11-06T12:10:02Z",
+                metadata: {},
+              },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": "2",
+                "X-Page-Max-Sequence": "2",
+                "X-Max-Sequence": "2",
+              },
+            },
+          );
+        }
+        if (url.includes(`/missions/${parentId}/events?`)) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: 1,
+                mission_id: parentId,
+                sequence: 1,
+                event_type: "user_message",
+                event_id: "u-main",
+                content: "Main prompt",
+                timestamp: "2026-11-06T12:09:00Z",
+                metadata: {},
+              },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": "1",
+                "X-Page-Max-Sequence": "1",
+                "X-Max-Sequence": "1",
+              },
+            },
+          );
+        }
+        return Response.json({ id: parentId, tags: [] });
+      }),
+    );
+
+    const releaseParent = retainTranscript(parentId);
+    await loadTranscript(parentId);
+    const detachParent = attachMissionStream(parentId, {
+      onEvent: () => {},
+      onBatch: () => {},
+      onLagged: () => {},
+      onReady: () => {},
+      onDisconnected: () => {},
+    });
+
+    await vi.waitFor(() => expect(FakeSyncSocket.instances).toHaveLength(1));
+    const sock = FakeSyncSocket.instances[0];
+
+    await reconcileBtwServerHistory(parentId, []);
+    await vi.waitFor(() =>
+      expect(sock.sent).toContainEqual(
+        expect.objectContaining({ op: "subscribe", mission_id: childId, since_seq: 2 }),
+      ),
+    );
+
+    detachParent();
+    releaseParent();
+
+    // 1) Live broadcast delivers UNSEQUENCED `user_message`, `text_op` insert, and truncated `assistant_message`:
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "user_message",
+        mission_id: childId,
+        id: "u-live-2",
+        content: "Summarize findings",
+        at: "2026-11-06T12:12:00Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "text_op",
+        mission_id: childId,
+        bubble_id: "text_delta_latest",
+        ops: [{ type: "insert", pos: 0, text: fullTextOpAnswer }],
+        at: "2026-11-06T12:12:03Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "assistant_message",
+        mission_id: childId,
+        id: "a-live-2",
+        content: closingLine,
+        success: true,
+        at: "2026-11-06T12:12:04Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "mission_status_changed",
+        mission_id: childId,
+        status: "awaiting_user",
+      }),
+    });
+
+    await new Promise((r) => setTimeout(r, 30));
+
+    const afterLive = peekWarmBtwState(parentId);
+    expect(afterLive?.clean).toBe(true);
+    expect(afterLive?.history).toHaveLength(2);
+    // `text_op` recovery text repaired the short closing line in memory!
+    expect(afterLive?.history[1]?.answer).toBe(fullTextOpAnswer);
+
+    // 2) Now simulate replay delivering the DURABLE SEQUENCED copies (e.g. after a reconnect from `since_seq: 2`):
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "user_message",
+        mission_id: childId,
+        id: "u-live-2",
+        sequence: 20,
+        content: "Summarize findings",
+        at: "2026-11-06T12:12:00Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "text_op",
+        mission_id: childId,
+        sequence: 21,
+        bubble_id: "text_delta_latest",
+        ops: [{ type: "insert", pos: 0, text: fullTextOpAnswer }],
+        at: "2026-11-06T12:12:03Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "assistant_message",
+        mission_id: childId,
+        id: "a-live-2",
+        sequence: 22,
+        content: closingLine,
+        success: true,
+        at: "2026-11-06T12:12:04Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "sync_caught_up",
+        mission_id: childId,
+        replayed: 3,
+        cursor: 22,
+      }),
+    });
+
+    await new Promise((r) => setTimeout(r, 30));
+
+    const afterReplay = peekWarmBtwState(parentId);
+    expect(afterReplay?.clean).toBe(true);
+    // Reconciled in place to durable sequence 20 with ZERO duplicate rows and repairedFinal preserved:
+    expect(afterReplay?.history).toHaveLength(2);
+    expect(afterReplay?.history[1]).toMatchObject({
+      id: `btw:${childId}:20`,
+      question: "Summarize findings",
+      answer: fullTextOpAnswer,
+    });
+  });
 });
