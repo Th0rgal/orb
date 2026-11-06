@@ -7209,6 +7209,60 @@ entry:
   ret i64 %sel_296.i
 }
 
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define dso_local zeroext i8 @orb_model_account_admit(i32 %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3) local_unnamed_addr #0 {
+entry:
+  %cmp_eq_5.not.i = icmp ne i32 %a0, 0
+  %cmp_eq_20.not.i = icmp eq i8 %a1, 0
+  %or.cond.i = and i1 %cmp_eq_5.not.i, %cmp_eq_20.not.i
+  br i1 %or.cond.i, label %ite_else_28.i, label %probe_orb_model_account_admit.exit
+
+ite_else_28.i:                                    ; preds = %entry
+  switch i8 %a2, label %probe_orb_model_account_admit.exit [
+    i8 2, label %ite_else_44.i
+    i8 1, label %ite_else_57.i
+  ]
+
+ite_else_57.i:                                    ; preds = %ite_else_28.i
+  %cmp_eq_65.not.i = icmp eq i8 %a3, 0
+  %0 = zext i1 %cmp_eq_65.not.i to i8
+  br label %probe_orb_model_account_admit.exit
+
+ite_else_44.i:                                    ; preds = %ite_else_28.i
+  br label %probe_orb_model_account_admit.exit
+
+probe_orb_model_account_admit.exit:               ; preds = %ite_else_44.i, %ite_else_57.i, %ite_else_28.i, %entry
+  %common.ret.op.i = phi i8 [ 1, %ite_else_44.i ], [ 0, %ite_else_28.i ], [ %0, %ite_else_57.i ], [ 0, %entry ]
+  ret i8 %common.ret.op.i
+}
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define dso_local i64 @orb_model_account_score(i32 %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4, i32 %a5, i32 %a6) local_unnamed_addr #0 {
+entry:
+  %ext6 = zext i32 %a6 to i64
+  %cmp_eq_13.not.i = icmp ne i32 %a0, 0
+  %cmp_eq_24.not.i = icmp eq i8 %a1, 0
+  %cmp_eq_33.not.i = icmp eq i8 %a2, 2
+  %cmp_eq_42.not.i = icmp eq i8 %a2, 1
+  %cmp_eq_53.not.i = icmp eq i8 %a3, 0
+  %narrow.i = and i1 %cmp_eq_42.not.i, %cmp_eq_53.not.i
+  %narrow23.i = or i1 %cmp_eq_33.not.i, %narrow.i
+  %narrow24.i = and i1 %cmp_eq_24.not.i, %narrow23.i
+  %narrow25.i = and i1 %cmp_eq_13.not.i, %narrow24.i
+  %sel_100.i = select i1 %cmp_eq_33.not.i, i64 0, i64 1125899906842624
+  %cmp_eq_113.not.i = icmp eq i8 %a4, 1
+  %sel_121.i = select i1 %cmp_eq_113.not.i, i64 0, i64 562949953421312
+  %alu_137.i = shl nuw nsw i64 %ext6, 16
+  %sel_141.i = select i1 %cmp_eq_113.not.i, i64 0, i64 %alu_137.i
+  %0 = tail call i32 @llvm.umin.i32(i32 %a5, i32 65535)
+  %sel_165.i = zext nneg i32 %0 to i64
+  %alu_179.i = or disjoint i64 %sel_121.i, %sel_100.i
+  %alu_182.i = or disjoint i64 %alu_179.i, %sel_165.i
+  %alu_185.i = or disjoint i64 %alu_182.i, %sel_141.i
+  %sel_189.i = select i1 %narrow25.i, i64 %alu_185.i, i64 -1
+  ret i64 %sel_189.i
+}
+
 ; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i64 @llvm.fshl.i64(i64, i64, i64) #1
 

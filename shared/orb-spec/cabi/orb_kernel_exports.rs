@@ -162,4 +162,6 @@ pub const EXPORTS: &[&str] = &[
     "orb_validation_dag_step",
     "orb_fts5_lexer_step",
     "orb_utf8_utf16_window_step",
+    "orb_model_account_admit",
+    "orb_model_account_score",
 ];

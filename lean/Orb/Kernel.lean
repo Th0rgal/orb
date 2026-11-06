@@ -3218,4 +3218,52 @@ def utf8Utf16WindowStep
     let lo32 : UInt32 := seqBytes ||| (256 : UInt32) ||| (u16Cost <<< 16)
     lo32.toUInt64 ||| (nextU16.toUInt64 <<< 32)
 
+/--
+  Unboxed C-ABI Model-Compatible Account Admission Gate (`orb_model_account_admit`):
+  Decides whether candidate account `candId` may serve a requested model under
+  3-valued capability entitlement (`0 = LacksModel`, `1 = Unknown`, `2 = Entitled`):
+  - Rejects (`0`) if `candId == 0`, `ineligible != 0` (`NeedsVerification` / disabled),
+    or `entitlement == 0` (`LacksModel`) or `entitlement > 2`.
+  - Rejects (`0`) `Unknown` (`entitlement == 1`) whenever `requireEntitled == 1`
+    (EAP-gated models such as Gemini 4 Carbon / `agy-model-*`, or whenever at least one
+    eligible account in the pool has positive `Entitled` evidence).
+  - Admits (`1`) otherwise (`entitlement == 2`, or `entitlement == 1 && requireEntitled == 0`).
+-/
+@[inline, export orb_model_account_admit]
+def modelAccountAdmit
+    (candId : UInt32)
+    (ineligible entitlement requireEntitled : UInt8) : UInt8 :=
+  if candId != 0 && ineligible == 0 &&
+      (entitlement == 2 || (entitlement == 1 && requireEntitled == 0)) then 1
+  else 0
+
+/--
+  Unboxed C-ABI Model-Compatible Account Minimize-Score Key (`orb_model_account_score`):
+  Computes a strictly monotone 64-bit minimize-score for `orb_route_argmin_step` across
+  admissible accounts:
+  - `bit 50`: `entitlementPenalty` (`0` when `entitlement == 2 (Entitled)`, `1` otherwise),
+    so positively entitled accounts strictly dominate unknown accounts at every priority and quota state.
+  - `bit 49`: `quotaPenalty` (`0` when `hasPoolQuota == 1`, `1` when spent/cooling),
+    so unspent pool quota strictly beats spent pool quota within the same entitlement tier.
+  - `bits 16..47`: `waitSecs` (`0` when `hasPoolQuota == 1`, else `usableInSecs`),
+    so when all compatible accounts are spent in the model's quota pool, the earliest reset wins.
+  - `bits 0..15`: `min(priorityRank, 65535)`, breaking ties by configured account priority.
+  Inadmissible accounts receive `0xFFFFFFFFFFFFFFFF` (`UInt64.max`).
+-/
+@[inline, export orb_model_account_score]
+def modelAccountScore
+    (candId : UInt32)
+    (ineligible entitlement requireEntitled hasPoolQuota : UInt8)
+    (priorityRank usableInSecs : UInt32) : UInt64 :=
+  if modelAccountAdmit candId ineligible entitlement requireEntitled == 0 then
+    0xFFFFFFFFFFFFFFFF
+  else
+    let entPen : UInt64 := if entitlement == 2 then 0 else (1 : UInt64) <<< 50
+    let quotaPen : UInt64 := if hasPoolQuota == 1 then 0 else (1 : UInt64) <<< 49
+    let waitField : UInt64 :=
+      if hasPoolQuota == 1 then 0 else usableInSecs.toUInt64 <<< 16
+    let rankClamped : UInt64 :=
+      if priorityRank ≤ 65535 then priorityRank.toUInt64 else 65535
+    entPen ||| quotaPen ||| waitField ||| rankClamped
+
 end Orb.Kernel

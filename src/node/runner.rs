@@ -1319,7 +1319,7 @@ impl JobRunner {
                 let _thought_stop_guard = thought_stop.clone().drop_guard();
                 let thought_monitor = managed_auth
                     .iter()
-                    .any(|profile| profile == "antigravity")
+                    .any(|profile| profile == "antigravity" || profile.starts_with("antigravity:"))
                     .then(|| {
                         crate::antigravity::clear_all_historical_error_steps(&mission_dir);
                         let log = log_path.clone();
