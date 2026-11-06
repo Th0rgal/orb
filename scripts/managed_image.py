@@ -360,7 +360,8 @@ def fleet_tools():
     meta = ARTIFACTS / 'fleet-tools.json'
     if not tarball.exists() or not meta.exists():
         ARTIFACTS.mkdir(parents=True, exist_ok=True)
-        ssh = ['ssh', '-i', str(Path.home() / '.ssh' / 'paloma'), '-o', 'IdentitiesOnly=yes', FLEET_HOST]
+        ssh = ['ssh', '-i', str(Path.home() / '.ssh' / 'paloma'), '-o', 'IdentitiesOnly=yes',
+               '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', FLEET_HOST]
         log(f'copying x86_64 tool builds from {FLEET_HOST} (read-only)')
         with tarball.open('wb') as fh:
             subprocess.run([*ssh, 'cd /usr/local/bin && tar czf - ' + ' '.join(FLEET_TOOLS)], stdout=fh, check=True)

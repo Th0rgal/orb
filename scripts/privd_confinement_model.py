@@ -700,8 +700,8 @@ def serve_conn(conn: socket.socket) -> None:
                             "cwd": "/root",
                         }
                     )
-                    if not verdict.get("allow_exec"):
-                        resp = {"ok": False, "exit_code": 126, "stderr": "Lease denied by Core"}
+                    if not verdict.get("allow_exec") or str(verdict.get("scope", "")) not in ("service_deploy", "root_exec", "host_admin"):
+                        resp = {"ok": False, "exit_code": 126, "stderr": "Lease denied by Core (requires service_deploy or root_exec scope)"}
                     else:
                         resp = handle_update_harness(req)
             else:

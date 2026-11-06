@@ -83,7 +83,103 @@ private def isHopByHopHeader (name : String) : Bool :=
   low == "transfer-encoding" || low == "keep-alive" || low == "upgrade" ||
   low == "proxy-connection" || low.startsWith "access-control-"
 
-private def handleTransportProxyRequest (st : LocaldState) (fd : Fd) (req : HttpRequest) (origin? : Option String) : IO Unit := do
+private def isHeaderValueClean (s : String) : Bool :=
+  !(s.toList.any (fun c => c == '\r' || c == '\n' || c.toNat == 0))
+
+private def sanitizeUpstreamHeaders (hdrs : Array (String × String)) : String := Id.run do
+  let mut out := ""
+  for (k, v) in hdrs do
+    let tk := k.trimAscii.toString
+    let tv := v.trimAscii.toString
+    if !tk.isEmpty && !isHopByHopHeader tk && tk.toLower != "content-type" &&
+       isHeaderValueClean tk && isHeaderValueClean tv then
+      out := out ++ s!"{tk}: {tv}\r\n"
+  return out
+
+private def findCurlBin? : IO (Option String) := do
+  for cand in #["/usr/bin/curl", "/bin/curl", "/opt/homebrew/bin/curl"] do
+    if (← System.FilePath.pathExists cand) then
+      return some cand
+  return none
+
+private def isSseStreamRequest (isShardPort : Bool) (req : HttpRequest) : Bool :=
+  if isShardPort && req.method.toUpper == "GET" then true
+  else
+    let acc := (findHeaderVal? req.headers "accept").getD ""
+    acc.toLower.splitOn "text/event-stream" |>.length > 1
+
+private def streamSseViaCurl (fd : Fd) (origin? : Option String) (url : String)
+    (method : String) (fwdHdrs : Array (String × String)) : IO Bool := do
+  let some curlBin ← findCurlBin? | return false
+  let mut cargs : Array String := #[
+    "--silent", "--show-error", "--no-buffer", "-N", "--http1.1",
+    "--proto", "=https", "--connect-timeout", "10", "-i", "-X", method
+  ]
+  for (hk, hv) in fwdHdrs do
+    if isHeaderValueClean hk && isHeaderValueClean hv then
+      cargs := cargs.push "-H"
+      cargs := cargs.push s!"{hk}: {hv}"
+  cargs := cargs.push "--url"
+  cargs := cargs.push url
+  let child ← IO.Process.spawn {
+    cmd := curlBin
+    args := cargs
+    stdin := .null
+    stdout := .piped
+    stderr := .null
+  }
+  let mut hdrAcc := ByteArray.empty
+  let mut headerSent := false
+  let mut aborted := false
+  let mut eof := false
+  while !eof && !aborted do
+    let chunk ← child.stdout.read 4096
+    if chunk.isEmpty then
+      eof := true
+    else if !headerSent then
+      hdrAcc := hdrAcc ++ chunk
+      let rawStr := String.fromUTF8? hdrAcc |>.getD ""
+      let parts := rawStr.splitOn "\r\n\r\n"
+      if parts.length ≥ 2 then
+        -- Skip any 100 Continue block if present
+        let blocks := parts.dropLast
+        let lastHdrBlock := blocks.getLast?.getD ""
+        let firstLine := (lastHdrBlock.splitOn "\r\n").head?.getD ""
+        let toks := (firstLine.splitOn " ").filter (fun s => !s.isEmpty)
+        let statusNat := (toks[1]?.bind String.toNat?).getD 502
+        if statusNat == 429 || (500 ≤ statusNat && statusNat ≤ 599) then
+          aborted := true
+        else
+          let hdrLines := (lastHdrBlock.splitOn "\r\n").drop 1
+          let parsedHdrs : Array (String × String) := (hdrLines.filterMap fun ln =>
+            match ln.splitOn ":" with
+            | [] => none
+            | k :: vs => some (k.trimAscii.toString, (String.intercalate ":" vs).trimAscii.toString)).toArray
+          let ctype := (findHeaderVal? parsedHdrs "content-type").getD "text/event-stream"
+          let extra := sanitizeUpstreamHeaders parsedHdrs
+          let reason := HttpResponse.reasonPhrase statusNat
+          let outHead :=
+            s!"HTTP/1.1 {statusNat} {reason}\r\n" ++
+            corsHeaderBlock origin? ++
+            s!"Content-Type: {ctype}\r\n" ++
+            "Cache-Control: no-cache\r\n" ++
+            extra ++
+            "Connection: close\r\n\r\n"
+          let bodyTail := (parts.getLast?.getD "").toUTF8
+          match ← writeAll fd (outHead.toUTF8 ++ bodyTail) false with
+          | .ok _ => headerSent := true
+          | .error _ => eof := true
+      else if hdrAcc.size > 65536 then
+        aborted := true
+    else
+      match ← writeAll fd chunk false with
+      | .ok _ => pure ()
+      | .error _ => eof := true
+  try child.kill catch _ => pure ()
+  discard <| child.wait
+  return headerSent
+
+private def handleTransportProxyRequest (st : LocaldState) (isShardPort : Bool) (fd : Fd) (req : HttpRequest) (origin? : Option String) : IO Unit := do
   let expectedPfx := s!"/__orb_tx/{st.bridge.bridgeUuid}"
   if !req.path.startsWith expectedPfx then
     sendJsonHttp fd 403 origin? "{\"error\":\"invalid_bridge_token\"}"
@@ -96,6 +192,7 @@ private def handleTransportProxyRequest (st : LocaldState) (fd : Fd) (req : Http
     let fwdHdrs := req.headers.filter fun (k, _) => !isHopByHopHeader k
     let reqBody := req.bodySlice.toByteArray
     let origins := st.bridge.failoverOrigins
+    let wantSse := isSseStreamRequest isShardPort req && reqBody.isEmpty
     if origins.isEmpty then
       sendJsonHttp fd 503 origin? "{\"error\":\"no_failover_origins\"}"
     else
@@ -103,49 +200,70 @@ private def handleTransportProxyRequest (st : LocaldState) (fd : Fd) (req : Http
       let mut done := false
       while idx < origins.size && !done do
         let orig := origins[idx]!
-        let attemptRes ← match parseOriginHostPort orig with
-          | none => pure (.error "invalid_origin")
+        if wantSse then
+          match parseOriginHostPort orig with
           | some (true, host, port, pfx) =>
-            httpsRequest req.method host port (pfx ++ relPath) fwdHdrs reqBody
-          | some (false, _, _, _) =>
-            pure (.error "plaintext_origin_rejected")
-        match attemptRes with
-        | .ok up =>
-          let retryStatus := up.status == 429 || (500 ≤ up.status && up.status ≤ 599)
-          if retryStatus && canFailoverRequest req.method hasIdem (idx + 1) origins then
-            idx := idx + 1
-          else
-            let ctype := (findHeaderVal? up.headers "content-type").getD "application/json"
-            let reason := HttpResponse.reasonPhrase up.status
-            let head :=
-              s!"HTTP/1.1 {up.status} {reason}\r\n" ++
-              corsHeaderBlock origin? ++
-              s!"Content-Type: {ctype}\r\n" ++
-              s!"Content-Length: {up.body.size}\r\n" ++
-              "Connection: close\r\n\r\n"
-            discard <| writeAll fd (head.toUTF8 ++ up.body) false
-            done := true
-        | .error _ =>
-          if canFailoverRequest req.method hasIdem (idx + 1) origins then
-            idx := idx + 1
-          else
-            sendJsonHttp fd 502 origin? "{\"error\":\"upstream_unreachable\"}"
-            done := true
+            let auth := if port == 443 then host else s!"{host}:{port}"
+            let fullUrl := s!"https://{auth}{pfx}{relPath}"
+            if (← streamSseViaCurl fd origin? fullUrl req.method fwdHdrs) then
+              done := true
+            else if canFailoverRequest req.method hasIdem (idx + 1) origins then
+              idx := idx + 1
+            else
+              sendJsonHttp fd 502 origin? "{\"error\":\"upstream_stream_unreachable\"}"
+              done := true
+          | _ =>
+            if canFailoverRequest req.method hasIdem (idx + 1) origins then
+              idx := idx + 1
+            else
+              sendJsonHttp fd 502 origin? "{\"error\":\"invalid_stream_origin\"}"
+              done := true
+        else
+          let attemptRes ← match parseOriginHostPort orig with
+            | none => pure (.error "invalid_origin")
+            | some (true, host, port, pfx) =>
+              httpsRequest req.method host port (pfx ++ relPath) fwdHdrs reqBody
+            | some (false, _, _, _) =>
+              pure (.error "plaintext_origin_rejected")
+          match attemptRes with
+          | .ok up =>
+            let retryStatus := up.status == 429 || (500 ≤ up.status && up.status ≤ 599)
+            if retryStatus && canFailoverRequest req.method hasIdem (idx + 1) origins then
+              idx := idx + 1
+            else
+              let ctype := (findHeaderVal? up.headers "content-type").getD "application/json"
+              let extra := sanitizeUpstreamHeaders up.headers
+              let reason := HttpResponse.reasonPhrase up.status
+              let head :=
+                s!"HTTP/1.1 {up.status} {reason}\r\n" ++
+                corsHeaderBlock origin? ++
+                s!"Content-Type: {ctype}\r\n" ++
+                extra ++
+                s!"Content-Length: {up.body.size}\r\n" ++
+                "Connection: close\r\n\r\n"
+              discard <| writeAll fd (head.toUTF8 ++ up.body) false
+              done := true
+          | .error _ =>
+            if canFailoverRequest req.method hasIdem (idx + 1) origins then
+              idx := idx + 1
+            else
+              sendJsonHttp fd 502 origin? "{\"error\":\"upstream_unreachable\"}"
+              done := true
 
-private def handleClientConnection (stRef : IO.Ref LocaldState) (isProxyPort : Bool) (clientFd : Fd) : IO Unit := do
+private def handleClientConnection (stRef : IO.Ref LocaldState) (portIdx : Nat) (clientFd : Fd) : IO Unit := do
   try
     match ← readHttpRequestFromFd clientFd none 5000 with
     | .error errMsg =>
       let code := statusForParseError errMsg
-      sendJsonHttp clientFd code none s!"\{\"error\":\"{errMsg}\"}"
+      sendJsonHttp clientFd code none (renderCompact (.obj #[("error", .str errMsg)]))
     | .ok req =>
       let origin? := findHeaderVal? req.headers "origin"
       if !isAllowedLocaldOrigin origin? then
         sendJsonHttp clientFd 403 none "{\"error\":\"forbidden_origin\"}"
       else
         let st ← stRef.get
-        if isProxyPort || req.path.startsWith "/__orb_tx/" then
-          handleTransportProxyRequest st clientFd req origin?
+        if portIdx > 0 || req.path.startsWith "/__orb_tx/" then
+          handleTransportProxyRequest st (portIdx ≥ 2) clientFd req origin?
         else if req.method == "OPTIONS" && req.path == "/__orb_rpc" then
           sendPreflight204 clientFd origin?
         else if req.method != "POST" || req.path != "/__orb_rpc" then
@@ -179,7 +297,8 @@ partial def acceptMuxLoop (stRef : IO.Ref LocaldState) (rpcFd : Fd) (proxyFds : 
       if h : idx < allFds.size then
         let lfd := allFds[idx]
         match ← tcpAcceptPoll lfd 10 with
-        | .ok cfd => handleClientConnection stRef (idx > 0) cfd
+        | .ok cfd =>
+          discard <| IO.asTask (prio := .dedicated) (handleClientConnection stRef idx cfd)
         | .error _ => pure ()
   | .error _ => pure ()
   acceptMuxLoop stRef rpcFd proxyFds
@@ -262,9 +381,25 @@ def main (args : List String) : IO UInt32 := do
   let bridgeUuid ← randomUuidV4
   let hostOs ← detectHostOs
   let signerEnv? ← IO.getEnv "ORB_SIGNER_BIN"
-  let signerBin? := match signerEnv? with
-    | some b => if b.trimAscii.toString.isEmpty then none else some b.trimAscii.toString
-    | none => some "macos_shell/build/orb-signer"
+  let signerBin? ← match signerEnv? with
+    | some b =>
+      let tb := b.trimAscii.toString
+      pure (if tb.isEmpty then none else some tb)
+    | none =>
+      let appPath ← IO.appPath
+      let sibling : String := match appPath.parent with
+        | some dir => (dir / "orb-signer").toString
+        | none => "orb-signer"
+      if (← System.FilePath.pathExists sibling) then
+        pure (some sibling)
+      else
+        pure (some "macos_shell/build/orb-signer")
+  let homeDir := ((← IO.getEnv "HOME").getD "/tmp").trimAscii.toString
+  let defaultKeyPath :=
+    if hostOs == "macos" then s!"{homeDir}/Library/Application Support/sh.sandboxed.orb/approval-key.bin"
+    else s!"{homeDir}/.config/orb/approval-key.bin"
+  let rawKeyEnv := ((← IO.getEnv "ORB_APPROVAL_KEY_PATH").getD "").trimAscii.toString
+  let approvalKeyPath := if rawKeyEnv.isEmpty then defaultKeyPath else rawKeyEnv
   let baseProxyHint : UInt16 := if port ≤ 65520 then port + 1 else 19480
   match ← bindLoopbackPortPool baseProxyHint with
   | .error e =>
@@ -287,6 +422,7 @@ def main (args : List String) : IO UInt32 := do
         launchToken := tok
         rpcPort := boundRpcPort
         bridge := bridge
+        approvalKeyPath := approvalKeyPath
         hostOs := hostOs
         signerBin? := signerBin?
       }

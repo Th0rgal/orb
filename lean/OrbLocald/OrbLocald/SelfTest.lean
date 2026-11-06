@@ -68,7 +68,7 @@ def main : IO UInt32 := do
   total := total + 1
   if (← assertTrue "failover_post_with_idem_allowed" (canFailoverRequest "POST" true 2 defaultFailoverOrigins)) then passed := passed + 1
 
-  -- 4. Channel subscribe / unsubscribe / __orb_poll_events lifecycle
+  -- 4. Channel subscribe / initial snapshot / unsubscribe / __orb_poll_events lifecycle
   let sub1 ← dispatchRpcCommand stRef "local_bindings_subscribe" (.obj #[])
   let sub2 ← dispatchRpcCommand stRef "local_interaction_subscribe" (.obj #[("id", .str "m1")])
   total := total + 1
@@ -77,20 +77,30 @@ def main : IO UInt32 := do
     | _, _ => false
   if (← assertTrue "channel_subscribe_monotonic" okSubs) then passed := passed + 1
 
-  stRef.modify fun s => { s with queuedChannelEvents := #[(2, .obj #[("kind", .str "tick")])] }
-  let polled ← dispatchRpcCommand stRef "__orb_poll_events" (.obj #[])
-  let polledAgain ← dispatchRpcCommand stRef "__orb_poll_events" (.obj #[])
+  -- Initial snapshots (`{"revision":0,"bindings":{}}` for 1, `null` for 2) are queued immediately!
+  let polledInit ← dispatchRpcCommand stRef "__orb_poll_events" (.obj #[])
+  let polledEmpty ← dispatchRpcCommand stRef "__orb_poll_events" (.obj #[])
   total := total + 1
-  let pollOk := match polled, polledAgain with
-    | .ok (.arr #[_]), .ok (.arr #[]) => true
+  let pollOk := match polledInit, polledEmpty with
+    | .ok (.arr #[_, _]), .ok (.arr #[]) => true
     | _, _ => false
-  if (← assertTrue "channel_poll_events_drains_once" pollOk) then passed := passed + 1
+  if (← assertTrue "channel_poll_events_initial_snapshots_and_drains_once" pollOk) then passed := passed + 1
 
   let _ ← dispatchRpcCommand stRef "local_bindings_unsubscribe" (.obj #[("token", JVal.nat 1)])
   let curSt ← stRef.get
   total := total + 1
   let activeCount := (curSt.subscriptions.filter (·.active)).size
-  if (← assertEq "channel_unsubscribe_deactivates" activeCount 1) then passed := passed + 1
+  if (← assertEq "channel_unsubscribe_prunes" activeCount 1) then passed := passed + 1
+
+  -- Origin CRLF reflection defense + approval_grace_until / set_approval_grace ({ secs }) contract
+  total := total + 1
+  if (← assertTrue "origin_reject_crlf_injection" (!(isAllowedLocaldOrigin (some "http://127.0.0.1:19479\r\nX-Injected: 1")))) then passed := passed + 1
+  let _ ← dispatchRpcCommand stRef "set_approval_grace" (.obj #[("secs", JVal.nat 120)])
+  let graceSt ← stRef.get
+  let graceUntilRes ← dispatchRpcCommand stRef "approval_grace_until" (.obj #[])
+  total := total + 1
+  let graceOk := graceSt.approvalGraceSecs == 120 && (match graceUntilRes with | .ok (.num "0") => true | _ => false)
+  if (← assertTrue "approval_grace_secs_and_until_contract" graceOk) then passed := passed + 1
 
   -- 5. Paloma Touch ID grace eligibility (strict canonical UUID + paloma-approval-v1 + non-empty summary)
   let goodPayload :=

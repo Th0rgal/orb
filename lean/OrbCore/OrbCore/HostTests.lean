@@ -45,28 +45,39 @@ def shadow_state_observation_detects_independent_host_poststate_and_effect_diver
   (workspace_prefix 0 != workspace_prefix 1)
 
 def production_mission_control_gate_enforces_archive_lease_dedupe_and_codex_rollout (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_mission_control_step" #[0, 0, 0, 0, 0, 0, 0, 0, 0] == some 5) &&
-  (callExportU64? "orb_mission_control_step" #[1, 1, 1, 1, 1, 1, 1, 1, 1] == some 65536) &&
+  -- Archived (65536), msgAlreadyDelivered dedupe (4), verified resume (4294967554 = (1<<<32)|||258), fallback resume (4294968067 = (1<<<32)|||771)
+  (callExportU64? "orb_mission_control_step" #[1, 0, 1, 0, 0, 0, 0, 0, 0] == some 65536) &&
+  (callExportU64? "orb_mission_control_step" #[0, 0, 1, 1, 0, 0, 0, 0, 0] == some 4) &&
+  (callExportU64? "orb_mission_control_step" #[0, 0, 1, 0, 1, 1, 1, 1, 0] == some 4294967554) &&
+  (callExportU64? "orb_mission_control_step" #[0, 0, 1, 0, 1, 0, 0, 0, 1] == some 4294968067) &&
   (evaluate_mission_control_gate 0 != evaluate_mission_control_gate 1)
 
 def mission_control_rejects_store_supersession_with_stale_caller_snapshot (_ : Unit := ()) : Bool :=
+  -- Active track writer > 0 (`activeTrackWriters = 2`) or missing lease -> 5; exclusive fresh turn -> 4294967553 ((1<<<32)|||257)
+  (callExportU64? "orb_mission_control_step" #[0, 2, 1, 0, 0, 0, 0, 0, 0] == some 5) &&
   (callExportU64? "orb_mission_control_step" #[0, 0, 0, 0, 0, 0, 0, 0, 0] == some 5) &&
-  (callExportU64? "orb_mission_control_step" #[1, 1, 1, 1, 1, 1, 1, 1, 1] == some 65536) &&
+  (callExportU64? "orb_mission_control_step" #[0, 0, 1, 0, 0, 0, 0, 0, 0] == some 4294967553) &&
   (evaluate_mission_control_gate 0 != evaluate_mission_control_gate 1)
 
 def remote_submission_rejects_closed_snapshots_and_records_host_observations (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_mission_control_step" #[0, 0, 0, 0, 0, 0, 0, 0, 0] == some 5) &&
-  (callExportU64? "orb_mission_control_step" #[1, 1, 1, 1, 1, 1, 1, 1, 1] == some 65536) &&
+  -- Unverified resume without fallback prompt -> 6; archived closed snapshot -> 65536
+  (callExportU64? "orb_mission_control_step" #[0, 0, 1, 0, 1, 1, 1, 0, 0] == some 6) &&
+  (callExportU64? "orb_mission_control_step" #[1, 0, 0, 0, 1, 1, 1, 1, 1] == some 65536) &&
   (evaluate_mission_control_gate 0 != evaluate_mission_control_gate 1)
 
 def production_workspace_prefix_enforces_fork_home_and_node_invariants (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_fork_home_step" #[0, 0, 0, 0, 0, 0, 0] == some 131329) &&
-  (callExportU64? "orb_fork_home_step" #[1, 1, 1, 1, 1, 1, 1] == some 335007580160) &&
+  -- Standard non-fork (131329), valid sibling fork (131842), valid committed-transfer fork (131843), symlink fork rejected ((78<<<32)|||131072 = 335007580160)
+  (callExportU64? "orb_fork_home_step" #[0, 0, 0, 0, 0, 0, 1] == some 131329) &&
+  (callExportU64? "orb_fork_home_step" #[1, 1, 0, 1, 1, 0, 1] == some 131842) &&
+  (callExportU64? "orb_fork_home_step" #[1, 1, 0, 1, 1, 1, 1] == some 131843) &&
+  (callExportU64? "orb_fork_home_step" #[1, 1, 1, 1, 1, 0, 1] == some 335007580160) &&
   (workspace_prefix 0 != workspace_prefix 1)
 
 def unobserved_remote_home_is_not_an_exact_match (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_fork_home_step" #[0, 0, 0, 0, 0, 0, 0] == some 131329) &&
-  (callExportU64? "orb_fork_home_step" #[1, 1, 1, 1, 1, 1, 1] == some 335007580160) &&
+  -- Cross-node fork (`sameNode = 0`) and missing source (`sourceExists = 0`) MUST fail closed (`335007580160`) while preserving jobHome bit
+  (callExportU64? "orb_fork_home_step" #[1, 1, 0, 1, 0, 0, 0] == some 335007580160) &&
+  (callExportU64? "orb_fork_home_step" #[1, 0, 0, 1, 1, 0, 0] == some 335007580160) &&
+  (callExportU64? "orb_fork_home_step" #[1, 1, 0, 1, 1, 0, 0] == some 131842) &&
   (workspace_prefix 0 != workspace_prefix 1)
 
 def orb_wire_roundtrip_and_failure_no_partial_mutation (_ : Unit := ()) : Bool :=
@@ -114,53 +125,66 @@ def phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_d
   (evaluate_remote_ssh_and_codex_confinement 0 != evaluate_remote_ssh_and_codex_confinement 1)
 
 def agent_sees_nothing_of_the_target_before_a_live_grant (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_access_step" #[0, 0, 0, 0, 0, 0] == some 0) &&
-  (callExportU64? "orb_access_step" #[1, 1, 1, 1, 1, 1] == some 65793) &&
+  -- Before grant approval (`grantApproved = 0`), `discloseTitle == 0` regardless of `targetExists` (0 vs 1) -> exact 0
+  (callExportU64? "orb_access_step" #[1, 0, 1, 0, 1, 0] == some 0) &&
+  (callExportU64? "orb_access_step" #[1, 0, 1, 0, 1, 1] == some 0) &&
+  (callExportU64? "orb_access_step" #[1, 0, 1, 1, 1, 1] == some 257) &&
   (grant_for_tool 0 != grant_for_tool 1)
 
 def an_approved_grant_never_allows_control (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_access_step" #[0, 0, 0, 0, 0, 0] == some 0) &&
-  (callExportU64? "orb_access_step" #[1, 1, 1, 1, 1, 1] == some 65793) &&
+  -- Approved cross-mission grant (`isSelfOrChild = 0`, `grantApproved = 1`, `grantUnexpired = 1`) with control tool (`isReadTool = 0`) -> 256 (`allowTool = 0`, `discloseTitle = 1`)
+  (callExportU64? "orb_access_step" #[1, 0, 0, 1, 1, 1] == some 256) &&
+  (callExportU64? "orb_access_step" #[1, 0, 1, 1, 1, 1] == some 257) &&
   (grant_for_tool 0 != grant_for_tool 1)
 
 def read_allowed_only_after_approval (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_access_step" #[0, 0, 0, 0, 0, 0] == some 0) &&
-  (callExportU64? "orb_access_step" #[1, 1, 1, 1, 1, 1] == some 65793) &&
+  -- Read tool (`isReadTool = 1`) denied when expired (`grantUnexpired = 0` -> 0) or cross-owner (`sameOwner = 0` -> 0), allowed (`257`) when approved & unexpired
+  (callExportU64? "orb_access_step" #[1, 0, 1, 1, 0, 1] == some 0) &&
+  (callExportU64? "orb_access_step" #[0, 0, 1, 1, 1, 1] == some 0) &&
+  (callExportU64? "orb_access_step" #[1, 0, 1, 1, 1, 1] == some 257) &&
   (grant_for_tool 0 != grant_for_tool 1)
 
 def control_grant_allows_control_and_read_tools_only_after_approval (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_access_step" #[0, 0, 0, 0, 0, 0] == some 0) &&
-  (callExportU64? "orb_access_step" #[1, 1, 1, 1, 1, 1] == some 65793) &&
+  -- Self/child scope (`sameOwner = 1`, `isSelfOrChild = 1`) allows both control (`isReadTool = 0`) and read (`isReadTool = 1`) -> `65793`, while cross-owner (`sameOwner = 0`) -> `0`
+  (callExportU64? "orb_access_step" #[1, 1, 0, 0, 0, 1] == some 65793) &&
+  (callExportU64? "orb_access_step" #[1, 1, 1, 0, 0, 1] == some 65793) &&
+  (callExportU64? "orb_access_step" #[0, 1, 0, 1, 1, 1] == some 0) &&
   (grant_for_tool 0 != grant_for_tool 1)
 
 def keepalives_fill_long_pauses_between_events_only (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_stream_deadlines" #[0, 0, 0, 0, 0, 0, 0, 0] == some 256) &&
-  (callExportU64? "orb_stream_deadlines" #[1, 1, 1, 1, 1, 1, 1, 1] == some 65793) &&
+  -- Keepalive bit (`1`) fires ONLY when `atEventBoundary == 1` (`15000 >= 15000`); mid-event (`atEventBoundary == 0`) returns `0`
+  (callExportU64? "orb_stream_deadlines" #[15000, 15000, 0, 30000, 30000, 0, 0, 0] == some 0) &&
+  (callExportU64? "orb_stream_deadlines" #[15000, 15000, 0, 30000, 30000, 1, 0, 0] == some 1) &&
   (client_stream_response 0 != client_stream_response 1)
 
 def stall_before_output_is_rerouted_transparently (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_proxy_step" #[0, 0, 0, 0, 0] == some 0) &&
-  (callExportU64? "orb_proxy_step" #[1, 1, 1, 1, 1] == some 769) &&
+  -- Stall before commitment (`committed = 0, chunkCommits = 0, stalled = 1`) reroutes (`256` on first retry `0 < 3`, `66048` on second retry `1 < 3` with `excludeCurrent`)
+  (callExportU64? "orb_proxy_step" #[0, 0, 1, 0, 3] == some 256) &&
+  (callExportU64? "orb_proxy_step" #[0, 0, 1, 1, 3] == some 66048) &&
   (client_stream_response 0 != client_stream_response 1)
 
 def stall_after_output_is_surfaced_not_retried (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_proxy_step" #[0, 0, 0, 0, 0] == some 0) &&
-  (callExportU64? "orb_proxy_step" #[1, 1, 1, 1, 1] == some 769) &&
+  -- Stall after commitment (`committed = 1, stalled = 1, retries = 0, maxRetries = 3`) NEVER reroutes: surfaces `fail_stall` (`769 = 1 ||| 0x300`)
+  (callExportU64? "orb_proxy_step" #[1, 0, 0, 0, 3] == some 1) &&
+  (callExportU64? "orb_proxy_step" #[1, 0, 1, 0, 3] == some 769) &&
   (client_stream_response 0 != client_stream_response 1)
 
 def newer_validation_suppresses_stale_terminal_wake (_ : Unit := ()) : Bool :=
+  -- `newerTerminalExists = 1` sets `wakeDisposition = 2 (superseded = 512)` even when `newerAmbiguousTentative = 0`
+  (callExportU64? "orb_job_ledger_step" #[0, 0, 1, 0] == some 512) &&
   (callExportU64? "orb_job_ledger_step" #[0, 0, 0, 0] == some 0) &&
-  (callExportU64? "orb_job_ledger_step" #[1, 1, 1, 1] == some 512) &&
   (current_remote_build_wait_handle 0 != current_remote_build_wait_handle 1)
 
 def newer_terminal_validation_prevents_old_handle_from_owning_wait_lease (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_job_ledger_step" #[0, 0, 0, 0] == some 0) &&
-  (callExportU64? "orb_job_ledger_step" #[1, 1, 1, 1] == some 512) &&
+  -- Accepted remote build expecting continuation retains wait handle (`1`) when fresh (`0, 0`), drops wait handle (`512`, bit 0 == 0) when `newerTerminalExists = 1`
+  (callExportU64? "orb_job_ledger_step" #[1, 1, 0, 0] == some 1) &&
+  (callExportU64? "orb_job_ledger_step" #[1, 1, 1, 0] == some 512) &&
   (current_remote_build_wait_handle 0 != current_remote_build_wait_handle 1)
 
 def newer_tentative_submission_defers_without_suppressing_wake (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_job_ledger_step" #[0, 0, 0, 0] == some 0) &&
-  (callExportU64? "orb_job_ledger_step" #[1, 1, 1, 1] == some 512) &&
+  -- `newerTerminalExists = 0, newerAmbiguousTentative = 1` yields `wakeDisposition = 1 (deferred = 256)`, distinct from `superseded (512)` and `ready (1)`
+  (callExportU64? "orb_job_ledger_step" #[1, 1, 0, 1] == some 256) &&
+  (callExportU64? "orb_job_ledger_step" #[1, 1, 0, 0] == some 1) &&
   (current_remote_build_wait_handle 0 != current_remote_build_wait_handle 1)
 
 def wave12_orbwire_machine_and_seven_stateful_families_verified (_ : Unit := ()) : Bool :=
@@ -260,13 +284,17 @@ def stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences (_ : U
   (stream_bounded_commit_step 0 != stream_bounded_commit_step 1)
 
 def mission_vm_limits_bypass_saturated_global_pool_and_enforce_per_provider_caps (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_vm_cap_admit" #[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] == some 257) &&
-  (callExportU64? "orb_vm_cap_admit" #[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1] == some 512) &&
+  -- Pool override (`hasPoolOverride=1`) bypasses saturated global pool (`sharedActive=10 >= globalMax=2` -> `257`), but rejects when `providerActive=4 >= providerMax=4` (`512`)
+  (callExportU64? "orb_vm_cap_admit" #[1, 1, 1, 1, 0, 10, 2, 1, 4, 2, 4] == some 257) &&
+  (callExportU64? "orb_vm_cap_admit" #[1, 1, 1, 1, 0, 10, 2, 1, 4, 4, 4] == some 512) &&
   (vm_cap_admit 0 != vm_cap_admit 1)
 
 def mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_usd_budget (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_vm_cap_admit" #[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] == some 257) &&
-  (callExportU64? "orb_vm_cap_admit" #[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1] == some 512) &&
+  -- Ancestor blocked (`ancestorBlocked=1` -> `512`), zero-provider cap (`providerMax=0` -> `512`), empty pool override (`hasPoolMax=0, hasProviderMax=0` -> `512`)
+  (callExportU64? "orb_vm_cap_admit" #[0, 0, 0, 1, 1, 0, 10, 0, 0, 0, 0] == some 512) &&
+  (callExportU64? "orb_vm_cap_admit" #[1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0] == some 512) &&
+  (callExportU64? "orb_vm_cap_admit" #[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] == some 512) &&
+  (callExportU64? "orb_vm_cap_admit" #[0, 0, 0, 1, 0, 1, 4, 0, 0, 0, 0] == some 257) &&
   (vm_cap_admit 0 != vm_cap_admit 1)
 
 def turbo_lean_command_confinement_and_cache_env_verified (_ : Unit := ()) : Bool :=
@@ -322,11 +350,12 @@ def host_slice_bounds_and_isa_selection_gates_verified (_ : Unit := ()) : Bool :
   (select_host_stream_isa_with_caps 0 != select_host_stream_isa_with_caps 1)
 
 def kmp_suffix_prefix_overlap_matches_naive_across_multibyte_utf8 (_ : Unit := ()) : Bool :=
-  (callExportU64? "leansys_select_isa" #[775, 775, 1, 6] == some 1) &&
-  (callExportU64? "leansys_select_isa" #[0, 775, 1, 6] == some 0) &&
-  (callExportU64? "leansys_verify_isa_selection" #[775, 775, 1, 6] == some 1) &&
-  (callExportU64? "leansys_verify_isa_selection" #[0, 775, 1, 6] == some 0) &&
-  (select_host_stream_isa_with_caps 0 != select_host_stream_isa_with_caps 1)
+  -- AVX2/BMI variant 2 (`requiredMask = 0x31F = 799`) selected iff `detectedHwCaps` includes `799`
+  (callExportU64? "leansys_select_isa" #[799, 799, 2, 6] == some 2) &&
+  (callExportU64? "leansys_select_isa" #[775, 799, 2, 6] == some 0) &&
+  (callExportU64? "leansys_verify_isa_selection" #[799, 799, 2, 6] == some 1) &&
+  (callExportU64? "leansys_verify_isa_selection" #[775, 799, 2, 6] == some 0) &&
+  (scan_host_stream_bytes 0 != scan_host_stream_bytes 1)
 
 def source_capacity_is_exactly_the_advertised_limit (_ : Unit := ()) : Bool :=
   (callExportU64? "orb_verify_bundle_budget" #[0, 0, 0, 0, 0] == some 1) &&
@@ -334,13 +363,16 @@ def source_capacity_is_exactly_the_advertised_limit (_ : Unit := ()) : Bool :=
   (check 0 != check 1)
 
 def tiered_gc_preserves_hot_caches_when_disk_pressure_is_pinned_above_emergency (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_node_gc_step" #[0, 0, 0, 0, 0, 0, 0] == some 309237645312) &&
-  (callExportU64? "orb_node_gc_step" #[0, 1, 0, 1, 0, 1, 0] == some 25769804033) &&
+  -- Above emergency (`free=150 < floor=200`, `emergency=100`, zero scratch/cold, `hot=10` < `deficit=50`) -> `PinnedPreserveHot` (`action=5 ||| 256 ||| 512 ||| 1024 ||| 4096 = 5893`, `graceHours=0`)
+  -- Plus mild pressure satisfied by cold cache (`free=150, floor=200, emerg=100, aged=20, fresh=0, cold=40, hot=100` -> `action=2 ||| 256 ||| 512 = 770`, `graceHours=6` -> `(6<<<32)|||770 = 25769804546`)
+  (callExportU64? "orb_node_gc_step" #[150, 200, 100, 0, 0, 0, 10] == some 5893) &&
+  (callExportU64? "orb_node_gc_step" #[150, 200, 100, 20, 0, 40, 100] == some 25769804546) &&
   (run_gc_pass 0 != run_gc_pass 1)
 
 def tiered_gc_evicts_hot_caches_under_emergency_floor_while_respecting_active_locks (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_node_gc_step" #[0, 0, 0, 0, 0, 0, 0] == some 309237645312) &&
-  (callExportU64? "orb_node_gc_step" #[0, 1, 0, 1, 0, 1, 0] == some 25769804033) &&
+  -- Under emergency floor (`free=50 < emergency=100, floor=200`, `hot=200 >= rem3=150`) -> `EvictHotCaches` (`action=4 ||| 256 ||| 512 ||| 1024 ||| 2048 = 3844`, `graceHours=0`)
+  (callExportU64? "orb_node_gc_step" #[50, 200, 100, 0, 0, 0, 200] == some 3844) &&
+  (callExportU64? "orb_node_gc_step" #[250, 200, 100, 0, 0, 0, 200] == some 309237645312) &&
   (run_gc_pass 0 != run_gc_pass 1)
 
 def coordinator_wakeup_runs_immediately_while_child_workers_saturate_main (_ : Unit := ()) : Bool :=

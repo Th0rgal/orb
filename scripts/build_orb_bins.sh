@@ -67,11 +67,11 @@ if ! command -v lake >/dev/null 2>&1; then
         lean_ext=".tar.zst"
       elif [[ "$os_name" == "Darwin" && "$arch_name" == "arm64" ]]; then
         lean_url="https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-darwin_aarch64.tar.zst"
-        lean_sha256=""
+        lean_sha256="c0c6f34f35ba1dcc5c4a5fd106fefab9eb5e8469712624dd2c868d51b63177c2"
         lean_ext=".tar.zst"
       elif [[ "$os_name" == "Darwin" && "$arch_name" == "x86_64" ]]; then
         lean_url="https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-darwin.tar.zst"
-        lean_sha256=""
+        lean_sha256="0b43be5c7ecfb36016566a41005ab62bdb04743e6bfd5837e45f796ef4750b4e"
         lean_ext=".tar.zst"
       else
         echo "error: --ensure-lean automatic bootstrap unsupported on $os_name/$arch_name" >&2
@@ -85,8 +85,10 @@ if ! command -v lake >/dev/null 2>&1; then
       }
       trap cleanup_bootstrap EXIT
       curl --retry 5 --retry-all-errors -fsSL "$lean_url" -o "$lean_archive"
-      if [[ -n "$lean_sha256" ]]; then
+      if command -v sha256sum >/dev/null 2>&1; then
         echo "${lean_sha256}  ${lean_archive}" | sha256sum -c -
+      else
+        echo "${lean_sha256}  ${lean_archive}" | shasum -a 256 -c -
       fi
       mkdir -p "$(dirname "$lean_dest")"
       tar --zstd -xf "$lean_archive" --strip-components=1 -C "$lean_stage"

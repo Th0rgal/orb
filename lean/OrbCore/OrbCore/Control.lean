@@ -6,6 +6,7 @@
 import LeanSys
 import Orb.Kernel
 import OrbBin.Json
+import OrbBin.PrivdShared
 import OrbCore.Spec
 import OrbCore.Store
 import OrbCore.Search
@@ -269,22 +270,54 @@ def enforcedProjectParallelCap? (parallelMissions? : Option Int) : Option Nat :=
   | some c => if c > 0 then some c.toNat else none
   | none => none
 
-/-- Confine requested mission `working_directory` under `baseDir` (rejects `..` traversal and NUL bytes). -/
-def confineWorkingDirectory (baseDir rawDir : String) : Except String String :=
-  let t := rawDir.trimAscii.toString
-  if t.isEmpty then .ok baseDir
+private partial def trimTrailingSlashes (p : String) : String :=
+  if p.length > 1 && p.endsWith "/" then
+    trimTrailingSlashes (p.dropEnd 1 |>.toString)
+  else
+    p
+
+/-- Confine requested mission `working_directory` under `baseDir` (rejects `..` traversal, NUL bytes,
+    trailing-slash root-boundary drift, and symlink escapes). -/
+def confineWorkingDirectory (baseDir rawDir : String) : IO (Except String String) := do
+  let cleanBase := trimTrailingSlashes baseDir.trimAscii.toString
+  let realBase ← try
+      let rp ← IO.FS.realPath (System.FilePath.mk cleanBase)
+      pure (trimTrailingSlashes rp.toString)
+    catch _ =>
+      pure cleanBase
+  let t := trimTrailingSlashes rawDir.trimAscii.toString
+  if t.isEmpty then
+    return .ok realBase
   else if t.toList.any (fun c => c.toNat == 0) then
-    .error "invalid_working_directory_nul"
+    return .error "invalid_working_directory_nul"
   else
     let segs := t.splitOn "/"
     if segs.any (fun s => s == "..") then
-      .error "working_directory_parent_traversal_rejected"
-    else if t == baseDir || t.startsWith (if baseDir.endsWith "/" then baseDir else baseDir ++ "/") then
-      .ok t
-    else if !t.startsWith "/" then
-      .ok s!"{if baseDir.endsWith "/" then baseDir.dropEnd 1 |>.toString else baseDir}/{t}"
+      return .error "working_directory_parent_traversal_rejected"
     else
-      .error "working_directory_outside_workspace_root"
+      let cand :=
+        if t == cleanBase || t.startsWith (if cleanBase == "/" then "/" else cleanBase ++ "/") ||
+           t == realBase || t.startsWith (if realBase == "/" then "/" else realBase ++ "/") then
+          t
+        else if !t.startsWith "/" then
+          s!"{if realBase == "/" then "" else realBase}/{t}"
+        else
+          ""
+      if cand.isEmpty then
+        return .error "working_directory_outside_workspace_root"
+      if (← System.FilePath.pathExists cand) then
+        try
+          let rp ← IO.FS.realPath (System.FilePath.mk cand)
+          let rpStr := trimTrailingSlashes rp.toString
+          let basePrefix := if realBase == "/" then "/" else realBase ++ "/"
+          if rpStr == realBase || rpStr.startsWith basePrefix then
+            return .ok rpStr
+          else
+            return .error "working_directory_symlink_escape_rejected"
+        catch _ =>
+          return .error "working_directory_realpath_failed"
+      else
+        return .ok cand
 
 /-- Parse `models_json` array into `ProviderTarget` list for `RoutingChain` hydration. -/
 def parseChainTargetsJson (rawJson : String) : Array ProviderTarget := Id.run do
@@ -316,11 +349,16 @@ def loadRoutingChainsFromStore (st : CoreStore) : IO (Array RoutingChain) := do
       out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj }
     return out
 
-private def scopeRankOf : String → UInt8
-  | "ops_read"       => 0
-  | "service_deploy" => 1
-  | "root_exec"      => 2
-  | _                => 3
+private def scopeRankOf? : String → Option UInt8
+  | "ops_read"       => some 0
+  | "service_deploy" => some 1
+  | "root_exec" | "host_admin" => some 2
+  | _                => none
+
+private def normalizeTargetHost (h : String) : String :=
+  let low := h.trimAscii.toString.toLower
+  if low == "local" || low == "localhost" || low == "local-node" || low == "self" then "self"
+  else h.trimAscii.toString
 
 private def hash64Fnv1a (s : String) : UInt64 := Id.run do
   let mut h : UInt64 := 14695981039346656037
@@ -481,31 +519,74 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     let targetHost := (jv.fieldStr? "target_host").getD ""
     let execHost := (jv.fieldStr? "executing_host").getD ""
     let cmdText := (jv.fieldStr? "command").getD ""
+    let argv : Array String :=
+      match jv.fieldArr? "argv" with
+      | some xs => xs.filterMap JVal.asStr?
+      | none =>
+        let toks := (cmdText.splitOn " ").filter (fun s => !s.isEmpty)
+        toks.toArray
+    let isPostExecLog := (jv.field? "exit_code").isSome
     if missionId.isEmpty || leaseTok.isEmpty || targetHost.isEmpty then
       return .ok (mkJson 403 "{\"allow_exec\":false,\"allowed\":false,\"error\":\"missing_lease_fields\"}")
     let some lease ← lookupPrivilegeLease? st.store leaseTok
       | do
         discard <| appendPrivilegeAuditLog st.store "" missionId targetHost execHost cmdText false s!"{nowEpochSec}"
         return .ok (mkJson 403 "{\"allow_exec\":false,\"allowed\":false,\"error\":\"unknown_lease\"}")
+    let some sRank := scopeRankOf? lease.scope
+      | do
+        discard <| appendPrivilegeAuditLog st.store lease.grantId missionId targetHost execHost cmdText false s!"{nowEpochSec}"
+        return .ok (mkJson 403 "{\"allow_exec\":false,\"allowed\":false,\"error\":\"unknown_privilege_scope\"}")
+    let allowedUnits : Array String :=
+      match OrbBin.Json.parse lease.allowedUnitsJson with
+      | .ok (.arr us) => us.filterMap JVal.asStr?
+      | _ => #[]
+    let normLeaseHost := normalizeTargetHost lease.targetHost
+    let normReqTarget := normalizeTargetHost targetHost
+    let normExecHost  := normalizeTargetHost execHost
+    let targetMatches : Bool :=
+      normLeaseHost == "all" ||
+      normLeaseHost == normReqTarget ||
+      (normReqTarget == "self" && (normExecHost.isEmpty || normExecHost == "self" || normLeaseHost == normExecHost))
+    let execMatches : Bool :=
+      normReqTarget == "self" ||
+      normLeaseHost == "all" ||
+      normExecHost.isEmpty ||
+      normExecHost == normReqTarget ||
+      normExecHost == normLeaseHost
+    let cmdScopeOk ←
+      if isPostExecLog then
+        pure true
+      else if cmdText == "[update_harness]" then
+        pure (sRank ≥ 1)
+      else if argv.isEmpty then
+        pure false
+      else do
+        match ← OrbBin.PrivdShared.checkScopeRestrictions lease.scope allowedUnits argv (jv.fieldStr? "cwd") #[] lease.requireForceCmd with
+        | .ok _ => pure true
+        | .error _ => pure false
     let bunkerWord := bunkerStep 0 0 0 0 0
     let bunkerState : UInt8 := (bunkerWord &&& 0xFF).toUInt8
-    let sameOwner : UInt8 := if lease.missionId == missionId && lease.targetHost == targetHost &&
-                                (execHost.isEmpty || execHost == targetHost) then 1 else 0
-    let sRank := scopeRankOf lease.scope
+    let sameOwner : UInt8 := if lease.missionId == missionId && targetMatches && execMatches then 1 else 0
     let privWord := privilegeStep
       sameOwner 1
       (if lease.biometricSigned then 1 else 0)
       sRank sRank bunkerState
       (if lease.revoked then 1 else 0)
       nowEpochSec lease.expiresAtEpoch (lease.expiresAtEpoch + 3600)
-    let tgtHash : UInt32 := (hash64Fnv1a targetHost &&& 0xFFFFFFFF).toUInt32
-    let execHash : UInt32 := (hash64Fnv1a (if execHost.isEmpty then targetHost else execHost) &&& 0xFFFFFFFF).toUInt32
-    let cmdDigest := hash64Fnv1a lease.grantId
-    let toctouWord := authToctouExecuteStep 1 bunkerState
-      (if tgtHash == 0 then 1 else tgtHash) (if execHash == 0 then 1 else execHash)
+    let rawTgtHash : UInt32 := (hash64Fnv1a normLeaseHost &&& 0xFFFFFFFF).toUInt32
+    let tgtHash : UInt32 := if rawTgtHash == 0 then 1 else rawTgtHash
+    let execHash : UInt32 :=
+      if execMatches then tgtHash
+      else
+        let h := (hash64Fnv1a (normExecHost ++ ":mismatch") &&& 0xFFFFFFFF).toUInt32
+        if h == 0 || h == tgtHash then tgtHash ^^^ 1 else h
+    let cmdDigest := hash64Fnv1a (cmdText ++ "\x00" ++ String.intercalate "\x00" argv.toList)
+    let principalKind : UInt8 := sRank + 1
+    let toctouWord := authToctouExecuteStep principalKind bunkerState
+      tgtHash execHash
       lease.expiresAtEpoch lease.expiresAtEpoch nowEpochSec lease.expiresAtEpoch
       cmdDigest cmdDigest
-    let allowExec := (privWord &&& 1) == 1 && toctouWord == 257
+    let allowExec := cmdScopeOk && (privWord &&& 1) == 1 && toctouWord == 257
     if let .error e ← appendPrivilegeAuditLog st.store lease.grantId missionId targetHost execHost cmdText allowExec s!"{nowEpochSec}" then
       return .ok (mkJson 500 s!"\{\"allow_exec\":false,\"allowed\":false,\"error\":{jsonEscape e}}")
     if !allowExec then
@@ -590,20 +671,20 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       if normEffort == "__REJECT_EFFORT__" then
         return .ok (mkJson 400 s!"\{\"error\":\"unsupported_model_effort\",\"backend\":{jsonEscape backend},\"effort\":{jsonEscape rawEffort}}")
       let rawWorkDir := (JsonTape.lookupString? tape "working_directory").getD st.cfg.workingDir
-      let .ok safeWorkDir := confineWorkingDirectory st.cfg.workingDir rawWorkDir
+      let .ok safeWorkDir ← confineWorkingDirectory st.cfg.workingDir rawWorkDir
         | return .ok (mkJson 400 "{\"error\":\"invalid_working_directory\"}")
-      let projSlug := (JsonTape.lookupString? tape "project_slug").getD ""
+      let projSlug := ((JsonTape.lookupString? tape "project_slug").orElse (fun _ => JsonTape.lookupString? tape "project")).getD ""
       if !projSlug.isEmpty then
         let rawCap? ← queryProjectParallelMissions? st.store projSlug
         if let some cap := enforcedProjectParallelCap? rawCap? then
-          if let .ok statuses ← listMissionStatuses st.store then
+          if let .ok statuses ← listProjectMissionStatuses st.store projSlug then
             let held := (statuses.filter campaignSlotHeldBy).size
             if held ≥ cap then
-              return .ok (mkJson 429 s!"\{\"error\":\"project_parallel_cap_reached\",\"limit\":{cap},\"held\":{held}}")
+              return .ok (mkJson 429 s!"\{\"error\":\"parallel_missions_cap\",\"cap\":{cap},\"active\":{held}}")
       let mRec : MissionRecord := {
         id := mid, title := title, status := "awaiting_user", backend := backend,
         modelOverride := "", modelEffort := normEffort, workingDirectory := safeWorkDir,
-        updatedAt := s!"{nowEpochSec}", totalCostCents := 0
+        project := projSlug, updatedAt := s!"{nowEpochSec}", totalCostCents := 0
       }
       match ← upsertMission st.store mRec with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
@@ -727,7 +808,10 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     IO.eprintln s!"[sandboxed-sh] FATAL security configuration error: {msg}"
     return 1
   | .ok () =>
-    let dataRoot := s!"{cfg.workingDir}/.sandboxed-sh"
+    let normWork := trimTrailingSlashes cfg.workingDir.trimAscii.toString
+    let dataRoot :=
+      if normWork.endsWith "/.sandboxed-sh" || normWork == ".sandboxed-sh" then normWork
+      else s!"{normWork}/.sandboxed-sh"
     let .ok store ← openCoreStore dataRoot
       | do IO.eprintln s!"[sandboxed-sh] FATAL: failed to open SQLite CoreStore at {dataRoot}"; return 1
     let searchRes ← openSearchIndex s!"{dataRoot}/search_index"
@@ -755,7 +839,10 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       match ← tcpAcceptPoll listenFd 250 with
       | .error _ => pure ()
       | .ok cfd =>
-        handleClientConn appState cfd
+        if maxRequests?.isSome then
+          handleClientConn appState cfd
+        else
+          discard <| IO.asTask (prio := .dedicated) (handleClientConn appState cfd)
         served := served + 1
     discard <| closeFd listenFd
     closeCoreStore store

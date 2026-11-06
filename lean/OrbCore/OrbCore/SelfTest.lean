@@ -216,16 +216,80 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
 
   let .ok () ← upsertPrivilegeLease store {
     grantId := "grant-1", leaseToken := "lease-live-1234567890", missionId := "m-alpha",
-    targetHost := "ashur", scope := "ops_admin", allowedUnitsJson := "[\"sandboxed-sh.service\"]",
+    targetHost := "ashur", scope := "service_deploy", allowedUnitsJson := "[\"sandboxed-sh.service\"]",
     requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := nowSec + 300
   } | do closeCoreStore store; return 1
-  let validPrivBody := "{\"mission_id\":\"m-alpha\",\"lease_token\":\"lease-live-1234567890\",\"target_host\":\"ashur\",\"executing_host\":\"ashur\",\"command\":\"systemctl restart sandboxed-sh.service\"}"
+  -- Local orb-privd sends target_host="self" + executing_host="ashur" + argv
+  let validPrivBody := "{\"mission_id\":\"m-alpha\",\"lease_token\":\"lease-live-1234567890\",\"target_host\":\"self\",\"executing_host\":\"ashur\",\"command\":\"systemctl restart sandboxed-sh.service\",\"argv\":[\"systemctl\",\"restart\",\"sandboxed-sh.service\"]}"
   let validPrivRaw := s!"POST /api/privilege-access/verify-and-log HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {validPrivBody.utf8ByteSize}\r\n\r\n{validPrivBody}".toUTF8
   let .ok validPrivReq := parseRequest validPrivRaw none | do closeCoreStore store; return 1
   let .ok validPrivResp ← dispatchCoreRequest appSt validPrivReq nowSec | do closeCoreStore store; return 1
   if validPrivResp.status != 200 || ((String.fromUTF8! validPrivResp.body).splitOn "\"allow_exec\":true").length != 2 then
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: valid privilege lease rejected: {String.fromUTF8! validPrivResp.body}"
+    return 1
+
+  -- Disallowed unit (`sshd.service`) on `service_deploy` lease MUST fail closed with 403!
+  let badUnitBody := "{\"mission_id\":\"m-alpha\",\"lease_token\":\"lease-live-1234567890\",\"target_host\":\"self\",\"executing_host\":\"ashur\",\"command\":\"systemctl restart sshd.service\",\"argv\":[\"systemctl\",\"restart\",\"sshd.service\"]}"
+  let badUnitRaw := s!"POST /api/privilege-access/verify-and-log HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {badUnitBody.utf8ByteSize}\r\n\r\n{badUnitBody}".toUTF8
+  let .ok badUnitReq := parseRequest badUnitRaw none | do closeCoreStore store; return 1
+  let .ok badUnitResp ← dispatchCoreRequest appSt badUnitReq nowSec | do closeCoreStore store; return 1
+  if badUnitResp.status != 403 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: unauthorized unit was not rejected (got {badUnitResp.status})"
+    return 1
+
+  -- Unknown privilege scope (`ops_admin`) MUST fail closed with 403!
+  let .ok () ← upsertPrivilegeLease store {
+    grantId := "grant-bad-scope", leaseToken := "lease-bad-scope-123", missionId := "m-alpha",
+    targetHost := "ashur", scope := "ops_admin", allowedUnitsJson := "[]",
+    requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := nowSec + 300
+  } | do closeCoreStore store; return 1
+  let badScopeBody := "{\"mission_id\":\"m-alpha\",\"lease_token\":\"lease-bad-scope-123\",\"target_host\":\"ashur\",\"executing_host\":\"ashur\",\"command\":\"uname -a\",\"argv\":[\"uname\",\"-a\"]}"
+  let badScopeRaw := s!"POST /api/privilege-access/verify-and-log HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {badScopeBody.utf8ByteSize}\r\n\r\n{badScopeBody}".toUTF8
+  let .ok badScopeReq := parseRequest badScopeRaw none | do closeCoreStore store; return 1
+  let .ok badScopeResp ← dispatchCoreRequest appSt badScopeReq nowSec | do closeCoreStore store; return 1
+  if badScopeResp.status != 403 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: unknown scope was not rejected (got {badScopeResp.status})"
+    return 1
+
+  -- Expired privilege lease on a fresh mission MUST NOT permanently fence `startMachineTransfer`!
+  let .ok () ← upsertMission store {
+    id := "m-exp-lease", title := "Expired Lease Transfer Test", status := "awaiting_user",
+    backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := tmpRoot,
+    project := "proj-cap", updatedAt := "2026-11-06T00:00:00Z", totalCostCents := 0
+  } | do closeCoreStore store; return 1
+  let .ok () ← upsertPrivilegeLease store {
+    grantId := "grant-exp", leaseToken := "lease-expired-999", missionId := "m-exp-lease",
+    targetHost := "ashur", scope := "ops_read", allowedUnitsJson := "[]",
+    requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := 100
+  } | do closeCoreStore store; return 1
+  let expTxRes ← startMachineTransfer store {
+    id := "tx-exp-1", missionId := "m-exp-lease", requestKey := "rk-exp-1", revision := 0,
+    phase := "preparing", destination := "ashur", sourceRevision := "2026-11-06T00:00:00Z",
+    sourceGeneration := 0, generation := 0, createdAt := "2026-11-06T00:02:00Z"
+  }
+  if !expTxRes.isOk then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: expired privilege lease falsely fenced startMachineTransfer"
+    return 1
+
+  -- Per-project `parallel_missions_cap` returns HTTP 429 `{"error":"parallel_missions_cap","cap":1,"active":1}`
+  -- for `"proj-cap"`, while unrelated `"other-proj"` succeeds!
+  let _ ← execParamQuery store.projectsDb upsertProjectGrantSql
+    #["proj-cap", "owner", "1h", "1", "", "", "high", "propose", "2026-11-06T00:00:00Z"]
+  let capHitBody := "{\"id\":\"m-cap-2\",\"title\":\"Blocked\",\"backend\":\"codex\",\"project_slug\":\"proj-cap\"}"
+  let capHitRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {capHitBody.utf8ByteSize}\r\n\r\n{capHitBody}".toUTF8
+  let .ok capHitReq := parseRequest capHitRaw none | do closeCoreStore store; return 1
+  let .ok capHitResp ← dispatchCoreRequest appSt { capHitReq with } nowSec | do closeCoreStore store; return 1
+  let capHitStr := String.fromUTF8! capHitResp.body
+  if capHitResp.status != 429 ||
+     (capHitStr.splitOn "\"error\":\"parallel_missions_cap\"").length != 2 ||
+     (capHitStr.splitOn "\"cap\":1").length != 2 ||
+     (capHitStr.splitOn "\"active\":1").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: parallel_missions_cap contract mismatch ({capHitResp.status}): {capHitStr}"
     return 1
 
   -- WebSocket upgrade: 401 without JWT; 101 with `Sec-WebSocket-Protocol: jwt.<tok>` echoed in response!

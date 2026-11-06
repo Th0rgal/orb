@@ -1,6 +1,7 @@
 import LeanSys
 import OrbNetLeaf
 import OrbBin.Json
+import OrbBin.PosixExt
 import OrbLocald.Spec
 
 /-
@@ -141,22 +142,33 @@ structure LocaldState where
   nextSubToken        : Nat := 1
   subscriptions       : Array SubscriptionEntry := #[]
   queuedChannelEvents : Array (Nat × JVal) := #[]
+  bindingsRevision    : Nat := 0
+  bindingsEntries     : Array (String × JVal) := #[]
   clientLinkConnected : Bool := false
   approvalGraceSecs   : Nat := 300
+  approvalGraceUntil  : UInt64 := 0
+  approvalKeyPath     : String := ""
   grantedFolders      : Array String := #[]
   connectionJson      : JVal := .obj #[("url", .str ""), ("token", .str "")]
   hostOs              : String := "linux"
   signerBin?          : Option String := none
   deriving Inhabited
 
-def LocaldState.subscribe (st : LocaldState) (channel : String) : (Nat × LocaldState) :=
+def LocaldState.bindingsSnapshotJson (st : LocaldState) : JVal :=
+  .obj #[("revision", JVal.nat st.bindingsRevision), ("bindings", .obj st.bindingsEntries)]
+
+def LocaldState.subscribe (st : LocaldState) (channel : String) (initialEvent? : Option JVal := none) : (Nat × LocaldState) :=
   let tok := st.nextSubToken
   let entry : SubscriptionEntry := { token := tok, channel := channel, active := true }
-  (tok, { st with nextSubToken := tok + 1, subscriptions := st.subscriptions.push entry })
+  let q := match initialEvent? with
+    | some ev => st.queuedChannelEvents.push (tok, ev)
+    | none    => st.queuedChannelEvents
+  (tok, { st with nextSubToken := tok + 1, subscriptions := st.subscriptions.push entry, queuedChannelEvents := q })
 
 def LocaldState.unsubscribe (st : LocaldState) (tok : Nat) : LocaldState :=
-  { st with subscriptions := st.subscriptions.map fun e =>
-      if e.token == tok then { e with active := false } else e }
+  { st with
+      subscriptions := st.subscriptions.filter (fun e => e.token != tok && e.active),
+      queuedChannelEvents := st.queuedChannelEvents.filter (fun (t, _) => t != tok) }
 
 def LocaldState.clearAllSubscriptions (st : LocaldState) : LocaldState :=
   { st with subscriptions := #[], queuedChannelEvents := #[] }
@@ -172,15 +184,18 @@ def checkRpcAuth (remoteHost : String) (providedToken : String) (expectedToken :
   let tokOk : UInt8 := if !isPlaceholder && LeanSys.Auth.ctEqString providedToken expectedToken then 1 else 0
   verifyLocaldRpcAuth isLoop tokOk tokLen == 1
 
-/-- Check whether an HTTP `Origin` header is an allowed local desktop shell origin (never wildcard `*`). -/
+/-- Check whether an HTTP `Origin` header is an allowed local desktop shell origin (never wildcard `*`),
+    rejecting CR/LF/NUL control characters so header reflection is impossible. -/
 def isAllowedLocaldOrigin (origin? : Option String) : Bool :=
   match origin? with
   | none => true
   | some raw =>
-    let o := raw.trimAscii.toString
-    o.isEmpty || o == "null" || o == "file://" || o == "tauri://localhost" ||
-    o.startsWith "http://127.0.0.1:" || o.startsWith "http://localhost:" ||
-    o == "http://127.0.0.1" || o == "http://localhost"
+    if raw.toList.any (fun c => c == '\r' || c == '\n' || c.toNat == 0) then false
+    else
+      let o := raw.trimAscii.toString
+      o.isEmpty || o == "null" || o == "file://" || o == "tauri://localhost" ||
+      o.startsWith "http://127.0.0.1:" || o.startsWith "http://localhost:" ||
+      o == "http://127.0.0.1" || o == "http://localhost"
 
 /-- Canonical list of all 88 desktop IPC commands (`87` commands + `plugin:app|version`). -/
 def supportedDesktopCommands : Array String := #[
@@ -214,9 +229,9 @@ def supportedDesktopCommands : Array String := #[
 ]
 
 private def runOrbSigner (signerBin : String) (subArgs : Array String) (stdinText? : Option String := none) :
-    IO (Except String JVal) := do
+    IO (Except (UInt32 × String) JVal) := do
   if !(← System.FilePath.pathExists signerBin) then
-    return .error "orb-signer binary not found"
+    return .error (127, "orb-signer binary not found")
   let child ← IO.Process.spawn {
     cmd := signerBin
     args := subArgs
@@ -233,10 +248,15 @@ private def runOrbSigner (signerBin : String) (subArgs : Array String) (stdinTex
   let code ← child'.wait
   let outStr ← IO.ofExcept outTask.get
   if code != 0 then
-    return .error (if errStr.trimAscii.toString.isEmpty then s!"orb-signer exited {code}" else errStr.trimAscii.toString)
+    let msg := if errStr.trimAscii.toString.isEmpty then s!"orb-signer exited {code}" else errStr.trimAscii.toString
+    return .error (code, msg)
   match OrbBin.Json.parse outStr.trimAscii.toString with
   | .ok jv => return .ok jv
-  | .error e => return .error s!"orb-signer JSON parse error: {e}"
+  | .error e => return .error (1, s!"orb-signer JSON parse error: {e}")
+
+private def resolveApprovalKeyArgs (st : LocaldState) (verb : String) : Array String :=
+  let kp := if st.approvalKeyPath.trimAscii.toString.isEmpty then "approval-key.bin" else st.approvalKeyPath
+  #[verb, "--key", kp]
 
 private def allShardPortsValid (rpcPort proxyPort : UInt16) (shardPorts : Array UInt16) : Bool :=
   shardPorts.all (fun p => p ≥ 1024 && p != rpcPort && p != proxyPort) &&
@@ -275,34 +295,60 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     match st.signerBin? with
     | some bin =>
       if st.hostOs == "macos" && (← System.FilePath.pathExists bin) then
-        match ← runOrbSigner bin #["public"] with
+        match ← runOrbSigner bin (resolveApprovalKeyArgs st "public") with
         | .ok jv =>
           let pk := (jv.fieldStr? "public_key").getD ""
-          return .ok (.obj #[("available", .bool true), ("enrolled", .bool (!pk.isEmpty)), ("public_key", .str pk)])
+          return .ok (.obj #[("available", .bool true), ("enrolled", .bool (!pk.isEmpty)), ("public_key", if pk.isEmpty then .null else .str pk)])
         | .error _ =>
-          return .ok (.obj #[("available", .bool true), ("enrolled", .bool false)])
+          return .ok (.obj #[("available", .bool true), ("enrolled", .bool false), ("public_key", .null)])
       else
-        return .ok (.obj #[("available", .bool false), ("enrolled", .bool false)])
+        return .ok (.obj #[("available", .bool false), ("enrolled", .bool false), ("public_key", .null)])
     | none =>
-      return .ok (.obj #[("available", .bool false), ("enrolled", .bool false)])
+      return .ok (.obj #[("available", .bool false), ("enrolled", .bool false), ("public_key", .null)])
   | "approval_key_create" =>
     match st.signerBin? with
     | some bin =>
-      if st.hostOs == "macos" then runOrbSigner bin #["create"]
+      if st.hostOs == "macos" then
+        match ← runOrbSigner bin (resolveApprovalKeyArgs st "create") with
+        | .ok jv =>
+          let pk := (jv.fieldStr? "public_key").getD ""
+          if pk.isEmpty then return .error "orb-signer returned empty public_key"
+          return .ok (.str pk)
+        | .error (_, msg) => return .error msg
       else return .error "Secure Enclave is only available on macOS"
     | none => return .error "Secure Enclave is only available on macOS"
   | "approval_sign" =>
     let payload := (args.fieldStr? "payload").getD ""
     match st.signerBin? with
     | some bin =>
-      if st.hostOs == "macos" then runOrbSigner bin #["sign"] (some payload)
+      if st.hostOs == "macos" then
+        match ← runOrbSigner bin (resolveApprovalKeyArgs st "sign") (some payload) with
+        | .ok jv =>
+          let sig := (jv.fieldStr? "signature").getD ""
+          if sig.isEmpty then return .error "orb-signer returned empty signature"
+          if isPalomaPayloadGraceEligible payload && st.approvalGraceSecs > 0 then
+            let nowSec ← OrbBin.PosixExt.nowEpoch
+            stRef.modify fun s => { s with approvalGraceUntil := nowSec + s.approvalGraceSecs.toUInt64 }
+          return .ok (.str sig)
+        | .error (2, _) =>
+          stRef.modify fun s => { s with approvalGraceUntil := 0 }
+          return .error "cancelled"
+        | .error (_, msg) =>
+          stRef.modify fun s => { s with approvalGraceUntil := 0 }
+          return .error msg
       else return .error "Secure Enclave signing unavailable on this host"
     | none => return .error "Secure Enclave signing unavailable on this host"
   | "approval_grace_until" =>
-    return .ok .null
+    let nowSec ← OrbBin.PosixExt.nowEpoch
+    let rem : Nat := if st.approvalGraceUntil > nowSec then st.approvalGraceUntil.toNat else 0
+    return .ok (JVal.nat rem)
   | "set_approval_grace" =>
-    let secs := (args.fieldNat? "seconds").getD 300
-    stRef.modify fun s => { s with approvalGraceSecs := min secs 3600 }
+    let secs := ((args.fieldNat? "secs").orElse (fun _ => args.fieldNat? "seconds")).getD 300
+    let clamped := min secs 3600
+    stRef.modify fun s =>
+      { s with
+          approvalGraceSecs := clamped,
+          approvalGraceUntil := if clamped == 0 then 0 else s.approvalGraceUntil }
     return .ok .null
   | "biometric_status" =>
     let avail := st.hostOs == "macos"
@@ -316,21 +362,39 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     return .ok (.bool true)
   | "client_link_flush" | "client_link_set_capabilities" | "client_link_start_result" =>
     return .ok .null
+  | "local_bindings_refresh" =>
+    return .ok st.bindingsSnapshotJson
+  | "local_binding_set" =>
+    let bid := (args.fieldStr? "id").getD ""
+    let bval := (args.field? "binding").getD (.obj #[])
+    let ifAbsent := (args.fieldBool? "ifAbsent").getD false
+    let snap ← stRef.modifyGet fun s =>
+      if bid.isEmpty || (ifAbsent && (s.bindingsEntries.any (fun (k, _) => k == bid))) then
+        (s.bindingsSnapshotJson, s)
+      else
+        let filtered := s.bindingsEntries.filter (fun (k, _) => k != bid)
+        let nextEntries := filtered.push (bid, bval)
+        let nextRev := s.bindingsRevision + 1
+        let nextSnap : JVal := .obj #[("revision", JVal.nat nextRev), ("bindings", .obj nextEntries)]
+        let pushed := (s.subscriptions.filter (fun e => e.active && e.channel == "local_bindings")).foldl
+          (fun acc e => acc.push (e.token, nextSnap)) s.queuedChannelEvents
+        (nextSnap, { s with bindingsRevision := nextRev, bindingsEntries := nextEntries, queuedChannelEvents := pushed })
+    return .ok snap
   | "local_bindings_subscribe" =>
-    let (tok, st') := st.subscribe "local_bindings"
-    stRef.set st'
+    let tok ← stRef.modifyGet fun s =>
+      s.subscribe "local_bindings" (some s.bindingsSnapshotJson)
     return .ok (JVal.nat tok)
   | "local_interaction_subscribe" =>
-    let (tok, st') := st.subscribe "local_interaction"
-    stRef.set st'
+    let tok ← stRef.modifyGet fun s =>
+      s.subscribe "local_interaction" (some .null)
     return .ok (JVal.nat tok)
   | "project_context_subscribe" =>
-    let (tok, st') := st.subscribe "project_context"
-    stRef.set st'
+    let tok ← stRef.modifyGet fun s =>
+      s.subscribe "project_context" none
     return .ok (JVal.nat tok)
   | "local_agents_subscribe" =>
-    let (tok, st') := st.subscribe "local_agents"
-    stRef.set st'
+    let tok ← stRef.modifyGet fun s =>
+      s.subscribe "local_agents" none
     return .ok (JVal.nat tok)
   | "local_bindings_unsubscribe" | "local_interaction_unsubscribe"
   | "project_context_unsubscribe" | "local_agents_unsubscribe" =>
@@ -379,8 +443,23 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   s!"  const ORB_TOKEN = {tokLit};\n" ++
   "  const listeners = new Map();\n" ++
   "  const channels = new Map();\n" ++
+  "  let timer = 0;\n" ++
   "  class Channel {\n" ++
   "    constructor() { this.onmessage = () => {}; }\n" ++
+  "  }\n" ++
+  "  async function drain() {\n" ++
+  "    if (!channels.size) { if (timer) { clearInterval(timer); timer = 0; } return; }\n" ++
+  "    try {\n" ++
+  "      const r = await _fetch(ORB_LOCALD_URL, {\n" ++
+  "        method: 'POST',\n" ++
+  "        headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },\n" ++
+  "        body: _jsonStringify({ command: '__orb_poll_events', args: {} })\n" ++
+  "      });\n" ++
+  "      const b = await r.json();\n" ++
+  "      if (Array.isArray(b.result)) {\n" ++
+  "        for (const ev of b.result) channels.get(ev.token)?.onmessage(ev.payload);\n" ++
+  "      }\n" ++
+  "    } catch {}\n" ++
   "  }\n" ++
   "  async function invoke(command, args = {}, _options = {}) {\n" ++
   "    const cleanArgs = { ...(args || {}) };\n" ++
@@ -389,6 +468,9 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "      boundChan = cleanArgs.onEvent;\n" ++
   "      delete cleanArgs.onEvent;\n" ++
   "    }\n" ++
+  "    if (command.endsWith('_unsubscribe') && typeof cleanArgs.token === 'number') {\n" ++
+  "      channels.delete(cleanArgs.token);\n" ++
+  "    }\n" ++
   "    const res = await _fetch(ORB_LOCALD_URL, {\n" ++
   "      method: 'POST',\n" ++
   "      headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },\n" ++
@@ -396,7 +478,11 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "    });\n" ++
   "    const body = await res.json();\n" ++
   "    if (!res.ok || body.error) throw new Error(body.error || `RPC ${command} failed`);\n" ++
-  "    if (boundChan && typeof body.result === 'number') channels.set(body.result, boundChan);\n" ++
+  "    if (boundChan && typeof body.result === 'number') {\n" ++
+  "      channels.set(body.result, boundChan);\n" ++
+  "      if (!timer) timer = setInterval(drain, 250);\n" ++
+  "      void drain();\n" ++
+  "    }\n" ++
   "    return body.result;\n" ++
   "  }\n" ++
   "  async function listen(name, handler) {\n" ++

@@ -66,13 +66,15 @@ def handleUpdateHarness (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : Pee
     ]
     match (← sendJsonRequest "POST" verifyUrl cfg.apiToken (some verifyBody) #[("User-Agent", "orb-privd/1.0")] 15000) with
     | .ok (status, text, j?) =>
-      let valid := match j? with
+      let (valid, scopeStr) := match j? with
         | some j =>
-          (j.fieldBool? "allow_exec").orElse (fun _ =>
+          let v := (j.fieldBool? "allow_exec").orElse (fun _ =>
             (j.fieldBool? "valid").orElse (fun _ => j.fieldBool? "allowed")) |>.getD false
-        | none => false
-      if !(200 ≤ status && status < 300) || !valid then
-        return (← replyError cfd s!"Core rejected update_harness lease ({status}): {text}" 126)
+          (v, (j.fieldStr? "scope").getD "")
+        | none => (false, "")
+      let scopeAllowed := scopeStr == "service_deploy" || scopeStr == "root_exec" || scopeStr == "host_admin"
+      if !(200 ≤ status && status < 300) || !valid || !scopeAllowed then
+        return (← replyError cfd s!"Core rejected update_harness lease ({status}, scope={scopeStr}): {text}" 126)
     | .error err =>
       return (← replyError cfd s!"Failed contacting Core privilege verifier: {err}" 126)
   let rawHarness := ((req.fieldStr? "name").orElse (fun _ => req.fieldStr? "harness")).getD ""

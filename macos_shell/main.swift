@@ -68,7 +68,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegat
                 "ORB_LOCALD_PORT": String(port),
                 "ORB_LOCALD_TOKEN": token
             ]
-            for k in ["HOME", "PATH", "TMPDIR", "USER", "LANG", "ORB_SIGNER_BIN"] {
+            for k in ["HOME", "PATH", "TMPDIR", "USER", "LANG", "ORB_SIGNER_BIN", "ORB_APPROVAL_KEY_PATH"] {
                 if let v = env[k] { childEnv[k] = v }
             }
             p.environment = childEnv
@@ -87,10 +87,26 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegat
           class Channel { constructor() { this.onmessage = () => {}; } }
           const listeners = new Map();
           const channels = new Map();
+          let timer = 0;
+          async function drain() {
+            if (!channels.size) { if (timer) { clearInterval(timer); timer = 0; } return; }
+            try {
+              const r = await _fetch(ORB_LOCALD_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },
+                body: _jsonStringify({ command: '__orb_poll_events', args: {} })
+              });
+              const b = await r.json();
+              if (Array.isArray(b.result)) {
+                for (const ev of b.result) channels.get(ev.token)?.onmessage(ev.payload);
+              }
+            } catch {}
+          }
           async function invoke(command, args = {}) {
             const clean = { ...(args || {}) };
             let bound = null;
             if (clean.onEvent instanceof Channel) { bound = clean.onEvent; delete clean.onEvent; }
+            if (command.endsWith('_unsubscribe') && typeof clean.token === 'number') channels.delete(clean.token);
             const r = await _fetch(ORB_LOCALD_URL, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },
@@ -98,7 +114,11 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegat
             });
             const b = await r.json();
             if (!r.ok || b.error) throw new Error(b.error || command);
-            if (bound && typeof b.result === 'number') channels.set(b.result, bound);
+            if (bound && typeof b.result === 'number') {
+              channels.set(b.result, bound);
+              if (!timer) timer = setInterval(drain, 250);
+              void drain();
+            }
             return b.result;
           }
           async function listen(n, h) {

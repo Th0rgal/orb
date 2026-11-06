@@ -4,6 +4,7 @@
   Opens existing `missions.db` / `projects.db` / `ask.db` / `idempotency_keys.db`
   in-place with WAL journaling and positional `?1..?N` bindings.
 -/
+import Std.Sync.Mutex
 import OrbCore.Spec
 
 namespace OrbCore.Store
@@ -25,11 +26,11 @@ opaque sqliteQueryRowsRaw (handle : UInt64) (sql : @& String) (params : @& Array
 @[extern "orb_core_epoch_sec"]
 opaque coreEpochSec : IO UInt64
 
-/-- Typed SQLite handle opened in WAL mode. -/
+/-- Typed SQLite handle opened in WAL mode with an exclusive `Std.Mutex` serializing C `sqlite3*` access. -/
 structure SqliteDb where
   handle : UInt64
   path   : String
-  deriving Repr, DecidableEq
+  mu     : Std.Mutex Unit
 
 /-- Conversation turn history entry (`pub history: Vec<MissionHistoryEntry>,` capability parity). -/
 structure MissionHistoryEntry where
@@ -49,6 +50,7 @@ structure MissionRecord where
   modelOverride    : String
   modelEffort      : String := ""
   workingDirectory : String
+  project          : String := ""
   updatedAt        : String
   totalCostCents   : UInt64 := 0
   history          : Array MissionHistoryEntry := #[]
@@ -114,7 +116,7 @@ def transferCleanupSql : String :=
   "COMMIT;"
 
 def missionsSchemaSql : String :=
-  "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', model_override TEXT, model_effort TEXT, working_directory TEXT NOT NULL DEFAULT '', requires_local_disk INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]', session_id TEXT, deferred_goal TEXT, workspace_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000', terminal_reason TEXT, updated_at TEXT NOT NULL DEFAULT '', opened_at TEXT, agent TEXT, config_profile TEXT, total_cost_cents INTEGER NOT NULL DEFAULT 0, history_json TEXT NOT NULL DEFAULT '[]');" ++
+  "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', model_override TEXT, model_effort TEXT, working_directory TEXT NOT NULL DEFAULT '', project TEXT NOT NULL DEFAULT '', requires_local_disk INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]', session_id TEXT, deferred_goal TEXT, workspace_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000', terminal_reason TEXT, updated_at TEXT NOT NULL DEFAULT '', opened_at TEXT, agent TEXT, config_profile TEXT, total_cost_cents INTEGER NOT NULL DEFAULT 0, history_json TEXT NOT NULL DEFAULT '[]');" ++
   "CREATE TABLE IF NOT EXISTS mission_runs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1, execution_state TEXT NOT NULL DEFAULT 'terminal', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, mission_id TEXT NOT NULL, seq INTEGER NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_automations (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, cron_expr TEXT NOT NULL, prompt TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '');" ++
@@ -146,7 +148,7 @@ def askSchemaSql : String :=
 def idempotencySchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS idempotency_keys (scope TEXT NOT NULL, request_key TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(scope, request_key));"
 
-def openSqliteDb (path : String) (ddl : String) : IO (Except String SqliteDb) := do
+def openSqliteDb (path : String) (ddl : String) (postDdlAlter? : Option String := none) : IO (Except String SqliteDb) := do
   let h ← sqliteOpenRaw path
   if h == 0 then
     return .error s!"sqlite_open_failed:{path}"
@@ -155,12 +157,16 @@ def openSqliteDb (path : String) (ddl : String) : IO (Except String SqliteDb) :=
     sqliteCloseRaw h
     return .error e
   | .ok () =>
-    return .ok { handle := h, path := path }
+    if let some alt := postDdlAlter? then
+      discard <| sqliteExecRaw h alt
+    let mu ← Std.Mutex.new ()
+    return .ok { handle := h, path := path, mu := mu }
 
 /-- Open or initialize the full `CoreStore` SQLite bundle in `rootDir` (preserving existing DB files in-place). -/
 def openCoreStore (rootDir : String) : IO (Except String CoreStore) := do
   IO.FS.createDirAll rootDir
   let mRes ← openSqliteDb s!"{rootDir}/missions.db" missionsSchemaSql
+    (some "ALTER TABLE missions ADD COLUMN project TEXT NOT NULL DEFAULT '';")
   let .ok mDb := mRes | return .error (match mRes with | .error e => e | .ok _ => "err")
   let pRes ← openSqliteDb s!"{rootDir}/projects.db" projectsSchemaSql
   let .ok pDb := pRes | do sqliteCloseRaw mDb.handle; return .error (match pRes with | .error e => e | .ok _ => "err")
@@ -177,10 +183,10 @@ def openCoreStore (rootDir : String) : IO (Except String CoreStore) := do
 def closeCoreStore (st : CoreStore) : IO Unit := do
   let already ← st.closedRef.swap true
   if !already then
-    sqliteCloseRaw st.missionsDb.handle
-    sqliteCloseRaw st.projectsDb.handle
-    sqliteCloseRaw st.askDb.handle
-    sqliteCloseRaw st.idempotencyDb.handle
+    st.missionsDb.mu.atomically (sqliteCloseRaw st.missionsDb.handle)
+    st.projectsDb.mu.atomically (sqliteCloseRaw st.projectsDb.handle)
+    st.askDb.mu.atomically (sqliteCloseRaw st.askDb.handle)
+    st.idempotencyDb.mu.atomically (sqliteCloseRaw st.idempotencyDb.handle)
 
 private def hexNibble (n : Nat) : Char :=
   let v := n % 16
@@ -235,30 +241,34 @@ def rowsToJsonArray (rows : Array (Array String)) : String :=
       objs := objs.push ("{" ++ String.intercalate "," kvs.toList ++ "}")
     return "[" ++ String.intercalate "," objs.toList ++ "]"
 
-def execParamQuery (db : SqliteDb) (sql : String) (params : Array String) : IO (Except String (Array (Array String))) :=
+def execParamQueryUnlocked (db : SqliteDb) (sql : String) (params : Array String) : IO (Except String (Array (Array String))) :=
   sqliteQueryRowsRaw db.handle sql params
 
-/-- Execute `act` inside an atomic `BEGIN IMMEDIATE ... COMMIT` SQLite write transaction. -/
-def withImmediateTx {α : Type} (db : SqliteDb) (act : IO (Except String α)) : IO (Except String α) := do
-  match ← sqliteExecRaw db.handle "BEGIN IMMEDIATE;" with
-  | .error e => return .error s!"tx_begin_failed:{e}"
-  | .ok () =>
-    match ← act with
-    | .ok v =>
-      match ← sqliteExecRaw db.handle "COMMIT;" with
-      | .ok () => return .ok v
-      | .error e =>
+def execParamQuery (db : SqliteDb) (sql : String) (params : Array String) : IO (Except String (Array (Array String))) :=
+  db.mu.atomically (sqliteQueryRowsRaw db.handle sql params)
+
+/-- Execute `act` inside an atomic, mutex-serialized `BEGIN IMMEDIATE ... COMMIT` SQLite write transaction. -/
+def withImmediateTx {α : Type} (db : SqliteDb) (act : IO (Except String α)) : IO (Except String α) :=
+  db.mu.atomically do
+    match ← sqliteExecRaw db.handle "BEGIN IMMEDIATE;" with
+    | .error e => return .error s!"tx_begin_failed:{e}"
+    | .ok () =>
+      match ← act with
+      | .ok v =>
+        match ← sqliteExecRaw db.handle "COMMIT;" with
+        | .ok () => return .ok v
+        | .error e =>
+          discard <| sqliteExecRaw db.handle "ROLLBACK;"
+          return .error s!"tx_commit_failed:{e}"
+      | .error err =>
         discard <| sqliteExecRaw db.handle "ROLLBACK;"
-        return .error s!"tx_commit_failed:{e}"
-    | .error err =>
-      discard <| sqliteExecRaw db.handle "ROLLBACK;"
-      return .error err
+        return .error err
 
 /-- Upsert a mission record into `missions.db`. -/
 def upsertMission (st : CoreStore) (m : MissionRecord) : IO (Except String Unit) := do
-  let sql := "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,updated_at,total_cost_cents) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET title=excluded.title,status=excluded.status,backend=excluded.backend,model_override=excluded.model_override,model_effort=excluded.model_effort,working_directory=excluded.working_directory,updated_at=excluded.updated_at,total_cost_cents=excluded.total_cost_cents;"
+  let sql := "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,updated_at,total_cost_cents) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET title=excluded.title,status=excluded.status,backend=excluded.backend,model_override=excluded.model_override,model_effort=excluded.model_effort,working_directory=excluded.working_directory,project=excluded.project,updated_at=excluded.updated_at,total_cost_cents=excluded.total_cost_cents;"
   let res ← execParamQuery st.missionsDb sql #[
-    m.id, m.title, m.status, m.backend, m.modelOverride, m.modelEffort, m.workingDirectory, m.updatedAt, s!"{m.totalCostCents}"
+    m.id, m.title, m.status, m.backend, m.modelOverride, m.modelEffort, m.workingDirectory, m.project, m.updatedAt, s!"{m.totalCostCents}"
   ]
   return res.map (fun _ => ())
 
@@ -271,6 +281,17 @@ def mark_mission_opened (st : CoreStore) (missionId openedAt : String) : IO (Exc
 /-- List all mission status strings currently persisted in `missions.db`. -/
 def listMissionStatuses (st : CoreStore) : IO (Except String (Array String)) := do
   let rows ← execParamQuery st.missionsDb "SELECT status FROM missions;" #[]
+  return rows.map (fun rs =>
+    if rs.size ≤ 1 then #[]
+    else Id.run do
+      let mut out : Array String := Array.mkEmpty (rs.size - 1)
+      for i in [1:rs.size] do
+        out := out.push ((rs[i]![0]?).getD "")
+      return out)
+
+/-- List mission status strings scoped to a specific `project` slug in `missions.db`. -/
+def listProjectMissionStatuses (st : CoreStore) (proj : String) : IO (Except String (Array String)) := do
+  let rows ← execParamQuery st.missionsDb "SELECT status FROM missions WHERE project=?1;" #[proj]
   return rows.map (fun rs =>
     if rs.size ≤ 1 then #[]
     else Id.run do
@@ -317,25 +338,26 @@ def isStatusMovable (status : String) : Bool :=
   status == "not_feasible" || status == "acknowledged"
 
 /-- Transactional fence-checked machine-transfer initiation gated by `verifyTransferFence` (`OrbCore.Spec`). -/
-def startMachineTransfer (st : CoreStore) (t : TransferRecord) : IO (Except String TransferRecord) :=
+def startMachineTransfer (st : CoreStore) (t : TransferRecord) : IO (Except String TransferRecord) := do
+  let nowSec ← coreEpochSec
   withImmediateTx st.missionsDb do
-    let activeRows ← execParamQuery st.missionsDb
+    let activeRows ← execParamQueryUnlocked st.missionsDb
       "SELECT COUNT(*) FROM machine_transfers WHERE mission_id=?1 AND phase NOT IN ('activated','cancelled');" #[t.missionId]
     let .ok ar := activeRows | return .error "transfer_active_query_failed"
     let activeCnt := ((ar[1]?.bind (·[0]?)).bind String.toNat?).getD 1
-    let runRows ← execParamQuery st.missionsDb
+    let runRows ← execParamQueryUnlocked st.missionsDb
       "SELECT COUNT(*), COALESCE(MAX(generation),0) FROM mission_runs WHERE mission_id=?1 AND execution_state<>'terminal';" #[t.missionId]
     let .ok rr := runRows | return .error "transfer_runs_query_failed"
     let nonTermCnt := ((rr[1]?.bind (·[0]?)).bind String.toNat?).getD 1
-    let leaseRows ← execParamQuery st.missionsDb
-      "SELECT COUNT(*) FROM privilege_leases WHERE mission_id=?1 AND revoked=0 AND expires_at_epoch>0;" #[t.missionId]
+    let leaseRows ← execParamQueryUnlocked st.missionsDb
+      "SELECT COUNT(*) FROM privilege_leases WHERE mission_id=?1 AND revoked=0 AND expires_at_epoch>?2;" #[t.missionId, s!"{nowSec}"]
     let .ok lr := leaseRows | return .error "transfer_lease_query_failed"
     let liveLeaseCnt := ((lr[1]?.bind (·[0]?)).bind String.toNat?).getD 0
-    let genRows ← execParamQuery st.missionsDb
+    let genRows ← execParamQueryUnlocked st.missionsDb
       "SELECT COALESCE(MAX(generation),0) FROM mission_runs WHERE mission_id=?1;" #[t.missionId]
     let .ok gr := genRows | return .error "transfer_gen_query_failed"
     let storedGen := (((gr[1]?.bind (·[0]?)).bind String.toNat?).getD 0).toUInt64
-    let mRows ← execParamQuery st.missionsDb
+    let mRows ← execParamQueryUnlocked st.missionsDb
       "SELECT status, updated_at FROM missions WHERE id=?1;" #[t.missionId]
     let .ok mr := mRows | return .error "transfer_mission_query_failed"
     if mr.size ≤ 1 then return .error "mission_not_found"
@@ -350,11 +372,11 @@ def startMachineTransfer (st : CoreStore) (t : TransferRecord) : IO (Except Stri
     let nextGen := storedGen + 1
     let outRec := { t with generation := nextGen, revision := 0 }
     let dataJson := s!"\{\"id\":{jsonEscape outRec.id},\"mission_id\":{jsonEscape outRec.missionId},\"phase\":{jsonEscape outRec.phase},\"destination\":{jsonEscape outRec.destination},\"generation\":{outRec.generation}}"
-    let ins ← execParamQuery st.missionsDb
+    let ins ← execParamQueryUnlocked st.missionsDb
       "INSERT INTO machine_transfers(id,mission_id,request_key,revision,phase,data,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7);"
       #[outRec.id, outRec.missionId, outRec.requestKey, "0", outRec.phase, dataJson, outRec.createdAt]
     let .ok _ := ins | return .error (match ins with | .error e => e | .ok _ => "transfer_insert_failed")
-    let runIns ← execParamQuery st.missionsDb
+    let runIns ← execParamQueryUnlocked st.missionsDb
       "INSERT OR REPLACE INTO mission_runs(id,mission_id,generation,execution_state,updated_at) VALUES(?1,?2,?3,'terminal',?4);"
       #[s!"txrun-{outRec.id}", outRec.missionId, s!"{nextGen}", outRec.createdAt]
     match runIns with
@@ -405,14 +427,14 @@ def appendPrivilegeAuditLog (st : CoreStore)
 /-- Transactional idempotency key read-or-insert (`idempotency_keys.db`). -/
 def checkOrStoreIdempotency (st : CoreStore) (scope reqKey responseJson createdAt : String) : IO (Except String String) :=
   withImmediateTx st.idempotencyDb do
-    let existing ← execParamQuery st.idempotencyDb
+    let existing ← execParamQueryUnlocked st.idempotencyDb
       "SELECT response_json FROM idempotency_keys WHERE scope=?1 AND request_key=?2;" #[scope, reqKey]
     match existing with
     | .error e => return .error e
     | .ok rows =>
       if rows.size > 1 then
         return .ok ((rows[1]?.bind (·[0]?)).getD "{}")
-      let ins ← execParamQuery st.idempotencyDb
+      let ins ← execParamQueryUnlocked st.idempotencyDb
         "INSERT INTO idempotency_keys(scope,request_key,response_json,created_at) VALUES(?1,?2,?3,?4);"
         #[scope, reqKey, responseJson, createdAt]
       match ins with

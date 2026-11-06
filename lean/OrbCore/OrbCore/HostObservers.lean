@@ -158,24 +158,42 @@ def validate_lease_token (seed : UInt64 := 0) : UInt64 :=
   else (callExportU64? "leansys_verify_token_auth" #[1, 1, 1, 1, 100, 200]).getD 0
 
 def node_token_matches (seed : UInt64 := 0) : UInt64 :=
-  if (seed &&& 1) == 0 then (callExportU64? "leansys_verify_token_auth" #[0, 0, 0, 0, 0, 0]).getD 0 ^^^ (callExportU64? "orb_verify_token_rotation" #[0, 0, 0, 0, 0]).getD 0
-  else (callExportU64? "leansys_verify_token_auth" #[1, 1, 1, 1, 100, 200]).getD 0 ^^^ (callExportU64? "orb_verify_token_rotation" #[0, 0, 0, 0, 0]).getD 0
+  if (seed &&& 1) == 0 then
+    (callExportU64? "leansys_verify_token_auth" #[0, 0, 0, 0, 0, 0]).getD 0 ^^^
+    ((callExportU64? "orb_verify_token_rotation" #[0, 0, 0, 0, 0]).getD 0 <<< 1)
+  else
+    (callExportU64? "leansys_verify_token_auth" #[1, 1, 1, 1, 100, 200]).getD 0 ^^^
+    ((callExportU64? "orb_verify_token_rotation" #[1, 1, 1, 1, 1]).getD 0 <<< 1)
 
 def read_log_chunk (seed : UInt64 := 0) : UInt64 :=
-  if (seed &&& 1) == 0 then (callExportU64? "leansys_verify_log_window" #[0, 0, 0, 0]).getD 0 ^^^ (callExportU64? "leansys_verify_slice_bounds" #[0, 0, 0]).getD 0 ^^^ (callExportU64? "orb_verify_log_window" #[0, 0, 0, 0, 0, 0]).getD 0
-  else (callExportU64? "leansys_verify_log_window" #[0, 1, 0, 1]).getD 0 ^^^ (callExportU64? "leansys_verify_slice_bounds" #[0, 0, 0]).getD 0 ^^^ (callExportU64? "orb_verify_log_window" #[0, 0, 0, 0, 0, 0]).getD 0
+  if (seed &&& 1) == 0 then
+    (callExportU64? "leansys_verify_log_window" #[0, 64, 4096, 1024]).getD 0 ^^^
+    ((callExportU64? "leansys_verify_slice_bounds" #[0, 64, 1024]).getD 0 <<< 1) ^^^
+    ((callExportU64? "orb_verify_log_window" #[0, 64, 4096, 65536, 1024, 64]).getD 0 <<< 2)
+  else
+    (callExportU64? "leansys_verify_log_window" #[2000, 64, 4096, 1024]).getD 0 ^^^
+    ((callExportU64? "leansys_verify_slice_bounds" #[2000, 64, 1024]).getD 0 <<< 1) ^^^
+    ((callExportU64? "orb_verify_log_window" #[2000, 64, 4096, 65536, 1024, 64]).getD 0 <<< 2)
 
 def proc_stat_fields (seed : UInt64 := 0) : UInt64 :=
   if (seed &&& 1) == 0 then (callExportU64? "leansys_verify_proc_stat_fields" #[0, 0, 0, 0, 0]).getD 0
   else (callExportU64? "leansys_verify_proc_stat_fields" #[100, 110, 120, 130, 140]).getD 0
 
 def select_host_stream_isa_with_caps (seed : UInt64 := 0) : UInt64 :=
-  if (seed &&& 1) == 0 then (callExportU64? "leansys_select_isa" #[775, 775, 1, 6]).getD 0 ^^^ (callExportU64? "leansys_verify_isa_selection" #[775, 775, 1, 6]).getD 0
-  else (callExportU64? "leansys_select_isa" #[0, 775, 1, 6]).getD 0 ^^^ (callExportU64? "leansys_verify_isa_selection" #[775, 775, 1, 6]).getD 0
+  if (seed &&& 1) == 0 then
+    (callExportU64? "leansys_select_isa" #[775, 775, 1, 6]).getD 0 ^^^
+    ((callExportU64? "leansys_verify_isa_selection" #[775, 775, 1, 6]).getD 0 <<< 4)
+  else
+    (callExportU64? "leansys_select_isa" #[0, 775, 1, 6]).getD 0 ^^^
+    ((callExportU64? "leansys_verify_isa_selection" #[0, 775, 1, 6]).getD 0 <<< 4)
 
 def scan_host_stream_bytes (seed : UInt64 := 0) : UInt64 :=
-  if (seed &&& 1) == 0 then (callExportU64? "leansys_select_isa" #[775, 775, 1, 6]).getD 0 ^^^ (callExportU64? "leansys_verify_isa_selection" #[775, 775, 1, 6]).getD 0
-  else (callExportU64? "leansys_select_isa" #[0, 775, 1, 6]).getD 0 ^^^ (callExportU64? "leansys_verify_isa_selection" #[775, 775, 1, 6]).getD 0
+  if (seed &&& 1) == 0 then
+    (callExportU64? "leansys_select_isa" #[799, 799, 2, 6]).getD 0 ^^^
+    ((callExportU64? "leansys_verify_isa_selection" #[799, 799, 2, 6]).getD 0 <<< 4)
+  else
+    (callExportU64? "leansys_select_isa" #[0, 799, 2, 6]).getD 0 ^^^
+    ((callExportU64? "leansys_verify_isa_selection" #[0, 799, 2, 6]).getD 0 <<< 4)
 
 def check (seed : UInt64 := 0) : UInt64 :=
   if (seed &&& 1) == 0 then (callExportU64? "orb_verify_bundle_budget" #[0, 0, 0, 0, 0]).getD 0
