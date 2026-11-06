@@ -1,5 +1,5 @@
 import json, pathlib, subprocess, tempfile, unittest
-SCRIPT = pathlib.Path(__file__).parents[1] / 'src-tauri/src/wakeup_mcp.py'
+SCRIPT = pathlib.Path(__file__).parents[2] / 'scripts/wakeup_mcp.py'
 class DurableWakeupTests(unittest.TestCase):
     def test_duplicate_request_survives_process_restart(self):
         with tempfile.TemporaryDirectory() as root:

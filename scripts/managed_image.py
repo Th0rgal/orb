@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -288,9 +289,19 @@ def resolve_source(source):
 
 
 def node_version_for(repo, treeish, sha):
-    cargo = git(repo, 'show', f'{treeish}:Cargo.toml')
-    version = next(line.split('"')[1] for line in cargo.splitlines() if line.startswith('version'))
-    return f'{version}+{sha[:9]}'
+    try:
+        lakefile = git(repo, 'show', f'{treeish}:lean/OrbNode/lakefile.lean')
+        m = re.search(r'version\s*:=\s*v!"([^"]+)"', lakefile)
+        if m:
+            return f'{m.group(1)}+{sha[:9]}'
+    except subprocess.CalledProcessError:
+        pass
+    try:
+        cargo = git(repo, 'show', f'{treeish}:Cargo.toml')
+        version = next(line.split('"')[1] for line in cargo.splitlines() if line.startswith('version'))
+        return f'{version}+{sha[:9]}'
+    except (subprocess.CalledProcessError, StopIteration) as err:
+        raise RuntimeError(f'unable to resolve OrbNode version from {treeish} (neither lean/OrbNode/lakefile.lean nor Cargo.toml matched)') from err
 
 
 BUILD_SCRIPT = r'''set -euo pipefail
@@ -332,7 +343,7 @@ def build_node_binary(source, created):
             script = Path(tmp) / 'build.sh'
             script.write_text(BUILD_SCRIPT)
             upload(sid, script, '/home/user/build.sh')
-            code = run_long(sid, 'bash /home/user/build.sh', limit=5400, label='cargo build')
+            code = run_long(sid, 'bash /home/user/build.sh', limit=5400, label='lean build')
             if code != 0:
                 raise RuntimeError(f'node build failed (exit {code}); see /home/user/build.log in {sid}')
             download(sid, '/home/user/sandboxed-node.out', cached)
@@ -349,7 +360,8 @@ def fleet_tools():
     meta = ARTIFACTS / 'fleet-tools.json'
     if not tarball.exists() or not meta.exists():
         ARTIFACTS.mkdir(parents=True, exist_ok=True)
-        ssh = ['ssh', '-i', str(Path.home() / '.ssh' / 'paloma'), '-o', 'IdentitiesOnly=yes', FLEET_HOST]
+        ssh = ['ssh', '-i', str(Path.home() / '.ssh' / 'paloma'), '-o', 'IdentitiesOnly=yes',
+               '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', FLEET_HOST]
         log(f'copying x86_64 tool builds from {FLEET_HOST} (read-only)')
         with tarball.open('wb') as fh:
             subprocess.run([*ssh, 'cd /usr/local/bin && tar czf - ' + ' '.join(FLEET_TOOLS)], stdout=fh, check=True)

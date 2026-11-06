@@ -105,8 +105,8 @@ class Generator(unittest.TestCase):
 
     def test_build_inventory_covers_every_manifest_symbol_once(self):
         data = manifest()
-        path = ROOT / "shared/orb-spec/cabi/orb_kernel_exports.rs"
-        symbols = re.findall(r'^    "(\w+)",$', gen.outputs(data)[path], re.M)
+        path = ROOT / "shared/orb-spec/cabi/orb_kernel_exports.json"
+        symbols = json.loads(gen.outputs(data)[path])["exports"]
         self.assertEqual(symbols, [f["name"] for f in data["functions"]])
 
     def test_check_mode_reports_stale(self):

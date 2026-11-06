@@ -1,19 +1,15 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
 
-// A registered native command still fails at runtime unless the main window's
-// capability grants it. Catch new frontend calls missing that second step.
+// Every native command invoked by the frontend must be explicitly admitted by
+// `supportedDesktopCommands` in `lean/OrbLocald/OrbLocald/Rpc.lean`.
 it('grants the local agent commands invoked by the frontend', () => {
-  const native = join(process.cwd(), 'src-tauri');
-  const capability = JSON.parse(readFileSync(join(native, 'capabilities/default.json'), 'utf8'));
-  const permissions = readdirSync(join(native, 'permissions'))
-    .filter(name => name.endsWith('.toml'))
-    .map(name => readFileSync(join(native, 'permissions', name), 'utf8'))
-    .filter(text => capability.permissions.includes(text.match(/identifier\s*=\s*"([^"]+)"/)?.[1]))
-    .map(text => text.match(/commands\.allow\s*=\s*\[([\s\S]*?)\]/)?.[1] ?? '')
-    .join('\n');
-  const allowed = new Set([...permissions.matchAll(/"([a-z_]+)"/g)].map(m => m[1]));
+  const rpcLean = readFileSync(join(process.cwd(), '../lean/OrbLocald/OrbLocald/Rpc.lean'), 'utf8');
+  const start = rpcLean.indexOf('def supportedDesktopCommands');
+  expect(start).toBeGreaterThanOrEqual(0);
+  const block = rpcLean.slice(start, rpcLean.indexOf(']', start) + 1);
+  const allowed = new Set([...block.matchAll(/"([a-z_]+)"/g)].map(m => m[1]));
   const source = readFileSync(join(process.cwd(), 'src/localAgents.ts'), 'utf8');
   const commands = [...source.matchAll(/\binvoke\s*\(\s*['"]([^'"]+)['"]/g)].map(m => m[1]);
   expect(commands.length).toBeGreaterThan(0);

@@ -13,20 +13,20 @@ import {
 } from "../src/effort";
 
 // vitest runs with `orb/` as the cwd; the core lives one level up.
-const CONTROL_RS = resolve(__dirname, "../../src/api/control/mission_create.rs");
+const CONTROL_LEAN = resolve(__dirname, "../../lean/OrbCore/OrbCore/Control.lean");
 
 /**
  * Re-derive the accepted ladder from the core's own gate,
- * `normalize_model_effort_for_backend`, so Orb's table cannot drift from the
+ * `normalizeModelEffortForBackend`, so Orb's table cannot drift from the
  * server that validates it.
  */
 function effortsFromCore(): Record<string, string[]> {
-  const source = readFileSync(CONTROL_RS, "utf8");
-  const fn = source.slice(source.indexOf("fn normalize_model_effort_for_backend"));
-  const body = fn.slice(0, fn.indexOf("\n}\n"));
+  const source = readFileSync(CONTROL_LEAN, "utf8");
+  const fn = source.slice(source.indexOf("def normalizeModelEffortForBackend"));
+  const body = fn.slice(0, fn.indexOf("| _ => none"));
   const out: Record<string, string[]> = {};
-  for (const [, backend, arms] of body.matchAll(/\(Some\("(\w+)"\),\s*([^)]+?)\)\s*=>/g)) {
-    out[backend] = [...arms.matchAll(/"(\w+)"/g)].map((m) => m[1]);
+  for (const [, backend, arms] of body.matchAll(/\|\s*some\s+"(\w+)"\s*=>\s*\n\s*([^\n]+)/g)) {
+    out[backend] = [...arms.matchAll(/level == "(\w+)"/g)].map((m) => m[1]);
   }
   return out;
 }

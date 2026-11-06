@@ -349,7 +349,7 @@ class IdentityTests(unittest.TestCase):
 
     def test_orb_privd_command_confinement_rejects_attack_vectors(self):
         import importlib.util
-        privd_path = Path(__file__).with_name("orb-privd.py")
+        privd_path = Path(__file__).with_name("privd_confinement_model.py")
         spec = importlib.util.spec_from_file_location("orb_privd", privd_path)
         privd = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(privd)
@@ -558,7 +558,7 @@ class IdentityTests(unittest.TestCase):
         lib.orb_ssh_identity_step.argtypes = [ctypes.c_uint8] * 7
         lib.orb_ssh_identity_step.restype = ctypes.c_uint64
 
-        privd_path = Path(__file__).with_name("orb-privd.py")
+        privd_path = Path(__file__).with_name("privd_confinement_model.py")
         spec = importlib.util.spec_from_file_location("orb_privd", privd_path)
         privd = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(privd)

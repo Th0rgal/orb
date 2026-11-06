@@ -14,8 +14,8 @@ artifacts = ["docs/specs/state-machine-inventory.md", ".sandboxed/validation.tom
 
 [[gates]]
 id = "fmt"
-description = "Check workspace Rust formatting"
-command = ["cargo", "fmt", "--all", "--", "--check"]
+description = "Check pure-Lean kernel call lint and C shim hygiene"
+command = ["python3", "scripts/lint_kernel_calls.py"]
 required = true
 mode = "incremental"
 reuse = true
@@ -33,7 +33,7 @@ timeout_secs = 600
 
 [[gates]]
 id = "kernel-abi-check"
-description = "Verify generated C-ABI/WASM/JNI/Swift/Rust kernel bindings and coverage registry"
+description = "Verify generated C-ABI/WASM/JNI/Swift kernel bindings and coverage registry"
 command = ["python3", "scripts/gen_kernel_bindings.py", "--check"]
 dependencies = ["state-inventory"]
 required = true
@@ -52,9 +52,9 @@ reuse = true
 timeout_secs = 300
 
 [[gates]]
-id = "rust-workspace-tests"
-description = "Certifying Rust workspace test suite"
-command = ["cargo", "test", "--locked", "-j", "1", "--workspace"]
+id = "lean-workspace-tests"
+description = "Certifying pure-Lean workspace binary build and self-test suite"
+command = ["bash", "scripts/build_orb_bins.sh", "--ensure-lean", "--with-tests", "--out-dir", "target/debug"]
 dependencies = ["fmt", "policy-scripts", "kernel-abi-check", "capability-matrix"]
 required = true
 mode = "clean"

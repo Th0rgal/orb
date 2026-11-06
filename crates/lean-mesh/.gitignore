@@ -1,6 +1,0 @@
-/target/
-/lean/.lake/
-/lean/build/
-*.olean
-*.ilean
-paloma-fleet-manifest.json

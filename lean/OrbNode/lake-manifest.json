@@ -30,7 +30,7 @@
    "name": "«lean-mesh»",
    "manifestFile": "lake-manifest.json",
    "inherited": true,
-   "dir": "../OrbBin/../../crates/lean-mesh/lean",
+   "dir": "../LeanMesh",
    "copy": false,
    "configFile": "lakefile.lean"},
   {"url": "https://github.com/Th0rgal/lean-sys.git",

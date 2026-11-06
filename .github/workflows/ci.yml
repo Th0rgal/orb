@@ -23,9 +23,6 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  CARGO_BUILD_JOBS: 4
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -34,69 +31,52 @@ jobs:
     runs-on: ubuntu-latest
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
-    env:
-      # Keep parallel test linking comfortably inside the 16 GB ubuntu-latest RAM ceiling.
-      CARGO_BUILD_JOBS: 2
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev libsqlite3-dev zstd
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: test
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-
-      - name: Run tests
-        env:
-          # `cargo test --workspace` links `sandboxed_sh` unit tests alongside 8
-          # binary targets; 4 concurrent rustc/cc1/ld jobs exceed the 16 GB RAM
-          # ceiling on GitHub-hosted ubuntu-latest runners (exit 143 OOM).
-          CARGO_BUILD_JOBS: 1
-          CARGO_PROFILE_DEV_DEBUG: 0
-          CARGO_PROFILE_TEST_DEBUG: 0
-          CARGO_INCREMENTAL: 0
-        run: cargo test --locked --workspace
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    # Skip CI on draft PRs unless explicitly requested
-    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: clippy
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-
-      - name: Run clippy
-        run: cargo clippy --locked --workspace -- -D clippy::all
+      - name: Build all 12 native Lean binaries and run all self-test suites
+        run: |
+          set -euo pipefail
+          ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/debug
+          export PATH="$HOME/.local/lean-4.35.0/bin:$PATH"
+          (cd lean/OrbNetLeaf && lake build orb-net-leaf-test -- -DwarningAsError=true && ./.lake/build/bin/orb-net-leaf-test)
+          (cd lean/OrbBin && lake build orb-bin-test -- -DwarningAsError=true && ./.lake/build/bin/orb-bin-test)
+          (cd lean/OrbNode && lake build orb-node-test -- -DwarningAsError=true && ./.lake/build/bin/orb-node-test)
+          (cd lean/OrbClient && lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-client-test)
+          (cd lean/OrbCore && lake build orb-core-test orb-spec-runner -- -DwarningAsError=true)
+          ./lean/OrbCore/.lake/build/bin/orb-core-test
+          ./lean/OrbCore/.lake/build/bin/orb-spec-runner --fixtures shared/orb-spec/fixtures
+          (cd lean/OrbLocald && lake build orb-locald-test -- -DwarningAsError=true && ./.lake/build/bin/orb-locald-test)
+          for bin in fido-agent-proxy orb-privd orb-sudo lean-mesh palomactl sandboxed-mcp workspace-mcp desktop-mcp automation-manager-mcp sandboxed-node sandboxed-sh orb-locald; do
+            test -x "target/debug/$bin"
+            elab_syms=$(nm -u "target/debug/$bin" | grep -c lean_elab || true)
+            test "$elab_syms" -eq 0
+          done
 
   fmt:
-    name: Format
+    name: Format & Hygiene
     runs-on: ubuntu-latest
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Verify zero Rust files, C shim <= 220 LOC, and kernel call lint
+        run: |
+          set -euo pipefail
+          rs_count=$(git ls-files '*.rs' | wc -l)
+          test "$rs_count" -eq 0
+          for cfile in lean/OrbNetLeaf/c/orb_net_leaf.c lean/OrbBin/c/orb_bin_posix.c lean/OrbNode/c/orb_node_posix.c lean/OrbCore/c/orb_core_sqlite.c linux_shell/main.c; do
+            lines=$(wc -l < "$cfile")
+            echo "$cfile: $lines LOC"
+            test "$lines" -le 220
+          done
+          python3 scripts/lint_kernel_calls.py
+          python3 scripts/check_state_inventory.py
 
   harness-contract:
     name: Harness Contract Tests
@@ -106,13 +86,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: harness-contract
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev libsqlite3-dev zstd
 
       - name: Run harness contract tests
         run: scripts/harness_contract_tests.sh
@@ -261,52 +237,45 @@ jobs:
           path: orb/test-results
           if-no-files-found: ignore
 
-  orb-tauri:
-    name: Orb Tauri (Rust)
+  orb-desktop-shell:
+    name: Orb Desktop Shell (Lean + C)
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
-    defaults:
-      run:
-        working-directory: orb/src-tauri
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      - name: Install WebKitGTK build deps
+      - name: Install WebKitGTK and Lean build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
-            libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev libxdo-dev libssl-dev
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            orb/src-tauri -> target
-          shared-key: orb-tauri
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-      # tauri-build checks that frontendDist and every externalBin exist, and
-      # the run_recovery tests launch the real sandboxed-mcp companion, so build
-      # it (what scripts/build-mcp.py does, without its -j1) and stage it.
-      # orb-signer is macOS-only (tauri.macos.conf.json), as is gen/app-icon,
-      # so neither is needed on Linux.
-      - name: Build and stage sandboxed-mcp; stub frontend dist
+            libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libssl-dev zstd
+      - name: Build orb-locald + sandboxed-mcp and run Linux shell & wakeup MCP tests
         run: |
           set -euo pipefail
-          sudo apt-get install -y --no-install-recommends zstd
-          (cd ../.. && ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/debug --only sandboxed-mcp)
-          host="$(rustc -vV | sed -n 's/^host: //p')"
-          mkdir -p ../dist binaries target/debug
-          cp ../../target/debug/sandboxed-mcp "binaries/sandboxed-mcp-$host"
-          cp ../../target/debug/sandboxed-mcp target/debug/sandboxed-mcp
-      # TODO: make blocking once orb/src-tauri is rustfmt-clean (owned by the
-      # Orb refactor; not reformatted here to avoid conflicts).
-      - name: cargo fmt --check (non-blocking)
-        continue-on-error: true
-        run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D clippy::all -D warnings
-      - run: cargo test --locked --bin orb
+          ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/debug --only orb-locald --only sandboxed-mcp
+          make -C linux_shell clean
+          make -C linux_shell test
+          python3 -m unittest -v orb/tests/wakeup_mcp_test.py
+
+  orb-macos-shell:
+    name: Orb macOS Shell & Signer (Swift)
+    runs-on: macos-26
+    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compile macos_shell, orb-signer, and macOS app icon
+        run: |
+          set -euo pipefail
+          mkdir -p macos_shell/build
+          swiftc -O -framework AppKit -framework WebKit -framework Security \
+            macos_shell/main.swift -o macos_shell/build/orb-desktop
+          python3 orb/scripts/build-signer.py
+          node orb/scripts/build-macos-icon.mjs
+          test -x macos_shell/build/orb-desktop
+          test -x macos_shell/build/orb-signer
+          test -f macos_shell/gen/app-icon/Assets.car
 
   docker:
     name: Docker image

@@ -3,7 +3,7 @@ set -e
 
 # =============================================================================
 # Orb Core — Docker Entrypoint
-# Starts: Rust backend, Caddy (PID 1)
+# Starts: Lean 4 Core backend (sandboxed-sh), Caddy (PID 1)
 # =============================================================================
 
 cleanup() {
@@ -36,10 +36,18 @@ fi
 # start a shared desktop.
 
 
-# -- Start Rust backend -------------------------------------------------------
+# -- Start Lean 4 Core backend ------------------------------------------------
 case "$(printf '%s' "${DEV_MODE:-false}" | tr '[:upper:]' '[:lower:]')" in
     1|true|t|yes|y|on)
-        echo "[entrypoint] WARNING: DEV_MODE=true disables all authentication. Ensure container port 80 is published only on 127.0.0.1." >&2
+        case "$(printf '%s' "${ALLOW_INSECURE_REMOTE_DEV_AUTH:-false}" | tr '[:upper:]' '[:lower:]')" in
+            1|true|t|yes|y|on)
+                echo "[entrypoint] WARNING: DEV_MODE=true with ALLOW_INSECURE_REMOTE_DEV_AUTH=true disables authentication behind Caddy :80. Ensure container port 80 is published only on 127.0.0.1." >&2
+                ;;
+            *)
+                echo "[entrypoint] ERROR: Refusing to start container with DEV_MODE=true because Caddy listens on :80 across container interfaces. Set ALLOW_INSECURE_REMOTE_DEV_AUTH=true only when publishing port 80 strictly on 127.0.0.1." >&2
+                exit 1
+                ;;
+        esac
         ;;
 esac
 

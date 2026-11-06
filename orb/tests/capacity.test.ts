@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { launchRefusal } from "../src/missionLaunch";
 import { ApiError, NO_PROJECT_LIMIT, holdsCapSlot, projectLimitOf, setProjectLimit, updateGlobalSettings, setConnection } from "../src/api";
 
-const CONTROL_RS = resolve(__dirname, "../../src/api/control/mission_create.rs");
+const CONTROL_LEAN = resolve(__dirname, "../../lean/OrbCore/OrbCore/Control.lean");
+const STORE_LEAN = resolve(__dirname, "../../lean/OrbCore/OrbCore/Store.lean");
 const capError = (active: number, cap: number) =>
   new ApiError(429, JSON.stringify({ error: "parallel_missions_cap", cap, active }));
 
@@ -64,12 +65,12 @@ describe("the project cap refusal is explained, not dumped", () => {
 });
 
 describe("cap slot accounting mirrors the core", () => {
-  it("counts exactly the statuses campaign_slot_held_by counts", () => {
-    const source = readFileSync(CONTROL_RS, "utf8");
-    const fn = source.slice(source.indexOf("fn campaign_slot_held_by"));
-    const body = fn.slice(0, fn.indexOf("\n}\n"));
-    const core = [...body.matchAll(/MissionStatus::(\w+)/g)]
-      .map((m) => m[1].replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase())
+  it("counts exactly the statuses campaignSlotHeldBy counts", () => {
+    const source = readFileSync(CONTROL_LEAN, "utf8");
+    const fn = source.slice(source.indexOf("def campaignSlotHeldBy"));
+    const body = fn.slice(0, fn.indexOf("| _ => false"));
+    const core = [...body.matchAll(/"([a-z_]+)"/g)]
+      .map((m) => m[1])
       .sort();
     expect(core).toEqual(["active", "awaiting_user", "paused", "pending", "waiting_background"]);
     for (const status of core) expect(holdsCapSlot(status)).toBe(true);
@@ -80,10 +81,10 @@ describe("cap slot accounting mirrors the core", () => {
 });
 
 /**
- * The backend merge these payloads have to survive. `projects_store.rs`
- * `set_grant` upserts with `COALESCE(excluded.<col>, project_grant.<col>)` per
- * column, and `create_mission` only enforces `parallel_missions` when it is
- * `> 0`. Both facts are asserted against the Rust source below.
+ * The backend merge these payloads have to survive. `OrbCore/Store.lean`
+ * `upsertProjectGrantSql` upserts with `COALESCE(excluded.<col>, project_grant.<col>)` per
+ * column, and `enforcedProjectParallelCap?` only enforces `parallel_missions` when it is
+ * `> 0`. Both facts are asserted against the Lean source below.
  */
 function mergeGrant(stored: Record<string, unknown>, posted: Record<string, unknown>) {
   const columns = ["merge_authority", "budget_per_tick", "parallel_missions", "pause_reason", "resume_condition", "material_bar", "autonomy_level"];
@@ -98,7 +99,7 @@ function mergeGrant(stored: Record<string, unknown>, posted: Record<string, unkn
 }
 
 describe("the backend merge these payloads are written for", () => {
-  const store = readFileSync(resolve(__dirname, "../../src/api/projects_store.rs"), "utf8");
+  const store = readFileSync(STORE_LEAN, "utf8");
 
   it("really does COALESCE every grant column, so null preserves", () => {
     expect(store).toContain("parallel_missions = COALESCE(excluded.parallel_missions, project_grant.parallel_missions)");
@@ -108,8 +109,8 @@ describe("the backend merge these payloads are written for", () => {
   });
 
   it("really does treat only a positive limit as enforced", () => {
-    const control = readFileSync(CONTROL_RS, "utf8");
-    expect(control).toContain("grant.parallel_missions.filter(|&c| c > 0)");
+    const control = readFileSync(CONTROL_LEAN, "utf8");
+    expect(control).toContain("if c > 0 then some c.toNat else none");
     expect(NO_PROJECT_LIMIT).toBe(0);
     expect(projectLimitOf({ parallel_missions: 0 })).toBeNull();
     expect(projectLimitOf({ parallel_missions: -1 })).toBeNull();

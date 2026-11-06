@@ -304,26 +304,57 @@ class Receipts(unittest.TestCase):
                         if out_target != "Wrappers.olean":
                             self.assertTrue(Path(out_target).is_absolute(), out_target)
 
-                build_bin = root / "build_rs_driver"
-                subprocess.run(
-                    ["rustc", "--edition", "2021", str(p3.ROOT / "crates/orb-spec/build.rs"), "-o", str(build_bin)],
-                    check=True,
-                )
                 build_out = root / "build-out"
                 build_out.mkdir()
-                env = {
-                    **os.environ,
-                    "CARGO_MANIFEST_DIR": str(p3.ROOT / "crates/orb-spec"),
-                    "OUT_DIR": str(build_out),
-                    "CARGO_CFG_TARGET_OS": "linux",
-                    "ORB_KERNEL_BACKEND": "leannative",
-                    "ORB_LEANNATIVE_ARCHIVE": "libleannative_synth.a",
-                }
-                subprocess.run([str(build_bin)], cwd=root, env=env, check=True)
-                self.assertTrue((build_out / "liborb_spec_cabi.a").is_file())
-                p3.verify_cabi_symbols(build_out / "liborb_spec_cabi.a", [fn["name"] for fn in functions])
+                expected_names = [fn["name"] for fn in functions]
+                _native_lib, native_archive = p3.build_native(build_out, Path("libleannative_synth.a"), expected_names)
+                self.assertTrue(native_archive.is_file())
+                p3.verify_cabi_symbols(native_archive, expected_names)
             finally:
                 os.chdir(prev)
+
+    def test_verify_cabi_symbols_rejects_missing_injected_duplicate_imported_data_and_corrupt_objects(self):
+        functions = p3.load_manifest()
+        expected_names = [fn["name"] for fn in functions]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _stock_lib, stock_archive = p3.build_stock(root, expected_names)
+            p3.verify_cabi_symbols(stock_archive, expected_names)
+
+            # 1. Missing export rejected
+            with self.assertRaisesRegex(ValueError, "unexpected|missing"):
+                p3.verify_cabi_symbols(stock_archive, expected_names + ["orb_missing_future_export"])
+            with self.assertRaisesRegex(ValueError, "unexpected"):
+                p3.verify_cabi_symbols(stock_archive, expected_names[:-1])
+
+            # 2. Duplicate .o member inside .a rejected
+            dup_archive = root / "dup.a"
+            stock_obj = root / "stock_orb_kernel.o"
+            subprocess.run(["ar", "qc", str(dup_archive), str(stock_obj), str(stock_obj)], check=True)
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                p3.verify_cabi_symbols(dup_archive, expected_names)
+
+            # 3. Undefined external import rejected
+            imp_c = root / "imp.c"
+            imp_o = root / "imp.o"
+            imp_c.write_text("extern int external_runtime(void);\nint orb_injected(void) { return external_runtime(); }\n")
+            subprocess.run(["cc", "-O2", "-c", str(imp_c), "-o", str(imp_o)], check=True)
+            with self.assertRaisesRegex(ValueError, "unexpected, imported, non-text"):
+                p3.verify_cabi_symbols(imp_o, ["orb_injected"])
+
+            # 4. Non-text global data symbol rejected
+            dat_c = root / "dat.c"
+            dat_o = root / "dat.o"
+            dat_c.write_text("int orb_data_sym = 42;\n")
+            subprocess.run(["cc", "-O2", "-c", str(dat_c), "-o", str(dat_o)], check=True)
+            with self.assertRaisesRegex(ValueError, "non-text"):
+                p3.verify_cabi_symbols(dat_o, ["orb_data_sym"])
+
+            # 5. Corrupt object rejected
+            bad_o = root / "corrupt.o"
+            bad_o.write_bytes(b"not-an-elf-or-ar-object")
+            with self.assertRaises(subprocess.CalledProcessError):
+                p3.verify_cabi_symbols(bad_o, expected_names)
 
 
 if __name__ == "__main__":

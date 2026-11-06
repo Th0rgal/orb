@@ -52,7 +52,7 @@ def checked_evidence(names: list[str]) -> dict[str, Any]:
             if kind not in ("theorem", "host_observer", "host_test"):
                 raise ValueError("unsupported evidence link kind")
             # Require a declaration, rather than a comment, import or call.
-            keyword = "theorem" if kind == "theorem" else "(?:async\\s+)?fn"
+            keyword = "theorem" if kind == "theorem" else "(?:(?:async\\s+)?fn|def)"
             if not re.search(r"^\s*(?:pub(?:\([^)]*\))?\s+)?" + keyword
                              + r"\s+" + re.escape(symbol) + r"(?=\s|\()",
                              texts[link["path"]], re.MULTILINE):

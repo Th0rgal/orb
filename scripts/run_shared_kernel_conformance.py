@@ -444,7 +444,7 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, terminate)
     manifest = load_manifest(ORB / "shared/orb-spec/kernel_abi.json")
     functions = public_export_functions(manifest)
-    if run(["git", "rev-parse", "HEAD"], SYS).strip() != "c089f3e31dbd36f2bde2219913d5b9c90da670be":
+    if run(["git", "rev-parse", "HEAD"], SYS).strip() != "d658cb2450743434d255e59ea4225bd651681177":
         raise ValueError("unexpected LeanSys revision")
     sources = [(ORB / "lean/Orb/Kernel.lean", "Orb.Kernel"),
                (SYS / "LeanSys/Spec.lean", "LeanSys.Spec")]
@@ -473,9 +473,8 @@ def main(argv=None):
         ORB / "shared/orb-spec/kernel_abi.json",
         ORB / "lean/Orb/MutantSuite.lean",
         ORB / "scripts/conformance_loop_alias_rc.lean",
-        ORB / "crates/orb-spec/src/lib.rs",
-        ORB / "crates/orb-spec/examples/conformance_runner.rs",
-        ORB / "crates/orb-spec/tests/shared_fixtures.rs",
+        ORB / "lean/OrbCore/OrbCore/ConformanceRunner.lean",
+        ORB / "lean/OrbCore/OrbCore/SpecRunnerMain.lean",
         ORB / "shared/orb-spec/fixtures/projection-invariants.json",
         ORB / "android_dashboard/app/src/main/jniLibs/x86_64/liborb_kernel.so",
         Path(__file__),
@@ -500,12 +499,14 @@ def main(argv=None):
     report["tools"] = {}
     for name, path in [(n, TOOLS / n) for n in ("lean", "leanc", "clang", "ld.lld")] + [
         (n, TURBO / "lean/.lake/build/bin" / n) for n in ("lean-native", "lean-native-core")
-    ] + [("python", Path(sys.executable))] + [(n, Path(shutil.which(n) or n)) for n in ("cc", "node", "rustc", "cargo", "ar")]:
-        path = Path(EXECUTABLES.get(name, str(path))).resolve()
-        report["tools"][name] = {"path": str(path), "sha256": digest(path) if path.is_file() else None}
-        if path.is_file():
+    ] + [("python", Path(sys.executable))] + [(n, Path(shutil.which(n) or "")) for n in ("cc", "node", "rustc", "cargo", "ar")]:
+        raw_exec = EXECUTABLES.get(name) or (str(path) if str(path) else "")
+        resolved = Path(raw_exec).resolve() if raw_exec else None
+        is_present = bool(resolved and resolved.is_file())
+        report["tools"][name] = {"path": str(resolved) if resolved else None, "sha256": digest(resolved) if is_present else None}
+        if is_present:
             try:
-                version = run([path, "--version"])
+                version = run([resolved, "--version"])
                 report["tools"][name]["version"] = version
             except CommandFailure as error:
                 report["tools"][name]["version_unavailable"] = str(error)
@@ -635,14 +636,13 @@ for (const c of cases) {
         engine(name, action)
     qualification_failed = False
 
-    # 1. Production host-adapter conformance: crates/orb-spec, shared fixtures & Android JNI x86_64.
+    # 1. Production host-adapter conformance: lean/OrbCore (`orb-spec-runner`), shared fixtures & Android JNI x86_64.
     try:
         if "stock_lean" not in values:
             raise RuntimeError("stock_lean unavailable for host-adapter conformance")
-        cargo_target = OUT / "cargo-target"
-        run(["cargo", "build", "--locked", "--manifest-path", ORB / "crates/orb-spec/Cargo.toml",
-             "--target-dir", cargo_target, "--example", "conformance_runner"])
-        runner_bin = cargo_target / "debug/examples/conformance_runner"
+        lake_bin = TOOLS / "lake" if (TOOLS / "lake").is_file() else Path(shutil.which("lake") or "lake")
+        run([lake_bin, "build", "orb-spec-runner", "--", "-DwarningAsError=true"], ORB / "lean/OrbCore")
+        runner_bin = ORB / "lean/OrbCore/.lake/build/bin/orb-spec-runner"
         rust_host_rows = parse_rows(run([runner_bin, OUT / "cases.txt"], role="execution"))
         rust_mismatches = compare_rows(values["stock_lean"], rust_host_rows, cases)
         if rust_mismatches:
@@ -655,9 +655,8 @@ for (const c of cases) {
         qualification_failed |= isinstance(error, (RowFailure, ValueError))
 
     try:
-        cargo_target = OUT / "cargo-target"
-        fixture_out = run(["cargo", "test", "--locked", "--manifest-path", ORB / "crates/orb-spec/Cargo.toml",
-                           "--target-dir", cargo_target, "--test", "shared_fixtures"], role="execution")
+        runner_bin = ORB / "lean/OrbCore/.lake/build/bin/orb-spec-runner"
+        fixture_out = run([runner_bin, "--fixtures", ORB / "shared/orb-spec/fixtures"], role="execution")
         proj_json = json.loads((ORB / "shared/orb-spec/fixtures/projection-invariants.json").read_text())
         fixture_total = sum(len(v) for v in proj_json.values() if isinstance(v, list))
         report["host_adapters"]["projection_invariants"] = {

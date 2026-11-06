@@ -1,6 +1,9 @@
 /.lake/
 /lake-manifest.json
+/LeanMesh/.lake/
 /OrbNetLeaf/.lake/
 /OrbBin/.lake/
 /OrbNode/.lake/
 /OrbClient/.lake/
+/OrbCore/.lake/
+/OrbLocald/.lake/

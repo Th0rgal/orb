@@ -14,7 +14,7 @@
    "name": "«lean-mesh»",
    "manifestFile": "lake-manifest.json",
    "inherited": false,
-   "dir": "../../crates/lean-mesh/lean",
+   "dir": "../LeanMesh",
    "copy": false,
    "configFile": "lakefile.lean"},
   {"type": "path",

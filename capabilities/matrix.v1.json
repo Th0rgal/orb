@@ -9,8 +9,8 @@
         "status": "supported",
         "evidence": [
           {
-            "path": "src/api/mission_store/mod.rs",
-            "pattern": "pub history: Vec<MissionHistoryEntry>,"
+            "path": "lean/OrbCore/OrbCore/Store.lean",
+            "pattern": "history          : Array MissionHistoryEntry := #[]"
           }
         ]
       },
@@ -49,8 +49,8 @@
         "status": "supported",
         "evidence": [
           {
-            "path": "src/api/control/actor.rs",
-            "pattern": "AgentEvent::Thinking { done, mission_id, .. } => {"
+            "path": "lean/OrbCore/OrbCore/Harness.lean",
+            "pattern": "| Thinking (missionId : String) (content : String) (done : Bool)"
           }
         ]
       },
@@ -89,7 +89,7 @@
         "status": "supported",
         "evidence": [
           {
-            "path": "src/api/routes.rs",
+            "path": "lean/OrbCore/OrbCore/Control.lean",
             "pattern": "\"/api/control/missions/:id/automations\""
           }
         ]
@@ -119,8 +119,8 @@
         "status": "supported",
         "evidence": [
           {
-            "path": "src/api/routes.rs",
-            "pattern": ".nest(\"/api/model-routing\", model_routing_api::routes())"
+            "path": "lean/OrbCore/OrbCore/Control.lean",
+            "pattern": "if cleanPath.startsWith \"/api/model-routing\" then"
           }
         ]
       },
@@ -159,8 +159,8 @@
         "status": "supported",
         "evidence": [
           {
-            "path": "src/api/routes.rs",
-            "pattern": "total_cost_cents,"
+            "path": "lean/OrbCore/OrbCore/Store.lean",
+            "pattern": "let total_cost_cents :="
           }
         ]
       },
@@ -189,8 +189,8 @@
         "status": "supported",
         "evidence": [
           {
-            "path": "src/api/control/mission_settings.rs",
-            "pattern": "pub async fn mark_mission_opened("
+            "path": "lean/OrbCore/OrbCore/Store.lean",
+            "pattern": "def mark_mission_opened ("
           }
         ]
       },

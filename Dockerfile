@@ -1,7 +1,7 @@
 # =============================================================================
 # sandboxed.sh — All-in-One Docker Image
 # =============================================================================
-# Multi-stage build: Rust Core backend + runtime with AI CLIs
+# Multi-stage build: Pure Lean 4 Core backend + runtime with AI CLIs
 # Formerly known as "Open Agent"
 #
 # Build:   docker build -t sandboxed-sh .
@@ -9,12 +9,12 @@
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Stage 1: Rust + Lean 4 builder
+# Stage 1: Lean 4 builder (zero Rust / Cargo)
 # ---------------------------------------------------------------------------
-FROM rust:1.91-bookworm AS rust-builder
+FROM debian:bookworm-slim AS lean-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libssl-dev zstd ca-certificates curl \
+    build-essential git libssl-dev libsqlite3-dev zstd ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && LEAN_ARCHIVE="/tmp/lean-4.35.0-linux.tar.zst" \
     && LEAN_SHA256="7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d" \
@@ -29,24 +29,14 @@ ENV PATH="/opt/lean-4.35.0/bin:${PATH}"
 
 WORKDIR /build
 
-# Everything the crate compiles: build.rs reads catalog/, and the sources
-# include shared/*.rs and some scripts/ via #[path] / include_str!.
-COPY Cargo.toml Cargo.lock build.rs ./
-COPY crates/ crates/
 COPY lean/ lean/
-COPY src/ src/
 COPY shared/ shared/
 COPY catalog/ catalog/
 COPY scripts/ scripts/
 
-ARG RUST_BINARIES="sandboxed-sh"
-ARG LEAN_BINARIES="desktop-mcp workspace-mcp automation-manager-mcp sandboxed-mcp"
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
-    cargo build --release --locked $(printf -- '--bin %s ' $RUST_BINARIES) \
-    && ./scripts/build_orb_bins.sh --out-dir /out $(printf -- '--only %s ' $LEAN_BINARIES) \
-    && mkdir -p /out \
-    && for bin in $RUST_BINARIES; do cp "target/release/$bin" /out/; done
+ARG LEAN_BINARIES="sandboxed-sh desktop-mcp workspace-mcp automation-manager-mcp sandboxed-mcp"
+RUN mkdir -p /out \
+    && ./scripts/build_orb_bins.sh --out-dir /out $(printf -- '--only %s ' $LEAN_BINARIES)
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime (Ubuntu 24.04 for native debootstrap support)
@@ -57,7 +47,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # -- Core system deps --------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl jq sqlite3 zstd unzip openssh-client ca-certificates gnupg python3 python3-yaml caddy \
+    git curl jq sqlite3 libsqlite3-0 libssl3t64 zstd unzip openssh-client ca-certificates gnupg python3 python3-yaml caddy \
     # nspawn / container workspaces
     systemd-container debootstrap \
     # Wayland app streaming and automation
@@ -83,8 +73,8 @@ RUN curl -fsSL https://bun.sh/install | bash \
 # Caddy uses Ubuntu's signed security/update archives. The separate Cloudsmith
 # index is signed by an expired key; signature verification must stay enabled.
 
-# -- Copy Rust binaries from builder -----------------------------------------
-COPY --from=rust-builder /out/ /usr/local/bin/
+# -- Copy native Lean 4 binaries from builder --------------------------------
+COPY --from=lean-builder /out/ /usr/local/bin/
 
 # -- Pre-install AI harness CLIs (optional — agents still work if these fail) -
 # Uses bun for global installs (faster than npm, and our preferred package manager)

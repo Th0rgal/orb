@@ -11,7 +11,7 @@ package «orb-bin» where
   moreLinkArgs := #["-lssl", "-lcrypto", "-lutil", "-ldl"]
 
 require «orb-spec» from ".."
-require «lean-mesh» from "../../crates/lean-mesh/lean"
+require «lean-mesh» from "../LeanMesh"
 require «orb-net-leaf» from "../OrbNetLeaf"
 
 target orb_bin_posix_o pkg : FilePath := do
