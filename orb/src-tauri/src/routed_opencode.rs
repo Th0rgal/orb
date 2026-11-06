@@ -3,6 +3,43 @@ use crate::local_agents::{self, StartRequest};
 use serde_json::{json, Value};
 use std::time::Duration;
 
+fn resolve_opencode_route(
+    selected: Option<&str>,
+    routes: &[Value],
+    direct_models: &[Value],
+) -> Result<String, &'static str> {
+    let selected = selected.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(id) = routes
+        .iter()
+        .find(|r| match selected {
+            Some(id) => {
+                let rid = r["id"].as_str();
+                rid == Some(id) || rid.and_then(|v| v.strip_prefix("builtin/")) == Some(id)
+            }
+            None => r["is_default"].as_bool() == Some(true),
+        })
+        .or_else(|| {
+            if selected.is_none() {
+                routes.first()
+            } else {
+                None
+            }
+        })
+        .and_then(|r| r["id"].as_str())
+    {
+        return Ok(id.to_string());
+    }
+    if let Some(id) = selected {
+        if direct_models
+            .iter()
+            .any(|m| m["value"].as_str() == Some(id))
+        {
+            return Ok(id.to_string());
+        }
+    }
+    Err("The selected OpenCode model or route is unavailable. Refresh the model list.")
+}
+
 fn configuration(base: &str, route: &str, mission: &str) -> Value {
     json!({
         "model": format!("orb-routing/{route}"),
@@ -153,15 +190,33 @@ pub async fn start_fenced(
     let (http, routes) = opencode_routes_res?;
     let base = trimmed_base;
     let selected = request.model.as_deref().filter(|s| !s.is_empty());
-    let route = routes
-        .iter()
-        .find(|r| match selected {
-            Some(id) => r["id"].as_str() == Some(id),
-            None => r["is_default"].as_bool() == Some(true),
-        })
-        .and_then(|r| r["id"].as_str())
-        .ok_or("The selected OpenCode route is unavailable. Refresh the model list.")?
-        .to_string();
+    let route = match resolve_opencode_route(selected, &routes, &[]) {
+        Ok(route) => route,
+        Err(_) if selected.is_some() => {
+            let models_resp = http
+                .get(format!("{base}/api/providers/backend-models"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|_| "Could not load OpenCode models")?;
+            if !models_resp.status().is_success() {
+                return Err(format!(
+                    "Could not load OpenCode models ({})",
+                    models_resp.status()
+                ));
+            }
+            let catalog: Value = models_resp
+                .json()
+                .await
+                .map_err(|_| "Invalid backend model catalog")?;
+            let direct = catalog["backends"]["opencode"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            resolve_opencode_route(selected, &routes, &direct)?
+        }
+        Err(err) => return Err(err.to_string()),
+    };
     // Dedicated key, never the dashboard JWT. It exists only for this run and is
     // revoked on launch failure or termination (including stopped generations).
     let response = http
@@ -231,7 +286,7 @@ mod tests {
     use super::*;
     #[test]
     fn preserves_route_identity_and_keeps_secrets_out_of_config() {
-        for route in ["builtin/smart", "reviewer", "team/custom"] {
+        for route in ["builtin/smart", "reviewer", "team/custom", "xai/grok-4.6"] {
             let c = configuration("https://core.test/", route, "mission");
             assert_eq!(c["model"], format!("orb-routing/{route}"));
             let model = &c["provider"]["orb-routing"]["models"][route];
@@ -249,5 +304,30 @@ mod tests {
             );
             assert_eq!(c["enabled_providers"], json!(["orb-routing"]));
         }
+    }
+
+    #[test]
+    fn resolves_routing_chains_and_direct_opencode_models() {
+        let routes = vec![
+            json!({"id": "builtin/smart", "is_default": true}),
+            json!({"id": "reviewer", "is_default": false}),
+        ];
+        let direct = vec![
+            json!({"value": "openai/gpt-6-astra"}),
+            json!({"value": "xai/grok-4.6"}),
+        ];
+        assert_eq!(
+            resolve_opencode_route(None, &routes, &direct).unwrap(),
+            "builtin/smart"
+        );
+        assert_eq!(
+            resolve_opencode_route(Some("smart"), &routes, &direct).unwrap(),
+            "builtin/smart"
+        );
+        assert_eq!(
+            resolve_opencode_route(Some("xai/grok-4.6"), &routes, &direct).unwrap(),
+            "xai/grok-4.6"
+        );
+        assert!(resolve_opencode_route(Some("unknown/model"), &routes, &direct).is_err());
     }
 }
