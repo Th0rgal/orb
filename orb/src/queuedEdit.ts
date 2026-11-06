@@ -20,9 +20,10 @@ export function createQueuedEdit(o:{setRevision:(revision:Revision)=>void;onErro
  };
  /** `release` resumes the queue without changes (cancel); a saved edit already released it. */
  const finish=(release:boolean)=>{
-  const id=editing(),wasRemote=editingRemote();setEditing(undefined);setEditingRemote(false);
+  const id=editing(),wasRemote=editingRemote(),savedBefore=before;setEditing(undefined);setEditingRemote(false);
   if(release&&id&&!wasRemote)void releaseQueuedMessage(id).catch(swallow("queuedEdit.release", { message: id }));
   o.setRevision({text:before,append:false});before='';
+  return ()=>{before=savedBefore;if(savedBefore)o.setRevision({text:'',append:false});};
  };
  onCleanup(()=>{const id=editing();if(id&&!editingRemote())void releaseQueuedMessage(id).catch(swallow("queuedEdit.release", { message: id }));});
  return {editing,editingRemote,start,finish,trackDraft:(text:string)=>{draft=text;}};

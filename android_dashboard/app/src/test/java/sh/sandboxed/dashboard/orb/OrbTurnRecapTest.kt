@@ -107,6 +107,8 @@ class OrbTurnRecapTest {
         assertEquals(listOf("Investigating first question…"), parsed.open?.narration)
         assertTrue("m1" in parsed.deliveredIds)
         assertFalse("q2" in parsed.deliveredIds)
+        assertEquals(listOf(OrbDeliveredMessage("m1", "First question?", 1L)), parsed.deliveredMessages)
+        assertEquals(4L, parsed.maxSequence)
 
         val wrapped = OrbSideAgent.prompt("User: hi", "Original question?") + "\nAttachment: /tmp/a.png"
         val replaced = OrbSideAgent.replaceQuestion(wrapped, "Edited question?")

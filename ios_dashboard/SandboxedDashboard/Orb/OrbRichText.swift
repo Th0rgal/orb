@@ -1560,14 +1560,23 @@ enum OrbMessagePresentation {
     )
 
     static func parse(_ content: String) -> Parsed {
-        guard content.contains("<!-- paloma:attachment:") else {
-            return Parsed(text: content, attached: false)
-        }
         let ns = content as NSString
-        guard let match = trailerRegex.firstMatch(in: content, range: NSRange(location: 0, length: ns.length)) else {
-            return Parsed(text: content, attached: false)
+        let match = trailerRegex.firstMatch(in: content, range: NSRange(location: 0, length: ns.length))
+        let unwrapped = match.map { ns.substring(to: $0.range.location) } ?? content
+        if unwrapped.contains("Current request:\n") {
+            return Parsed(text: OrbBtwThreads.question(unwrapped), attached: match != nil || unwrapped.contains("\nAttachment: "))
         }
-        return Parsed(text: ns.substring(to: match.range.location), attached: true)
+        return match.map { Parsed(text: ns.substring(to: $0.range.location), attached: true) } ?? Parsed(text: content, attached: false)
+    }
+
+    static func replaceUserText(_ content: String, with nextText: String) -> String {
+        let ns = content as NSString
+        let match = trailerRegex.firstMatch(in: content, range: NSRange(location: 0, length: ns.length))
+        let unwrapped = match.map { ns.substring(to: $0.range.location) } ?? content
+        let suffix = match.map { ns.substring(from: $0.range.location) } ?? ""
+        let updated = OrbBtwThreads.replaceQuestion(unwrapped, with: nextText)
+        let changed = updated != unwrapped || unwrapped.contains("Current request:\n")
+        return (changed ? updated : nextText) + suffix
     }
 }
 

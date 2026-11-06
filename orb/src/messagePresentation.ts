@@ -36,6 +36,15 @@ export function replaceBtwUserQuestion(content: string, nextQuestion: string): s
   return `${prefix}${nextQuestion.trim()}${suffix}`.replace(/\n+$/, match => (attachMatch ? "" : match.slice(0, 1)));
 }
 
+export function replaceMessageUserText(content: string, nextText: string): string {
+  const trailer = /\n\n<!-- paloma:attachment:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) -->\nAttached context: read `\.paloma\/messages\/\1\/\.paloma\/attach\.md` \(paths in that manifest are relative to `\.paloma\/messages\/\1`\)\.$/i;
+  const match = trailer.exec(content);
+  const unwrapped = match ? content.slice(0, match.index) : content;
+  const suffix = match ? content.slice(match.index) : "";
+  const updated = isBtwWrappedPrompt(unwrapped) ? replaceBtwUserQuestion(unwrapped, nextText) : nextText;
+  return `${updated}${suffix}`;
+}
+
 /** Hide only the exact server-generated attachment transport trailer and `/btw`
  * context wrapper. The model retains the original text for replay; the UI
  * reports context without exposing staging paths or system preambles. */

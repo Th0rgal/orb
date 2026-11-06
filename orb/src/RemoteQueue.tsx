@@ -2,8 +2,8 @@ import { pollWhileVisible } from "./poll";
 import { swallow } from "./log";
 import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
 import { ErrorToast } from "./toast";
-import { isBtwWrappedPrompt, messagePresentation, replaceBtwUserQuestion } from "./messagePresentation";
-import { api, ApiError, connectionVersion, listQueuedMessages, type QueuedMessage } from "./api";
+import { isBtwWrappedPrompt, messagePresentation, replaceMessageUserText } from "./messagePresentation";
+import { api, ApiError, connectionVersion, editQueuedMessage, listQueuedMessages, type QueuedMessage } from "./api";
 import * as Ic from "./icons";
 
 export interface RemoteQueueHandle {
@@ -44,10 +44,15 @@ export function RemoteQueue(p: {
   onSendNowAccepted?: (id: string, live: boolean) => void;
   /** A queued message's content changed in place (same id). */
   onEdited?: (id: string, content: string) => void;
+  /** Another client edited this queued row. The inbox poll may still hold
+   * the previous text until the next read. */
+  liveEdit?: { id: string; content: string; at: number } | { id: string; content: string; at: number }[];
   ref?: (handle: RemoteQueueHandle) => void;
 }) {
-  let revision = 0, destroyed = false;
+  let revision = 0, destroyed = false, inboxClock = 0;
   const deletedIds = new Set<string>();
+  const [liveEdits, setLiveEdits] = createSignal<ReadonlyMap<string, { content: string; at: number; epoch: number }>>(new Map());
+  const [settledPollEpoch, setSettledPollEpoch] = createSignal(0);
   onCleanup(() => { destroyed = true; });
   const [rows, setRows] = createSignal<QueuedMessage[]>([]);
   /** Optimistic in-place edits, by id, until Core confirms or refuses them. */
@@ -61,7 +66,19 @@ export function RemoteQueue(p: {
     const sent = delivered();
     const known = new Map<string,QueuedMessage & {attached?:boolean}>();
     for (const row of rows()) if (!deletedIds.has(row.id) && !sent.has(row.id)) known.set(row.id, row);
-    for (const row of p.confirmed ?? []) if (!deletedIds.has(row.id) && !sent.has(row.id)) known.set(row.id, {...known.get(row.id), ...row});
+    // A live edit newer than the last inbox poll wins until the next poll.
+    // An older confirmed copy must not hide an edit another client already
+    // wrote into the inbox.
+    for (const [id, edit] of liveEdits()) {
+      if (deletedIds.has(id) || sent.has(id) || edit.epoch <= settledPollEpoch()) continue;
+      const current = known.get(id);
+      if (current) known.set(id, { ...current, content: edit.content });
+      else known.set(id, { id, mission_id: p.mission, content: edit.content, source: "remote-queue" });
+    }
+    for (const row of p.confirmed ?? []) {
+      if (deletedIds.has(row.id) || sent.has(row.id) || known.has(row.id)) continue;
+      known.set(row.id, row);
+    }
     return [...known.values()];
   };
   const edited = <T extends { id: string; content: string }>(row: T): T => {
@@ -93,17 +110,23 @@ export function RemoteQueue(p: {
   createEffect(() => {
     const mission = p.mission, version = connectionVersion();
     deletedIds.clear();
-    untrack(() => { setRows([]); setError(""); p.onRows([]); });
+    inboxClock = 0;
+    untrack(() => { setSettledPollEpoch(0); setRows([]); setLiveEdits(new Map()); setError(""); p.onRows([]); });
     let disposed = false, loading = false;
     const refresh = async () => {
       if (loading || !mission) return;
       loading = true;
+      const pollEpoch = ++inboxClock;
       const started = revision;
       try {
         const pending = (await listQueuedMessages(mission)).filter(row => !row.inflight && !deletedIds.has(row.id) && (row.source === "remote-queue" || row.source?.startsWith("host-queue:api:")));
         if (disposed || started !== revision || version !== connectionVersion()) return;
         const sent = untrack(delivered);
-        setRows(pending); p.onRows(pending.filter(row => !sent.has(row.id)).map(row => row.id));
+        batch(() => {
+          setSettledPollEpoch(pollEpoch);
+          setRows(pending);
+        });
+        p.onRows(pending.filter(row => !sent.has(row.id)).map(row => row.id));
       } catch { /* Keep the last confirmed inbox during a network interruption. */ }
       finally { loading = false; }
     };
@@ -212,42 +235,9 @@ export function RemoteQueue(p: {
       setWorking(false);
     }
   };
-  const replaceEdited: RemoteQueueHandle["replaceEdited"] = async (id, sendReplaced, replayAfter) => {
-    const list = visibleRows();
-    const idx = list.findIndex(r => r.id === id);
-    if (idx < 0) {
-      setError("This message was already sent. Your edit is still in the composer.");
-      return false;
-    }
-    const tail = list.slice(idx);
-    const after = tail.slice(1);
-    setWorking(true); setError("");
-    try {
-      await api(`/api/control/queue/${encodeURIComponent(id)}`, { method: "DELETE" });
-      await Promise.all(
-        after.map(r => api(`/api/control/queue/${encodeURIComponent(r.id)}`, { method: "DELETE" }).catch(swallow("remoteQueue.delete", { message: r.id }))),
-      );
-      revision++;
-      for (const r of tail) deletedIds.add(r.id);
-      setRows(previous => previous.filter(row => !tail.some(t => t.id === row.id)));
-      p.onRows(rows().map(row => row.id));
-      for (const r of tail) {
-        p.onRemove?.(r.id);
-        p.onCancel(r.id);
-      }
-      const ok = await sendReplaced();
-      if (!ok) return false;
-      if (after.length && replayAfter) await replayAfter(after.map(r => {
-        const presented = messagePresentation(r.content);
-        return { content: isBtwWrappedPrompt(r.content) ? r.content : presented.text, attached: r.attached || presented.attached || undefined };
-      }));
-      return true;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      return false;
-    } finally {
-      setWorking(false);
-    }
+  const replaceEdited: RemoteQueueHandle["replaceEdited"] = async () => {
+    setError("This edit cannot be saved atomically. The queued messages have not been changed.");
+    return false;
   };
   const editInPlace: RemoteQueueHandle["editInPlace"] = async (id, content) => {
     const target = visibleRows().find(r => r.id === id);
@@ -255,11 +245,11 @@ export function RemoteQueue(p: {
       setError("This message was already sent. Your edit was not applied.");
       return "failed";
     }
-    const wrappedBtw = isBtwWrappedPrompt(target.content);
-    // Attached context lives in the stored content: the resend path rebuilds it
-    // unless this is a /btw wrapper where `replaceBtwUserQuestion` keeps Attachment: lines intact.
-    if (!wrappedBtw && (target.attached || messagePresentation(target.content).attached)) return "unsupported";
-    const nextContent = wrappedBtw ? replaceBtwUserQuestion(target.content, content) : content;
+    const nextContent = replaceMessageUserText(target.content, content);
+    if (!isBtwWrappedPrompt(target.content) && target.attached && !messagePresentation(target.content).attached) {
+      setError("Attached context cannot be changed on a queued message. Remove it and send a new follow-up instead.");
+      return "failed";
+    }
     const version = connectionVersion(), mission = p.mission;
     const previous = edits()[id];
     setError("");
@@ -270,23 +260,19 @@ export function RemoteQueue(p: {
       return next;
     });
     try {
-      await api(`/api/control/queue/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: nextContent }) });
+      await editQueuedMessage(id, nextContent);
       if (destroyed || version !== connectionVersion() || mission !== p.mission) return "edited";
       batch(() => {
         revision++;
         setRows(list => list.map(row => row.id === id ? { ...row, content: nextContent } : row));
-        // The confirmed transcript copy (queued user item) follows the edit too.
         p.onEdited?.(id, nextContent);
         setEdits(all => { const next = { ...all }; delete next[id]; return next; });
       });
       return "edited";
     } catch (e) {
       revert();
-      // Older Core (no PATCH route) or a row Core keeps outside its durable
-      // inbox: the caller replaces it the old way.
-      if (e instanceof ApiError && (e.status === 404 || e.status === 405)) return "unsupported";
       if (!destroyed && version === connectionVersion() && mission === p.mission) {
-        setError(e instanceof ApiError && e.status === 409 ? "This message was already sent, so the edit was not applied." : `Couldn’t save the edit: ${e instanceof Error ? e.message : String(e)}`);
+        setError(e instanceof ApiError && (e.status === 409 || e.status === 404) ? "This message was already sent, so the edit was not applied." : `Couldn’t save the edit: ${e instanceof Error ? e.message : String(e)}`);
       }
       return "failed";
     }
@@ -302,6 +288,21 @@ export function RemoteQueue(p: {
       }
     },
     hasQueued: () => visibleRows().length > 0,
+  });
+  createEffect(() => {
+    const incoming = p.liveEdit ? (Array.isArray(p.liveEdit) ? p.liveEdit : [p.liveEdit]) : [];
+    if (!incoming.length) return;
+    setLiveEdits(previous => {
+      let next = previous;
+      for (const edit of incoming) {
+        const seen = next.get(edit.id);
+        if (seen && edit.at <= seen.at) continue;
+        if (next === previous) next = new Map(previous);
+        const epoch = ++inboxClock;
+        (next as Map<string, { content: string; at: number; epoch: number }>).set(edit.id, { content: edit.content, at: edit.at, epoch });
+      }
+      return next;
+    });
   });
   type Row = QueuedMessage & { attached?: boolean; sending?: boolean };
   // A row moving to the transcript leaves in the same frame its bubble lands:

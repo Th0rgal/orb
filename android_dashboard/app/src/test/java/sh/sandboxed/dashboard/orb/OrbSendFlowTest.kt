@@ -19,6 +19,138 @@ class OrbSendFlowTest {
         assertTrue(q.pending.isEmpty())
     }
 
+    @Test fun acceptedRowOnlyLeavesForQueueReadStartedAfterPosting() {
+        val q = OrbFollowUpQueue().enqueue("c1", "yes", lastSequence = 20)
+            .posted("c1", queued = true, atMs = 1_000)
+        assertEquals(1_000L, q.row("c1")?.postedAtMs)
+        assertEquals(1, q.withServer(emptyList()).count)
+        assertEquals(1, q.withServer(emptyList(), fetchedAtMs = 999).count)
+        assertEquals(1, q.withServer(emptyList(), fetchedAtMs = 1_000).count)
+        val settled = q.withServer(emptyList(), fetchedAtMs = 1_001)
+        assertEquals(0, settled.count)
+        assertTrue(settled.seenAfter.isEmpty())
+        assertEquals(1, OrbFollowUpQueue().enqueue("c2", "yes")
+            .withServer(emptyList(), fetchedAtMs = 2_000).count)
+    }
+
+    @Test fun historicalYesStaysPendingUntilNewPostSendTurn() {
+        val history = listOf(OrbDeliveredMessage(null, "yes", 5), OrbDeliveredMessage("old", " yes ", 20))
+        var q = OrbFollowUpQueue().enqueue("c1", "yes", lastSequence = 20)
+            .posted("c1", queued = true, atMs = 1_000)
+        q = q.reconciled(history)
+        assertEquals(listOf("c1"), ids(q))
+        q = q.withServer(listOf(OrbQueuedRow("c1", "yes")), fetchedAtMs = 1_001, lastSequence = 25)
+            .reconciled(history)
+        assertEquals(20L, q.seenAfter["c1"])
+        assertEquals(listOf("c1"), ids(q))
+        q = q.reconciled(history + OrbDeliveredMessage("new-turn", " yes\n", 21))
+        assertEquals(0, q.count)
+        assertEquals(0, q.withServer(listOf(OrbQueuedRow("c1", "yes"))).count)
+    }
+
+    @Test fun deliveredByIdWinsOverContentAndReservesItsEvent() {
+        val q = OrbFollowUpQueue().enqueue("c1", "yes", lastSequence = 20)
+            .enqueue("c2", "edited elsewhere", lastSequence = 20)
+        val next = q.reconciled(listOf(OrbDeliveredMessage("c1", "edited elsewhere", 21)))
+        assertEquals(listOf("c2"), ids(next))
+        assertEquals(setOf("c1"), next.delivered)
+    }
+
+    @Test fun contentFallbackDeliversOneRowPerEvent() {
+        val q = OrbFollowUpQueue().enqueue("c1", "yes", lastSequence = 20)
+            .enqueue("c2", "yes", lastSequence = 20)
+        assertEquals(listOf("c2"), ids(q.reconciled(listOf(OrbDeliveredMessage(null, "yes", 21)))))
+        assertEquals(0, q.reconciled(listOf(
+            OrbDeliveredMessage(null, "yes", 21), OrbDeliveredMessage(null, "yes", 22)
+        )).count)
+    }
+
+    @Test fun serverRowsKeepFirstBaselineAndDropItWhenRemoved() {
+        val rows = listOf(OrbQueuedRow("s", "yes", sending = true))
+        val q = OrbFollowUpQueue().withServer(rows, lastSequence = 20)
+        assertFalse(q.rows.single().sending)
+        assertEquals(1, q.reconciled(listOf(OrbDeliveredMessage(null, "yes", 20))).count)
+        val refreshed = q.withServer(rows, lastSequence = 30)
+        assertEquals(20L, refreshed.seenAfter["s"])
+        assertEquals(0, refreshed.reconciled(listOf(OrbDeliveredMessage(null, "yes", 21))).count)
+        assertTrue(refreshed.withServer(emptyList()).seenAfter.isEmpty())
+    }
+
+    @Test fun missingBaselineDoesNotMatchHistoricalContent() {
+        val q = OrbFollowUpQueue(server = listOf(OrbQueuedRow("s", "yes")))
+        assertEquals(1, q.reconciled(listOf(OrbDeliveredMessage(null, "yes", Long.MAX_VALUE))).count)
+        assertEquals(0, q.reconciled(listOf(OrbDeliveredMessage("s", "changed", 1))).count)
+    }
+
+    @Test fun enqueueWithoutCursorRejectsContentButAcceptsId() {
+        val q = OrbFollowUpQueue().enqueue("c1", "yes")
+            .posted("c1", queued = true, atMs = 1_000)
+        assertEquals(null, q.seenAfter["c1"])
+        val history = listOf(OrbDeliveredMessage(null, "yes", 5), OrbDeliveredMessage("old", "yes", 20))
+        assertEquals(listOf("c1"), ids(q.reconciled(history)))
+        assertEquals(listOf("c1"), ids(q.reconciled(listOf(OrbDeliveredMessage(null, "yes", Long.MAX_VALUE)))))
+        assertEquals(0, q.reconciled(history + OrbDeliveredMessage("c1", "changed", 21)).count)
+        assertEquals(0, q.withDelivered(setOf("c1")).count)
+    }
+
+    @Test fun serverWithoutCursorArmsBaselineOnceEventsLoad() {
+        val rows = listOf(OrbQueuedRow("s", "yes"))
+        val cold = OrbFollowUpQueue().withServer(rows)
+        assertEquals(null, cold.seenAfter["s"])
+        assertEquals(listOf("s"), ids(cold.reconciled(listOf(OrbDeliveredMessage(null, "yes", 20)))))
+        val armed = cold.withServer(rows, lastSequence = 20)
+        assertEquals(20L, armed.seenAfter["s"])
+        assertEquals(listOf("s"), ids(armed.reconciled(listOf(OrbDeliveredMessage(null, "yes", 20)))))
+        assertEquals(0, armed.reconciled(listOf(OrbDeliveredMessage(null, "yes", 21))).count)
+    }
+
+    @Test fun contentEventIsNotReusedAcrossReconciliations() {
+        val messages = listOf(OrbDeliveredMessage(null, "yes", 21))
+        val q = OrbFollowUpQueue().enqueue("c1", "yes", lastSequence = 20)
+            .enqueue("c2", "yes", lastSequence = 20)
+            .reconciled(messages)
+        assertEquals(listOf("c2"), ids(q))
+        assertEquals(q, q.reconciled(messages))
+        assertEquals(listOf("c2"), ids(q.withServer(emptyList()).reconciled(messages)))
+        assertEquals(0, q.reconciled(messages + OrbDeliveredMessage(null, "yes", 22)).count)
+    }
+
+    @Test fun consumedServerEventStaysReservedAfterMatchedRowLeaves() {
+        val messages = listOf(OrbDeliveredMessage("server-id", "yes", 21))
+        val q = OrbFollowUpQueue().withServer(listOf(OrbQueuedRow("c1", "yes")), lastSequence = 20)
+            .reconciled(messages)
+            .withServer(emptyList())
+            .enqueue("c2", "yes", lastSequence = 20)
+        assertEquals(listOf("c2"), ids(q.reconciled(messages)))
+        assertEquals(0, q.reconciled(messages + OrbDeliveredMessage("next-server-id", "yes", 22)).count)
+    }
+
+    @Test fun deliveredIdEventsStayReservedWhenKnownRowLeaves() {
+        val q = OrbFollowUpQueue().withServer(listOf(OrbQueuedRow("c1", "yes")), lastSequence = 20)
+            .withDelivered(setOf("c1"))
+            .withServer(emptyList())
+            .enqueue("c2", "yes", lastSequence = 20)
+        val messages = listOf(OrbDeliveredMessage("c1", "yes", 21))
+        val reconciled = q.reconciled(messages)
+        assertEquals(listOf("c2"), ids(reconciled))
+        assertEquals(reconciled, reconciled.reconciled(messages))
+        assertEquals(0, reconciled.reconciled(messages + OrbDeliveredMessage(null, "yes", 22)).count)
+    }
+
+    @Test fun deliveredIdsAccumulateAcrossLiveEvents() {
+        val q = OrbFollowUpQueue().withServer(listOf(OrbQueuedRow("a", "yes"), OrbQueuedRow("b", "yes")))
+            .withDelivered(setOf("a")).withDelivered(setOf("b")).withDelivered(emptySet())
+        assertEquals(0, q.count)
+    }
+
+    @Test fun historicalYesAnswerDoesNotSettlePendingSideQuestion() {
+        val old = OrbSideAgent.Turn("old", "yes", "old answer", at = "2026-11-06T10:00:00Z")
+        val askedAt = java.time.Instant.parse("2026-11-06T12:00:00Z").toEpochMilli()
+        assertFalse(OrbSideAgent.doesTurnAnswerPending("yes", askedAt, listOf(old), listOf(old)))
+        val new = OrbSideAgent.Turn("new", "yes", "new answer", at = "2026-11-06T12:00:01Z")
+        assertTrue(OrbSideAgent.doesTurnAnswerPending("yes", askedAt, listOf(old, new), listOf(old)))
+    }
+
     @Test fun deliveredImmediatelyLeavesNoRow() {
         val q = OrbFollowUpQueue().enqueue("m1", "hi").posted("m1", queued = false)
         assertEquals(0, q.count)
@@ -45,11 +177,24 @@ class OrbSendFlowTest {
 
     @Test fun editOutcomes() {
         assertEquals(OrbEditOutcome.Edited, OrbSendFlow.editOutcome(200))
-        assertEquals(OrbEditOutcome.Unsupported, OrbSendFlow.editOutcome(404))
+        assertEquals(OrbEditOutcome.AlreadySent, OrbSendFlow.editOutcome(404))
         assertEquals(OrbEditOutcome.Unsupported, OrbSendFlow.editOutcome(405))
         assertEquals(OrbEditOutcome.AlreadySent, OrbSendFlow.editOutcome(409))
         assertEquals(OrbEditOutcome.Failed, OrbSendFlow.editOutcome(500))
         assertEquals(OrbEditOutcome.Failed, OrbSendFlow.editOutcome(null))
+        val initial = OrbFollowUpQueue().withServer(
+            listOf(OrbQueuedRow("a", "first"), OrbQueuedRow("b", "second"), OrbQueuedRow("c", "third")),
+            lastSequence = 10
+        )
+        for (status in listOf(404, 405, 409, 500, null)) {
+            val outcome = OrbSendFlow.editOutcome(status)
+            assertTrue(outcome != OrbEditOutcome.Edited)
+            val reverted = initial.edit("b", "mutated").editReverted("b")
+            assertEquals(listOf("a", "b", "c"), ids(reverted))
+            assertEquals(listOf("first", "second", "third"), reverted.rows.map { it.content })
+            assertTrue(reverted.hidden.isEmpty())
+            assertTrue(reverted.pending.isEmpty())
+        }
     }
 
     @Test fun sendNowAndRemoveHideImmediatelyAndRollBack() {

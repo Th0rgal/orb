@@ -322,6 +322,30 @@ data class OrbParsedUserPrompt(
     val files: List<OrbImageAttachmentRef>
 )
 
+object OrbMessagePresentation {
+    private val trailer = Regex("""\n\n<!-- paloma:attachment:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) -->\nAttached context: read `\.paloma/messages/\1/\.paloma/attach\.md` \(paths in that manifest are relative to `\.paloma/messages/\1`\)\.$""", RegexOption.IGNORE_CASE)
+
+    data class Parsed(val text: String, val attached: Boolean)
+
+    fun parse(content: String): Parsed {
+        val match = trailer.find(content)
+        val unwrapped = if (match != null) content.substring(0, match.range.first) else content
+        if (unwrapped.contains("Current request:\n")) {
+            return Parsed(OrbSideAgent.extractQuestion(unwrapped), match != null || unwrapped.contains("\nAttachment: "))
+        }
+        return if (match != null) Parsed(unwrapped, true) else Parsed(content, false)
+    }
+
+    fun replaceUserText(content: String, nextText: String): String {
+        val match = trailer.find(content)
+        val unwrapped = if (match != null) content.substring(0, match.range.first) else content
+        val suffix = if (match != null) content.substring(match.range.first) else ""
+        val updated = OrbSideAgent.replaceQuestion(unwrapped, nextText)
+        val changed = updated != unwrapped || unwrapped.contains("Current request:\n")
+        return (if (changed) updated else nextText) + suffix
+    }
+}
+
 object OrbUserPromptParser {
     private val lineRegex = Regex("^\\s*-\\s*\\[(image|file)\\]\\s*([^:]+):\\s*(\\S+)(?:\\s*\\(([^)]+)\\))?\\s*$", RegexOption.IGNORE_CASE)
 

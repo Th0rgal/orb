@@ -600,6 +600,9 @@ final class OrbBtwStore {
             return
         }
         guard let stored = StoredEvent.fromStreamFrame(missionId: missionId, type: type, data: data) else {
+            if type == "user_message", (data["queued"] as? Bool) == true {
+                recomputeFromCache()
+            }
             return
         }
         let existing = eventCache[missionId]?.events ?? []
@@ -689,34 +692,45 @@ struct OrbSideQuestionSheet: View {
     }
     private var canSend: Bool { !busy && !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
+    private var scrollTranscriptView: some View {
+        OrbTranscriptScrollView(identifier: "btw", scroller: scroller, working: waiting) {
+            transcript
+        }
+        .scrollDismissesKeyboard(.interactively)
+        // Tapping the transcript hides the keyboard, like the conversation tab
+        // (simultaneous: links and buttons in the transcript still get the tap).
+        .simultaneousGesture(TapGesture().onEnded { if focused { focused = false } })
+        .onChange(of: store.turns.count) { _, _ in if scroller.pinned { scroller.scrollToBottom(animated: true) } }
+        .onChange(of: store.boundDeliveredMessages) { _, delivered in
+            let next = followUps.reconciled(with: delivered)
+            if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
+        }
+        .onChange(of: store.boundMaxSequence) { _, _ in Task { await refreshQueue() } }
+        .onChange(of: pending) { _, value in if value != nil { scroller.scrollToBottom(animated: true) } }
+        .onChange(of: focused) { _, value in if value && scroller.metrics.distanceFromBottom <= OrbTranscriptScroller.pillThreshold { scroller.scrollToBottom(animated: true) } }
+        .background(OrbStyle.background)
+    }
+
+    private func handleSheetAppear() {
+        OrbWarmSyncCoordinator.shared.noteBtwSheetOpened(parentId: parentID)
+        // `/btw <question>` from the composer was already a send: don't ask for a second tap.
+        let typed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !typed.isEmpty && !autoAsked {
+            autoAsked = true
+            Task { await ask() }
+        } else if store.loaded && store.turns.isEmpty && store.open == nil {
+            focused = true
+        }
+    }
+
     var body: some View {
         NavigationStack {
-            OrbTranscriptScrollView(identifier: "btw", scroller: scroller, working: waiting) {
-                transcript
-            }
-            .scrollDismissesKeyboard(.interactively)
-            // Tapping the transcript hides the keyboard, like the conversation tab
-            // (simultaneous: links and buttons in the transcript still get the tap).
-            .simultaneousGesture(TapGesture().onEnded { if focused { focused = false } })
-            .onChange(of: store.turns.count) { _, _ in if scroller.pinned { scroller.scrollToBottom(animated: true) } }
-            .onChange(of: pending) { _, value in if value != nil { scroller.scrollToBottom(animated: true) } }
-            .onChange(of: focused) { _, value in if value && scroller.metrics.distanceFromBottom <= OrbTranscriptScroller.pillThreshold { scroller.scrollToBottom(animated: true) } }
-            .background(OrbStyle.background)
+            scrollTranscriptView
             .safeAreaInset(edge: .bottom, spacing: 0) { composer }
             .navigationTitle("Side question").navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbar }
             .task(id: phase) { await follow() }
-            .onAppear {
-                OrbWarmSyncCoordinator.shared.noteBtwSheetOpened(parentId: parentID)
-                // `/btw <question>` from the composer was already a send: don't ask for a second tap.
-                let typed = question.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !typed.isEmpty && !autoAsked {
-                    autoAsked = true
-                    Task { await ask() }
-                } else if store.loaded && store.turns.isEmpty && store.open == nil {
-                    focused = true
-                }
-            }
+            .onAppear { handleSheetAppear() }
             .onDisappear {
                 OrbWarmSyncCoordinator.shared.noteBtwSheetClosed(parentId: parentID)
             }
@@ -967,11 +981,11 @@ struct OrbSideQuestionSheet: View {
         let displayRows = parsed.map { row -> OrbQueuedRow in
             rawMap[row.id] = row.content
             var copy = row
-            copy.content = OrbBtwThreads.question(row.content)
+            copy.content = OrbMessagePresentation.parse(row.content).text
             return copy
         }
         rawQueuedByID = rawMap
-        let lastSeq = store.boundDeliveredMessages.last?.sequence
+        let lastSeq = store.boundMaxSequence > 0 ? store.boundMaxSequence : store.boundDeliveredMessages.last?.sequence
         let next = followUps.withServer(displayRows, fetchedAt: fetchedAt, lastSequence: lastSeq).reconciled(with: store.boundDeliveredMessages)
         if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
     }
@@ -1035,8 +1049,9 @@ struct OrbSideQuestionSheet: View {
         // so Core accepts the question at most once (desktop `askBtwAgent`).
         let messageID = UUID().uuidString
         if queueing {
+            let enqueueSeq = store.boundMaxSequence > 0 ? store.boundMaxSequence : store.boundDeliveredMessages.last?.sequence
             withAnimation(reduceMotion ? nil : .snappy(duration: 0.18)) {
-                followUps = followUps.enqueue(messageID, text, lastSequence: store.boundDeliveredMessages.last?.sequence)
+                followUps = followUps.enqueue(messageID, text, lastSequence: enqueueSeq)
             }
             OrbUsageTelemetry.shared.trackAction(.queue, surface: "btw")
         }
@@ -1073,7 +1088,8 @@ struct OrbSideQuestionSheet: View {
                     } else {
                         followUps = followUps.postFailed(messageID)
                         if queuedNow {
-                            followUps = followUps.enqueue(receiptID, text, lastSequence: store.boundDeliveredMessages.last?.sequence).posted(receiptID, queued: true)
+                            let postedSeq = store.boundMaxSequence > 0 ? store.boundMaxSequence : store.boundDeliveredMessages.last?.sequence
+                            followUps = followUps.enqueue(receiptID, text, lastSequence: postedSeq).posted(receiptID, queued: true)
                         }
                     }
                     if !queuedNow { pendingBaselineTurns = store.turns; pending = text; askedAt = Date(); store.sent(to: id) }
@@ -1118,7 +1134,7 @@ struct OrbSideQuestionSheet: View {
     }
 
     private func editQueued(_ queueID: String, content: String) async {
-        guard let id = store.boundID else { return }
+        guard store.boundID != nil else { return }
         editingQueuedID = nil
         question = ""
         guard followUps.row(queueID) != nil else {
@@ -1126,7 +1142,8 @@ struct OrbSideQuestionSheet: View {
             return
         }
         followUps = followUps.edit(queueID, content)
-        let wireContent = rawQueuedByID[queueID].map { OrbBtwThreads.replaceQuestion($0, with: content) } ?? content
+        let base = rawQueuedByID[queueID] ?? followUps.row(queueID)?.content ?? content
+        let wireContent = OrbMessagePresentation.replaceUserText(base, with: content)
         var status: Int? = nil
         do {
             _ = try await OrbCore.shared.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "PATCH", body: .object(["content": .string(wireContent)]))
@@ -1138,22 +1155,12 @@ struct OrbSideQuestionSheet: View {
             followUps = followUps.editConfirmed(queueID, content)
             OrbUsageTelemetry.shared.trackAction(.messageEdit, surface: "btw-queue")
         case .unsupported:
-            followUps = followUps.editReverted(queueID).hide(queueID)
-            _ = try? await OrbCore.shared.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "DELETE")
-            let clientID = UUID().uuidString
-            followUps = followUps.enqueue(clientID, content, lastSequence: store.boundDeliveredMessages.last?.sequence)
-            do {
-                let result = try await OrbCore.shared.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(wireContent), "client_message_id": .string(clientID), "queue_followup": .bool(true)]))
-                rawQueuedByID[clientID] = wireContent
-                followUps = followUps.posted(clientID, queued: result["queued"] == .bool(true))
-            } catch {
-                followUps = followUps.postFailed(clientID)
-                question = content
-                self.error = "Couldn’t save the edit. Your text is back in the composer."
-            }
+            followUps = followUps.editReverted(queueID)
+            error = "This edit cannot be saved atomically. The queued messages have not been changed."
         case .alreadySent:
             followUps = followUps.editReverted(queueID)
             error = "This side question was already sent, so the edit was not applied."
+            try? await store.refresh(force: true)
         case .failed:
             followUps = followUps.editReverted(queueID)
             error = "Couldn’t save the edit."

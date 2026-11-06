@@ -1236,6 +1236,9 @@ object OrbWarmSyncCoordinator {
                         nextBound = OrbRow(missionId, (nextBound?.raw ?: mapOf("id" to missionId)) + ("status" to "running"))
                     }
                 }
+            } else if (evType == "user_message" && OrbJSON.bool(parsed, "queued") == true) {
+                dirtyBtwParents.add(parentId)
+                checkedCleanBtwParents.remove(parentId)
             } else {
                 val stored = OrbLiveEventReducer.streamFrameToStoredRow(missionId, evType, parsed) ?: return
                 nextEvents = OrbLiveEventReducer.mergeMissionEvents(nextEvents, listOf(stored))

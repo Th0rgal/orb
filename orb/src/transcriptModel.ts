@@ -202,6 +202,14 @@ export class TranscriptReducer {
       const index = messageId ? this.users.get(messageId) : undefined;
       const previous = index == null ? undefined : this.items[index];
       if (previous?.kind === "user" && index != null) {
+        if (previous.queued && queued) {
+          const text = str(d.content) || previous.text;
+          const nextSource = source ?? previous.source;
+          if (text !== previous.text || nextSource !== previous.source) {
+            this.put(index, { ...previous, text, source: nextSource });
+          }
+          return;
+        }
         if (source && source !== previous.source) this.put(index, { ...previous, source });
         if (!previous.queued || queued) {
           const nextAt = !queued && typeof d.at === "string" ? d.at : previous.at;

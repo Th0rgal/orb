@@ -104,8 +104,9 @@ it('recovers a stored Antigravity answer on completion when live text was missed
  expect(view.container.querySelector('.agent-wait-status')).toBeNull();
 });
 
-it.each([['edits in place on a current Core',false],['falls back to replace on an older Core',true]] as const)('%s, without leaving a duplicate Sending… row',async(_name,oldCore)=>{
+it.each([['edits in place on a current Core',false],['preserves the original queue when an older Core rejects atomic editing',true]] as const)('%s, without leaving a duplicate Sending… row',async(_name,oldCore)=>{
  const {getMission,sendMissionMessage}=await import('../src/api');
+ vi.mocked(sendMissionMessage).mockClear();
  vi.mocked(getMission).mockResolvedValue({id:'edit-remote-queued',status:'active',history:[],created_at:'',updated_at:''});
  let rows=[{id:'orig-msg',mission_id:'edit-remote-queued',content:'Original queued text',source:'remote-queue'}];
  vi.mocked(sendMissionMessage).mockImplementation(async(_id,text,_attachments,clientMessageId)=>{
@@ -139,17 +140,40 @@ it.each([['edits in place on a current Core',false],['falls back to replace on a
  expect(input.value).toBe('Original queued text');
  fireEvent.input(input,{target:{value:'Edited queued text'}});
  fireEvent.keyDown(input,{key:'Enter'});
- await waitFor(()=>{
-  expect(screen.getAllByText('Edited queued text')).toHaveLength(1);
-  expect(screen.queryByText('Sending…')).toBeNull();
- });
- expect(screen.queryByText('Original queued text')).toBeNull();
- // Same id and the count never changed: one row, never "2 Queued".
+ await waitFor(()=>expect(vi.mocked(fetch).mock.calls.filter(([,options])=>options?.method==='PATCH')).toHaveLength(1));
+ expect(screen.queryByText('Sending…')).toBeNull();
  expect(screen.getByText('1 Queued')).toBeTruthy();
- await waitFor(()=>expect(rows.map(r=>r.id)).toEqual(oldCore?[expect.not.stringMatching(/^orig-msg$/)]:['orig-msg']));
- await waitFor(()=>expect(screen.getAllByText('Edited queued text')).toHaveLength(1));
- expect(screen.queryByText('Original queued text')).toBeNull();
-});
+  if(oldCore){
+   await waitFor(()=>expect(screen.getByRole('alert').textContent).toContain('405'));
+   await waitFor(()=>expect(input.value).toBe('Edited queued text'));
+   expect(screen.getAllByText('Original queued text')).toHaveLength(1);
+   expect(rows).toEqual([{id:'orig-msg',mission_id:'edit-remote-queued',content:'Original queued text',source:'remote-queue'}]);
+  }else{
+  await waitFor(()=>expect(screen.getAllByText('Edited queued text')).toHaveLength(1));
+  expect(screen.queryByText('Original queued text')).toBeNull();
+ }
+  expect(rows.map(r=>r.id)).toEqual(['orig-msg']);
+  expect(vi.mocked(fetch).mock.calls.filter(([,options])=>options?.method==='DELETE')).toEqual([]);
+  expect(sendMissionMessage).not.toHaveBeenCalled();
+ });
+
+ it('updates a queued row in place when another tab edits it',async()=>{
+  const {getMission}=await import('../src/api');
+  vi.mocked(getMission).mockResolvedValue({id:'cross-tab-edit',status:'active',history:[],created_at:'',updated_at:''});
+  vi.stubGlobal('fetch',vi.fn(async(url)=>{
+   if(String(url).includes('/queue?'))return Response.json([{id:'q1',mission_id:'cross-tab-edit',content:'draft one',source:'remote-queue'}]);
+   return Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}});
+  }));
+  const view=render(()=><NativeMissionView id="cross-tab-edit" initial={{id:'cross-tab-edit',status:'active',history:[],created_at:'',updated_at:''}}/>);
+  await waitFor(()=>expect(state.event).toBeTypeOf('function'));
+  await screen.findByText('draft one');
+  const node=view.container.querySelector('.queue-item');
+  state.event!({type:'user_message',data:{id:'q1',content:'edited in tab A',queued:true,source:'remote-queue'}});
+  await waitFor(()=>expect(screen.getAllByText('edited in tab A')).toHaveLength(1));
+  expect(screen.queryByText('draft one')).toBeNull();
+  expect(screen.getByText('1 Queued')).toBeTruthy();
+  expect(view.container.querySelector('.queue-item')).toBe(node);
+ });
 
 it('allows rapidly stacking multiple follow-up messages while earlier sends are still in flight',async()=>{
  const {getMission,sendMissionMessage}=await import('../src/api');

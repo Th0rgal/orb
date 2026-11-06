@@ -36,7 +36,11 @@ extension OrbConversation {
                 live.applyTextOp(data)
                 return
             }
-            if type == "user_message", (data["queued"] as? Bool) != true {
+            if type == "user_message" {
+                if (data["queued"] as? Bool) == true {
+                    Task { await refresh(force: true) }
+                    return
+                }
                 live.resetTurn()
             }
             if let stored {
@@ -198,6 +202,12 @@ extension OrbConversation {
         events = merged
         await hydrateTurnStart(id)
         OrbReadCache.saveEvents(id, events: events)
+        let nextFollowUps = followUps.reconciled(with: deliveredUserMessages)
+        if nextFollowUps != followUps {
+            withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) {
+                followUps = nextFollowUps
+            }
+        }
         rebuildWorkModel()
         rebuildHistory()
         live.reconcileStored(events, working: working, streamAdvanced: live.streamEpoch != epoch)
@@ -685,38 +695,28 @@ extension OrbConversation {
         }
     }
 
-    /// Edit in place via PATCH (same id and position); replace on 404/405 (older Core).
     func editQueued(_ queueID: String, content: String) async {
-        guard let id else { return }
+        guard id != nil else { return }
         editingQueuedID = nil
         text = ""
-        guard followUps.row(queueID) != nil else {
+        guard let before = followUps.row(queueID) else {
             error = "This message was already sent. Your edit was not applied."
             return
         }
-        followUps = followUps.edit(queueID, content)
+        let wireContent = OrbMessagePresentation.replaceUserText(before.content, with: content)
+        followUps = followUps.edit(queueID, wireContent)
         var status: Int? = nil
         do {
-            _ = try await api.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "PATCH", body: .object(["content": .string(content)]))
+            _ = try await api.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "PATCH", body: .object(["content": .string(wireContent)]))
             status = 200
         } catch let e as OrbHTTPError { status = e.status } catch { status = nil }
         switch OrbSendFlow.editOutcome(status: status) {
         case .edited:
-            followUps = followUps.editConfirmed(queueID, content)
+            followUps = followUps.editConfirmed(queueID, wireContent)
             OrbUsageTelemetry.shared.trackAction(.messageEdit, surface: "queue")
         case .unsupported:
-            followUps = followUps.editReverted(queueID).hide(queueID)
-            _ = try? await api.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "DELETE")
-            let clientID = UUID().uuidString
-            followUps = followUps.enqueue(clientID, content, lastSequence: events.last?.sequence)
-            do {
-                let result = try await api.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(content), "client_message_id": .string(clientID), "queue_followup": .bool(true)]))
-                followUps = followUps.posted(clientID, queued: result["queued"] == .bool(true))
-            } catch {
-                followUps = followUps.postFailed(clientID)
-                text = content
-                self.error = "Couldn’t save the edit. Your text is back in the composer."
-            }
+            followUps = followUps.editReverted(queueID)
+            error = "This edit cannot be saved atomically. The queued messages have not been changed."
         case .alreadySent:
             followUps = followUps.editReverted(queueID)
             error = "This message was already sent, so the edit was not applied."
@@ -735,7 +735,7 @@ extension OrbConversation {
         withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) {
             followUps = followUps.hide(queueID)
             live.resetTurn()
-            optimisticPrompt = row.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            optimisticPrompt = OrbMessagePresentation.parse(row.content).text.trimmingCharacters(in: .whitespacesAndNewlines)
             handoff = started
             handoffTracker.reset()
             scroller.scrollToBottom()
@@ -754,7 +754,8 @@ extension OrbConversation {
                 // Older Core without promote: stop the turn, then send this message.
                 _ = try? await api.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "DELETE")
                 _ = try? await api.call("/api/control/missions/\(OrbCore.escape(id))/cancel", method: "POST")
-                _ = try await api.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(row.content), "client_message_id": .string(UUID().uuidString)]))
+                let plainContent = OrbMessagePresentation.parse(row.content).text
+                _ = try await api.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(plainContent), "client_message_id": .string(UUID().uuidString)]))
             }
             OrbReadCache.invalidate("mission:\(id)")
             await refresh(force: true)

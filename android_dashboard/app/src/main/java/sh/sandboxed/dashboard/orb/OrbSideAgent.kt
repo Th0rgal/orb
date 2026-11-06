@@ -135,7 +135,9 @@ object OrbSideAgent {
     data class ParsedThread(
         val turns: List<Turn>,
         val open: OpenTurn?,
-        val deliveredIds: Set<String>
+        val deliveredIds: Set<String>,
+        val deliveredMessages: List<OrbDeliveredMessage> = emptyList(),
+        val maxSequence: Long = 0L
     )
 
     /** Text snapshot of the conversation, like Orb `sideContext()` (last 80 KB). */
@@ -493,6 +495,8 @@ object OrbSideAgent {
         val turns = mutableListOf<Turn>()
         val deliveredIds = mutableSetOf<String>()
         if (previous != null) deliveredIds.addAll(previous.deliveredIds)
+        val deliveredMessages = previous?.deliveredMessages.orEmpty().associateBy { it.sequence }.toMutableMap()
+        val maxSequence = maxOf(previous?.maxSequence ?: 0L, maxEventSeq(events))
         var sawNonQueuedUser = false
         var question = ""
         var at = ""
@@ -534,12 +538,17 @@ object OrbSideAgent {
                     val queued = OrbJSON.bool(meta, "queued") == true || OrbJSON.bool(data, "queued") == true
                     if (queued) continue
                     sawNonQueuedUser = true
+                    var primaryId: String? = null
                     for (key in listOf("client_message_id", "message_id", "event_id")) {
                         val cid = OrbJSON.str(meta, key) ?: OrbJSON.str(data, key) ?: ev.str(key)
-                        if (!cid.isNullOrEmpty()) deliveredIds.add(cid)
+                        if (!cid.isNullOrEmpty()) {
+                            if (primaryId == null) primaryId = cid
+                            deliveredIds.add(cid)
+                        }
                     }
                     if (question.isNotEmpty()) flush()
                     question = extractQuestion(rawContent)
+                    deliveredMessages[evSeq] = OrbDeliveredMessage(id = primaryId, content = question, sequence = evSeq)
                     at = ev.str("timestamp", "created_at").orEmpty()
                     seq = evSeq
                     start = index + 1
@@ -571,15 +580,18 @@ object OrbSideAgent {
                     return ParsedThread(
                         turns = mergeWithPrevious(fromHistory.turns),
                         open = openWithEvents,
-                        deliveredIds = deliveredIds
+                        deliveredIds = deliveredIds,
+                        deliveredMessages = deliveredMessages.values.sortedBy { it.sequence },
+                        maxSequence = maxSequence
                     )
                 }
             }
             if (previous != null) {
-                return if (active) previous else previous.copy(open = null)
+                return (if (active) previous else previous.copy(open = null)).copy(maxSequence = maxSequence)
             }
         }
 
+        val orderedDelivered = deliveredMessages.values.sortedBy { it.sequence }
         if (active && question.isNotEmpty()) {
             val tailEvents = ordered.subList(start, ordered.size).map { it.second }
             val liveTexts = texts.toMutableList()
@@ -600,11 +612,13 @@ object OrbSideAgent {
                     answer = live.answer,
                     narration = live.narration
                 ),
-                deliveredIds = deliveredIds
+                deliveredIds = deliveredIds,
+                deliveredMessages = orderedDelivered,
+                maxSequence = maxSequence
             )
         }
         if (question.isNotEmpty()) flush()
-        return ParsedThread(turns = mergeWithPrevious(turns), open = null, deliveredIds = deliveredIds)
+        return ParsedThread(turns = mergeWithPrevious(turns), open = null, deliveredIds = deliveredIds, deliveredMessages = orderedDelivered, maxSequence = maxSequence)
     }
 
     /** Resends an idempotent write after a dropped or timed-out connection (1, 2, 4, 8 s), like desktop `askBtwAgent`. */
@@ -694,6 +708,25 @@ fun OrbSideAgentSheet(
     var pendingBaselineTurns by remember(session.parentId) { mutableStateOf<List<OrbSideAgent.Turn>>(emptyList()) }
     var nowMs by remember(session.parentId) { mutableLongStateOf(System.currentTimeMillis()) }
 
+    suspend fun refreshQueue(targetId: String?) {
+        val id = targetId ?: return
+        val fetchedAtMs = System.currentTimeMillis()
+        val parsedThread = cachedThreads[id]?.second
+        val lastSequence = (parsedThread?.maxSequence ?: OrbSideAgent.maxEventSeq(cachedEventsByThread[id].orEmpty())).takeIf { it > 0L }
+        val items = runCatching {
+            OrbJSON.dictList(core.request("/api/control/queue?mission_id=${core.encodeComponent(id)}"))
+        }.getOrNull()
+        if (items != null) {
+            val parsed = OrbFollowUpQueue.parse(items, id)
+            val displayRows = parsed.map { row ->
+                rawQueuedById[row.id] = row.content
+                row.copy(content = OrbMessagePresentation.parse(row.content).text)
+            }
+            followUps = followUps.withServer(displayRows, fetchedAtMs = fetchedAtMs, lastSequence = lastSequence)
+        }
+        parsedThread?.deliveredMessages?.takeIf { it.isNotEmpty() }?.let { followUps = followUps.reconciled(it) }
+    }
+
     DisposableEffect(session.parentId) {
         val token = OrbWarmSyncCoordinator.attachBtwSheet(core, session.parentId) { snap ->
             if (snap.boundMission != null) {
@@ -704,6 +737,13 @@ fun OrbSideAgentSheet(
             openTurn = snap.openTurn
             cachedThreads.putAll(snap.cachedThreads)
             cachedEventsByThread.putAll(snap.cachedEventsByThread)
+            val activeBoundId = snap.boundMission?.id ?: boundId
+            if (!activeBoundId.isNullOrEmpty()) {
+                snap.cachedThreads[activeBoundId]?.second?.deliveredMessages?.takeIf { it.isNotEmpty() }?.let {
+                    followUps = followUps.reconciled(it)
+                }
+            }
+            scope.launch { refreshQueue(activeBoundId) }
             val pending = pendingQuestion?.trim()
             if (!pending.isNullOrEmpty() && (
                     snap.openTurn?.question?.trim() == pending ||
@@ -731,19 +771,6 @@ fun OrbSideAgentSheet(
         hasPriorTurns = turns.isNotEmpty()
     )
     val elapsedSuffix = turnStartMs?.let { " · ${OrbSideAgent.elapsedLabel(nowMs - it)}" }.orEmpty()
-
-    suspend fun refreshQueue(targetId: String?) {
-        val id = targetId ?: return
-        val items = runCatching {
-            OrbJSON.dictList(core.request("/api/control/queue?mission_id=${core.encodeComponent(id)}"))
-        }.getOrNull() ?: return
-        val parsed = OrbFollowUpQueue.parse(items, id)
-        val displayRows = parsed.map { row ->
-            rawQueuedById[row.id] = row.content
-            row.copy(content = OrbSideAgent.extractQuestion(row.content))
-        }
-        followUps = followUps.withServer(displayRows)
-    }
 
     suspend fun refreshThreads(force: Boolean = false): OrbRow? {
         if (!force && !loading && !running && pendingQuestion == null && OrbWarmSyncCoordinator.canSkipBtwServerCrawl(core, session.parentId)) {
@@ -868,7 +895,7 @@ fun OrbSideAgentSheet(
         }
         val perThread = mutableListOf<List<OrbSideAgent.Turn>>()
         var latestOpen: OrbSideAgent.OpenTurn? = null
-        var latestDelivered = emptySet<String>()
+        var latestDelivered = emptyList<OrbDeliveredMessage>()
         for (outcome in outcomes) {
             val tid = outcome.tid
             val isLive = outcome.isLive
@@ -882,7 +909,7 @@ fun OrbSideAgentSheet(
                 perThread.add(parsed.turns)
                 if (tid == target.id) {
                     latestOpen = parsed.open
-                    latestDelivered = parsed.deliveredIds
+                    latestDelivered = parsed.deliveredMessages
                 }
             } else {
                 perThread.add(turns.filter { it.id.startsWith("btw:$tid:") })
@@ -895,7 +922,7 @@ fun OrbSideAgentSheet(
         turns = merged
         openTurn = latestOpen
         if (latestDelivered.isNotEmpty()) {
-            followUps = followUps.withDelivered(latestDelivered)
+            followUps = followUps.reconciled(latestDelivered)
         }
         val pending = pendingQuestion?.trim()
         val answeredPending = !pending.isNullOrEmpty() &&
@@ -937,14 +964,20 @@ fun OrbSideAgentSheet(
             val targetId = currentBound?.id
             val isTargetLive = targetId != null && currentStatus in OrbSideAgent.liveStatuses
             val boundTurnCount = if (targetId != null) cachedThreads[targetId]?.second?.turns?.size ?: 0 else 0
-            val boundMaxSeq = if (targetId != null) OrbSideAgent.maxEventSeq(cachedEventsByThread[targetId].orEmpty()) else 0L
+            val boundMaxSeq = if (targetId != null) {
+                maxOf(
+                    cachedThreads[targetId]?.second?.maxSequence ?: 0L,
+                    OrbSideAgent.maxEventSeq(cachedEventsByThread[targetId].orEmpty())
+                )
+            } else 0L
+            val boundSeqCursor = boundMaxSeq.takeIf { it > 0L }
             val rotateIdle = !isTargetLive && followUps.count == 0 && OrbSideAgent.shouldRotateSession(boundTurnCount, boundMaxSeq)
             val canReuse = !freshSession && !rotateIdle && (isTargetLive || followUps.count > 0 || currentStatus in OrbSideAgent.resumableStatuses)
 
             if (targetId != null && canReuse) {
                 val queueing = isTargetLive || followUps.count > 0
                 if (queueing) {
-                    followUps = followUps.enqueue(clientId, text)
+                    followUps = followUps.enqueue(clientId, text, lastSequence = boundSeqCursor)
                     UsageTelemetry.trackAction(UsageTelemetry.Action.Queue, "btw")
                 } else {
                     pendingBaselineTurns = turns
@@ -970,12 +1003,13 @@ fun OrbSideAgentSheet(
                 val queuedNow = receipt?.get("queued") == true
                 val receiptId = OrbJSON.str(receipt, "id")?.takeIf { it.isNotEmpty() } ?: clientId
                 rawQueuedById[receiptId] = wrapped
+                val postedAtMs = System.currentTimeMillis()
                 if (queueing || queuedNow) {
                     if (receiptId == clientId) {
-                        followUps = followUps.posted(clientId, queuedNow)
+                        followUps = followUps.posted(clientId, queuedNow, atMs = postedAtMs)
                     } else {
                         followUps = followUps.postFailed(clientId).let {
-                            if (queuedNow) it.enqueue(receiptId, text).posted(receiptId, true) else it
+                            if (queuedNow) it.enqueue(receiptId, text, lastSequence = boundSeqCursor).posted(receiptId, true, atMs = postedAtMs) else it
                         }
                     }
                     if (!queuedNow) {
@@ -1023,7 +1057,8 @@ fun OrbSideAgentSheet(
             return
         }
         followUps = followUps.edit(queueId, content)
-        val wireContent = rawQueuedById[queueId]?.let { OrbSideAgent.replaceQuestion(it, content) } ?: content
+        val base = rawQueuedById[queueId] ?: followUps.row(queueId)?.content ?: content
+        val wireContent = OrbMessagePresentation.replaceUserText(base, content)
         scope.launch {
             val httpStatus = try {
                 core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "PATCH", body = mapOf("content" to wireContent))
@@ -1040,29 +1075,13 @@ fun OrbSideAgentSheet(
                     UsageTelemetry.trackAction(UsageTelemetry.Action.MessageEdit, "btw_queue")
                 }
                 OrbEditOutcome.Unsupported -> {
-                    followUps = followUps.editReverted(queueId).hide(queueId)
-                    runCatching { core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "DELETE") }
-                    val clientId = UUID.randomUUID().toString()
-                    followUps = followUps.enqueue(clientId, content)
-                    try {
-                        val receipt = OrbJSON.dict(
-                            core.request(
-                                "/api/control/message",
-                                method = "POST",
-                                body = mapOf("mission_id" to targetId, "content" to wireContent, "client_message_id" to clientId, "queue_followup" to true)
-                            )
-                        )
-                        rawQueuedById[clientId] = wireContent
-                        followUps = followUps.posted(clientId, receipt?.get("queued") == true)
-                    } catch (e: Throwable) {
-                        followUps = followUps.postFailed(clientId)
-                        inputText = content
-                        error = e.message ?: "Couldn't save the edit."
-                    }
+                    followUps = followUps.editReverted(queueId)
+                    error = "This edit cannot be saved atomically. The queued messages have not been changed."
                 }
                 OrbEditOutcome.AlreadySent -> {
                     followUps = followUps.editReverted(queueId)
                     error = "This side question was already sent, so the edit was not applied."
+                    refreshThreads(force = true)
                 }
                 OrbEditOutcome.Failed -> {
                     followUps = followUps.editReverted(queueId)

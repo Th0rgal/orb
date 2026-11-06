@@ -326,6 +326,107 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln s!"[orb-core-test] FAIL: authenticated /api/console/ws returned HTTP {r.status}"
     return 1
 
+  -- Durable queue edit (`GET /api/control/queue`, `PATCH /api/control/queue/:id`):
+  -- edits in place without changing FIFO order, emits a queued `user_message` event,
+  -- rejects empty edits with 400, missing rows with 404, and delivered/bound rows with 409.
+  for (qid, text) in [("q-1", "first"), ("q-2", "second"), ("q-3", "third")] do
+    let .ok _ ← enqueueRemoteMessage store "core" qid "m-alpha" text (some "remote-queue")
+      | do closeCoreStore store; return 1
+  let patchBody := "{\"content\":\"second-edited\"}"
+  let patchRaw := s!"PATCH /api/control/queue/q-2 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {patchBody.utf8ByteSize}\r\n\r\n{patchBody}".toUTF8
+  let .ok patchReq := parseRequest patchRaw none | do closeCoreStore store; return 1
+  let .ok patchResp ← dispatchCoreRequest appSt patchReq nowSec | do closeCoreStore store; return 1
+  if patchResp.status != 200 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: PATCH /api/control/queue/q-2 returned {patchResp.status}: {String.fromUTF8! patchResp.body}"
+    return 1
+
+  let listQueueRaw := s!"GET /api/control/queue?mission_id=m-alpha HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+  let .ok listQueueReq := parseRequest listQueueRaw none | do closeCoreStore store; return 1
+  let .ok listQueueResp ← dispatchCoreRequest appSt listQueueReq nowSec | do closeCoreStore store; return 1
+  let listQueueStr := String.fromUTF8! listQueueResp.body
+  let expectedQueue := "[{\"id\":\"q-1\",\"mission_id\":\"m-alpha\",\"content\":\"first\",\"source\":\"remote-queue\",\"inflight\":false},{\"id\":\"q-2\",\"mission_id\":\"m-alpha\",\"content\":\"second-edited\",\"source\":\"remote-queue\",\"inflight\":false},{\"id\":\"q-3\",\"mission_id\":\"m-alpha\",\"content\":\"third\",\"source\":\"remote-queue\",\"inflight\":false}]"
+  if listQueueResp.status != 200 || listQueueStr != expectedQueue then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: queue FIFO snapshot mismatch ({listQueueResp.status}): {listQueueStr}"
+    return 1
+
+  let .ok evRows ← execParamQuery store.missionsDb
+    "SELECT payload FROM mission_events WHERE mission_id='m-alpha' AND event_type='user_message' ORDER BY seq DESC LIMIT 1;" #[]
+    | do closeCoreStore store; return 1
+  let evPayload := ((evRows[1]?.bind (·[0]?)).getD "")
+  if (evPayload.splitOn "\"id\":\"q-2\"").length != 2 ||
+     (evPayload.splitOn "\"content\":\"second-edited\"").length != 2 ||
+     (evPayload.splitOn "\"queued\":true").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: queued user_message event missing after PATCH: {evPayload}"
+    return 1
+
+  -- RFC 8259: escaped content is decoded, not stored as literal backslash sequences.
+  let escBody := "{\"content\":\"line1\\nline2\\\"q\\\"\\\\end\"}"
+  let escRaw := s!"PATCH /api/control/queue/q-2 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {escBody.utf8ByteSize}\r\n\r\n{escBody}".toUTF8
+  let .ok escReq := parseRequest escRaw none | do closeCoreStore store; return 1
+  let .ok escResp ← dispatchCoreRequest appSt escReq nowSec | do closeCoreStore store; return 1
+  if escResp.status != 200 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: escaped PATCH returned {escResp.status}: {String.fromUTF8! escResp.body}"
+    return 1
+  let .ok escListReq := parseRequest listQueueRaw none | do closeCoreStore store; return 1
+  let .ok escListResp ← dispatchCoreRequest appSt escListReq nowSec | do closeCoreStore store; return 1
+  let escListStr := String.fromUTF8! escListResp.body
+  if escListResp.status != 200 ||
+     (escListStr.splitOn "\"content\":\"line1\\nline2\\\"q\\\"\\\\end\"").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: escaped content not decoded: {escListStr}"
+    return 1
+
+  -- Whitespace-only escapes are empty after unescaping and must be rejected.
+  let wsEscBody := "{\"content\":\"\\n\\t\\r\"}"
+  let wsEscRaw := s!"PATCH /api/control/queue/q-2 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {wsEscBody.utf8ByteSize}\r\n\r\n{wsEscBody}".toUTF8
+  let .ok wsEscReq := parseRequest wsEscRaw none | do closeCoreStore store; return 1
+  let .ok wsEscResp ← dispatchCoreRequest appSt wsEscReq nowSec | do closeCoreStore store; return 1
+  if wsEscResp.status != 400 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: whitespace-escape PATCH returned {wsEscResp.status}"
+    return 1
+
+  -- Non-string and malformed bodies are rejected before the queue is touched.
+  for badBody in ["{\"content\":null}", "{\"content\":123}", "{\"content\":false}", "{not json"] do
+    let badRaw := s!"PATCH /api/control/queue/q-2 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {badBody.utf8ByteSize}\r\n\r\n{badBody}".toUTF8
+    let .ok badReq := parseRequest badRaw none | do closeCoreStore store; return 1
+    let .ok badResp ← dispatchCoreRequest appSt badReq nowSec | do closeCoreStore store; return 1
+    if badResp.status != 400 then
+      closeCoreStore store
+      IO.eprintln s!"[orb-core-test] FAIL: bad PATCH body {badBody} returned {badResp.status}"
+      return 1
+
+  let emptyPatchBody := "{\"content\":\"   \"}"
+  let emptyPatchRaw := s!"PATCH /api/control/queue/q-2 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {emptyPatchBody.utf8ByteSize}\r\n\r\n{emptyPatchBody}".toUTF8
+  let .ok emptyPatchReq := parseRequest emptyPatchRaw none | do closeCoreStore store; return 1
+  let .ok emptyPatchResp ← dispatchCoreRequest appSt emptyPatchReq nowSec | do closeCoreStore store; return 1
+  if emptyPatchResp.status != 400 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: empty PATCH returned {emptyPatchResp.status}"
+    return 1
+
+  let missingPatchRaw := s!"PATCH /api/control/queue/q-missing HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {patchBody.utf8ByteSize}\r\n\r\n{patchBody}".toUTF8
+  let .ok missingPatchReq := parseRequest missingPatchRaw none | do closeCoreStore store; return 1
+  let .ok missingPatchResp ← dispatchCoreRequest appSt missingPatchReq nowSec | do closeCoreStore store; return 1
+  if missingPatchResp.status != 404 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: missing PATCH returned {missingPatchResp.status}"
+    return 1
+
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE remote_message_queue SET payload=json_set(payload,'$.job_id','job-1') WHERE user_id='core' AND message_id='q-2';" #[]
+  let boundPatchRaw := s!"PATCH /api/control/queue/q-2 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {patchBody.utf8ByteSize}\r\n\r\n{patchBody}".toUTF8
+  let .ok boundPatchReq := parseRequest boundPatchRaw none | do closeCoreStore store; return 1
+  let .ok boundPatchResp ← dispatchCoreRequest appSt boundPatchReq nowSec | do closeCoreStore store; return 1
+  if boundPatchResp.status != 409 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: job-bound PATCH returned {boundPatchResp.status}"
+    return 1
+
   closeCoreStore store
   IO.FS.removeDirAll tmpRoot
 
