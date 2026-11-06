@@ -434,6 +434,7 @@ where
                     error = %err,
                     "Pending OAuth rotation retained for retry"
                 );
+                break;
             }
         }
     }
@@ -685,6 +686,147 @@ mod tests {
             reloaded.get(id).await.unwrap().oauth.unwrap().refresh_token,
             "new"
         );
+    }
+
+    #[tokio::test]
+    async fn chained_rotations_survive_persistence_failure_and_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending.json");
+        let storage_path = dir.path().join("ai_providers.json");
+        let backup_path = dir.path().join("ai_providers.backup");
+        let (store, id) = store_with_account(dir.path(), "A").await;
+        for (old, new) in [("A", "B"), ("B", "C")] {
+            let expected = AIProviderStore::oauth_generation_at_path(
+                &storage_path,
+                ProviderType::Anthropic,
+                old,
+            );
+            assert_eq!(expected.is_some(), old == "A");
+            record_pending_rotation_with_generation_async(&path, rotation(old, new), expected)
+                .await
+                .unwrap();
+        }
+        let entries = snapshot_pending(&path).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[1].expected_oauth_generation,
+            Some(entries[0].rotation_id)
+        );
+        fs::rename(&storage_path, &backup_path).unwrap();
+        fs::create_dir(&storage_path).unwrap();
+        assert_eq!(drain_pending(&store, &path).await, 0);
+        assert_eq!(
+            read_pending(&path),
+            vec![rotation("A", "B"), rotation("B", "C")]
+        );
+        assert_eq!(
+            store.get(id).await.unwrap().oauth.unwrap().refresh_token,
+            "A"
+        );
+        fs::remove_dir(&storage_path).unwrap();
+        fs::rename(&backup_path, &storage_path).unwrap();
+        let restarted = AIProviderStore::new(storage_path.clone()).await;
+        assert_eq!(drain_pending(&restarted, &path).await, 2);
+        assert!(!path.exists());
+        let reloaded = AIProviderStore::new(storage_path).await;
+        let saved = reloaded.get(id).await.unwrap();
+        assert_eq!(saved.oauth_generation, entries[1].rotation_id);
+        assert_eq!(saved.oauth_rotation_id, Some(entries[1].rotation_id));
+        assert_eq!(saved.oauth.unwrap().refresh_token, "C");
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_acknowledges_only_successful_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending.json");
+        let storage_path = dir.path().join("ai_providers.json");
+        let backup_path = dir.path().join("ai_providers.backup");
+        let (store, id) = store_with_account(dir.path(), "A").await;
+        for (old, new) in [("A", "B"), ("B", "C"), ("C", "D")] {
+            record_pending_rotation_async(&path, rotation(old, new))
+                .await
+                .unwrap();
+        }
+        let mut calls = 0;
+        let applied = drain_pending_with(&path, |entry| {
+            calls += 1;
+            let fail = calls == 2;
+            let store = &store;
+            let storage_path = &storage_path;
+            let backup_path = &backup_path;
+            async move {
+                if fail {
+                    fs::rename(storage_path, backup_path).unwrap();
+                    fs::create_dir(storage_path).unwrap();
+                }
+                apply_pending(store, &entry).await
+            }
+        })
+        .await;
+        assert_eq!(applied, 1);
+        assert_eq!(calls, 2);
+        assert_eq!(
+            read_pending(&path),
+            vec![rotation("B", "C"), rotation("C", "D")]
+        );
+        assert_eq!(
+            store.get(id).await.unwrap().oauth.unwrap().refresh_token,
+            "B"
+        );
+        fs::remove_dir(&storage_path).unwrap();
+        fs::rename(&backup_path, &storage_path).unwrap();
+        let restarted = AIProviderStore::new(storage_path.clone()).await;
+        assert_eq!(drain_pending(&restarted, &path).await, 2);
+        assert!(!path.exists());
+        let reloaded = AIProviderStore::new(storage_path).await;
+        assert_eq!(
+            reloaded.get(id).await.unwrap().oauth.unwrap().refresh_token,
+            "D"
+        );
+    }
+
+    #[tokio::test]
+    async fn chained_recovery_updates_only_exact_owner_without_account_inference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending.json");
+        let storage_path = dir.path().join("ai_providers.json");
+        let (store, owner) = store_with_account(dir.path(), "A").await;
+        let mut other =
+            crate::ai_providers::AIProvider::new(ProviderType::Anthropic, "Other".into());
+        other.oauth = Some(OAuthCredentials {
+            access_token: "other-access".into(),
+            refresh_token: "other-refresh".into(),
+            expires_at: 123,
+        });
+        let other_id = store.add(other).await;
+        let unchanged = store.get(other_id).await.unwrap();
+        for (old, new) in [("A", "B"), ("B", "C"), ("unknown", "unowned")] {
+            record_pending_rotation_async(&path, rotation(old, new))
+                .await
+                .unwrap();
+        }
+        fs::remove_file(&storage_path).unwrap();
+        fs::create_dir(&storage_path).unwrap();
+        assert_eq!(drain_pending(&store, &path).await, 0);
+        assert_eq!(read_pending(&path).len(), 3);
+        fs::remove_dir(&storage_path).unwrap();
+        assert_eq!(drain_pending(&store, &path).await, 2);
+        assert!(!path.exists());
+        let reloaded = AIProviderStore::new(storage_path).await;
+        assert_eq!(
+            reloaded
+                .get(owner)
+                .await
+                .unwrap()
+                .oauth
+                .unwrap()
+                .refresh_token,
+            "C"
+        );
+        let saved_other = reloaded.get(other_id).await.unwrap();
+        assert_eq!(saved_other.oauth, unchanged.oauth);
+        assert_eq!(saved_other.oauth_generation, unchanged.oauth_generation);
+        assert_eq!(saved_other.oauth_rotation_id, unchanged.oauth_rotation_id);
     }
 
     #[tokio::test]
