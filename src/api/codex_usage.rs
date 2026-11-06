@@ -117,6 +117,13 @@ pub struct CodexUsageSnapshot {
     /// real-traffic 429). Lets the UI label staleness/source.
     #[serde(rename = "codex_source", skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+
+    /// Banked or promotional subscription usage-limit resets (`rate_limit_reset_credits`).
+    #[serde(
+        rename = "subscription_resets",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub subscription_resets: Option<super::subscription_usage::SubscriptionResets>,
 }
 
 impl CodexUsageSnapshot {
@@ -205,6 +212,11 @@ impl CodexUsageStore {
         );
     }
 
+    /// Drop any cached snapshot for `account_id` so the next read queries upstream.
+    pub async fn invalidate(&self, account_id: &str) {
+        self.entries.write().await.remove(account_id);
+    }
+
     /// Fold a passive exhaustion signal (from a real-traffic `model_cooldown`
     /// 429) into the account's snapshot. Updates the secondary-window reset and
     /// marks it 100% used, but preserves any richer fields a prior probe set.
@@ -268,6 +280,7 @@ pub fn parse_codex_headers(headers: &reqwest::header::HeaderMap) -> Option<Codex
             .map(|v| v.eq_ignore_ascii_case("true")),
         limit_reached: None,
         source: None,
+        subscription_resets: None,
     };
     // Some deployments only carry the bare reset/used pair; treat the snapshot
     // as valid as long as at least one window field came through.
@@ -312,16 +325,33 @@ pub fn parse_usage(report: &serde_json::Value) -> Option<CodexUsageSnapshot> {
     let minutes = |name: &str| Some(window(name)?.get("limit_window_seconds")?.as_u64()? / 60);
     let reset = |name: &str| window(name)?.get("reset_at")?.as_i64();
     let credits = report.get("credits");
+    let primary_used_percent = used("primary_window");
+    let secondary_used_percent = used("secondary_window");
+    let limit_reached = limits
+        .get("limit_reached")
+        .and_then(|reached| reached.as_bool());
+    let subscription_resets = super::subscription_usage::parse_codex_reset_credits_summary(
+        report,
+        chrono::Utc::now().timestamp(),
+    )
+    .map(|resets| {
+        super::subscription_usage::apply_codex_usage_eligibility(
+            resets,
+            limit_reached,
+            primary_used_percent,
+            secondary_used_percent,
+        )
+    });
     Some(CodexUsageSnapshot {
         plan_type: report
             .get("plan_type")
             .and_then(|plan| plan.as_str())
             .map(str::to_string),
         active_limit: None,
-        primary_used_percent: used("primary_window"),
+        primary_used_percent,
         primary_window_minutes: minutes("primary_window"),
         primary_reset_at: reset("primary_window"),
-        secondary_used_percent: used("secondary_window"),
+        secondary_used_percent,
         secondary_window_minutes: minutes("secondary_window"),
         secondary_reset_at: reset("secondary_window"),
         credits_balance: credits
@@ -333,10 +363,9 @@ pub fn parse_usage(report: &serde_json::Value) -> Option<CodexUsageSnapshot> {
         credits_unlimited: credits
             .and_then(|credits| credits.get("unlimited"))
             .and_then(|unlimited| unlimited.as_bool()),
-        limit_reached: limits
-            .get("limit_reached")
-            .and_then(|reached| reached.as_bool()),
+        limit_reached,
         source: Some("usage".to_string()),
+        subscription_resets,
     })
 }
 
@@ -346,8 +375,28 @@ pub async fn read_usage(
     access_token: &str,
     account_id: &str,
 ) -> Result<CodexUsageSnapshot, UsageError> {
+    read_usage_at(
+        client,
+        super::subscription_usage::CODEX_WHAM_BASE,
+        access_token,
+        account_id,
+    )
+    .await
+}
+
+pub async fn read_usage_at(
+    client: &reqwest::Client,
+    wham_base: &str,
+    access_token: &str,
+    account_id: &str,
+) -> Result<CodexUsageSnapshot, UsageError> {
+    let url = if wham_base == super::subscription_usage::CODEX_WHAM_BASE {
+        CODEX_USAGE_URL.to_string()
+    } else {
+        format!("{}/wham/usage", wham_base.trim_end_matches('/'))
+    };
     let response = client
-        .get(CODEX_USAGE_URL)
+        .get(&url)
         .header("Authorization", format!("Bearer {access_token}"))
         .header("chatgpt-account-id", account_id)
         .header("originator", "codex_cli_rs")
@@ -369,8 +418,32 @@ pub async fn read_usage(
         .json()
         .await
         .map_err(|error| UsageError::Other(format!("Codex usage is not JSON: {error}")))?;
-    parse_usage(&report)
-        .ok_or_else(|| UsageError::Other("Codex usage has no rate limits".to_string()))
+    let mut snap = parse_usage(&report)
+        .ok_or_else(|| UsageError::Other("Codex usage has no rate limits".to_string()))?;
+
+    // When `/wham/usage` advertises available reset credits without embedded
+    // credit details, enrich from `/wham/rate-limit-reset-credits` (best effort).
+    if let Some(fallback) = snap
+        .subscription_resets
+        .clone()
+        .filter(|r| r.available_count > 0 && r.grants.iter().all(|g| g.id.is_empty()))
+    {
+        let detailed = super::subscription_usage::read_codex_reset_credits(
+            client,
+            wham_base,
+            access_token,
+            account_id,
+            fallback,
+        )
+        .await;
+        snap.subscription_resets = Some(super::subscription_usage::apply_codex_usage_eligibility(
+            detailed,
+            snap.limit_reached,
+            snap.primary_used_percent,
+            snap.secondary_used_percent,
+        ));
+    }
+    Ok(snap)
 }
 
 /// Active probe: ask the Codex backend for this account's limits and parse the
@@ -510,5 +583,39 @@ mod tests {
         // Non-cooldown errors are ignored.
         let other = br#"{"error":{"code":"usage_limit_reached"}}"#;
         assert_eq!(parse_cooldown_reset(other, 5_000), None);
+    }
+
+    #[test]
+    fn parses_usage_report_with_subscription_reset_credits() {
+        let report = serde_json::json!({
+            "plan_type": "pro",
+            "rate_limit": {
+                "allowed": false,
+                "limit_reached": true,
+                "primary_window": {
+                    "used_percent": 100,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1791000000
+                },
+                "secondary_window": {
+                    "used_percent": 100,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1791046737
+                }
+            },
+            "rate_limit_reset_credits": {
+                "available_count": 1
+            }
+        });
+        let snap = parse_usage(&report).expect("usage snapshot");
+        let resets = snap
+            .subscription_resets
+            .as_ref()
+            .expect("subscription_resets");
+        assert_eq!(resets.available_count, 1);
+        assert!(resets.usable_now);
+        let json = snap.to_json();
+        assert_eq!(json["subscription_resets"]["available_count"], 1);
+        assert_eq!(json["subscription_resets"]["usable_now"], true);
     }
 }

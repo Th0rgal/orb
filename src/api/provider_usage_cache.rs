@@ -70,6 +70,10 @@ impl ProviderUsageCache {
         self.entries.write().await.insert(key, entry);
     }
 
+    pub async fn remove(&self, key: &str) {
+        self.entries.write().await.remove(key);
+    }
+
     /// Snapshot only the keys present in the cache (cheap; for the refresh
     /// loop to know which providers to revisit).
     pub async fn keys(&self) -> Vec<String> {

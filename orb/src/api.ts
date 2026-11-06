@@ -549,6 +549,8 @@ export interface AIProvider {
   account_email?: string | null;
   /** Order among the provider's accounts: lower is tried first. */
   priority?: number;
+  /** Automatically redeem a banked subscription reset when all accounts hit a usage limit. */
+  auto_reset_on_limit?: boolean;
   status: { type: string; reason?: string; message?: string };
 }
 
@@ -769,6 +771,15 @@ export async function setProviderEnabled(id: string, enabled: boolean): Promise<
   });
 }
 
+/** Toggle whether Core automatically redeems a banked subscription reset when all accounts hit a limit. */
+export async function setProviderAutoResetOnLimit(id: string, autoResetOnLimit: boolean): Promise<AIProvider> {
+  return api<AIProvider>(`/api/ai/providers/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ auto_reset_on_limit: autoResetOnLimit }),
+  });
+}
+
 /** Set the order in which one provider's accounts are tried, first id first. */
 export async function reorderProviders(ids: string[]): Promise<AIProvider[]> {
   return api<AIProvider[]>("/api/ai/providers/reorder", {
@@ -782,7 +793,28 @@ export async function listProviders(signal?: AbortSignal): Promise<AIProvider[]>
   return Array.isArray(data.providers) ? data.providers : [];
 }
 
+export interface SubscriptionResetGrant {
+  id: string;
+  label: string;
+  clears?: string[];
+  resets_left: number;
+  expires_at?: number;
+  usable_now: boolean;
+  requires_limit: boolean;
+  unavailable_reason?: string;
+}
+
+export interface SubscriptionResets {
+  available_count: number;
+  usable_now: boolean;
+  grants?: SubscriptionResetGrant[];
+  unavailable_reason?: string;
+}
+
 export interface ProviderUsage {
+  subscription_resets?: SubscriptionResets;
+  reset_redeemed?: boolean;
+  woken_missions?: number;
   antigravity_plan?: string;
   antigravity_windows?: { label: string; used_percent: number; reset_at?: number }[];
   muse_plan?: string;
@@ -866,6 +898,18 @@ export interface ProviderUsage {
 
 export async function getProviderUsage(id: string, force = false): Promise<ProviderUsage> {
   return api(`/api/ai/providers/${encodeURIComponent(id)}/usage${force ? "?force=true" : ""}`);
+}
+
+/** Redeem a banked subscription usage-limit reset on an Anthropic or OpenAI account. */
+export async function resetProviderUsage(id: string, opts?: { idempotencyKey?: string; grantId?: string }): Promise<ProviderUsage> {
+  return api(`/api/ai/providers/${encodeURIComponent(id)}/reset-usage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      idempotency_key: opts?.idempotencyKey,
+      grant_id: opts?.grantId,
+    }),
+  });
 }
 
 /** "Check again" after verifying an Antigravity account with Google. */

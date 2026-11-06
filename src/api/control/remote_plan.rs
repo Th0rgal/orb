@@ -464,7 +464,8 @@ pub(crate) fn remote_opencode_config(model: &str, api_base_url: &str) -> serde_j
                 },
                 "options": {
                     "baseURL": format!("{}/v1", api_base_url.trim_end_matches('/')),
-                    "apiKey": format!("{{env:{REMOTE_PROXY_KEY_ENV}}}")
+                    "apiKey": format!("{{env:{REMOTE_PROXY_KEY_ENV}}}"),
+                    "timeout": crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS
                 }
             }
         }
@@ -804,5 +805,9 @@ mod vision_tests {
         assert_eq!(model["attachment"], true);
         assert_eq!(model["modalities"]["input"], json!(["text", "image"]));
         assert_eq!(model["modalities"]["output"], json!(["text"]));
+        assert_eq!(
+            config["provider"]["builtin"]["options"]["timeout"],
+            crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS
+        );
     }
 }

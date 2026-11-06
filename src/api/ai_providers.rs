@@ -39,6 +39,23 @@ use crate::util::{
 static OAUTH_WARN_DEDUP: LazyLock<StdMutex<HashMap<String, Instant>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
+static REGISTERED_APP_STATE: LazyLock<StdMutex<Option<std::sync::Weak<super::routes::AppState>>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+pub(crate) fn register_app_state(state: &Arc<super::routes::AppState>) {
+    *REGISTERED_APP_STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(state));
+}
+
+pub(crate) fn registered_app_state() -> Option<Arc<super::routes::AppState>> {
+    REGISTERED_APP_STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(std::sync::Weak::upgrade)
+}
+
 /// Accounts whose stored OAuth refresh token the provider has *permanently*
 /// rejected (`invalid_grant` / "refresh token not found"). Keyed by account id
 /// → the exact dead refresh-token value. The proactive usage-refresh loop
@@ -2733,6 +2750,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/:id/default", post(set_default))
         .route("/:id/health", post(check_provider_health))
         .route("/:id/usage", get(get_provider_usage_cached))
+        .route("/:id/reset-usage", post(reset_provider_usage))
         .route("/:id/antigravity/recheck", post(recheck_antigravity))
         .route(
             "/:id/mistral-usage-session",
@@ -5016,6 +5034,8 @@ pub struct UpdateProviderRequest {
     pub api_key: Option<Option<String>>,
     pub base_url: Option<Option<String>>,
     pub enabled: Option<bool>,
+    /// Automatically redeem an available subscription reset when a usage limit blocks a mission.
+    pub auto_reset_on_limit: Option<bool>,
     /// Which backends this provider is used for (e.g., ["opencode", "claudecode"])
     pub use_for_backends: Option<Vec<String>>,
     /// Custom models for custom providers
@@ -5054,6 +5074,8 @@ pub struct ProviderResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub npm_package: Option<String>,
     pub enabled: bool,
+    #[serde(default)]
+    pub auto_reset_on_limit: bool,
     pub is_default: bool,
     pub uses_oauth: bool,
     pub auth_methods: Vec<AuthMethod>,
@@ -5255,6 +5277,7 @@ fn build_provider_response(
         custom_env_var: None,
         npm_package: None,
         enabled,
+        auto_reset_on_limit: false,
         is_default,
         uses_oauth: provider_type.uses_oauth(),
         auth_methods: provider_type.auth_methods(),
@@ -5341,6 +5364,7 @@ fn build_response_from_store(provider: &crate::ai_providers::AIProvider) -> Prov
         custom_env_var: provider.custom_env_var.clone(),
         npm_package: provider.npm_package.clone(),
         enabled: provider.enabled,
+        auto_reset_on_limit: provider.auto_reset_on_limit,
         is_default: provider.is_default,
         uses_oauth: pt.uses_oauth() || provider.mistral_subscription,
         auth_methods: pt.auth_methods(),
@@ -8696,18 +8720,67 @@ async fn check_provider_health(
     }
 }
 
-/// Merge a Codex usage snapshot's `codex_*` fields into the base provider-usage
-/// JSON object the dashboard consumes.
-/// The account can send messages again (plan change, reset, credits): a limit
-/// recorded earlier must not keep it out of rotation until the old reset.
-async fn release_codex_limit(state: &super::routes::AppState, id: uuid::Uuid) {
+static PROVIDER_RESET_GATES: LazyLock<StdMutex<HashMap<uuid::Uuid, Arc<AsyncMutex<()>>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn provider_reset_gate(id: uuid::Uuid) -> Arc<AsyncMutex<()>> {
+    let mut gates = PROVIDER_RESET_GATES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    Arc::clone(
+        gates
+            .entry(id)
+            .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+    )
+}
+
+/// Prefer CLIProxyAPI's live access token whenever CLIProxyAPI owns OAuth for
+/// `provider_type`. Checks `cli_proxy_accounts::account_for` first (exact file
+/// binding) and falls back to scanning the proxy auth dirs by provider ID / email.
+pub(crate) fn cli_proxy_live_oauth_token(
+    provider_opt: Option<&crate::ai_providers::AIProvider>,
+    provider_type: ProviderType,
+    provider_uuid: Option<uuid::Uuid>,
+    account_email: Option<&str>,
+) -> Option<String> {
+    if !crate::api::oauth_owner::cli_proxy_owns(provider_type) {
+        return None;
+    }
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if let Some(acct) = provider_opt.and_then(super::cli_proxy_accounts::account_for) {
+        if !acct.disabled
+            && !acct.oauth.access_token.trim().is_empty()
+            && acct.oauth.expires_at > now_ms
+        {
+            return Some(acct.oauth.access_token);
+        }
+    }
+    let (prefix, tag) = match provider_type {
+        ProviderType::Anthropic => ("claude-", "claude"),
+        ProviderType::OpenAI => ("codex-", "codex"),
+        _ => return None,
+    };
+    cli_proxy_access_token(
+        prefix,
+        tag,
+        CliProxyAccountRef {
+            provider_id: provider_uuid,
+            email: account_email,
+        },
+    )
+}
+
+/// The account can send messages again (plan change, reset, credits): lift any
+/// recorded usage-limit cooldown so routing and scheduler passes see it immediately.
+async fn release_provider_limit(state: &super::routes::AppState, id: uuid::Uuid, force: bool) {
     let limits = crate::account_limits::shared();
     let Some(provider) = state.ai_providers.get(id).await else {
         return;
     };
     let subscription =
         crate::provider_health::store_account_subscription_key(provider.provider_type, &provider);
-    let held = limits.is_cooling(&crate::account_limits::account_key(id))
+    let held = force
+        || limits.is_cooling(&crate::account_limits::account_key(id))
         || subscription
             .as_ref()
             .is_some_and(|key| limits.is_cooling(&crate::account_limits::subscription_key(&key.0)));
@@ -8718,7 +8791,11 @@ async fn release_codex_limit(state: &super::routes::AppState, id: uuid::Uuid) {
     if let Some(key) = subscription {
         state.health_tracker.clear_subscription_cooldown(&key).await;
     }
-    tracing::info!(provider = %id, "Codex account has messages again; its recorded limit is lifted");
+    tracing::info!(
+        provider = %id,
+        provider_type = %provider.provider_type.id(),
+        "Subscription account has capacity again; its recorded limit is lifted"
+    );
 }
 
 fn merge_codex_usage(
@@ -8905,28 +8982,37 @@ async fn get_provider_usage(
     // Determine how to call each provider for rate-limit info
     let usage_result = match provider_type {
         ProviderType::Anthropic => {
+            let stored_provider = match provider_uuid {
+                Some(uuid) => state.ai_providers.get(uuid).await,
+                None => None,
+            };
+            let proxy_token = if api_key_opt.is_none() {
+                cli_proxy_live_oauth_token(
+                    stored_provider.as_ref(),
+                    ProviderType::Anthropic,
+                    provider_uuid,
+                    account_email.as_deref(),
+                )
+            } else {
+                None
+            };
+
             // Use API key or OAuth access token. OAuth credentials must be
             // sent as a Bearer token with the oauth-2025-04-20 beta header
             // — sending them as `x-api-key` gets rejected with 401, which
             // is what users on a Claude subscription (no api_key, OAuth only)
             // were seeing while their missions still worked via Claude Code.
-            let (mut auth, mut is_oauth) = if let Some(ref key) = api_key_opt {
+            let (auth, is_oauth) = if let Some(ref key) = api_key_opt {
                 (key.clone(), false)
+            } else if let Some(token) = proxy_token {
+                // Under CLI-proxy ownership, CLIProxyAPI owns refresh and holds
+                // the authoritative live access token. Never refresh in Core.
+                (token, true)
             } else if let Some(ref o) = oauth {
-                // Refresh the token if expired before using it.
-                //
-                // When the provider lives in AIProviderStore (UUID-based
-                // lookup), refresh using that record's own refresh_token and
-                // persist the new credentials back into the same record —
-                // refresh_anthropic_oauth_token() only touches the shared
-                // opencode auth.json, so without this we'd silently reuse a
-                // months-stale access_token and surface as HTTP 401.
-                if oauth_token_expired(o.expires_at) {
+                if oauth_token_expired(o.expires_at)
+                    && !crate::api::oauth_owner::cli_proxy_owns(ProviderType::Anthropic)
+                {
                     let (token, refresh_err) = if let Some(uuid) = provider_uuid {
-                        // Route through the single locked, all-tiers refresh path so
-                        // this on-demand probe can't rotate the (rotating) Anthropic
-                        // refresh token out from under the proactive refresher or the
-                        // shared credential tiers and leave them with invalid_grant.
                         match refresh_store_account_oauth_locked(
                             &state.ai_providers,
                             uuid,
@@ -8985,10 +9071,6 @@ async fn get_provider_usage(
                             .unwrap_or_else(|| o.access_token.clone());
                         (tok, None)
                     };
-                    // If the refresh_token itself is dead, short-circuit with a
-                    // clear message — probing Anthropic with the stale
-                    // access_token would just return HTTP 401 and hide the real
-                    // problem (the user needs to re-authenticate).
                     if let Some(err) = refresh_err {
                         let lower = err.to_lowercase();
                         if lower.contains("invalid_grant")
@@ -9015,24 +9097,6 @@ async fn get_provider_usage(
                     "error": "No credentials configured"
                 })));
             };
-
-            // Under CLI-proxy ownership, sandboxed.sh's own Anthropic OAuth
-            // record is deliberately stale (the proxy owns refresh). Probe
-            // with the proxy's live access token instead so the usage window
-            // data (5h / 7d) reflects the credential missions actually use.
-            if crate::api::oauth_owner::cli_proxy_owns(ProviderType::Anthropic) {
-                if let Some(token) = cli_proxy_access_token(
-                    "claude-",
-                    "claude",
-                    CliProxyAccountRef {
-                        provider_id: provider_uuid,
-                        email: account_email.as_deref(),
-                    },
-                ) {
-                    auth = token;
-                    is_oauth = true;
-                }
-            }
 
             // Minimal messages API call to get rate limit headers
             let mut req_builder = client
@@ -9191,6 +9255,41 @@ async fn get_provider_usage(
                             }
                         }
                     }
+
+                    let unified_status = info
+                        .get("unified_status")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    if unified_status.as_deref() == Some("allowed") {
+                        if let Some(uuid) = provider_uuid {
+                            release_provider_limit(&state, uuid, false).await;
+                        }
+                    }
+                    if is_oauth && status_code != 401 && status_code != 403 {
+                        let at_wall =
+                            unified_status.as_deref() == Some("rejected") || status_code == 429;
+                        let reset_key = provider_uuid
+                            .map(|u| u.to_string())
+                            .unwrap_or_else(|| "anthropic".to_string());
+                        if let Some(resets) =
+                            super::subscription_usage::AnthropicResetStore::shared()
+                                .get_or_fetch(
+                                    &state.http_client,
+                                    super::subscription_usage::ANTHROPIC_API_BASE,
+                                    &reset_key,
+                                    &auth,
+                                    at_wall,
+                                )
+                                .await
+                        {
+                            if let Some(obj) = info.as_object_mut() {
+                                obj.insert(
+                                    "subscription_resets".to_string(),
+                                    serde_json::to_value(resets).unwrap_or_default(),
+                                );
+                            }
+                        }
+                    }
                     info
                 }
                 Err(e) => serde_json::json!({
@@ -9225,6 +9324,18 @@ async fn get_provider_usage(
                         "account_email": account_email,
                         "status": "connected",
                     });
+                    let stored_provider = match provider_uuid {
+                        Some(uuid) => state.ai_providers.get(uuid).await,
+                        None => None,
+                    };
+                    let proxy_token = cli_proxy_live_oauth_token(
+                        stored_provider.as_ref(),
+                        ProviderType::OpenAI,
+                        provider_uuid,
+                        account_email.as_deref(),
+                    );
+                    let candidate_jwt = proxy_token.as_deref().unwrap_or(&o.access_token);
+
                     // The codex_usage store is keyed by the provider account
                     // UUID so the proxy's passive `model_cooldown` capture
                     // (which only knows `entry.account_id`) and this active
@@ -9232,11 +9343,13 @@ async fn get_provider_usage(
                     // ChatGPT account id, decoded from the token.
                     let store_key = match provider_uuid {
                         Some(u) => u.to_string(),
-                        None => crate::api::codex_usage::account_id_from_token(&o.access_token)
+                        None => crate::api::codex_usage::account_id_from_token(candidate_jwt)
                             .unwrap_or_default(),
                     };
-                    let chatgpt_account_id =
-                        crate::api::codex_usage::account_id_from_token(&o.access_token);
+                    let chatgpt_account_id = crate::api::codex_usage::account_id_from_token(
+                        candidate_jwt,
+                    )
+                    .or_else(|| crate::api::codex_usage::account_id_from_token(&o.access_token));
                     let (Some(chatgpt_account_id), false) =
                         (chatgpt_account_id, store_key.is_empty())
                     else {
@@ -9251,38 +9364,51 @@ async fn get_provider_usage(
                         return Ok(Json(merge_codex_usage(base, &snap)));
                     }
 
-                    // Get a usable access token: refresh + persist if expired.
-                    // We excluded these accounts from the background refresh
-                    // loop, so don't rely on it having kept the token fresh.
+                    // Prefer CLIProxyAPI's live OAuth token when CLIProxyAPI
+                    // owns OpenAI OAuth; otherwise refresh + persist via Core.
                     let working_dir = &state.config.working_dir;
-                    let token = match find_openai_oauth_account_by_chatgpt_account_id(
-                        working_dir,
-                        &chatgpt_account_id,
-                    ) {
-                        Some(acct) => {
-                            match prepare_codex_oauth_account_for_launch(working_dir, &acct).await {
-                                Ok(fresh) => Some(fresh.access_token),
-                                Err(e) => {
-                                    tracing::debug!("Codex usage token refresh failed: {}", e);
-                                    let lower = e.to_lowercase();
-                                    if lower.contains("invalid_grant")
-                                        || lower.contains("expired")
-                                        || lower.contains("revoked")
-                                        || lower.contains("401")
-                                        || lower.contains("unauthorized")
-                                    {
-                                        base["status"] = serde_json::json!("needs_reauth");
-                                    }
-                                    None
-                                }
-                            }
-                        }
-                        // Not in the store file (e.g. OpenCode-auth only): try
-                        // the token we already hold.
-                        None if !oauth_token_expired(o.expires_at) => Some(o.access_token.clone()),
-                        None => {
+                    let proxy_owned = crate::api::oauth_owner::cli_proxy_owns(ProviderType::OpenAI);
+                    let token = if let Some(tok) = proxy_token {
+                        Some(tok)
+                    } else if proxy_owned {
+                        if !oauth_token_expired(o.expires_at) {
+                            Some(o.access_token.clone())
+                        } else {
                             base["status"] = serde_json::json!("needs_reauth");
                             None
+                        }
+                    } else {
+                        match find_openai_oauth_account_by_chatgpt_account_id(
+                            working_dir,
+                            &chatgpt_account_id,
+                        ) {
+                            Some(acct) => {
+                                match prepare_codex_oauth_account_for_launch(working_dir, &acct)
+                                    .await
+                                {
+                                    Ok(fresh) => Some(fresh.access_token),
+                                    Err(e) => {
+                                        tracing::debug!("Codex usage token refresh failed: {}", e);
+                                        let lower = e.to_lowercase();
+                                        if lower.contains("invalid_grant")
+                                            || lower.contains("expired")
+                                            || lower.contains("revoked")
+                                            || lower.contains("401")
+                                            || lower.contains("unauthorized")
+                                        {
+                                            base["status"] = serde_json::json!("needs_reauth");
+                                        }
+                                        None
+                                    }
+                                }
+                            }
+                            None if !oauth_token_expired(o.expires_at) => {
+                                Some(o.access_token.clone())
+                            }
+                            None => {
+                                base["status"] = serde_json::json!("needs_reauth");
+                                None
+                            }
                         }
                     };
                     let Some(token) = token else {
@@ -9306,31 +9432,33 @@ async fn get_provider_usage(
                         report,
                         Err(crate::api::codex_usage::UsageError::Unauthorized)
                     ) {
-                        let refreshed = match find_openai_oauth_account_by_chatgpt_account_id(
-                            working_dir,
-                            &chatgpt_account_id,
-                        ) {
-                            Some(account) => {
-                                refresh_codex_oauth_account_now(working_dir, &account).await
-                            }
-                            None => Err("the account is not in the provider store".to_string()),
-                        };
-                        match refreshed {
-                            Ok(account) => {
-                                tracing::info!(
-                                    provider = %store_key,
-                                    "Replaced a Codex token the backend refused before its expiry"
-                                );
-                                token = account.access_token;
-                                report = crate::api::codex_usage::read_usage(
-                                    &state.http_client,
-                                    &token,
-                                    &chatgpt_account_id,
-                                )
-                                .await;
-                            }
-                            Err(error) => {
-                                tracing::warn!(provider = %store_key, %error, "Codex token is refused and could not be refreshed");
+                        if !proxy_owned {
+                            let refreshed = match find_openai_oauth_account_by_chatgpt_account_id(
+                                working_dir,
+                                &chatgpt_account_id,
+                            ) {
+                                Some(account) => {
+                                    refresh_codex_oauth_account_now(working_dir, &account).await
+                                }
+                                None => Err("the account is not in the provider store".to_string()),
+                            };
+                            match refreshed {
+                                Ok(account) => {
+                                    tracing::info!(
+                                        provider = %store_key,
+                                        "Replaced a Codex token the backend refused before its expiry"
+                                    );
+                                    token = account.access_token;
+                                    report = crate::api::codex_usage::read_usage(
+                                        &state.http_client,
+                                        &token,
+                                        &chatgpt_account_id,
+                                    )
+                                    .await;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(provider = %store_key, %error, "Codex token is refused and could not be refreshed");
+                                }
                             }
                         }
                         if matches!(
@@ -9352,7 +9480,7 @@ async fn get_provider_usage(
                                 .await;
                             if snap.limit_reached == Some(false) {
                                 if let Some(id) = provider_uuid {
-                                    release_codex_limit(&state, id).await;
+                                    release_provider_limit(&state, id, false).await;
                                 }
                             }
                             return Ok(Json(merge_codex_usage(base, &snap)));
@@ -10398,6 +10526,659 @@ async fn recheck_antigravity(
     Ok(Json(live_fetch_and_cache(state, id).await?))
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct ResetProviderUsageRequest {
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub grant_id: Option<String>,
+}
+
+#[cfg(test)]
+static TEST_SUBSCRIPTION_RESET_BASES: LazyLock<StdMutex<Option<(String, String)>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+#[cfg(test)]
+pub(crate) fn set_test_subscription_reset_bases(bases: Option<(String, String)>) {
+    if let Ok(mut guard) = TEST_SUBSCRIPTION_RESET_BASES.lock() {
+        *guard = bases;
+    }
+}
+
+fn subscription_reset_bases() -> (String, String) {
+    #[cfg(test)]
+    if let Ok(guard) = TEST_SUBSCRIPTION_RESET_BASES.lock() {
+        if let Some(ref bases) = *guard {
+            return bases.clone();
+        }
+    }
+    (
+        super::subscription_usage::ANTHROPIC_API_BASE.to_string(),
+        super::subscription_usage::CODEX_WHAM_BASE.to_string(),
+    )
+}
+
+async fn resolve_subscription_oauth_token(
+    working_dir: &Path,
+    ai_providers_opt: Option<&crate::ai_providers::AIProviderStore>,
+    provider: &crate::ai_providers::AIProvider,
+) -> Result<String, (StatusCode, String)> {
+    if provider
+        .api_key
+        .as_ref()
+        .is_some_and(|key| !key.trim().is_empty())
+        && provider.oauth.is_none()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Subscription usage resets are only available on OAuth subscription accounts".into(),
+        ));
+    }
+    if let Some(proxy_tok) = cli_proxy_live_oauth_token(
+        Some(provider),
+        provider.provider_type,
+        Some(provider.id),
+        provider.account_email.as_deref(),
+    ) {
+        return Ok(proxy_tok);
+    }
+    let oauth = provider.oauth.as_ref().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Account has no OAuth subscription credentials configured".into(),
+    ))?;
+    if crate::api::oauth_owner::cli_proxy_owns(provider.provider_type) {
+        if !oauth_token_expired(oauth.expires_at) {
+            return Ok(oauth.access_token.clone());
+        }
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "CLIProxyAPI OAuth login is expired or unavailable; reconnect this account".into(),
+        ));
+    }
+    if !oauth_token_expired(oauth.expires_at) {
+        return Ok(oauth.access_token.clone());
+    }
+    match provider.provider_type {
+        ProviderType::Anthropic => {
+            if let Some(store) = ai_providers_opt {
+                match refresh_store_account_oauth_locked(
+                    store,
+                    provider.id,
+                    ProviderType::Anthropic,
+                    &oauth.refresh_token,
+                )
+                .await
+                {
+                    Ok((access, _, _)) => Ok(access),
+                    Err(e) => Err((
+                        StatusCode::UNAUTHORIZED,
+                        format!("Failed to refresh Anthropic OAuth token: {e}"),
+                    )),
+                }
+            } else {
+                Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Anthropic OAuth access token is expired; reconnect or refresh usage first"
+                        .into(),
+                ))
+            }
+        }
+        ProviderType::OpenAI => {
+            let chatgpt_id = crate::api::codex_usage::account_id_from_token(&oauth.access_token)
+                .ok_or((
+                    StatusCode::BAD_REQUEST,
+                    "Could not decode ChatGPT account ID from OAuth token".into(),
+                ))?;
+            let acct = find_openai_oauth_account_by_chatgpt_account_id(working_dir, &chatgpt_id)
+                .ok_or((
+                    StatusCode::UNAUTHORIZED,
+                    "OpenAI OAuth account not found in provider store".into(),
+                ))?;
+            prepare_codex_oauth_account_for_launch(working_dir, &acct)
+                .await
+                .map(|fresh| fresh.access_token)
+                .map_err(|e| {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        format!("Failed to refresh Codex OAuth token: {e}"),
+                    )
+                })
+        }
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} does not support subscription usage resets",
+                other.display_name()
+            ),
+        )),
+    }
+}
+
+/// POST /api/ai/providers/:id/reset-usage — redeem one banked subscription
+/// usage-limit reset on Anthropic (`cedar_ember` / `juniper_tide`) or OpenAI
+/// Codex (`wham` reset credits), lift any recorded cooldowns, wake parked
+/// `usage_limit_wait` missions, and return the refreshed usage card.
+async fn reset_provider_usage(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+    body: Option<Json<ResetProviderUsageRequest>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let req = body.map(|b| b.0).unwrap_or_default();
+    super::cli_proxy_accounts::reconcile(&state.ai_providers).await;
+
+    let provider = if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        state.ai_providers.get(uuid).await
+    } else if let Some(pt) = ProviderType::from_id(&id) {
+        state.ai_providers.get_by_type(pt).await
+    } else {
+        None
+    }
+    .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+
+    if !matches!(
+        provider.provider_type,
+        ProviderType::Anthropic | ProviderType::OpenAI
+    ) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} does not support subscription usage resets",
+                provider.provider_type.display_name()
+            ),
+        ));
+    }
+
+    let uuid = provider.id;
+    let gate = provider_reset_gate(uuid);
+    let _guard = gate.lock().await;
+
+    let access_token = resolve_subscription_oauth_token(
+        &state.config.working_dir,
+        Some(&state.ai_providers),
+        &provider,
+    )
+    .await?;
+    let request_id =
+        super::subscription_usage::sanitize_reset_request_id(req.idempotency_key.as_deref());
+    let (anthropic_base, codex_base) = subscription_reset_bases();
+
+    let outcome = match provider.provider_type {
+        ProviderType::Anthropic => {
+            let org_id = super::subscription_usage::resolve_anthropic_org_id(
+                &state.http_client,
+                &anthropic_base,
+                &access_token,
+                provider.organization_id.as_deref(),
+            )
+            .await
+            .ok_or((
+                StatusCode::CONFLICT,
+                "Anthropic organization ID is not yet known; refresh usage once and try again"
+                    .to_string(),
+            ))?;
+            if provider.organization_id.as_deref() != Some(org_id.as_str()) {
+                let _ = state
+                    .ai_providers
+                    .set_organization_id(uuid, org_id.clone())
+                    .await;
+            }
+            let grant_id = match req
+                .grant_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(gid) => gid.to_string(),
+                None => {
+                    let inventory = super::subscription_usage::fetch_anthropic_resets_uncached(
+                        &state.http_client,
+                        &anthropic_base,
+                        &access_token,
+                        true,
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                    .ok_or((
+                        StatusCode::CONFLICT,
+                        "No subscription usage reset is available on this account".to_string(),
+                    ))?;
+                    inventory
+                        .grants
+                        .iter()
+                        .find(|g| g.usable_now && g.resets_left > 0)
+                        .or_else(|| inventory.grants.iter().find(|g| g.resets_left > 0))
+                        .map(|g| g.id.clone())
+                        .ok_or((
+                            StatusCode::CONFLICT,
+                            "No usable subscription reset grant is available right now".to_string(),
+                        ))?
+                }
+            };
+            super::subscription_usage::redeem_anthropic_reset(
+                &state.http_client,
+                &anthropic_base,
+                &access_token,
+                &org_id,
+                &grant_id,
+                &request_id,
+            )
+            .await
+        }
+        ProviderType::OpenAI => {
+            let chatgpt_id =
+                crate::api::codex_usage::account_id_from_token(&access_token).ok_or((
+                    StatusCode::BAD_REQUEST,
+                    "Could not decode ChatGPT account ID from OAuth token".to_string(),
+                ))?;
+            super::subscription_usage::redeem_codex_reset(
+                &state.http_client,
+                &codex_base,
+                &access_token,
+                &chatgpt_id,
+                req.grant_id.as_deref(),
+                &request_id,
+            )
+            .await
+        }
+        _ => unreachable!(),
+    };
+
+    match outcome {
+        super::subscription_usage::ResetRedeemOutcome::Reset { .. }
+        | super::subscription_usage::ResetRedeemOutcome::AlreadyRedeemed => {
+            let was_already_redeemed = matches!(
+                outcome,
+                super::subscription_usage::ResetRedeemOutcome::AlreadyRedeemed
+            );
+            let (mut refreshed, woken) =
+                reconcile_subscription_reset(&provider, Some(&state), was_already_redeemed, true)
+                    .await?;
+
+            if let Some(obj) = refreshed.as_object_mut() {
+                obj.insert("reset_redeemed".to_string(), serde_json::json!(true));
+                obj.insert("woken_missions".to_string(), serde_json::json!(woken));
+            }
+            tracing::info!(
+                provider = %uuid,
+                provider_type = %provider.provider_type.id(),
+                woken_missions = woken,
+                "Redeemed subscription usage-limit reset"
+            );
+            Ok(Json(refreshed))
+        }
+        super::subscription_usage::ResetRedeemOutcome::NothingToReset(msg) => {
+            Err((StatusCode::CONFLICT, msg))
+        }
+        super::subscription_usage::ResetRedeemOutcome::Unauthorized => Err((
+            StatusCode::UNAUTHORIZED,
+            "Provider rejected OAuth credentials; reconnect this account first".to_string(),
+        )),
+        super::subscription_usage::ResetRedeemOutcome::Unavailable(msg) => {
+            Err((StatusCode::BAD_GATEWAY, msg))
+        }
+    }
+}
+
+fn already_redeemed_usage_is_usable(
+    provider_type: ProviderType,
+    refreshed: &serde_json::Value,
+) -> bool {
+    if refreshed.get("error").is_some()
+        || refreshed.get("status").and_then(|v| v.as_str()) == Some("needs_reauth")
+    {
+        return false;
+    }
+    match provider_type {
+        ProviderType::Anthropic => {
+            refreshed
+                .get("unified_status")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s != "rejected")
+                && refreshed.get("status_code").and_then(|v| v.as_u64()) != Some(429)
+        }
+        ProviderType::OpenAI => {
+            let has_codex_signal = refreshed.get("codex_limit_reached").is_some()
+                || refreshed.get("codex_primary_used_percent").is_some()
+                || refreshed.get("codex_secondary_used_percent").is_some();
+            has_codex_signal
+                && refreshed
+                    .get("codex_limit_reached")
+                    .and_then(|v| v.as_bool())
+                    != Some(true)
+                && !refreshed
+                    .get("codex_primary_used_percent")
+                    .and_then(|v| v.as_f64())
+                    .is_some_and(|pct| pct >= 100.0)
+                && !refreshed
+                    .get("codex_secondary_used_percent")
+                    .and_then(|v| v.as_f64())
+                    .is_some_and(|pct| pct >= 100.0)
+        }
+        _ => false,
+    }
+}
+
+fn clear_subscription_limit_records(provider: &crate::ai_providers::AIProvider) {
+    let limits = crate::account_limits::shared();
+    limits.clear(&crate::account_limits::account_key(provider.id));
+    if let Some(sub_key) =
+        crate::provider_health::store_account_subscription_key(provider.provider_type, provider)
+    {
+        limits.clear(&crate::account_limits::subscription_key(&sub_key.0));
+    }
+}
+
+async fn reconcile_subscription_reset(
+    provider: &crate::ai_providers::AIProvider,
+    state_opt: Option<&Arc<super::routes::AppState>>,
+    was_already_redeemed: bool,
+    refresh_inline: bool,
+) -> Result<(serde_json::Value, usize), (StatusCode, String)> {
+    let key = provider.id.to_string();
+    super::subscription_usage::AnthropicResetStore::shared()
+        .invalidate(&key)
+        .await;
+
+    let fallback = || {
+        serde_json::json!({
+            "provider_type": provider.provider_type.id(),
+            "provider_name": provider.name,
+            "account_email": provider.account_email,
+            "status": "connected",
+        })
+    };
+
+    let Some(state) = state_opt else {
+        if was_already_redeemed {
+            return Err((
+                StatusCode::CONFLICT,
+                "That subscription reset grant was already redeemed".to_string(),
+            ));
+        }
+        clear_subscription_limit_records(provider);
+        return Ok((fallback(), 0));
+    };
+
+    state.codex_usage.invalidate(&key).await;
+    state.provider_usage_cache.remove(&key).await;
+
+    let refreshed = if was_already_redeemed {
+        let fetched = live_fetch_and_cache(Arc::clone(state), key)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::CONFLICT,
+                    "That subscription reset grant was already redeemed".to_string(),
+                )
+            })?;
+        if !already_redeemed_usage_is_usable(provider.provider_type, &fetched) {
+            return Err((
+                StatusCode::CONFLICT,
+                "That subscription reset grant was already redeemed".to_string(),
+            ));
+        }
+        clear_subscription_limit_records(provider);
+        release_provider_limit(state, provider.id, true).await;
+        fetched
+    } else {
+        clear_subscription_limit_records(provider);
+        release_provider_limit(state, provider.id, true).await;
+        if refresh_inline {
+            live_fetch_and_cache(Arc::clone(state), key)
+                .await
+                .unwrap_or_else(|_| fallback())
+        } else {
+            let bg_state = Arc::clone(state);
+            tokio::spawn(async move {
+                let _ = live_fetch_and_cache(bg_state, key).await;
+            });
+            fallback()
+        }
+    };
+
+    let woken = state
+        .control
+        .wake_usage_limit_waits(provider.provider_type.id())
+        .await;
+    Ok((refreshed, woken))
+}
+
+pub(crate) fn auto_reset_idempotency_key(
+    provider_id: uuid::Uuid,
+    mission_id: uuid::Uuid,
+    event_key: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"orb-auto-sub-reset:v1:");
+    hasher.update(provider_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(mission_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(event_key.as_bytes());
+    let hex = hex::encode(hasher.finalize());
+    format!("auto-{}", &hex[..40])
+}
+
+/// Returns `Some(account_label)` when a reset was redeemed and the account's
+/// cooldown + parked waits were cleared so missions can resume immediately.
+pub(crate) async fn try_auto_reset_subscription_on_limit(
+    working_dir: &Path,
+    state_opt: Option<&Arc<super::routes::AppState>>,
+    backend: &str,
+    mission_id: uuid::Uuid,
+    event_key: &str,
+) -> Option<String> {
+    let target_type = match backend {
+        "claudecode" => ProviderType::Anthropic,
+        "codex" => ProviderType::OpenAI,
+        _ => return None,
+    };
+
+    let mut providers = if let Some(state) = state_opt {
+        super::cli_proxy_accounts::reconcile(&state.ai_providers).await;
+        state.ai_providers.list().await
+    } else {
+        let path = working_dir.join(crate::util::AI_PROVIDERS_PATH);
+        let contents = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str::<Vec<crate::ai_providers::AIProvider>>(&contents).ok()?
+    };
+
+    providers.retain(|p| {
+        p.enabled
+            && p.provider_type == target_type
+            && p.auto_reset_on_limit
+            && p.api_key.as_ref().is_none_or(|k| k.trim().is_empty())
+            && p.oauth.is_some()
+            && p.use_for_backends
+                .as_ref()
+                .is_none_or(|b| b.iter().any(|x| x == backend))
+    });
+    if providers.is_empty() {
+        return None;
+    }
+    providers.sort_by_key(|p| p.priority);
+
+    // If a direct-OAuth Codex mission is bound to a specific native thread's
+    // ChatGPT account, only that account can continue the thread without forking.
+    let pinned_codex_fingerprint = if target_type == ProviderType::OpenAI
+        && crate::api::oauth_owner::codex_via_cli_proxy().is_none()
+    {
+        crate::backend::codex::continuity::read(&crate::backend::codex::continuity::binding_path(
+            working_dir,
+            mission_id,
+        ))
+        .ok()
+        .flatten()
+        .map(|b| b.identity.account)
+    } else {
+        None
+    };
+
+    let client = state_opt.map(|s| s.http_client.clone()).unwrap_or_default();
+    let (anthropic_base, codex_base) = subscription_reset_bases();
+
+    for provider in providers {
+        let gate = provider_reset_gate(provider.id);
+        let _guard = gate.lock().await;
+
+        let Ok(token) = resolve_subscription_oauth_token(
+            working_dir,
+            state_opt.map(|s| s.ai_providers.as_ref()),
+            &provider,
+        )
+        .await
+        else {
+            continue;
+        };
+
+        if let Some(ref want_fp) = pinned_codex_fingerprint {
+            let Some(chatgpt_id) = crate::api::codex_usage::account_id_from_token(&token) else {
+                continue;
+            };
+            let have_fp =
+                crate::backend::codex::continuity::account_fingerprint("oauth", &chatgpt_id);
+            if &have_fp != want_fp {
+                continue;
+            }
+        }
+
+        let req_id = auto_reset_idempotency_key(provider.id, mission_id, event_key);
+
+        let outcome = match target_type {
+            ProviderType::Anthropic => {
+                let Ok(snapshot) =
+                    super::subscription_usage::fetch_anthropic_reset_snapshot_uncached(
+                        &client,
+                        &anthropic_base,
+                        &token,
+                        false,
+                    )
+                    .await
+                else {
+                    continue;
+                };
+                if !snapshot.exhausted {
+                    continue;
+                }
+                let Some(inventory) = snapshot.resets else {
+                    continue;
+                };
+                let Some(grant) = inventory
+                    .grants
+                    .iter()
+                    .find(|g| g.usable_now && g.resets_left > 0)
+                else {
+                    continue;
+                };
+                let Some(org_id) = super::subscription_usage::resolve_anthropic_org_id(
+                    &client,
+                    &anthropic_base,
+                    &token,
+                    provider.organization_id.as_deref(),
+                )
+                .await
+                else {
+                    continue;
+                };
+                if let Some(state) = state_opt {
+                    if provider.organization_id.as_deref() != Some(org_id.as_str()) {
+                        let _ = state
+                            .ai_providers
+                            .set_organization_id(provider.id, org_id.clone())
+                            .await;
+                    }
+                }
+                super::subscription_usage::redeem_anthropic_reset(
+                    &client,
+                    &anthropic_base,
+                    &token,
+                    &org_id,
+                    &grant.id,
+                    &req_id,
+                )
+                .await
+            }
+            ProviderType::OpenAI => {
+                let Some(chatgpt_id) = crate::api::codex_usage::account_id_from_token(&token)
+                else {
+                    continue;
+                };
+                let Ok(snap) = crate::api::codex_usage::read_usage_at(
+                    &client,
+                    &codex_base,
+                    &token,
+                    &chatgpt_id,
+                )
+                .await
+                else {
+                    continue;
+                };
+                let exhausted = snap.limit_reached == Some(true)
+                    || snap.primary_used_percent.is_some_and(|pct| pct >= 100.0)
+                    || snap.secondary_used_percent.is_some_and(|pct| pct >= 100.0);
+                if !exhausted {
+                    continue;
+                }
+                let Some(resets) = snap
+                    .subscription_resets
+                    .filter(|r| r.available_count > 0 && r.usable_now)
+                else {
+                    continue;
+                };
+                let credit_id = resets
+                    .grants
+                    .first()
+                    .map(|g| g.id.as_str())
+                    .filter(|id| !id.is_empty());
+                super::subscription_usage::redeem_codex_reset(
+                    &client,
+                    &codex_base,
+                    &token,
+                    &chatgpt_id,
+                    credit_id,
+                    &req_id,
+                )
+                .await
+            }
+            _ => continue,
+        };
+
+        let was_already_redeemed = matches!(
+            outcome,
+            super::subscription_usage::ResetRedeemOutcome::AlreadyRedeemed
+        );
+        let accepted = matches!(
+            outcome,
+            super::subscription_usage::ResetRedeemOutcome::Reset { .. }
+        ) || (was_already_redeemed && state_opt.is_some());
+        if accepted {
+            let Ok((_val, woken)) =
+                reconcile_subscription_reset(&provider, state_opt, was_already_redeemed, false)
+                    .await
+            else {
+                continue;
+            };
+            let account_label = provider
+                .label
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| provider.account_email.filter(|s| !s.trim().is_empty()))
+                .unwrap_or(provider.name);
+            tracing::info!(
+                provider_id = %provider.id,
+                %mission_id,
+                %backend,
+                woken_missions = woken,
+                account = %account_label,
+                "Automatically redeemed subscription reset after usage limit"
+            );
+            return Some(account_label);
+        }
+    }
+
+    None
+}
+
 /// GET /api/ai/providers/usage — bulk snapshot of every cached entry.
 async fn list_all_provider_usage(
     State(state): State<Arc<super::routes::AppState>>,
@@ -10677,6 +11458,9 @@ async fn update_provider(
     }
     if let Some(enabled) = req.enabled {
         updated.enabled = enabled;
+    }
+    if let Some(auto_reset_on_limit) = req.auto_reset_on_limit {
+        updated.auto_reset_on_limit = auto_reset_on_limit;
     }
     if let Some(api_key_update) = req.api_key {
         updated.api_key = api_key_update;

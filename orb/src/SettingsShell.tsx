@@ -1,6 +1,12 @@
-import { For, Show, type JSX } from "solid-js";
+import { For, Show, Suspense, createSignal, lazy, type JSX } from "solid-js";
+import { isConnected } from "./api";
 import { settingsPageId, settingsSectionFor } from "./settingsNav";
+import { ErrorToast } from "./toast";
 export { SettingsCard, SettingsRow } from "./SettingsCard";
+
+const ApprovalDevicesPanel = lazy(() => import("./ApprovalDevicesPanel").then(m => ({ default: m.ApprovalDevicesPanel })));
+const PrivilegeAccessPanel = lazy(() => import("./PrivilegeAccessPanel").then(m => ({ default: m.PrivilegeAccessPanel })));
+const MissionAccessPanel = lazy(() => import("./MissionAccessPanel").then(m => ({ default: m.MissionAccessPanel })));
 
 /** Page chrome for a settings section: title, one-line subtitle and tabs.
  * The panel inside keeps its own markup; CSS folds its scroll box and title
@@ -35,6 +41,24 @@ export function SettingsShell(p: { page: string; onOpen: (id: string) => void; c
         <div class="settings-page-content" role={section().tabs.length > 1 ? "tabpanel" : undefined} aria-labelledby={section().tabs.length > 1 ? `settings-tab-${current()}` : undefined}>
           {p.children}
         </div>
+      </div>
+    </div>
+  );
+}
+/** Security → Access: approval devices, Fleet Bunker Mode and privileged access. */
+export function SecuritySettings() {
+  const [error, setError] = createSignal("");
+  return (
+    <div class="s-body settings-body">
+      <div class="s-inner">
+        <ErrorToast error={error()} title="Security" onDismiss={() => setError("")} />
+        <Show when={isConnected()} fallback={<p class="s-lead">Connect to Core on the Account page to manage approvals and access.</p>}>
+          <Suspense>
+            <ApprovalDevicesPanel onError={setError} />
+            <PrivilegeAccessPanel onError={setError} />
+            <MissionAccessPanel onError={setError} />
+          </Suspense>
+        </Show>
       </div>
     </div>
   );

@@ -4087,11 +4087,12 @@ async fn chat_completions_routed(
         // their first chunk; direct endpoints (e.g. orbrouter.thomas.md) get a
         // 240s budget while Cloudflare orange-cloud requests keep
         // `queue_waited + first_token_timeout` inside the 90s budget (< 100s cliff).
+        let estimated_prompt_tokens = (body.len() as u64) >> 2;
         let raw_first_token_timeout = reliability::first_token_timeout_for_prompt(
             &entry.provider_id,
             &entry.model_id,
             via_cloudflare,
-            (body.len() as u64) >> 2,
+            estimated_prompt_tokens,
         );
         let first_token_timeout = if via_cloudflare && !queue_waited.is_zero() {
             raw_first_token_timeout
@@ -4099,6 +4100,23 @@ async fn chat_completions_routed(
                 .max(std::time::Duration::from_secs(15))
         } else {
             raw_first_token_timeout
+        };
+        let raw_semantic_timeout = reliability::semantic_first_token_timeout_for_prompt(
+            &entry.provider_id,
+            &entry.model_id,
+            via_cloudflare,
+            estimated_prompt_tokens,
+        );
+        let semantic_first_token_timeout = if via_cloudflare && !queue_waited.is_zero() {
+            raw_semantic_timeout
+                .saturating_sub(queue_waited)
+                .max(first_token_timeout)
+        } else {
+            raw_semantic_timeout.max(first_token_timeout)
+        };
+        let first_token_deadlines = reliability::FirstTokenDeadlines {
+            transport_idle: first_token_timeout,
+            semantic_total: semantic_first_token_timeout,
         };
         // Recompute `provider_type` from `entry` after `acquire_google_group_permit`,
         // which may have rotated an `antigravity/agy-model-*` Carbon EAP sibling
@@ -4816,7 +4834,7 @@ async fn chat_completions_routed(
                         }
                     },
                     &retry_policy,
-                    first_token_timeout,
+                    first_token_deadlines,
                     (entry.provider_id.as_str(), entry.model_id.as_str()),
                 )
                 .await;
@@ -5198,7 +5216,7 @@ async fn chat_completions_routed(
                         }
                     },
                     &retry_policy,
-                    first_token_timeout,
+                    first_token_deadlines,
                     (entry.provider_id.as_str(), entry.model_id.as_str()),
                 )
                 .await;
@@ -5910,7 +5928,7 @@ async fn chat_completions_routed(
                     }
                 },
                 &retry_policy,
-                first_token_timeout,
+                first_token_deadlines,
                 (entry.provider_id.as_str(), entry.model_id.as_str()),
             )
             .await;
@@ -9929,6 +9947,27 @@ fn translate_google_json_to_openai(
     Ok((bytes, Some((prompt_tokens, completion_tokens))))
 }
 
+/// Evaluate the formally verified `ClockDiscipline` gate (`orb_stream_deadlines`)
+/// on the monotone pre-first-chunk semantic timer.
+fn precommit_semantic_deadline_exceeded(
+    semantic_started: tokio::time::Instant,
+    semantic_limit: std::time::Duration,
+) -> bool {
+    let semantic_limit_ms = semantic_limit.as_millis().min(u64::MAX as u128) as u64;
+    let elapsed_ms = semantic_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    crate::orb_spec::stream_deadlines(crate::orb_spec::StreamDeadlinesInput {
+        client_elapsed_ms: 0,
+        keepalive_ms: 1,
+        upstream_elapsed_ms: elapsed_ms,
+        base_idle_ms: semantic_limit_ms.max(1),
+        provider_floor_ms: semantic_limit_ms.max(1),
+        at_event_boundary: false,
+        has_mission_header: false,
+        auth_verified: false,
+    })
+    .upstream_stalled
+}
+
 #[cfg(test)]
 async fn peek_google_sse_stream<S, E>(
     inner: S,
@@ -9940,12 +9979,30 @@ where
     peek_google_sse_stream_within(inner, reliability::first_token_timeout()).await
 }
 
-/// [`peek_google_sse_stream`] with an explicit idle limit: the stream fails as a
-/// `Timeout` when no upstream byte arrives for `idle` before the first
-/// content chunk, instead of holding the client indefinitely.
+/// [`peek_google_sse_stream`] with a symmetric idle/semantic limit.
+#[cfg(test)]
 async fn peek_google_sse_stream_within<S, E>(
     inner: S,
     idle: std::time::Duration,
+) -> Result<(Vec<u8>, std::pin::Pin<Box<S>>), (CooldownReason, String)>
+where
+    S: futures::Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
+    E: std::fmt::Display,
+{
+    peek_google_sse_stream_within_deadlines(
+        inner,
+        reliability::FirstTokenDeadlines::symmetric(idle),
+    )
+    .await
+}
+
+/// [`peek_google_sse_stream`] with two-clock pre-commit deadlines
+/// (`transport_idle` for raw byte silence, `semantic_total` for monotone
+/// time-to-first-content so `: keepalive` comments never extend the semantic
+/// deadline).
+async fn peek_google_sse_stream_within_deadlines<S, E>(
+    inner: S,
+    deadlines: reliability::FirstTokenDeadlines,
 ) -> Result<(Vec<u8>, std::pin::Pin<Box<S>>), (CooldownReason, String)>
 where
     S: futures::Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
@@ -9956,19 +10013,41 @@ where
     let mut scanned = 0usize;
     let mut last_empty_reason: Option<String> = None;
     let mut filter_acc = CannedFilterAccumulator::default();
+    let semantic_started = tokio::time::Instant::now();
 
     const MAX_PEEK_BYTES: usize = 64 * 1024;
     while peek_buf.len() < MAX_PEEK_BYTES {
-        let next = match tokio::time::timeout(idle, stream.next()).await {
+        if precommit_semantic_deadline_exceeded(semantic_started, deadlines.semantic_total) {
+            return Err((
+                CooldownReason::Timeout,
+                format!(
+                    "no content within {}s before the first chunk (keepalive-only or non-committing stream)",
+                    deadlines.semantic_total.as_secs()
+                ),
+            ));
+        }
+        let remaining_semantic = deadlines
+            .semantic_total
+            .saturating_sub(semantic_started.elapsed());
+        let wait_limit = deadlines.transport_idle.min(remaining_semantic);
+        let next = match tokio::time::timeout(wait_limit, stream.next()).await {
             Ok(next) => next,
             Err(_) => {
-                return Err((
-                    CooldownReason::Timeout,
+                let detail = if precommit_semantic_deadline_exceeded(
+                    semantic_started,
+                    deadlines.semantic_total,
+                ) {
+                    format!(
+                        "no content within {}s before the first chunk (keepalive-only or non-committing stream)",
+                        deadlines.semantic_total.as_secs()
+                    )
+                } else {
                     format!(
                         "no content within {}s before the first chunk",
-                        idle.as_secs()
-                    ),
-                ))
+                        deadlines.transport_idle.as_secs()
+                    )
+                };
+                return Err((CooldownReason::Timeout, detail));
             }
         };
         match next {
@@ -10085,12 +10164,30 @@ where
     peek_openai_sse_stream_within(inner, reliability::first_token_timeout()).await
 }
 
-/// [`peek_openai_sse_stream`] with an explicit idle limit: the stream fails as a
-/// `Timeout` when no upstream byte arrives for `idle` before the first
-/// content chunk, instead of holding the client indefinitely.
+/// [`peek_openai_sse_stream`] with a symmetric idle/semantic limit.
+#[cfg(test)]
 async fn peek_openai_sse_stream_within<S, E>(
     inner: S,
     idle: std::time::Duration,
+) -> Result<(Vec<u8>, std::pin::Pin<Box<S>>), (CooldownReason, String)>
+where
+    S: futures::Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
+    E: std::fmt::Display,
+{
+    peek_openai_sse_stream_within_deadlines(
+        inner,
+        reliability::FirstTokenDeadlines::symmetric(idle),
+    )
+    .await
+}
+
+/// [`peek_openai_sse_stream`] with two-clock pre-commit deadlines
+/// (`transport_idle` for raw byte silence, `semantic_total` for monotone
+/// time-to-first-content so `: keepalive` comments never extend the semantic
+/// deadline).
+async fn peek_openai_sse_stream_within_deadlines<S, E>(
+    inner: S,
+    deadlines: reliability::FirstTokenDeadlines,
 ) -> Result<(Vec<u8>, std::pin::Pin<Box<S>>), (CooldownReason, String)>
 where
     S: futures::Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
@@ -10101,19 +10198,41 @@ where
     let mut scanned = 0usize;
     let mut last_empty_reason: Option<String> = None;
     let mut filter_acc = CannedFilterAccumulator::default();
+    let semantic_started = tokio::time::Instant::now();
 
     const MAX_PEEK_BYTES: usize = 64 * 1024;
     while peek_buf.len() < MAX_PEEK_BYTES {
-        let next = match tokio::time::timeout(idle, stream.next()).await {
+        if precommit_semantic_deadline_exceeded(semantic_started, deadlines.semantic_total) {
+            return Err((
+                CooldownReason::Timeout,
+                format!(
+                    "no content within {}s before the first chunk (keepalive-only or non-committing stream)",
+                    deadlines.semantic_total.as_secs()
+                ),
+            ));
+        }
+        let remaining_semantic = deadlines
+            .semantic_total
+            .saturating_sub(semantic_started.elapsed());
+        let wait_limit = deadlines.transport_idle.min(remaining_semantic);
+        let next = match tokio::time::timeout(wait_limit, stream.next()).await {
             Ok(next) => next,
             Err(_) => {
-                return Err((
-                    CooldownReason::Timeout,
+                let detail = if precommit_semantic_deadline_exceeded(
+                    semantic_started,
+                    deadlines.semantic_total,
+                ) {
+                    format!(
+                        "no content within {}s before the first chunk (keepalive-only or non-committing stream)",
+                        deadlines.semantic_total.as_secs()
+                    )
+                } else {
                     format!(
                         "no content within {}s before the first chunk",
-                        idle.as_secs()
-                    ),
-                ))
+                        deadlines.transport_idle.as_secs()
+                    )
+                };
+                return Err((CooldownReason::Timeout, detail));
             }
         };
         match next {
@@ -10323,29 +10442,35 @@ enum PeekKind {
 
 type Peeked<S> = Result<(Vec<u8>, std::pin::Pin<Box<S>>), (CooldownReason, String)>;
 
-async fn peek_sse<S, E>(kind: PeekKind, inner: S, idle: std::time::Duration) -> Peeked<S>
+async fn peek_sse<S, E>(
+    kind: PeekKind,
+    inner: S,
+    deadlines: reliability::FirstTokenDeadlines,
+) -> Peeked<S>
 where
     S: futures::Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
     E: std::fmt::Display,
 {
     match kind {
-        PeekKind::OpenAi => peek_openai_sse_stream_within(inner, idle).await,
-        PeekKind::Google => peek_google_sse_stream_within(inner, idle).await,
+        PeekKind::OpenAi => peek_openai_sse_stream_within_deadlines(inner, deadlines).await,
+        PeekKind::Google => peek_google_sse_stream_within_deadlines(inner, deadlines).await,
     }
 }
 
 /// Peek `first` for its first content chunk; when it errors, stalls or ends
 /// empty before that chunk, re-send to the same entry (`reopen`) and peek
 /// again, up to the policy's budget. Only transient failures retry (see
-/// [`reliability::RetryPolicy::delay`]). Nothing has been sent to the client
-/// while this runs, and the returned stream is never retried once it has
-/// produced content. Returns the last result and the number of retries.
+/// [`reliability::RetryPolicy::delay`]), and an attempt that already exhausted
+/// [`reliability::FirstTokenDeadlines::semantic_total`] skips same-entry
+/// retries so contended GPU queues do not multiply wait time or drop queue
+/// slots. Nothing has been sent to the client while this runs, and the returned
+/// stream is never retried once it has produced content.
 async fn open_sse_with_retry<S, E, F, Fut>(
     first: S,
     kind: PeekKind,
     mut reopen: F,
     policy: &reliability::RetryPolicy,
-    idle: std::time::Duration,
+    deadlines: reliability::FirstTokenDeadlines,
     log: (&str, &str),
 ) -> (Peeked<S>, u32)
 where
@@ -10355,8 +10480,14 @@ where
     Fut: std::future::Future<Output = Option<S>>,
 {
     let mut retries = 0u32;
-    let mut result = peek_sse(kind, first, idle).await;
+    let mut attempt_started = tokio::time::Instant::now();
+    let mut result = peek_sse(kind, first, deadlines).await;
     while let Err((reason, detail)) = &result {
+        if matches!(reason, CooldownReason::Timeout)
+            && precommit_semantic_deadline_exceeded(attempt_started, deadlines.semantic_total)
+        {
+            break;
+        }
         let Some(delay) = policy.delay(retries, *reason) else {
             break;
         };
@@ -10373,7 +10504,10 @@ where
         retries += 1;
         let failure = (*reason, detail.clone());
         match reopen(&failure).await {
-            Some(stream) => result = peek_sse(kind, stream, idle).await,
+            Some(stream) => {
+                attempt_started = tokio::time::Instant::now();
+                result = peek_sse(kind, stream, deadlines).await;
+            }
             None => break,
         }
     }
@@ -13509,7 +13643,7 @@ mod tests {
                 async { Some(sse(&[HELLO, "data: [DONE]\n\n"])) }
             },
             &policy,
-            std::time::Duration::from_secs(5),
+            reliability::FirstTokenDeadlines::symmetric(std::time::Duration::from_secs(5)),
             ("test", "model"),
         )
         .await;
@@ -13533,7 +13667,7 @@ mod tests {
                 async { Some(sse(&[EMPTY_STOP])) }
             },
             &policy,
-            std::time::Duration::from_secs(5),
+            reliability::FirstTokenDeadlines::symmetric(std::time::Duration::from_secs(5)),
             ("test", "model"),
         )
         .await;
@@ -13559,7 +13693,7 @@ mod tests {
                 async { Some(sse(&[HELLO])) }
             },
             &policy,
-            std::time::Duration::from_secs(5),
+            reliability::FirstTokenDeadlines::symmetric(std::time::Duration::from_secs(5)),
             ("test", "model"),
         )
         .await;
@@ -13589,7 +13723,7 @@ mod tests {
                 }
             },
             &policy,
-            std::time::Duration::from_secs(5),
+            reliability::FirstTokenDeadlines::symmetric(std::time::Duration::from_secs(5)),
             ("test", "model"),
         )
         .await;
@@ -13615,6 +13749,149 @@ mod tests {
         assert!(matches!(reason, CooldownReason::Timeout), "{detail}");
         assert!(started.elapsed() < std::time::Duration::from_secs(60));
         assert!(reliability::is_retryable_before_first_byte(reason));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keepalive_only_stream_hits_semantic_deadline_without_resetting_clock() {
+        // Replays mission 9508c505-1a9a-48a5-b265-7c4816a8b124 / hung-router SSE order:
+        // `: keepalive\n\n` every 10s keeps transport_idle (45s) alive, yet must never
+        // extend semantic_total (90s) on OpenAI or Google SSE streams.
+        let deadlines = reliability::FirstTokenDeadlines {
+            transport_idle: std::time::Duration::from_secs(45),
+            semantic_total: std::time::Duration::from_secs(90),
+        };
+        let keepalive_forever_oa = async_stream::stream! {
+            for _ in 0..60 {
+                yield Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(": keepalive\n\n"));
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+            yield Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(HELLO));
+        };
+        let started = tokio::time::Instant::now();
+        let result = peek_openai_sse_stream_within_deadlines(keepalive_forever_oa, deadlines).await;
+        let (reason, detail) = result.err().expect("semantic first-token timeout");
+        assert!(matches!(reason, CooldownReason::Timeout), "{detail}");
+        assert!(detail.contains("keepalive-only"), "{detail}");
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(90));
+
+        let keepalive_forever_google = async_stream::stream! {
+            for _ in 0..60 {
+                yield Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(": keepalive\n\n"));
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+            yield Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}]}}]}\n\n",
+            ));
+        };
+        let started_g = tokio::time::Instant::now();
+        let result_g =
+            peek_google_sse_stream_within_deadlines(keepalive_forever_google, deadlines).await;
+        let (reason_g, detail_g) = result_g.err().expect("google semantic first-token timeout");
+        assert!(matches!(reason_g, CooldownReason::Timeout), "{detail_g}");
+        assert!(detail_g.contains("keepalive-only"), "{detail_g}");
+        assert_eq!(started_g.elapsed(), std::time::Duration::from_secs(90));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fleet_keepalive_bridges_transport_idle_within_semantic_queue_budget() {
+        // Positive witness for dgx-spark serialized GPU queuing: `: keepalive\n\n`
+        // every 10s for 320s bridges `transport_idle` (105s) while staying within
+        // `semantic_total` (600s), so the queued turn completes without losing its slot.
+        let deadlines = reliability::FirstTokenDeadlines {
+            transport_idle: std::time::Duration::from_secs(105),
+            semantic_total: std::time::Duration::from_secs(600),
+        };
+        let queued_spark = async_stream::stream! {
+            for _ in 0..32 {
+                yield Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(": keepalive\n\n"));
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+            yield Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(HELLO));
+            yield Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from("data: [DONE]\n\n"));
+        };
+        let started = tokio::time::Instant::now();
+        let (peek, _) = peek_openai_sse_stream_within_deadlines(queued_spark, deadlines)
+            .await
+            .expect("queued fleet stream succeeds once GPU lock releases");
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(320));
+        assert!(String::from_utf8(peek).unwrap().contains("Hello"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_semantic_deadline_skips_same_entry_retries() {
+        // An attempt that already burned the full semantic deadline must not
+        // multiply wait time by `1 + max_retries` on the same entry; a fast
+        // transport/socket timeout (< semantic_total) still retries normally.
+        let deadlines = reliability::FirstTokenDeadlines {
+            transport_idle: std::time::Duration::from_secs(30),
+            semantic_total: std::time::Duration::from_secs(90),
+        };
+        let policy = reliability::RetryPolicy::immediate(2);
+        let reopened_semantic = std::sync::atomic::AtomicU32::new(0);
+        let keepalive_stall = async_stream::stream! {
+            for _ in 0..20 {
+                yield Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(": keepalive\n\n"));
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        }
+        .boxed();
+        let started = tokio::time::Instant::now();
+        let (res, retries) = open_sse_with_retry(
+            keepalive_stall,
+            PeekKind::OpenAi,
+            |_| {
+                reopened_semantic.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async {
+                    Some(
+                        async_stream::stream! {
+                            yield Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(HELLO));
+                        }
+                        .boxed(),
+                    )
+                }
+            },
+            &policy,
+            deadlines,
+            ("spark", "qwen3.8-flash-next"),
+        )
+        .await;
+        assert!(matches!(res, Err((CooldownReason::Timeout, _))));
+        assert_eq!(retries, 0);
+        assert_eq!(
+            reopened_semantic.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(90));
+
+        // Contrast: a 30s silent socket stall (< 90s semantic_total) still retries.
+        let reopened_fast = std::sync::atomic::AtomicU32::new(0);
+        let silent_stall = async_stream::stream! {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            yield Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(HELLO));
+        }
+        .boxed();
+        let (res_fast, retries_fast) = open_sse_with_retry(
+            silent_stall,
+            PeekKind::OpenAi,
+            |_| {
+                reopened_fast.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async {
+                    Some(
+                        async_stream::stream! {
+                            yield Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(HELLO));
+                        }
+                        .boxed(),
+                    )
+                }
+            },
+            &policy,
+            deadlines,
+            ("spark", "qwen3.8-flash-next"),
+        )
+        .await;
+        assert!(res_fast.is_ok());
+        assert_eq!(retries_fast, 1);
+        assert_eq!(reopened_fast.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -13692,7 +13969,7 @@ mod tests {
                 async { Some(sse(&[text])) }
             },
             &policy,
-            std::time::Duration::from_secs(5),
+            reliability::FirstTokenDeadlines::symmetric(std::time::Duration::from_secs(5)),
             ("google", "gemini-4-argon-eap"),
         )
         .await;
@@ -13717,7 +13994,7 @@ mod tests {
                 async { Some(sse(&[HELLO])) }
             },
             &policy,
-            std::time::Duration::from_secs(5),
+            reliability::FirstTokenDeadlines::symmetric(std::time::Duration::from_secs(5)),
             ("mistral", "labs-leanstral-1-5-1"),
         )
         .await;
@@ -13731,7 +14008,7 @@ mod tests {
             PeekKind::OpenAi,
             |_: &(CooldownReason, String)| async { None },
             &policy,
-            std::time::Duration::from_secs(5),
+            reliability::FirstTokenDeadlines::symmetric(std::time::Duration::from_secs(5)),
             ("mistral", "labs-leanstral-1-5-1"),
         )
         .await;
@@ -13756,7 +14033,7 @@ mod tests {
                 async { Some(sse(&[HELLO])) }
             },
             &policy,
-            std::time::Duration::from_secs(5),
+            reliability::FirstTokenDeadlines::symmetric(std::time::Duration::from_secs(5)),
             ("antigravity", "agy-model-high"),
         )
         .await;
@@ -13792,7 +14069,7 @@ mod tests {
             PeekKind::Google,
             |_: &(CooldownReason, String)| async { Some(sse(&[HELLO])) },
             &policy,
-            std::time::Duration::from_secs(5),
+            reliability::FirstTokenDeadlines::symmetric(std::time::Duration::from_secs(5)),
             ("google", "gemini-4-carbon-eap"),
         )
         .await;
@@ -13819,7 +14096,7 @@ mod tests {
             PeekKind::OpenAi,
             |_: &(CooldownReason, String)| async { Some(sse(&[HELLO])) },
             &policy,
-            std::time::Duration::from_secs(5),
+            reliability::FirstTokenDeadlines::symmetric(std::time::Duration::from_secs(5)),
             ("antigravity", "agy-model-high"),
         )
         .await;
@@ -13839,7 +14116,7 @@ mod tests {
             PeekKind::Google,
             |_: &(CooldownReason, String)| async { Some(sse(&[HELLO])) },
             &policy,
-            std::time::Duration::from_secs(5),
+            reliability::FirstTokenDeadlines::symmetric(std::time::Duration::from_secs(5)),
             ("google", "gemini-4-carbon-eap"),
         )
         .await;
@@ -13876,7 +14153,7 @@ mod tests {
             PeekKind::OpenAi,
             |_: &(CooldownReason, String)| async { Some(sse(&[HELLO])) },
             &policy,
-            std::time::Duration::from_secs(5),
+            reliability::FirstTokenDeadlines::symmetric(std::time::Duration::from_secs(5)),
             ("antigravity", "agy-model-low"),
         )
         .await;
@@ -13896,7 +14173,7 @@ mod tests {
             PeekKind::Google,
             |_: &(CooldownReason, String)| async { Some(sse(&[HELLO])) },
             &policy,
-            std::time::Duration::from_secs(5),
+            reliability::FirstTokenDeadlines::symmetric(std::time::Duration::from_secs(5)),
             ("google", "gemini-4-argon-eap"),
         )
         .await;

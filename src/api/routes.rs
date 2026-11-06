@@ -593,6 +593,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     });
 
     state.control.bind_admission_state(&state);
+    super::ai_providers::register_app_state(&state);
     // Open the privilege broker now so a mission that ends before anyone
     // touches it still has its session-scoped grants reaped.
     super::privilege_broker::store(&state);

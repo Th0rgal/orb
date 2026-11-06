@@ -1,4 +1,4 @@
-import { render, waitFor } from "@solidjs/testing-library";
+import { render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, expect, it, vi } from "vitest";
 import { Providers } from "../src/Providers";
 import { clearConnection, setConnection, type AIProvider, type ProviderUsage } from "../src/api";
@@ -145,4 +145,85 @@ it.each([
   if (used === undefined) expect(ui.container.textContent).toContain('usage unavailable');
   expect(ui.container.textContent).not.toContain('Prepaid balance');
   expect(ui.container.textContent).not.toContain('Connected');
+});
+
+it("renders banked subscription resets, confirms manual redemption, and toggles auto-reset on limit", async () => {
+  setConnection("http://core.test", "test-token");
+  let autoReset = false;
+  let redeemed = false;
+  const claude = (): AIProvider => ({
+    ...account("claude-pro"),
+    provider_type: "anthropic",
+    name: "Anthropic (alice@example.com)",
+    account_email: "alice@example.com",
+    auto_reset_on_limit: autoReset,
+  });
+  const currentUsage = (): ProviderUsage => redeemed
+    ? {
+        provider_type: "anthropic",
+        unified_status: "allowed",
+        unified_5h_utilization: 0,
+        unified_7d_utilization: 0,
+        reset_redeemed: true,
+        woken_missions: 1,
+        subscription_resets: { available_count: 0, usable_now: false, grants: [] },
+      }
+    : {
+        provider_type: "anthropic",
+        unified_status: "rejected",
+        unified_5h_utilization: 0.4,
+        unified_7d_utilization: 1,
+        subscription_resets: {
+          available_count: 1,
+          usable_now: true,
+          grants: [{
+            id: "grant-weekly",
+            label: "Promotional reset",
+            clears: ["5h", "Weekly"],
+            resets_left: 1,
+            usable_now: true,
+            requires_limit: true,
+          }],
+        },
+      };
+
+  const calls: Array<{ url: string; method: string; body?: Record<string, unknown> }> = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : undefined;
+    calls.push({ url, method, body });
+    if (url.endsWith("/providers")) return new Response(JSON.stringify([claude()]));
+    if (url.endsWith("/providers/usage")) return new Response(JSON.stringify({ entries: { "claude-pro": currentUsage() } }));
+    if (url.endsWith("/claude-pro/usage")) return new Response(JSON.stringify(currentUsage()));
+    if (url.endsWith("/providers/claude-pro") && method === "PUT") {
+      autoReset = Boolean(body?.auto_reset_on_limit);
+      return new Response(JSON.stringify(claude()));
+    }
+    if (url.endsWith("/providers/claude-pro/reset-usage") && method === "POST") {
+      redeemed = true;
+      return new Response(JSON.stringify(currentUsage()));
+    }
+    return new Response(JSON.stringify({}));
+  }));
+
+  const ui = render(() => <Providers />);
+  await waitFor(() => expect(ui.getByTestId("subscription-reset-hint").textContent).toContain("1 reset available"));
+
+  (ui.container.querySelector(".p-acc-btn") as HTMLButtonElement).click();
+  await waitFor(() => expect(ui.getByRole("button", { name: "Use reset…" })).toBeTruthy());
+
+  const autoSwitch = ui.getByRole("switch", { name: /Auto-use reset on limit/i });
+  expect(autoSwitch.getAttribute("aria-checked")).toBe("false");
+  autoSwitch.click();
+  await waitFor(() => expect(autoSwitch.getAttribute("aria-checked")).toBe("true"));
+  expect(calls.some(c => c.url.endsWith("/providers/claude-pro") && c.method === "PUT" && c.body?.auto_reset_on_limit === true)).toBe(true);
+
+  ui.getByRole("button", { name: "Use reset…" }).click();
+  await waitFor(() => expect(screen.getByRole("dialog", { name: "Use subscription reset" })).toBeTruthy());
+  screen.getByRole("button", { name: "Use reset" }).click();
+
+  await waitFor(() => expect(redeemed).toBe(true));
+  const resetCall = calls.find(c => c.url.endsWith("/providers/claude-pro/reset-usage") && c.method === "POST");
+  expect(typeof resetCall?.body?.idempotency_key).toBe("string");
+  await waitFor(() => expect(ui.queryByTestId("subscription-reset-hint")).toBeNull());
 });
