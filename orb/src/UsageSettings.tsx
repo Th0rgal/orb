@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
 import "./usage.css";
 import { connectionVersion, isConnected } from "./api";
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import { Select } from "./Select";
 import {
   CALLER_KINDS, CALLER_KIND_LABEL, USAGE_WINDOWS, chartBuckets, costTitle, formatCost, formatTokens,
@@ -155,7 +155,7 @@ export function UsageSettings() {
         </div>
       </div>
       <Show when={!isConnected()}><p class="routing-muted">Connect to Core in General settings to see usage.</p></Show>
-      <Show when={error()}><ErrorNotice error={`Could not load usage: ${error()}`} /></Show>
+      <ErrorToast error={error() ? `Could not load usage: ${error()}` : null} title="Could not load usage" background action={{ label: "Retry", run: () => load() }} />
 
       <div class="usage-filters">
         <Select aria-label="Source" value={filters().source ?? ""} onChange={e => setFilter("source", e.currentTarget.value)}>

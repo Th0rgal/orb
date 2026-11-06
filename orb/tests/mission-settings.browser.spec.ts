@@ -100,9 +100,10 @@ test("a refused save rolls back with Retry", async ({ page }) => {
   const view = page.getByRole("region", { name: "Mission settings" });
   await view.getByLabel("Amount (USD)").fill("50");
   await view.getByRole("button", { name: "Save budget" }).click();
-  await expect(view.getByText("Budget not saved")).toBeVisible();
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText("Budget not saved");
   await expect(view.getByLabel("Amount (USD)")).toHaveValue("10");
-  await expect(view.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(alert.getByRole("button", { name: "Retry" })).toBeVisible();
   await shot(page, "mission-settings-error");
 });
 

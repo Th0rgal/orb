@@ -5,6 +5,7 @@ import {ProviderUsageMeter} from './ProviderUsageMeter';
 import {ChevronRight,FlaskIcon} from './icons';
 import {ProviderLogo} from './ProviderLogo';
 import {mergeById,pollWhileVisible} from './poll';
+import {ErrorToast} from './toast';
 import './providerUsage.css';
 
 type AccountUsage={windows:{label:string;used_percent:number}[];details:{label:string;used_percent:number}[];reset_at?:string;reset_at_ms?:string;source:string};
@@ -21,20 +22,23 @@ export function CloudProviders() {
  let usageGeneration=0;
  const refreshUsage=async()=>{const generation=++usageGeneration,version=connectionVersion();try{const data=await api<{accounts?:Record<string,AccountUsage>}>('/api/cloud/usage');if(!disposed&&generation===usageGeneration&&version===connectionVersion())setUsage(data.accounts??{});}catch{if(!disposed&&generation===usageGeneration)setUsage({});}};
  const [loaded,setLoaded]=createSignal(false),[error,setError]=createSignal('');
- let disposed=false,busy=false;
- const refresh=async()=>{
-  if(busy)return;busy=true;const version=connectionVersion();void refreshUsage();
+ let disposed=false,busy=false,queuedManual=false;
+ const refresh=async(manual=false)=>{
+  if(manual)setError('');
+  if(busy){queuedManual||=manual;return;}
+  busy=true;const version=connectionVersion();void refreshUsage();
   try {const next=await cloudAccounts();if(!Array.isArray(next))throw new Error('Cloud accounts could not be read. Refresh to retry.');if(!disposed&&version===connectionVersion()){setAccounts(previous=>mergeById(previous,next));setError('');setLoaded(true);}}
   catch(e){if(!disposed&&version===connectionVersion()){setError(e instanceof Error?e.message:String(e));setLoaded(true);}}
-  finally{busy=false;if(!disposed&&version!==connectionVersion())void refresh();}
+  finally{busy=false;if(!disposed&&(version!==connectionVersion()||queuedManual)){const m=queuedManual;queuedManual=false;void refresh(m);}}
  };
  createEffect(on(connectionVersion,()=>{setAccounts([]);setUsage({});setLoaded(false);setError('');void refresh();}));
- onMount(()=>{const stop=pollWhileVisible(refresh,60000);window.addEventListener('orb:providers-refresh',refresh);onCleanup(()=>{disposed=true;stop();window.removeEventListener('orb:providers-refresh',refresh);});});
- return <section class="s-sec" aria-label="Cloud agents"><h3>Cloud agents</h3><div class="s-card">
+ onMount(()=>{const stop=pollWhileVisible(()=>refresh(false),60000);const onRefresh=()=>{void refresh(true);};window.addEventListener('orb:providers-refresh',onRefresh);onCleanup(()=>{disposed=true;stop();window.removeEventListener('orb:providers-refresh',onRefresh);});});
+  return <section class="s-sec" aria-label="Cloud agents"><h3>Cloud agents</h3><div class="s-card">
+  <ErrorToast error={error()} title="Couldn’t load cloud accounts" background action={{label:'Retry',run:()=>refresh(true)}}/>
   <Show when={loaded()} fallback={<div class="s-row" role="status">Loading cloud accounts…</div>}>
-   <Show when={error()}><div class="s-row cloud-provider-error"><span class="s-row-desc" role="alert">{error()}</span><button class="s-btn sm" onClick={()=>void refresh()}>Retry</button></div></Show>
    <For each={services.filter(service=>accounts().some(a=>a.provider===service))}>{service=><CloudProviderRow provider={service} accounts={accounts().filter(a=>a.provider===service)} usage={usage()[accounts().find(a=>a.provider===service)?.id??'']}/>}</For>
    <Show when={!error()&&!accounts().length}><div class="s-row"><span class="s-row-desc">No cloud accounts configured.</span></div></Show>
+   <Show when={error()&&!accounts().length}><div class="s-row"><span class="s-row-desc">Cloud accounts could not be loaded.</span><button class="s-btn sm" onClick={()=>void refresh(true)}>Retry</button></div></Show>
   </Show>
  </div></section>;
 }
@@ -55,6 +59,6 @@ function CloudProviderRow(p:{provider:CloudProvider;accounts:CloudAccount[];usag
   </Show>
   <Show when={dashboards[p.provider]}><div class="p-acc-actions"><button class="s-btn" onClick={()=>void visit()}>{p.provider==='cursor_cloud'?'View usage in Cursor':`Open ${cloudNames[p.provider]}`} ↗</button></div></Show>
   <Show when={p.provider==='hermes'}><div class="p-acc-actions"><button class="s-btn" onClick={()=>window.dispatchEvent(new CustomEvent('orb:open-page',{detail:'hermes-settings'}))}>Configure Hermes</button></div></Show>
-  <Show when={error()}><p class="s-row-desc inline-error" role="alert">{error()}</p></Show>
+  <ErrorToast error={error()} onDismiss={()=>setError('')}/>
  </div></Show></div>;
 }

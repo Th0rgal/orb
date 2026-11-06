@@ -24,7 +24,6 @@ import {
 } from "./api";
 import * as R from "./routingApi";
 import * as Ic from "./icons";
-import { ErrorNotice } from "./ErrorNotice";
 import { ConfirmDialog } from "./Dialog";
 import { SettingsCard, SettingsRow } from "./SettingsCard";
 
@@ -115,6 +114,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
   let fetching = false;
   let queuedFullRefresh = false;
   let queuedForceRefresh = false;
+  let queuedManualRefresh = false;
   let dragged = -1;
   const accountName = (id: string) => {
     const account = accounts().find((a) => a.id === id);
@@ -132,11 +132,13 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
       else delete next[key];
       return next;
     });
-  async function refresh(full = false, force = false) {
+  async function refresh(full = false, force = false, manual = false) {
     if (!isConnected()) return;
+    if (manual) setErrors({});
     if (fetching) {
       queuedFullRefresh ||= full;
       queuedForceRefresh ||= force;
+      queuedManualRefresh ||= manual;
       return;
     }
     fetching = true;
@@ -176,11 +178,14 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
       setUpdated(new Date().toISOString());
       setLoading(false);
       fetching = false;
-      if (queuedFullRefresh) {
+      if (queuedFullRefresh || queuedManualRefresh) {
+        const nextFull = queuedFullRefresh;
+        const nextForce = queuedForceRefresh;
+        const nextManual = queuedManualRefresh;
         queuedFullRefresh = false;
-        const force = queuedForceRefresh;
         queuedForceRefresh = false;
-        void refresh(true, force);
+        queuedManualRefresh = false;
+        void refresh(nextFull, nextForce, nextManual);
       }
     }
   }
@@ -193,6 +198,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
     setLoading(false);
     queuedFullRefresh = false;
     queuedForceRefresh = false;
+    queuedManualRefresh = false;
     setChains([]);
     setHealth([]);
     setAccounts([]);
@@ -238,6 +244,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
   const [discovery, setDiscovery] = createSignal<R.ModelDiscovery>();
   async function loadCatalog(force = false) {
     const epoch = generation;
+    if (force) clearError("Model catalog");
     setCatalogLoading(true);
     try {
       if (force) await R.refreshModelDiscovery();
@@ -599,7 +606,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
             aria-label={loading() ? "Refreshing" : "Refresh"}
             title="Refresh"
             disabled={loading() || !isConnected()}
-            onClick={() => void refresh(true, true)}
+            onClick={() => void refresh(true, true, true)}
           >
             <Ic.RefreshIcon size={14} />
           </button>
@@ -622,8 +629,8 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
             <button aria-current={tab() === "keys" ? "page" : undefined} onClick={() => selectTab("keys")}>Proxy API Keys</button>
           </nav>
           <Show when={tab() === "keys"}><ProxyApiKeys /></Show>
-          <For each={Object.entries(errors())}>
-            {([key, error]) => <ErrorNotice error={`${key}: ${error}`} />}
+          <For each={Object.keys(errors())}>
+            {key => <ErrorToast error={errors()[key] ? `${key}: ${errors()[key]}` : null} title="Couldn’t load routing settings" background />}
           </For>
           <Show when={tab() === "chains"}>
           <section class="s-sec" id="routing-chains">
@@ -633,7 +640,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                 New chain
               </button>
             </div>
-            <Show when={!loading() && !chains().length}>
+            <Show when={!loading() && !errors()["Fallback Chains"] && !chains().length}>
               <p class="routing-muted">
                 No chains configured. The backend creates builtin/smart when
                 first needed.
@@ -726,10 +733,12 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
             <Show
               when={health().length}
               fallback={
-                <p class="routing-muted">
-                  No health data yet. Tracking begins when the proxy handles
-                  requests.
-                </p>
+                <Show when={!loading() && !errors()["Provider Health"]}>
+                  <p class="routing-muted">
+                    No health data yet. Tracking begins when the proxy handles
+                    requests.
+                  </p>
+                </Show>
               }
             >
               <For each={health()}>

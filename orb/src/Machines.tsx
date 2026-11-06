@@ -1,5 +1,5 @@
 import { AgentSoftware } from "./AgentSoftware";
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import { ResourceIcon } from "./ResourceIcon";
 import { readHistory, saveHistory, freshSamples, historyScope } from "./resourceCache";
 import { ResourceHistory, appendSamples, type ResourceSample } from "./ResourceHistory";
@@ -137,11 +137,12 @@ function FleetRow(p: {
               </button>
             </div>
           </SettingsRow>
-          <Show when={capError()}>
-            <ErrorNotice error={capError()!} title="Couldn’t update slot limit" onDismiss={() => setCapError(null)}>
-              <button type="button" class="s-btn" onClick={() => void saveCapacity()}>Retry</button>
-            </ErrorNotice>
-          </Show>
+          <ErrorToast
+            error={capError()}
+            title="Couldn’t update slot limit"
+            onDismiss={() => setCapError(null)}
+            action={{ label: "Retry", run: () => saveCapacity() }}
+          />
         </div>
       </Show>
     </div></Show></div>;

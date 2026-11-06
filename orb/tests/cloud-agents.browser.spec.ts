@@ -160,7 +160,7 @@ test('Hermes uses Paloma and profile default, preserves a failed draft and reque
  expect(launches).toHaveLength(0);
  await form.getByLabel('Prompt',{exact:true}).fill('Remember ORB_HERMES_LOCAL_TEST');
  await form.getByRole('button',{name:'Create cloud agent'}).click();
- await expect(form.getByRole('alert')).toContainText('Hermes temporarily unavailable');
+ await expect(page.getByRole('alert')).toContainText('Hermes temporarily unavailable');
  await expect(form.getByLabel('Prompt',{exact:true})).toHaveValue('Remember ORB_HERMES_LOCAL_TEST');
  await form.getByRole('button',{name:'Create cloud agent'}).click();
  await expect.poll(()=>launches.length).toBe(2);
