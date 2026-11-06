@@ -276,17 +276,61 @@ private partial def trimTrailingSlashes (p : String) : String :=
   else
     p
 
+private def resolveConfinedTargetPath (realBase cand : String) : IO (Except String String) := do
+  let segs := (cand.splitOn "/").filter (fun s => !s.isEmpty && s != ".")
+  if segs.any (fun s => s == "..") then
+    return .error "working_directory_parent_traversal_rejected"
+  let basePrefix := if realBase == "/" then "/" else realBase ++ "/"
+  let mut splitIdx := segs.length
+  let mut foundExisting := false
+  let mut resolvedAnc := "/"
+  while splitIdx > 0 && !foundExisting do
+    let ancPath := "/" ++ String.intercalate "/" (segs.take splitIdx)
+    if (← System.FilePath.pathExists ancPath) then
+      try
+        let rp ← IO.FS.realPath (System.FilePath.mk ancPath)
+        resolvedAnc := trimTrailingSlashes rp.toString
+        foundExisting := true
+      catch _ =>
+        return .error "working_directory_realpath_failed"
+    else
+      splitIdx := splitIdx - 1
+  if !foundExisting then
+    try
+      let rp ← IO.FS.realPath (System.FilePath.mk "/")
+      resolvedAnc := trimTrailingSlashes rp.toString
+    catch _ =>
+      resolvedAnc := "/"
+  let tailSegs := segs.drop splitIdx
+  let finalPath :=
+    if tailSegs.isEmpty then resolvedAnc
+    else if resolvedAnc == "/" then "/" ++ String.intercalate "/" tailSegs
+    else resolvedAnc ++ "/" ++ String.intercalate "/" tailSegs
+  if finalPath == realBase || finalPath.startsWith basePrefix then
+    return .ok finalPath
+  else
+    return .error "working_directory_symlink_escape_rejected"
+
 /-- Confine requested mission `working_directory` under `baseDir` (rejects `..` traversal, NUL bytes,
-    trailing-slash root-boundary drift, and symlink escapes). -/
+    trailing-slash root-boundary drift, and symlink escapes including non-existent leaf paths under symlinked ancestors). -/
 def confineWorkingDirectory (baseDir rawDir : String) : IO (Except String String) := do
-  let cleanBase := trimTrailingSlashes baseDir.trimAscii.toString
+  let rawBase := baseDir.trimAscii.toString
+  let curDir ← IO.currentDir
+  let cwd := trimTrailingSlashes curDir.toString
+  let cleanBase :=
+    if rawBase.isEmpty || rawBase == "." then
+      cwd
+    else if rawBase.startsWith "/" then
+      trimTrailingSlashes rawBase
+    else
+      trimTrailingSlashes (if cwd == "/" then s!"/{rawBase}" else s!"{cwd}/{rawBase}")
   let realBase ← try
       let rp ← IO.FS.realPath (System.FilePath.mk cleanBase)
       pure (trimTrailingSlashes rp.toString)
     catch _ =>
       pure cleanBase
   let t := trimTrailingSlashes rawDir.trimAscii.toString
-  if t.isEmpty then
+  if t.isEmpty || t == "." then
     return .ok realBase
   else if t.toList.any (fun c => c.toNat == 0) then
     return .error "invalid_working_directory_nul"
@@ -300,24 +344,13 @@ def confineWorkingDirectory (baseDir rawDir : String) : IO (Except String String
            t == realBase || t.startsWith (if realBase == "/" then "/" else realBase ++ "/") then
           t
         else if !t.startsWith "/" then
-          s!"{if realBase == "/" then "" else realBase}/{t}"
+          let rel := if t.startsWith "./" then (t.drop 2).toString else t
+          if rel.isEmpty then realBase else s!"{if realBase == "/" then "" else realBase}/{rel}"
         else
           ""
       if cand.isEmpty then
         return .error "working_directory_outside_workspace_root"
-      if (← System.FilePath.pathExists cand) then
-        try
-          let rp ← IO.FS.realPath (System.FilePath.mk cand)
-          let rpStr := trimTrailingSlashes rp.toString
-          let basePrefix := if realBase == "/" then "/" else realBase ++ "/"
-          if rpStr == realBase || rpStr.startsWith basePrefix then
-            return .ok rpStr
-          else
-            return .error "working_directory_symlink_escape_rejected"
-        catch _ =>
-          return .error "working_directory_realpath_failed"
-      else
-        return .ok cand
+      resolveConfinedTargetPath realBase cand
 
 /-- Parse `models_json` array into `ProviderTarget` list for `RoutingChain` hydration. -/
 def parseChainTargetsJson (rawJson : String) : Array ProviderTarget := Id.run do

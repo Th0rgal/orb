@@ -141,5 +141,14 @@ def main : IO UInt32 := do
   total := total + 1
   if (← assertTrue "csprng_uuid_v4_canonical_and_distinct" (isCanonicalUuid u1 && isCanonicalUuid u2 && u1 != u2)) then passed := passed + 1
 
+  -- 8. Streaming SSE response header parser preserves `\r\n\r\n`-delimited SSE events + split UTF-8 body tail
+  let sseSample := ("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: {\"type\":\"ready\"}\r\n\r\n".toUTF8).push 0xE2
+  total := total + 1
+  let sseOk := match extractStreamingResponseHead? sseSample with
+    | .ok (some (200, _, tail)) =>
+      tail == (("data: {\"type\":\"ready\"}\r\n\r\n".toUTF8).push 0xE2)
+    | _ => false
+  if (← assertTrue "sse_streaming_head_preserves_crlf_frames_and_split_utf8" sseOk) then passed := passed + 1
+
   IO.println s!"orb-locald-test: {passed}/{total} checks passed"
   return if passed == total then 0 else 1

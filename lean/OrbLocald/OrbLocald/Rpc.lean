@@ -327,8 +327,8 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           let sig := (jv.fieldStr? "signature").getD ""
           if sig.isEmpty then return .error "orb-signer returned empty signature"
           if isPalomaPayloadGraceEligible payload && st.approvalGraceSecs > 0 then
-            let nowSec ← OrbBin.PosixExt.nowEpoch
-            stRef.modify fun s => { s with approvalGraceUntil := nowSec + s.approvalGraceSecs.toUInt64 }
+            let graceNat := (jv.fieldStr? "grace_until").bind String.toNat? |>.getD 0
+            stRef.modify fun s => { s with approvalGraceUntil := graceNat.toUInt64 }
           return .ok (.str sig)
         | .error (2, _) =>
           stRef.modify fun s => { s with approvalGraceUntil := 0 }
@@ -501,5 +501,46 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "    webview: { getCurrentWebview: () => ({ label: 'main' }) }\n" ++
   "  };\n" ++
   "})();\n"
+
+/-- Extract `(status, headers, rawBodyTail)` from a raw byte buffer, skipping up to 8 `1xx`
+    informational blocks (`100..199` except `101`) without splitting `\r\n\r\n` SSE body frames
+    or corrupting multi-byte UTF-8 sequences split across `read` chunks. -/
+def extractStreamingResponseHead? (buf : ByteArray) :
+    Except String (Option (Nat × Array (String × String) × ByteArray)) := do
+  let mut cursor := buf
+  let mut infoCount : Nat := 0
+  while true do
+    match LeanSys.Http.findHeaderEnd? cursor with
+    | none =>
+      if cursor.size > 65536 then
+        throw "upstream HTTP response header block exceeds 64 KiB cap"
+      return none
+    | some bodyStart =>
+      if bodyStart > 65536 then
+        throw "upstream HTTP response header block exceeds 64 KiB cap"
+      let hdrBytes := cursor.extract 0 (bodyStart - 4)
+      let some hdrStr := String.fromUTF8? hdrBytes
+        | throw "non-UTF8 upstream HTTP response headers"
+      let lines := hdrStr.splitOn "\r\n"
+      let firstLine := lines.head?.getD ""
+      let toks := (firstLine.splitOn " ").filter (fun s => !s.isEmpty)
+      let statusNat ← match toks[1]?.bind String.toNat? with
+        | some code =>
+          if (firstLine.startsWith "HTTP/") && 100 ≤ code && code ≤ 599 then pure code
+          else throw "malformed upstream HTTP status line"
+        | none => throw "malformed upstream HTTP status line"
+      let rest := cursor.extract bodyStart cursor.size
+      if 100 ≤ statusNat && statusNat < 200 && statusNat != 101 then
+        if infoCount ≥ 8 then
+          throw "too many 1xx informational HTTP responses"
+        infoCount := infoCount + 1
+        cursor := rest
+      else
+        let parsedHdrs : Array (String × String) := ((lines.drop 1).filterMap fun ln =>
+          match ln.splitOn ":" with
+          | [] => none
+          | k :: vs => some (k.trimAscii.toString, (String.intercalate ":" vs).trimAscii.toString)).toArray
+        return some (statusNat, parsedHdrs, rest)
+  return none
 
 end OrbLocald.Rpc

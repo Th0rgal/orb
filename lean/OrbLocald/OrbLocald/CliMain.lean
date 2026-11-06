@@ -112,6 +112,7 @@ private def streamSseViaCurl (fd : Fd) (origin? : Option String) (url : String)
     (method : String) (fwdHdrs : Array (String × String)) : IO Bool := do
   let some curlBin ← findCurlBin? | return false
   let mut cargs : Array String := #[
+    "--disable", "--globoff", "--path-as-is", "--disallow-username-in-url",
     "--silent", "--show-error", "--no-buffer", "-N", "--http1.1",
     "--proto", "=https", "--connect-timeout", "10", "-i", "-X", method
   ]
@@ -138,23 +139,15 @@ private def streamSseViaCurl (fd : Fd) (origin? : Option String) (url : String)
       eof := true
     else if !headerSent then
       hdrAcc := hdrAcc ++ chunk
-      let rawStr := String.fromUTF8? hdrAcc |>.getD ""
-      let parts := rawStr.splitOn "\r\n\r\n"
-      if parts.length ≥ 2 then
-        -- Skip any 100 Continue block if present
-        let blocks := parts.dropLast
-        let lastHdrBlock := blocks.getLast?.getD ""
-        let firstLine := (lastHdrBlock.splitOn "\r\n").head?.getD ""
-        let toks := (firstLine.splitOn " ").filter (fun s => !s.isEmpty)
-        let statusNat := (toks[1]?.bind String.toNat?).getD 502
+      match extractStreamingResponseHead? hdrAcc with
+      | .error _ =>
+        aborted := true
+      | .ok none =>
+        pure ()
+      | .ok (some (statusNat, parsedHdrs, bodyTail)) =>
         if statusNat == 429 || (500 ≤ statusNat && statusNat ≤ 599) then
           aborted := true
         else
-          let hdrLines := (lastHdrBlock.splitOn "\r\n").drop 1
-          let parsedHdrs : Array (String × String) := (hdrLines.filterMap fun ln =>
-            match ln.splitOn ":" with
-            | [] => none
-            | k :: vs => some (k.trimAscii.toString, (String.intercalate ":" vs).trimAscii.toString)).toArray
           let ctype := (findHeaderVal? parsedHdrs "content-type").getD "text/event-stream"
           let extra := sanitizeUpstreamHeaders parsedHdrs
           let reason := HttpResponse.reasonPhrase statusNat
@@ -165,12 +158,9 @@ private def streamSseViaCurl (fd : Fd) (origin? : Option String) (url : String)
             "Cache-Control: no-cache\r\n" ++
             extra ++
             "Connection: close\r\n\r\n"
-          let bodyTail := (parts.getLast?.getD "").toUTF8
           match ← writeAll fd (outHead.toUTF8 ++ bodyTail) false with
           | .ok _ => headerSent := true
           | .error _ => eof := true
-      else if hdrAcc.size > 65536 then
-        aborted := true
     else
       match ← writeAll fd chunk false with
       | .ok _ => pure ()
