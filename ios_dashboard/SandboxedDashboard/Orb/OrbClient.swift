@@ -937,15 +937,25 @@ final class OrbCore {
 
     /// Untyped JSON call used by the Orb screens. `rawBody` sends exact bytes
     /// (device-signed requests hash them); `headers` are added as-is.
-    func call(_ path: String, method: String = "GET", body: OrbJSON? = nil, rawBody: Data? = nil, headers: [String: String] = [:]) async throws -> OrbJSON {
-        guard let url = URL(string: endpoint + path) else {
+    func call(
+        _ path: String,
+        method: String = "GET",
+        body: OrbJSON? = nil,
+        rawBody: Data? = nil,
+        headers: [String: String] = [:],
+        explicitEndpoint: String? = nil,
+        explicitToken: String? = nil
+    ) async throws -> OrbJSON {
+        let base = explicitEndpoint ?? endpoint
+        let bearer = explicitToken ?? (authToken ?? "")
+        guard let url = URL(string: base + path) else {
             ErrorRing.shared.recordRequest(path: "\(method) \(path)", error: OrbHTTPError.invalidURL)
             throw OrbHTTPError.invalidURL
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 45
-        request.setValue("Bearer \(authToken ?? "")", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         if let rawBody { request.httpBody = rawBody; request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         else if let body {
             do { request.httpBody = try JSONEncoder().encode(body) }
@@ -971,12 +981,21 @@ final class OrbCore {
     }
 
     /// For endpoints that answer binary payloads (such as `.zip` settings backups).
-    func callData(_ path: String, method: String = "GET", rawBody: Data? = nil, headers: [String: String] = [:]) async throws -> Data {
-        guard let url = URL(string: endpoint + path) else { throw OrbHTTPError.invalidURL }
+    func callData(
+        _ path: String,
+        method: String = "GET",
+        rawBody: Data? = nil,
+        headers: [String: String] = [:],
+        explicitEndpoint: String? = nil,
+        explicitToken: String? = nil
+    ) async throws -> Data {
+        let base = explicitEndpoint ?? endpoint
+        let bearer = explicitToken ?? (authToken ?? "")
+        guard let url = URL(string: base + path) else { throw OrbHTTPError.invalidURL }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 90
-        request.setValue("Bearer \(authToken ?? "")", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         if let rawBody { request.httpBody = rawBody }
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
         let (data, _) = try await send(request, session: .shared, label: "\(method) \(path)", failure: "Request failed")

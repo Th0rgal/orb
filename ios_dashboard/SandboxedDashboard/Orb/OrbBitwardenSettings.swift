@@ -1065,10 +1065,32 @@ enum OrbApprovalKey {
     }
 
     @MainActor
+    private static func ensureOriginUnchanged(endpoint: String, token: String) throws {
+        guard !endpoint.isEmpty else {
+            throw OrbHTTPError(status: 0, detail: "Not connected to a Core server.")
+        }
+        guard OrbCore.shared.endpoint == endpoint, (OrbCore.shared.authToken ?? "") == token else {
+            throw OrbHTTPError(status: 0, detail: "Server connection changed during device approval. Retry on the selected server.")
+        }
+    }
+
+    @MainActor
     static func signedCall(_ path: String, method: String = "GET", body: OrbJSON? = nil, summary: String) async throws -> OrbJSON {
+        let originEndpoint = OrbCore.shared.endpoint
+        let originToken = OrbCore.shared.authToken ?? ""
+        try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
         let raw = try body.map { try JSONEncoder().encode($0) }
         _ = await ensureEnrolled()
-        return try await performSignedCall(path, method: method, rawBody: raw, summary: summary, allowReenroll: true)
+        try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
+        return try await performSignedCall(
+            path,
+            method: method,
+            rawBody: raw,
+            summary: summary,
+            allowReenroll: true,
+            originEndpoint: originEndpoint,
+            originToken: originToken
+        )
     }
 
     static func sha256Hex(_ data: Data) -> String {
@@ -1078,19 +1100,51 @@ enum OrbApprovalKey {
     /// Send a protected binary download request, signed when this phone is enrolled.
     @MainActor
     static func signedCallData(_ path: String, method: String = "GET", summary: String) async throws -> Data {
+        let originEndpoint = OrbCore.shared.endpoint
+        let originToken = OrbCore.shared.authToken ?? ""
+        try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
         _ = await ensureEnrolled()
-        return try await performSignedCallData(path, method: method, summary: summary, allowReenroll: true)
+        try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
+        return try await performSignedCallData(
+            path,
+            method: method,
+            summary: summary,
+            allowReenroll: true,
+            originEndpoint: originEndpoint,
+            originToken: originToken
+        )
     }
 
     /// Send a protected binary/multipart upload request whose exact `body_sha256` is bound to the challenge.
     @MainActor
     static func signedCallRaw(_ path: String, method: String, rawBody: Data, contentType: String, summary: String) async throws -> OrbJSON {
+        let originEndpoint = OrbCore.shared.endpoint
+        let originToken = OrbCore.shared.authToken ?? ""
+        try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
         _ = await ensureEnrolled()
-        return try await performSignedCallRaw(path, method: method, rawBody: rawBody, contentType: contentType, summary: summary, allowReenroll: true)
+        try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
+        return try await performSignedCallRaw(
+            path,
+            method: method,
+            rawBody: rawBody,
+            contentType: contentType,
+            summary: summary,
+            allowReenroll: true,
+            originEndpoint: originEndpoint,
+            originToken: originToken
+        )
     }
 
     @MainActor
-    private static func performSignedCallData(_ path: String, method: String, summary: String, allowReenroll: Bool) async throws -> Data {
+    private static func performSignedCallData(
+        _ path: String,
+        method: String,
+        summary: String,
+        allowReenroll: Bool,
+        originEndpoint: String,
+        originToken: String
+    ) async throws -> Data {
+        try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
         var headers: [String: String] = [:]
         if let device = deviceId, !device.isEmpty, publicKey != nil {
             let challenge = try await OrbCore.shared.call(
@@ -1101,16 +1155,36 @@ enum OrbApprovalKey {
                     "path": .string(path),
                     "body": .string(""),
                     "summary": .string(summary)
-                ])
+                ]),
+                explicitEndpoint: originEndpoint,
+                explicitToken: originToken
             )
+            try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
             let signature = try await sign(challenge["payload"].text, reason: summary)
+            try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
             headers["X-Paloma-Approval"] = "\(challenge["challenge_id"].text).\(device).\(signature)"
         }
+        try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
         do {
-            return try await OrbCore.shared.callData(path, method: method, headers: headers)
+            return try await OrbCore.shared.callData(
+                path,
+                method: method,
+                headers: headers,
+                explicitEndpoint: originEndpoint,
+                explicitToken: originToken
+            )
         } catch let err as OrbHTTPError where allowReenroll && err.status == 403 {
+            try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
             if await ensureEnrolled(forceRefresh: true) {
-                return try await performSignedCallData(path, method: method, summary: summary, allowReenroll: false)
+                try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
+                return try await performSignedCallData(
+                    path,
+                    method: method,
+                    summary: summary,
+                    allowReenroll: false,
+                    originEndpoint: originEndpoint,
+                    originToken: originToken
+                )
             }
             throw err
         }
@@ -1123,8 +1197,11 @@ enum OrbApprovalKey {
         rawBody: Data,
         contentType: String,
         summary: String,
-        allowReenroll: Bool
+        allowReenroll: Bool,
+        originEndpoint: String,
+        originToken: String
     ) async throws -> OrbJSON {
+        try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
         var headers: [String: String] = ["Content-Type": contentType]
         if let device = deviceId, !device.isEmpty, publicKey != nil {
             let challenge = try await OrbCore.shared.call(
@@ -1135,22 +1212,38 @@ enum OrbApprovalKey {
                     "path": .string(path),
                     "body_sha256": .string(sha256Hex(rawBody)),
                     "summary": .string(summary)
-                ])
+                ]),
+                explicitEndpoint: originEndpoint,
+                explicitToken: originToken
             )
+            try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
             let signature = try await sign(challenge["payload"].text, reason: summary)
+            try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
             headers["X-Paloma-Approval"] = "\(challenge["challenge_id"].text).\(device).\(signature)"
         }
+        try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
         do {
-            return try await OrbCore.shared.call(path, method: method, rawBody: rawBody, headers: headers)
+            return try await OrbCore.shared.call(
+                path,
+                method: method,
+                rawBody: rawBody,
+                headers: headers,
+                explicitEndpoint: originEndpoint,
+                explicitToken: originToken
+            )
         } catch let err as OrbHTTPError where allowReenroll && err.status == 403 {
+            try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
             if await ensureEnrolled(forceRefresh: true) {
+                try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
                 return try await performSignedCallRaw(
                     path,
                     method: method,
                     rawBody: rawBody,
                     contentType: contentType,
                     summary: summary,
-                    allowReenroll: false
+                    allowReenroll: false,
+                    originEndpoint: originEndpoint,
+                    originToken: originToken
                 )
             }
             throw err
@@ -1158,7 +1251,16 @@ enum OrbApprovalKey {
     }
 
     @MainActor
-    private static func performSignedCall(_ path: String, method: String, rawBody: Data?, summary: String, allowReenroll: Bool) async throws -> OrbJSON {
+    private static func performSignedCall(
+        _ path: String,
+        method: String,
+        rawBody: Data?,
+        summary: String,
+        allowReenroll: Bool,
+        originEndpoint: String,
+        originToken: String
+    ) async throws -> OrbJSON {
+        try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
         var headers: [String: String] = [:]
         if let device = deviceId, !device.isEmpty, publicKey != nil {
             let challenge = try await OrbCore.shared.call(
@@ -1169,16 +1271,38 @@ enum OrbApprovalKey {
                     "path": .string(path),
                     "body": .string(rawBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""),
                     "summary": .string(summary)
-                ])
+                ]),
+                explicitEndpoint: originEndpoint,
+                explicitToken: originToken
             )
+            try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
             let signature = try await sign(challenge["payload"].text, reason: summary)
+            try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
             headers["X-Paloma-Approval"] = "\(challenge["challenge_id"].text).\(device).\(signature)"
         }
+        try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
         do {
-            return try await OrbCore.shared.call(path, method: method, rawBody: rawBody, headers: headers)
+            return try await OrbCore.shared.call(
+                path,
+                method: method,
+                rawBody: rawBody,
+                headers: headers,
+                explicitEndpoint: originEndpoint,
+                explicitToken: originToken
+            )
         } catch let err as OrbHTTPError where allowReenroll && err.status == 403 {
+            try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
             if await ensureEnrolled(forceRefresh: true) {
-                return try await performSignedCall(path, method: method, rawBody: rawBody, summary: summary, allowReenroll: false)
+                try ensureOriginUnchanged(endpoint: originEndpoint, token: originToken)
+                return try await performSignedCall(
+                    path,
+                    method: method,
+                    rawBody: rawBody,
+                    summary: summary,
+                    allowReenroll: false,
+                    originEndpoint: originEndpoint,
+                    originToken: originToken
+                )
             }
             throw err
         }

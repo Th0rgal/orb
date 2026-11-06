@@ -1774,7 +1774,9 @@ class OrbCore private constructor(context: Context) {
         headers: Map<String, String> = emptyMap(),
         allowAuthRetry: Boolean = true,
         /** Exact JSON text to send (device-signed requests hash these bytes). */
-        rawBody: String? = null
+        rawBody: String? = null,
+        explicitBaseURL: String? = null,
+        explicitToken: String? = null
     ): Any? = withContext(Dispatchers.IO) {
         val upperMethod = method.uppercase()
         val effectiveHeaders = LinkedHashMap<String, String>(headers)
@@ -1787,11 +1789,11 @@ class OrbCore private constructor(context: Context) {
             it.key.equals("Idempotency-Key", ignoreCase = true) && it.value.isNotBlank()
         }
         val idempotent = upperMethod == "GET" || upperMethod == "HEAD" || hasIdemKey
-        val primaryBase = _baseURL.value.trim().trimEnd('/')
+        val primaryBase = (explicitBaseURL ?: _baseURL.value).trim().trimEnd('/')
         if (primaryBase.isEmpty()) throw OrbError("No server URL configured")
         val candidates = if (idempotent) orderedCandidateEndpoints(primaryBase) else listOf(primaryBase)
 
-        val cleanToken = _token.value?.trim()?.takeIf { it.isNotEmpty() }
+        val cleanToken = (explicitToken ?: _token.value)?.trim()?.takeIf { it.isNotEmpty() }
         val requestBody = when {
             rawBody != null -> rawBody.toRequestBody("application/json; charset=utf-8".toMediaType())
             body != null -> {
@@ -1858,7 +1860,10 @@ class OrbCore private constructor(context: Context) {
         }
         if (lastIoError != null) throw lastIoError
 
-        if (code == 401 && allowAuthRetry && path != "/api/auth/login" && path != "/api/auth/change-password") {
+        val sameConnectionForRetry =
+            (explicitBaseURL == null || _baseURL.value.trim().trimEnd('/') == primaryBase) &&
+                (explicitToken == null || _token.value == explicitToken)
+        if (code == 401 && allowAuthRetry && sameConnectionForRetry && path != "/api/auth/login" && path != "/api/auth/change-password") {
             if (renewSessionFromSavedCredentials()) {
                 return@withContext request(
                     path = path,
@@ -1866,7 +1871,8 @@ class OrbCore private constructor(context: Context) {
                     body = body,
                     headers = effectiveHeaders,
                     allowAuthRetry = false,
-                    rawBody = rawBody
+                    rawBody = rawBody,
+                    explicitBaseURL = explicitBaseURL
                 )
             }
         }
@@ -1927,11 +1933,14 @@ class OrbCore private constructor(context: Context) {
         headers: Map<String, String> = emptyMap(),
         rawBytes: ByteArray? = null,
         contentType: String? = null,
-        allowAuthRetry: Boolean = true
+        allowAuthRetry: Boolean = true,
+        explicitBaseURL: String? = null,
+        explicitToken: String? = null
     ): ByteArray = withContext(Dispatchers.IO) {
         val upperMethod = method.uppercase()
-        val url = makeURL(path)
-        val cleanToken = _token.value?.trim()?.takeIf { it.isNotEmpty() }
+        val targetBase = (explicitBaseURL ?: _baseURL.value).trim().trimEnd('/')
+        val url = makeURL(path, explicitBase = targetBase)
+        val cleanToken = (explicitToken ?: _token.value)?.trim()?.takeIf { it.isNotEmpty() }
         val reqBody = rawBytes?.toRequestBody((contentType ?: "application/octet-stream").toMediaType())
         val reqBuilder = Request.Builder().url(url)
         if (cleanToken != null) {
@@ -1945,14 +1954,18 @@ class OrbCore private constructor(context: Context) {
         val code = resp.code
         val bytes = resp.body?.bytes() ?: ByteArray(0)
         resp.close()
-        if (code == 401 && allowAuthRetry && renewSessionFromSavedCredentials()) {
+        val sameConnectionForRetry =
+            (explicitBaseURL == null || _baseURL.value.trim().trimEnd('/') == targetBase) &&
+                (explicitToken == null || _token.value == explicitToken)
+        if (code == 401 && allowAuthRetry && sameConnectionForRetry && renewSessionFromSavedCredentials()) {
             return@withContext requestBytes(
                 path = path,
                 method = method,
                 headers = headers,
                 rawBytes = rawBytes,
                 contentType = contentType,
-                allowAuthRetry = false
+                allowAuthRetry = false,
+                explicitBaseURL = explicitBaseURL
             )
         }
         if (code !in 200..299) {

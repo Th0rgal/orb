@@ -372,11 +372,11 @@ export function isTransientNetworkError(error: unknown): boolean {
   return error instanceof TypeError && /load failed|failed to fetch|networkerror|network connection|internet connection|could not connect/i.test(error.message);
 }
 
-export function api<T>(path: string, init?: RequestInit): Promise<T> {
+export function api<T>(path: string, init?: RequestInit, explicitBase?: string): Promise<T> {
   // Explicit signals/options retain independent cancellation semantics.
-  if (!init) return sharedRead(`${connectionVersion()}:${getApiUrl()}:${path}`, () => apiRequest<T>(path));
-  if (init.method && init.method.toUpperCase() !== 'GET') invalidateReads();
-  return apiRequest<T>(path, init);
+  if (!init && !explicitBase) return sharedRead(`${connectionVersion()}:${getApiUrl()}:${path}`, () => apiRequest<T>(path));
+  if (init?.method && init.method.toUpperCase() !== 'GET') invalidateReads();
+  return apiRequest<T>(path, init, false, explicitBase);
 }
 /** Like `api`, for endpoints that answer with plain text (e.g. Library save receipts). */
 export function apiText(path: string, init?: RequestInit): Promise<string> {
@@ -387,10 +387,10 @@ function redactDiagnosticPath(path: string): string {
   return path.replace(/([?&](?:q|query)=)[^&]*/gi, "$1[redacted]");
 }
 
-async function apiRequest<T>(path: string, init?: RequestInit, text = false): Promise<T> {
+async function apiRequest<T>(path: string, init?: RequestInit, text = false, explicitBase?: string): Promise<T> {
   const from = performance.now(), label = `${init?.method?.toUpperCase() ?? "GET"} ${redactDiagnosticPath(path)}`;
   try {
-    const result = await sendRequest<T>(path, init, text);
+    const result = await sendRequest<T>(path, init, text, explicitBase);
     requestDone(label, performance.now() - from, true);
     return text ? result : stickMissionRows(path, result);
   } catch (error) {
@@ -415,29 +415,33 @@ function isFastRetryableError(error: unknown, init?: RequestInit): boolean {
   return error instanceof TypeError && /load failed|failed to fetch|networkerror|network connection|internet connection|could not connect/i.test(error.message);
 }
 
-async function sendRequest<T>(path: string, init?: RequestInit, text = false): Promise<T> {
+async function sendRequest<T>(path: string, init?: RequestInit, text = false, explicitBase?: string): Promise<T> {
   try {
-    return await sendRequestOnce<T>(path, init, text);
+    return await sendRequestOnce<T>(path, init, text, explicitBase);
   } catch (error) {
     if (!isFastRetryableError(error, init)) throw error;
     const delayMs = 200 + Math.floor(Math.random() * 200);
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     if (init?.signal?.aborted) throw error;
-    return sendRequestOnce<T>(path, init, text);
+    return sendRequestOnce<T>(path, init, text, explicitBase);
   }
 }
 
-async function sendRequestOnce<T>(path: string, init?: RequestInit, text = false): Promise<T> {
+async function sendRequestOnce<T>(path: string, init?: RequestInit, text = false, explicitBase?: string): Promise<T> {
   const version = connectionVersion();
   const jwt = getJwt();
   const headers: Record<string, string> = {
-    ...((init?.headers as Record<string, string> | undefined) ?? {}),
     ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+    ...((init?.headers as Record<string, string> | undefined) ?? {}),
   };
   const started = performance.now();
   let res: Response;
   try {
-    res = await transportFetch(path, { ...init, headers, signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    res = await transportFetch(
+      path,
+      { ...init, headers, signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+      explicitBase,
+    );
   } catch (error) {
     if (!isAbortError(error)) throw error;
     const reason = abortReason(init?.signal);

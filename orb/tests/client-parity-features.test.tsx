@@ -10,6 +10,7 @@ import {
   parseCleanupDays,
 } from "../src/accountAdmin";
 import { clearConnection, isConnected, setConnection } from "../src/api";
+import { signedApi, signedRawRequest } from "../src/deviceApproval";
 import {
   GITHUB_OAUTH_STATE_TTL_MS,
   beginGitHubOAuthAttempt,
@@ -20,6 +21,8 @@ import { isDivergedLibraryError, needsLibraryRemoteInit, sameLibraryRemote } fro
 
 afterEach(() => {
   cleanup();
+  delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  localStorage.clear();
   clearConnection();
   sessionStorage.clear();
   vi.unstubAllGlobals();
@@ -556,5 +559,107 @@ describe("SkillsSettings diverged history recovery", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("Library connected to org/new-skills.")).toBeTruthy();
     expect(putBodies.every((b) => b.force_reinitialize === true)).toBe(true);
+  });
+});
+
+describe("signedRawRequest & signedApi connection binding", () => {
+  it("aborts signedRawRequest and never leaks origin bearer token or archive to a newly selected server", async () => {
+    setConnection("http://core-a.test", "jwt-origin-a");
+    localStorage.setItem("orb.approvalDevice.http://core-a.test", "dev-mac-1");
+
+    const requests: Array<{ url: string; auth?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        requests.push({ url, auth: headers.Authorization });
+        if (url === "http://core-a.test/api/approvals/challenge") {
+          return new Response(JSON.stringify({ challenge_id: "ch-1", payload: "payload-to-sign" }));
+        }
+        return new Response(JSON.stringify({ success: true }));
+      }),
+    );
+
+    (window as unknown as { __TAURI_INTERNALS__?: { invoke: (cmd: string) => Promise<unknown> } }).__TAURI_INTERNALS__ = {
+      invoke: async (cmd: string) => {
+        if (cmd === "approval_sign") {
+          // User or background event switches active server mid-Touch-ID prompt.
+          setConnection("http://core-b.test", "jwt-dest-b");
+          return "sig-abc";
+        }
+        if (cmd === "approval_grace_remaining") return 300;
+        return undefined;
+      },
+    };
+
+    const archive = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    await expect(
+      signedRawRequest("POST", "/api/settings/restore", "Restore backup", {
+        body: archive,
+        contentType: "multipart/form-data; boundary=orb",
+      }),
+    ).rejects.toThrow(/Server connection changed during device approval/);
+
+    // Challenge went to core-a, and the restore archive + jwt-origin-a were NEVER sent to core-b (or anywhere).
+    expect(requests.some((r) => r.url.startsWith("http://core-b.test"))).toBe(false);
+    expect(requests.some((r) => r.url.endsWith("/api/settings/restore"))).toBe(false);
+  });
+
+  it("sends signedRawRequest and signedApi to the bound origin when the connection stays unchanged", async () => {
+    setConnection("http://core-a.test/", "jwt-origin-a");
+    localStorage.setItem("orb.approvalDevice.http://core-a.test", "dev-mac-1");
+
+    const seen: Array<{ url: string; auth?: string; approval?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        seen.push({
+          url,
+          auth: headers.Authorization,
+          approval: headers["X-Paloma-Approval"],
+        });
+        if (url === "http://core-a.test/api/approvals/challenge") {
+          return new Response(JSON.stringify({ challenge_id: "ch-2", payload: "payload-2" }));
+        }
+        if (url === "http://core-a.test/api/settings/backup") {
+          return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+        }
+        return new Response(JSON.stringify({ ok: true }));
+      }),
+    );
+
+    (window as unknown as { __TAURI_INTERNALS__?: { invoke: (cmd: string) => Promise<unknown> } }).__TAURI_INTERNALS__ = {
+      invoke: async (cmd: string) => {
+        if (cmd === "approval_sign") return "sig-ok";
+        if (cmd === "approval_grace_remaining") return 300;
+        return undefined;
+      },
+    };
+
+    const backupRes = await signedRawRequest("GET", "/api/settings/backup", "Download backup");
+    expect(backupRes.status).toBe(200);
+    expect(seen).toContainEqual({
+      url: "http://core-a.test/api/settings/backup",
+      auth: "Bearer jwt-origin-a",
+      approval: "ch-2.dev-mac-1.sig-ok",
+    });
+
+    // Also verify signedApi aborts if connection switches during signing.
+    (window as unknown as { __TAURI_INTERNALS__?: { invoke: (cmd: string) => Promise<unknown> } }).__TAURI_INTERNALS__ = {
+      invoke: async (cmd: string) => {
+        if (cmd === "approval_sign") {
+          setConnection("http://core-c.test", "jwt-c");
+          return "sig-late";
+        }
+        return 0;
+      },
+    };
+    await expect(
+      signedApi("POST", "/api/privilege-access/req-1/approve", { note: "ok" }, "Approve"),
+    ).rejects.toThrow(/Server connection changed during device approval/);
+    expect(seen.some((r) => r.url.startsWith("http://core-c.test"))).toBe(false);
   });
 });

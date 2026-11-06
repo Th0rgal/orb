@@ -190,6 +190,16 @@ object OrbApprovalKey {
      * Send a request Core protects with a device signature. Without an enrolled
      * key the request goes unsigned (accepted only while Core is in warn mode).
      */
+    private const val CONNECTION_CHANGED_ERROR =
+        "Server connection changed during device approval. Retry on the selected server."
+
+    private fun ensureOriginUnchanged(core: OrbCore, originBaseURL: String, originToken: String?) {
+        if (originBaseURL.isEmpty()) throw OrbError("No server URL configured")
+        if (core.baseURLFlow.value.trim().trimEnd('/') != originBaseURL || core.token != originToken) {
+            throw OrbError(CONNECTION_CHANGED_ERROR)
+        }
+    }
+
     suspend fun signedRequest(
         core: OrbCore,
         activity: FragmentActivity?,
@@ -200,13 +210,21 @@ object OrbApprovalKey {
         /** Usage telemetry for this decision: wait and method are measured here, never the payload. */
         telemetry: UsageTelemetry.Approval? = null
     ): Any? {
+        val originBaseURL = core.baseURLFlow.value.trim().trimEnd('/')
+        val originToken = core.token
+        ensureOriginUnchanged(core, originBaseURL, originToken)
         val text = body?.let { OrbJSON.stringify(it) } ?: ""
         fun record(decision: UsageTelemetry.Decision, method: UsageTelemetry.Method, waitMs: Long) {
             telemetry?.let { UsageTelemetry.trackApproval(it.kind, decision, method, waitMs, it.toolName, it.commandClass) }
         }
-        val context = activity ?: return core.request(path, method, rawBody = body?.let { text })
-            .also { record(telemetry?.decision ?: UsageTelemetry.Decision.Approved, UsageTelemetry.Method.None, 0) }
-        val device = deviceId(context, core.baseURLFlow.value)
+        val context = activity ?: return core.request(
+            path,
+            method,
+            rawBody = body?.let { text },
+            explicitBaseURL = originBaseURL,
+            explicitToken = originToken
+        ).also { record(telemetry?.decision ?: UsageTelemetry.Decision.Approved, UsageTelemetry.Method.None, 0) }
+        val device = deviceId(context, originBaseURL)
         val headers = mutableMapOf<String, String>()
         if (device == null || publicKey() == null) {
             record(telemetry?.decision ?: UsageTelemetry.Decision.Approved, UsageTelemetry.Method.None, 0)
@@ -215,9 +233,12 @@ object OrbApprovalKey {
                 core.request(
                     "/api/approvals/challenge",
                     "POST",
-                    body = mapOf("method" to method, "path" to path, "body" to text, "summary" to summary)
+                    body = mapOf("method" to method, "path" to path, "body" to text, "summary" to summary),
+                    explicitBaseURL = originBaseURL,
+                    explicitToken = originToken
                 )
             )
+            ensureOriginUnchanged(core, originBaseURL, originToken)
             val id = OrbJSON.str(challenge, "challenge_id") ?: error("No challenge")
             val payload = OrbJSON.str(challenge, "payload") ?: error("No challenge payload")
             // Wait = biometric prompt shown -> decision. Strong biometric only, so face and
@@ -230,9 +251,18 @@ object OrbApprovalKey {
                 throw e
             }
             record(telemetry?.decision ?: UsageTelemetry.Decision.Approved, UsageTelemetry.Method.TouchId, System.currentTimeMillis() - shown)
+            ensureOriginUnchanged(core, originBaseURL, originToken)
             headers["X-Paloma-Approval"] = "$id.$device.$signed"
         }
-        return core.request(path, method, headers = headers, rawBody = body?.let { text })
+        ensureOriginUnchanged(core, originBaseURL, originToken)
+        return core.request(
+            path,
+            method,
+            headers = headers,
+            rawBody = body?.let { text },
+            explicitBaseURL = originBaseURL,
+            explicitToken = originToken
+        )
     }
 
     fun sha256Hex(bytes: ByteArray): String =
@@ -247,23 +277,42 @@ object OrbApprovalKey {
         path: String,
         summary: String
     ): ByteArray {
-        val context = activity ?: return core.requestBytes(path = path, method = method)
-        val device = deviceId(context, core.baseURLFlow.value)
+        val originBaseURL = core.baseURLFlow.value.trim().trimEnd('/')
+        val originToken = core.token
+        ensureOriginUnchanged(core, originBaseURL, originToken)
+        val context = activity ?: return core.requestBytes(
+            path = path,
+            method = method,
+            explicitBaseURL = originBaseURL,
+            explicitToken = originToken
+        )
+        val device = deviceId(context, originBaseURL)
         val headers = mutableMapOf<String, String>()
         if (device != null && publicKey() != null) {
             val challenge = dictOf(
                 core.request(
                     "/api/approvals/challenge",
                     "POST",
-                    body = mapOf("method" to method, "path" to path, "body" to "", "summary" to summary)
+                    body = mapOf("method" to method, "path" to path, "body" to "", "summary" to summary),
+                    explicitBaseURL = originBaseURL,
+                    explicitToken = originToken
                 )
             )
+            ensureOriginUnchanged(core, originBaseURL, originToken)
             val id = OrbJSON.str(challenge, "challenge_id") ?: error("No challenge")
             val payload = OrbJSON.str(challenge, "payload") ?: error("No challenge payload")
             val signed = sign(context, payload, summary)
+            ensureOriginUnchanged(core, originBaseURL, originToken)
             headers["X-Paloma-Approval"] = "$id.$device.$signed"
         }
-        return core.requestBytes(path = path, method = method, headers = headers)
+        ensureOriginUnchanged(core, originBaseURL, originToken)
+        return core.requestBytes(
+            path = path,
+            method = method,
+            headers = headers,
+            explicitBaseURL = originBaseURL,
+            explicitToken = originToken
+        )
     }
 
     suspend fun signedMultipartRequest(
@@ -275,10 +324,13 @@ object OrbApprovalKey {
         contentType: String,
         summary: String
     ): Any? {
+        val originBaseURL = core.baseURLFlow.value.trim().trimEnd('/')
+        val originToken = core.token
+        ensureOriginUnchanged(core, originBaseURL, originToken)
         val context = activity
         val headers = mutableMapOf<String, String>()
         if (context != null) {
-            val device = deviceId(context, core.baseURLFlow.value)
+            val device = deviceId(context, originBaseURL)
             if (device != null && publicKey() != null) {
                 val challenge = dictOf(
                     core.request(
@@ -289,21 +341,28 @@ object OrbApprovalKey {
                             "path" to path,
                             "body_sha256" to sha256Hex(rawBytes),
                             "summary" to summary
-                        )
+                        ),
+                        explicitBaseURL = originBaseURL,
+                        explicitToken = originToken
                     )
                 )
+                ensureOriginUnchanged(core, originBaseURL, originToken)
                 val id = OrbJSON.str(challenge, "challenge_id") ?: error("No challenge")
                 val payload = OrbJSON.str(challenge, "payload") ?: error("No challenge payload")
                 val signed = sign(context, payload, summary)
+                ensureOriginUnchanged(core, originBaseURL, originToken)
                 headers["X-Paloma-Approval"] = "$id.$device.$signed"
             }
         }
+        ensureOriginUnchanged(core, originBaseURL, originToken)
         val respBytes = core.requestBytes(
             path = path,
             method = method,
             headers = headers,
             rawBytes = rawBytes,
-            contentType = contentType
+            contentType = contentType,
+            explicitBaseURL = originBaseURL,
+            explicitToken = originToken
         )
         return if (respBytes.isEmpty()) emptyMap<String, Any?>() else OrbJSON.parse(respBytes)
     }

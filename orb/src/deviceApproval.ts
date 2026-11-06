@@ -140,17 +140,54 @@ export function approvalDecisionPath(path: string): { kind: ApprovalKind; decisi
   return { kind, decision: m[2] === "approve" ? "approved" : "denied" };
 }
 
+const CONNECTION_CHANGED_ERROR =
+  "Server connection changed during device approval. Retry on the selected server.";
+
+function captureOriginConnection(): {
+  version: number;
+  targetBase: string;
+  jwt: string | null;
+  ensureUnchanged: () => void;
+} {
+  const version = connectionVersion();
+  const targetBase = getApiUrl().trim().replace(/\/+$/, "");
+  const jwt = getJwt();
+  if (!targetBase) throw new Error("Not connected to a Core server.");
+  const ensureUnchanged = () => {
+    if (
+      connectionVersion() !== version ||
+      getApiUrl().trim().replace(/\/+$/, "") !== targetBase ||
+      getJwt() !== jwt
+    ) {
+      throw new Error(CONNECTION_CHANGED_ERROR);
+    }
+  };
+  return { version, targetBase, jwt, ensureUnchanged };
+}
+
 async function signedApiInner<T>(method: string, path: string, body: unknown, summary: string): Promise<T> {
+  const origin = captureOriginConnection();
   const text = body === undefined ? "" : JSON.stringify(body);
-  const headers: Record<string, string> = body === undefined ? {} : { "Content-Type": "application/json" };
+  const headers: Record<string, string> = {
+    ...(origin.jwt ? { Authorization: `Bearer ${origin.jwt}` } : {}),
+    ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+  };
   const device = enrolledDeviceId();
   const call = invoke();
   if (device && call) {
-    const challenge = await api<{ challenge_id: string; payload: string }>("/api/approvals/challenge", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ method, path, body: text, summary }),
-    });
+    const challenge = await api<{ challenge_id: string; payload: string }>(
+      "/api/approvals/challenge",
+      {
+        method: "POST",
+        headers: {
+          ...(origin.jwt ? { Authorization: `Bearer ${origin.jwt}` } : {}),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ method, path, body: text, summary }),
+      },
+      origin.targetBase,
+    );
+    origin.ensureUnchanged();
     let signature: string;
     try {
       await call("set_approval_grace", { secs: approvalGraceSecs() }).catch(() => undefined);
@@ -161,10 +198,12 @@ async function signedApiInner<T>(method: string, path: string, body: unknown, su
       throw e instanceof Error ? e : new Error(String(e));
     }
     void refreshGrace(call);
+    origin.ensureUnchanged();
     headers["X-Paloma-Approval"] = `${challenge.challenge_id}.${device}.${signature}`;
   }
+  origin.ensureUnchanged();
   try {
-    return await api<T>(path, { method, headers, ...(body === undefined ? {} : { body: text }) });
+    return await api<T>(path, { method, headers, ...(body === undefined ? {} : { body: text }) }, origin.targetBase);
   } catch (e) {
     if (e instanceof ApiError && e.status === 403 && e.detail.includes("device_approval_required")) {
       throw new Error("Core requires an enrolled device for this. Enroll this Mac in Settings → Security → Approval devices.");
@@ -190,26 +229,34 @@ export async function signedRawRequest(
   summary: string,
   options?: { body?: Uint8Array; contentType?: string },
 ): Promise<Response> {
-  const version = connectionVersion();
-  const jwt = getJwt();
+  const origin = captureOriginConnection();
   const headers: Record<string, string> = {
-    ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+    ...(origin.jwt ? { Authorization: `Bearer ${origin.jwt}` } : {}),
     ...(options?.contentType ? { "Content-Type": options.contentType } : {}),
   };
   const device = enrolledDeviceId();
   const call = invoke();
   if (device && call) {
     const bodyHash = options?.body ? await sha256Hex(options.body) : undefined;
-    const challenge = await api<{ challenge_id: string; payload: string }>("/api/approvals/challenge", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        method,
-        path,
-        ...(bodyHash ? { body_sha256: bodyHash } : { body: "" }),
-        summary,
-      }),
-    });
+    origin.ensureUnchanged();
+    const challenge = await api<{ challenge_id: string; payload: string }>(
+      "/api/approvals/challenge",
+      {
+        method: "POST",
+        headers: {
+          ...(origin.jwt ? { Authorization: `Bearer ${origin.jwt}` } : {}),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          method,
+          path,
+          ...(bodyHash ? { body_sha256: bodyHash } : { body: "" }),
+          summary,
+        }),
+      },
+      origin.targetBase,
+    );
+    origin.ensureUnchanged();
     let signature: string;
     try {
       await call("set_approval_grace", { secs: approvalGraceSecs() }).catch(() => undefined);
@@ -220,6 +267,7 @@ export async function signedRawRequest(
       throw e instanceof Error ? e : new Error(String(e));
     }
     void refreshGrace(call);
+    origin.ensureUnchanged();
     headers["X-Paloma-Approval"] = `${challenge.challenge_id}.${device}.${signature}`;
   }
 
@@ -230,15 +278,20 @@ export async function signedRawRequest(
     bodyInit = copy;
   }
 
+  origin.ensureUnchanged();
   if (method.toUpperCase() !== "GET") invalidateReads();
-  const res = await transportFetch(path, {
-    method,
-    headers,
-    ...(bodyInit !== undefined ? { body: bodyInit } : {}),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
+  const res = await transportFetch(
+    path,
+    {
+      method,
+      headers,
+      ...(bodyInit !== undefined ? { body: bodyInit } : {}),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    },
+    origin.targetBase,
+  );
   if (res.status === 401) {
-    if (connectionVersion() === version) clearConnection();
+    if (connectionVersion() === origin.version) clearConnection();
     throw new Error("401 Unauthorized — reconnect in Settings → Account");
   }
   if (!res.ok) {
