@@ -1452,29 +1452,40 @@ async fn rerun_init_script(
         .map_err(|conflict| (conflict.status, conflict.message))?;
     workspace = claim.workspace.clone();
 
-    // Write the init script to the container
+    let settle_claim_error =
+        |claim: workspace::BuildClaimGuard, workspace: Workspace, error: String| async move {
+            let mut failed = workspace;
+            failed.status = WorkspaceStatus::Error;
+            failed.error_message = Some(error.clone());
+            if let Err(settle_error) = claim.settle(failed).await {
+                tracing::error!(%settle_error, "Failed to settle workspace init error");
+            }
+            Err((StatusCode::INTERNAL_SERVER_ERROR, error))
+        };
+
     let script_path = workspace.path.join("sandboxed-init.sh");
-    tokio::fs::write(&script_path, &init_script)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to write init script: {}", e),
-            )
-        })?;
+    if let Err(error) = tokio::fs::write(&script_path, &init_script).await {
+        return settle_claim_error(
+            claim,
+            workspace,
+            format!("Failed to write init script: {}", error),
+        )
+        .await;
+    }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o755);
-        tokio::fs::set_permissions(&script_path, perms)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to set script permissions: {}", e),
-                )
-            })?;
+        if let Err(error) = tokio::fs::set_permissions(&script_path, perms).await {
+            let _ = tokio::fs::remove_file(&script_path).await;
+            return settle_claim_error(
+                claim,
+                workspace,
+                format!("Failed to set script permissions: {}", error),
+            )
+            .await;
+        }
     }
 
     // Run the init script
@@ -3412,5 +3423,48 @@ mod tests {
         let settled = state.workspaces.get(id).await.unwrap();
         assert_eq!(settled.status, WorkspaceStatus::Error);
         assert!(!stale_marker.exists());
+    }
+
+    #[tokio::test]
+    async fn rerun_init_script_write_failure_deterministically_settles_error_before_response() {
+        let root = TempDir::new().unwrap();
+        let state = test_state(root.path()).await;
+        let ws_path = root
+            .path()
+            .join(".sandboxed-sh/containers/rerun-write-fail");
+        std::fs::create_dir_all(ws_path.join("bin")).unwrap();
+        std::fs::create_dir_all(ws_path.join("sandboxed-init.sh")).unwrap();
+
+        let mut container = Workspace::new_container("rerun-write-fail".into(), ws_path.clone());
+        container.status = WorkspaceStatus::Ready;
+        container.init_script = Some("echo hello".into());
+        let id = state.workspaces.add(container).await.unwrap();
+
+        let err = rerun_init_script(State(Arc::clone(&state)), AxumPath(id))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.1.starts_with("Failed to write init script:"));
+
+        let in_mem = state.workspaces.get(id).await.unwrap();
+        assert_eq!(in_mem.status, WorkspaceStatus::Error);
+        assert_eq!(in_mem.error_message.as_deref(), Some(err.1.as_str()));
+        assert_eq!(in_mem.config["build_generation"].as_u64(), Some(1));
+
+        let reloaded = workspace::WorkspaceStore::new(root.path().to_path_buf()).await;
+        let on_disk = reloaded.get(id).await.unwrap();
+        assert_eq!(on_disk.status, WorkspaceStatus::Error);
+        assert_eq!(on_disk.error_message.as_deref(), Some(err.1.as_str()));
+
+        let next_claim = state
+            .workspaces
+            .try_claim_workspace_build(id, None)
+            .await
+            .unwrap();
+        assert_eq!(next_claim.generation(), 2);
+        let mut recovered = next_claim.workspace.clone();
+        recovered.status = WorkspaceStatus::Ready;
+        recovered.error_message = None;
+        next_claim.settle(recovered).await.unwrap();
     }
 }

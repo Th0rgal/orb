@@ -1054,7 +1054,7 @@ impl WorkspaceStore {
         let storage_path = self.storage_path.clone();
         let in_memory = (*self.workspaces.load_full()).clone();
         let built = built.clone();
-        let claimed_distro = claimed_snapshot.map(|ws| ws.distro.clone());
+        let claimed_snapshot = claimed_snapshot.cloned();
 
         let next = tokio::task::spawn_blocking(
             move || -> std::io::Result<Option<HashMap<Uuid, Workspace>>> {
@@ -1068,27 +1068,12 @@ impl WorkspaceStore {
                 {
                     return Ok(None);
                 }
-                latest.status = if built.status == WorkspaceStatus::Ready {
-                    WorkspaceStatus::Ready
-                } else {
-                    WorkspaceStatus::Error
-                };
-                latest.error_message = built.error_message.clone();
-                match claimed_distro {
-                    Some(ref original_distro) => {
-                        if &built.distro != original_distro {
-                            latest.distro = built.distro.clone();
-                        }
-                    }
-                    None => {
-                        if built.distro.is_some() {
-                            latest.distro = built.distro.clone();
-                        }
-                    }
+                let preserved_generation = latest.config["build_generation"].clone();
+                apply_build_owned_mutations(latest, &built, claimed_snapshot.as_ref());
+                if !latest.config.is_object() {
+                    latest.config = serde_json::json!({});
                 }
-                if built.harness_versions.is_some() {
-                    latest.harness_versions = built.harness_versions.clone();
-                }
+                latest.config["build_generation"] = preserved_generation;
                 write_workspace_snapshot(&storage_path, &next)?;
                 Ok(Some(next))
             },
@@ -5151,17 +5136,176 @@ pub async fn sync_workspace_mcp_binaries_for_workspace(
     sync_workspace_mcp_binaries(working_dir, &workspace.path).await
 }
 
+const CONTAINER_FALLBACK_CONFIG_KEY: &str = "container_fallback";
+const CONTAINER_FALLBACK_REASON_CONFIG_KEY: &str = "container_fallback_reason";
+const CONTAINER_FALLBACK_ENV_KEY: &str = "SANDBOXED_SH_CONTAINER_FALLBACK";
+const BUILD_OWNED_CONFIG_KEYS: [&str; 2] = [
+    CONTAINER_FALLBACK_CONFIG_KEY,
+    CONTAINER_FALLBACK_REASON_CONFIG_KEY,
+];
+
+fn json_values_eq(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    left == right
+}
+
+fn apply_build_owned_config(
+    latest: &mut serde_json::Value,
+    built: &serde_json::Value,
+    claimed: Option<&serde_json::Value>,
+) {
+    let built_obj = built.as_object();
+    let claimed_obj = claimed.and_then(|value| value.as_object());
+    let mut keys: HashSet<String> = BUILD_OWNED_CONFIG_KEYS
+        .into_iter()
+        .map(String::from)
+        .collect();
+    if let Some(obj) = built_obj {
+        keys.extend(obj.keys().cloned());
+    }
+    if let Some(obj) = claimed_obj {
+        keys.extend(obj.keys().cloned());
+    }
+    keys.remove("build_generation");
+    if keys.is_empty() {
+        return;
+    }
+    if !latest.is_object() {
+        *latest = serde_json::json!({});
+    }
+    let latest_obj = latest.as_object_mut().expect("config object");
+    for key in keys {
+        let built_value = built_obj.and_then(|obj| obj.get(&key));
+        let is_build_owned = BUILD_OWNED_CONFIG_KEYS.contains(&key.as_str());
+        let should_apply = if is_build_owned {
+            match built_value {
+                Some(_) => true,
+                None => claimed_obj.is_some_and(|obj| obj.contains_key(&key)),
+            }
+        } else {
+            let claimed_value = claimed_obj.and_then(|obj| obj.get(&key));
+            match (built_value, claimed_value) {
+                (Some(built_value), Some(claimed_value)) => {
+                    !json_values_eq(built_value, claimed_value)
+                }
+                (Some(_), None) => true,
+                (None, Some(_)) => true,
+                (None, None) => false,
+            }
+        };
+        if !should_apply {
+            continue;
+        }
+        match built_value {
+            Some(value) => {
+                latest_obj.insert(key, value.clone());
+            }
+            None => {
+                latest_obj.remove(&key);
+            }
+        }
+    }
+}
+
+fn apply_build_owned_env(
+    latest: &mut HashMap<String, String>,
+    built: &HashMap<String, String>,
+    claimed: Option<&HashMap<String, String>>,
+) {
+    let mut keys: HashSet<String> = built.keys().cloned().collect();
+    keys.insert(CONTAINER_FALLBACK_ENV_KEY.to_string());
+    if let Some(claimed) = claimed {
+        keys.extend(claimed.keys().cloned());
+    }
+    for key in keys {
+        let built_value = built.get(&key);
+        let should_apply = if key == CONTAINER_FALLBACK_ENV_KEY {
+            match built_value {
+                Some(_) => true,
+                None => claimed.is_some_and(|env| env.contains_key(&key)),
+            }
+        } else {
+            let claimed_value = claimed.and_then(|env| env.get(&key));
+            built_value != claimed_value
+        };
+        if !should_apply {
+            continue;
+        }
+        match built_value {
+            Some(value) => {
+                latest.insert(key, value.clone());
+            }
+            None => {
+                latest.remove(&key);
+            }
+        }
+    }
+}
+
+fn apply_build_owned_mutations(
+    latest: &mut Workspace,
+    built: &Workspace,
+    claimed: Option<&Workspace>,
+) {
+    latest.status = if built.status == WorkspaceStatus::Ready {
+        WorkspaceStatus::Ready
+    } else {
+        WorkspaceStatus::Error
+    };
+    latest.error_message = built.error_message.clone();
+
+    let claimed_distro = claimed.map(|workspace| &workspace.distro);
+    let distro_changed = match claimed_distro {
+        Some(original) => &built.distro != original,
+        None => built.distro.is_some(),
+    };
+    if distro_changed {
+        latest.distro = built.distro.clone();
+    }
+
+    let claimed_harness = claimed.and_then(|workspace| workspace.harness_versions.as_ref());
+    let harness_changed = match claimed {
+        Some(_) => built.harness_versions.as_ref() != claimed_harness,
+        None => built.harness_versions.is_some(),
+    };
+    if harness_changed {
+        latest.harness_versions = built.harness_versions.clone();
+    }
+
+    apply_build_owned_config(
+        &mut latest.config,
+        &built.config,
+        claimed.map(|workspace| &workspace.config),
+    );
+    apply_build_owned_env(
+        &mut latest.env_vars,
+        &built.env_vars,
+        claimed.map(|workspace| &workspace.env_vars),
+    );
+}
+
+fn clear_container_fallback(workspace: &mut Workspace) {
+    if let Some(obj) = workspace.config.as_object_mut() {
+        obj.remove(CONTAINER_FALLBACK_CONFIG_KEY);
+        obj.remove(CONTAINER_FALLBACK_REASON_CONFIG_KEY);
+    }
+    workspace.env_vars.remove(CONTAINER_FALLBACK_ENV_KEY);
+}
+
 fn mark_container_fallback(workspace: &mut Workspace, reason: &str) {
     let mut obj = workspace.config.as_object().cloned().unwrap_or_default();
-    obj.insert("container_fallback".to_string(), json!(true));
+    obj.insert(CONTAINER_FALLBACK_CONFIG_KEY.to_string(), json!(true));
     if !reason.trim().is_empty() {
-        obj.insert("container_fallback_reason".to_string(), json!(reason));
+        obj.insert(
+            CONTAINER_FALLBACK_REASON_CONFIG_KEY.to_string(),
+            json!(reason),
+        );
+    } else {
+        obj.remove(CONTAINER_FALLBACK_REASON_CONFIG_KEY);
     }
     workspace.config = serde_json::Value::Object(obj);
     workspace
         .env_vars
-        .entry("SANDBOXED_SH_CONTAINER_FALLBACK".to_string())
-        .or_insert_with(|| "1".to_string());
+        .insert(CONTAINER_FALLBACK_ENV_KEY.to_string(), "1".to_string());
 }
 
 async fn build_container_fallback(workspace: &mut Workspace, reason: &str) -> anyhow::Result<()> {
@@ -5228,6 +5372,7 @@ pub async fn build_container_workspace(
                             Some(format!("Failed to sync MCP binaries: {}", e));
                         return Err(e);
                     }
+                    clear_container_fallback(workspace);
                     workspace.status = WorkspaceStatus::Ready;
                     workspace.error_message = None;
                     return Ok(());
@@ -5348,6 +5493,7 @@ pub async fn build_container_workspace(
                     );
                 }
             }
+            clear_container_fallback(workspace);
             workspace.status = WorkspaceStatus::Ready;
             workspace.error_message = None;
             tracing::info!("Container workspace built successfully");
@@ -8005,5 +8151,106 @@ mod managed_library_skill_tests {
                 .unwrap(),
             "LIBRARY-FIXTURE"
         );
+    }
+
+    #[tokio::test]
+    async fn container_fallback_settles_persisted_markers_preserves_concurrent_updates_and_clears_on_real_build(
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(WorkspaceStore::new(directory.path().to_path_buf()).await);
+        let ws_path = directory
+            .path()
+            .join(".sandboxed-sh/containers/fallback-ws");
+        let mut container = Workspace::new_container("fallback-ws".into(), ws_path);
+        container
+            .env_vars
+            .insert("INITIAL_KEY".into(), "initial".into());
+        container.config = serde_json::json!({ "initial_cfg": "keep" });
+        let id = store.add(container).await.unwrap();
+
+        let claim = store
+            .try_claim_workspace_build(id, Some("ubuntu-noble".into()))
+            .await
+            .unwrap();
+        assert_eq!(claim.generation(), 1);
+        let mut built = claim.workspace.clone();
+        build_container_fallback(&mut built, "systemd-nspawn not available")
+            .await
+            .unwrap();
+
+        store
+            .update_with(id, |ws| {
+                ws.name = "fallback-ws-renamed".into();
+                ws.env_vars = HashMap::from([("USER_ENV".into(), "preserved".into())]);
+                ws.config = serde_json::json!({
+                    "user_cfg": 7,
+                    "build_generation": 999
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        claim.settle(built).await.unwrap();
+
+        for check_store in [
+            Arc::clone(&store),
+            Arc::new(WorkspaceStore::new(directory.path().to_path_buf()).await),
+        ] {
+            let settled = check_store.get(id).await.unwrap();
+            assert_eq!(settled.status, WorkspaceStatus::Ready);
+            assert!(settled.error_message.is_none());
+            assert_eq!(settled.name, "fallback-ws-renamed");
+            assert_eq!(settled.config["build_generation"].as_u64(), Some(1));
+            assert_eq!(settled.config["user_cfg"].as_i64(), Some(7));
+            assert_eq!(settled.config["container_fallback"].as_bool(), Some(true));
+            assert_eq!(
+                settled.config["container_fallback_reason"].as_str(),
+                Some("systemd-nspawn not available")
+            );
+            assert_eq!(
+                settled.env_vars.get("USER_ENV").map(String::as_str),
+                Some("preserved")
+            );
+            assert!(!settled.env_vars.contains_key("INITIAL_KEY"));
+            assert_eq!(
+                settled
+                    .env_vars
+                    .get("SANDBOXED_SH_CONTAINER_FALLBACK")
+                    .map(String::as_str),
+                Some("1")
+            );
+            assert!(is_container_fallback(&settled));
+            assert!(container_fallback_from_env(&settled.env_vars));
+            assert!(!use_nspawn_for_workspace(&settled));
+        }
+
+        let rebuild_claim = store
+            .try_claim_workspace_build(id, Some("ubuntu-noble".into()))
+            .await
+            .unwrap();
+        assert_eq!(rebuild_claim.generation(), 2);
+        let mut real_built = rebuild_claim.workspace.clone();
+        clear_container_fallback(&mut real_built);
+        real_built.status = WorkspaceStatus::Ready;
+        real_built.error_message = None;
+        rebuild_claim.settle(real_built).await.unwrap();
+
+        let reloaded = WorkspaceStore::new(directory.path().to_path_buf()).await;
+        let cleared = reloaded.get(id).await.unwrap();
+        assert_eq!(cleared.status, WorkspaceStatus::Ready);
+        assert_eq!(cleared.config["build_generation"].as_u64(), Some(2));
+        assert_eq!(cleared.config["user_cfg"].as_i64(), Some(7));
+        assert!(cleared.config.get("container_fallback").is_none());
+        assert!(cleared.config.get("container_fallback_reason").is_none());
+        assert!(!cleared
+            .env_vars
+            .contains_key("SANDBOXED_SH_CONTAINER_FALLBACK"));
+        assert_eq!(
+            cleared.env_vars.get("USER_ENV").map(String::as_str),
+            Some("preserved")
+        );
+        assert!(!is_container_fallback(&cleared));
+        assert!(!container_fallback_from_env(&cleared.env_vars));
     }
 }
